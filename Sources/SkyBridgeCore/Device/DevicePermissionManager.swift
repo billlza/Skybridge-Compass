@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import CoreWLAN
 import CoreBluetooth
@@ -35,31 +40,6 @@ public enum PermissionType: String, CaseIterable, Sendable {
     }
 }
 
-/// 权限状态枚举
-public enum PermissionStatus: String, Sendable {
-    case notDetermined = "未确定"
-    case denied = "已拒绝"
-    case authorized = "已授权"
-    case restricted = "受限制"
-    case unavailable = "不可用"
-    
-    public var isAuthorized: Bool {
-        return self == .authorized
-    }
-    
-    public var color: String {
-        switch self {
-        case .authorized:
-            return "green"
-        case .denied, .restricted:
-            return "red"
-        case .notDetermined:
-            return "orange"
-        case .unavailable:
-            return "gray"
-        }
-    }
-}
 
 /// 权限信息结构
 public struct PermissionInfo: Identifiable, Sendable {
@@ -529,3 +509,4 @@ extension DevicePermissionManager {
         }
     }
 }
+#endif

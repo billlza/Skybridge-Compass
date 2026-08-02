@@ -705,7 +705,7 @@
 "remote.connectionMode.far" = "Far";
 "remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
 "remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
-"remote.connectionMode.far.description" = "Far-field RDP — stable across networks (FreeRDP 3.x + GFX-AVC444)";
+"remote.connectionMode.far.description" = "Manual RDP (restricted preview) — FreeRDP 3.30 software GDI, strict certificate validation, no channel redirection";
 "common.unknown" = "Unknown";
 "profile.title" = "Profile";
 "action.close" = "Close";
@@ -907,6 +907,7 @@
 "remote.form.recommended.body" = "Most users don't need to enter IP/port manually. Go to Device Discovery and pick a device to connect.";
 "remote.form.openDeviceDiscovery" = "Open Device Discovery";
 "remote.form.advanced.section" = "Advanced: Manual Setup (RDP/VNC/SSH)";
+"remote.form.rdp.certificateNotice" = "RDP accepts only endpoints whose certificate chain is trusted by macOS and whose hostname matches. Unknown, self-signed, or changed certificates that require manual trust are rejected; this version has no certificate enrollment or TOFU flow.";
 "monitor.title" = "System Monitor";
 "monitor.status.monitoring" = "Monitoring";
 "monitor.status.initializing" = "Initializing...";

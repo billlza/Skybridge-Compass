@@ -41,6 +41,82 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     // otherwise Apple↔OQS mixed deployments will fail with CryptoKitError (e.g. error 3) when opening MessageB.
     private static let hkdfSaltLabel = "SkyBridge-KDF-Salt-v1|"
 
+    #if canImport(OQSRAII)
+    private struct MLKEM768Lengths {
+        let publicKey: Int
+        let secretKey: Int
+        let ciphertext: Int
+        let sharedSecret: Int
+    }
+
+    private struct MLDSA65Lengths {
+        let publicKey: Int
+        let secretKey: Int
+        let signature: Int
+    }
+
+    private static func requireNativeLength(
+        _ actual: Int,
+        expected: Int,
+        field: String
+    ) throws -> Int {
+        guard actual == expected else {
+            throw CryptoProviderError.providerContractViolation(
+                provider: "liboqs",
+                field: field,
+                expected: expected,
+                actual: actual
+            )
+        }
+        return actual
+    }
+
+    private static func validatedMLKEM768Lengths() throws -> MLKEM768Lengths {
+        MLKEM768Lengths(
+            publicKey: try requireNativeLength(
+                oqs_raii_mlkem768_public_key_length(),
+                expected: 1_184,
+                field: "ML-KEM-768 public key length"
+            ),
+            secretKey: try requireNativeLength(
+                oqs_raii_mlkem768_secret_key_length(),
+                expected: 2_400,
+                field: "ML-KEM-768 secret key length"
+            ),
+            ciphertext: try requireNativeLength(
+                oqs_raii_mlkem768_ciphertext_length(),
+                expected: 1_088,
+                field: "ML-KEM-768 ciphertext length"
+            ),
+            sharedSecret: try requireNativeLength(
+                oqs_raii_mlkem768_shared_secret_length(),
+                expected: 32,
+                field: "ML-KEM-768 shared secret length"
+            )
+        )
+    }
+
+    private static func validatedMLDSA65Lengths() throws -> MLDSA65Lengths {
+        MLDSA65Lengths(
+            publicKey: try requireNativeLength(
+                oqs_raii_mldsa65_public_key_length(),
+                expected: 1_952,
+                field: "ML-DSA-65 public key length"
+            ),
+            secretKey: try requireNativeLength(
+                oqs_raii_mldsa65_secret_key_length(),
+                expected: 4_032,
+                field: "ML-DSA-65 secret key length"
+            ),
+            signature: try requireNativeLength(
+                oqs_raii_mldsa65_signature_length(),
+                expected: 3_309,
+                field: "ML-DSA-65 signature length"
+            )
+        )
+    }
+    #endif
+
     private static func hkdfSalt(info: Data) -> Data {
         var data = Data(hkdfSaltLabel.utf8)
         data.append(info)
@@ -66,10 +142,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     ) async throws -> HPKESealedBox {
         #if canImport(OQSRAII)
  // 1. 验证公钥长度
-        let expectedPkLen = oqs_raii_mlkem768_public_key_length()
-        guard recipientPublicKey.count == expectedPkLen else {
+        let lengths = try Self.validatedMLKEM768Lengths()
+        guard recipientPublicKey.count == lengths.publicKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedPkLen),
+                expected: lengths.publicKey,
                 actual: recipientPublicKey.count,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
@@ -77,12 +153,12 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
 
  // 2. 使用 ML-KEM-768 封装生成共享密钥
-        let ctLen = oqs_raii_mlkem768_ciphertext_length()
-        let ssLen = oqs_raii_mlkem768_shared_secret_length()
+        let ctLen = lengths.ciphertext
+        let ssLen = lengths.sharedSecret
 
  // 使用 SecureBytes 保护共享密钥
-        let sharedSecretSecure = SecureBytes(count: Int(ssLen))
-        var ciphertext = [UInt8](repeating: 0, count: Int(ctLen))
+        let sharedSecretSecure = try SecureBytes(count: ssLen)
+        var ciphertext = [UInt8](repeating: 0, count: ctLen)
 
         let encapsResult = recipientPublicKey.withUnsafeBytes { pkPtr -> Int32 in
             guard let pkBase = pkPtr.baseAddress else { return OQSRAII_FAIL }
@@ -94,7 +170,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                     &ciphertext,
                     ciphertext.count,
                     ssBase.assumingMemoryBound(to: UInt8.self),
-                    Int(ssLen)
+                    ssLen
                 )
             }
         }
@@ -139,10 +215,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     ) async throws -> (sealedBox: HPKESealedBox, sharedSecret: SecureBytes) {
         #if canImport(OQSRAII)
  // 1. 验证公钥长度
-        let expectedPkLen = oqs_raii_mlkem768_public_key_length()
-        guard recipientPublicKey.count == expectedPkLen else {
+        let lengths = try Self.validatedMLKEM768Lengths()
+        guard recipientPublicKey.count == lengths.publicKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedPkLen),
+                expected: lengths.publicKey,
                 actual: recipientPublicKey.count,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
@@ -150,11 +226,11 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
 
  // 2. 使用 ML-KEM-768 封装生成共享密钥
-        let ctLen = oqs_raii_mlkem768_ciphertext_length()
-        let ssLen = oqs_raii_mlkem768_shared_secret_length()
+        let ctLen = lengths.ciphertext
+        let ssLen = lengths.sharedSecret
 
-        let sharedSecretSecure = SecureBytes(count: Int(ssLen))
-        var ciphertext = [UInt8](repeating: 0, count: Int(ctLen))
+        let sharedSecretSecure = try SecureBytes(count: ssLen)
+        var ciphertext = [UInt8](repeating: 0, count: ctLen)
 
         let encapsResult = recipientPublicKey.withUnsafeBytes { pkPtr -> Int32 in
             guard let pkBase = pkPtr.baseAddress else { return OQSRAII_FAIL }
@@ -166,7 +242,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                     &ciphertext,
                     ciphertext.count,
                     ssBase.assumingMemoryBound(to: UInt8.self),
-                    Int(ssLen)
+                    ssLen
                 )
             }
         }
@@ -229,10 +305,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     ) async throws -> Data {
         #if canImport(OQSRAII)
  // 1. 验证私钥长度
-        let expectedSkLen = oqs_raii_mlkem768_secret_key_length()
-        guard privateKey.byteCount == expectedSkLen else {
+        let lengths = try Self.validatedMLKEM768Lengths()
+        guard privateKey.byteCount == lengths.secretKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedSkLen),
+                expected: lengths.secretKey,
                 actual: privateKey.byteCount,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
@@ -240,17 +316,16 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
 
  // 2. 验证密文长度
-        let expectedCtLen = oqs_raii_mlkem768_ciphertext_length()
-        guard sealedBox.encapsulatedKey.count == expectedCtLen else {
+        guard sealedBox.encapsulatedKey.count == lengths.ciphertext else {
             throw CryptoProviderError.invalidCiphertextLength(
-                expected: Int(expectedCtLen),
+                expected: lengths.ciphertext,
                 actual: sealedBox.encapsulatedKey.count
             )
         }
 
  // 3. 使用 ML-KEM-768 解封装恢复共享密钥
-        let ssLen = oqs_raii_mlkem768_shared_secret_length()
-        let sharedSecretSecure = SecureBytes(count: Int(ssLen))
+        let ssLen = lengths.sharedSecret
+        let sharedSecretSecure = try SecureBytes(count: ssLen)
 
         let decapsResult = sealedBox.encapsulatedKey.withUnsafeBytes { ctPtr -> Int32 in
             guard let ctBase = ctPtr.baseAddress else { return OQSRAII_FAIL }
@@ -264,7 +339,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                         skBase.assumingMemoryBound(to: UInt8.self),
                         privateKey.byteCount,
                         ssBase.assumingMemoryBound(to: UInt8.self),
-                        Int(ssLen)
+                        ssLen
                     )
                 }
             }
@@ -304,10 +379,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     ) async throws -> (plaintext: Data, sharedSecret: SecureBytes) {
         #if canImport(OQSRAII)
  // 1. 验证私钥长度
-        let expectedSkLen = oqs_raii_mlkem768_secret_key_length()
-        guard privateKey.byteCount == expectedSkLen else {
+        let lengths = try Self.validatedMLKEM768Lengths()
+        guard privateKey.byteCount == lengths.secretKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedSkLen),
+                expected: lengths.secretKey,
                 actual: privateKey.byteCount,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
@@ -315,17 +390,16 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
 
  // 2. 验证密文长度
-        let expectedCtLen = oqs_raii_mlkem768_ciphertext_length()
-        guard sealedBox.encapsulatedKey.count == expectedCtLen else {
+        guard sealedBox.encapsulatedKey.count == lengths.ciphertext else {
             throw CryptoProviderError.invalidCiphertextLength(
-                expected: Int(expectedCtLen),
+                expected: lengths.ciphertext,
                 actual: sealedBox.encapsulatedKey.count
             )
         }
 
  // 3. 使用 ML-KEM-768 解封装恢复共享密钥
-        let ssLen = oqs_raii_mlkem768_shared_secret_length()
-        let sharedSecretSecure = SecureBytes(count: Int(ssLen))
+        let ssLen = lengths.sharedSecret
+        let sharedSecretSecure = try SecureBytes(count: ssLen)
 
         let decapsResult = sealedBox.encapsulatedKey.withUnsafeBytes { ctPtr -> Int32 in
             guard let ctBase = ctPtr.baseAddress else { return OQSRAII_FAIL }
@@ -339,7 +413,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                         skBase.assumingMemoryBound(to: UInt8.self),
                         privateKey.byteCount,
                         ssBase.assumingMemoryBound(to: UInt8.self),
-                        Int(ssLen)
+                        ssLen
                     )
                 }
             }
@@ -377,21 +451,21 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         recipientPublicKey: Data
     ) async throws -> (encapsulatedKey: Data, sharedSecret: SecureBytes) {
         #if canImport(OQSRAII)
-        let expectedPkLen = oqs_raii_mlkem768_public_key_length()
-        guard recipientPublicKey.count == expectedPkLen else {
+        let lengths = try Self.validatedMLKEM768Lengths()
+        guard recipientPublicKey.count == lengths.publicKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedPkLen),
+                expected: lengths.publicKey,
                 actual: recipientPublicKey.count,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
             )
         }
 
-        let ctLen = oqs_raii_mlkem768_ciphertext_length()
-        let ssLen = oqs_raii_mlkem768_shared_secret_length()
+        let ctLen = lengths.ciphertext
+        let ssLen = lengths.sharedSecret
 
-        let sharedSecretSecure = SecureBytes(count: Int(ssLen))
-        var ciphertext = [UInt8](repeating: 0, count: Int(ctLen))
+        let sharedSecretSecure = try SecureBytes(count: ssLen)
+        var ciphertext = [UInt8](repeating: 0, count: ctLen)
 
         let encapsResult = recipientPublicKey.withUnsafeBytes { pkPtr -> Int32 in
             guard let pkBase = pkPtr.baseAddress else { return OQSRAII_FAIL }
@@ -403,7 +477,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                     &ciphertext,
                     ciphertext.count,
                     ssBase.assumingMemoryBound(to: UInt8.self),
-                    Int(ssLen)
+                    ssLen
                 )
             }
         }
@@ -423,28 +497,27 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         privateKey: SecureBytes
     ) async throws -> SecureBytes {
         #if canImport(OQSRAII)
-        let expectedSkLen = oqs_raii_mlkem768_secret_key_length()
-        guard privateKey.byteCount == expectedSkLen else {
+        let lengths = try Self.validatedMLKEM768Lengths()
+        guard privateKey.byteCount == lengths.secretKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedSkLen),
+                expected: lengths.secretKey,
                 actual: privateKey.byteCount,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
             )
         }
 
-        let expectedCtLen = oqs_raii_mlkem768_ciphertext_length()
-        guard encapsulatedKey.count == expectedCtLen else {
+        guard encapsulatedKey.count == lengths.ciphertext else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedCtLen),
+                expected: lengths.ciphertext,
                 actual: encapsulatedKey.count,
                 suite: activeSuite.rawValue,
                 usage: .keyExchange
             )
         }
 
-        let ssLen = oqs_raii_mlkem768_shared_secret_length()
-        let sharedSecretSecure = SecureBytes(count: Int(ssLen))
+        let ssLen = lengths.sharedSecret
+        let sharedSecretSecure = try SecureBytes(count: ssLen)
 
         let decapsResult = encapsulatedKey.withUnsafeBytes { ctPtr -> Int32 in
             guard let ctBase = ctPtr.baseAddress else { return OQSRAII_FAIL }
@@ -458,7 +531,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                         skBase.assumingMemoryBound(to: UInt8.self),
                         privateKey.byteCount,
                         ssBase.assumingMemoryBound(to: UInt8.self),
-                        Int(ssLen)
+                        ssLen
                     )
                 }
             }
@@ -491,10 +564,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
         #if canImport(OQSRAII)
  // 1. 验证私钥长度
-        let expectedSkLen = oqs_raii_mldsa65_secret_key_length()
-        guard privateKey.count == expectedSkLen else {
+        let lengths = try Self.validatedMLDSA65Lengths()
+        guard privateKey.count == lengths.secretKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedSkLen),
+                expected: lengths.secretKey,
                 actual: privateKey.count,
                 suite: activeSuite.rawValue,
                 usage: .signing
@@ -502,8 +575,8 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
 
  // 2. 分配签名缓冲区
-        let maxSigLen = oqs_raii_mldsa65_signature_length()
-        var signature = [UInt8](repeating: 0, count: Int(maxSigLen))
+        let maxSigLen = lengths.signature
+        var signature = [UInt8](repeating: 0, count: maxSigLen)
         var actualSigLen = maxSigLen
 
  // 3. 执行签名
@@ -527,7 +600,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
         }
 
  // 4. 返回实际长度的签名
-        return Data(signature.prefix(Int(actualSigLen)))
+        return Data(signature.prefix(actualSigLen))
         #else
         throw CryptoProviderError.providerNotAvailable(.liboqs)
         #endif
@@ -542,10 +615,10 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     public func verify(data: Data, signature: Data, publicKey: Data) async throws -> Bool {
         #if canImport(OQSRAII)
  // 1. 验证公钥长度
-        let expectedPkLen = oqs_raii_mldsa65_public_key_length()
-        guard publicKey.count == expectedPkLen else {
+        let lengths = try Self.validatedMLDSA65Lengths()
+        guard publicKey.count == lengths.publicKey else {
             throw CryptoProviderError.invalidKeyLength(
-                expected: Int(expectedPkLen),
+                expected: lengths.publicKey,
                 actual: publicKey.count,
                 suite: activeSuite.rawValue,
                 usage: .signing
@@ -600,12 +673,13 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
     #if canImport(OQSRAII)
  /// 生成 ML-KEM-768 密钥对
     private func generateMLKEM768KeyPair() throws -> KeyPair {
-        let pkLen = oqs_raii_mlkem768_public_key_length()
-        let skLen = oqs_raii_mlkem768_secret_key_length()
+        let lengths = try Self.validatedMLKEM768Lengths()
+        let pkLen = lengths.publicKey
+        let skLen = lengths.secretKey
 
-        var publicKeyBytes = [UInt8](repeating: 0, count: Int(pkLen))
+        var publicKeyBytes = [UInt8](repeating: 0, count: pkLen)
  // 使用 SecureBytes 保护私钥
-        let privateKeySecure = SecureBytes(count: Int(skLen))
+        let privateKeySecure = try SecureBytes(count: skLen)
 
         let result = privateKeySecure.withUnsafeMutableBytes { skPtr -> Int32 in
             guard let skBase = skPtr.baseAddress else { return OQSRAII_FAIL }
@@ -613,7 +687,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 &publicKeyBytes,
                 publicKeyBytes.count,
                 skBase.assumingMemoryBound(to: UInt8.self),
-                Int(skLen)
+                skLen
             )
         }
 
@@ -621,7 +695,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             throw CryptoProviderError.keyGenerationFailed("ML-KEM-768 keypair generation failed")
         }
 
-        return KeyPair(
+        return try KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
                 usage: .keyExchange,
@@ -637,12 +711,13 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
 
  /// 生成 ML-DSA-65 密钥对
     private func generateMLDSA65KeyPair() throws -> KeyPair {
-        let pkLen = oqs_raii_mldsa65_public_key_length()
-        let skLen = oqs_raii_mldsa65_secret_key_length()
+        let lengths = try Self.validatedMLDSA65Lengths()
+        let pkLen = lengths.publicKey
+        let skLen = lengths.secretKey
 
-        var publicKeyBytes = [UInt8](repeating: 0, count: Int(pkLen))
+        var publicKeyBytes = [UInt8](repeating: 0, count: pkLen)
  // 使用 SecureBytes 保护私钥
-        let privateKeySecure = SecureBytes(count: Int(skLen))
+        let privateKeySecure = try SecureBytes(count: skLen)
 
         let result = privateKeySecure.withUnsafeMutableBytes { skPtr -> Int32 in
             guard let skBase = skPtr.baseAddress else { return OQSRAII_FAIL }
@@ -650,7 +725,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
                 &publicKeyBytes,
                 publicKeyBytes.count,
                 skBase.assumingMemoryBound(to: UInt8.self),
-                Int(skLen)
+                skLen
             )
         }
 
@@ -658,7 +733,7 @@ public struct OQSPQCCryptoProvider: CryptoProvider, Sendable {
             throw CryptoProviderError.keyGenerationFailed("ML-DSA-65 keypair generation failed")
         }
 
-        return KeyPair(
+        return try KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
                 usage: .signing,

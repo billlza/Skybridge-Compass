@@ -4,6 +4,7 @@ import SkyBridgeProtocolCore
 
 @MainActor
 extension CrossNetworkConnectionManager {
+    #if os(macOS)
     static func webRTCHardwareCompatibleCaptureSize(
         _ size: CGSize,
         preferredCodec: PreferredVideoCodec,
@@ -15,6 +16,7 @@ extension CrossNetworkConnectionManager {
             preserveExactVisibleSize: preserveExactVisibleSize
         )
     }
+    #endif
 
     static func supportedRemoteVideoFormats() -> [String] {
         WebRTCRemoteDesktopVideoFormatPolicy.supportedRemoteVideoFormats()

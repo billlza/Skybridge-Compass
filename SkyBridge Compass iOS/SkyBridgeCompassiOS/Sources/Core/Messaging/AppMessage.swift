@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 /// App-level encrypted message sent over an established P2P session (after handshake).
 /// This is distinct from handshake frames.
@@ -8,6 +9,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
     case clipboard(ClipboardPayload)
     /// 设备间文本消息（离线时经 OfflineMessageQueue 排队，重连后投递）。
     case textMessage(TextMessagePayload)
+    case textMessageReceipt(TextMessageReceiptPayload)
     case pairingIdentityExchange(PairingIdentityExchangePayload)
     case kemRefreshRequest(KEMRefreshRequestPayload)
     case signedKEMRefresh(SignedKEMRefreshPayload)
@@ -28,11 +30,34 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let id: UUID
         public let text: String
         public let sentAt: Date
+        public let deliveryAttemptID: UUID?
 
-        public init(id: UUID = UUID(), text: String, sentAt: Date = Date()) {
+        public init(
+            id: UUID = UUID(),
+            text: String,
+            sentAt: Date = Date(),
+            deliveryAttemptID: UUID? = nil
+        ) {
             self.id = id
             self.text = text
             self.sentAt = sentAt
+            self.deliveryAttemptID = deliveryAttemptID
+        }
+    }
+
+    public struct TextMessageReceiptPayload: Codable, Sendable, Equatable {
+        public let messageID: UUID
+        public let deliveryAttemptID: UUID
+        public let receivedAt: Date
+
+        public init(
+            messageID: UUID,
+            deliveryAttemptID: UUID,
+            receivedAt: Date = Date()
+        ) {
+            self.messageID = messageID
+            self.deliveryAttemptID = deliveryAttemptID
+            self.receivedAt = receivedAt
         }
     }
 
@@ -1235,9 +1260,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
         }
     }
 
-    private enum CodingKeys: String, CodingKey {
+    private enum CodingKeys: String, CodingKey, CaseIterable {
         case clipboard
         case textMessage
+        case textMessageReceipt
         case pairingIdentityExchange
         case kemRefreshRequest
         case signedKEMRefresh
@@ -1253,141 +1279,167 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case pong
     }
 
+    private static let wireDiscriminators = Set(CodingKeys.allCases.map(\.rawValue))
+
+    /// Decodes authenticated AppMessage wire bytes after validating their raw
+    /// JSON structure. Production wire boundaries must use this entry point;
+    /// direct `JSONDecoder` calls cannot detect duplicate object keys.
+    public static func decodeWireMessage(
+        from data: Data,
+        using decoder: JSONDecoder = JSONDecoder()
+    ) throws -> AppMessage {
+        try StrictJSONSingleDiscriminatorWireValidator.validate(
+            data,
+            allowedDiscriminators: wireDiscriminators
+        )
+        return try decoder.decode(AppMessage.self, from: data)
+    }
+
     private struct LegacyAssociatedValueBox<Value: Decodable>: Decodable {
         let _0: Value
     }
 
+    private struct DynamicCodingKey: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+
+        init(_ stringValue: String) {
+            self.stringValue = stringValue
+        }
+
+        init?(stringValue: String) {
+            self.init(stringValue)
+        }
+
+        init?(intValue: Int) {
+            return nil
+        }
+    }
+
+    private static func decodePayload<Value: Decodable>(
+        _ type: Value.Type,
+        forKey key: CodingKeys,
+        from container: KeyedDecodingContainer<CodingKeys>,
+        legacyAssociatedValue: Bool
+    ) throws -> Value {
+        if legacyAssociatedValue {
+            return try container.decode(
+                LegacyAssociatedValueBox<Value>.self,
+                forKey: key
+            )._0
+        }
+        return try container.decode(type, forKey: key)
+    }
+
     public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-
-        if let payload = try? container.decode(ClipboardPayload.self, forKey: .clipboard) {
-            self = .clipboard(payload)
-            return
-        }
-        if let payload = try? container.decode(TextMessagePayload.self, forKey: .textMessage) {
-            self = .textMessage(payload)
-            return
-        }
-        if let payload = try? container.decode(PairingIdentityExchangePayload.self, forKey: .pairingIdentityExchange) {
-            self = .pairingIdentityExchange(payload)
-            return
-        }
-        if let payload = try? container.decode(KEMRefreshRequestPayload.self, forKey: .kemRefreshRequest) {
-            self = .kemRefreshRequest(payload)
-            return
-        }
-        if let payload = try? container.decode(SignedKEMRefreshPayload.self, forKey: .signedKEMRefresh) {
-            self = .signedKEMRefresh(payload)
-            return
-        }
-        if let payload = try? container.decode(KEMRefreshFailurePayload.self, forKey: .kemRefreshFailure) {
-            self = .kemRefreshFailure(payload)
-            return
-        }
-        if let payload = try? container.decode(ProtocolIdentityBindingRequestPayload.self, forKey: .protocolIdentityBindingRequest) {
-            self = .protocolIdentityBindingRequest(payload)
-            return
-        }
-        if let payload = try? container.decode(SignedProtocolIdentityBindingPayload.self, forKey: .signedProtocolIdentityBinding) {
-            self = .signedProtocolIdentityBinding(payload)
-            return
-        }
-        if let payload = try? container.decode(ProtocolIdentityBindingConfirmPayload.self, forKey: .protocolIdentityBindingConfirm) {
-            self = .protocolIdentityBindingConfirm(payload)
-            return
-        }
-        if let payload = try? container.decode(SignedProtocolIdentityBindingFinalAckPayload.self, forKey: .signedProtocolIdentityBindingFinalAck) {
-            self = .signedProtocolIdentityBindingFinalAck(payload)
-            return
-        }
-        if let payload = try? container.decode(HeartbeatPayload.self, forKey: .heartbeat) {
-            self = .heartbeat(payload)
-            return
-        }
-        if let payload = try? container.decode(AuthenticatedRouteBindingPayload.self, forKey: .authenticatedRouteBinding) {
-            self = .authenticatedRouteBinding(payload)
-            return
-        }
-        if let payload = try? container.decode(PeerDisconnectingPayload.self, forKey: .peerDisconnecting) {
-            self = .peerDisconnecting(payload)
-            return
-        }
-        if let payload = try? container.decode(PingPayload.self, forKey: .ping) {
-            self = .ping(payload)
-            return
-        }
-        if let payload = try? container.decode(PongPayload.self, forKey: .pong) {
-            self = .pong(payload)
-            return
-        }
-
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<ClipboardPayload>.self, forKey: .clipboard))?._0 {
-            self = .clipboard(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<TextMessagePayload>.self, forKey: .textMessage))?._0 {
-            self = .textMessage(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<PairingIdentityExchangePayload>.self, forKey: .pairingIdentityExchange))?._0 {
-            self = .pairingIdentityExchange(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<KEMRefreshRequestPayload>.self, forKey: .kemRefreshRequest))?._0 {
-            self = .kemRefreshRequest(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<SignedKEMRefreshPayload>.self, forKey: .signedKEMRefresh))?._0 {
-            self = .signedKEMRefresh(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<KEMRefreshFailurePayload>.self, forKey: .kemRefreshFailure))?._0 {
-            self = .kemRefreshFailure(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<ProtocolIdentityBindingRequestPayload>.self, forKey: .protocolIdentityBindingRequest))?._0 {
-            self = .protocolIdentityBindingRequest(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<SignedProtocolIdentityBindingPayload>.self, forKey: .signedProtocolIdentityBinding))?._0 {
-            self = .signedProtocolIdentityBinding(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<ProtocolIdentityBindingConfirmPayload>.self, forKey: .protocolIdentityBindingConfirm))?._0 {
-            self = .protocolIdentityBindingConfirm(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<SignedProtocolIdentityBindingFinalAckPayload>.self, forKey: .signedProtocolIdentityBindingFinalAck))?._0 {
-            self = .signedProtocolIdentityBindingFinalAck(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<HeartbeatPayload>.self, forKey: .heartbeat))?._0 {
-            self = .heartbeat(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<AuthenticatedRouteBindingPayload>.self, forKey: .authenticatedRouteBinding))?._0 {
-            self = .authenticatedRouteBinding(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<PeerDisconnectingPayload>.self, forKey: .peerDisconnecting))?._0 {
-            self = .peerDisconnecting(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<PingPayload>.self, forKey: .ping))?._0 {
-            self = .ping(payload)
-            return
-        }
-        if let payload = (try? container.decode(LegacyAssociatedValueBox<PongPayload>.self, forKey: .pong))?._0 {
-            self = .pong(payload)
-            return
-        }
-
-        throw DecodingError.dataCorrupted(
-            .init(
-                codingPath: decoder.codingPath,
-                debugDescription: "Unsupported AppMessage payload"
+        let rawContainer = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard rawContainer.allKeys.count == 1,
+              let rawKey = rawContainer.allKeys.first,
+              let selectedKey = CodingKeys(rawValue: rawKey.stringValue) else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "AppMessage must contain exactly one known discriminator"
+                )
             )
+        }
+        let payloadContainer = try rawContainer.nestedContainer(
+            keyedBy: DynamicCodingKey.self,
+            forKey: rawKey
         )
+        let legacyKey = DynamicCodingKey("_0")
+        let usesLegacyAssociatedValue = payloadContainer.contains(legacyKey)
+        guard !usesLegacyAssociatedValue || payloadContainer.allKeys.count == 1 else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath + [rawKey],
+                    debugDescription: "AppMessage payload mixes current and legacy representations"
+                )
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch selectedKey {
+        case .clipboard:
+            self = .clipboard(try Self.decodePayload(
+                ClipboardPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .textMessage:
+            self = .textMessage(try Self.decodePayload(
+                TextMessagePayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .textMessageReceipt:
+            self = .textMessageReceipt(try Self.decodePayload(
+                TextMessageReceiptPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .pairingIdentityExchange:
+            self = .pairingIdentityExchange(try Self.decodePayload(
+                PairingIdentityExchangePayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .kemRefreshRequest:
+            self = .kemRefreshRequest(try Self.decodePayload(
+                KEMRefreshRequestPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .signedKEMRefresh:
+            self = .signedKEMRefresh(try Self.decodePayload(
+                SignedKEMRefreshPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .kemRefreshFailure:
+            self = .kemRefreshFailure(try Self.decodePayload(
+                KEMRefreshFailurePayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .protocolIdentityBindingRequest:
+            self = .protocolIdentityBindingRequest(try Self.decodePayload(
+                ProtocolIdentityBindingRequestPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .signedProtocolIdentityBinding:
+            self = .signedProtocolIdentityBinding(try Self.decodePayload(
+                SignedProtocolIdentityBindingPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .protocolIdentityBindingConfirm:
+            self = .protocolIdentityBindingConfirm(try Self.decodePayload(
+                ProtocolIdentityBindingConfirmPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .signedProtocolIdentityBindingFinalAck:
+            self = .signedProtocolIdentityBindingFinalAck(try Self.decodePayload(
+                SignedProtocolIdentityBindingFinalAckPayload.self, forKey: selectedKey,
+                from: container, legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .heartbeat:
+            self = .heartbeat(try Self.decodePayload(
+                HeartbeatPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .authenticatedRouteBinding:
+            self = .authenticatedRouteBinding(try Self.decodePayload(
+                AuthenticatedRouteBindingPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .peerDisconnecting:
+            self = .peerDisconnecting(try Self.decodePayload(
+                PeerDisconnectingPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .ping:
+            self = .ping(try Self.decodePayload(
+                PingPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        case .pong:
+            self = .pong(try Self.decodePayload(
+                PongPayload.self, forKey: selectedKey, from: container,
+                legacyAssociatedValue: usesLegacyAssociatedValue
+            ))
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1397,6 +1449,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             try container.encode(payload, forKey: .clipboard)
         case .textMessage(let payload):
             try container.encode(payload, forKey: .textMessage)
+        case .textMessageReceipt(let payload):
+            try container.encode(payload, forKey: .textMessageReceipt)
         case .pairingIdentityExchange(let payload):
             try container.encode(payload, forKey: .pairingIdentityExchange)
         case .kemRefreshRequest(let payload):

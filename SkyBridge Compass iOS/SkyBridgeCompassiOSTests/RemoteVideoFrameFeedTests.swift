@@ -1282,7 +1282,9 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? CameraRemoteDesktopRuntimeError, .invalidDisplayName)
         }
+    }
 
+    func testCameraDisplayNameUsesLocalizedDefaultSourceShape() throws {
         let source = try remoteDesktopManagerSource()
         XCTAssertTrue(source.contains("defaultName: RuntimeLocalization.string(\"智能监控\")"))
     }
@@ -1358,7 +1360,7 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
             let tableURL = resourceRoot
                 .appendingPathComponent("\(locale).lproj")
                 .appendingPathComponent("Localizable.strings")
-            let table = try String(contentsOf: tableURL, encoding: .utf8)
+            let table = try readRepositorySourceForSourceShapeTests(at: tableURL)
             for key in keys {
                 XCTAssertTrue(
                     table.contains("\"\(key)\" = "),
@@ -2346,7 +2348,9 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
             CameraDecodeIdentity(width: 1, height: 1),
             "Published display dimensions must not mutate the camera decoder stream identity"
         )
+    }
 
+    func testCameraDecodeIdentitySourceDoesNotFeedPublishedResolutionBackIntoDecoder() throws {
         let source = try remoteDesktopManagerSource()
         guard let handlerStart = source.range(of: "let cameraDecodeIdentity ="),
               let handlerEnd = source.range(
@@ -2363,7 +2367,7 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
         XCTAssertFalse(handler.contains("Int(resolution.height"))
     }
 
-    func testCameraFrameClassificationIsSerializedOffMainActorExactlyOnce() async throws {
+    func testCameraFrameClassifierRejectsAdvertisedSyncPredictiveFrame() async throws {
         let worker = RemoteDesktopVideoFrameClassificationWorker()
         let advertisedSyncPredictiveFrame = ScreenData(
             width: 1,
@@ -2380,7 +2384,9 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
             classifiedFrame.traits.isIndependentlyDecodableFrame,
             "Advertised metadata must not turn an actual predictive NAL into a recovery anchor"
         )
+    }
 
+    func testCameraFrameClassificationIsSerializedOffMainActorExactlyOnce() throws {
         let source = try remoteDesktopManagerSource()
         let taskStart = try XCTUnwrap(source.range(of: "let cameraDecodeIdentity =")?.lowerBound)
         let taskSuffix = source[taskStart...]
@@ -2501,7 +2507,7 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
             .appendingPathComponent("Sources")
             .appendingPathComponent("Managers")
             .appendingPathComponent("RemoteDesktopManager.swift")
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
     private func remoteDesktopViewSource() throws -> String {
@@ -2514,7 +2520,7 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
             .appendingPathComponent("Sources")
             .appendingPathComponent("Views")
             .appendingPathComponent("RemoteDesktopView.swift")
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try readRepositorySourceForSourceShapeTests(at: sourceURL)
     }
 
     private func canSubmitCameraEndpoint(

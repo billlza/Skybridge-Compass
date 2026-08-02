@@ -35,7 +35,7 @@ Three-tier Stable → Fluid → Reference pipeline is implemented. HDR/Reference
 1. **Protocol-parity drift gate — ✅ DONE (2026-06-16).** `Scripts/check_protocol_parity.py` + `.github/workflows/protocol-parity.yml` guard the ~32 hand-copied iOS↔macOS wire/protocol files (normalized-hash baseline + DataChannel-label wire anchors). See `Docs/CoreLayering.md`.
 2. **WebRTC Swift package 148→149+** — blocked by an *upstream* checksum bug on 149 (`Package.swift` line ~93). Bump when upstream fixes it; no code change expected.
 3. **Move SwiftUI views out of `SkyBridgeCore` into `SkyBridgeUI`** — `SettingsView`, `DeviceManagementView`, `DiscoveryDiagnosticsView` violate the UI-layer boundary (`CoreLayering.md`). Small-step migration (cover with baseline test → move → delete).
-4. **Verify vendored FreeRDP ≥ 3.26** — ✅ confirmed `3.26.0` (`Scripts/build_freerdp_xcframework.sh`). Keep tracking 3.27+ for TLS/crypto updates.
+4. **Keep the vendored FreeRDP runtime exact-pinned** — `3.30.0` is built as the sole dynamic runtime by `Scripts/build_freerdp_dylibs.sh`; headers, dylibs, source commits and hashes are verified together. The obsolete static XCFramework path has been removed.
 5. **Doc hygiene** — add implementation status + code anchors to contract docs (`signaling-lifecycle-contract.md`, `failure-matrix-and-recovery.md`).
 
 ## Cross-platform expansion (Windows / Android / Linux)

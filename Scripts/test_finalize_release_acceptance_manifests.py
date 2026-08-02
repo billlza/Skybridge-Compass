@@ -21,6 +21,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
         root: Path,
         *,
         candidate: bool = True,
+        transport: str = "webrtc",
     ) -> tuple[Path, Path, bytes]:
         private_directory = root / "private"
         public_directory = root / "public"
@@ -32,7 +33,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             "diagnosticOnly": True,
             "preCleanupCandidate": candidate,
             "schemaVersion": 1,
-            "transport": "webrtc",
+            "transport": transport,
             "iosProductSurface": "production",
             "iosSwiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
             "iosTestingCompilationCondition": False,
@@ -43,6 +44,15 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             "iosProductionIdentityLifecycleVerified": True,
             "iosProductionIdentityProof": True,
         }
+        if transport == "p2p":
+            payload.update(
+                {
+                    "macHostLaunchMode": "packaged",
+                    "macHostDiagnosticOnly": False,
+                    "identitySourceStaplerValid": True,
+                    "identitySourceGatekeeperAccepted": True,
+                }
+            )
         raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         private_path = private_directory / finalizer.MANIFEST_FILE_NAME
         public_path = public_directory / finalizer.MANIFEST_FILE_NAME
@@ -116,6 +126,36 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 phases.index("after-private-verify"),
                 phases.index("before-public-final-replace"),
             )
+
+    def test_p2p_signed_lab_host_cannot_be_finalized_as_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            private_path, public_path, _ = self.create_manifests(
+                Path(raw_root),
+                transport="p2p",
+            )
+            for path in (private_path, public_path):
+                payload = self.read_payload(path)
+                payload["macHostLaunchMode"] = "packaged-lab"
+                payload["macHostDiagnosticOnly"] = True
+                payload["identitySourceStaplerValid"] = False
+                payload["identitySourceGatekeeperAccepted"] = False
+                path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                path.chmod(0o600)
+
+            with self.assertRaisesRegex(
+                finalizer.FinalizationError,
+                "macHostLaunchMode must be packaged",
+            ):
+                finalizer.finalize_release_acceptance_manifests(
+                    private_path,
+                    public_path,
+                )
+
+            self.assertIs(self.read_payload(private_path)["acceptanceEligible"], False)
+            self.assertIs(self.read_payload(public_path)["acceptanceEligible"], False)
 
     def test_private_write_failure_cannot_make_either_manifest_green(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

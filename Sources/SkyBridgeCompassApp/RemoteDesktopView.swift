@@ -9,6 +9,7 @@ struct RemoteDesktopView: View {
     @State private var isFullScreen = false
     @State private var showingConnectionSheet = false
     @State private var showingSettingsSheet = false
+    @State private var settingsApplyError: String?
     @State private var searchText = ""
     @State private var newConnectionPrefersAdvanced: Bool = false
     @State private var hasRequestedManagerBootstrap = false
@@ -49,6 +50,16 @@ struct RemoteDesktopView: View {
         }
         .sheet(isPresented: $showingSettingsSheet) {
             RemoteDesktopSettingsView(isPresented: $showingSettingsSheet)
+        }
+        .alert("设置需要重新连接", isPresented: Binding(
+            get: { settingsApplyError != nil },
+            set: { if !$0 { settingsApplyError = nil } }
+        )) {
+            Button(LocalizationManager.shared.localizedString("action.ok")) {
+                settingsApplyError = nil
+            }
+        } message: {
+            Text(settingsApplyError ?? "")
         }
         .onAppear(perform: bootstrapRemoteDesktopManagerIfNeeded)
 // 订阅远程桌面管理器的会话发布，实时更新侧边栏列表
@@ -137,7 +148,8 @@ struct RemoteDesktopView: View {
                     connectionMode = mode
  // 让模式真正路由到对应的连接入口（此前仅 .nearField 有动作，其余只更新徽章=仅显示）：
  // 自动→设备发现（推荐 P2P，自动选路）；近距→近距硬件镜像窗口（NearFieldMirrorView 真实实现）；
- // 远距→高级手动 RDP/VNC/SSH 连接表单。三个目标均为已落地能力。
+ // 远距→高级手动 RDP/VNC/SSH 连接表单。RDP 当前是严格证书策略下的受限路径；
+ // 真实 Windows 端点的证书、NLA、首帧、输入与断开恢复仍须独立发布验收。
                     switch mode {
                     case .auto:
                         NotificationCenter.default.post(name: .skybridgeNavigateToDeviceDiscovery, object: nil)
@@ -356,7 +368,11 @@ struct RemoteDesktopView: View {
                             Button {
                                 RemoteDesktopSettingsManager.shared.settings.displaySettings.videoQuality = quality
                                 RemoteDesktopSettingsManager.shared.saveSettings()
-                                remoteDesktopManager.reapplyCurrentSettingsToActiveSessions()
+                                do {
+                                    try remoteDesktopManager.reapplyCurrentSettingsToActiveSessions()
+                                } catch {
+                                    settingsApplyError = error.localizedDescription
+                                }
                             } label: {
                                 Label(
                                     quality.displayName,
@@ -1070,6 +1086,13 @@ struct NewConnectionSheet: View {
                             } else {
                                 TextField(LocalizationManager.shared.localizedString("remote.form.hostname"), text: $hostname)
                                 TextField(LocalizationManager.shared.localizedString("remote.form.port"), text: $port)
+
+                                if selectedProtocol == .rdp {
+                                    Text(LocalizationManager.shared.localizedString("remote.form.rdp.certificateNotice"))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                             }
 
                             Divider()

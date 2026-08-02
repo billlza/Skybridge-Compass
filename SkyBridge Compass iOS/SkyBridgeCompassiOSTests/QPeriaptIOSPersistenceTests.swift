@@ -6,7 +6,7 @@ import XCTest
 final class QPeriaptIOSPersistenceTests: XCTestCase {
     func testIdentityEnvelopeDecodesDirectlyIntoSecureBytes() throws {
         let rootFingerprint = randomFingerprint()
-        let material = makeIdentityMaterial(seed: 0x31)
+        let material = try makeIdentityMaterial(seed: 0x31)
         defer { material.privateKey.zeroize() }
         var encoded = try QPeriaptKEMIdentityEnvelope.encode(
             rootFingerprint: rootFingerprint,
@@ -295,13 +295,15 @@ final class QPeriaptIOSPersistenceTests: XCTestCase {
 
     private func makeIdentityMaterial(
         seed: UInt8
-    ) -> (publicKey: Data, privateKey: SecureBytes) {
+    ) throws -> (publicKey: Data, privateKey: SecureBytes) {
         let publicKey = Data(
             (0..<QPeriaptKEMIdentityEnvelope.publicKeyLength).map {
                 seed &+ UInt8(truncatingIfNeeded: $0)
             }
         )
-        let privateKey = SecureBytes(count: QPeriaptKEMIdentityEnvelope.privateKeyLength)
+        let privateKey = try SecureBytes(
+            count: QPeriaptKEMIdentityEnvelope.privateKeyLength
+        )
         privateKey.withUnsafeMutableBytes { privateRaw in
             for index in 0..<privateRaw.count {
                 privateRaw[index] = seed ^ UInt8(truncatingIfNeeded: index)
@@ -326,7 +328,7 @@ final class QPeriaptIOSPersistenceTests: XCTestCase {
         encoded: Data
     ) {
         let rootFingerprint = rootFingerprint ?? randomFingerprint()
-        let material = makeIdentityMaterial(seed: seed)
+        let material = try makeIdentityMaterial(seed: seed)
         do {
             let encoded = try QPeriaptKEMIdentityEnvelope.encode(
                 rootFingerprint: rootFingerprint,

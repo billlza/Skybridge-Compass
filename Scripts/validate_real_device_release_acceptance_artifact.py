@@ -348,6 +348,11 @@ def validate_p2p(payload: dict[str, Any], artifact_dir: Path) -> None:
     if payload.get("macOnlineSource") != "packaged":
         fail("P2P macOnlineSource must be packaged; Debug product-identity signing is diagnostic-only")
     require_exact_bool(payload, "macOnlineSourceCurrent", True)
+    if payload.get("macHostLaunchMode") != "packaged":
+        fail("P2P macHostLaunchMode must be packaged; signed lab hosts are diagnostic-only")
+    require_exact_bool(payload, "macHostDiagnosticOnly", False)
+    require_exact_bool(payload, "identitySourceStaplerValid", True)
+    require_exact_bool(payload, "identitySourceGatekeeperAccepted", True)
     if payload.get("approvalLifecycle") != [
         "Shown",
         "PanelPresented",
@@ -529,6 +534,11 @@ def validate_p2p_logs(artifact_dir: Path) -> None:
     )
     if re.search(r"\bfailed\s+stage=", mac_status):
         fail("macOS P2P status contains a failed stage")
+    if re.search(
+        r"\bidentity\s+legacyResidueInspectionComplete=1\s+conflicts=(?:0|1)\s+reason=none\b",
+        mac_status,
+    ) is None:
+        fail("macOS P2P status is missing a complete legacy-residue inspection")
     if re.search(r"(?:\bsuccess\b.*\bsuite=X-Wing\b.*\bhandshakeOnly=1\b|\bmac remote established\b.*\bsuite=X-Wing\b)", mac_status) is None:
         fail("macOS P2P status does not prove the iOS-to-Mac X-Wing handshake")
     if re.search(r"\bsmoke-final\b.*\bresult=success\b.*\bvalidated=1\b", mac_status) is None:

@@ -61,6 +61,7 @@ public class NetworkFrameworkEnhancements {
                 var chainSubjects: [String] = []
                 if let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] {
                     for cert in chain {
+#if os(macOS)
                         if let values = SecCertificateCopyValues(cert, [kSecOIDCommonName] as CFArray, nil) as? [CFString: Any],
                            let valueDict = values[kSecOIDCommonName] as? [CFString: Any],
                            let cnValue = valueDict[kSecPropertyKeyValue] as? String {
@@ -68,6 +69,16 @@ public class NetworkFrameworkEnhancements {
                         } else {
                             chainSubjects.append("(no CN)")
                         }
+#else
+                        // Diagnostics only, never a trust decision: `SecCertificateCopyValues` is
+                        // macOS-only, so other platforms use the portable subject summary. The
+                        // hostname binding above stays fail-closed rather than approximated.
+                        if let summary = SecCertificateCopySubjectSummary(cert) as String? {
+                            chainSubjects.append(summary)
+                        } else {
+                            chainSubjects.append("(no CN)")
+                        }
+#endif
                     }
                 }
  // 上报验证事件；若开启隐私诊断则同时附带ALPN信息
@@ -157,6 +168,24 @@ public class NetworkFrameworkEnhancements {
     
  /// 主机名匹配（CN 或 SAN）
     private static func hostnamesContains(trust: SecTrust, candidates: [String]) -> Bool {
+#if !os(macOS)
+        // `SecCertificateCopyValues` and the `kSecOID*` keys are macOS-only, and no public iOS API
+        // exposes the SubjectAltName list. Matching only the Common Name here would give iOS a
+        // strictly weaker hostname binding than macOS, so this fails closed instead: the caller
+        // treats `false` as "reject the connection".
+        //
+        // Migration requirement (do not paper over): both platforms should move to
+        // `SecPolicyCreateSSL(true, hostname)` + `SecTrustEvaluateWithError`, which performs
+        // CN/SAN hostname validation correctly and identically on macOS and iOS. Until then this
+        // path is unavailable on iOS rather than approximated.
+        logger.fault(
+            """
+            🚨 主机名绑定校验在当前平台不可用（SecCertificateCopyValues 为 macOS 专属），\
+            按 fail-closed 拒绝连接；请改用 SecPolicyCreateSSL 的跨平台校验路径
+            """
+        )
+        return false
+#else
         guard let certs = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = certs.first else { return false }
  // 读取Subject Common Name
         var cn: String?
@@ -180,6 +209,7 @@ public class NetworkFrameworkEnhancements {
         if let cn = cn?.lowercased(), all.contains(cn) { return true }
         if !sanSet.isEmpty, !all.isDisjoint(with: sanSet.map { $0.lowercased() }) { return true }
         return false
+#endif
     }
     
  // MARK: - 2. NWConnectionGroup（多设备发现）

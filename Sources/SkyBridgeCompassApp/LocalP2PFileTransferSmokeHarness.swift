@@ -645,7 +645,12 @@ final class LocalP2PFileTransferSmokeHarness {
         }
         if let transferError = error as? FileTransferError {
             switch transferError {
-            case .secureSessionRequired, .securityThreatDetected, .receiverNotConfirmed, .receiverRejected:
+            case .secureSessionRequired,
+                 .securityThreatDetected,
+                 .securityScanReviewRequired,
+                 .securityScanIncomplete,
+                 .receiverNotConfirmed,
+                 .receiverRejected:
                 return "auth_policy"
             case .invalidHeader,
                  .inboundInvalidInitialHeader,
@@ -749,6 +754,10 @@ final class LocalP2PFileTransferSmokeHarness {
                 return "mac_file_transfer_secure_session_required"
             case .securityThreatDetected:
                 return "mac_file_transfer_security_threat_detected"
+            case .securityScanReviewRequired:
+                return "mac_file_transfer_security_scan_review_required"
+            case .securityScanIncomplete:
+                return "mac_file_transfer_security_scan_incomplete"
             case .partialFileCleanupFailed:
                 return "mac_file_transfer_partial_cleanup_failed"
             case .sourceFileCloseFailed:
@@ -1152,7 +1161,7 @@ private struct LocalP2PBonjourFileTransferRoute {
 @available(macOS 14.0, *)
 @MainActor
 private final class LocalP2PBonjourFileTransferRouteResolver: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
-    private let serviceType = "_skybridge-transfer._tcp."
+    private let serviceType = "_skybridge-xfer._tcp."
     private let serviceDomain = "local."
     private var browser: NetServiceBrowser?
     private var services: [NetService] = []

@@ -247,18 +247,11 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
                 markers: ["func clearForTesting()", "func countForTesting("]
             ),
             .init(
-                relativePath: "Sources/SkyBridgeCore/P2P/SecureBytes.swift",
+                relativePath: "Sources/SkyBridgeProtocolCore/Security/SecureBytes.swift",
                 markers: [
                     "private static let wipingFunctionStorage",
                     "public static var wipingFunction",
                     "public final class SecureBytesWipeTracker"
-                ]
-            ),
-            .init(
-                relativePath: "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CoreTypes.swift",
-                markers: [
-                    "private static let wipingFunctionStorage",
-                    "public static var wipingFunction"
                 ]
             ),
             .init(
@@ -537,17 +530,21 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
     }
 
     func testSecureBytesExportsOnlyOwnedDataAndUsesImmutableReleaseWipingHooks() throws {
-        let paths = [
-            "Sources/SkyBridgeCore/P2P/SecureBytes.swift",
-            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CoreTypes.swift"
-        ]
+        let sharedPath = "Sources/SkyBridgeProtocolCore/Security/SecureBytes.swift"
+        let sharedSource = try repositorySource(sharedPath)
+        XCTAssertTrue(sharedSource.contains("public func copyData() -> Data"), sharedPath)
+        XCTAssertFalse(sharedSource.contains("noCopyData"), sharedPath)
+        XCTAssertTrue(sharedSource.contains("internal static let wipingFunction"), sharedPath)
 
-        for path in paths {
-            let source = try repositorySource(path)
-            XCTAssertTrue(source.contains("public func copyData() -> Data"), path)
-            XCTAssertFalse(source.contains("noCopyData"), path)
-            XCTAssertTrue(source.contains("internal static let wipingFunction"), path)
-        }
+        let iosPath = "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CoreTypes.swift"
+        let iosSource = try repositorySource(iosPath)
+        XCTAssertTrue(
+            iosSource.contains(
+                "public typealias SecureBytes = SkyBridgeProtocolCore.SecureBytes"
+            ),
+            iosPath
+        )
+        XCTAssertFalse(iosSource.contains("public final class SecureBytes"), iosPath)
     }
 
     func testSignalingTransportPolicyInitializerIsNotInTheProductionSurface() throws {

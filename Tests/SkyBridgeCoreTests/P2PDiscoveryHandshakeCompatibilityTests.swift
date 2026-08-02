@@ -3,7 +3,7 @@ import XCTest
 
 @available(macOS 14.0, *)
 final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
-    func testNormalizeInboundControlFrameUnwrapsHandshakePaddingBeforeClassification() {
+    func testNormalizeInboundControlFrameUnwrapsHandshakePaddingBeforeClassification() throws {
         UserDefaults.standard.set(true, forKey: "sb_handshake_padding_enabled")
         defer { UserDefaults.standard.removeObject(forKey: "sb_handshake_padding_enabled") }
 
@@ -11,7 +11,7 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
             direction: .initiatorToResponder,
             mac: Data(repeating: 0xAB, count: 32)
         ).encoded
-        let padded = HandshakePadding.wrapIfEnabled(finished, label: "test/finished")
+        let padded = try HandshakePadding.wrapIfEnabled(finished, label: "test/finished")
 
         XCTAssertNotEqual(padded, finished)
 

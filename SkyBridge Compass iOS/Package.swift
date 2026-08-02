@@ -36,17 +36,6 @@ func shouldEnableApplePQCSDK() -> Bool {
 
 let enableApplePQCSDK: Bool = shouldEnableApplePQCSDK()
 
-// WebRTC binary header overlay path, resolved as an ABSOLUTE path from this
-// manifest's own location (#filePath) instead of a build-CWD-relative "../" flag.
-// The shared WebRTC headers live in the parent monorepo's Sources/Vendor/WebRTCHeaders;
-// a relative `-I ../Sources/...` is resolved against the build working directory and
-// breaks when SwiftPM/Xcode builds from a different CWD. An absolute path is stable.
-let webRTCHeadersIncludePath: String = URL(fileURLWithPath: #filePath)
-    .deletingLastPathComponent()              // "SkyBridge Compass iOS"
-    .deletingLastPathComponent()              // monorepo root
-    .appendingPathComponent("Sources/Vendor/WebRTCHeaders")
-    .path
-
 let package = Package(
     name: "SkyBridgeCompassiOS",
     defaultLocalization: "en",
@@ -63,7 +52,8 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "SkyBridgeRoot", path: ".."),
-        .package(url: "https://github.com/stasel/WebRTC", from: "148.0.0")
+        .package(name: "SkyBridgeCameraKit", path: "../Packages/SkyBridgeCameraKit"),
+        .package(url: "https://github.com/stasel/WebRTC", exact: "150.0.0")
     ],
     targets: [
         // MARK: - iOS 主应用目标
@@ -73,7 +63,10 @@ let package = Package(
                 .product(name: "WebRTC", package: "WebRTC"),
                 .product(name: "SkyBridgeQPeriaptRuntime", package: "SkyBridgeRoot"),
                 .product(name: "OQSRAII", package: "SkyBridgeRoot"),
-                .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeRoot")
+                .product(name: "SkyBridgeRealtimeMedia", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeWebRTCRuntime", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeMessagePersistence", package: "SkyBridgeRoot"),
+                .product(name: "SkyBridgeCameraKit", package: "SkyBridgeCameraKit")
             ],
             path: "SkyBridgeCompassiOS",
             exclude: [
@@ -86,9 +79,6 @@ let package = Package(
             ],
             swiftSettings: ([
                 .enableUpcomingFeature("StrictConcurrency"),
-                // WebRTC binary header overlay (SwiftPM): some distributions omit internal headers referenced by WebRTC.h.
-                // Absolute path (computed above from #filePath) — CWD-independent, unlike the previous "../" flag.
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath]),
             ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : []))
         )
     ],

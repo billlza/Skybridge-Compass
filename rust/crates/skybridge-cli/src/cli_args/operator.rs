@@ -26,8 +26,12 @@ pub(crate) struct DisconnectCommand {
 #[derive(Debug, Args)]
 pub(crate) struct ConnectCommand {
     pub(crate) code: String,
-    #[arg(long, default_value_t = 5)]
-    pub(crate) hold_seconds: u64,
+    #[arg(
+        long,
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
+    pub(crate) timeout_seconds: u64,
     #[arg(long)]
     pub(crate) json: bool,
 }
@@ -55,8 +59,18 @@ pub(crate) enum DeviceSubcommand {
 pub(crate) struct DeviceDiscoverArgs {
     #[arg(long)]
     pub(crate) nearby: bool,
-    #[arg(long)]
+    #[arg(long, requires = "nearby")]
     pub(crate) scan: bool,
+    /// Foreground mDNS browse window. Omit for the bounded 4-second default.
+    #[arg(
+        long,
+        requires = "scan",
+        value_parser = clap::value_parser!(u64).range(1..=30)
+    )]
+    pub(crate) scan_seconds: Option<u64>,
+    /// Include ephemeral mDNS-advertised IP/port observations in this response.
+    #[arg(long, requires = "scan")]
+    pub(crate) show_addresses: bool,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
 }
@@ -227,12 +241,38 @@ pub(crate) struct FileSendArgs {
     pub(crate) to: String,
     #[arg(long)]
     pub(crate) session_id: Option<String>,
+    /// Return after the active agent accepts the request instead of waiting for a verified receipt.
+    #[arg(long)]
+    pub(crate) detach: bool,
+    #[arg(
+        long,
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..=3600)
+    )]
+    pub(crate) timeout_seconds: u64,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
 }
 
 #[derive(Debug, Args)]
+#[command(group(
+    clap::ArgGroup::new("receive_action")
+        .required(true)
+        .args(["accept", "reject", "list"])
+))]
 pub(crate) struct FileReceiveArgs {
+    /// Session containing the authenticated inbound approval request.
+    #[arg(long, required_unless_present = "list")]
+    pub(crate) session_id: Option<String>,
+    /// Approve one pending inbound transfer by canonical transfer UUID.
+    #[arg(long, conflicts_with_all = ["reject", "list"])]
+    pub(crate) accept: Option<String>,
+    /// Reject one pending inbound transfer by canonical transfer UUID.
+    #[arg(long, conflicts_with_all = ["accept", "list"])]
+    pub(crate) reject: Option<String>,
+    /// List persisted inbound approval requests without changing them.
+    #[arg(long, conflicts_with_all = ["accept", "reject"])]
+    pub(crate) list: bool,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
 }

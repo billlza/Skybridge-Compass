@@ -14,6 +14,8 @@ IOS_PROJECT_FILE="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompass-iOS.xc
 IOS_PROJECT_YAML="${SCRIPT_DIR}/../SkyBridge Compass iOS/project.yml"
 IOS_DEBUG_ENTITLEMENTS="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
 IOS_RELEASE_ENTITLEMENTS="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
+IOS_APP_INFO_PLIST="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
+SOURCE_INPUT_DIGEST_TOOL="${SCRIPT_DIR}/source_input_digest.py"
 
 fail() {
   echo "[test-real-device-smoke-preflight] $1" >&2
@@ -42,6 +44,13 @@ direct_launch_body="$(
   awk '
     /^start_macos_smoke_host_directly\(\)/ { in_function = 1 }
     /^start_macos_smoke_host\(\)/ { in_function = 0 }
+    in_function { print }
+  ' "$SMOKE_SCRIPT"
+)"
+launch_evidence_body="$(
+  awk '
+    /^record_macos_smoke_host_launch_evidence\(\)/ { in_function = 1 }
+    /^append_ios_status\(\)/ { in_function = 0 }
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
@@ -77,6 +86,20 @@ cleanup_body="$(
   awk '
     /^cleanup\(\)/ { in_function = 1 }
     /^trap cleanup EXIT/ { in_function = 0 }
+    in_function { print }
+  ' "$SMOKE_SCRIPT"
+)"
+artifact_sync_body="$(
+  awk '
+    /^sync_macos_smoke_host_artifacts\(\)/ { in_function = 1 }
+    /^tracked_process_executable\(\)/ { in_function = 0 }
+    in_function { print }
+  ' "$SMOKE_SCRIPT"
+)"
+tracked_process_termination_body="$(
+  awk '
+    /^terminate_tracked_process\(\)/ { in_function = 1 }
+    /^capture_ios_release_source_provenance\(\)/ { in_function = 0 }
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
@@ -129,6 +152,13 @@ source_provenance_body="$(
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
+ios_build_invocation_body="$(
+  awk '
+    /^IOS_XCODEBUILD_ARGS=\(/ { in_block = 1 }
+    /^IOS_APP_PATH=/ { in_block = 0 }
+    in_block { print }
+  ' "$SMOKE_SCRIPT"
+)"
 for shared_ios_signing_file in \
   "$IOS_DISTRIBUTION_SIGNING_HELPERS" \
   "$IOS_DISTRIBUTION_SIGNING_RESOLVER" \
@@ -136,6 +166,8 @@ for shared_ios_signing_file in \
   [[ -f "$shared_ios_signing_file" && ! -L "$shared_ios_signing_file" ]] \
     || fail "shared iOS distribution signing source is missing or symlinked: $shared_ios_signing_file"
 done
+[[ -f "$SOURCE_INPUT_DIGEST_TOOL" && ! -L "$SOURCE_INPUT_DIGEST_TOOL" ]] \
+  || fail "source-input digest tool is missing or symlinked"
 distribution_profile_resolver_body="$(<"$IOS_DISTRIBUTION_SIGNING_RESOLVER")"
 ios_product_proof_body="$(<"$IOS_DISTRIBUTION_SIGNING_HELPERS")"$'\n'"$(<"$IOS_DISTRIBUTION_PRODUCT_VERIFIER")"
 
@@ -185,14 +217,44 @@ script_has_literal 'IOS_BUILD_CONFIGURATION="${SKYBRIDGE_SMOKE_IOS_BUILD_CONFIGU
   || fail "formal P2P iOS builds must default to the Release configuration"
 script_has_literal 'The iOS Debug product is diagnostic-only and requires SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1.' \
   || fail "Debug iOS products must be restricted to explicit lab diagnostics"
+script_has_literal 'IOS_PROVISIONING_DEVICE_ID="$(validate_real_ipad_device_id)"' \
+  || fail "CoreDevice selection must resolve the hardware UDID used by provisioning profiles"
+script_has_literal '"$IOS_PROVISIONING_DEVICE_ID"' \
+  || fail "distribution profile selection and product proof must consume the hardware UDID"
 script_has_literal '-configuration "$IOS_BUILD_CONFIGURATION"' \
   || fail "the iOS build must consume the validated Release-or-lab-Debug configuration"
+contains_literal "$ios_build_invocation_body" 'IOS_XCODEBUILD_ARGS=(' \
+  || fail "the iOS build must start from a non-empty common argument array"
+contains_literal "$ios_build_invocation_body" 'IOS_XCODEBUILD_ARGS+=(' \
+  || fail "Release-only signing arguments must append to the common iOS build array"
+contains_literal "$ios_build_invocation_body" 'skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}"' \
+  || fail "the iOS build must expand the always-non-empty common argument array"
+! contains_literal "$ios_build_invocation_body" 'IOS_XCODE_SIGNING_SETTINGS' \
+  || fail "the iOS build must not expand an empty Release-only array under Bash nounset"
 script_has_literal 'Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app' \
   || fail "iOS product selection must bind to the actual requested build configuration"
 contains_literal "$source_provenance_body" 'git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all' \
   || fail "formal P2P acceptance must measure tracked and untracked Git provenance"
 contains_literal "$source_provenance_body" 'Formal P2P acceptance requires a clean Git worktree' \
   || fail "dirty source provenance must fail closed outside lab mode"
+contains_literal "$source_provenance_body" 'capture_source_input_binding' \
+  || fail "source provenance must capture an exact build-input digest before any smoke build"
+script_has_literal 'verify_source_input_binding_unchanged "mac-build"' \
+  || fail "macOS smoke products must be followed by a source-input stability check"
+script_has_literal 'verify_source_input_binding_unchanged "ios-build"' \
+  || fail "iOS smoke products must be followed by a source-input stability check"
+script_has_literal '"SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST=$IOS_SOURCE_INPUT_DIGEST"' \
+  || fail "the iOS product must embed the exact measured source-input digest"
+script_has_literal 'verify_ios_product_source_input_binding' \
+  || fail "the signed iOS app executable and Info.plist must be bound to the source digest"
+grep -Fq '<key>SkyBridgePackagingSourceInputDigest</key>' "$IOS_APP_INFO_PLIST" \
+  || fail "the iOS Info.plist must expose the signed source-input digest marker"
+grep -Fq 'SkyBridgePackagingSourceInputDigest: "$(SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST)"' "$IOS_PROJECT_YAML" \
+  || fail "XcodeGen must preserve the source-input digest Info.plist expansion"
+grep -Fq 'SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST: unbound' "$IOS_PROJECT_YAML" \
+  || fail "ordinary iOS builds must remain explicitly unbound until a producer supplies a digest"
+grep -Fq 'SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST = unbound;' "$IOS_PROJECT_FILE" \
+  || fail "the generated Xcode project must preserve the source-input digest build setting"
 script_has_literal 'write_ios_p2p_product_proof "$IOS_EMBEDDED_PROFILE" "$IOS_WIDGET_EMBEDDED_PROFILE"' \
   || fail "the built iOS app and Widget must emit measured signing/profile proof before installation"
 script_has_literal 'source "$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh"' \
@@ -241,9 +303,9 @@ contains_literal "$ios_product_proof_body" '/usr/bin/codesign --verify --deep --
   || fail "the iOS product proof must strictly verify the nested code signature"
 contains_literal "$ios_product_proof_body" '/usr/bin/codesign --verify --strict --verbose=2 "$widget_path"' \
   || fail "the embedded iOS Widget must also pass strict signature verification"
-contains_literal "$ios_product_proof_body" '--extract-certificates "$app_certificate_prefix"' \
+contains_literal "$ios_product_proof_body" '--extract-certificates="$app_certificate_prefix"' \
   || fail "the iOS product proof must extract the app leaf signing certificate"
-contains_literal "$ios_product_proof_body" '--extract-certificates "$widget_certificate_prefix"' \
+contains_literal "$ios_product_proof_body" '--extract-certificates="$widget_certificate_prefix"' \
   || fail "the iOS product proof must extract the Widget leaf signing certificate"
 contains_literal "$ios_product_proof_body" 'skybridge_write_signed_entitlements "$app_path" "$app_signed_entitlements"' \
   || fail "the iOS product proof must inspect actual app signed entitlements"
@@ -261,8 +323,10 @@ contains_literal "$ios_product_proof_body" '"-checkend",' \
   || fail "the leaf signing certificate expiry must be checked"
 contains_literal "$ios_product_proof_body" 'profile.get("ProvisionedDevices", [])' \
   || fail "the selected real device must be covered by the provisioning profile"
-contains_literal "$ios_product_proof_body" 'signed_keychain_groups == expected_keychain_groups' \
-  || fail "the signed iOS product must carry exactly the product and shared Keychain groups"
+contains_literal "$ios_product_proof_body" 'signed_keychain_groups == expected_keychain_group_set' \
+  || fail "the signed iOS product must carry exactly the configuration-specific Keychain groups"
+contains_literal "$ios_product_proof_body" 'required_keychain_groups(' \
+  || fail "the signed iOS product proof must derive App and Widget Keychain requirements from the requested configuration"
 contains_literal "$ios_product_proof_body" 'not get_task_allow' \
   || fail "formal iOS product proof must reject get-task-allow"
 contains_literal "$ios_product_proof_body" 'distribution_signing' \
@@ -283,12 +347,22 @@ contains_literal "$ios_product_proof_body" 'Print :SkyBridgePackagingSourceRepos
   || fail "formal product proof must measure source repository metadata from the signed app"
 contains_literal "$ios_product_proof_body" '"$product_source_repository" == "$expected_source_repository"' \
   || fail "formal product proof must match signed repository metadata to the release environment"
-script_has_literal '"INFOPLIST_KEY_SkyBridgePackagingSourceRepository=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"' \
+script_has_literal '"SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"' \
   || fail "the diagnostic P2P product must embed its source-repository provenance when available"
-script_has_literal '"INFOPLIST_KEY_SkyBridgePackagingProductSurface=testing"' \
+script_has_literal '"SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"' \
   || fail "the diagnostic P2P harness must truthfully label its signed iOS product as testing"
-script_has_literal '"INFOPLIST_KEY_SkyBridgePackagingSwiftActiveCompilationConditions=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"' \
+script_has_literal '"SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"' \
   || fail "the diagnostic P2P harness must embed its test compilation condition"
+for provenance_key in \
+  SkyBridgePackagingBuildConfiguration \
+  SkyBridgePackagingGitDirtyState \
+  SkyBridgePackagingGitCommit \
+  SkyBridgePackagingSourceRepository \
+  SkyBridgePackagingProductSurface \
+  SkyBridgePackagingSwiftActiveCompilationConditions; do
+  grep -Fq "<key>${provenance_key}</key>" "$IOS_APP_INFO_PLIST" \
+    || fail "the explicit iOS Info.plist must contain signed provenance key ${provenance_key}"
+done
 script_has_literal '"OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"' \
   || fail "the P2P harness test surface must remain an explicit compile-time diagnostic condition"
 grep -Fq 'REQUIRED_IDENTITY_ALGORITHM = "mldsa87"' "$RELEASE_ACCEPTANCE_VALIDATOR" \
@@ -657,6 +731,40 @@ script_has_literal "MAC_HOST_LAUNCH_MODE=\"\${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MO
   || fail "real-device acceptance must default the macOS host to packaged-product identity launch"
 script_has_literal 'acceptance_violations+=("SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged")' \
   || fail "acceptance mode must reject the diagnostic direct host path"
+script_has_literal 'packaged|packaged-lab|direct) ;;' \
+  || fail "macOS host launch policy must enumerate packaged-lab as an explicit third mode"
+script_has_literal 'if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" && "$LAB_RUN" != "1" ]]; then' \
+  || fail "packaged-lab must fail before work unless the explicit lab profile is active"
+script_has_literal 'IDENTITY_AUDIT_ONLY="${SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY:-0}"' \
+  || fail "the read-only identity audit must be an explicit default-off mode"
+script_has_literal 'IDENTITY_AUDIT_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IDENTITY_AUDIT_TIMEOUT_SECONDS:-120}"' \
+  || fail "the read-only identity audit must have an explicit bounded default timeout"
+script_has_literal 'IDENTITY_AUDIT_TIMEOUT_SECONDS < 30 || IDENTITY_AUDIT_TIMEOUT_SECONDS > 300' \
+  || fail "identity audit timeout overrides must stay within the reviewed bounded range"
+contains_literal "$host_start_body" 'audit_started_at >= IDENTITY_AUDIT_TIMEOUT_SECONDS' \
+  || fail "identity audit launch must use the validated bounded timeout"
+script_has_literal 'if [[ "$LAB_RUN" != "1" || "$MAC_HOST_LAUNCH_MODE" != "packaged-lab" ]]; then' \
+  || fail "identity audit must require the signed packaged-lab profile"
+script_has_literal '--env "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY=$IDENTITY_AUDIT_ONLY"' \
+  || fail "LaunchServices must forward only the fixed identity-audit boolean"
+contains_literal "$host_start_body" 'validate_identity_audit_output' \
+  || fail "identity audit completion must pass the bounded JSON validator"
+script_has_literal '"stableAcrossReads"' \
+  || fail "identity audit evidence must prove a stable double-read snapshot"
+script_has_literal 'Identity audit output must contain exactly one JSON record' \
+  || fail "identity audit stdout must reject appended or ambiguous records"
+script_has_literal 'Signed read-only identity audit completed; this diagnostic is never release-acceptance evidence.' \
+  || fail "identity audit must remain explicitly outside release acceptance"
+script_has_literal 'mac_host_uses_signed_app_bundle()' \
+  || fail "product-identity host modes must share one closed signed-app routing policy"
+grep -Fq 'payload.get("macHostLaunchMode") != "packaged"' "$RELEASE_ACCEPTANCE_FINALIZER" \
+  || fail "manifest finalization must independently reject packaged-lab host evidence"
+grep -Fq 'payload.get("macHostLaunchMode") != "packaged"' "$RELEASE_ACCEPTANCE_VALIDATOR" \
+  || fail "release validation must independently require the formal packaged host mode"
+grep -Fq 'identitySourceStaplerValid' "$RELEASE_ACCEPTANCE_VALIDATOR" \
+  || fail "release validation must require stapler proof for the host identity source"
+grep -Fq 'identitySourceGatekeeperAccepted' "$RELEASE_ACCEPTANCE_VALIDATOR" \
+  || fail "release validation must require Gatekeeper proof for the host identity source"
 script_has_literal 'MAC_HOST_PRODUCT_APP_BUNDLE="$ROOT_DIR/dist/SkyBridge Compass Pro.app"' \
   || fail "acceptance host signing must use the canonical dist product app as its read-only identity source"
 script_has_literal 'MAC_HOST_PRODUCT_BUNDLE_ID="com.skybridge.compass.pro"' \
@@ -675,6 +783,22 @@ contains_literal "$product_signing_body" '/usr/bin/xcrun stapler validate "$MAC_
   || fail "packaged product identity input must have a valid stapled notarization ticket"
 contains_literal "$product_signing_body" '/usr/sbin/spctl --assess --type execute "$MAC_HOST_PRODUCT_APP_BUNDLE"' \
   || fail "packaged product identity input must pass Gatekeeper assessment"
+contains_literal "$product_signing_body" 'if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then' \
+  || fail "distribution trust checks may be omitted only outside the exact formal packaged mode"
+contains_literal "$product_signing_body" 'MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID=0' \
+  || fail "packaged-lab must explicitly record missing stapler proof"
+contains_literal "$product_signing_body" 'MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED=0' \
+  || fail "packaged-lab must explicitly record missing Gatekeeper proof"
+contains_literal "$product_signing_body" 'verify_macos_smoke_host_identity_source_unchanged()' \
+  || fail "signed host preparation must bind the product identity source against TOCTOU changes"
+contains_literal "$product_signing_body" 'product_profile_sha256' \
+  || fail "product identity freshness must bind the app provisioning profile hash"
+contains_literal "$product_signing_body" 'product_widget_profile_sha256' \
+  || fail "product identity freshness must bind the Widget provisioning profile hash"
+contains_literal "$product_signing_body" 'product_cdhash' \
+  || fail "product identity freshness must bind the app code directory hash"
+contains_literal "$product_signing_body" 'widget_cdhash' \
+  || fail "product identity freshness must bind the Widget code directory hash"
 contains_literal "$product_signing_body" 'skybridge_write_signed_entitlements "$MAC_HOST_PRODUCT_APP_BUNDLE" "$MAC_HOST_PRODUCT_ENTITLEMENTS"' \
   || fail "macOS host helper must use the packaged product signed entitlements"
 contains_literal "$product_signing_body" 'skybridge_validate_provisionprofile_app_identity' \
@@ -727,14 +851,18 @@ grep -q 'fail_if_smoke_source_exited' "$SMOKE_SCRIPT" \
   || fail "LAN host must not own the smoke animation source"
 grep -q 'Unsupported SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE' "$SMOKE_SCRIPT" \
   || fail "macOS host launch mode should be validated before smoke execution"
-script_has_literal "if [[ \"\$MAC_HOST_LAUNCH_MODE\" == \"direct\" ]]" \
+contains_literal "$host_start_body" 'case "$MAC_HOST_LAUNCH_MODE" in' \
+  || fail "macOS host start must use an explicit closed launch-mode switch"
+contains_literal "$host_start_body" 'direct)' \
   || fail "macOS host start should route direct mode to the direct app binary"
 contains_literal "$direct_launch_body" 'if [[ "$LAB_RUN" != "1" ]]' \
   || fail "direct SwiftPM host launch must enforce diagnostic lab mode at the execution boundary"
 contains_literal "$direct_launch_body" " \"\$MAC_DIRECT_BIN\" >\"\$HOST_STDOUT\" 2>&1 &" \
   || fail "direct macOS host launch should execute the SwiftPM build product, not the app bundle copy"
-[[ "$direct_launch_body" == *"launch method=direct-app-binary pid=\$HOST_PID mode=direct binary=swiftpm-build-product"* ]] \
-  || fail "direct macOS host launch evidence should not claim LaunchServices fallback"
+! contains_literal "$direct_launch_body" 'launch method=direct-app-binary pid=$HOST_PID mode=direct' \
+  || fail "direct host startup must not write launch evidence before the app resets its status file"
+contains_literal "$launch_evidence_body" 'launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product' \
+  || fail "post-ready direct macOS host launch evidence should identify the SwiftPM product"
 [[ "$direct_launch_body" != *"fallbackFrom=open-app-bundle"* ]] \
   || fail "direct macOS host launch evidence must not include open-app-bundle fallback wording"
 ! contains_literal "$host_start_body" 'fallback=direct-app-binary' \
@@ -743,8 +871,14 @@ contains_literal "$host_start_body" 'failed stage=mac-host phase=launch reason=p
   || fail "packaged-product LaunchServices failure must be explicit and fail closed"
 contains_literal "$host_start_body" 'failed stage=mac-host phase=launch reason=packaged-product-app-pid-not-found' \
   || fail "packaged-product app PID timeout must fail closed without fallback"
-script_has_literal "if [[ \"\$MAC_HOST_LAUNCH_MODE\" == \"packaged\" ]]; then" \
-  || fail "product-identity macOS helper should be prepared only for packaged mode"
+[[ "$(grep -Fc 'if mac_host_uses_signed_app_bundle; then' "$SMOKE_SCRIPT")" -ge 3 ]] \
+  || fail "both product-identity modes must share verification, helper preparation, and localization proof"
+contains_literal "$host_start_body" 'packaged-lab)' \
+  || fail "macOS host launch must explicitly route packaged-lab without a generic non-direct fallback"
+contains_literal "$launch_evidence_body" 'launch method=signed-lab-app-bundle' \
+  || fail "packaged-lab launch evidence must be distinguishable from formal packaged evidence"
+contains_literal "$launch_evidence_body" 'stapler=skipped spctl=skipped diagnosticOnly=1' \
+  || fail "packaged-lab launch evidence must explicitly remain diagnostic-only"
 contains_literal "$host_bundle_prepare_body" '-c "Add :CFBundleIdentifier string $MAC_HOST_PRODUCT_BUNDLE_ID"' \
   || fail "product-identity helper must use the exact packaged product bundle identifier"
 contains_literal "$host_bundle_prepare_body" 'cp "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"' \
@@ -799,6 +933,10 @@ contains_literal "$host_bundle_prepare_body" '--entitlements "$MAC_HOST_HELPER_E
   || fail "product-identity helper must be signed with derived least-privilege entitlements"
 contains_literal "$host_bundle_prepare_body" 'cmp -s "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"' \
   || fail "signed helper must retain the exact packaged product profile bytes"
+contains_literal "$host_bundle_prepare_body" 'embedded_profile_sha256' \
+  || fail "signed helper must retain the originally verified product profile hash"
+contains_literal "$host_bundle_prepare_body" 'verify_macos_smoke_host_identity_source_unchanged' \
+  || fail "signed helper must recheck product identity freshness after signing"
 contains_literal "$host_bundle_prepare_body" 'skybridge_write_signed_entitlements "$MAC_APP_BUNDLE" "$MAC_HOST_SIGNED_ENTITLEMENTS"' \
   || fail "signed helper entitlements must be re-extracted for post-sign verification"
 ! contains_literal "$host_bundle_prepare_body" 'codesign --force --deep --sign -' \
@@ -817,8 +955,28 @@ script_has_literal 'HOST_STDOUT="$MAC_ONLINE_RUNTIME_DIR/mac.stdout.log"' \
   || fail "LaunchServices stdout/stderr must stay outside the protected Desktop artifact path"
 script_has_literal 'sync_macos_smoke_host_artifacts' \
   || fail "private runtime host evidence must be persisted to the release artifact directory"
+contains_literal "$artifact_sync_body" 'if [[ "$MAC_HOST_STARTED" == "1" ]]; then' \
+  || fail "artifact sync must distinguish a launched host from a pre-launch cleanup"
+contains_literal "$artifact_sync_body" '[[ ! -s "$HOST_STATUS" ]] || [[ ! -s "$HOST_PQC_REPORT" ]] || [[ ! -f "$HOST_STDOUT" ]]' \
+  || fail "artifact sync must fail closed when launched-host evidence is missing"
 script_has_literal 'failed stage=cleanup phase=artifact-sync reason=mac-host-runtime-artifact-copy-failed' \
   || fail "runtime evidence persistence failure must affect an otherwise successful acceptance run"
+contains_literal "$cleanup_body" 'terminate_tracked_process "$HOST_PID" "macOS smoke host" "$expected_host_executable"' \
+  || fail "cleanup must terminate the host only through the executable-bound process helper"
+contains_literal "$cleanup_body" 'terminate_tracked_process "$MAC_SOURCE_PID" "macOS smoke source" "$MAC_SOURCE_DIRECT_BIN"' \
+  || fail "cleanup must terminate the source helper only through the executable-bound process helper"
+contains_literal "$cleanup_body" 'terminate_tracked_process "$MAC_ONLINE_PID" "macOS online iPad client" "$MAC_ONLINE_APP_BIN"' \
+  || fail "cleanup must terminate the online client only through the executable-bound process helper"
+contains_literal "$tracked_process_termination_body" 'actual_canonical="$(python3 -c' \
+  || fail "tracked-process cleanup must canonicalize the executable identity before signaling"
+contains_literal "$tracked_process_termination_body" 'if [[ "$actual_canonical" != "$expected_canonical" ]]; then' \
+  || fail "tracked-process cleanup must reject PID reuse or executable mismatch"
+contains_literal "$tracked_process_termination_body" 'kill -TERM "$pid"' \
+  || fail "tracked-process cleanup must attempt bounded graceful termination"
+contains_literal "$tracked_process_termination_body" 'kill -KILL "$pid"' \
+  || fail "tracked-process cleanup must have a bounded, identity-revalidated force-termination path"
+! contains_literal "$cleanup_body" 'kill -TERM "$HOST_PID"' \
+  || fail "cleanup must not signal the host PID without executable identity validation"
 script_has_literal 'unregister_launch_services_app_bundle "$MAC_APP_BUNDLE"' \
   || fail "cleanup must unregister the temporary same-bundle-id helper"
 script_has_literal 'MAC_ONLINE_APP_REGISTERED=0' \
@@ -859,8 +1017,14 @@ script_has_literal 'failed stage=cleanup phase=release-acceptance reason=manifes
   || fail "acceptance manifest finalization failure must turn an otherwise green run red"
 script_has_literal "verify_mac_control_port_reachable \"\$MAC_CONTROL_HOST\" \"\$MAC_CONTROL_PORT\"" \
   || fail "real-device smoke should verify the dynamic control listener before launching iOS"
-script_has_literal "mac-control-port reachable=1 host=\$host port=\$port source=pre-ios-probe" \
-  || fail "macOS control port probe should emit positive TCP reachability evidence"
+script_has_literal "mac-control-port reachable=1 host=\$host port=\$port source=local-self-probe" \
+  || fail "macOS control port probe must identify itself as a local-only reachability diagnostic"
+script_has_literal 'verify_host_pid_owns_listener_port "$MAC_CONTROL_PORT" "control"' \
+  || fail "real-device smoke must bind the dynamic control port to the tracked host PID"
+script_has_literal 'record_macos_smoke_host_launch_evidence' \
+  || fail "host launch evidence must be appended only after the host resets and publishes its status file"
+! grep -q 'SKYBRIDGE_SMOKE_TARGET_HOST\|SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT\|SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT' "$SMOKE_SCRIPT" \
+  || fail "iOS smoke must not replace provenance-bound Bonjour routes with independently injected host/port fields"
 grep -q 'failed stage=mac-host phase=control-port-probe reason=tcp-unreachable' "$SMOKE_SCRIPT" \
   || fail "macOS control port probe should fail fast with a structured startup failure"
 grep -q 'verify_ipad_control_port_reachable_from_mac' "$SMOKE_SCRIPT" \
@@ -893,5 +1057,97 @@ grep -q 'failed stage=mac-smoke-source' "$SMOKE_SCRIPT" \
   || fail "host failure matcher should surface smoke source helper failures"
 grep -q 'already_connected' "$SMOKE_SCRIPT" \
   || fail "smoke failure matcher should surface SOA already_connected rejections instead of treating success sentinels as enough"
+script_has_literal 'source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"' \
+  || fail "P2P remote smoke must use the shared exact iOS console-handle ownership boundary"
+script_has_literal 'skybridge_ios_require_fresh_app_launch' \
+  || fail "P2P remote smoke must prove the app is absent before launching"
+script_has_literal 'skybridge_ios_capture_console_handle' \
+  || fail "P2P remote smoke must capture the exact local devicectl handle before proceeding"
+script_has_literal 'skybridge_ios_signal_console_handle' \
+  || fail "P2P remote smoke cleanup must signal the exact audit-token-bound console handle"
+script_has_literal 'skybridge_ios_capture_exited_console_identity' \
+  || fail "P2P remote smoke cleanup must validate the exited remote launch identity"
+script_has_literal 'skybridge_ios_require_app_absent_after_handle_exit' \
+  || fail "P2P remote smoke cleanup must prove remote app absence"
+script_has_literal 'IOS_PROCESS_CLEANUP_RECEIPT="$ARTIFACT_DIR/ios-process-cleanup.json"' \
+  || fail "P2P remote smoke must emit an explicit process-cleanup receipt"
+script_has_literal 'python3 "$ROOT_DIR/Scripts/check_p2p_notice_disconnect.py"' \
+  || fail "P2P remote smoke must bind Disconnected evidence to the approved notice session"
+script_has_literal 'P2P_NOTICE_SESSION="$approved_session"' \
+  || fail "P2P approval proof must retain the exact session only for same-session lifecycle validation"
+! script_has_literal '--terminate-existing' \
+  || fail "P2P remote smoke must never terminate a pre-existing app instance"
+! script_has_literal 'device process terminate' \
+  || fail "P2P remote smoke must never authorize iOS termination from a reusable remote PID"
+! grep -Fq 'kill "$IOS_CONSOLE_PID"' "$SMOKE_SCRIPT" \
+  || fail "P2P remote smoke must never signal the local console process by PID alone"
+ios_exact_cleanup_line="$(grep -n '^  terminate_ios_remote_smoke_app_exact "remote-control-notice-disconnect-proof"' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+performance_gate_line="$(grep -n '^skybridge_smoke_check_performance_gate .*p2p-remote' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+[[ -n "$ios_exact_cleanup_line" && -n "$performance_gate_line" ]] \
+  || fail "P2P remote smoke must contain exact iOS cleanup and performance gate phases"
+(( ios_exact_cleanup_line < performance_gate_line )) \
+  || fail "exact iOS app exit and absence proof must precede performance/public artifact acceptance"
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/test_check_p2p_notice_disconnect.py" >/dev/null \
+  || fail "same-session P2P notice disconnect behavior tests failed"
+
+mode_guard_root="$(mktemp -d)"
+mode_guard_artifact="$mode_guard_root/must-not-be-created"
+set +e
+mode_guard_output="$({
+  SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=0 \
+  SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged-lab \
+  SKYBRIDGE_SMOKE_ARTIFACT_DIR="$mode_guard_artifact" \
+    bash "$SMOKE_SCRIPT"
+} 2>&1)"
+mode_guard_status=$?
+set -e
+[[ "$mode_guard_status" -eq 2 ]] \
+  || fail "packaged-lab without LAB_RUN=1 must exit 2 before execution"
+[[ "$mode_guard_output" == *"packaged-lab requires SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1"* ]] \
+  || fail "packaged-lab rejection must explain the exact required diagnostic profile"
+[[ ! -e "$mode_guard_artifact" ]] \
+  || fail "packaged-lab rejection must happen before artifact or runtime side effects"
+/bin/rm -r "$mode_guard_root"
+
+audit_guard_root="$(mktemp -d)"
+audit_guard_artifact="$audit_guard_root/must-not-be-created"
+set +e
+audit_guard_output="$({
+  SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1 \
+  SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged \
+  SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY=1 \
+  SKYBRIDGE_SMOKE_ARTIFACT_DIR="$audit_guard_artifact" \
+    bash "$SMOKE_SCRIPT"
+} 2>&1)"
+audit_guard_status=$?
+set -e
+[[ "$audit_guard_status" -eq 2 ]] \
+  || fail "identity audit outside packaged-lab must exit 2 before execution"
+[[ "$audit_guard_output" == *"identity audit is diagnostic-only"* ]] \
+  || fail "identity audit rejection must explain the exact signed lab boundary"
+[[ ! -e "$audit_guard_artifact" ]] \
+  || fail "identity audit rejection must happen before artifact or runtime side effects"
+/bin/rm -r "$audit_guard_root"
+
+audit_timeout_guard_root="$(mktemp -d)"
+audit_timeout_guard_artifact="$audit_timeout_guard_root/must-not-be-created"
+set +e
+audit_timeout_guard_output="$({
+  SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1 \
+  SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged-lab \
+  SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY=1 \
+  SKYBRIDGE_SMOKE_IDENTITY_AUDIT_TIMEOUT_SECONDS=0 \
+  SKYBRIDGE_SMOKE_ARTIFACT_DIR="$audit_timeout_guard_artifact" \
+    bash "$SMOKE_SCRIPT"
+} 2>&1)"
+audit_timeout_guard_status=$?
+set -e
+[[ "$audit_timeout_guard_status" -eq 2 ]] \
+  || fail "invalid identity audit timeout must exit 2 before execution"
+[[ "$audit_timeout_guard_output" == *"must be an integer from 30 through 300"* ]] \
+  || fail "invalid identity audit timeout must explain the bounded contract"
+[[ ! -e "$audit_timeout_guard_artifact" ]] \
+  || fail "invalid identity audit timeout must be rejected before artifact side effects"
+/bin/rm -r "$audit_timeout_guard_root"
 
 echo "[test-real-device-smoke-preflight] all checks passed"

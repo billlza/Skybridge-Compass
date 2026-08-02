@@ -60,7 +60,7 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
     private let cacheValidityDuration: TimeInterval = 3600 // 1小时缓存有效期
     
     private var isCoreLocationAuthorized: Bool {
-        authorizationStatus == .authorizedAlways || authorizationStatus == .authorized
+        Self.isAuthorized(authorizationStatus)
     }
     private var periodicRefreshTask: Task<Void, Never>?
     
@@ -184,10 +184,15 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
             locationManager.requestWhenInUseAuthorization()
  // 等待权限响应
             try? await Task.sleep(for: .seconds(1))
-            return locationManager.authorizationStatus == .authorizedAlways || locationManager.authorizationStatus == .authorized
-            
-        case .authorizedAlways, .authorized:
+            return Self.isAuthorized(locationManager.authorizationStatus)
+
+        #if os(macOS)
+        case .authorized, .authorizedAlways:
             return true
+        #else
+        case .authorizedAlways, .authorizedWhenInUse:
+            return true
+        #endif
             
         case .denied, .restricted:
             error = .unauthorized
@@ -196,6 +201,14 @@ public final class LocationManager: NSObject, ObservableObject, Sendable {
         @unknown default:
             return false
         }
+    }
+
+    private static func isAuthorized(_ status: CLAuthorizationStatus) -> Bool {
+        #if os(macOS)
+        status == .authorized
+        #else
+        status == .authorizedAlways || status == .authorizedWhenInUse
+        #endif
     }
     
  /// 手动设置位置（用户选择城市）

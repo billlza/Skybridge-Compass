@@ -11,6 +11,7 @@ public final class TrustedDeviceStore: ObservableObject {
         case unavailable(String)
         case writeFailed(operation: String, reason: String)
         case concurrentModification(operation: String)
+        case authorityTransactionQuarantined
 
         public var errorDescription: String? {
             switch self {
@@ -20,6 +21,8 @@ public final class TrustedDeviceStore: ObservableObject {
                 return "无法持久化\(operation)：\(reason)"
             case .concurrentModification(let operation):
                 return "无法完成\(operation)：本地信任状态在合并期间持续变化"
+            case .authorityTransactionQuarantined:
+                return "配对接受事务尚未完成恢复，受信任设备 authority 已隔离"
             }
         }
     }
@@ -31,6 +34,7 @@ public final class TrustedDeviceStore: ObservableObject {
         case protocolPublicKeyFingerprintMismatch
         case conflictingProtocolIdentityKey(algorithm: String)
         case missingStableDeviceIdentifier
+        case ambiguousStableDeviceIdentifier
         case missingAuthenticatedRemoteAuthority
 
         public var errorDescription: String? {
@@ -47,10 +51,42 @@ public final class TrustedDeviceStore: ObservableObject {
                 return "\(algorithm) 协议身份公钥与已持久化 authority 冲突，必须重新验证"
             case .missingStableDeviceIdentifier:
                 return "无法将认证 authority 绑定到稳定设备标识"
+            case .ambiguousStableDeviceIdentifier:
+                return "同一稳定设备标识对应多条信任记录，记录已隔离并要求重新验证"
             case .missingAuthenticatedRemoteAuthority:
                 return "握手完成但没有可提交的对端认证 authority"
             }
         }
+    }
+
+    public enum AuthenticatedAuthorityObservationResult: Sendable, Equatable {
+        /// The exact authenticated raw key was already present, so its existing
+        /// durable record could be refreshed without widening trust.
+        case refreshedExistingAuthority
+        /// A self-authenticated key is session evidence only until the operator
+        /// explicitly approves its device binding.
+        case pendingOperatorApproval
+    }
+
+    public struct TrustMutationReceipt: Codable, Sendable, Equatable {
+        fileprivate let stableDeviceId: String
+        fileprivate let previousRecord: TrustedDevice?
+        fileprivate let committedRecord: TrustedDevice
+        fileprivate let committedRevision: UInt64
+        let beforeSnapshot: PairingAcceptanceSnapshot
+        let afterSnapshot: PairingAcceptanceSnapshot
+    }
+
+    struct PairingAcceptanceSnapshot: Codable, Sendable, Equatable {
+        let devices: [TrustedDevice]
+    }
+
+    struct PreparedTrustMutation: Sendable {
+        let before: PairingAcceptanceSnapshot
+        let after: PairingAcceptanceSnapshot
+        fileprivate let stableDeviceId: String
+        fileprivate let previousRecord: TrustedDevice?
+        fileprivate let committedRecord: TrustedDevice
     }
 
     public enum CurrentPathLifecycleState: String, Codable, Sendable, Equatable {
@@ -69,12 +105,18 @@ public final class TrustedDeviceStore: ObservableObject {
 
     public struct TrustedDevice: Codable, Identifiable, Sendable, Equatable {
         public struct ConnectableContext: Codable, Sendable, Equatable {
+            static let currentBonjourRouteSchemaVersion = 1
+
             public var bonjourServiceName: String?
             public var bonjourServiceType: String?
             public var bonjourServiceDomain: String?
             public var services: [String]
             public var portMap: [String: UInt16]
             public var lastResolvedIPAddress: String?
+            /// `nil` identifies legacy records whose three route fields were persisted
+            /// independently. Such a record is accepted only when its service evidence proves
+            /// that exactly one service type could own the tuple.
+            var bonjourRouteSchemaVersion: Int?
 
             public init(
                 bonjourServiceName: String? = nil,
@@ -90,6 +132,56 @@ public final class TrustedDeviceStore: ObservableObject {
                 self.services = services
                 self.portMap = portMap
                 self.lastResolvedIPAddress = lastResolvedIPAddress
+                self.bonjourRouteSchemaVersion = nil
+            }
+
+            init(
+                bonjourRoute: BonjourRouteTuple?,
+                services: [String],
+                portMap: [String: UInt16],
+                lastResolvedIPAddress: String?
+            ) {
+                bonjourServiceName = bonjourRoute?.name
+                bonjourServiceType = bonjourRoute?.type
+                bonjourServiceDomain = bonjourRoute?.domain
+                self.services = services
+                self.portMap = portMap
+                self.lastResolvedIPAddress = lastResolvedIPAddress
+                bonjourRouteSchemaVersion = bonjourRoute == nil
+                    ? nil
+                    : Self.currentBonjourRouteSchemaVersion
+            }
+
+            var verifiedBonjourRoute: BonjourRouteTuple? {
+                guard let candidate = BonjourRouteTuple(
+                    name: bonjourServiceName,
+                    type: bonjourServiceType,
+                    domain: bonjourServiceDomain
+                ) else {
+                    return nil
+                }
+
+                if bonjourRouteSchemaVersion == Self.currentBonjourRouteSchemaVersion {
+                    return candidate
+                }
+                guard bonjourRouteSchemaVersion == nil else {
+                    return nil
+                }
+
+                // Before route schema v1, fields were merged separately. A legacy route can be
+                // migrated only when all service/port evidence names the same single owner.
+                // Multi-service records cannot prove which name/domain belongs to which type and
+                // must be rehydrated from live Bonjour instead of guessing.
+                let evidencedServiceTypes = Set(
+                    (services + Array(portMap.keys)).compactMap { raw -> String? in
+                        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        return value.isEmpty ? nil : value
+                    }
+                )
+                guard evidencedServiceTypes == [candidate.type] else {
+                    return nil
+                }
+                return candidate
             }
         }
 
@@ -250,11 +342,24 @@ public final class TrustedDeviceStore: ObservableObject {
 
     @Published public private(set) var trustedDevices: [TrustedDevice] = []
     @Published public private(set) var persistenceErrorMessage: String?
+    private var trustMutationRevisionByStableDeviceId: [String: UInt64] = [:]
+    private var lastPersistedTrustedDevices: [TrustedDevice] = []
+    private let pairingAcceptanceJournalExists: @Sendable () -> Bool
 
     /// Stored authority is usable only after a strict load and while every
     /// subsequent write in this process has remained observable and durable.
     public var isAuthorityPersistenceAvailable: Bool {
-        persistenceErrorMessage == nil
+        persistenceErrorMessage == nil && !pairingAcceptanceJournalExists()
+    }
+
+    func activeAuthoritySnapshot() throws -> [TrustedDevice] {
+        try requireAuthorityPersistenceAvailable(outerPermit: nil)
+        return trustedDevices.filter { isActive($0) }
+    }
+
+    func authorityRecordsSnapshot() throws -> [TrustedDevice] {
+        try requireAuthorityPersistenceAvailable(outerPermit: nil)
+        return trustedDevices
     }
 
     private static let trustedDevicesStore = CodablePersistenceStore<[TrustedDevice]>(
@@ -263,28 +368,66 @@ public final class TrustedDeviceStore: ObservableObject {
             legacyUserDefaultsKey: "trusted_devices.v1"
         )
     )
+    private final class EphemeralPersistence {
+        var devices: [TrustedDevice]?
+    }
     private let loadPersistedDevices: () throws -> [TrustedDevice]?
     private let savePersistedDevices: ([TrustedDevice]) throws -> Void
 
     private init() {
+        pairingAcceptanceJournalExists = {
+            PairingAcceptanceJournalStore.defaultJournalExists()
+        }
+        #if DEBUG || SKYBRIDGE_TESTING
+        if Self.usesEphemeralPersistenceForSmoke() {
+            let persistence = EphemeralPersistence()
+            loadPersistedDevices = { persistence.devices }
+            savePersistedDevices = { persistence.devices = $0 }
+        } else {
+            loadPersistedDevices = { try Self.trustedDevicesStore.loadOrThrow() }
+            savePersistedDevices = { try Self.trustedDevicesStore.save($0) }
+        }
+        #else
         loadPersistedDevices = { try Self.trustedDevicesStore.loadOrThrow() }
         savePersistedDevices = { try Self.trustedDevicesStore.save($0) }
+        #endif
         load()
+    }
+
+    nonisolated static func usesEphemeralPersistenceForSmoke(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        #if DEBUG || SKYBRIDGE_TESTING
+        return environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && environment["SKYBRIDGE_KEYCHAIN_IN_MEMORY"] == "1"
+        #else
+        return false
+        #endif
     }
 
 #if DEBUG || SKYBRIDGE_TESTING
     init(
         testingLoad: @escaping () throws -> [TrustedDevice]?,
-        testingSave: @escaping ([TrustedDevice]) throws -> Void
+        testingSave: @escaping ([TrustedDevice]) throws -> Void,
+        pairingAcceptanceJournalExists: @escaping @Sendable () -> Bool = {
+            PairingAcceptanceJournalStore.defaultJournalExists()
+        }
     ) {
         loadPersistedDevices = testingLoad
         savePersistedDevices = testingSave
+        self.pairingAcceptanceJournalExists = pairingAcceptanceJournalExists
         load()
     }
 
     func replaceTrustedDevicesForTesting(_ devices: [TrustedDevice]) throws {
+        let touchedStableDeviceIds = Set(
+            (trustedDevices + devices).flatMap { Array(stableDeviceIdentifiers(for: $0)) }
+        )
         try persist(devices, operation: "重置测试受信任设备")
         trustedDevices = devices
+        for stableDeviceId in touchedStableDeviceIds {
+            _ = advanceTrustMutationRevision(for: stableDeviceId)
+        }
     }
 #endif
 
@@ -303,6 +446,7 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     public func canonicalTrustedDeviceId(for deviceId: String) -> String? {
+        guard isAuthorityPersistenceAvailable else { return nil }
         let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
         guard !candidates.isEmpty else { return nil }
         guard let matched = trustedDevices.first(where: { isActive($0) && matches($0, candidates: candidates) }) else {
@@ -312,6 +456,7 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     public func uniqueCanonicalTrustedDeviceId(for deviceId: String) -> String? {
+        guard isAuthorityPersistenceAvailable else { return nil }
         let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
         guard !candidates.isEmpty else { return nil }
 
@@ -324,6 +469,7 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     public func canonicalTrustedDeviceId(for device: DiscoveredDevice) -> String? {
+        guard isAuthorityPersistenceAvailable else { return nil }
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
         candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
         if let ipAddress = device.ipAddress {
@@ -333,21 +479,27 @@ public final class TrustedDeviceStore: ObservableObject {
         if let matched = trustedDevices.first(where: { isActive($0) && matches($0, candidates: candidates) }) {
             return resolvedCurrentDeviceId(for: matched)
         }
+        return nil
+    }
 
-        let normalizedDeviceName = normalizedNameToken(device.name)
-        guard !normalizedDeviceName.isEmpty else { return nil }
-
-        let sameNameMatches = trustedDevices.filter { trusted in
-            guard isActive(trusted) else { return false }
-            return normalizedNameToken(trusted.name) == normalizedDeviceName
-                && (trusted.platform == .unknown || device.platform == .unknown || trusted.platform == device.platform)
+    /// Authority-sensitive callers may use only an exact stable identifier.
+    /// Bonjour names, host aliases and IP routes remain discovery hints and are
+    /// deliberately excluded from this lookup.
+    func stableIdentifierMatchedTrustedDeviceId(for device: DiscoveredDevice) -> String? {
+        guard isAuthorityPersistenceAvailable,
+              let stableDeviceId = PeerIdentityAliasResolver.persistentDeviceId(from: device.id)
+        else {
+            return nil
         }
-
-        guard sameNameMatches.count == 1 else { return nil }
-        return resolvedCurrentDeviceId(for: sameNameMatches[0])
+        let matches = trustedDevices.filter { trusted in
+            isActive(trusted) && stableDeviceIdentifiers(for: trusted).contains(stableDeviceId)
+        }
+        guard matches.count == 1 else { return nil }
+        return resolvedCurrentDeviceId(for: matches[0])
     }
 
     public func resolvedConnectableDevice(for device: DiscoveredDevice) -> DiscoveredDevice? {
+        guard isAuthorityPersistenceAvailable else { return nil }
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
         candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
         if let ipAddress = device.ipAddress {
@@ -364,8 +516,9 @@ public final class TrustedDeviceStore: ObservableObject {
             with: connectableContext(from: device)
         )
 
-        guard let mergedContext,
-              mergedContext.bonjourServiceName?.isEmpty == false
+        guard let mergedContext else { return nil }
+        let bonjourRoute = mergedContext.verifiedBonjourRoute
+        guard bonjourRoute != nil
                 || mergedContext.lastResolvedIPAddress?.isEmpty == false
                 || !mergedContext.services.isEmpty
                 || !mergedContext.portMap.isEmpty else {
@@ -378,13 +531,13 @@ public final class TrustedDeviceStore: ObservableObject {
         return DiscoveredDevice(
             id: device.id,
             name: device.name,
-            bonjourServiceName: device.bonjourServiceName ?? mergedContext.bonjourServiceName,
+            bonjourServiceName: bonjourRoute?.name,
             modelName: device.modelName,
             platform: device.platform,
             osVersion: device.osVersion,
             ipAddress: device.ipAddress ?? mergedContext.lastResolvedIPAddress ?? matched.ipAddress,
-            bonjourServiceType: device.bonjourServiceType ?? mergedContext.bonjourServiceType,
-            bonjourServiceDomain: device.bonjourServiceDomain ?? mergedContext.bonjourServiceDomain,
+            bonjourServiceType: bonjourRoute?.type,
+            bonjourServiceDomain: bonjourRoute?.domain,
             services: mergedServices,
             portMap: mergedPortMap,
             signalStrength: device.signalStrength,
@@ -395,94 +548,6 @@ public final class TrustedDeviceStore: ObservableObject {
             advertisedCapabilities: device.advertisedCapabilities,
             capabilities: device.capabilities
         )
-    }
-
-    @discardableResult
-    func repairLegacyTrustedDeviceIdentity(
-        requestedDevice: DiscoveredDevice,
-        liveDiscoveredDevice: DiscoveredDevice
-    ) -> [String] {
-        guard let canonicalStableId = canonicalPersistentTrustedDeviceIdentifier(liveDiscoveredDevice.id) else {
-            return []
-        }
-
-        var candidateAliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: requestedDevice.id))
-        candidateAliases.formUnion(PeerIdentityAliasResolver.aliasKeys(for: requestedDevice))
-        candidateAliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: liveDiscoveredDevice.id))
-        candidateAliases.formUnion(PeerIdentityAliasResolver.aliasKeys(for: liveDiscoveredDevice))
-        if let requestedIPAddress = requestedDevice.ipAddress {
-            candidateAliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: requestedIPAddress))
-        }
-        if let liveIPAddress = liveDiscoveredDevice.ipAddress {
-            candidateAliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: liveIPAddress))
-        }
-
-        var matchingIndices = trustedDevices.indices.filter { index in
-            matches(trustedDevices[index], candidates: candidateAliases)
-        }
-        if matchingIndices.isEmpty {
-            matchingIndices = uniqueNameMatchedTrustedDeviceIndices(for: liveDiscoveredDevice)
-        }
-        guard !matchingIndices.isEmpty else { return [] }
-
-        let primaryIndex =
-            preferredPrimaryAuthorityIndex(
-                matchingIndices: matchingIndices,
-                preferredCurrentDeviceId: canonicalStableId,
-                preferredFingerprint: "",
-                devices: trustedDevices
-            )
-            ?? matchingIndices.first!
-
-        var mergedRecord = trustedDevices[primaryIndex]
-        for index in matchingIndices where index != primaryIndex {
-            mergedRecord = mergedTrustedDeviceRecord(mergedRecord, with: trustedDevices[index])
-        }
-
-        var legacyIdentifiers = Set(candidateAliases)
-        legacyIdentifiers.insert(requestedDevice.id)
-        legacyIdentifiers.insert(liveDiscoveredDevice.id)
-        for index in matchingIndices {
-            let record = trustedDevices[index]
-            legacyIdentifiers.insert(record.id)
-            if let currentDeviceId = record.currentDeviceId {
-                legacyIdentifiers.insert(currentDeviceId)
-            }
-            for knownDeviceId in record.knownDeviceIds ?? [] {
-                legacyIdentifiers.insert(knownDeviceId)
-            }
-        }
-        legacyIdentifiers.insert(canonicalStableId)
-
-        if !liveDiscoveredDevice.name.isEmpty {
-            mergedRecord.name = liveDiscoveredDevice.name
-        }
-        if liveDiscoveredDevice.platform != .unknown {
-            mergedRecord.platform = liveDiscoveredDevice.platform
-        }
-        if let ipAddress = liveDiscoveredDevice.ipAddress, !ipAddress.isEmpty {
-            mergedRecord.ipAddress = ipAddress
-        }
-        mergedRecord.currentDeviceId = canonicalStableId
-        mergedRecord.knownDeviceIds = mergedKnownDeviceIds(
-            existing: mergedRecord.knownDeviceIds,
-            adding: Array(legacyIdentifiers).sorted()
-        )
-        mergedRecord.connectableContext = mergedConnectableContext(
-            mergedRecord.connectableContext,
-            with: connectableContext(from: liveDiscoveredDevice)
-        )
-        if mergedRecord.currentPathLifecycleState == nil {
-            mergedRecord.currentPathLifecycleState = .active
-        }
-
-        trustedDevices[primaryIndex] = migratedTrustedDeviceRecord(mergedRecord) ?? mergedRecord
-        for index in matchingIndices.sorted(by: >) where index != primaryIndex {
-            trustedDevices.remove(at: index)
-        }
-        save()
-
-        return Array(legacyIdentifiers.subtracting([canonicalStableId])).sorted()
     }
 
     public func currentPathTrustRecord(fingerprint: String) -> TrustedDevice? {
@@ -605,6 +670,7 @@ public final class TrustedDeviceStore: ObservableObject {
 
     @discardableResult
     public func markReverificationRequired(deviceId: String) -> Bool {
+        guard isAuthorityPersistenceAvailable else { return false }
         let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
         guard !candidates.isEmpty else { return false }
 
@@ -626,6 +692,7 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     public func trust(_ device: DiscoveredDevice) {
+        guard isAuthorityPersistenceAvailable else { return }
         let id = device.id
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: id))
         candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
@@ -665,19 +732,49 @@ public final class TrustedDeviceStore: ObservableObject {
         save()
     }
 
+    @discardableResult
     public func trustResolvedPeer(
         _ device: DiscoveredDevice,
         declaredDeviceId: String,
         protocolSigningAlgorithm: String? = nil,
         protocolPublicKeyFingerprint: String? = nil
-    ) throws {
-        let normalizedDeclaredDeviceId = declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+    ) throws -> TrustMutationReceipt {
+        do {
+            let prepared = try prepareTrustResolvedPeer(
+                device,
+                declaredDeviceId: declaredDeviceId,
+                protocolSigningAlgorithm: protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+                outerPermit: nil
+            )
+            return try applyPreparedTrustMutation(prepared, outerPermit: nil)
+        } catch AuthorityUpdateError.ambiguousStableDeviceIdentifier {
+            if let stableDeviceId = normalizedTrustedDeviceIdentifier(declaredDeviceId) {
+                try quarantineStableAuthorityRows(
+                    stableDeviceId: stableDeviceId,
+                    operation: "隔离重复的稳定设备 authority"
+                )
+            }
+            throw AuthorityUpdateError.ambiguousStableDeviceIdentifier
+        }
+    }
+
+    func prepareTrustResolvedPeer(
+        _ device: DiscoveredDevice,
+        declaredDeviceId: String,
+        protocolSigningAlgorithm: String? = nil,
+        protocolPublicKeyFingerprint: String? = nil,
+        outerPermit: PairingIdentityAuthorityMutationPermit?
+    ) throws -> PreparedTrustMutation {
+        try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
+        guard let normalizedDeclaredDeviceId = normalizedTrustedDeviceIdentifier(
+            declaredDeviceId
+        ) else {
+            throw AuthorityUpdateError.missingStableDeviceIdentifier
+        }
         let normalizedAlgorithm = protocolSigningAlgorithm?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedFingerprint = normalizedFingerprint(protocolPublicKeyFingerprint)
-        guard !normalizedDeclaredDeviceId.isEmpty else {
-            return
-        }
 
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
         candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
@@ -685,11 +782,24 @@ public final class TrustedDeviceStore: ObservableObject {
         if let ipAddress = device.ipAddress {
             candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
         }
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else {
+            throw AuthorityUpdateError.missingStableDeviceIdentifier
+        }
         let latestConnectableContext = connectableContext(from: device)
+        let beforeSnapshot = PairingAcceptanceSnapshot(devices: trustedDevices)
         var candidateTrustedDevices = trustedDevices
+        let exactStableIdentityIndices = candidateTrustedDevices.indices.filter { index in
+            stableDeviceIdentifiers(for: candidateTrustedDevices[index]).contains(
+                normalizedDeclaredDeviceId
+            )
+        }
+        guard exactStableIdentityIndices.count <= 1 else {
+            throw AuthorityUpdateError.ambiguousStableDeviceIdentifier
+        }
+        let exactStableIdentityIndex = exactStableIdentityIndices.first
+        let previousRecord = exactStableIdentityIndex.map { candidateTrustedDevices[$0] }
 
-        if let idx = candidateTrustedDevices.firstIndex(where: { matches($0, candidates: candidates) }) {
+        if let idx = exactStableIdentityIndex {
             candidateTrustedDevices[idx].name = device.name
             candidateTrustedDevices[idx].platform = device.platform
             candidateTrustedDevices[idx].ipAddress = device.ipAddress
@@ -748,18 +858,143 @@ public final class TrustedDeviceStore: ObservableObject {
                 )
             )
         }
-        try persist(candidateTrustedDevices, operation: "受信任设备")
-        trustedDevices = candidateTrustedDevices
+        guard let committedRecord = candidateTrustedDevices.first(where: { record in
+            stableDeviceIdentifiers(for: record).contains(normalizedDeclaredDeviceId)
+        }) else {
+            throw PersistenceError.writeFailed(
+                operation: "受信任设备",
+                reason: "候选缺少待提交的稳定设备记录"
+            )
+        }
+        return PreparedTrustMutation(
+            before: beforeSnapshot,
+            after: PairingAcceptanceSnapshot(devices: candidateTrustedDevices),
+            stableDeviceId: normalizedDeclaredDeviceId,
+            previousRecord: previousRecord,
+            committedRecord: committedRecord
+        )
+    }
+
+    func applyPreparedTrustMutation(
+        _ prepared: PreparedTrustMutation,
+        outerPermit: PairingIdentityAuthorityMutationPermit?
+    ) throws -> TrustMutationReceipt {
+        try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
+        guard trustedDevices == prepared.before.devices else {
+            throw PersistenceError.concurrentModification(operation: "配对接受事务")
+        }
+        try persist(
+            prepared.after.devices,
+            operation: "受信任设备",
+            outerPermit: outerPermit
+        )
+        let committedRevision = advanceTrustMutationRevision(for: prepared.stableDeviceId)
+        trustedDevices = prepared.after.devices
+        return TrustMutationReceipt(
+            stableDeviceId: prepared.stableDeviceId,
+            previousRecord: prepared.previousRecord,
+            committedRecord: prepared.committedRecord,
+            committedRevision: committedRevision,
+            beforeSnapshot: prepared.before,
+            afterSnapshot: prepared.after
+        )
+    }
+
+    func pairingAcceptanceSnapshot(
+        outerPermit: PairingIdentityAuthorityMutationPermit
+    ) throws -> PairingAcceptanceSnapshot {
+        try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
+        return PairingAcceptanceSnapshot(devices: trustedDevices)
+    }
+
+    func restorePairingAcceptanceSnapshot(
+        _ snapshot: PairingAcceptanceSnapshot,
+        expectedCurrent: [PairingAcceptanceSnapshot],
+        outerPermit: PairingIdentityAuthorityMutationPermit
+    ) throws {
+        try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
+        guard expectedCurrent.contains(where: { $0.devices == trustedDevices }) else {
+            throw PersistenceError.concurrentModification(operation: "配对接受事务恢复")
+        }
+        let previous = trustedDevices
+        try persist(
+            snapshot.devices,
+            operation: "恢复配对接受事务",
+            outerPermit: outerPermit
+        )
+        trustedDevices = snapshot.devices
+        let touchedStableDeviceIds = Set(
+            (previous + snapshot.devices).flatMap { Array(stableDeviceIdentifiers(for: $0)) }
+        )
+        for stableDeviceId in touchedStableDeviceIds {
+            _ = advanceTrustMutationRevision(for: stableDeviceId)
+        }
+    }
+
+    func pairingAcceptanceSnapshotMatches(
+        _ snapshot: PairingAcceptanceSnapshot,
+        outerPermit: PairingIdentityAuthorityMutationPermit
+    ) throws -> Bool {
+        try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
+        return trustedDevices == snapshot.devices
+    }
+
+    public func rollbackTrustMutation(_ receipt: TrustMutationReceipt) throws {
+        let stableIdentityIndices = trustedDevices.indices.filter {
+            stableDeviceIdentifiers(for: trustedDevices[$0]).contains(
+                receipt.stableDeviceId
+            )
+        }
+        let committedIndices = stableIdentityIndices.filter {
+            trustedDevices[$0] == receipt.committedRecord
+        }
+        guard stableIdentityIndices.count == 1,
+              committedIndices.count == 1,
+              let committedIndex = committedIndices.first,
+              trustMutationRevisionByStableDeviceId[receipt.stableDeviceId]
+                == receipt.committedRevision else {
+            // A same-authority concurrent mutation makes exact compensation
+            // impossible. Quarantine every matching stable record so the
+            // residue cannot authorize a later automatic pairing.
+            var quarantined = trustedDevices
+            var didQuarantine = false
+            for index in quarantined.indices where stableDeviceIdentifiers(
+                for: quarantined[index]
+            ).contains(receipt.stableDeviceId) {
+                switch quarantined[index].currentPathLifecycleState ?? .active {
+                case .active, .reverificationRequired:
+                    transitionLifecycle(of: &quarantined[index], to: .quarantined)
+                    didQuarantine = true
+                case .quarantined, .revoked:
+                    break
+                }
+            }
+            if didQuarantine, quarantined != trustedDevices {
+                try persist(quarantined, operation: "隔离并发修改的受信任设备")
+                trustedDevices = quarantined
+                _ = advanceTrustMutationRevision(for: receipt.stableDeviceId)
+            }
+            throw PersistenceError.concurrentModification(operation: "受信任设备回滚")
+        }
+
+        var candidate = trustedDevices
+        if let previousRecord = receipt.previousRecord {
+            candidate[committedIndex] = previousRecord
+        } else {
+            candidate.remove(at: committedIndex)
+        }
+        try persist(candidate, operation: "受信任设备回滚")
+        trustedDevices = candidate
+        _ = advanceTrustMutationRevision(for: receipt.stableDeviceId)
     }
 
     @discardableResult
     public func recordAuthenticatedRemoteAuthority(
         for device: DiscoveredDevice,
-        preferredCurrentDeviceId: String? = nil,
         protocolSigningAlgorithm: String,
         protocolPublicKeyFingerprint: String,
         protocolPublicKeyBytes: Data
-    ) throws -> Bool {
+    ) throws -> AuthenticatedAuthorityObservationResult {
         guard let normalizedFingerprint = normalizedFingerprint(protocolPublicKeyFingerprint) else {
             throw AuthorityUpdateError.invalidProtocolPublicKeyFingerprint
         }
@@ -768,11 +1003,27 @@ public final class TrustedDeviceStore: ObservableObject {
             throw AuthorityUpdateError.invalidProtocolSigningAlgorithm
         }
 
-        let stableCurrentDeviceId = normalizedTrustedDeviceIdentifier(preferredCurrentDeviceId)
+        let authenticatedKeyBinding = try validatedProtocolIdentityKeyBinding(
+            algorithm: normalizedAlgorithm,
+            fingerprint: normalizedFingerprint,
+            publicKeyBytes: protocolPublicKeyBytes,
+            source: Self.authenticatedHandshakePinSource
+        )
+        guard let authenticatedAlgorithm = ProtocolSigningAlgorithm(
+            rawValue: authenticatedKeyBinding.algorithm
+        ), uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+            algorithm: authenticatedAlgorithm,
+            fingerprint: authenticatedKeyBinding.fingerprint,
+            publicKey: protocolPublicKeyBytes
+        ) != nil else {
+            // Unknown self-authenticated keys remain bound to the live session.
+            // Persisting one row per key would create an attacker-controlled,
+            // unbounded durable store before any operator approval.
+            return .pendingOperatorApproval
+        }
 
         var candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
         candidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
-        candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: stableCurrentDeviceId))
         if let ipAddress = device.ipAddress {
             candidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
         }
@@ -780,7 +1031,7 @@ public final class TrustedDeviceStore: ObservableObject {
             throw AuthorityUpdateError.missingStableDeviceIdentifier
         }
 
-        return try upsertAuthoritativeTrustedDevice(
+        _ = try upsertAuthoritativeTrustedDevice(
             preferredRecordId: device.id,
             candidateAliases: candidates,
             name: device.name,
@@ -789,10 +1040,13 @@ public final class TrustedDeviceStore: ObservableObject {
             protocolSigningAlgorithm: normalizedAlgorithm,
             protocolPublicKeyFingerprint: normalizedFingerprint,
             protocolPublicKeyBytes: protocolPublicKeyBytes,
-            preferredCurrentDeviceId: stableCurrentDeviceId,
+            preferredCurrentDeviceId: nil,
             connectableContext: connectableContext(from: device),
-            pinSource: Self.authenticatedHandshakePinSource
+            pinSource: Self.authenticatedHandshakePinSource,
+            activation: .preserveExistingAuthorization,
+            recordMatchPolicy: .authenticatedAuthorityOnly
         )
+        return .refreshedExistingAuthority
     }
 
     @discardableResult
@@ -836,7 +1090,9 @@ public final class TrustedDeviceStore: ObservableObject {
             protocolPublicKeyFingerprint: normalizedFingerprint,
             protocolPublicKeyBytes: protocolPublicKeyBytes,
             preferredCurrentDeviceId: stableCurrentDeviceId,
-            pinSource: Self.pibOperatorApprovalPinSource
+            pinSource: Self.pibOperatorApprovalPinSource,
+            activation: .operatorApproved,
+            recordMatchPolicy: .operatorApprovedStableIdentifierOrAuthority
         )
     }
 
@@ -880,7 +1136,9 @@ public final class TrustedDeviceStore: ObservableObject {
             protocolPublicKeyBytes: protocolPublicKeyBytes,
             preferredCurrentDeviceId: stableCurrentDeviceId,
             connectableContext: connectableContext,
-            pinSource: Self.authenticatedHandshakePinSource
+            pinSource: Self.authenticatedHandshakePinSource,
+            activation: .operatorApproved,
+            recordMatchPolicy: .operatorApprovedStableIdentifierOrAuthority
         )
     }
 
@@ -1067,8 +1325,31 @@ public final class TrustedDeviceStore: ObservableObject {
             removalCandidates.insert(trimmedDeviceId)
         }
 
-        let matchedRecords = trustedDevices.filter { record in
+        let directlyMatchedRecords = trustedDevices.filter { record in
             record.id == deviceId || matches(record, candidates: removalCandidates)
+        }
+        let selectedStableDeviceIds: Set<String>
+        if let requestedStableDeviceId = normalizedTrustedDeviceIdentifier(trimmedDeviceId) {
+            selectedStableDeviceIds = [requestedStableDeviceId]
+        } else {
+            let activeStableMatches = Set(
+                directlyMatchedRecords
+                    .filter(isActive)
+                    .flatMap { stableDeviceIdentifiers(for: $0) }
+            )
+            guard activeStableMatches.count <= 1 else {
+                throw AuthorityUpdateError.ambiguousStableDeviceIdentifier
+            }
+            guard let uniqueStableDeviceId = activeStableMatches.first else {
+                return Array(removalCandidates).sorted()
+            }
+            selectedStableDeviceIds = [uniqueStableDeviceId]
+        }
+
+        let matchedRecords = trustedDevices.filter { record in
+            !stableDeviceIdentifiers(for: record).isDisjoint(
+                with: selectedStableDeviceIds
+            )
         }
         for record in matchedRecords {
             removalCandidates.formUnion(trustedAliasCandidates(for: record))
@@ -1085,8 +1366,9 @@ public final class TrustedDeviceStore: ObservableObject {
         var changed = false
         for index in candidateTrustedDevices.indices {
             let record = candidateTrustedDevices[index]
-            guard record.id == deviceId
-                    || !trustedAliasCandidates(for: record).isDisjoint(with: removalCandidates) else {
+            guard !stableDeviceIdentifiers(for: record).isDisjoint(
+                with: selectedStableDeviceIds
+            ) else {
                 continue
             }
             let needsTombstoneSanitization = record.currentPathLifecycleState == .revoked
@@ -1103,7 +1385,7 @@ public final class TrustedDeviceStore: ObservableObject {
         }
 
         if matchedRecords.isEmpty,
-           let stableId = PeerIdentityAliasResolver.persistentDeviceId(from: trimmedDeviceId) {
+           let stableId = selectedStableDeviceIds.first {
             candidateTrustedDevices.append(
                 TrustedDevice(
                     id: stableId,
@@ -1111,7 +1393,7 @@ public final class TrustedDeviceStore: ObservableObject {
                     platform: .unknown,
                     ipAddress: nil,
                     currentDeviceId: stableId,
-                    knownDeviceIds: Array(removalCandidates).sorted(),
+                    knownDeviceIds: [stableId],
                     currentPathLifecycleState: .revoked,
                     currentPathLifecycleGeneration: 1
                 )
@@ -1158,8 +1440,10 @@ public final class TrustedDeviceStore: ObservableObject {
         do {
             trustedDevices = (try loadPersistedDevices() ?? [])
                 .compactMap(migratedTrustedDeviceRecord)
+            lastPersistedTrustedDevices = trustedDevices
         } catch {
             trustedDevices = []
+            lastPersistedTrustedDevices = []
             markPersistenceUnavailable(error, operation: "读取受信任设备")
         }
     }
@@ -1174,15 +1458,39 @@ public final class TrustedDeviceStore: ObservableObject {
         }
     }
 
-    private func persist(_ candidate: [TrustedDevice], operation: String) throws {
-        guard persistenceErrorMessage == nil else {
-            throw PersistenceError.unavailable(persistenceErrorMessage ?? "未知错误")
-        }
+    private func persist(
+        _ candidate: [TrustedDevice],
+        operation: String,
+        outerPermit: PairingIdentityAuthorityMutationPermit? = nil
+    ) throws {
+        try requireAuthorityPersistenceAvailable(outerPermit: outerPermit)
         do {
             try savePersistedDevices(candidate)
+            let changedStableDeviceIds = changedStableDeviceIdentifiers(
+                from: lastPersistedTrustedDevices,
+                to: candidate
+            )
+            lastPersistedTrustedDevices = candidate
+            for stableDeviceId in changedStableDeviceIds {
+                _ = advanceTrustMutationRevision(for: stableDeviceId)
+            }
         } catch {
             markPersistenceUnavailable(error, operation: operation)
             throw PersistenceError.writeFailed(operation: operation, reason: error.localizedDescription)
+        }
+    }
+
+    private func requireAuthorityPersistenceAvailable(
+        outerPermit: PairingIdentityAuthorityMutationPermit?
+    ) throws {
+        guard persistenceErrorMessage == nil else {
+            throw PersistenceError.unavailable(persistenceErrorMessage ?? "未知错误")
+        }
+        if pairingAcceptanceJournalExists() {
+            guard let outerPermit,
+                  PairingAcceptanceJournalStore.permitOwnsActiveJournal(outerPermit) else {
+                throw PersistenceError.authorityTransactionQuarantined
+            }
         }
     }
 
@@ -1394,6 +1702,73 @@ public final class TrustedDeviceStore: ObservableObject {
         return matchingBindings[0]
     }
 
+    /// Returns true only when the exact raw-key authority was already active
+    /// before the current handshake observation is persisted. A fresh
+    /// self-authenticated handshake must never manufacture its own automatic
+    /// pairing authorization.
+    func uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+        algorithm: ProtocolSigningAlgorithm,
+        fingerprint: String,
+        publicKey: Data
+    ) -> String? {
+        guard isAuthorityPersistenceAvailable,
+            let normalizedFingerprint = normalizedFingerprint(fingerprint)
+        else {
+            return nil
+        }
+        let matchingRecords = trustedDevices.filter { record in
+            isActive(record) && protocolIdentityKeyBindings(for: record).contains { binding in
+                binding.algorithm == algorithm.rawValue
+                    && binding.fingerprint == normalizedFingerprint
+                    && binding.publicKeyBytes == publicKey
+            }
+        }
+        guard matchingRecords.count == 1 else { return nil }
+        return normalizedTrustedDeviceIdentifier(
+            resolvedCurrentDeviceId(for: matchingRecords[0])
+        )
+    }
+
+    /// Returns only an active PIB-1 operator approval whose current stable
+    /// device identifier exactly equals the declared pairing identity. Alias
+    /// matches and handshake-derived pins are deliberately excluded: this is
+    /// the sole non-SOA admission source for pairing-identity persistence.
+    func exactActivePIBOperatorApproval(
+        forDeclaredDeviceId deviceId: String,
+        algorithm: ProtocolSigningAlgorithm
+    ) -> PIBOperatorApprovalReceipt? {
+        guard isAuthorityPersistenceAvailable else { return nil }
+        let declaredDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !declaredDeviceId.isEmpty else { return nil }
+
+        let matchingBindings = trustedDevices.compactMap { device -> TrustedDevice.ProtocolIdentityKeyBinding? in
+            guard isActive(device),
+                resolvedCurrentDeviceId(for: device) == declaredDeviceId
+            else {
+                return nil
+            }
+            let exact = protocolIdentityKeyBindings(for: device).filter {
+                $0.algorithm == algorithm.rawValue
+                    && $0.source == Self.pibOperatorApprovalPinSource
+            }
+            guard exact.count == 1 else { return nil }
+            return exact[0]
+        }
+        guard matchingBindings.count == 1,
+            let publicKey = matchingBindings[0].publicKeyBytes
+        else {
+            return nil
+        }
+        let binding = matchingBindings[0]
+        return PIBOperatorApprovalReceipt(
+            declaredDeviceId: declaredDeviceId,
+            protocolSigningAlgorithm: algorithm,
+            protocolPublicKeyFingerprint: binding.fingerprint,
+            protocolPublicKey: publicKey,
+            pinSource: binding.source
+        )
+    }
+
     private func protocolIdentityPinsByReplacingAlgorithm(
         existing pins: [TrustedDevice.ProtocolIdentityPin]?,
         legacyAlgorithm: String?,
@@ -1436,17 +1811,16 @@ public final class TrustedDeviceStore: ObservableObject {
         )
     }
 
-    private func normalizedNameToken(_ raw: String?) -> String {
-        guard let raw else { return "" }
-        return raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: " ", with: "")
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: "_", with: "")
+    private enum AuthorityActivation: Equatable {
+        case preserveExistingAuthorization
+        case operatorApproved
     }
 
-    @discardableResult
+    private enum AuthorityRecordMatchPolicy: Equatable {
+        case authenticatedAuthorityOnly
+        case operatorApprovedStableIdentifierOrAuthority
+    }
+
     private func upsertAuthoritativeTrustedDevice(
         preferredRecordId: String,
         candidateAliases: Set<String>,
@@ -1458,7 +1832,9 @@ public final class TrustedDeviceStore: ObservableObject {
         protocolPublicKeyBytes: Data,
         preferredCurrentDeviceId: String?,
         connectableContext: TrustedDevice.ConnectableContext? = nil,
-        pinSource: String
+        pinSource: String,
+        activation: AuthorityActivation,
+        recordMatchPolicy: AuthorityRecordMatchPolicy
     ) throws -> Bool {
         let authenticatedKeyBinding = try validatedProtocolIdentityKeyBinding(
             algorithm: protocolSigningAlgorithm,
@@ -1469,14 +1845,24 @@ public final class TrustedDeviceStore: ObservableObject {
         var candidateTrustedDevices = trustedDevices
         let matchingIndices = candidateTrustedDevices.indices.filter { index in
             let record = candidateTrustedDevices[index]
-            if matches(record, candidates: candidateAliases) {
-                return true
+            let matchesExactAuthority = protocolIdentityKeyBindings(for: record).contains {
+                $0.algorithm == authenticatedKeyBinding.algorithm
+                    && $0.fingerprint == authenticatedKeyBinding.fingerprint
+                    && $0.publicKeyBase64 == authenticatedKeyBinding.publicKeyBase64
             }
-            if let preferredCurrentDeviceId,
-               normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: record)) == preferredCurrentDeviceId {
-                return true
+            switch recordMatchPolicy {
+            case .authenticatedAuthorityOnly:
+                // A route, display name, or peer-claimed stable identifier is
+                // not authority. Automatic handshake persistence may merge an
+                // existing record only when the authenticated raw key is
+                // already bound to that record.
+                return isActive(record) && matchesExactAuthority
+            case .operatorApprovedStableIdentifierOrAuthority:
+                return matchesExactAuthority
+                    || (preferredCurrentDeviceId.map {
+                        stableDeviceIdentifiers(for: record).contains($0)
+                    } ?? false)
             }
-            return authorityFingerprints(for: record).contains(protocolPublicKeyFingerprint)
         }
 
         let primaryIndex = preferredPrimaryAuthorityIndex(
@@ -1486,22 +1872,39 @@ public final class TrustedDeviceStore: ObservableObject {
             devices: candidateTrustedDevices
         )
 
-        let canonicalCurrentDeviceId =
-            preferredCurrentDeviceId
-            ?? primaryIndex.flatMap { normalizedTrustedDeviceIdentifier(resolvedCurrentDeviceId(for: candidateTrustedDevices[$0])) }
-            ?? normalizedTrustedDeviceIdentifier(preferredRecordId)
+        let canonicalCurrentDeviceId: String?
+        switch recordMatchPolicy {
+        case .authenticatedAuthorityOnly:
+            canonicalCurrentDeviceId =
+                primaryIndex.flatMap {
+                    normalizedTrustedDeviceIdentifier(
+                        resolvedCurrentDeviceId(for: candidateTrustedDevices[$0])
+                    )
+                }
+        case .operatorApprovedStableIdentifierOrAuthority:
+            canonicalCurrentDeviceId =
+                preferredCurrentDeviceId
+                ?? primaryIndex.flatMap {
+                    normalizedTrustedDeviceIdentifier(
+                        resolvedCurrentDeviceId(for: candidateTrustedDevices[$0])
+                    )
+                }
+                ?? normalizedTrustedDeviceIdentifier(preferredRecordId)
+        }
 
         guard let canonicalCurrentDeviceId else {
             throw AuthorityUpdateError.missingStableDeviceIdentifier
         }
-        if primaryIndex == nil, preferredCurrentDeviceId == nil {
-            // Do not mint a new authoritative trust record from an ephemeral alias
-            // alone. The caller must first provide a persistent device id or match
-            // an existing trusted alias chain.
-            throw AuthorityUpdateError.missingStableDeviceIdentifier
+        let knownDeviceIds: [String]
+        switch recordMatchPolicy {
+        case .authenticatedAuthorityOnly:
+            // Discovery aliases are routing observations, not authenticated
+            // device identity. Persisting them as known stable identifiers
+            // would let an attacker poison later canonical lookups.
+            knownDeviceIds = [canonicalCurrentDeviceId]
+        case .operatorApprovedStableIdentifierOrAuthority:
+            knownDeviceIds = [canonicalCurrentDeviceId]
         }
-
-        let knownDeviceIds = Array(candidateAliases.union([canonicalCurrentDeviceId])).sorted()
 
         let matchingRecords = matchingIndices.map { candidateTrustedDevices[$0] }
         let sameAlgorithmPins = matchingRecords
@@ -1582,7 +1985,9 @@ public final class TrustedDeviceStore: ObservableObject {
                 existing: mergedRecord.knownDeviceIds,
                 adding: knownDeviceIds
             )
-            transitionLifecycle(of: &mergedRecord, to: .active)
+            if activation == .operatorApproved {
+                transitionLifecycle(of: &mergedRecord, to: .active)
+            }
             candidateTrustedDevices[primaryIndex] = mergedRecord
 
             for index in matchingIndices.sorted(by: >) where index != primaryIndex {
@@ -1607,7 +2012,9 @@ public final class TrustedDeviceStore: ObservableObject {
                     protocolIdentityKeyBindings: [authenticatedKeyBinding],
                     currentDeviceId: canonicalCurrentDeviceId,
                     knownDeviceIds: knownDeviceIds,
-                    currentPathLifecycleState: CurrentPathLifecycleState.active,
+                    currentPathLifecycleState: activation == .operatorApproved
+                        ? .active
+                        : .reverificationRequired,
                     connectableContext: connectableContext
                 )
             )
@@ -1816,19 +2223,6 @@ public final class TrustedDeviceStore: ObservableObject {
         return !trustedAliasCandidates(for: device).isDisjoint(with: candidates)
     }
 
-    private func uniqueNameMatchedTrustedDeviceIndices(for device: DiscoveredDevice) -> [Int] {
-        let normalizedDeviceName = normalizedNameToken(device.name)
-        guard !normalizedDeviceName.isEmpty else { return [] }
-
-        let matches = trustedDevices.indices.filter { index in
-            let trusted = trustedDevices[index]
-            guard normalizedNameToken(trusted.name) == normalizedDeviceName else { return false }
-            return trusted.platform == .unknown || device.platform == .unknown || trusted.platform == device.platform
-        }
-
-        return matches.count == 1 ? matches : []
-    }
-
     private nonisolated func resolvedCurrentDeviceId(for device: TrustedDevice) -> String {
         bestPersistentTrustedDeviceIdentifier(for: device) ?? device.id
     }
@@ -1868,19 +2262,73 @@ public final class TrustedDeviceStore: ObservableObject {
         })
     }
 
+    /// Stable authority identifiers only. Routing aliases such as IP and
+    /// Bonjour endpoints are intentionally excluded because they can be
+    /// reassigned to a different physical device.
+    private nonisolated func stableDeviceIdentifiers(
+        for device: TrustedDevice
+    ) -> Set<String> {
+        let rawIdentifiers: [String?] = [device.id, device.currentDeviceId]
+            + (device.knownDeviceIds ?? []).map(Optional.some)
+        return Set(rawIdentifiers.compactMap(normalizedTrustedDeviceIdentifier))
+    }
+
+    private nonisolated func changedStableDeviceIdentifiers(
+        from previous: [TrustedDevice],
+        to current: [TrustedDevice]
+    ) -> Set<String> {
+        let identifiers = Set(
+            (previous + current).flatMap { Array(stableDeviceIdentifiers(for: $0)) }
+        )
+        return Set(identifiers.filter { stableDeviceId in
+            let previousRecords = previous.filter {
+                stableDeviceIdentifiers(for: $0).contains(stableDeviceId)
+            }
+            let currentRecords = current.filter {
+                stableDeviceIdentifiers(for: $0).contains(stableDeviceId)
+            }
+            return previousRecords != currentRecords
+        })
+    }
+
+    private func quarantineStableAuthorityRows(
+        stableDeviceId: String,
+        operation: String
+    ) throws {
+        var candidate = trustedDevices
+        for index in candidate.indices where stableDeviceIdentifiers(
+            for: candidate[index]
+        ).contains(stableDeviceId) {
+            switch candidate[index].currentPathLifecycleState ?? .active {
+            case .active, .reverificationRequired:
+                transitionLifecycle(of: &candidate[index], to: .quarantined)
+            case .quarantined, .revoked:
+                break
+            }
+        }
+        guard candidate != trustedDevices else { return }
+        try persist(candidate, operation: operation)
+        trustedDevices = candidate
+    }
+
+    @discardableResult
+    private func advanceTrustMutationRevision(for stableDeviceId: String) -> UInt64 {
+        let current = trustMutationRevisionByStableDeviceId[stableDeviceId] ?? 0
+        let increment = current.addingReportingOverflow(1)
+        precondition(!increment.overflow, "Trusted device mutation revision exhausted")
+        trustMutationRevisionByStableDeviceId[stableDeviceId] = increment.partialValue
+        return increment.partialValue
+    }
+
     private func connectableContext(from device: DiscoveredDevice) -> TrustedDevice.ConnectableContext? {
-        let bonjourServiceName = device.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bonjourServiceType = device.bonjourServiceType?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bonjourServiceDomain = device.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bonjourRoute = BonjourRouteTuple(device)
         let services = Array(Set(device.services.map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter { !$0.isEmpty })).sorted()
         let portMap = device.portMap.filter { !$0.key.isEmpty && $0.value > 0 }
         let ipAddress = device.ipAddress?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard bonjourServiceName?.isEmpty == false
-                || bonjourServiceType?.isEmpty == false
-                || bonjourServiceDomain?.isEmpty == false
+        guard bonjourRoute != nil
                 || !services.isEmpty
                 || !portMap.isEmpty
                 || ipAddress?.isEmpty == false else {
@@ -1888,9 +2336,7 @@ public final class TrustedDeviceStore: ObservableObject {
         }
 
         return TrustedDevice.ConnectableContext(
-            bonjourServiceName: bonjourServiceName,
-            bonjourServiceType: bonjourServiceType,
-            bonjourServiceDomain: bonjourServiceDomain,
+            bonjourRoute: bonjourRoute,
             services: services,
             portMap: portMap,
             lastResolvedIPAddress: ipAddress
@@ -1908,27 +2354,38 @@ public final class TrustedDeviceStore: ObservableObject {
         _ existing: TrustedDevice.ConnectableContext?,
         with update: TrustedDevice.ConnectableContext?
     ) -> TrustedDevice.ConnectableContext? {
-        guard let existing else { return update }
-        guard let update else { return existing }
+        guard existing != nil || update != nil else { return nil }
+
+        let selectedRoute = BonjourRouteTuple.preferred(
+            existing: existing?.verifiedBonjourRoute,
+            update: update?.verifiedBonjourRoute
+        )
+        let services = Array(
+            Set(existing?.services ?? []).union(update?.services ?? [])
+        ).sorted()
+        let portMap = (existing?.portMap ?? [:]).merging(update?.portMap ?? [:]) {
+            _, latest in latest
+        }
+        let lastResolvedIPAddress = existing?.lastResolvedIPAddress
+            ?? update?.lastResolvedIPAddress
+        guard selectedRoute != nil
+                || !services.isEmpty
+                || !portMap.isEmpty
+                || lastResolvedIPAddress?.isEmpty == false else {
+            return nil
+        }
 
         return TrustedDevice.ConnectableContext(
-            bonjourServiceName: existing.bonjourServiceName ?? update.bonjourServiceName,
-            bonjourServiceType: existing.bonjourServiceType ?? update.bonjourServiceType,
-            bonjourServiceDomain: existing.bonjourServiceDomain ?? update.bonjourServiceDomain,
-            services: Array(Set(existing.services).union(update.services)).sorted(),
-            portMap: existing.portMap.merging(update.portMap) { _, latest in latest },
-            lastResolvedIPAddress: existing.lastResolvedIPAddress ?? update.lastResolvedIPAddress
+            bonjourRoute: selectedRoute,
+            services: services,
+            portMap: portMap,
+            lastResolvedIPAddress: lastResolvedIPAddress
         )
     }
 
     private nonisolated func bonjourAlias(from context: TrustedDevice.ConnectableContext) -> String? {
-        guard let name = context.bonjourServiceName?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !name.isEmpty else {
-            return nil
-        }
-        let domain = context.bonjourServiceDomain?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedDomain = (domain?.isEmpty == false ? domain! : "local.")
-        return "bonjour:\(name)@\(resolvedDomain)"
+        guard let route = context.verifiedBonjourRoute else { return nil }
+        return "bonjour:\(route.name)@\(route.domain)"
     }
 
     private nonisolated func canonicalPersistentTrustedDeviceIdentifier(_ raw: String?) -> String? {

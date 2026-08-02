@@ -158,16 +158,12 @@ final class QPeriaptABI2AdmissionBoundaryTests: XCTestCase {
                 providerTier: .qperiaptPQC
             )
         )
-        XCTAssertEqual(
-            KEMIdentityKeyLengthContract.resolve(
-                suite: .qperiaptABI2PolicyBound,
-                providerTier: .qperiaptPQC
-            ),
-            .init(
-                publicKeyLength: QPeriaptPlatformPolicy.publicKeyLength,
-                privateKeyLength: QPeriaptPlatformPolicy.privateKeyLength
-            )
+        let contract = KEMIdentityKeyLengthContract.resolve(
+            suite: .qperiaptABI2PolicyBound,
+            providerTier: .qperiaptPQC
         )
+        XCTAssertEqual(contract?.publicKeyLength, QPeriaptPlatformPolicy.publicKeyLength)
+        XCTAssertEqual(contract?.privateKeyLength, QPeriaptPlatformPolicy.privateKeyLength)
         XCTAssertNil(
             KEMIdentityKeyLengthContract.resolve(
                 suite: .qperiaptABI2PolicyBound,

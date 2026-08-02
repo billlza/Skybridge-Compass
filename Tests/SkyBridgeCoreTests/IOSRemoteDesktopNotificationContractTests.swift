@@ -35,10 +35,11 @@ final class IOSRemoteDesktopNotificationContractTests: XCTestCase {
         XCTAssertTrue(crossNetwork.contains("NotificationManager.beginRemoteDesktopSession(\n            sessionId: sessionId,\n            transport: \"webrtc\""))
         XCTAssertTrue(crossNetwork.contains("guard hasUserVisibleRemoteDesktopSession(sessionId: sessionId) else { return }"))
         XCTAssertTrue(crossNetwork.contains("public func notifyRemoteDesktopInterruptedForActiveSession(reason: String) async"))
-        XCTAssertTrue(crossNetwork.contains("kind: .normal,\n                reason: \"explicit_disconnect\""))
-        XCTAssertTrue(crossNetwork.contains("kind: .interrupted,\n                        reason: \"remote_peer_timeout\""))
-        XCTAssertTrue(crossNetwork.contains("kind: .interrupted,\n                    reason: \"transport_disconnected:\\(reason)\""))
-        XCTAssertTrue(crossNetwork.contains("kind: .interrupted,\n            reason: \"strict_pqc_bootstrap_failed\""))
+        XCTAssertTrue(crossNetwork.contains("notificationKind: .normal,\n                reason: \"explicit_disconnect\""))
+        XCTAssertTrue(crossNetwork.contains("reason: \"remote_peer_timeout\""))
+        XCTAssertTrue(crossNetwork.contains("reason: \"transport_disconnected:\\(reason)\""))
+        XCTAssertTrue(crossNetwork.contains("reason: \"strict_pqc_bootstrap_failed\""))
+        XCTAssertTrue(crossNetwork.contains("expectedSessionObjectIdentifier: ObjectIdentifier(session)"))
 
         XCTAssertTrue(remoteDesktop.contains("NotificationManager.beginRemoteDesktopSession(\n                sessionId: refreshedLANDevice.id,\n                transport: \"lan\",\n                role: \"viewer\""))
         XCTAssertTrue(remoteDesktop.contains("kind: .normal,\n                reason: \"viewer_disconnect_transport\""))
@@ -46,20 +47,38 @@ final class IOSRemoteDesktopNotificationContractTests: XCTestCase {
         XCTAssertTrue(remoteDesktop.contains("await crossNetwork.notifyRemoteDesktopInterruptedForActiveSession(reason: errorMessage)"))
     }
 
-    func testIOSWebRTCTerminalSessionTerminationNotifiesBeforeDisconnecting() throws {
+    func testIOSWebRTCTerminalSessionTerminationOwnsLifecycleBeforeNotifying() throws {
         let crossNetwork = try repositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
         )
 
         assertContainsInOrder(crossNetwork, [
             "private func terminateRemoteDesktopSession(",
-            "await notifyRemoteDesktopTerminalSessionIfNeeded(",
-            "applyActiveSessionDisconnect(sessionId: sessionId, kind: disconnectKind)",
-            "await disconnect(clearSnapshot: clearSnapshot)"
+            "guard let expectedIncarnation = sessionIncarnation(",
+            "await disconnectInternal(",
+            "originatingReceiveLoop: originatingReceiveLoop",
+            "terminalFailureMessage: terminalFailureMessage",
+            "expectedIncarnation: expectedIncarnation",
+            "terminalNotification: DisconnectTerminalNotification("
+        ])
+        assertContainsInOrder(crossNetwork, [
+            "guard let teardownLease = lifecycleGate.beginTeardown() else",
+            "defer {",
+            "enqueueTerminalNotification(deferredTerminalNotification)",
+            "lifecycleGate.finishTeardown(teardownLease)",
+            "advanceSessionLifecycleEpoch()",
+            "activeSessionIncarnation = nil",
+            "currentSessionId = nil",
+            "if let terminalNotification",
+            "applyActiveSessionDisconnect(",
+            "deferredTerminalNotification = DeferredTerminalNotification("
         ])
         assertContainsInOrder(crossNetwork, [
             "case .leave:",
-            "await self?.terminateRemoteDesktopSession(",
+            "switch envelopeLifecycleWitness",
+            "case .incarnation(let incarnation):",
+            "await terminateRemoteDesktopSession(",
+            "expectedSessionObjectIdentifier: incarnation.sessionObjectIdentifier",
             "disconnectKind: .remoteLeave",
             "notificationKind: .normal",
             "reason: \"remote_leave\""
@@ -67,6 +86,7 @@ final class IOSRemoteDesktopNotificationContractTests: XCTestCase {
         assertContainsInOrder(crossNetwork, [
             "private func recordSessionAuthorityLost(sessionId: String, reason: String)",
             "await self.terminateRemoteDesktopSession(",
+            "expectedSessionObjectIdentifier: expectedSessionObjectIdentifier",
             "disconnectKind: .transient",
             "notificationKind: .interrupted",
             "reason: \"session_authority_lost:\\(reason)\""

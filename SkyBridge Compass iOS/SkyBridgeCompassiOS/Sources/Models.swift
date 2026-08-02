@@ -342,19 +342,20 @@ enum BonjourServiceIdentitySanitizer {
 public struct DiscoveredDevice: Identifiable, Codable, Sendable {
     public let id: String
     public var name: String
-    /// Bonjour service instance name（用于 NWEndpoint.service 连接；通常等于对端 publish 的 serviceName）
+    /// Bonjour service instance name（用于匹配当前 live NWBrowser endpoint；不能单独重建连接路由）
     public var bonjourServiceName: String?
     public var modelName: String
     public var platform: DevicePlatform
     public var osVersion: String
+    /// 诊断/展示地址；可能来自 TXT，不能与独立端口字段组合成可连接的 P2P 路由。
     public var ipAddress: String?
-    /// Bonjour 服务类型（例如：_skybridge._tcp / _skybridge._udp）。用于在无 IP 时仍可直接连接。
+    /// Bonjour 服务类型（例如：_skybridge._tcp / _skybridge._udp），仅作为 live endpoint 的身份字段。
     public var bonjourServiceType: String?
-    /// Bonjour 域（一般为 local.）。用于在无 IP 时构造 NWEndpoint.service 连接。
+    /// Bonjour 域（一般为 local.），必须与同一 live endpoint 的 interface 一起使用。
     public var bonjourServiceDomain: String?
     /// 该设备被发现到的所有 Bonjour 服务类型（用于能力推断与端口展示）
     public var services: [String]
-    /// 端口映射：serviceType -> port（有些情况下端口无法直接从 NWBrowser 获得，需要依赖 TXT 记录或后续 resolve）
+    /// 诊断端口映射：serviceType -> port。TXT 值不能替代同一 DNS-SD endpoint 解析出的 SRV 路由。
     public var portMap: [String: UInt16]
     public var signalStrength: Int // RSSI
     public var lastSeen: Date
@@ -437,9 +438,9 @@ public struct DiscoveredDevice: Identifiable, Codable, Sendable {
 
 public extension DiscoveredDevice {
     /// SkyBridge File Transfer Bonjour service type
-    static let fileTransferServiceType = "_skybridge-transfer._tcp"
+    static let fileTransferServiceType = "_skybridge-xfer._tcp"
     /// SkyBridge Remote Control Bonjour service type
-    static let remoteControlServiceType = "_skybridge-remote._tcp"
+    static let remoteControlServiceType = "_skybridge-rd._tcp"
     static let classicResumeCapability = ClassicTransferCapability.classicResume
 
     var supportsFileTransfer: Bool {

@@ -421,9 +421,9 @@ final class P2PTrustSyncTests: XCTestCase {
         )
 
         service.setInMemoryPersistenceForTesting(true)
-        await service.removeRecordsForTesting(deviceIds: [deviceId])
+        try await service.removeRecordsForTesting(deviceIds: [deviceId])
         addTeardownBlock { @MainActor in
-            await service.removeRecordsForTesting(deviceIds: [deviceId])
+            try await service.removeRecordsForTesting(deviceIds: [deviceId])
             service.setInMemoryPersistenceForTesting(false)
         }
 
@@ -821,7 +821,9 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertFalse(source.contains("SecItemDelete(query as CFDictionary)\n        try removeFallbackRecord"))
         XCTAssertFalse(source.contains("try? storeFallbackRecords"))
         XCTAssertFalse(source.contains("try? Self.protectedFallbackRecordStore.remove()"))
-        XCTAssertTrue(source.contains("preconditionFailure(\"failed to remove trust record for testing"))
+        XCTAssertTrue(source.contains("func removeRecordsForTesting(deviceIds: [String]) async throws"))
+        XCTAssertTrue(source.contains("try deleteFromKeychain(deviceId: deviceId)"))
+        XCTAssertFalse(source.contains("preconditionFailure(\"failed to remove trust record for testing"))
     }
 
     func testLocalTrustRecordLoadVerifiesSignaturesBeforeMerging() throws {
@@ -849,12 +851,10 @@ final class P2PTrustSyncTests: XCTestCase {
         let stableId = "id:\(suffix)"
 
         service.setInMemoryPersistenceForTesting(true)
-        await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-        defer {
+        try await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+        addTeardownBlock { @MainActor [service] in
+            try await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
             service.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-            }
         }
 
         _ = try await service.addTrustRecord(
@@ -968,9 +968,9 @@ final class P2PTrustSyncTests: XCTestCase {
         let ids = [activeId, quarantineId, reverificationId]
 
         service.setInMemoryPersistenceForTesting(true)
-        await service.removeRecordsForTesting(deviceIds: ids)
+        try await service.removeRecordsForTesting(deviceIds: ids)
         addTeardownBlock { @MainActor in
-            await service.removeRecordsForTesting(deviceIds: ids)
+            try await service.removeRecordsForTesting(deviceIds: ids)
             service.setInMemoryPersistenceForTesting(false)
         }
 

@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 
 /// 系统监控设置视图 - 提供监控配置选项
@@ -393,3 +398,4 @@ struct SystemMonitorSettingsView_Previews: PreviewProvider {
         SystemMonitorSettingsView(isPresented: .constant(true))
     }
 }
+#endif

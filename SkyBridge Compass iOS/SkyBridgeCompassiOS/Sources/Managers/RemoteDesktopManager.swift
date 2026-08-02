@@ -688,6 +688,7 @@ public class RemoteDesktopManager: ObservableObject {
     private var networkConnection: NWConnection?
     private var lanHandshakeTransport: NWConnectionTransport?
     private var lanHandshakeDriver: HandshakeDriver?
+    private var lanEstablishedArbiterLease: PeerSessionArbiter.EstablishedLease?
     private var lanSessionKeys: SessionKeys?
     private var lanReceiveLoopConnectionID: ObjectIdentifier?
     private var lanSOAPairKey: Data?
@@ -2936,10 +2937,8 @@ public class RemoteDesktopManager: ObservableObject {
             }
             if clipboardListenerToken == nil {
                 clipboardListenerToken = clipboard.addLocalClipboardListener { [weak self] data, mimeType in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        await self.handleLocalClipboardChange(data: data, mimeType: mimeType)
-                    }
+                    guard let self else { throw CancellationError() }
+                    try await self.handleLocalClipboardChange(data: data, mimeType: mimeType)
                 }
             }
         } else {
@@ -2954,18 +2953,16 @@ public class RemoteDesktopManager: ObservableObject {
         }
     }
 
-    private func handleLocalClipboardChange(data: Data, mimeType: String) async {
+    private func handleLocalClipboardChange(data: Data, mimeType: String) async throws {
         guard !isReadOnlyCameraSession,
               viewerSettings.clipboardSyncEnabled,
-              isStreaming else { return }
-        do {
-            let payload = RemoteClipboardMessagePayload(mimeType: mimeType, data: data)
-            let encoded = try JSONEncoder().encode(payload)
-            let message = RemoteMessage(type: .clipboard, payload: encoded)
-            try await sendMessage(message)
-        } catch {
-            SkyBridgeLogger.shared.error("❌ 发送会话剪贴板失败: \(error.localizedDescription)")
+              isStreaming else {
+            throw P2PError.connectionFailed
         }
+        let payload = RemoteClipboardMessagePayload(mimeType: mimeType, data: data)
+        let encoded = try JSONEncoder().encode(payload)
+        let message = RemoteMessage(type: .clipboard, payload: encoded)
+        try await sendMessage(message)
     }
 
     private func prepareRealtimeMediaAudioReceiverIfNeeded(
@@ -4766,14 +4763,12 @@ public class RemoteDesktopManager: ObservableObject {
     }
 
     private func clearLANSecureChannelState() async {
-        if let lanHandshakeTransport, let lanHandshakePeerId {
-            await lanHandshakeTransport.removeConnection(for: lanHandshakePeerId)
-        }
-        if let lanSOAPairKey {
-            await PeerSessionArbiter.shared.clearEstablished(pairKey: lanSOAPairKey)
-            await PeerSessionArbiter.shared.clearOutgoing(pairKey: lanSOAPairKey, attemptId: nil)
-        }
+        let closingTransport = lanHandshakeTransport
+        let closingPeerId = lanHandshakePeerId
+        let closingDriver = lanHandshakeDriver
+        let closingArbiterLease = lanEstablishedArbiterLease
         lanHandshakeDriver = nil
+        lanEstablishedArbiterLease = nil
         lanSessionKeys = nil
         lanReceiveLoopConnectionID = nil
         lanSOAPairKey = nil
@@ -4782,6 +4777,14 @@ public class RemoteDesktopManager: ObservableObject {
         lanHandshakePeerId = nil
         lanHandshakeTransport = nil
         resetLANReceiveParserState()
+
+        await closingDriver?.cancel()
+        if let closingArbiterLease {
+            _ = await PeerSessionArbiter.shared.clearEstablished(closingArbiterLease)
+        }
+        if let closingTransport, let closingPeerId {
+            _ = await closingTransport.removeConnection(for: closingPeerId)
+        }
     }
 
     private func ensureLANRemoteControlTrustBootstrap(
@@ -4796,12 +4799,11 @@ public class RemoteDesktopManager: ObservableObject {
         let bootstrapDevice = deviceResolver.activeP2PBootstrapDevice(for: device)
             ?? deviceResolver.activeP2PBootstrapDevice(for: resolvedDevice)
             ?? resolvedDevice
-        let bootstrapPeerId = bootstrapDevice.id
         let bootstrapStatus = connectionManager.resolvedConnectionStatus(for: bootstrapDevice)
 
         if bootstrapStatus != .connected {
             SkyBridgeLogger.shared.info(
-                "🧩 LAN 远控前置 bootstrap：先建立通用 P2P 会话以同步 authority peer=\(bootstrapPeerId)"
+                "🧩 LAN 远控前置 bootstrap：先建立通用 P2P 会话以同步 authority peer=<redacted>"
             )
             try await connectionManager.connect(to: bootstrapDevice)
         }
@@ -4822,7 +4824,7 @@ public class RemoteDesktopManager: ObservableObject {
         )
         if bootstrapReady {
             SkyBridgeLogger.shared.info(
-                "🧩 LAN 远控前置 bootstrap 完成：reply=\(observedReply) ready=\(bootstrapReady) peer=\(resolvedBootstrapPeer.id)"
+                "🧩 LAN 远控前置 bootstrap 完成：reply=\(observedReply) ready=\(bootstrapReady) peer=<redacted>"
             )
             return
         }
@@ -4832,7 +4834,7 @@ public class RemoteDesktopManager: ObservableObject {
             bootstrapReady: bootstrapReady
         ) {
             SkyBridgeLogger.shared.error(
-                "⛔️ LAN 远控前置 bootstrap fail-fast: peer=\(resolvedBootstrapPeer.id) \(reason)"
+                "⛔️ LAN 远控前置 bootstrap fail-fast: peer=<redacted> \(reason)"
             )
             throw RemoteDesktopError.connectionFailed(reason)
         }
@@ -4842,7 +4844,7 @@ public class RemoteDesktopManager: ObservableObject {
         for device: DiscoveredDevice,
         over connection: NWConnection
     ) async throws {
-        let trustedDevices = TrustedDeviceStore.shared.trustedDevices
+        let trustedDevices = try TrustedDeviceStore.shared.activeAuthoritySnapshot()
         let trustedPeerId = try RemoteDesktopLANHandshakeTrust.resolveTrustedLANPeerIdentifier(
             for: device,
             trustedDevices: trustedDevices
@@ -4867,17 +4869,18 @@ public class RemoteDesktopManager: ObservableObject {
         lanSecureReplayWindow = RemoteControlSecureReplayWindow()
         lanSecureSendCounter = 0
         lanHandshakeDriver = nil
+        lanEstablishedArbiterLease = nil
 
         let localDeviceId = try resolvedLocalRemoteControlDeviceId()
         guard let localSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: localDeviceId),
-              let expectedRemoteSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: trustedPeerId),
-              let soaMetadata = try? HandshakeSOAMetadata(
-                initiatorPeerId: localSOAPeerId,
-                targetPeerId: expectedRemoteSOAPeerId,
-                attemptId: RemoteDesktopLANHandshakeTrust.randomRemoteControlAttemptId()
-              ) else {
+              let expectedRemoteSOAPeerId = RemoteDesktopLANHandshakeTrust.remoteControlSOAPeerId(for: trustedPeerId) else {
             throw RemoteDesktopError.connectionFailed("LAN 远控缺少稳定身份，无法建立安全通道")
         }
+        let soaMetadata = try HandshakeSOAMetadata(
+            initiatorPeerId: localSOAPeerId,
+            targetPeerId: expectedRemoteSOAPeerId,
+            attemptId: RemoteDesktopLANHandshakeTrust.randomRemoteControlAttemptId()
+        )
         let pairKey = PeerSessionArbiter.pairKey(
             localPeerId: localSOAPeerId,
             remotePeerId: expectedRemoteSOAPeerId,
@@ -4908,6 +4911,15 @@ public class RemoteDesktopManager: ObservableObject {
         )
 
         try ensureLANBootstrapStillActive(for: connection)
+        guard let establishedDriver = lanHandshakeDriver else {
+            throw RemoteDesktopError.connectionFailed(
+                "LAN 远控握手完成但缺少精确 arbiter owner"
+            )
+        }
+        try await captureLANEstablishedArbiterLease(
+            from: establishedDriver,
+            keys: keys
+        )
         try installLANSecureSessionKeys(keys, peerId: trustedPeerId, source: "performHandshake-return")
     }
 
@@ -4931,15 +4943,14 @@ public class RemoteDesktopManager: ObservableObject {
     ) throws {
         if let existing = lanSessionKeys {
             if Self.isSameLANSecureSession(existing, keys) {
-                lanHandshakeDriver = nil
                 transportStatusText = currentTransportStatusText()
                 SkyBridgeLogger.shared.debug(
-                    "ℹ️ 已忽略重复 LAN 远控安全通道安装: peer=\(peerId) session=\(keys.sessionId) source=\(source)"
+                    "ℹ️ 已忽略重复 LAN 远控安全通道安装: peer=<redacted> session=<redacted> source=\(source)"
                 )
                 return
             }
 
-            let reason = "LAN 远控安全通道已处于活跃 session，拒绝替换 session: peer=\(peerId) existing=\(existing.sessionId) incoming=\(keys.sessionId) source=\(source)"
+            let reason = "LAN 远控安全通道已处于活跃 session，拒绝未授权替换"
             SkyBridgeLogger.shared.error("⛔️ \(reason)")
             throw RemoteDesktopError.connectionFailed(reason)
         }
@@ -4954,10 +4965,9 @@ public class RemoteDesktopManager: ObservableObject {
         lanSecureReplayWindow = RemoteControlSecureReplayWindow()
         lanSecureSendCounter = 0
         lanSessionKeys = keys
-        lanHandshakeDriver = nil
         transportStatusText = currentTransportStatusText()
         SkyBridgeLogger.shared.info(
-            "🔐 LAN 远控安全通道已建立: peer=\(peerId) suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
+            "🔐 LAN 远控安全通道已建立: peer=<redacted> suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
         )
         SkyBridgeDiagnosticTrace.appendStatus(
             "lan-remote handshake-established peer=<redacted> suite=\(keys.negotiatedSuite.rawValue) source=\(source)"
@@ -5000,6 +5010,7 @@ public class RemoteDesktopManager: ObservableObject {
 
         switch await driver.getCurrentState() {
         case .established(let keys):
+            try await captureLANEstablishedArbiterLease(from: driver, keys: keys)
             try installLANSecureSessionKeys(
                 keys,
                 peerId: lanHandshakePeerId ?? "-",
@@ -5010,6 +5021,23 @@ public class RemoteDesktopManager: ObservableObject {
         default:
             break
         }
+    }
+
+    private func captureLANEstablishedArbiterLease(
+        from driver: HandshakeDriver,
+        keys: SessionKeys
+    ) async throws {
+        let lease = await driver.getEstablishedArbiterLease()
+        guard isCurrentLANHandshakeDriver(driver),
+              let expectedPairKey = lanSOAPairKey,
+              let lease,
+              lease.pairKey == expectedPairKey,
+              lease.sessionId == keys.sessionId else {
+            throw RemoteDesktopError.connectionFailed(
+                "LAN 远控握手 arbiter owner 与当前安全会话不一致"
+            )
+        }
+        lanEstablishedArbiterLease = lease
     }
 
     private func unwrapLANInboundPayload(

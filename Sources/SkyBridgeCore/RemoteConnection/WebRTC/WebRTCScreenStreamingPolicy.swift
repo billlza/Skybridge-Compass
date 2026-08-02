@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import CoreGraphics
 import Foundation
 
@@ -295,80 +300,7 @@ extension CrossNetworkConnectionManager {
         }
     }
 
-    static func streamConfigurationByPreservingAudioEndpointForVideoRefresh(
-        _ config: RemoteDesktopStreamConfiguration,
-        previousConfig: RemoteDesktopStreamConfiguration?
-    ) -> RemoteDesktopStreamConfiguration {
-        guard config.streamRefreshToken != nil,
-              config.mediaAudioEndpoint == nil,
-              config.mediaSessionId == nil,
-              config.requestsRealtimeMediaAudio,
-              let previousConfig,
-              Self.hasUnchangedRealtimeAudioSemantics(config, previous: previousConfig),
-              previousConfig.requestsRealtimeMediaAudio,
-              let previousEndpoint = previousConfig.mediaAudioEndpoint else {
-            return config
-        }
 
-        return RemoteDesktopStreamConfiguration(
-            width: config.width,
-            height: config.height,
-            preferredCodec: config.preferredCodec,
-            supportedVideoFormats: config.supportedVideoFormats,
-            qualityPreset: config.qualityPreset,
-            videoCompressionLevel: config.videoCompressionLevel,
-            adaptiveResolutionEnabled: config.adaptiveResolutionEnabled,
-            targetFrameRate: config.targetFrameRate,
-            keyFrameInterval: config.keyFrameInterval,
-            lowLatencyMode: config.lowLatencyMode,
-            enableHardwareAcceleration: config.enableHardwareAcceleration,
-            enableAppleSiliconOptimization: config.enableAppleSiliconOptimization,
-            clipboardSyncEnabled: config.clipboardSyncEnabled,
-            damageTrackingEnabled: config.damageTrackingEnabled,
-            separateCursorChannelEnabled: config.separateCursorChannelEnabled,
-            interactionOverlayChannelEnabled: config.interactionOverlayChannelEnabled,
-            refreshStrategy: config.refreshStrategy,
-            jitterBufferFrames: config.jitterBufferFrames,
-            lossRecoveryMode: config.lossRecoveryMode,
-            screenFrameTransport: config.screenFrameTransport,
-            screenDataChannelEnabled: config.screenDataChannelEnabled,
-            screenChannelWireFormat: config.screenChannelWireFormat,
-            nativeVideoTrackReady: config.nativeVideoTrackReady,
-            nativeAudioTrackEnabled: config.nativeAudioTrackEnabled,
-            audioRedirectionEnabled: config.audioRedirectionEnabled,
-            audioTransport: config.audioTransport,
-            audioMode: config.audioMode ?? previousConfig.audioMode,
-            mediaSessionId: config.mediaSessionId ?? previousConfig.mediaSessionId,
-            mediaAudioEndpoint: previousEndpoint,
-            compatibilityAudioFallbackEnabled: config.compatibilityAudioFallbackEnabled,
-            preferredAudioEncoding: config.preferredAudioEncoding ?? previousConfig.preferredAudioEncoding,
-            audioSampleRate: config.audioSampleRate ?? previousConfig.audioSampleRate,
-            audioChannelCount: config.audioChannelCount ?? previousConfig.audioChannelCount,
-            performanceValidationMode: config.performanceValidationMode ?? previousConfig.performanceValidationMode,
-            mediaFallbackPolicy: config.mediaFallbackPolicy ?? previousConfig.mediaFallbackPolicy,
-            streamRefreshToken: config.streamRefreshToken,
-            sentAt: config.sentAt
-        )
-    }
-
-    private static func hasUnchangedRealtimeAudioSemantics(
-        _ config: RemoteDesktopStreamConfiguration,
-        previous: RemoteDesktopStreamConfiguration
-    ) -> Bool {
-        func normalize(_ value: String?) -> String? {
-            value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        }
-        return config.audioRedirectionEnabled == previous.audioRedirectionEnabled
-            && normalize(config.audioTransport) == normalize(previous.audioTransport)
-            && normalize(config.audioMode) == normalize(previous.audioMode)
-            && config.nativeAudioTrackEnabled == previous.nativeAudioTrackEnabled
-            && config.compatibilityAudioFallbackEnabled == previous.compatibilityAudioFallbackEnabled
-            && normalize(config.preferredAudioEncoding) == normalize(previous.preferredAudioEncoding)
-            && config.audioSampleRate == previous.audioSampleRate
-            && config.audioChannelCount == previous.audioChannelCount
-            && normalize(config.performanceValidationMode) == normalize(previous.performanceValidationMode)
-            && normalize(config.mediaFallbackPolicy) == normalize(previous.mediaFallbackPolicy)
-    }
 
     static func shouldUseWebRTCAudioFallback(
         audioRedirectionEnabled: Bool,
@@ -512,3 +444,4 @@ extension CrossNetworkConnectionManager {
         audioRedirectionEnabled && remoteNativeAudioTrackEnabled && localNativeAudioTrackReady
     }
 }
+#endif

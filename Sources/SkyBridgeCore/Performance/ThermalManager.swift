@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import IOKit
 import os.log
@@ -461,27 +466,6 @@ public enum ChipType {
     }
 }
 
-/// 热量状态
-public enum ThermalState: String, CaseIterable {
-    case nominal = "正常"
-    case fair = "良好"
-    case serious = "严重"
-    case critical = "危险"
-    
- /// 获取状态颜色
-    public var color: String {
-        switch self {
-        case .nominal:
-            return "绿色"
-        case .fair:
-            return "黄色"
-        case .serious:
-            return "橙色"
-        case .critical:
-            return "红色"
-        }
-    }
-}
 
 /// 温度趋势方向
 public enum ThermalTrendDirection: String {
@@ -524,3 +508,4 @@ private struct AppleSiliconThermalConfig {
         return (warning: 80.0, critical: 95.0)
     }
 }
+#endif

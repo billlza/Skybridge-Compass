@@ -262,7 +262,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
             publicKey: publicKey
         )
         addTeardownBlock { @MainActor [trust] in
-            await trust.removeRecordsForTesting(deviceIds: [peerId])
+            try await trust.removeRecordsForTesting(deviceIds: [peerId])
             trust.setInMemoryPersistenceForTesting(false)
         }
 
@@ -330,7 +330,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
         )
         let trust = TrustSyncService.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [peerId])
+        try await trust.removeRecordsForTesting(deviceIds: [peerId])
         _ = try await trust.addTrustRecord(record)
 
         do {
@@ -342,11 +342,11 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
             )
             XCTAssertTrue(verified)
         } catch {
-            await trust.removeRecordsForTesting(deviceIds: [peerId])
+            try await trust.removeRecordsForTesting(deviceIds: [peerId])
             trust.setInMemoryPersistenceForTesting(false)
             throw error
         }
-        await trust.removeRecordsForTesting(deviceIds: [peerId])
+        try await trust.removeRecordsForTesting(deviceIds: [peerId])
         trust.setInMemoryPersistenceForTesting(false)
     }
 
@@ -643,7 +643,7 @@ final class EnhancedPostQuantumCryptoTests: XCTestCase {
             publicKey: publicKey
         )
         addTeardownBlock { @MainActor in
-            await trust.removeRecordsForTesting(deviceIds: [peerId])
+            try await trust.removeRecordsForTesting(deviceIds: [peerId])
             trust.setInMemoryPersistenceForTesting(false)
         }
     }

@@ -8,6 +8,11 @@
 
 import Foundation
 import Network
+import class SkyBridgeProtocolCore.BonjourRegistrationReadinessGate
+import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
+import class SkyBridgeProtocolCore.ClassicTransferJSONWorker
+import enum SkyBridgeProtocolCore.ClassicTransferInboundPolicy
+import struct SkyBridgeProtocolCore.ClassicTransferInboundAdmission
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -23,19 +28,6 @@ public actor FileTransferNetworkService {
         NWParameters,
         NWEndpoint.Port
     ) throws -> NWListener
-
-    private final class StartState: @unchecked Sendable {
-        private let lock = NSLock()
-        private var finished = false
-
-        func finish() -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !finished else { return false }
-            finished = true
-            return true
-        }
-    }
 
     private enum ListenerHealthState {
         case stopped
@@ -93,6 +85,10 @@ public actor FileTransferNetworkService {
     
     /// 监听器
     private var listener: NWListener?
+    private var pendingListener: NWListener?
+    private var startTask: Task<Void, Error>?
+    private var startTaskToken: UUID?
+    private var listenerGeneration: UInt64 = 0
     
     /// 活跃连接
     private var activeConnections: [String: NWConnection] = [:]
@@ -113,6 +109,7 @@ public actor FileTransferNetworkService {
     
     /// 是否正在监听
     private var isListening = false
+    private var isBonjourPublished = false
     private var listenerHealthState: ListenerHealthState = .stopped
     
     // MARK: - Initialization
@@ -120,8 +117,10 @@ public actor FileTransferNetworkService {
     public init(port: UInt16 = FileTransferConstants.defaultPort) {
         self.port = port
         protocolIdentityResolver = {
-            try await SkyBridgeiOSCore.shared
-                .currentProtocolIdentitySnapshot()
+            _ = try await IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()
+            return try await SkyBridgeiOSCore.shared
+                .committedActiveProtocolIdentitySnapshot()
+                .snapshot
         }
         listenerFactory = { parameters, port in
             try NWListener(using: parameters, on: port)
@@ -149,17 +148,69 @@ public actor FileTransferNetworkService {
     
     /// 启动监听服务
     public func startListening() async throws {
-        if await isHealthy() {
+        try await startListening(authorityOverride: nil)
+    }
+
+    private func startListening(
+        authorityOverride: ProtocolIdentitySnapshot?
+    ) async throws {
+        if isHealthy() {
             return
         }
-        if listener != nil {
-            stopListening()
+        if let startTask {
+            try await startTask.value
+            return
+        }
+        if listener != nil || pendingListener != nil {
+            stopListenerPreservingAcceptedConnections()
         }
 
+        listenerGeneration &+= 1
+        let generation = listenerGeneration
+        let token = UUID()
+        listenerHealthState = .starting
+        let task = Task { [weak self] in
+            guard let self else { throw POSIXError(.ECANCELED) }
+            try await self.performStart(
+                generation: generation,
+                token: token,
+                authorityOverride: authorityOverride
+            )
+        }
+        startTask = task
+        startTaskToken = token
+        do {
+            try await task.value
+            finishStartTask(token: token)
+        } catch {
+            finishStartTask(token: token)
+            throw error
+        }
+    }
+
+    private func performStart(
+        generation: UInt64,
+        token: UUID,
+        authorityOverride: ProtocolIdentitySnapshot?
+    ) async throws {
+        guard listenerGeneration == generation, startTaskToken == token else {
+            throw POSIXError(.ECANCELED)
+        }
         // Resolve the complete bound identity before allocating a listener so
         // cancellation/storage failure cannot leave a half-started service.
-        let protocolIdentity = try await protocolIdentityResolver()
-        listenerHealthState = .starting
+        let protocolIdentity: ProtocolIdentitySnapshot
+        if let authorityOverride {
+            protocolIdentity = authorityOverride
+        } else {
+            protocolIdentity = try await protocolIdentityResolver()
+        }
+        try Task.checkCancellation()
+        guard listenerGeneration == generation, startTaskToken == token else {
+            throw POSIXError(.ECANCELED)
+        }
+        let advertisedService = try makeBonjourService(
+            authority: protocolIdentity
+        )
         
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
@@ -172,159 +223,384 @@ public actor FileTransferNetworkService {
             tcp.keepaliveCount = 4
         }
         
-        listener = try listenerFactory(
+        let newListener = try listenerFactory(
             parameters,
             NWEndpoint.Port(integerLiteral: port)
         )
-        
-        // 配置 Bonjour 以便 macOS 端发现 (修复"未建立可用文件传输通道"错误)
-        #if canImport(UIKit)
-        let deviceName = await Self.currentDeviceName()
-        let systemVersion = await Self.currentSystemVersion()
-        let model = await Self.currentModel()
-        #else
-        let deviceName = "iOS Device"
-        let systemVersion = ProcessInfo.processInfo.operatingSystemVersionString
-        let model = "iOS Device"
-        #endif
+        pendingListener = newListener
+        newListener.service = advertisedService
 
-        let deviceId = protocolIdentity.deviceId
-
-        let txtRecord = Self.makeBonjourTXTRecord(
-            deviceName: deviceName,
-            deviceId: deviceId,
-            protocolSigningAlgorithm: protocolIdentity.signingAlgorithm.rawValue,
-            protocolIdentityFingerprint: protocolIdentity.signingPublicKeyFingerprint,
-            model: model,
-            systemVersion: systemVersion,
-            port: port
-        )
-        let txtData = NetService.data(fromTXTRecord: txtRecord)
-        
-        listener?.service = NWListener.Service(
-            name: deviceName,
-            type: "_skybridge-transfer._tcp",
-            domain: "local.",
-            txtRecord: txtData
-        )
-        
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                let startState = StartState()
-                queue.asyncAfter(deadline: .now() + .seconds(8)) {
-                    guard startState.finish() else { return }
-                    continuation.resume(throwing: POSIXError(.ETIMEDOUT))
-                }
-
-                listener?.stateUpdateHandler = { [weak self] state in
-                    Task { [weak self] in
-                        await self?.handleListenerState(state)
-                    }
-
-                    switch state {
-                    case .ready:
-                        guard startState.finish() else { return }
-                        continuation.resume()
-                    case .failed(let error):
-                        guard startState.finish() else { return }
-                        continuation.resume(throwing: error)
-                    case .cancelled:
-                        guard startState.finish() else { return }
-                        continuation.resume(throwing: POSIXError(.ECANCELED))
-                    default:
-                        break
-                    }
-                }
-
-                listener?.newConnectionHandler = { [weak self] connection in
-                    Task { [weak self] in
-                        await self?.handleNewConnection(connection)
-                    }
-                }
-
-                self.listener?.start(queue: self.queue)
-            }
+            try await start(listener: newListener, generation: generation)
         } catch {
-            stopListening()
+            if listenerGeneration == generation, startTaskToken == token {
+                if pendingListener === newListener {
+                    Self.cancelListener(newListener)
+                    pendingListener = nil
+                }
+                listenerHealthState = .failed
+                isListening = false
+                isBonjourPublished = false
+            }
             throw error
         }
-        
+
+        try Task.checkCancellation()
+        guard listenerGeneration == generation,
+              startTaskToken == token,
+              listener === newListener,
+              isBonjourPublished else {
+            Self.cancelListener(newListener)
+            if listener === newListener { listener = nil }
+            if pendingListener === newListener { pendingListener = nil }
+            isListening = false
+            isBonjourPublished = false
+            throw POSIXError(.ECANCELED)
+        }
         SkyBridgeLogger.shared.info("📁 文件传输服务已启动，端口: \(self.port)")
     }
 
     public func ensureHealthy() async throws {
-        if await isHealthy() {
+        if let startTask {
+            try await startTask.value
+            return
+        }
+        if isHealthy() {
             return
         }
         SkyBridgeLogger.shared.info(
             "ℹ️ iOS 文件传输 listener 未运行，准备重启: state=\(String(describing: listenerHealthState)) isListening=\(isListening)"
         )
-        stopListening()
+        stopListenerPreservingAcceptedConnections()
         try await startListening()
     }
 
-    public func isHealthy() async -> Bool {
+    public func isHealthy() -> Bool {
+        isListenerReady && isBonjourPublished && listener?.service != nil
+    }
+
+    /// Rebind the accepting listener to a new Bonjour authority while preserving
+    /// already-authenticated transfer connections. Registration callbacks do not
+    /// identify a TXT epoch, so mutating `service` in place cannot prove that a
+    /// later `.add` belongs to the new authority.
+    func refreshAdvertisingAuthority(
+        _ authority: ProtocolIdentitySnapshot
+    ) async throws {
+        guard isListenerReady else {
+            throw FileTransferError.networkError(
+                "文件传输监听器未就绪，无法发布协议身份"
+            )
+        }
+        stopListenerPreservingAcceptedConnections()
+        try await startListening(authorityOverride: authority)
+    }
+
+    private var isListenerReady: Bool {
         listener != nil && isListening && listenerHealthState == .ready
     }
 
-    #if canImport(UIKit)
-    @MainActor
-    private static func currentDeviceName() -> String {
-        AppleMobileDeviceIdentity.currentSnapshot().deviceName
-    }
+    private func makeBonjourService(
+        authority: ProtocolIdentitySnapshot
+    ) throws -> NWListener.Service {
+        let validatedAuthority = try ProtocolIdentityBindingCompat(
+            deviceId: authority.deviceId,
+            protocolSigningAlgorithm: authority.signingAlgorithm,
+            protocolPublicKeyBytes: authority.signingPublicKey
+        )
+        guard validatedAuthority.deviceId == authority.deviceId,
+              validatedAuthority.protocolPublicKeyFingerprint
+                == authority.signingPublicKeyFingerprint else {
+            throw FileTransferError.networkError(
+                "文件传输 Bonjour 身份指纹与算法标记公钥不匹配"
+            )
+        }
 
-    @MainActor
-    private static func currentSystemVersion() -> String {
-        UIDevice.current.systemVersion
+        let presentation = AppleMobileDeviceIdentity.currentSnapshot()
+        guard let advertisementPlatform = BonjourInteropProtocolContract.AdvertisementPlatform(
+            rawValue: presentation.platform.rawValue
+        ) else {
+            throw FileTransferError.networkError(
+                "文件传输 Bonjour 平台标识不受版本 2 协议支持"
+            )
+        }
+        let txtRecord = try Self.makeBonjourTXTRecord(
+            deviceId: validatedAuthority.deviceId,
+            protocolIdentityFingerprint: validatedAuthority
+                .protocolPublicKeyFingerprint,
+            platform: advertisementPlatform,
+            role: .dedicatedService
+        )
+        return NWListener.Service(
+            name: presentation.deviceName,
+            type: BonjourInteropProtocolContract.fileTransferServiceType,
+            domain: "local.",
+            txtRecord: NetService.data(fromTXTRecord: txtRecord)
+        )
     }
-
-    @MainActor
-    private static func currentModel() -> String {
-        UIDevice.current.model
-    }
-    #endif
 
     private static func makeBonjourTXTRecord(
-        deviceName: String,
         deviceId: String,
-        protocolSigningAlgorithm: String,
         protocolIdentityFingerprint: String,
-        model: String,
-        systemVersion: String,
-        port: UInt16
-    ) -> [String: Data] {
-        let portString = String(port)
-        return [
-            "version": Data("1".utf8),
-            "platform": Data("ios".utf8),
-            "name": Data(deviceName.utf8),
-            "device": Data(deviceName.utf8),
-            "deviceId": Data(deviceId.utf8),
-            "uuid": Data(deviceId.utf8),
-            "protocolSigningAlgorithm": Data(protocolSigningAlgorithm.utf8),
-            "pubKeyFP": Data(protocolIdentityFingerprint.utf8),
-            "identityFingerprint": Data(protocolIdentityFingerprint.utf8),
-            "model": Data(model.utf8),
-            "osVersion": Data(systemVersion.utf8),
-            // The inbound parser explicitly rejects resumeRequest. Advertise
-            // only capabilities that this listener can complete end to end.
-            "capabilities": Data("file,file_transfer".utf8),
-            "transferPort": Data(portString.utf8),
-            "fileTransferPort": Data(portString.utf8),
-            "file_transfer_port": Data(portString.utf8),
-            "port": Data(portString.utf8)
-        ]
+        platform: BonjourInteropProtocolContract.AdvertisementPlatform,
+        role: BonjourInteropProtocolContract.AdvertisementRole
+    ) throws -> [String: Data] {
+        let fields = try BonjourInteropProtocolContract.canonicalAdvertisementFields(
+            deviceId: deviceId,
+            pubKeyFingerprint: protocolIdentityFingerprint,
+            platform: platform,
+            role: role
+        )
+        return fields.mapValues { Data($0.utf8) }
+    }
+
+    private func start(listener: NWListener, generation: UInt64) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let startupGate = BonjourRegistrationReadinessGate()
+
+                listener.stateUpdateHandler = { [weak self] state in
+                    Task { [weak self] in
+                        guard let self else {
+                            if startupGate.observeTerminal() == .completesStartup {
+                                Self.cancelListener(listener)
+                                continuation.resume(throwing: POSIXError(.ECANCELED))
+                            }
+                            return
+                        }
+                        await self.handleListenerStartupState(
+                            state,
+                            listener: listener,
+                            generation: generation,
+                            startupGate: startupGate,
+                            continuation: continuation
+                        )
+                    }
+                }
+
+                listener.serviceRegistrationUpdateHandler = { [weak self] change in
+                    Task { [weak self] in
+                        guard let self else {
+                            if startupGate.observeTerminal() == .completesStartup {
+                                Self.cancelListener(listener)
+                                continuation.resume(throwing: POSIXError(.ECANCELED))
+                            }
+                            return
+                        }
+                        await self.handleServiceRegistrationChange(
+                            change,
+                            listener: listener,
+                            generation: generation,
+                            startupGate: startupGate,
+                            continuation: continuation
+                        )
+                    }
+                }
+
+                listener.newConnectionHandler = { [weak self] connection in
+                    Task { [weak self] in
+                        guard let self else {
+                            connection.cancel()
+                            return
+                        }
+                        await self.acceptNewConnection(
+                            connection,
+                            from: listener,
+                            generation: generation
+                        )
+                    }
+                }
+
+                listener.start(queue: queue)
+                Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: .seconds(8))
+                    } catch {
+                        return
+                    }
+                    guard startupGate.claimTimeout() else { return }
+                    Self.cancelListener(listener)
+                    if let self {
+                        await self.handleListenerStartupTimeout(
+                            listener: listener,
+                            generation: generation
+                        )
+                    }
+                    continuation.resume(throwing: POSIXError(.ETIMEDOUT))
+                }
+            }
+        } onCancel: {
+            listener.cancel()
+        }
+    }
+
+    private func ownsListener(_ candidate: NWListener, generation: UInt64) -> Bool {
+        listenerGeneration == generation
+            && (pendingListener === candidate || listener === candidate)
+    }
+
+    private func handleListenerStartupState(
+        _ state: NWListener.State,
+        listener candidate: NWListener,
+        generation: UInt64,
+        startupGate: BonjourRegistrationReadinessGate,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        guard ownsListener(candidate, generation: generation) else {
+            if startupGate.observeTerminal() == .completesStartup {
+                Self.cancelListener(candidate)
+                continuation.resume(throwing: POSIXError(.ECANCELED))
+            }
+            return
+        }
+
+        switch state {
+        case .ready:
+            guard let boundPort = candidate.port?.rawValue, boundPort > 0 else {
+                if startupGate.observeTerminal() == .completesStartup {
+                    Self.cancelListener(candidate)
+                    listenerHealthState = .failed
+                    isListening = false
+                    isBonjourPublished = false
+                    continuation.resume(throwing: POSIXError(.EADDRNOTAVAIL))
+                }
+                return
+            }
+            let observation = startupGate.observeSocketReady()
+            if observation == .completesStartup {
+                commitListenerStartup(candidate)
+                continuation.resume()
+            } else if observation == .runtimeReady {
+                listenerHealthState = .ready
+                isListening = true
+                isBonjourPublished = true
+            }
+        case .failed(let error):
+            let observation = startupGate.observeTerminal()
+            clearOwnedListener(candidate, terminalState: .failed)
+            if observation == .completesStartup {
+                continuation.resume(throwing: error)
+            }
+        case .cancelled:
+            let observation = startupGate.observeTerminal()
+            clearOwnedListener(candidate, terminalState: .cancelled)
+            if observation == .completesStartup {
+                continuation.resume(throwing: POSIXError(.ECANCELED))
+            }
+        case .waiting:
+            _ = startupGate.observeSocketUnavailable()
+            if listener === candidate {
+                listenerHealthState = .starting
+                isBonjourPublished = false
+            }
+        default:
+            break
+        }
+    }
+
+    private func handleServiceRegistrationChange(
+        _ change: NWListener.ServiceRegistrationChange,
+        listener candidate: NWListener,
+        generation: UInt64,
+        startupGate: BonjourRegistrationReadinessGate,
+        continuation: CheckedContinuation<Void, Error>
+    ) {
+        guard ownsListener(candidate, generation: generation) else {
+            if startupGate.observeTerminal() == .completesStartup {
+                Self.cancelListener(candidate)
+                continuation.resume(throwing: POSIXError(.ECANCELED))
+            }
+            return
+        }
+
+        let observation: BonjourRegistrationReadinessGate.Observation
+        switch change {
+        case .add(let endpoint):
+            observation = startupGate.observeRegistrationAdded(endpoint.debugDescription)
+        case .remove(let endpoint):
+            observation = startupGate.observeRegistrationRemoved(endpoint.debugDescription)
+        @unknown default:
+            Self.cancelListener(candidate)
+            if startupGate.observeTerminal() == .completesStartup {
+                continuation.resume(throwing: POSIXError(.EPROTO))
+            }
+            return
+        }
+
+        switch observation {
+        case .completesStartup:
+            commitListenerStartup(candidate)
+            continuation.resume()
+        case .runtimeReady:
+            listenerHealthState = .ready
+            isListening = true
+            isBonjourPublished = true
+        case .runtimeDegraded:
+            listenerHealthState = .starting
+            isBonjourPublished = false
+            SkyBridgeLogger.shared.warning(
+                "⚠️ iOS 文件传输 Bonjour registration 已移除"
+            )
+        case .pending, .runtimeTerminal, .ignored:
+            break
+        }
+    }
+
+    private func commitListenerStartup(_ candidate: NWListener) {
+        pendingListener = nil
+        listener = candidate
+        listenerHealthState = .ready
+        isListening = true
+        isBonjourPublished = true
+    }
+
+    private func clearOwnedListener(
+        _ candidate: NWListener,
+        terminalState: ListenerHealthState
+    ) {
+        Self.cancelListener(candidate)
+        if pendingListener === candidate { pendingListener = nil }
+        if listener === candidate { listener = nil }
+        listenerHealthState = terminalState
+        isListening = false
+        isBonjourPublished = false
+    }
+
+    private func handleListenerStartupTimeout(
+        listener candidate: NWListener,
+        generation: UInt64
+    ) {
+        guard ownsListener(candidate, generation: generation) else { return }
+        clearOwnedListener(candidate, terminalState: .failed)
+        SkyBridgeLogger.shared.error(
+            "❌ iOS 文件传输 listener 或 Bonjour registration 启动超时"
+        )
+    }
+
+    private func acceptNewConnection(
+        _ connection: NWConnection,
+        from sourceListener: NWListener,
+        generation: UInt64
+    ) {
+        guard listenerGeneration == generation,
+              listener === sourceListener,
+              isBonjourPublished else {
+            Self.clearConnectionHandlers(connection)
+            connection.cancel()
+            return
+        }
+        handleNewConnection(connection)
+    }
+
+    private func finishStartTask(token: UUID) {
+        guard startTaskToken == token else { return }
+        startTask = nil
+        startTaskToken = nil
     }
     
     /// 停止监听服务
     public func stopListening() {
-        if let listener {
-            Self.cancelListener(listener)
-        }
-        listener = nil
-        isListening = false
-        listenerHealthState = .stopped
-        
+        stopListenerPreservingAcceptedConnections()
+
         // 关闭所有连接
         for (_, connection) in activeConnections {
             Self.clearConnectionHandlers(connection)
@@ -340,8 +616,28 @@ public actor FileTransferNetworkService {
         }
         inboundHandlerTasks.removeAll()
         inboundAdmission.removeAll()
-        
+
         SkyBridgeLogger.shared.info("📁 文件传输服务已停止")
+    }
+
+    private func stopListenerPreservingAcceptedConnections() {
+        listenerGeneration &+= 1
+        startTask?.cancel()
+        startTask = nil
+        startTaskToken = nil
+        if let pendingListener {
+            pendingListener.newConnectionHandler = nil
+            pendingListener.serviceRegistrationUpdateHandler = nil
+            pendingListener.cancel()
+        }
+        pendingListener = nil
+        if let listener {
+            Self.cancelListener(listener)
+        }
+        listener = nil
+        isListening = false
+        isBonjourPublished = false
+        listenerHealthState = .stopped
     }
     
     /// 连接到设备
@@ -464,48 +760,21 @@ public actor FileTransferNetworkService {
     
     // MARK: - Private Methods
     
-    private func handleListenerState(_ state: NWListener.State) {
-        switch state {
-        case .ready:
-            listenerHealthState = .ready
-            isListening = true
-            SkyBridgeLogger.shared.info("✅ 文件传输监听器就绪")
-            
-        case .failed(let error):
-            if let listener {
-                Self.cancelListener(listener)
-            }
-            listener = nil
-            listenerHealthState = .failed
-            let listenerError = error as NSError
-            SkyBridgeLogger.shared.error(
-                "❌ 文件传输监听器失败: domain=\(listenerError.domain) code=\(listenerError.code)"
-            )
-            isListening = false
-            
-        case .cancelled:
-            if let listener {
-                Self.clearListenerHandlers(listener)
-            }
-            listener = nil
-            listenerHealthState = .cancelled
-            SkyBridgeLogger.shared.info("⏹️ 文件传输监听器已取消")
-            isListening = false
-            
-        default:
-            break
-        }
-    }
-    
     private func handleNewConnection(_ connection: NWConnection) {
         let connectionId = UUID().uuidString
         guard inboundAdmission.reserve(connectionID: connectionId) else {
+            SignedKEMRefreshSmokeStatusWriter.append(
+                "file-transfer inbound-rejected stage=admission reason=capacity"
+            )
             SkyBridgeLogger.shared.warning(
                 "⚠️ 拒绝文件传输入站连接: reason=capacity limit=\(ClassicTransferInboundPolicy.maximumConcurrentConnections)"
             )
             connection.cancel()
             return
         }
+        SignedKEMRefreshSmokeStatusWriter.append(
+            "file-transfer inbound-accepted stage=transport"
+        )
         
         connection.stateUpdateHandler = { [weak self] state in
             Task { [weak self] in
@@ -575,6 +844,9 @@ public actor FileTransferNetworkService {
                 }
                 return
             }
+            SignedKEMRefreshSmokeStatusWriter.append(
+                "file-transfer inbound-header-accepted stage=metadata length=\(header.length)"
+            )
 
             Task { [weak self] in
                 guard let self else {
@@ -622,6 +894,9 @@ public actor FileTransferNetworkService {
                             }
                             return
                         }
+                        SignedKEMRefreshSmokeStatusWriter.append(
+                            "file-transfer inbound-metadata-decoded stage=metadata"
+                        )
                         await self.startInboundTransferDispatch(
                             metadata,
                             from: connection,
@@ -706,8 +981,12 @@ public actor FileTransferNetworkService {
         do {
             try await onFileReceiveRequest(metadata, connection, peerContext)
         } catch {
+            let nsError = error as NSError
+            SignedKEMRefreshSmokeStatusWriter.append(
+                "file-transfer inbound-dispatch-failed domain=\(nsError.domain) code=\(nsError.code)"
+            )
             SkyBridgeLogger.shared.error(
-                "❌ 处理文件接收请求失败: reason=file_receive_request_handler_failed"
+                "❌ 处理文件接收请求失败: reason=file_receive_request_handler_failed domain=\(nsError.domain) code=\(nsError.code)"
             )
         }
         finishInboundConnection(connectionId: connectionId, cancelConnection: true)
@@ -797,6 +1076,9 @@ public actor FileTransferNetworkService {
         connectionId: String,
         error: InboundInitialMetadataError
     ) {
+        SignedKEMRefreshSmokeStatusWriter.append(
+            "file-transfer inbound-rejected stage=metadata reason=\(error.rejectionReason)"
+        )
         SkyBridgeLogger.shared.error("❌ 拒绝文件传输入站元数据: reason=\(error.rejectionReason)")
         finishInboundConnection(connectionId: connectionId, cancelConnection: true)
     }
@@ -819,6 +1101,7 @@ public actor FileTransferNetworkService {
 
     private nonisolated static func clearListenerHandlers(_ listener: NWListener) {
         listener.stateUpdateHandler = nil
+        listener.serviceRegistrationUpdateHandler = nil
         listener.newConnectionHandler = nil
     }
 

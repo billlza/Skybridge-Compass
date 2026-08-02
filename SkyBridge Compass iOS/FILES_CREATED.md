@@ -27,10 +27,10 @@
 
 ## Vendor And Local Packages
 
-- `LocalPackages/WebRTCLocal`
-- `LocalPackages/OQSRAIILocal`
-- `Vendor/WebRTC`
-- `Vendor/liboqs.xcframework`
+- `LocalPackages/WebRTCLocal` (removed after convergence on exact-pinned remote WebRTC)
+- `LocalPackages/OQSRAIILocal` (removed; iOS consumes the root `OQSRAII` product)
+- `Vendor/WebRTC` (removed; exact-pinned SwiftPM artifact is the sole WebRTC source)
+- `Vendor/liboqs.xcframework` (removed; `../Sources/Vendor/liboqs.xcframework` is the sole liboqs artifact)
 
 ## Notes
 

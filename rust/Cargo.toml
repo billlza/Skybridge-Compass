@@ -16,40 +16,42 @@ version = "0.3.0"
 rust-version = "1.94"
 
 [workspace.dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 aes-gcm = "0.10.3"
-async-trait = "0.1.89"
-axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
+async-trait = "0.1.91"
+axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
 base64 = "0.22.1"
-bytes = "1.11.1"
-clap = { version = "4.6.0", features = ["derive", "env"] }
+bytes = "1.12.1"
+clap = { version = "4.6.4", features = ["derive", "env"] }
 directories = "6.0.0"
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
-futures-util = "0.3.32"
+futures-util = "0.3.33"
 getrandom = "0.3.4"
 hkdf = "0.12.4"
 hmac = "0.12.1"
 hostname = "0.4.2"
-hpke = "0.13"
+hpke = "0.13.0"
 fips203 = { version = "0.4.3", default-features = false, features = ["ml-kem-768"] }
 fips204 = { version = "0.4.6", default-features = false, features = ["ml-dsa-65", "ml-dsa-87"] }
-mdns-sd = "0.20.0"
+mdns-sd = "0.20.2"
+rand = "0.9.5"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
-reqwest = { version = "0.12.24", default-features = false, features = ["charset", "http2", "json", "macos-system-configuration", "rustls-tls"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+rtc = "0.20.0-rc.4"
+reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "macos-system-configuration", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 sha2 = "0.10.9"
-sha3 = "0.10.8"
-thiserror = "2.0.18"
-time = { version = "0.3.47", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
-tokio = { version = "1.50.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+sha3 = "0.10.9"
+thiserror = "2.0.19"
+time = { version = "0.3.54", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
+tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
-tokio-util = { version = "0.7.18", features = ["rt"] }
+tokio-util = { version = "0.7.19", features = ["rt"] }
 tracing = "0.1.44"
-tracing-appender = "0.2.4"
+tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "time"] }
 url = "2.5.8"
-uuid = { version = "1.22.0", features = ["serde", "v4", "v7"] }
-webbrowser = "1.2.0"
-webrtc = "0.20.0-alpha.1"
+uuid = { version = "1.24.0", features = ["serde", "v4", "v7"] }
+webbrowser = "1.2.2"
+webrtc = "0.20.0-rc.4"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }

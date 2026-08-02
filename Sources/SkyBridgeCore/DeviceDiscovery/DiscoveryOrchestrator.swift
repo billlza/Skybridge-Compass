@@ -374,6 +374,7 @@ public actor ServiceAdvertiserCenter {
     public enum AdvertisingError: LocalizedError, Sendable {
         case listenerEndedBeforeReady
         case timedOut
+        case ownerConflict(serviceType: String, current: String?, requested: String?)
 
         public var errorDescription: String? {
             switch self {
@@ -381,6 +382,10 @@ public actor ServiceAdvertiserCenter {
                 return "Bonjour listener ended before becoming ready"
             case .timedOut:
                 return "Bonjour listener did not become ready before the startup deadline"
+            case .ownerConflict(let serviceType, let current, let requested):
+                let currentOwner = current ?? "<unowned>"
+                let requestedOwner = requested ?? "<unowned>"
+                return "Bonjour service \(serviceType) is owned by \(currentOwner); \(requestedOwner) cannot replace it"
             }
         }
     }
@@ -394,11 +399,23 @@ public actor ServiceAdvertiserCenter {
         let listener: NWListener
         let owner: String?
         let token: UUID
+        let readinessGate: BonjourRegistrationReadinessGate
+        let connectionHandler: (@Sendable (NWConnection) -> Void)?
+        let stateHandler: (@Sendable (NWListener.State) -> Void)?
+        let readinessHandler: (@Sendable (Bool) -> Void)?
         var state: ServiceAdvertisementSnapshot.ListenerState
         var port: UInt16?
+        var registrationEndpoints: Set<NWEndpoint>
+    }
+
+    private struct StartOperation {
+        let owner: String?
+        let token: UUID
+        let task: Task<UInt16, Error>
     }
 
     private var records: [String: ListenerRecord] = [:]
+    private var startOperations: [String: StartOperation] = [:]
 
     public static let shared = ServiceAdvertiserCenter()
 
@@ -406,16 +423,101 @@ public actor ServiceAdvertiserCenter {
     public func startAdvertising(
         serviceName: String,
         serviceType: String,
-        txtRecord: NWTXTRecord? = nil,
         owner: String? = nil,
         includePeerToPeer: Bool = true,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
-        stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
+        stateHandler: (@Sendable (NWListener.State) -> Void)? = nil,
+        readinessHandler: (@Sendable (Bool) -> Void)? = nil
     ) async throws -> UInt16 {
+        if let operation = startOperations[serviceType] {
+            try validateOwner(
+                serviceType: serviceType,
+                current: operation.owner,
+                requested: owner
+            )
+            return try await awaitStartOperation(operation, serviceType: serviceType)
+        }
+
         if let existing = records[serviceType] {
-            existing.listener.cancel()
+            try validateOwner(
+                serviceType: serviceType,
+                current: existing.owner,
+                requested: owner
+            )
+            existing.readinessHandler?(false)
+            Self.cancelListener(existing.listener)
             records.removeValue(forKey: serviceType)
             logger.debug("取消旧广播: \(serviceType, privacy: .public)")
+        }
+
+        return try await beginStartOperation(
+            serviceName: serviceName,
+            serviceType: serviceType,
+            owner: owner,
+            includePeerToPeer: includePeerToPeer,
+            connectionHandler: connectionHandler,
+            stateHandler: stateHandler,
+            readinessHandler: readinessHandler
+        )
+    }
+
+    private func beginStartOperation(
+        serviceName: String,
+        serviceType: String,
+        owner: String?,
+        includePeerToPeer: Bool,
+        connectionHandler: (@Sendable (NWConnection) -> Void)?,
+        stateHandler: (@Sendable (NWListener.State) -> Void)?,
+        readinessHandler: (@Sendable (Bool) -> Void)?
+    ) async throws -> UInt16 {
+        let token = UUID()
+        let task = Task {
+            try await self.performStart(
+                serviceName: serviceName,
+                serviceType: serviceType,
+                owner: owner,
+                token: token,
+                includePeerToPeer: includePeerToPeer,
+                connectionHandler: connectionHandler,
+                stateHandler: stateHandler,
+                readinessHandler: readinessHandler
+            )
+        }
+        let operation = StartOperation(owner: owner, token: token, task: task)
+        startOperations[serviceType] = operation
+        return try await awaitStartOperation(operation, serviceType: serviceType)
+    }
+
+    private func awaitStartOperation(
+        _ operation: StartOperation,
+        serviceType: String
+    ) async throws -> UInt16 {
+        do {
+            let port = try await operation.task.value
+            finishStartOperation(serviceType: serviceType, token: operation.token)
+            return port
+        } catch {
+            finishStartOperation(serviceType: serviceType, token: operation.token)
+            throw error
+        }
+    }
+
+    private func performStart(
+        serviceName: String,
+        serviceType: String,
+        owner: String?,
+        token: UUID,
+        includePeerToPeer: Bool,
+        connectionHandler: (@Sendable (NWConnection) -> Void)?,
+        stateHandler: (@Sendable (NWListener.State) -> Void)?,
+        readinessHandler: (@Sendable (Bool) -> Void)?
+    ) async throws -> UInt16 {
+        // Identity resolution may suspend. The start-operation token makes stop,
+        // restart and same-service concurrency observable across that suspension.
+        let finalTXT = try await makeDefaultTXTRecord()
+        try Task.checkCancellation()
+        guard startOperations[serviceType]?.token == token else {
+            throw POSIXError(.ECANCELED)
         }
 
         let parameters = NWParameters.tcp
@@ -433,43 +535,30 @@ public actor ServiceAdvertiserCenter {
         // 这里统一使用系统分配端口，避免启动期 address-in-use 抖动。
         let listener = try NWListener(using: parameters)
 
-        // 默认携带基础 TXT（iOS 端用于显示系统版本等）；若调用方提供 TXT，则在此基础上覆盖/补充。
-        let baseTXT = try await makeDefaultTXTRecord()
-        var finalTXT = baseTXT
-        if let txtRecord {
-            for (key, value) in txtRecord.dictionary {
-                finalTXT[key] = value
-            }
-        }
+        // The service type and SRV record own capabilities and ports. Keep TXT
+        // limited to the canonical discovery identity so AWDL advertisements stay
+        // well below the platform's 200-byte interoperability recommendation.
         let service = NWListener.Service(name: serviceName, type: serviceType, domain: "local.", txtRecord: finalTXT)
         listener.service = service
-        if let ch = connectionHandler {
-            listener.newConnectionHandler = { conn in ch(conn) }
-        }
-        let log = self.logger
-        let token = UUID()
-        let baseTXTForReady = finalTXT
-        let resolvedServiceName = serviceName
-        let resolvedServiceType = serviceType
-        listener.stateUpdateHandler = { state in
-            stateHandler?(state)
-            let actualPort = listener.port?.rawValue
-            if case .ready = state,
-               let actualPort,
-               actualPort > 0 {
-                var updatedTXT = baseTXTForReady
-                Self.attachAdvertisedPort(
-                    UInt16(actualPort),
-                    serviceType: resolvedServiceType,
-                    to: &updatedTXT
-                )
-                listener.service = NWListener.Service(
-                    name: resolvedServiceName,
-                    type: resolvedServiceType,
-                    domain: "local.",
-                    txtRecord: updatedTXT
+        listener.newConnectionHandler = { [weak listener] connection in
+            guard let listener else {
+                connection.cancel()
+                return
+            }
+            Task {
+                await self.handleNewConnection(
+                    serviceType: serviceType,
+                    token: token,
+                    listener: listener,
+                    connection: connection
                 )
             }
+        }
+        let log = self.logger
+        let resolvedServiceType = serviceType
+        listener.stateUpdateHandler = { [weak listener] state in
+            guard let listener else { return }
+            let actualPort = listener.port?.rawValue
             if case .failed(let error) = state {
                 log.error("❌ 广播监听失败: \(error.localizedDescription, privacy: .public)")
             }
@@ -482,12 +571,31 @@ public actor ServiceAdvertiserCenter {
                 )
             }
         }
+        listener.serviceRegistrationUpdateHandler = { change in
+            Task {
+                await self.handleServiceRegistrationUpdate(
+                    serviceType: resolvedServiceType,
+                    token: token,
+                    change: change
+                )
+            }
+        }
+        guard startOperations[serviceType]?.token == token,
+              !Task.isCancelled else {
+            Self.cancelListener(listener)
+            throw POSIXError(.ECANCELED)
+        }
         records[serviceType] = ListenerRecord(
             listener: listener,
             owner: owner,
             token: token,
+            readinessGate: BonjourRegistrationReadinessGate(),
+            connectionHandler: connectionHandler,
+            stateHandler: stateHandler,
+            readinessHandler: readinessHandler,
             state: .starting,
-            port: nil
+            port: nil,
+            registrationEndpoints: []
         )
         listener.start(queue: .global(qos: .utility))
         let readyPort = try await waitForAdvertisingReady(
@@ -503,13 +611,26 @@ public actor ServiceAdvertiserCenter {
     public func startAdvertisingIfNeeded(
         serviceName: String,
         serviceType: String,
-        txtRecord: NWTXTRecord? = nil,
         owner: String? = nil,
         includePeerToPeer: Bool = true,
         connectionHandler: (@Sendable (NWConnection) -> Void)? = nil,
-        stateHandler: (@Sendable (NWListener.State) -> Void)? = nil
+        stateHandler: (@Sendable (NWListener.State) -> Void)? = nil,
+        readinessHandler: (@Sendable (Bool) -> Void)? = nil
     ) async throws -> UInt16 {
+        if let operation = startOperations[serviceType] {
+            try validateOwner(
+                serviceType: serviceType,
+                current: operation.owner,
+                requested: owner
+            )
+            return try await awaitStartOperation(operation, serviceType: serviceType)
+        }
         if let record = records[serviceType] {
+            try validateOwner(
+                serviceType: serviceType,
+                current: record.owner,
+                requested: owner
+            )
             if record.state == .ready,
                let port = record.port ?? record.listener.port?.rawValue,
                port > 0 {
@@ -523,107 +644,24 @@ public actor ServiceAdvertiserCenter {
         return try await startAdvertising(
             serviceName: serviceName,
             serviceType: serviceType,
-            txtRecord: txtRecord,
             owner: owner,
             includePeerToPeer: includePeerToPeer,
             connectionHandler: connectionHandler,
-            stateHandler: stateHandler
+            stateHandler: stateHandler,
+            readinessHandler: readinessHandler
         )
     }
 
     private func makeDefaultTXTRecord() async throws -> NWTXTRecord {
-        let localPresentation = LocalDevicePresentation.current()
-        var record = NWTXTRecord()
-        record["platform"] = "macos"
-        record["osVersion"] = localPresentation.osVersion
-        record["name"] = localPresentation.deviceName ?? localPresentation.modelName ?? "Mac"
-        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &record)
-        LocalNetworkLinkStatusProvider.attachCurrentStatus(to: &record)
-
-        if #available(macOS 14.0, *) {
-            let snap = try await SelfIdentityProvider.shared
-                .snapshotEnsuringProtocolDeviceId(allowCreate: true)
-            if !snap.deviceId.isEmpty {
-                record["deviceId"] = snap.deviceId
-                record["uniqueId"] = snap.deviceId
-            }
-            if !snap.pubKeyFP.isEmpty {
-                record["pubKeyFP"] = snap.pubKeyFP
-                record["identityFingerprint"] = snap.pubKeyFP
-            }
-        }
-        record["kemRefreshVersion"] = "1"
-        if let kemKeyDigest = await currentKEMKeyDigestHex() {
-            record["kemKeyDigest"] = kemKeyDigest
-        }
-
-        // Best-effort: advertise crypto suites/capabilities for cross-platform peers.
-        // This does not change the handshake protocol; it only improves discovery UX and peer filtering.
-        let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let classic = ClassicCryptoProvider()
-        var suiteIds: [UInt16] = []
-        suiteIds.append(contentsOf: provider.supportedSuites.map { $0.wireId })
-        suiteIds.append(contentsOf: classic.supportedSuites.map { $0.wireId })
-        var seen = Set<UInt16>()
-        let uniqueSuites = suiteIds.filter { seen.insert($0).inserted }
-        if !uniqueSuites.isEmpty {
-            record["cryptoSuites"] = uniqueSuites.map { String(format: "%04x", $0) }.joined(separator: ",")
-        }
-
-        // Capabilities are optional strings used by non-Apple clients for UI hints.
-        let endpoints = ServiceEndpointRegistry.shared.snapshot()
-        BonjourInteropContract.attachPrimaryAdvertisementTXT(
-            to: &record,
-            transferPort: endpoints.fileTransferPort,
-            remoteControlPort: endpoints.remoteControlPort
+        let identity = try await CanonicalBonjourAdvertisementIdentityProvider.current(
+            allowCreateDeviceId: true
         )
-        record["hs_soa"] = "1"
-        return record
-    }
-
-    private nonisolated static func attachAdvertisedPort(
-        _ port: UInt16,
-        serviceType: String,
-        to record: inout NWTXTRecord
-    ) {
-        let portValue = String(port)
-        record["port"] = portValue
-
-        switch serviceType {
-        case "_skybridge._tcp", "_skybridge._udp":
-            record["skybridgePort"] = portValue
-            record["p2pPort"] = portValue
-            record["controlPort"] = portValue
-            record["controlPortSource"] = "listener"
-        case "_skybridge-transfer._tcp":
-            record["transferPort"] = portValue
-            record["fileTransferPort"] = portValue
-        case "_skybridge-remote._tcp":
-            record["remotePort"] = portValue
-            record["remoteControlPort"] = portValue
-        default:
-            break
-        }
-    }
-
-    private func currentKEMKeyDigestHex() async -> String? {
-        guard #available(macOS 14.0, *) else { return nil }
-        let provider = CryptoProviderFactory.make(policy: .requirePQC)
-        guard let rawKeys = try? await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(using: provider) else {
-            return nil
-        }
-        let keys = KEMPublicKeyInfo.normalizedValidKeys(rawKeys)
-            .filter { CryptoSuite(wireId: $0.suiteWireId).isPQCGroup }
-            .sorted { $0.suiteWireId < $1.suiteWireId }
-        guard !keys.isEmpty else { return nil }
-
-        var material = Data()
-        for key in keys {
-            var wireId = key.suiteWireId.bigEndian
-            material.append(Data(bytes: &wireId, count: MemoryLayout<UInt16>.size))
-            material.append(key.publicKey)
-        }
-        return SHA256.hash(data: material).map { String(format: "%02x", $0) }.joined()
+        return try BonjourInteropContract.makeCanonicalAdvertisementTXT(
+            deviceId: identity.deviceId,
+            pubKeyFingerprint: identity.protocolPublicKeyFingerprint,
+            platform: .macOS,
+            role: .control
+        )
     }
 
  /// 查询指定服务类型是否正在广播
@@ -659,21 +697,30 @@ public actor ServiceAdvertiserCenter {
 
  /// 停止指定服务类型的广播
     public func stopAdvertising(_ serviceType: String, owner: String? = nil) {
-        guard let record = records[serviceType] else { return }
-        if let owner, record.owner != owner {
+        let currentOwner = records[serviceType]?.owner ?? startOperations[serviceType]?.owner
+        guard records[serviceType] != nil || startOperations[serviceType] != nil else { return }
+        if let owner, currentOwner != owner {
             logger.warning(
-                "⚠️ 忽略非 owner 停止广播请求: service=\(serviceType, privacy: .public) owner=\(owner, privacy: .public) current=\(record.owner ?? "-", privacy: .public)"
+                "⚠️ 忽略非 owner 停止广播请求: service=\(serviceType, privacy: .public) owner=\(owner, privacy: .public) current=\(currentOwner ?? "-", privacy: .public)"
             )
             return
         }
-        record.listener.cancel()
-        records.removeValue(forKey: serviceType)
+        startOperations.removeValue(forKey: serviceType)?.task.cancel()
+        if let record = records.removeValue(forKey: serviceType) {
+            record.readinessHandler?(false)
+            Self.cancelListener(record.listener)
+        }
         logger.info("⏹️ 停止广播: \(serviceType, privacy: .public)")
     }
 
  /// 停止所有广播
     public func stopAll() {
-        for (_, record) in records { record.listener.cancel() }
+        for operation in startOperations.values { operation.task.cancel() }
+        startOperations.removeAll()
+        for (_, record) in records {
+            record.readinessHandler?(false)
+            Self.cancelListener(record.listener)
+        }
         records.removeAll()
         logger.info("⏹️ 停止所有广播")
     }
@@ -687,16 +734,114 @@ public actor ServiceAdvertiserCenter {
         guard var record = records[serviceType], record.token == token else { return }
         switch state {
         case .ready:
-            record.state = .ready
             if let port, port > 0 {
                 record.port = port
             }
+            let observation = record.readinessGate.observeSocketReady()
+            let becameReady = (observation == .completesStartup
+                    || observation == .runtimeReady)
+                && (record.port ?? 0) > 0
+            if becameReady {
+                record.state = .ready
+            }
             records[serviceType] = record
+            if becameReady {
+                record.readinessHandler?(true)
+                record.stateHandler?(.ready)
+            }
+        case .waiting(let error):
+            _ = record.readinessGate.observeSocketUnavailable()
+            record.state = .starting
+            records[serviceType] = record
+            record.readinessHandler?(false)
+            record.stateHandler?(.waiting(error))
         case .failed, .cancelled:
+            _ = record.readinessGate.observeTerminal()
             records.removeValue(forKey: serviceType)
-        default:
-            break
+            record.readinessHandler?(false)
+            record.stateHandler?(state)
+            if case .failed = state {
+                Self.cancelListener(record.listener)
+            } else {
+                Self.clearListenerHandlers(record.listener)
+            }
+        case .setup:
+            record.stateHandler?(state)
+        @unknown default:
+            _ = record.readinessGate.observeTerminal()
+            records.removeValue(forKey: serviceType)
+            record.readinessHandler?(false)
+            Self.cancelListener(record.listener)
         }
+    }
+
+    private func handleServiceRegistrationUpdate(
+        serviceType: String,
+        token: UUID,
+        change: NWListener.ServiceRegistrationChange
+    ) {
+        guard var record = records[serviceType], record.token == token else { return }
+        switch change {
+        case .add(let endpoint):
+            record.registrationEndpoints.insert(endpoint)
+            let observation = record.readinessGate.observeRegistrationAdded(
+                endpoint.debugDescription
+            )
+            if (observation == .completesStartup || observation == .runtimeReady),
+               (record.port ?? 0) > 0 {
+                record.state = .ready
+            }
+        case .remove(let endpoint):
+            record.registrationEndpoints.remove(endpoint)
+            let observation = record.readinessGate.observeRegistrationRemoved(
+                endpoint.debugDescription
+            )
+            if observation == .runtimeDegraded {
+                record.state = .starting
+            }
+        @unknown default:
+            logger.error(
+                "Unsupported Bonjour registration change: service=\(serviceType, privacy: .public)"
+            )
+            return
+        }
+
+        let becameReady = record.state == .ready
+            && records[serviceType]?.state != .ready
+        if record.registrationEndpoints.isEmpty {
+            record.state = .starting
+        }
+        records[serviceType] = record
+
+        if becameReady {
+            logger.info(
+                "📡 Bonjour registration confirmed: service=\(serviceType, privacy: .public) registrations=\(record.registrationEndpoints.count, privacy: .public)"
+            )
+            record.readinessHandler?(true)
+            record.stateHandler?(.ready)
+        } else if record.registrationEndpoints.isEmpty {
+            logger.warning(
+                "⚠️ Bonjour registration removed: service=\(serviceType, privacy: .public)"
+            )
+            record.readinessHandler?(false)
+        }
+    }
+
+    private func handleNewConnection(
+        serviceType: String,
+        token: UUID,
+        listener: NWListener,
+        connection: NWConnection
+    ) {
+        guard let record = records[serviceType],
+              record.token == token,
+              record.listener === listener,
+              record.state == .ready,
+              let connectionHandler = record.connectionHandler else {
+            connection.cancel()
+            return
+        }
+        connectionHandler(connection)
     }
 
     private func waitForAdvertisingReady(
@@ -735,7 +880,39 @@ public actor ServiceAdvertiserCenter {
 
     private func cancelRecord(serviceType: String, token: UUID) {
         guard let record = records[serviceType], record.token == token else { return }
-        record.listener.cancel()
+        _ = record.readinessGate.claimTimeout()
+        record.readinessHandler?(false)
+        Self.cancelListener(record.listener)
         records.removeValue(forKey: serviceType)
+    }
+
+    private func finishStartOperation(serviceType: String, token: UUID) {
+        guard startOperations[serviceType]?.token == token else { return }
+        startOperations.removeValue(forKey: serviceType)
+    }
+
+    private func validateOwner(
+        serviceType: String,
+        current: String?,
+        requested: String?
+    ) throws {
+        guard current == requested else {
+            throw AdvertisingError.ownerConflict(
+                serviceType: serviceType,
+                current: current,
+                requested: requested
+            )
+        }
+    }
+
+    private nonisolated static func clearListenerHandlers(_ listener: NWListener) {
+        listener.stateUpdateHandler = nil
+        listener.serviceRegistrationUpdateHandler = nil
+        listener.newConnectionHandler = nil
+    }
+
+    private nonisolated static func cancelListener(_ listener: NWListener) {
+        clearListenerHandlers(listener)
+        listener.cancel()
     }
 }

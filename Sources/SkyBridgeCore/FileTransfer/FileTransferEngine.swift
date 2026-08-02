@@ -110,7 +110,7 @@ public class FileTransferEngine: ObservableObject {
             self.automaticRetryEnabled = configuration.resumeEnabled
             self.runtimeEncryptionEnabled = configuration.encryptionEnabled
         }
-        
+
         self.networkManager = P2PNetworkManager.shared
         self.securityManager = P2PSecurityManager()
         
@@ -195,14 +195,14 @@ public class FileTransferEngine: ObservableObject {
     private var virusScanEnabled: Bool = false
     
  /// 当前扫描级别（从 SettingsManager 同步）
-    private var currentScanLevel: FileScanService.ScanLevel = .standard
+    private var currentScanLevel: FileScanLevel = .standard
     
     private func updateVirusScanSettings(_ enabled: Bool) {
         virusScanEnabled = enabled
         logger.debugOnly("🛡️ 文件病毒扫描已\(enabled ? "启用" : "禁用")")
     }
     
-    private func updateScanLevel(_ level: FileScanService.ScanLevel) {
+    private func updateScanLevel(_ level: FileScanLevel) {
         currentScanLevel = level
         logger.debugOnly("🛡️ 扫描级别已更新: \(level.rawValue)")
     }
@@ -217,22 +217,35 @@ public class FileTransferEngine: ObservableObject {
         }
         
         logger.info("🛡️ 开始扫描接收文件: level=\(self.currentScanLevel.rawValue, privacy: .public)")
-        let configuration = FileScanService.ScanConfiguration(level: self.currentScanLevel)
+#if os(macOS)
+        let configuration = FileScanConfiguration(level: self.currentScanLevel)
         let result = await FileScanService.shared.scanFile(at: url, configuration: configuration)
-        
-        if !result.isSafe {
-            logger.warning("🚨 接收文件扫描命中威胁")
-            
- // 发送威胁检测通知
-            NotificationCenter.default.post(
-                name: .fileThreatDetected,
-                object: nil,
-                userInfo: [
-                    "fileURL": url,
-                    "threatName": result.threatName ?? "Unknown",
-                    "scanMethod": result.scanMethod.rawValue
-                ]
-            )
+#else
+        // 扫描器实现依赖 macOS 专属能力（隔离属性 xattr、SecCode 代码签名、Process），
+        // 其它平台没有对应物。既然扫描是**用户已启用**的安全特性，这里必须 fail-closed：
+        // 报 `.unknown`（既有语义为「无法确定」，`isSafe` 为 false），让文件按未通过扫描处理，
+        // 而不是静默跳过 —— 静默跳过会让「开启扫描」与「未开启扫描」在本平台行为一致。
+        logger.error(
+            "⛔️ 已启用文件扫描，但本平台没有可用的扫描器实现；按未通过扫描处理"
+        )
+        let result = FileScanResult(
+            fileURL: url,
+            verdict: .unknown,
+            methodsUsed: [],
+            scanLevel: self.currentScanLevel
+        )
+#endif
+
+        if case .block(let reason) = result.automaticTransferAdmission {
+            switch reason {
+            case .unsafe:
+                logger.warning("🚨 接收文件扫描命中威胁")
+            case .reviewRequired, .incomplete:
+                logger.warning(
+                    "⛔️ 接收文件扫描未满足自动放行条件: verdict=\(result.verdict.rawValue, privacy: .public)"
+                )
+            }
+            postAutomaticTransferScanRejection(result: result, fileURL: url)
         }
         
         return result
@@ -593,11 +606,13 @@ public class FileTransferEngine: ObservableObject {
                 ioHandle: ioHandle
             )
             
- // 文件接收完成后进行病毒扫描（如果启用）
+            // 文件接收完成后进行病毒扫描（如果启用）
             if let scanResult = await scanReceivedFileIfEnabled(stagingURL) {
-                if !scanResult.isSafe {
-                    logger.warning("🚨 文件扫描检测到威胁")
-                    throw FileTransferEngineError.securityThreatDetected(threatName: scanResult.threatName ?? "未知威胁")
+                if case .block(let reason) = scanResult.automaticTransferAdmission {
+                    logger.warning(
+                        "⛔️ 文件扫描阻止自动提交: verdict=\(scanResult.verdict.rawValue, privacy: .public)"
+                    )
+                    throw reason.engineError
                 }
                 logger.info("✅ 文件扫描通过")
             }
@@ -2144,6 +2159,8 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
     case insufficientPermissions
     case diskSpaceInsufficient(required: Int64, available: Int64)
     case securityThreatDetected(threatName: String)
+    case securityScanReviewRequired(warningCodes: [String])
+    case securityScanIncomplete(verdict: ScanVerdict, warningCodes: [String])
     case resourceCleanupFailed(
         primaryDomain: String,
         primaryCode: Int,
@@ -2200,6 +2217,12 @@ public enum FileTransferEngineError: LocalizedError, Sendable {
             return "磁盘空间不足（需要: \(formatBytes(required)), 可用: \(formatBytes(available))）"
         case .securityThreatDetected(let threatName):
             return "检测到安全威胁: \(threatName)"
+        case .securityScanReviewRequired(let warningCodes):
+            let codes = warningCodes.isEmpty ? "unspecified" : warningCodes.joined(separator: ",")
+            return "文件扫描需要人工复核，自动接收已阻止（\(codes)）"
+        case .securityScanIncomplete(let verdict, let warningCodes):
+            let codes = warningCodes.isEmpty ? "unspecified" : warningCodes.joined(separator: ",")
+            return "文件扫描未给出可自动放行的结论（verdict=\(verdict.rawValue), codes=\(codes)）"
         case .resourceCleanupFailed(
             let primaryDomain,
             let primaryCode,

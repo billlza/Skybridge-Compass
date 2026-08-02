@@ -223,6 +223,14 @@ final class DashboardViewModel: ObservableObject {
 // 启动系统指标监控
         systemMetricsService.startMonitoring()
 
+        do {
+            try await DeviceMessagingService.shared.prepare()
+            DeviceMessagingService.shared.start()
+        } catch {
+            SkyBridgeLogger.ui.error("❌ 统一消息仓库启动失败: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
         if !localPeerServices.hasStarted {
             guard await pauseBetweenStartupBursts() else { return }
             do {
@@ -232,9 +240,6 @@ final class DashboardViewModel: ObservableObject {
                 return
             }
         }
-
-        // 设备间文本消息服务：接 P2P 传输 + 离线队列投递（幂等，独立于自动扫描）。
-        DeviceMessagingService.shared.start()
 
         // 跨网在线状态（presence）：心跳 + 轮询受信设备在线（幂等，未登录时安全失败）。
         PresenceService.shared.start()

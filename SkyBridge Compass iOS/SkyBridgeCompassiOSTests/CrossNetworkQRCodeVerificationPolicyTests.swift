@@ -124,17 +124,15 @@ final class CrossNetworkQRCodeVerificationPolicyTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let coordinator = try String(
-            contentsOf: root.appendingPathComponent(
+        let coordinator = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CurrentPathDeviceIdentityRotationCoordinator.swift"
-            ),
-            encoding: .utf8
+            )
         )
-        let settings = try String(
-            contentsOf: root.appendingPathComponent(
+        let settings = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridgeCompassiOS/Sources/Views/SettingsView.swift"
-            ),
-            encoding: .utf8
+            )
         )
         let start = try XCTUnwrap(coordinator.range(of: "private func completePendingRequest("))
         let end = try XCTUnwrap(coordinator.range(

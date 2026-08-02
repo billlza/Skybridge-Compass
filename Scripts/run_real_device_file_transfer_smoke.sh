@@ -8,6 +8,8 @@ source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
+source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
+PROCESS_OWNERSHIP_HELPER="$ROOT_DIR/Scripts/webrtc_smoke_process_ownership.py"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_file_smoke_$(date +%Y%m%d_%H%M%S)}"
 PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
@@ -17,10 +19,13 @@ IOS_BUNDLE_ID="com.skybridge.compass.ios"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-180}"
 HOST_STARTUP_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_HOST_STARTUP_TIMEOUT_SECONDS:-45}"
 IOS_LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_LAUNCH_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
+DEVICECTL_TIMEOUT_SECONDS="${SKYBRIDGE_DEVICECTL_TIMEOUT_SECONDS:-60}"
 HOST_TOTAL_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_HOST_TIMEOUT_SECONDS:-}"
 if [[ -z "$HOST_TOTAL_TIMEOUT_SECONDS" ]]; then
   HOST_TOTAL_TIMEOUT_SECONDS=$((IOS_LAUNCH_TIMEOUT_SECONDS + SMOKE_TIMEOUT_SECONDS + HOST_STARTUP_TIMEOUT_SECONDS + 30))
 fi
+IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_CONSOLE_TIMEOUT_SECONDS:-$HOST_TOTAL_TIMEOUT_SECONDS}"
+IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS:-10}"
 RUN_ID="${SKYBRIDGE_SMOKE_FILE_TRANSFER_RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 skybridge_smoke_require_safe_run_id "$RUN_ID" "SKYBRIDGE_SMOKE_FILE_TRANSFER_RUN_ID"
 USER_REALISTIC="${SKYBRIDGE_SMOKE_USER_REALISTIC:-0}"
@@ -264,13 +269,90 @@ IOS_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME"
 IOS_BUILD_LOG="$ARTIFACT_DIR/ios-build.log"
 DEVICE_INFO_JSON="$ARTIFACT_DIR/device-info.json"
 LAUNCH_RESULT_JSON="$ARTIFACT_DIR/ios-launch.json"
+IOS_PROCESS_CLEANUP_RECEIPT="$ARTIFACT_DIR/ios-process-cleanup.json"
 HOST_PID=""
+IOS_CONSOLE_PID=""
+IOS_CONSOLE_HANDLE_STARTED=0
+IOS_CONSOLE_HANDLE_CAPTURED=0
+PROCESS_OWNERSHIP_PRIVATE_DIR=""
+IOS_PROCESS_IDENTITY=""
+IOS_CONSOLE_HANDLE_IDENTITY=""
+IOS_CONSOLE_STDOUT=""
+IOS_CONSOLE_STDERR=""
+IOS_CONSOLE_CAPTURE_DIAGNOSTIC=""
+
+initialize_process_ownership_session() {
+  if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
+    echo "Private file-transfer process-ownership directory was initialized more than once." >&2
+    return 1
+  fi
+  rm -f -- "$IOS_PROCESS_CLEANUP_RECEIPT"
+  PROCESS_OWNERSHIP_PRIVATE_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/skybridge-file-transfer-process-ownership.XXXXXX")"
+  IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"
+  IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"
+  IOS_CONSOLE_STDOUT="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stdout"
+  IOS_CONSOLE_STDERR="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stderr"
+  IOS_CONSOLE_CAPTURE_DIAGNOSTIC="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log"
+  chmod 0700 "$PROCESS_OWNERSHIP_PRIVATE_DIR"
+}
+
+destroy_process_ownership_session() {
+  local cleanup_failed=0
+  if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
+    local private_path
+    for private_path in \
+      "$IOS_PROCESS_IDENTITY" \
+      "$IOS_CONSOLE_HANDLE_IDENTITY" \
+      "$IOS_CONSOLE_STDOUT" \
+      "$IOS_CONSOLE_STDERR" \
+      "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC"; do
+      case "$private_path" in
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stdout"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stderr"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log")
+          if [[ -e "$private_path" || -L "$private_path" ]] \
+            && ! rm -f -- "$private_path"; then
+            echo "Unable to remove a private file-transfer process-ownership record." >&2
+            cleanup_failed=1
+          fi
+          ;;
+        *)
+          echo "Refusing to remove an unexpected file-transfer process-ownership path." >&2
+          cleanup_failed=1
+          ;;
+      esac
+    done
+    if ! rmdir -- "$PROCESS_OWNERSHIP_PRIVATE_DIR" 2>/dev/null; then
+      echo "Private file-transfer process-ownership directory is not empty or could not be removed." >&2
+      cleanup_failed=1
+    fi
+  fi
+  return "$cleanup_failed"
+}
 
 cleanup() {
+  local original_status=$?
+  local cleanup_status=0
+  trap - EXIT
+
+  if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] && ! terminate_ios_smoke_app; then
+    cleanup_status=1
+    echo "failed stage=cleanup phase=ios-process reason=exact-process-exit-unverified" >&2
+  fi
   if [[ -n "$HOST_PID" ]]; then
     kill "$HOST_PID" >/dev/null 2>&1 || true
     wait "$HOST_PID" >/dev/null 2>&1 || true
   fi
+  if ! destroy_process_ownership_session; then
+    cleanup_status=1
+  fi
+
+  if (( original_status == 0 && cleanup_status != 0 )); then
+    exit "$cleanup_status"
+  fi
+  exit "$original_status"
 }
 trap cleanup EXIT
 
@@ -395,6 +477,12 @@ wait_for_file_pattern() {
   started_at="$(date +%s)"
   while true; do
     copy_ios_status
+    if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "Exact iOS console launch handle exited or became unverifiable before ${label}." >&2
+      capture_host_context "$label"
+      return 1
+    fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer instrumentation gap while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
       print_ios_status_tail
@@ -475,6 +563,12 @@ wait_for_ios_status_pattern() {
   started_at="$(date +%s)"
   while true; do
     copy_ios_status
+    if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "Exact iOS console launch handle exited or became unverifiable before ${label}." >&2
+      capture_host_context "$label"
+      return 1
+    fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer instrumentation gap while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
       print_ios_status_tail
@@ -553,6 +647,12 @@ wait_for_optional_protocol_identity_binding() {
   started_at="$(date +%s)"
   while true; do
     copy_ios_status
+    if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "Exact iOS console launch handle exited or became unverifiable while waiting for SKR-1 or PIB-1 evidence." >&2
+      capture_host_context "SKR-1 or PIB-1"
+      return 1
+    fi
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE 'failed stage=file-transfer phase=unknown' "$IOS_STATUS_LOCAL"; then
       echo "Detected file-transfer instrumentation gap while waiting for SKR-1 or PIB-1: ${IOS_STATUS_LOCAL}" >&2
       print_ios_status_tail
@@ -607,29 +707,189 @@ wait_for_optional_protocol_identity_binding() {
 }
 
 launch_result_indicates_ios_profile_trust_failure() {
-  [[ -f "$LAUNCH_RESULT_JSON" ]] \
-    && grep -qE 'invalid code signature|inadequate entitlements|profile has not been explicitly trusted' "$LAUNCH_RESULT_JSON"
+  { [[ -f "$LAUNCH_RESULT_JSON" ]] \
+      && grep -qE 'invalid code signature|inadequate entitlements|profile has not been explicitly trusted' "$LAUNCH_RESULT_JSON"; } \
+    || { [[ -f "$IOS_CONSOLE_STDERR" ]] \
+      && grep -qE 'invalid code signature|inadequate entitlements|profile has not been explicitly trusted' "$IOS_CONSOLE_STDERR"; }
 }
 
 launch_result_indicates_locked_device() {
-  [[ -f "$LAUNCH_RESULT_JSON" ]] \
-    && grep -qE 'Locked|could not be unlocked|device.*locked|Device.*locked' "$LAUNCH_RESULT_JSON"
+  { [[ -f "$LAUNCH_RESULT_JSON" ]] \
+      && grep -qE 'Locked|could not be unlocked|device.*locked|Device.*locked' "$LAUNCH_RESULT_JSON"; } \
+    || { [[ -f "$IOS_CONSOLE_STDERR" ]] \
+      && grep -qE 'Locked|could not be unlocked|device.*locked|Device.*locked' "$IOS_CONSOLE_STDERR"; }
+}
+
+ios_console_handle_is_exact_and_running() {
+  local handle_state=0
+  [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] || return 1
+  if skybridge_ios_console_handle_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" >/dev/null 2>&1; then
+    handle_state=1
+  fi
+  [[ "$handle_state" == "1" ]]
+}
+
+write_ios_process_cleanup_receipt() {
+  python3 - "$IOS_PROCESS_CLEANUP_RECEIPT" <<'PY'
+import json
+import os
+import pathlib
+import tempfile
+import sys
+
+output = pathlib.Path(sys.argv[1])
+payload = {
+    "cleanupComplete": True,
+    "exactConsoleHandle": True,
+    "pidOnlySignal": False,
+    "remoteAbsenceProven": True,
+    "schemaVersion": 1,
+}
+descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+temporary = pathlib.Path(temporary_name)
+try:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+finally:
+    if temporary.exists():
+        temporary.unlink()
+PY
+}
+
+terminate_ios_smoke_app() {
+  local exited_ios_pid
+
+  if [[ "$IOS_CONSOLE_HANDLE_CAPTURED" != "1" ]] \
+    || [[ -z "$IOS_CONSOLE_PID" ]] \
+    || [[ ! -f "$IOS_CONSOLE_HANDLE_IDENTITY" ]]; then
+    echo "Refusing iOS file-transfer cleanup because exact console-handle ownership was not captured." >&2
+    return 1
+  fi
+
+  local handle_status
+  if skybridge_ios_console_handle_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY"; then
+    handle_status=0
+  else
+    handle_status=$?
+  fi
+  case "$handle_status" in
+    0)
+      if ! skybridge_ios_signal_console_handle \
+        "$PROCESS_OWNERSHIP_HELPER" \
+        "$IOS_CONSOLE_PID" \
+        "$IOS_CONSOLE_HANDLE_IDENTITY"; then
+        echo "Failed to signal the exact iOS file-transfer console launch handle." >&2
+        return 1
+      fi
+      ;;
+    1)
+      wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+      ;;
+    *)
+      echo "Refusing iOS file-transfer cleanup because the console launch handle is unverifiable." >&2
+      return 1
+      ;;
+  esac
+
+  if ! skybridge_ios_wait_console_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" \
+    15; then
+    return 1
+  fi
+  if ! skybridge_ios_capture_exited_console_identity \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$LAUNCH_RESULT_JSON" \
+    "$IOS_APP_PATH" \
+    "$IOS_PROCESS_IDENTITY"; then
+    echo "Unable to capture the exited iOS file-transfer launch identity." >&2
+    return 1
+  fi
+  if ! exited_ios_pid="$(python3 "$PROCESS_OWNERSHIP_HELPER" identity-pid \
+    --platform ios \
+    --identity "$IOS_PROCESS_IDENTITY")" \
+    || ! [[ "$exited_ios_pid" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Unable to read the exited iOS file-transfer launch PID evidence." >&2
+    return 1
+  fi
+  if ! skybridge_ios_require_app_absent_after_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_DEVICE_ID" \
+    "$IOS_APP_PATH" \
+    "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+    "$DEVICECTL_TIMEOUT_SECONDS"; then
+    return 1
+  fi
+  if ! write_ios_process_cleanup_receipt; then
+    echo "Unable to write the iOS file-transfer process-cleanup receipt." >&2
+    return 1
+  fi
+
+  IOS_CONSOLE_HANDLE_STARTED=0
+  IOS_CONSOLE_HANDLE_CAPTURED=0
+  return 0
 }
 
 launch_ios_smoke_app() {
   local started_at
   local attempt=1
+  local handle_status
 
   started_at="$(date +%s)"
   while true; do
-    rm -f "$LAUNCH_RESULT_JSON"
-    if xcrun devicectl device process launch \
-      --device "$IOS_DEVICE_ID" \
-      --terminate-existing \
-      --environment-variables "$IOS_ENV_JSON" \
-      --json-output "$LAUNCH_RESULT_JSON" \
-      "$IOS_BUNDLE_ID" >/dev/null; then
-      return 0
+    if ! skybridge_ios_require_fresh_app_launch \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$IOS_DEVICE_ID" \
+      "$IOS_APP_PATH" \
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+      "$DEVICECTL_TIMEOUT_SECONDS"; then
+      return 1
+    fi
+    skybridge_ios_start_console_launch \
+      "$IOS_DEVICE_ID" \
+      "$IOS_BUNDLE_ID" \
+      "$IOS_ENV_JSON" \
+      "$IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS" \
+      "$LAUNCH_RESULT_JSON" \
+      "$IOS_CONSOLE_STDOUT" \
+      "$IOS_CONSOLE_STDERR" \
+      IOS_CONSOLE_PID
+    IOS_CONSOLE_HANDLE_STARTED=1
+
+    if skybridge_ios_capture_console_handle \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$IOS_CONSOLE_PID" \
+      "$IOS_CONSOLE_HANDLE_IDENTITY" \
+      "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC" \
+      "$IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS"; then
+      IOS_CONSOLE_HANDLE_CAPTURED=1
+      sleep 0.5
+      if skybridge_ios_console_handle_status \
+        "$PROCESS_OWNERSHIP_HELPER" \
+        "$IOS_CONSOLE_PID" \
+        "$IOS_CONSOLE_HANDLE_IDENTITY" >/dev/null 2>&1; then
+        return 0
+      fi
+      handle_status=$?
+      echo "iOS console launch handle exited or became unverifiable during startup: status=$handle_status" >&2
+    elif kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
+      echo "iOS console launch handle is alive but exact ownership capture failed; refusing PID-only cleanup." >&2
+      return 1
+    else
+      wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+      IOS_CONSOLE_HANDLE_STARTED=0
     fi
 
     if launch_result_indicates_ios_profile_trust_failure; then
@@ -651,6 +911,8 @@ launch_ios_smoke_app() {
 
       echo "    iOS launch attempt ${attempt} was denied because the device is locked; unlock the device, keeping it on the home screen, and waiting..." >&2
       attempt=$((attempt + 1))
+      IOS_CONSOLE_HANDLE_CAPTURED=0
+      rm -f -- "$IOS_CONSOLE_HANDLE_IDENTITY"
       sleep 5
       continue
     fi
@@ -685,6 +947,8 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump({"deviceInfoCapture": "failed"}, handle)
 PY
 }
+
+initialize_process_ownership_session
 
 echo "==> Artifacts: $ARTIFACT_DIR"
 echo "==> Real device: $IOS_DEVICE_LABEL"
@@ -730,7 +994,12 @@ if [[ "$MAC_HOST_MODE" == "swiftpm-host" ]]; then
     SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
     CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
     SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-    swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost
+    swift build \
+      --disable-dependency-cache \
+      --manifest-cache local \
+      --scratch-path "$SMOKE_BUILD_DIR" \
+      -Xswiftc -warnings-as-errors \
+      --product LocalLanInteropHost
   ) >"$ARTIFACT_DIR/macos-build.log"
 
   MAC_APP_BIN="$SMOKE_BUILD_DIR/debug/LocalLanInteropHost"
@@ -1050,6 +1319,9 @@ else
   wait_for_file_pattern "$HOST_STATUS" "success .*suite=${EXPECTED_TARGET_SUITE} .*fileTransfer=1" "$SMOKE_TIMEOUT_SECONDS" "macOS file-transfer success"
   wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*fileTransfer=1" "$SMOKE_TIMEOUT_SECONDS" "iOS file-transfer success"
 fi
+
+echo "==> Closing the exact iOS console launch handle and proving remote app absence"
+terminate_ios_smoke_app
 
 echo "==> Running Rust CLI file-transfer performance artifact gate"
 skybridge_smoke_check_performance_gate "$ROOT_DIR" file-transfer "$ARTIFACT_DIR"

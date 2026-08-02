@@ -418,10 +418,10 @@ public final class TransferLinkManager: ObservableObject, Sendable {
     }
 
     private func preferredHostname() -> String? {
-        let rawCandidates = [
+        let rawCandidates: [String?] = [
             ProcessInfo.processInfo.hostName,
-            Host.current().name,
-            Host.current().localizedName
+            LocalHostName.networkName,
+            LocalHostName.localizedName
         ]
         let candidates = rawCandidates
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }

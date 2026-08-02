@@ -1627,8 +1627,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             lastConnectedAt: nil,
             isConnectable: true,
             connectionTypes: [.wifi],
-            services: ["_skybridge-remote._tcp"],
-            portMap: ["_skybridge-remote._tcp": 5901],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 5901],
             routeIdentifiers: ["host:192.168.0.101"],
             sources: [.skybridgeP2P],
             platformName: "macOS",
@@ -1667,8 +1667,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             lastConnectedAt: nil,
             isConnectable: true,
             connectionTypes: [.wifi],
-            services: ["_skybridge-remote._tcp"],
-            portMap: ["_skybridge-remote._tcp": 51776],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 51776],
             routeIdentifiers: ["bonjour:MacBookPro18,2@local."],
             sources: [.skybridgeBonjour],
             platformName: "macOS",
@@ -1709,8 +1709,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             lastConnectedAt: nil,
             isConnectable: true,
             connectionTypes: [.wifi],
-            services: ["_skybridge-remote._tcp"],
-            portMap: ["_skybridge-remote._tcp": 51776],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 51776],
             routeIdentifiers: ["bonjour:MacBookPro18,2@local."],
             sources: [.skybridgeBonjour],
             platformName: "macOS",
@@ -1726,9 +1726,9 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         let resolved = try XCTUnwrap(manager.onlineDevices.first)
         XCTAssertEqual(resolved.name, "Lza的MacBook Pro")
         XCTAssertTrue(resolved.services.contains("_skybridge._tcp"))
-        XCTAssertTrue(resolved.services.contains("_skybridge-remote._tcp"))
+        XCTAssertTrue(resolved.services.contains(BonjourInteropContract.remoteControlServiceType))
         XCTAssertEqual(resolved.portMap["_skybridge._tcp"], 51752)
-        XCTAssertEqual(resolved.portMap["_skybridge-remote._tcp"], 51776)
+        XCTAssertEqual(resolved.portMap[BonjourInteropContract.remoteControlServiceType], 51776)
     }
 
     func testDifferentMacNamesDoNotCoalesceAcrossSkyBridgeRoutes() {
@@ -1751,8 +1751,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             status: .online,
             lastConnectedAt: nil,
             isConnectable: true,
-            services: ["_skybridge-remote._tcp"],
-            portMap: ["_skybridge-remote._tcp": 5901],
+            services: [BonjourInteropContract.remoteControlServiceType],
+            portMap: [BonjourInteropContract.remoteControlServiceType: 5901],
             routeIdentifiers: ["host:192.168.0.110"],
             platformName: "macOS",
             modelName: "Mac Studio"
@@ -2161,8 +2161,8 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
             lastConnectedAt: nil,
             isConnectable: true,
             connectionTypes: [.wifi],
-            services: ["_skybridge._tcp", "_skybridge-remote._tcp"],
-            portMap: ["_skybridge._tcp": 51776, "_skybridge-remote._tcp": 51777],
+            services: ["_skybridge._tcp", BonjourInteropContract.remoteControlServiceType],
+            portMap: ["_skybridge._tcp": 51776, BonjourInteropContract.remoteControlServiceType: 51777],
             routeIdentifiers: ["bonjour:iPad_local@local."],
             sources: [.skybridgeBonjour],
             platformName: "iPadOS",
@@ -2256,13 +2256,15 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         let now = Date()
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [oldStableId, newStableId, bonjourAlias])
-        defer {
+        try await trust.removeRecordsForTesting(
+            deviceIds: [oldStableId, newStableId, bonjourAlias]
+        )
+        addTeardownBlock { @MainActor [manager, trust] in
             manager.replaceDevicesForTesting([])
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [oldStableId, newStableId, bonjourAlias])
-                trust.setInMemoryPersistenceForTesting(false)
-            }
+            try await trust.removeRecordsForTesting(
+                deviceIds: [oldStableId, newStableId, bonjourAlias]
+            )
+            trust.setInMemoryPersistenceForTesting(false)
         }
 
         _ = try await trust.addTrustRecord(
@@ -2331,13 +2333,15 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         let now = Date()
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [staleStableId, liveStableId, bonjourAlias])
-        defer {
+        try await trust.removeRecordsForTesting(
+            deviceIds: [staleStableId, liveStableId, bonjourAlias]
+        )
+        addTeardownBlock { @MainActor [manager, trust] in
             manager.replaceDevicesForTesting([])
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [staleStableId, liveStableId, bonjourAlias])
-                trust.setInMemoryPersistenceForTesting(false)
-            }
+            try await trust.removeRecordsForTesting(
+                deviceIds: [staleStableId, liveStableId, bonjourAlias]
+            )
+            trust.setInMemoryPersistenceForTesting(false)
         }
 
         _ = try await trust.addTrustRecord(

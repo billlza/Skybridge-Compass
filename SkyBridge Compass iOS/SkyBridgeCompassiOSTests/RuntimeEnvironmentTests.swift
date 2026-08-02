@@ -26,4 +26,27 @@ final class RuntimeEnvironmentTests: XCTestCase {
 
         XCTAssertFalse(discoveryManager.isDiscovering)
     }
+
+    func testEphemeralKeychainSmokeAlsoUsesEphemeralTrustPersistence() {
+        XCTAssertTrue(
+            TrustedDeviceStore.usesEphemeralPersistenceForSmoke(
+                environment: [
+                    "SKYBRIDGE_SMOKE_ROLE": "ios-p2p-client",
+                    "SKYBRIDGE_KEYCHAIN_IN_MEMORY": "1"
+                ]
+            )
+        )
+        XCTAssertFalse(
+            TrustedDeviceStore.usesEphemeralPersistenceForSmoke(
+                environment: ["SKYBRIDGE_KEYCHAIN_IN_MEMORY": "1"]
+            ),
+            "Normal app launches must keep durable trust even in a Debug build."
+        )
+        XCTAssertFalse(
+            TrustedDeviceStore.usesEphemeralPersistenceForSmoke(
+                environment: ["SKYBRIDGE_SMOKE_ROLE": "ios-p2p-client"]
+            ),
+            "A smoke role alone must never downgrade durable trust storage."
+        )
+    }
 }

@@ -6,29 +6,25 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 use skybridge_agent::{
     ensure_device_identity, ensure_rust_pqc_identity_for_algorithm, load_auth_session,
-    load_health_snapshot, resolve_paths,
+    resolve_paths,
 };
 use skybridge_core::{
-    AuthState, CryptoSuite, EnrollmentStatus, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
-    derive_tenant_identifier,
+    AuthState, CryptoSuite, EnrollmentStatus, ProtocolIdentityBinding, derive_tenant_identifier,
 };
 
+use crate::agent_runtime_guard::load_active_agent_health;
 use crate::operator_status::describe_agent_status;
 
 async fn maybe_pqc_identity_report(
     paths: &skybridge_agent::AgentPaths,
     identity: &skybridge_agent::DeviceIdentityMaterial,
 ) -> Result<Option<serde_json::Value>> {
-    let bridge_identity = crate::auth_support::pqc_bridge_identity_enabled()?;
-    if !identity.state.device.protocol_signing_algorithm.is_ml_dsa() && !bridge_identity {
+    let _bridge_identity_enabled = crate::auth_support::pqc_bridge_identity_enabled()?;
+    if !identity.state.device.protocol_signing_algorithm.is_ml_dsa() {
         return Ok(None);
     }
 
-    let signing_algorithm = if identity.state.device.protocol_signing_algorithm.is_ml_dsa() {
-        identity.state.device.protocol_signing_algorithm
-    } else {
-        ProtocolSigningAlgorithm::MlDsa65
-    };
+    let signing_algorithm = identity.state.device.protocol_signing_algorithm;
     let pqc_identity = ensure_rust_pqc_identity_for_algorithm(paths, signing_algorithm).await?;
     Ok(Some(json!({
         "signing_algorithm": pqc_identity.signing_algorithm,
@@ -64,7 +60,7 @@ async fn maybe_pqc_identity_report(
 pub(crate) async fn device_status(state_dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     let paths = resolve_paths(state_dir)?;
     let identity = ensure_device_identity(&paths).await?;
-    let health = load_health_snapshot(&paths).await?;
+    let health = load_active_agent_health(&paths).await;
     let auth_session = load_auth_session(&paths).await?;
     let tenant_id = auth_session
         .as_ref()
@@ -81,7 +77,15 @@ pub(crate) async fn device_status(state_dir: Option<PathBuf>, as_json: bool) -> 
                 "tenant_id": tenant_id,
                 "device": identity.state.device,
                 "pqc_identity": pqc_identity,
-                "agent_health": health,
+                "agent_health": health.as_ref().ok(),
+                "agent_health_observation": match &health {
+                    Ok(_) => json!({ "status": "current" }),
+                    Err(error) => json!({
+                        "status": "unavailable",
+                        "error_code": error.code,
+                        "retryable": error.retryable,
+                    }),
+                },
             }))?
         );
         return Ok(());
@@ -128,14 +132,13 @@ pub(crate) async fn device_status(state_dir: Option<PathBuf>, as_json: bool) -> 
             }
         );
     }
-    if let Some(health) = health {
-        println!(
-            "Agent: {} (updated {})",
+    match health {
+        Ok(health) => println!(
+            "Agent: {} (current; updated {})",
             describe_agent_status(health.status),
             health.updated_at
-        );
-    } else {
-        println!("Agent: no health snapshot yet");
+        ),
+        Err(error) => println!("Agent: unavailable (code: {})", error.code),
     }
     Ok(())
 }

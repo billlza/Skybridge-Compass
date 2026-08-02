@@ -22,6 +22,33 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         return [pumpSource, managerSource, videoSubmissionPipeSource].joined(separator: "\n")
     }
 
+    func testRemoteControlInboundAdmissionBoundsAndReleasesUnauthenticatedConnections() throws {
+        let admission = RemoteControlInboundAdmission(
+            maximumConnections: 3,
+            maximumConnectionsPerEndpoint: 2
+        )
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: 9)
+        let connections = (0..<4).map { _ in NWConnection(to: endpoint, using: .tcp) }
+        defer { connections.forEach { $0.cancel() } }
+
+        let first = try XCTUnwrap(admission.reserve(connection: connections[0], endpointKey: "peer:a"))
+        XCTAssertNotNil(admission.reserve(connection: connections[1], endpointKey: "peer:a"))
+        XCTAssertNil(admission.reserve(connection: connections[2], endpointKey: "peer:a"))
+        XCTAssertNotNil(admission.reserve(connection: connections[2], endpointKey: "peer:b"))
+        XCTAssertNil(admission.reserve(connection: connections[3], endpointKey: "peer:c"))
+        XCTAssertEqual(admission.activeConnectionCount, 3)
+        XCTAssertEqual(admission.activeConnectionCount(for: "peer:a"), 2)
+
+        admission.release(first)
+        XCTAssertNotNil(admission.reserve(connection: connections[3], endpointKey: "peer:c"))
+        XCTAssertEqual(admission.activeConnectionCount, 3)
+        XCTAssertEqual(admission.activeConnectionCount(for: "peer:a"), 1)
+
+        admission.cancelAll()
+        XCTAssertEqual(admission.activeConnectionCount, 0)
+        XCTAssertEqual(admission.activeConnectionCount(for: "peer:a"), 0)
+    }
+
     func testOpusRoundTripAndPLC() throws {
         let configuration = SkyBridgeOpusConfiguration.lowLatency
         let encoder = try SkyBridgeOpusEncoder(configuration: configuration)
@@ -1536,20 +1563,17 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(remoteServerSource.contains("qos: .userInteractive"))
         XCTAssertTrue(remoteServerSource.contains("listener.start(queue: queue)"))
         XCTAssertTrue(remoteServerSource.contains("connection.start(queue: connectionQueue)"))
-        XCTAssertTrue(remoteServerSource.contains("parameters.includePeerToPeer = false"))
-        XCTAssertTrue(remoteServerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)"))
-        XCTAssertGreaterThanOrEqual(
-            remoteServerSource.components(separatedBy: "LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)").count - 1,
-            2
-        )
+        XCTAssertTrue(remoteServerSource.contains("parameters.includePeerToPeer = true"))
+        XCTAssertTrue(remoteServerSource.contains("BonjourInteropContract.makeCanonicalAdvertisementTXT("))
+        XCTAssertFalse(remoteServerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT"))
 
         let fileTransferListenerSource = try String(
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/FileTransfer/FileTransferListenerService.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(fileTransferListenerSource.contains("parameters.includePeerToPeer = false"))
-        XCTAssertTrue(fileTransferListenerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)"))
-        XCTAssertTrue(fileTransferListenerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &d)"))
+        XCTAssertTrue(fileTransferListenerSource.contains("parameters.includePeerToPeer = true"))
+        XCTAssertTrue(fileTransferListenerSource.contains("BonjourInteropContract.makeCanonicalAdvertisementTXT("))
+        XCTAssertFalse(fileTransferListenerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT"))
 
         XCTAssertTrue(LocalNetworkAdvertisementAddressProvider.isAdvertisableRoutableLANAddress("192.168.31.20"))
         XCTAssertFalse(LocalNetworkAdvertisementAddressProvider.isAdvertisableRoutableLANAddress("169.254.10.20"))

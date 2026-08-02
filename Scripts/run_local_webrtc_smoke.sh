@@ -186,6 +186,43 @@ print(value)
 PY
 }
 
+resolve_signaling_tenant_from_access_token() {
+  SKYBRIDGE_AUTHORITY_TOKEN="$1" python3 <<'PY'
+import base64
+import json
+import os
+
+token = str(os.environ.get("SKYBRIDGE_AUTHORITY_TOKEN") or "").strip()
+parts = token.split(".")
+if len(parts) != 3 or not all(parts):
+    raise SystemExit("Signaling bearer is not a three-segment JWT.")
+payload_segment = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+try:
+    payload = json.loads(base64.urlsafe_b64decode(payload_segment))
+except Exception as exc:
+    raise SystemExit(f"Unable to decode signaling JWT payload: {type(exc).__name__}")
+if not isinstance(payload, dict):
+    raise SystemExit("Signaling JWT payload is not an object.")
+subject = payload.get("sub")
+if not isinstance(subject, str) or not subject or subject != subject.strip():
+    raise SystemExit("Signaling JWT has no canonical subject.")
+app_metadata = payload.get("app_metadata", {})
+if not isinstance(app_metadata, dict):
+    raise SystemExit("Signaling JWT app_metadata is malformed.")
+values = set()
+for key in ("tenant_id", "tenantId", "org_id", "workspace_id"):
+    value = app_metadata.get(key)
+    if value is None:
+        continue
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise SystemExit(f"Signaling JWT app_metadata.{key} is malformed.")
+    values.add(value)
+if len(values) > 1:
+    raise SystemExit("Signaling JWT contains conflicting protected tenant claims.")
+print(next(iter(values), subject))
+PY
+}
+
 wait_for_file_pattern() {
   local path="$1"
   local pattern="$2"
@@ -552,25 +589,13 @@ def load_environment_session():
             f"{jwt_error}"
         )
     payload = decoded_jwt_payload(token)
-    user_id = (
-        str(os.environ.get("SKYBRIDGE_USER_ID") or "").strip()
-        or first_claim(payload, ("sub",))
-        or first_claim(payload, ("user_id",), ("userId",))
-        or "smoke-user"
-    )
-    nebula_id = (
-        str(os.environ.get("SKYBRIDGE_NEBULA_ID") or "").strip()
-        or first_claim(
-            payload,
-            ("app_metadata", "tenant_id"),
-            ("app_metadata", "tenantId"),
-            ("user_metadata", "tenant_id"),
-            ("user_metadata", "tenantId"),
-            ("tenant_id",),
-            ("tenantId",),
-            ("sub",),
-        )
-    )
+    user_id = first_claim(payload, ("sub",))
+    if not user_id:
+        raise SystemExit("Environment Supabase access token is missing sub.")
+    expected_user_id = str(os.environ.get("SKYBRIDGE_USER_ID") or "").strip()
+    if expected_user_id and expected_user_id != user_id:
+        raise SystemExit("SKYBRIDGE_USER_ID does not match the bearer subject.")
+    nebula_id = str(os.environ.get("SKYBRIDGE_NEBULA_ID") or "").strip()
     display_name = str(os.environ.get("SKYBRIDGE_DISPLAY_NAME") or "").strip() or "Smoke Host"
     refresh_token = str(os.environ.get("SKYBRIDGE_REFRESH_TOKEN") or "").strip()
     return {
@@ -752,9 +777,7 @@ user_id = "local-smoke-user"
 header = b64url_json({"alg": "none", "typ": "JWT"})
 payload = b64url_json({
     "sub": user_id,
-    "tenant_id": tenant_id,
     "app_metadata": {"tenant_id": tenant_id},
-    "user_metadata": {"tenant_id": tenant_id},
     "iat": int(time.time()),
     "exp": int(time.time()) + 3600,
 })
@@ -763,7 +786,7 @@ session = {
     "accessToken": f"{header}.{payload}.{signature}",
     "refreshToken": "",
     "userIdentifier": user_id,
-    "nebulaId": tenant_id,
+    "nebulaId": "NEBULA-local-smoke",
     "displayName": "Local Smoke",
     "issuedAt": time.time(),
 }
@@ -884,7 +907,6 @@ else
   REQUIRE_SHARED_STATE_FOR_PUBLIC_CAPABILITIES=false \
   SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY=1 \
   SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH=1 \
-  SIGNALING_BOOTSTRAP_TENANT_MODE=user_id \
   node server.js >"$ARTIFACT_DIR/signaling.log" 2>&1 &
 fi
 SIGNALING_PID="$!"
@@ -1010,7 +1032,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
   fi
   CONNECTION_CODE="$(tr -d '\r\n' < "$MAC_CODE")"
   ACCESS_TOKEN="$(read_private_auth_session_field accessToken)"
-  TENANT_ID="$(read_private_auth_session_field nebulaId)"
+  TENANT_ID="$(resolve_signaling_tenant_from_access_token "$ACCESS_TOKEN")"
   if [[ -z "$CONNECTION_CODE" ]]; then
     echo "macOS smoke produced an empty connection code" >&2
     exit 1
@@ -1030,7 +1052,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
 	    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
 	    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
 	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-Smoke Remote Viewer}" \
-	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="$TENANT_ID" \
+    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-NEBULA-ios-smoke}" \
 	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
 	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
 	    SIMCTL_CHILD_SKYBRIDGE_STUN_URL="" \
@@ -1057,7 +1079,7 @@ for round in $(seq 1 "$SMOKE_ROUNDS"); do
 	    SIMCTL_CHILD_SKYBRIDGE_ACCESS_TOKEN="$ACCESS_TOKEN" \
 	    SIMCTL_CHILD_SKYBRIDGE_TENANT_ID="$TENANT_ID" \
 	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-Smoke Remote Viewer}" \
-	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="$TENANT_ID" \
+	    SIMCTL_CHILD_SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-NEBULA-ios-smoke}" \
 	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_SERVER_URL="$SIGNALING_SERVER_URL" \
 	    SIMCTL_CHILD_SKYBRIDGE_SIGNALING_WEBSOCKET_URL="$SIGNALING_WS_URL" \
 	    SIMCTL_CHILD_SKYBRIDGE_STUN_URL="" \

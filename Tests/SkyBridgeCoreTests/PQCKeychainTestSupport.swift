@@ -55,7 +55,7 @@ struct DeviceIdentityKeychainTestContext: Sendable {
         try DeviceIdentityKeyManager.testingResetMLDSAStorage(namespace: namespace)
         self.namespace = namespace
         self.scope = scope
-        self.manager = DeviceIdentityKeyManager(
+        self.manager = try DeviceIdentityKeyManager(
             testingStorageNamespace: namespace,
             keychainScope: scope
         )

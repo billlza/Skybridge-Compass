@@ -34,15 +34,17 @@ const HEADER_LEN: usize = 4 + 1 + 1 + 16;
 pub const MAX_FILENAME_LEN: usize = 255;
 /// Maximum reason string length in bytes (RECEIPT frames).
 pub const MAX_REASON_LEN: usize = 255;
-/// Policy cap on a single transfer's declared total size (2 GiB).
-pub const MAX_TRANSFER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Protocol-wide cap on a single transfer's declared total size (1 GiB).
+/// Senders and receivers must reject larger files before copying or hashing
+/// their contents.
+pub const MAX_TRANSFER_BYTES: u64 = 1024 * 1024 * 1024;
 /// Chunk payload size. Chosen to amortize per-frame overhead to ~0.02% while
 /// staying ~3% of the transport's 8 MiB framed cap and keeping reassembly
 /// buffers small. See the module-level design notes.
 pub const CHUNK_PAYLOAD_BYTES: usize = 256 * 1024;
 
 /// A decoded file transfer frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum FileAppFrame {
     Offer {
         transfer_id: [u8; 16],
@@ -66,6 +68,47 @@ pub enum FileAppFrame {
         transfer_id: [u8; 16],
         acked_through_seq: u32,
     },
+}
+
+impl std::fmt::Debug for FileAppFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Offer {
+                total_size,
+                chunk_size,
+                ..
+            } => formatter
+                .debug_struct("FileAppFrame::Offer")
+                .field("transfer_id", &"<redacted>")
+                .field("total_size", total_size)
+                .field("chunk_size", chunk_size)
+                .field("expected_sha256", &"<redacted>")
+                .field("filename", &"<redacted>")
+                .finish(),
+            Self::Chunk {
+                sequence, payload, ..
+            } => formatter
+                .debug_struct("FileAppFrame::Chunk")
+                .field("transfer_id", &"<redacted>")
+                .field("sequence", sequence)
+                .field("payload_bytes", &payload.len())
+                .finish(),
+            Self::Receipt { ok, .. } => formatter
+                .debug_struct("FileAppFrame::Receipt")
+                .field("transfer_id", &"<redacted>")
+                .field("ok", ok)
+                .field("computed_sha256", &"<redacted>")
+                .field("reason", &"<redacted>")
+                .finish(),
+            Self::ChunkAck {
+                acked_through_seq, ..
+            } => formatter
+                .debug_struct("FileAppFrame::ChunkAck")
+                .field("transfer_id", &"<redacted>")
+                .field("acked_through_seq", acked_through_seq)
+                .finish(),
+        }
+    }
 }
 
 /// Returns true if `plaintext` looks like a binary file frame (vs JSON).
@@ -433,5 +476,27 @@ mod tests {
         buffer.extend_from_slice(&0u32.to_be_bytes());
         buffer.extend_from_slice(&((CHUNK_PAYLOAD_BYTES as u32) + 1).to_be_bytes());
         assert!(decode_file_app_frame(&buffer).is_err());
+    }
+
+    #[test]
+    fn file_frame_debug_redacts_payload_identity_and_metadata() {
+        let frame = FileAppFrame::Offer {
+            transfer_id: TID,
+            total_size: 4,
+            chunk_size: 4,
+            expected_sha256: HASH,
+            filename: "private-filename-secret.txt".to_owned(),
+        };
+        let debug = format!("{frame:?}");
+        assert!(!debug.contains("private-filename-secret"));
+        assert!(!debug.contains("[7, 7, 7, 7"));
+        assert!(!debug.contains("[9, 9, 9, 9"));
+
+        let chunk = FileAppFrame::Chunk {
+            transfer_id: TID,
+            sequence: 0,
+            payload: b"private-payload-secret".to_vec(),
+        };
+        assert!(!format!("{chunk:?}").contains("private-payload-secret"));
     }
 }

@@ -124,10 +124,10 @@ final class AuthenticatedPQCSigningTrustResolverTests: XCTestCase {
 
         let trust = TrustSyncService.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [peerId])
+        try await trust.removeRecordsForTesting(deviceIds: [peerId])
         _ = try await trust.addTrustRecord(promotedRecord)
         addTeardownBlock { @MainActor [trust] in
-            await trust.removeRecordsForTesting(deviceIds: [peerId])
+            try await trust.removeRecordsForTesting(deviceIds: [peerId])
             trust.setInMemoryPersistenceForTesting(false)
         }
 

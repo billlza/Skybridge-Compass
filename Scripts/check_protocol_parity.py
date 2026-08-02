@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Protocol-parity drift checker for the iOS <-> macOS hand-copied protocol layer.
+Protocol-parity drift checker for the remaining iOS <-> macOS copied protocol layer.
 
 WHY THIS EXISTS
 ---------------
-`Docs/CoreLayering.md` documents that the iOS app (`SkyBridge Compass iOS/`)
-does NOT consume `SkyBridgeProtocolCore`; instead it carries ~60 same-named
-protocol/wire/handshake files that were hand-copied from the macOS tree and
-have since evolved independently. Wire compatibility between the two clients
-therefore relies on manual discipline, not the type system — the single
-largest cross-platform regression risk in the repo.
+`Docs/CoreLayering.md` documents the incremental migration of iOS protocol
+types into `SkyBridgeProtocolCore`. Migrated types have one canonical source;
+the remaining same-named protocol/wire/handshake files still need an explicit
+drift gate until their callers move to the shared module.
 
 WHAT THIS DOES (and does NOT do)
 --------------------------------
@@ -60,6 +58,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 IOS_CORE = REPO_ROOT / "SkyBridge Compass iOS" / "SkyBridgeCompassiOS" / "Sources" / "Core"
 MACOS_SOURCES = REPO_ROOT / "Sources"
 BASELINE_PATH = REPO_ROOT / "Scripts" / "protocol_parity_baseline.json"
+SHARED_CANONICAL_WIRE_SOURCES = {
+    "CrossNetworkFileTransferWire.swift": (
+        REPO_ROOT
+        / "Sources"
+        / "SkyBridgeProtocolCore"
+        / "RemoteConnection"
+        / "WebRTC"
+        / "CrossNetworkFileTransferWire.swift"
+    ),
+}
 
 # Same-named files that are legitimately platform-specific (NOT wire/protocol
 # formats) and are expected to diverge freely. They are excluded from tracking.
@@ -72,6 +80,11 @@ EXEMPT = {
     "STUNClient.swift",          # transport client impl (the STUN *wire* is RFC-fixed, not ours)
     "CoreTypes.swift",           # iOS-local convenience types
     "BackgroundTaskManager.swift",
+    # False basename match: iOS owns DTOs here, while the macOS file is the
+    # connection engine. Discovery DTOs are checked against P2PDeviceModels.swift
+    # below. The dormant legacy P2PMessage file-transfer payloads intentionally
+    # are not parity-certified because their schemas diverged; see CoreLayering.
+    "P2PModels.swift",
 }
 
 # Pairs that have intentionally forked (documented in CoreLayering.md). They are
@@ -79,6 +92,9 @@ EXEMPT = {
 # expected and the question is only "did the WIRE behaviour change".
 KNOWN_FORKED = {
     "CrossNetworkWebRTCLocalAppMessageFactory.swift",
+    "DeviceMessageStore.swift",
+    "DeviceMessagingService.swift",
+    "OfflineMessageQueue.swift",
     "TwoAttemptHandshakeManager.swift",
 }
 
@@ -195,6 +211,33 @@ WIRE_ANCHORS = [
     ("Q-Periapt application-context field length prefix",
      r'var\s+length\s*=\s*UInt32\((field\.count)\)\.(bigEndian)',
      "QPeriaptHandshakeApplicationContext.swift"),
+    ("P2P device-type wire values",
+     r'(?s)public\s+enum\s+P2PDeviceType\s*:[^{]+\{\s*'
+     r'case\s+(macOS)\s*=\s*"([^"]+)"\s*'
+     r'case\s+(iOS)\s*=\s*"([^"]+)"\s*'
+     r'case\s+(iPadOS)\s*=\s*"([^"]+)"\s*'
+     r'case\s+(android)\s*=\s*"([^"]+)"\s*'
+     r'case\s+(windows)\s*=\s*"([^"]+)"\s*'
+     r'case\s+(linux)\s*=\s*"([^"]+)"\s*'
+     r'case\s+(unknown)\s*=\s*"([^"]+)"',
+     ("P2PModels.swift", "P2PDeviceModels.swift")),
+    ("P2P discovery-message wire fields",
+     r'(?s)public\s+struct\s+P2PDiscoveryMessage\s*:[^{]+\{'
+     r'.*?public\s+let\s+(id)\s*:\s*(String)'
+     r'.*?public\s+let\s+(name)\s*:\s*(String)'
+     r'.*?public\s+let\s+(type)\s*:\s*(P2PDeviceType)'
+     r'.*?public\s+let\s+(address)\s*:\s*(String)'
+     r'.*?public\s+let\s+(port)\s*:\s*(UInt16)'
+     r'.*?public\s+let\s+(osVersion)\s*:\s*(String)'
+     r'.*?public\s+let\s+(capabilities)\s*:\s*(\[String\])'
+     r'.*?public\s+let\s+(publicKeyFingerprint)\s*:\s*(String)'
+     r'.*?public\s+let\s+(timestamp)\s*:\s*(Double)'
+     r'.*?public\s+let\s+(publicKeyBase64)\s*:\s*(String\?)'
+     r'.*?public\s+let\s+(signatureBase64)\s*:\s*(String\?)'
+     r'.*?public\s+let\s+(deviceId)\s*:\s*(String\?)'
+     r'.*?public\s+let\s+(pubKeyFP)\s*:\s*(String\?)'
+     r'.*?public\s+let\s+(macAddresses)\s*:\s*(String\?)',
+     ("P2PModels.swift", "P2PDeviceModels.swift")),
 ]
 
 
@@ -203,7 +246,8 @@ class ProtocolParityError(RuntimeError):
 
 
 SourceIndex = dict[str, tuple[Path, ...]]
-Anchor = tuple[str, str, str | None]
+AnchorSource = str | tuple[str, str] | None
+Anchor = tuple[str, str, AnchorSource]
 _LITERAL_TOKEN_RE = re.compile("\0([0-9]+)\0")
 
 
@@ -506,29 +550,84 @@ def check_wire_anchors(
     ios: SourceIndex,
     macos: SourceIndex,
     anchors: tuple[Anchor, ...] | list[Anchor] = WIRE_ANCHORS,
+    shared_sources: dict[str, Path] = SHARED_CANONICAL_WIRE_SOURCES,
 ) -> list[str]:
     """Return semantic anchor mismatches after all named paths are proven unique."""
     named_paths: dict[tuple[str, str], Path] = {}
-    for label, _, filename in anchors:
-        if filename is None:
+    for label, _, source in anchors:
+        if source is None:
             continue
-        named_paths[("ios", filename)] = _unique_path(
+        if isinstance(source, tuple):
+            if len(source) != 2:
+                raise ProtocolParityError(
+                    f"cross-file wire anchor '{label}' must name exactly two sources"
+                )
+            ios_filename, macos_filename = source
+            named_paths[("ios", label)] = _unique_path(
+                ios,
+                ios_filename,
+                side="iOS",
+                purpose=f"cross-file wire-anchor source for '{label}'",
+            )
+            named_paths[("macos", label)] = _unique_path(
+                macos,
+                macos_filename,
+                side="macOS",
+                purpose=f"cross-file wire-anchor source for '{label}'",
+            )
+            continue
+        filename = source
+        if filename in shared_sources:
+            ios_duplicates = ios.get(filename, ())
+            if ios_duplicates:
+                rendered = ", ".join(str(path) for path in ios_duplicates)
+                raise ProtocolParityError(
+                    f"iOS must consume shared canonical wire source '{filename}' "
+                    f"instead of carrying a local copy: {rendered}"
+                )
+            canonical = shared_sources[filename]
+            try:
+                resolved_canonical = canonical.resolve(strict=True)
+            except OSError as exc:
+                raise ProtocolParityError(
+                    f"shared canonical wire source cannot be resolved: {canonical}: {exc}"
+                ) from exc
+            if canonical.is_symlink() or not resolved_canonical.is_file():
+                raise ProtocolParityError(
+                    f"shared canonical wire source must be a regular non-symlink file: "
+                    f"{resolved_canonical}"
+                )
+            indexed_macos = _unique_path(
+                macos,
+                filename,
+                side="shared",
+                purpose=f"canonical wire-anchor source for '{label}'",
+            )
+            if indexed_macos != resolved_canonical:
+                raise ProtocolParityError(
+                    f"shared canonical wire source index mismatch for '{filename}': "
+                    f"expected {resolved_canonical}, found {indexed_macos}"
+                )
+            named_paths[("ios", label)] = resolved_canonical
+            named_paths[("macos", label)] = resolved_canonical
+            continue
+        named_paths[("ios", label)] = _unique_path(
             ios, filename, side="iOS", purpose=f"wire-anchor source for '{label}'"
         )
-        named_paths[("macos", filename)] = _unique_path(
+        named_paths[("macos", label)] = _unique_path(
             macos, filename, side="macOS", purpose=f"wire-anchor source for '{label}'"
         )
 
     all_ios = tuple(path for paths in ios.values() for path in paths)
     all_macos = tuple(path for paths in macos.values() for path in paths)
     errors: list[str] = []
-    for label, pattern, filename in anchors:
-        if filename is None:
+    for label, pattern, source in anchors:
+        if source is None:
             ios_paths = all_ios
             macos_paths = all_macos
         else:
-            ios_paths = (named_paths[("ios", filename)],)
-            macos_paths = (named_paths[("macos", filename)],)
+            ios_paths = (named_paths[("ios", label)],)
+            macos_paths = (named_paths[("macos", label)],)
         ios_vals = _extract(pattern, ios_paths, label=label)
         macos_vals = _extract(pattern, macos_paths, label=label)
         if not ios_vals or not macos_vals:

@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Combine
 import IOKit
@@ -481,3 +486,4 @@ extension Notification.Name {
     static let systemMonitorClearHistory = Notification.Name("SystemMonitor.ClearHistory")
     static let systemMonitorExport = Notification.Name("SystemMonitor.Export")
 }
+#endif

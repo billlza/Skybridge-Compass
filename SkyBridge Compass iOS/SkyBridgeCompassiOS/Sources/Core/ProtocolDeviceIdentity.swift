@@ -277,6 +277,19 @@ enum ProtocolSigningIdentityPolicy {
 }
 
 @available(iOS 17.0, *)
+enum ProtocolIdentityKeychainStage: String, Sendable, Equatable {
+    case loadDeviceAuthority
+    case insertDeviceAuthority
+    case loadSigningKey
+    case insertSigningKey
+    case loadSigningAuthority
+    case insertSigningAuthority
+    case queryLegacyDeviceIdentity
+    case queryLegacySigningIdentity
+    case reloadLegacyItem
+    case deleteLegacyItem
+}
+
 enum ProtocolDeviceIdentityError: Error, LocalizedError, Sendable, Equatable {
     case invalidDeviceId
     case invalidSmokeOverride
@@ -301,6 +314,7 @@ enum ProtocolDeviceIdentityError: Error, LocalizedError, Sendable, Equatable {
     case keychainProbeFailed(OSStatus)
     case corruptKeychainProbeResult
     case keychainProbeCleanupFailed(OSStatus)
+    case keychainOperationFailed(stage: ProtocolIdentityKeychainStage, status: OSStatus)
 
     var errorDescription: String? {
         switch self {
@@ -344,6 +358,8 @@ enum ProtocolDeviceIdentityError: Error, LocalizedError, Sendable, Equatable {
             return "The Keychain access-group probe returned malformed attributes"
         case .keychainProbeCleanupFailed(let status):
             return "The Keychain access-group probe could not be removed exactly: \(status)"
+        case .keychainOperationFailed(let stage, let status):
+            return "Protocol identity Keychain operation \(stage.rawValue) failed: \(status)"
         }
     }
 }
@@ -824,60 +840,72 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
     }
 
     func loadDeviceAuthority() throws -> Data? {
-        try KeychainManager.shared.loadImmutableKeyStrict(
-            service: Self.deviceAuthorityService,
-            account: Self.deviceAuthorityAccount,
-            accessGroup: accessGroup
-        )
+        try withKeychainContext(.loadDeviceAuthority) {
+            try KeychainManager.shared.loadImmutableKeyStrict(
+                service: Self.deviceAuthorityService,
+                account: Self.deviceAuthorityAccount,
+                accessGroup: accessGroup
+            )
+        }
     }
 
     func insertDeviceAuthorityIfAbsent(_ data: Data) throws -> IOSKeychainInsertResult {
-        try KeychainManager.shared.insertImmutableKeyIfAbsent(
-            data: data,
-            service: Self.deviceAuthorityService,
-            account: Self.deviceAuthorityAccount,
-            accessGroup: accessGroup
-        )
+        try withKeychainContext(.insertDeviceAuthority) {
+            try KeychainManager.shared.insertImmutableKeyIfAbsent(
+                data: data,
+                service: Self.deviceAuthorityService,
+                account: Self.deviceAuthorityAccount,
+                accessGroup: accessGroup
+            )
+        }
     }
 
     func loadSigningKey(for slot: ProtocolSigningIdentitySlot) throws -> Data? {
-        try KeychainManager.shared.loadImmutableKeyStrict(
-            service: Self.signingKeyService,
-            account: slot.persistenceAccount,
-            accessGroup: accessGroup
-        )
+        try withKeychainContext(.loadSigningKey) {
+            try KeychainManager.shared.loadImmutableKeyStrict(
+                service: Self.signingKeyService,
+                account: slot.persistenceAccount,
+                accessGroup: accessGroup
+            )
+        }
     }
 
     func insertSigningKeyIfAbsent(
         _ data: Data,
         for slot: ProtocolSigningIdentitySlot
     ) throws -> IOSKeychainInsertResult {
-        try KeychainManager.shared.insertImmutableKeyIfAbsent(
-            data: data,
-            service: Self.signingKeyService,
-            account: slot.persistenceAccount,
-            accessGroup: accessGroup
-        )
+        try withKeychainContext(.insertSigningKey) {
+            try KeychainManager.shared.insertImmutableKeyIfAbsent(
+                data: data,
+                service: Self.signingKeyService,
+                account: slot.persistenceAccount,
+                accessGroup: accessGroup
+            )
+        }
     }
 
     func loadSigningAuthority(for slot: ProtocolSigningIdentitySlot) throws -> Data? {
-        try KeychainManager.shared.loadImmutableKeyStrict(
-            service: Self.signingAuthorityService,
-            account: slot.persistenceAccount,
-            accessGroup: accessGroup
-        )
+        try withKeychainContext(.loadSigningAuthority) {
+            try KeychainManager.shared.loadImmutableKeyStrict(
+                service: Self.signingAuthorityService,
+                account: slot.persistenceAccount,
+                accessGroup: accessGroup
+            )
+        }
     }
 
     func insertSigningAuthorityIfAbsent(
         _ data: Data,
         for slot: ProtocolSigningIdentitySlot
     ) throws -> IOSKeychainInsertResult {
-        try KeychainManager.shared.insertImmutableKeyIfAbsent(
-            data: data,
-            service: Self.signingAuthorityService,
-            account: slot.persistenceAccount,
-            accessGroup: accessGroup
-        )
+        try withKeychainContext(.insertSigningAuthority) {
+            try KeychainManager.shared.insertImmutableKeyIfAbsent(
+                data: data,
+                service: Self.signingAuthorityService,
+                account: slot.persistenceAccount,
+                accessGroup: accessGroup
+            )
+        }
     }
 
     func legacyDefaultsDeviceIds() -> [String] {
@@ -900,13 +928,15 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
             }
             return [.init(location: .inMemoryLegacyDeviceId, data: data)]
         }
-        return try legacyCandidates(
-            itemClass: kSecClassGenericPassword,
-            attributes: [
-                kSecAttrService as String: Self.legacyDeviceService,
-                kSecAttrAccount as String: Self.legacyDeviceAccount
-            ]
-        )
+        return try withKeychainContext(.queryLegacyDeviceIdentity) {
+            try legacyCandidates(
+                itemClass: kSecClassGenericPassword,
+                attributes: [
+                    kSecAttrService as String: Self.legacyDeviceService,
+                    kSecAttrAccount as String: Self.legacyDeviceAccount
+                ]
+            )
+        }
     }
 
     func legacySigningKeyCandidates(
@@ -915,14 +945,16 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
         if SkyBridgeRuntimeEnvironment.isRunningUnderXCTest {
             return []
         }
-        return try legacyCandidates(
-            itemClass: kSecClassKey,
-            attributes: [
-                kSecAttrApplicationTag as String: Data(
-                    "com.skybridge.identity.\(algorithm.rawValue)".utf8
-                )
-            ]
-        )
+        return try withKeychainContext(.queryLegacySigningIdentity) {
+            try legacyCandidates(
+                itemClass: kSecClassKey,
+                attributes: [
+                    kSecAttrApplicationTag as String: Data(
+                        "com.skybridge.identity.\(algorithm.rawValue)".utf8
+                    )
+                ]
+            )
+        }
     }
 
     func deleteLegacyItemIfUnchanged(_ item: ProtocolIdentityLegacyItem) throws {
@@ -954,7 +986,7 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
                 reload[kSecClass as String] = itemClass
                 var result: CFTypeRef?
                 switch SecItemCopyMatching(reload as CFDictionary, &result) {
-                case errSecItemNotFound:
+                case let status where Self.shouldContinueLegacyClassProbe(after: status):
                     continue
                 case errSecSuccess:
                     guard let data = result as? Data else {
@@ -963,7 +995,10 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
                     matchedClass = itemClass
                     currentData = data
                 case let status:
-                    throw KeychainError.unexpectedError(status)
+                    throw ProtocolDeviceIdentityError.keychainOperationFailed(
+                        stage: .reloadLegacyItem,
+                        status: status
+                    )
                 }
                 if matchedClass != nil { break }
             }
@@ -978,9 +1013,20 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
             case errSecSuccess, errSecItemNotFound:
                 return
             case let status:
-                throw KeychainError.unexpectedError(status)
+                throw ProtocolDeviceIdentityError.keychainOperationFailed(
+                    stage: .deleteLegacyItem,
+                    status: status
+                )
             }
         }
+    }
+
+    /// A persistent reference carries its concrete Keychain item class. Querying it with the
+    /// wrong class returns either `errSecItemNotFound` or `errSecNoSuchClass`, depending on the
+    /// OS/runtime. Both mean only "try the other allowlisted legacy class" in this bounded probe;
+    /// no other Keychain failure is downgraded.
+    static func shouldContinueLegacyClassProbe(after status: OSStatus) -> Bool {
+        status == errSecItemNotFound || status == errSecNoSuchClass
     }
 
     private func legacyCandidates(
@@ -1020,6 +1066,20 @@ struct IOSProtocolIdentityKeychainStore: ProtocolIdentityPersistence {
             return ProtocolIdentityLegacyItem(
                 location: .persistentReference(reference),
                 data: data
+            )
+        }
+    }
+
+    private func withKeychainContext<T>(
+        _ stage: ProtocolIdentityKeychainStage,
+        operation: () throws -> T
+    ) throws -> T {
+        do {
+            return try operation()
+        } catch KeychainError.unexpectedError(let status) {
+            throw ProtocolDeviceIdentityError.keychainOperationFailed(
+                stage: stage,
+                status: status
             )
         }
     }
@@ -1499,13 +1559,20 @@ actor ProtocolDeviceIdentityAuthority {
         deviceId: String,
         material: ProtocolSigningIdentityMaterial
     ) -> ResolvedProtocolSigningIdentity {
-        let fingerprint = fingerprint(material.publicKey)
+        // Public protocol identity fingerprints are domain-separated by signing algorithm.
+        // The Keychain authority record intentionally keeps its legacy raw-key digest as an
+        // internal persistence-integrity field; changing that field would require an on-disk
+        // migration. Never expose that storage digest in Bonjour or handshake metadata.
+        let protocolFingerprint = ProtocolIdentityPublicKeys(
+            protocolPublicKey: material.publicKey,
+            protocolAlgorithm: material.algorithm
+        ).authoritativeFingerprint.lowercased()
         return ResolvedProtocolSigningIdentity(
             snapshot: ProtocolIdentitySnapshot(
                 deviceId: deviceId,
                 signingAlgorithm: material.algorithm,
                 signingPublicKey: material.publicKey,
-                signingPublicKeyFingerprint: fingerprint
+                signingPublicKeyFingerprint: protocolFingerprint
             ),
             material: material
         )

@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use serde::Serialize;
 use skybridge_agent::{
-    enqueue_remote_desktop_request_for_established_session,
     load_remote_desktop_capability_snapshot_registry, load_remote_desktop_request_registry,
     load_session_registry, resolve_paths,
 };
@@ -17,18 +16,20 @@ use skybridge_core::{
 };
 
 const SCHEMA_VERSION: u32 = 1;
-const LIVE_CONTROL_STATUS: &str = "planned";
+const LIVE_CONTROL_STATUS: &str = "unavailable";
 const PENDING_AGENT_OBSERVATION_STATUS: &str = "pending_agent_observation";
 const AGENT_OBSERVED_NOT_APPLIED_STATUS: &str = "agent_observed_not_applied";
-const REQUEST_CONTRACT_SOURCE: &str = "cli_request_contract_only_no_live_sender_modes";
+const REQUEST_CONTRACT_SOURCE: &str = "bounded_input_contract_only_no_standalone_backend";
 const OBSERVED_MODES_SOURCE: &str = "agent_owned_remote_desktop_capability_snapshot_not_live_apply";
 const OBSERVED_MODES_STATUS_PLANNED: &str = "planned";
 const OBSERVED_MODES_STATUS_AVAILABLE: &str = "available";
 const OBSERVED_MODES_STATUS_STALE: &str = "stale";
 
 const REQUIRED_GATES: &[&str] = &[
-    "agent_owned_remote_desktop_control",
-    "sender_observed_mode_change",
+    "standalone_screen_capture_and_media_backend",
+    "authenticated_sbwc_remote_desktop_control_protocol",
+    "runtime_applied_readback_receipt",
+    "standalone_remote_input_backend",
     "remote_control_notice_artifact_gate",
     "real_device_p2p_remote_gate",
     "performance_p2p_remote_final_window_fps_gate",
@@ -61,27 +62,27 @@ const COMMAND_CONTRACTS: &[RemoteDesktopCommandContract] = &[
     },
     RemoteDesktopCommandContract {
         command: "skybridge remote-desktop start --session-id <id> [--resolution <preset>] [--fps <value>]",
-        status: "request_only",
+        status: "unavailable",
         mutation_supported: false,
-        agent_observation_required: true,
+        agent_observation_required: false,
     },
     RemoteDesktopCommandContract {
         command: "skybridge remote-desktop stop --session-id <id>",
-        status: "request_only",
+        status: "unavailable",
         mutation_supported: false,
-        agent_observation_required: true,
+        agent_observation_required: false,
     },
     RemoteDesktopCommandContract {
         command: "skybridge remote-desktop set-resolution --session-id <id> --resolution <preset>",
-        status: "request_only",
+        status: "unavailable",
         mutation_supported: false,
-        agent_observation_required: true,
+        agent_observation_required: false,
     },
     RemoteDesktopCommandContract {
         command: "skybridge remote-desktop set-fps --session-id <id> --fps <value>",
-        status: "request_only",
+        status: "unavailable",
         mutation_supported: false,
-        agent_observation_required: true,
+        agent_observation_required: false,
     },
 ];
 
@@ -148,28 +149,16 @@ struct RemoteDesktopStatusReport {
 }
 
 #[derive(Debug, Serialize)]
-struct RemoteDesktopMutationReport {
-    schema_version: u32,
-    action: RemoteDesktopControlAction,
-    session_id: String,
-    request_id: String,
-    request_registered: bool,
-    accepted: bool,
-    live_control_status: &'static str,
-    mutation_supported: bool,
-    request_registry_supported: bool,
-    pending_agent_observation: bool,
-    agent_observed: bool,
-    applied: bool,
-    request: RemoteDesktopPendingRequestStatus,
-    required_gates_before_live_apply: &'static [&'static str],
-}
-
-#[derive(Debug, Serialize)]
 struct RemoteDesktopMutationRejectionReport {
     schema_version: u32,
+    success: bool,
+    status: &'static str,
     action: RemoteDesktopControlAction,
     session_id_provided: bool,
+    session_binding_verified: bool,
+    authenticated_peer_bound: bool,
+    peer_capability_status: &'static str,
+    standalone_backend_status: &'static str,
     request_registered: bool,
     accepted: bool,
     live_control_status: &'static str,
@@ -188,6 +177,16 @@ struct RemoteDesktopMutationErrorReport {
     message: &'static str,
     retryable: bool,
     required_gate: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RemoteDesktopMutationUnavailability {
+    code: &'static str,
+    message: &'static str,
+    required_gate: &'static str,
+    session_binding_verified: bool,
+    authenticated_peer_bound: bool,
+    peer_capability_status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -270,20 +269,11 @@ pub(crate) async fn status(
         .iter()
         .map(|session| session_to_status(session, &request_registry))
         .collect::<Vec<_>>();
-    let has_pending_request = sessions
-        .iter()
-        .any(|session| session.pending_agent_observation);
-    let has_observed_request = sessions.iter().any(|session| {
-        session
-            .latest_request
-            .as_ref()
-            .is_some_and(|request| request.agent_observed)
-    });
     let report = RemoteDesktopStatusReport {
         schema_version: SCHEMA_VERSION,
-        live_control_status: live_control_status(has_pending_request, has_observed_request),
+        live_control_status: LIVE_CONTROL_STATUS,
         mutation_supported: false,
-        agent_observation_supported: true,
+        agent_observation_supported: false,
         session_filter: args.session_id,
         sessions,
         evidence_sources: EVIDENCE_SOURCES,
@@ -392,7 +382,7 @@ pub(crate) async fn start(
         resolution: Some(resolution.to_payload()),
         fps: Some(args.fps),
     };
-    register_pending_request(
+    reject_unavailable_mutation(
         state_dir,
         session_id,
         RemoteDesktopControlAction::Start,
@@ -406,7 +396,7 @@ pub(crate) async fn stop(
     state_dir: Option<PathBuf>,
     args: crate::RemoteDesktopSessionActionArgs,
 ) -> Result<()> {
-    register_pending_request(
+    reject_unavailable_mutation(
         state_dir,
         args.session_id,
         RemoteDesktopControlAction::Stop,
@@ -436,7 +426,7 @@ pub(crate) async fn set_resolution(
         resolution: Some(resolution.to_payload()),
         fps: None,
     };
-    register_pending_request(
+    reject_unavailable_mutation(
         state_dir,
         session_id,
         RemoteDesktopControlAction::SetResolution,
@@ -463,7 +453,7 @@ pub(crate) async fn set_fps(
         resolution: None,
         fps: Some(args.fps),
     };
-    register_pending_request(
+    reject_unavailable_mutation(
         state_dir,
         session_id,
         RemoteDesktopControlAction::SetFps,
@@ -478,7 +468,7 @@ fn contract_report() -> RemoteDesktopContractReport {
         schema_version: SCHEMA_VERSION,
         live_control_status: LIVE_CONTROL_STATUS,
         mutation_supported: false,
-        agent_observation_supported: true,
+        agent_observation_supported: false,
         request_contract_source: REQUEST_CONTRACT_SOURCE,
         commands: COMMAND_CONTRACTS,
         resolution_request_contract: REMOTE_DESKTOP_RESOLUTION_REQUEST_CONTRACT,
@@ -517,12 +507,7 @@ fn session_to_status(
             .as_deref()
             .is_some_and(|name| !name.trim().is_empty()),
         updated_at: session.updated_at.to_string(),
-        live_control_status: live_control_status(
-            pending_agent_observation,
-            latest_request
-                .as_ref()
-                .is_some_and(|request| request.agent_observed),
-        ),
+        live_control_status: LIVE_CONTROL_STATUS,
         pending_agent_observation,
         pending_request,
         latest_request,
@@ -617,9 +602,14 @@ fn reject_invalid_mutation_request<T>(
         print_mutation_rejection_report(
             action,
             &session_id,
-            "remote_desktop_request_invalid",
-            "remote desktop request is outside the bounded request contract",
-            "remote_desktop.request_contract",
+            RemoteDesktopMutationUnavailability {
+                code: "remote_desktop_request_invalid",
+                message: "remote desktop request is outside the bounded request contract",
+                required_gate: "remote_desktop.request_contract",
+                session_binding_verified: false,
+                authenticated_peer_bound: false,
+                peer_capability_status: "not_evaluated",
+            },
         )?;
         bail!("remote desktop request is outside the bounded request contract");
     }
@@ -630,96 +620,146 @@ fn reject_invalid_mutation_request<T>(
 fn print_mutation_rejection_report(
     action: RemoteDesktopControlAction,
     session_id: &str,
-    code: &'static str,
-    message: &'static str,
-    required_gate: &'static str,
+    unavailability: RemoteDesktopMutationUnavailability,
 ) -> Result<()> {
-    eprintln!(
-        "{}",
-        serde_json::to_string_pretty(&RemoteDesktopMutationRejectionReport {
-            schema_version: SCHEMA_VERSION,
-            action,
-            session_id_provided: !session_id.trim().is_empty(),
-            request_registered: false,
-            accepted: false,
-            live_control_status: LIVE_CONTROL_STATUS,
-            mutation_supported: false,
-            request_registry_supported: true,
-            pending_agent_observation: false,
-            agent_observed: false,
-            applied: false,
-            error: RemoteDesktopMutationErrorReport {
-                code,
-                message,
-                retryable: false,
-                required_gate,
-            },
-            required_gates_before_live_apply: REQUIRED_GATES,
-        })?
-    );
-    Ok(())
+    crate::cli_output::write_json_failure(&RemoteDesktopMutationRejectionReport {
+        schema_version: SCHEMA_VERSION,
+        success: false,
+        status: LIVE_CONTROL_STATUS,
+        action,
+        session_id_provided: !session_id.trim().is_empty(),
+        session_binding_verified: unavailability.session_binding_verified,
+        authenticated_peer_bound: unavailability.authenticated_peer_bound,
+        peer_capability_status: unavailability.peer_capability_status,
+        standalone_backend_status: "unavailable",
+        request_registered: false,
+        accepted: false,
+        live_control_status: LIVE_CONTROL_STATUS,
+        mutation_supported: false,
+        request_registry_supported: false,
+        pending_agent_observation: false,
+        agent_observed: false,
+        applied: false,
+        error: RemoteDesktopMutationErrorReport {
+            code: unavailability.code,
+            message: unavailability.message,
+            retryable: false,
+            required_gate: unavailability.required_gate,
+        },
+        required_gates_before_live_apply: REQUIRED_GATES,
+    })
 }
 
-async fn register_pending_request(
+async fn reject_unavailable_mutation(
     state_dir: Option<PathBuf>,
     session_id: String,
     action: RemoteDesktopControlAction,
-    payload: RemoteDesktopControlRequestPayload,
+    _payload: RemoteDesktopControlRequestPayload,
     as_json: bool,
 ) -> Result<()> {
     let paths = resolve_paths(state_dir)?;
-    match enqueue_remote_desktop_request_for_established_session(
-        &paths,
-        &session_id,
-        action,
-        payload,
-    )
-    .await
-    {
-        Ok(request) => {
-            let report = mutation_report(request);
-            if as_json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!(
-                    "Remote desktop request `{}` registered for session `{}`; pending_agent_observation=true applied=false",
-                    report.request_id, report.session_id
-                );
-            }
-            Ok(())
-        }
+    let unavailability = match classify_mutation_unavailability(&paths, &session_id).await {
+        Ok(unavailability) => unavailability,
         Err(error) => {
             if as_json {
                 print_mutation_rejection_report(
                     action,
                     &session_id,
-                    "remote_desktop_request_rejected",
-                    "remote desktop request was rejected before agent observation",
-                    "agent_owned_remote_desktop_control",
+                    RemoteDesktopMutationUnavailability {
+                        code: "remote_desktop_state_unavailable",
+                        message: "remote desktop session state could not be verified",
+                        required_gate: "agent_owned_session_registry",
+                        session_binding_verified: false,
+                        authenticated_peer_bound: false,
+                        peer_capability_status: "unverified",
+                    },
                 )?;
-                bail!("remote desktop request rejected before agent observation");
             }
-            Err(error)
+            return Err(error.context("failed to inspect remote desktop session state"));
         }
+    };
+    if as_json {
+        print_mutation_rejection_report(action, &session_id, unavailability)?;
     }
+    bail!(unavailability.message)
 }
 
-fn mutation_report(request: RemoteDesktopControlRequest) -> RemoteDesktopMutationReport {
-    RemoteDesktopMutationReport {
-        schema_version: SCHEMA_VERSION,
-        action: request.action,
-        session_id: request.session_id.clone(),
-        request_id: request.request_id.clone(),
-        request_registered: true,
-        accepted: true,
-        live_control_status: PENDING_AGENT_OBSERVATION_STATUS,
-        mutation_supported: false,
-        request_registry_supported: true,
-        pending_agent_observation: true,
-        agent_observed: false,
-        applied: false,
-        request: request_to_status(&request),
-        required_gates_before_live_apply: REQUIRED_GATES,
+async fn classify_mutation_unavailability(
+    paths: &skybridge_agent::AgentPaths,
+    session_id: &str,
+) -> Result<RemoteDesktopMutationUnavailability> {
+    let registry = load_session_registry(paths).await?;
+    let Some(session) = registry.get(session_id) else {
+        return Ok(peer_capability_unverified(false, false));
+    };
+    let runtime_bound = !session.runtime_id.trim().is_empty();
+    let fingerprint_bound = session
+        .remote_protocol_public_key_fingerprint
+        .as_deref()
+        .is_some_and(|fingerprint| !fingerprint.trim().is_empty());
+    let established = session.is_active() && session.effective_established_readiness().is_some();
+    let authenticated_peer_bound = session
+        .authenticated_peer
+        .as_ref()
+        .zip(session.remote_device_id.as_deref())
+        .is_some_and(|(peer, remote_device_id)| {
+            !peer.device_id.trim().is_empty()
+                && peer.device_id == remote_device_id
+                && session
+                    .handshake_completed_at
+                    .is_some_and(|completed_at| peer.observed_at >= completed_at)
+        });
+    let session_binding_verified =
+        runtime_bound && fingerprint_bound && established && authenticated_peer_bound;
+    if !session_binding_verified {
+        return Ok(peer_capability_unverified(
+            session_binding_verified,
+            authenticated_peer_bound,
+        ));
+    }
+
+    let Some(capabilities) = session
+        .authenticated_peer
+        .as_ref()
+        .and_then(|peer| peer.capabilities.as_ref())
+    else {
+        return Ok(peer_capability_unverified(true, true));
+    };
+    if !capabilities
+        .iter()
+        .any(|capability| capability == "remote_desktop")
+    {
+        return Ok(RemoteDesktopMutationUnavailability {
+            code: "peer_capability_not_advertised",
+            message: "authenticated peer did not advertise remote desktop capability",
+            required_gate: "peer_remote_desktop_capability",
+            session_binding_verified: true,
+            authenticated_peer_bound: true,
+            peer_capability_status: "not_advertised",
+        });
+    }
+
+    Ok(RemoteDesktopMutationUnavailability {
+        code: "standalone_remote_desktop_backend_unavailable",
+        message: "standalone remote desktop backend is unavailable",
+        required_gate: "standalone_remote_desktop_backend",
+        session_binding_verified: true,
+        authenticated_peer_bound: true,
+        peer_capability_status: "advertised",
+    })
+}
+
+fn peer_capability_unverified(
+    session_binding_verified: bool,
+    authenticated_peer_bound: bool,
+) -> RemoteDesktopMutationUnavailability {
+    RemoteDesktopMutationUnavailability {
+        code: "peer_capability_unverified",
+        message: "authenticated peer remote desktop capability could not be verified",
+        required_gate: "authenticated_peer_capability_heartbeat",
+        session_binding_verified,
+        authenticated_peer_bound,
+        peer_capability_status: "unverified",
     }
 }
 
@@ -745,16 +785,6 @@ fn request_status_label(status: RemoteDesktopControlRequestStatus) -> &'static s
         }
         RemoteDesktopControlRequestStatus::AgentObserved => AGENT_OBSERVED_NOT_APPLIED_STATUS,
         RemoteDesktopControlRequestStatus::AgentRejected => "agent_rejected",
-    }
-}
-
-fn live_control_status(pending_agent_observation: bool, agent_observed: bool) -> &'static str {
-    if pending_agent_observation {
-        PENDING_AGENT_OBSERVATION_STATUS
-    } else if agent_observed {
-        AGENT_OBSERVED_NOT_APPLIED_STATUS
-    } else {
-        LIVE_CONTROL_STATUS
     }
 }
 
@@ -784,16 +814,16 @@ mod tests {
     fn remote_desktop_contract_keeps_live_application_unobserved() {
         let report = contract_report();
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.live_control_status, "planned");
+        assert_eq!(report.live_control_status, "unavailable");
         assert!(!report.mutation_supported);
-        assert!(report.agent_observation_supported);
+        assert!(!report.agent_observation_supported);
         assert!(report.commands.iter().any(|command| {
-            command.command.contains("start") && command.status == "request_only"
+            command.command.contains("start") && command.status == "unavailable"
         }));
         assert!(
             report
                 .required_gates
-                .contains(&"real_device_p2p_remote_gate")
+                .contains(&"runtime_applied_readback_receipt")
         );
     }
 

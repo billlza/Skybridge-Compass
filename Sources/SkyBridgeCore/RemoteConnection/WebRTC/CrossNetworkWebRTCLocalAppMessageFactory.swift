@@ -95,7 +95,7 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
 
     static func localAuthenticatedRouteBindingRoutes(
         endpointSnapshot: ServiceEndpointSnapshot,
-        serviceName: String = Host.current().localizedName ?? "Mac",
+        serviceName: String = LocalHostName.localizedName ?? "Mac",
         hostName: String = ProcessInfo.processInfo.hostName
     ) -> [CrossNetworkWebRTCLocalAuthenticatedRouteBindingRoute] {
         let normalizedServiceName = normalizedNonEmptyToken(serviceName) ?? "Mac"
@@ -104,8 +104,8 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
         if let port = endpointSnapshot.fileTransferPort, port > 0 {
             routes.append(.init(
                 kind: "fileTransfer",
-                serviceType: "_skybridge-transfer._tcp",
-                instanceName: "\(normalizedServiceName)._skybridge-transfer._tcp.local",
+                serviceType: BonjourInteropContract.fileTransferServiceType,
+                instanceName: "\(normalizedServiceName).\(BonjourInteropContract.fileTransferServiceType).local",
                 hostName: normalizedHostName,
                 port: port
             ))
@@ -113,8 +113,8 @@ enum CrossNetworkWebRTCLocalAppMessageFactory {
         if let port = endpointSnapshot.remoteControlPort, port > 0 {
             routes.append(.init(
                 kind: "remoteDesktop",
-                serviceType: "_skybridge-remote._tcp",
-                instanceName: "\(normalizedServiceName)._skybridge-remote._tcp.local",
+                serviceType: BonjourInteropContract.remoteControlServiceType,
+                instanceName: "\(normalizedServiceName).\(BonjourInteropContract.remoteControlServiceType).local",
                 hostName: normalizedHostName,
                 port: port
             ))

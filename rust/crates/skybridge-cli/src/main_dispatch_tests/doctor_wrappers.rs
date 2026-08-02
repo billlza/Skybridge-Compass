@@ -63,6 +63,7 @@ async fn doctor_wrappers_cover_control_plane_and_webrtc_entrypoints() -> Result<
 
     crate::doctor_commands::doctor_signaling(crate::SignalingDoctorArgs {
         base_url: Some(base_url),
+        allow_insecure_loopback: true,
         expected_backend: Some("redis".to_owned()),
         output: OutputOptions { json: true },
     })
@@ -97,6 +98,7 @@ async fn doctor_wrappers_cover_control_plane_and_webrtc_entrypoints() -> Result<
     ])?;
     crate::doctor_commands::doctor_media_lease(crate::MediaLeaseDoctorArgs {
         base_url: Some(lease_url),
+        allow_insecure_loopback: true,
         session_id: Some("SESSION1".to_owned()),
         media_admission_token: Some("token".to_owned()),
         output: OutputOptions { json: true },

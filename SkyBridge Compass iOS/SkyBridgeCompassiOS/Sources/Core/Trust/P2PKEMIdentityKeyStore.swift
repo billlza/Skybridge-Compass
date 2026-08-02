@@ -322,7 +322,7 @@ enum QPeriaptKEMIdentityEnvelope {
             }
 
             let publicKey = Data(bytes[publicKeyRange])
-            let privateKey = SecureBytes(count: privateKeyLength)
+            let privateKey = try SecureBytes(count: privateKeyLength)
             privateKey.withUnsafeMutableBytes { destination in
                 destination.copyBytes(
                     from: UnsafeRawBufferPointer(

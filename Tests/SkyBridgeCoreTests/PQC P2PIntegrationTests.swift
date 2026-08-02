@@ -58,11 +58,11 @@ final class PQCP2PIntegrationTests: XCTestCase {
         let cleanupTask = await MainActor.run {
             let trust = TrustSyncService.shared
             return Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: trustIds)
+                try await trust.removeRecordsForTesting(deviceIds: trustIds)
                 trust.setInMemoryPersistenceForTesting(false)
             }
         }
-        await cleanupTask.value
+        try await cleanupTask.value
 
         let enablePQC = originalEnablePQC
         let signatureAlgorithm = originalPQCSignatureAlgorithm

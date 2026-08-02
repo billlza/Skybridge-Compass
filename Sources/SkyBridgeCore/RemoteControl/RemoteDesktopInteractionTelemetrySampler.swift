@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import CoreGraphics
 import ApplicationServices
@@ -403,4 +406,5 @@ final class RemoteDesktopInteractionTelemetrySampler {
         )
     }
 }
+#endif
 #endif

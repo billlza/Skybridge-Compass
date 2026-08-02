@@ -22,6 +22,18 @@ fn doctor_and_connection_code_subcommands_parse_with_json_flags() {
         Cli::try_parse_from([
             "skybridge",
             "doctor",
+            "signaling",
+            "--base-url",
+            "http://127.0.0.1:8080",
+            "--allow-insecure-loopback",
+            "--json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "doctor",
             "media-lease",
             "--media-admission-token",
             "token",

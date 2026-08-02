@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Metal
 import MetalKit
@@ -756,3 +759,4 @@ public enum Metal4Error: LocalizedError {
         }
     }
 }
+#endif

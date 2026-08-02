@@ -1,7 +1,54 @@
 import Foundation
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferInboundAdmissionError
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferInboundAdmissionPolicy
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferOperationReservationLedger
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
+import enum SkyBridgeProtocolCore.InboundFileTransferIOError
+import struct SkyBridgeProtocolCore.InboundFileTransferIOHandle
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
+    struct InboundFileTransferProgressOwner: Sendable, Equatable {
+        let stateToken: UUID
+        let lifecycleToken: UUID
+        let sessionID: String
+        let revision: UInt64
+    }
+
+    enum InboundFileTransferProgressResumeDecision: Sendable, Equatable {
+        case resume
+        case discardStaleIO
+    }
+
+    enum InboundFileTransferProgressResumePolicy {
+        nonisolated static func decision(
+            expectedOwner: InboundFileTransferProgressOwner,
+            currentOwner: InboundFileTransferProgressOwner?,
+            activeLifecycleToken: UUID,
+            activeSessionID: String?
+        ) -> InboundFileTransferProgressResumeDecision {
+            guard currentOwner == expectedOwner,
+                  activeLifecycleToken == expectedOwner.lifecycleToken,
+                  activeSessionID == expectedOwner.sessionID else {
+                return .discardStaleIO
+            }
+            return .resume
+        }
+    }
+
+    struct InboundFileTransferCleanupReport: Sendable, Equatable {
+        let workerDeadlineExceededCount: Int
+        let workerJoinCancelledCount: Int
+        let partialFileDiscardFailureCount: Int
+
+        var hasFailures: Bool {
+            workerDeadlineExceededCount > 0
+                || workerJoinCancelledCount > 0
+                || partialFileDiscardFailureCount > 0
+        }
+    }
+
     struct FileTransferWaiterKey: Hashable, Sendable {
         let transferID: String
         let operation: String
@@ -54,6 +101,15 @@ extension CrossNetworkWebRTCManager {
         var isFinalizing = false
         var chunkHashes: [Int: Data] = [:]
         var receivedChunkSizes: [Int: Int] = [:]
+
+        var progressOwner: InboundFileTransferProgressOwner {
+            InboundFileTransferProgressOwner(
+                stateToken: stateToken,
+                lifecycleToken: lifecycleToken,
+                sessionID: sessionID,
+                revision: revision
+            )
+        }
     }
 
     struct InboundFileTransferPendingAdmission {
@@ -64,20 +120,27 @@ extension CrossNetworkWebRTCManager {
 
     struct QueuedInboundFileTransferOperation {
         let message: CrossNetworkFileTransferMessage
+        let reservation: CrossNetworkFileTransferOperationReservationLedger.Reservation
         let sessionID: String
         let lifecycleToken: UUID
     }
+    nonisolated private static let inboundFileTransferWorkerTeardownTimeoutSeconds: TimeInterval = 2
 
-    private static let maximumQueuedInboundFileTransferOperations = 128
-
-    func cleanupInboundFileTransfers() async {
+    /// Invalidates every file-transfer operation synchronously so teardown can
+    /// call it before its first suspension point. The later bounded cleanup
+    /// owns joins and exact I/O disposal.
+    func invalidateInboundFileTransferOperationsForTeardown() {
         inboundFileTransferLifecycleToken = UUID()
         acceptsQueuedInboundFileTransferOperations = false
+        inboundFileTransferChunkOperationsInFlight.removeAll(keepingCapacity: false)
+        let queuedOperations = queuedInboundFileTransferOperationsByTransferID.values
+            .flatMap { $0 }
         queuedInboundFileTransferOperationsByTransferID.removeAll(keepingCapacity: false)
-        queuedInboundFileTransferOperationCount = 0
-        let operationWorkers = Array(inboundFileTransferOperationWorkers.values)
-        for operationWorker in operationWorkers {
-            operationWorker.cancel()
+        for operation in queuedOperations {
+            _ = releaseInboundFileTransferOperationReservation(operation.reservation)
+        }
+        for operationWorker in inboundFileTransferOperationWorkers.values {
+            operationWorker.task.cancel()
         }
         for timer in inboundFileTransferCompleteTimers.values {
             timer.cancel()
@@ -87,24 +150,69 @@ extension CrossNetworkWebRTCManager {
             timer.cancel()
         }
         inboundFileTransferIdleTimers.removeAll()
-        for operationWorker in operationWorkers {
-            await operationWorker.value
+    }
+
+    func cleanupInboundFileTransfers() async -> InboundFileTransferCleanupReport {
+        invalidateInboundFileTransferOperationsForTeardown()
+        let operationWorkers = Array(inboundFileTransferOperationWorkers)
+        let workerOutcomes = await withTaskGroup(
+            of: CrossNetworkCancelledTaskTeardownJoiner.Outcome.self,
+            returning: [CrossNetworkCancelledTaskTeardownJoiner.Outcome].self
+        ) { group in
+            for (_, operationWorker) in operationWorkers {
+                group.addTask {
+                    await CrossNetworkCancelledTaskTeardownJoiner.joinCancelledTask(
+                        operationWorker.task,
+                        timeoutSeconds: Self.inboundFileTransferWorkerTeardownTimeoutSeconds
+                    )
+                }
+            }
+            var outcomes: [CrossNetworkCancelledTaskTeardownJoiner.Outcome] = []
+            for await outcome in group {
+                outcomes.append(outcome)
+            }
+            return outcomes
         }
-        inboundFileTransferOperationWorkers.removeAll(keepingCapacity: false)
+        for (transferID, operationWorker) in operationWorkers {
+            CrossNetworkExactOwnerDictionary.removeValue(
+                from: &inboundFileTransferOperationWorkers,
+                key: transferID,
+                expectedOwner: operationWorker.owner,
+                owner: \.owner
+            )
+        }
+        let workerDeadlineExceededCount = workerOutcomes.reduce(into: 0) { count, outcome in
+            if outcome == .quarantined(.deadlineExceeded) {
+                count += 1
+            }
+        }
+        let workerJoinCancelledCount = workerOutcomes.reduce(into: 0) { count, outcome in
+            if outcome == .quarantined(.joinCancelled) {
+                count += 1
+            }
+        }
+        if workerDeadlineExceededCount > 0 || workerJoinCancelledCount > 0 {
+            SkyBridgeLogger.shared.error(
+                "⛔️ WebRTC inbound file-transfer workers quarantined: deadline_exceeded=\(workerDeadlineExceededCount) join_cancelled=\(workerJoinCancelledCount)"
+            )
+        }
         let statesToDiscard = inboundFileTransfers.values.filter { !$0.isFinalizing }
         for state in statesToDiscard {
             inboundFileTransfers.removeValue(forKey: state.transferId)
         }
         inboundFileTransferPendingAdmissions.removeAll()
         inboundFileTransferTerminalReceipts.removeAll()
+        var partialFileDiscardFailureCount = 0
         for state in statesToDiscard {
             var terminalMessage = "WebRTC channel closed before transfer completion"
             do {
                 try await inboundFileTransferIO.discardUncommittedFile(state.ioHandle)
             } catch {
+                partialFileDiscardFailureCount += 1
                 terminalMessage = FileTransferError.partialFileCleanupFailed.localizedDescription
+                let diagnosticError = error as NSError
                 SkyBridgeLogger.shared.warning(
-                    "⚠️ WebRTC inbound channel-close cleanup failed: transfer=<redacted> error=\(error.localizedDescription)"
+                    "⚠️ WebRTC inbound channel-close cleanup failed: transfer=<redacted> error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
                 )
             }
             FileTransferManager.instance.completeExternalInboundTransfer(
@@ -113,16 +221,35 @@ extension CrossNetworkWebRTCManager {
                 error: terminalMessage
             )
         }
+        return InboundFileTransferCleanupReport(
+            workerDeadlineExceededCount: workerDeadlineExceededCount,
+            workerJoinCancelledCount: workerJoinCancelledCount,
+            partialFileDiscardFailureCount: partialFileDiscardFailureCount
+        )
     }
 
     /// Keeps potentially slow approval/hash/fsync work off the strictly ordered
     /// control receive loop while preserving FIFO ordering for inbound requests.
     func dispatchInboundFileTransferFromMac(
         _ message: CrossNetworkFileTransferMessage,
-        sessionID: String
+        sessionID: String,
+        encodedPayloadByteCount: Int
     ) async {
         switch message.op {
         case .error, .metadataAck, .chunkAck, .completeAck:
+            do {
+                try CrossNetworkFileTransferInboundAdmissionPolicy
+                    .validateInboundResponse(message)
+            } catch {
+                let diagnosticError = error as NSError
+                SkyBridgeLogger.shared.error(
+                    "WebRTC inbound file-transfer response admission failed: error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
+                )
+                failInboundFileTransferControlChannel(
+                    "Invalid inbound file-transfer response"
+                )
+                return
+            }
             await handleInboundFileTransferFromMac(
                 message,
                 expectedSessionID: sessionID
@@ -132,25 +259,69 @@ extension CrossNetworkWebRTCManager {
             if !acceptsQueuedInboundFileTransferOperations,
                inboundFileTransferOperationWorkers.isEmpty,
                inboundFileTransfers.isEmpty,
-               inboundFileTransferPendingAdmissions.isEmpty {
+               inboundFileTransferPendingAdmissions.isEmpty,
+               inboundFileTransferOperationReservationLedger.isEmpty {
                 acceptsQueuedInboundFileTransferOperations = true
             }
             guard acceptsQueuedInboundFileTransferOperations else { return }
-            guard queuedInboundFileTransferOperationCount
-                    < Self.maximumQueuedInboundFileTransferOperations else {
-                let message = "Inbound file-transfer operation queue capacity exceeded"
-                SkyBridgeLogger.shared.error(message)
-                failInboundFileTransferControlChannel(message)
+            let retainedByteCount: Int
+            do {
+                retainedByteCount = try CrossNetworkFileTransferInboundAdmissionPolicy
+                    .retainedByteCharge(
+                        for: message,
+                        encodedPayloadByteCount: encodedPayloadByteCount
+                    )
+            } catch {
+                let diagnosticError = error as NSError
+                SkyBridgeLogger.shared.error(
+                    "WebRTC inbound file-transfer request admission failed: error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
+                )
+                failInboundFileTransferControlChannel(
+                    "Invalid inbound file-transfer request"
+                )
+                return
+            }
+            let reservation: CrossNetworkFileTransferOperationReservationLedger.Reservation
+            do {
+                reservation = try inboundFileTransferOperationReservationLedger.reserve(
+                    byteCount: retainedByteCount
+                )
+            } catch CrossNetworkFileTransferInboundAdmissionError
+                .operationCapacityExceeded(_) {
+                SkyBridgeLogger.shared.error(
+                    "WebRTC inbound file-transfer operation count capacity exceeded"
+                )
+                failInboundFileTransferControlChannel(
+                    "Inbound file-transfer operation count capacity exceeded"
+                )
+                return
+            } catch CrossNetworkFileTransferInboundAdmissionError
+                .retainedByteCapacityExceeded(_) {
+                SkyBridgeLogger.shared.error(
+                    "WebRTC inbound file-transfer retained-byte capacity exceeded"
+                )
+                failInboundFileTransferControlChannel(
+                    "Inbound file-transfer retained-byte capacity exceeded"
+                )
+                return
+            } catch {
+                let diagnosticError = error as NSError
+                SkyBridgeLogger.shared.error(
+                    "WebRTC inbound file-transfer reservation invariant failed: error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
+                )
+                failInboundFileTransferControlChannel(
+                    "Inbound file-transfer operation accounting failed"
+                )
                 return
             }
             queuedInboundFileTransferOperationsByTransferID[message.transferId, default: []].append(
                 QueuedInboundFileTransferOperation(
                     message: message,
+                    reservation: reservation,
                     sessionID: sessionID,
                     lifecycleToken: inboundFileTransferLifecycleToken
                 )
             )
-            queuedInboundFileTransferOperationCount += 1
             startInboundFileTransferOperationWorkersIfPossible(
                 preferredTransferID: message.transferId
             )
@@ -168,7 +339,7 @@ extension CrossNetworkWebRTCManager {
             startInboundFileTransferOperationWorkerIfPossible(for: preferredTransferID)
         }
         while inboundFileTransferOperationWorkers.count
-                < Self.maxConcurrentInboundWebRTCFileTransfersGlobal,
+                < Self.maxConcurrentInboundWebRTCFileTransfersPerSession,
               let transferID = queuedInboundFileTransferOperationsByTransferID.keys.first(where: {
                   inboundFileTransferOperationWorkers[$0] == nil
               }) {
@@ -181,26 +352,52 @@ extension CrossNetworkWebRTCManager {
               inboundFileTransferOperationWorkers[transferID] == nil,
               queuedInboundFileTransferOperationsByTransferID[transferID]?.isEmpty == false,
               inboundFileTransferOperationWorkers.count
-                < Self.maxConcurrentInboundWebRTCFileTransfersGlobal else {
+                < Self.maxConcurrentInboundWebRTCFileTransfersPerSession else {
             return
         }
 
-        inboundFileTransferOperationWorkers[transferID] = Task { @MainActor [weak self] in
+        let owner = InboundFileTransferOperationWorker.Owner(
+            token: UUID(),
+            lifecycleToken: inboundFileTransferLifecycleToken
+        )
+        let task = Task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled,
                   let operation = dequeueInboundFileTransferOperation(for: transferID) {
                 guard operation.lifecycleToken == inboundFileTransferLifecycleToken,
                       operation.sessionID == sessionKeys?.sessionId else {
+                    _ = releaseInboundFileTransferOperationReservation(
+                        operation.reservation
+                    )
                     continue
                 }
                 await handleInboundFileTransferFromMac(
                     operation.message,
                     expectedSessionID: operation.sessionID
                 )
+                guard releaseInboundFileTransferOperationReservation(
+                    operation.reservation
+                ) else {
+                    failInboundFileTransferControlChannel(
+                        "Inbound file-transfer operation accounting failed"
+                    )
+                    return
+                }
             }
-            inboundFileTransferOperationWorkers.removeValue(forKey: transferID)
+            guard CrossNetworkExactOwnerDictionary.removeValue(
+                from: &inboundFileTransferOperationWorkers,
+                key: transferID,
+                expectedOwner: owner,
+                owner: \.owner
+            ) != nil else {
+                return
+            }
             startInboundFileTransferOperationWorkersIfPossible()
         }
+        inboundFileTransferOperationWorkers[transferID] = InboundFileTransferOperationWorker(
+            owner: owner,
+            task: task
+        )
     }
 
     private func dequeueInboundFileTransferOperation(
@@ -212,13 +409,26 @@ extension CrossNetworkWebRTCManager {
             return nil
         }
         let operation = operations.removeFirst()
-        queuedInboundFileTransferOperationCount -= 1
         if operations.isEmpty {
             queuedInboundFileTransferOperationsByTransferID.removeValue(forKey: transferID)
         } else {
             queuedInboundFileTransferOperationsByTransferID[transferID] = operations
         }
         return operation
+    }
+
+    @discardableResult
+    private func releaseInboundFileTransferOperationReservation(
+        _ reservation: CrossNetworkFileTransferOperationReservationLedger.Reservation
+    ) -> Bool {
+        guard inboundFileTransferOperationReservationLedger.release(reservation) else {
+            acceptsQueuedInboundFileTransferOperations = false
+            SkyBridgeLogger.shared.error(
+                "WebRTC inbound file-transfer operation accounting invariant failed"
+            )
+            return false
+        }
+        return true
     }
 
     func sendFramed(_ data: Data, over session: WebRTCSession) async throws {
@@ -247,7 +457,7 @@ public extension CrossNetworkWebRTCManager {
         guard let session, let keys = sessionKeys else { throw RemoteDesktopError.disconnected }
         let data = try JSONEncoder().encode(message)
         let encrypted = try encrypt(plaintext: data, with: keys, packetType: .fileTransfer)
-        let padded = TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-file")
+        let padded = try TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-file")
         try await sendFramed(padded, over: session)
     }
 
@@ -567,8 +777,9 @@ extension CrossNetworkWebRTCManager {
         do {
             try await inboundFileTransferIO.discardUncommittedFile(state.ioHandle)
         } catch {
+            let diagnosticError = error as NSError
             SkyBridgeLogger.shared.warning(
-                "⚠️ WebRTC stale inbound I/O cleanup failed: context=\(context) transfer=<redacted> error=\(error.localizedDescription)"
+                "⚠️ WebRTC stale inbound I/O cleanup failed: context=\(context) transfer=<redacted> error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
             )
         }
     }
@@ -867,11 +1078,23 @@ extension CrossNetworkWebRTCManager {
         let expectedLifecycleToken = inboundFileTransferLifecycleToken
 
         func sendAck(_ ack: CrossNetworkFileTransferMessage, label: String) async {
+            guard inboundFileTransferLifecycleToken == expectedLifecycleToken,
+                  sessionKeys?.sessionId == sessionID else {
+                return
+            }
             do {
                 try await sendFileTransferMessage(ack)
             } catch {
+                let diagnosticError = error as NSError
+                guard inboundFileTransferLifecycleToken == expectedLifecycleToken,
+                      sessionKeys?.sessionId == sessionID else {
+                    SkyBridgeLogger.shared.debug(
+                        "ℹ️ stale WebRTC file-transfer ack failure quarantined: label=\(label) op=\(ack.op.rawValue) transfer=<redacted> error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
+                    )
+                    return
+                }
                 SkyBridgeLogger.shared.error(
-                    "WebRTC file-transfer ack send failed: label=\(label) op=\(ack.op.rawValue) transfer=<redacted> error=\(error.localizedDescription)"
+                    "WebRTC file-transfer ack send failed: label=\(label) op=\(ack.op.rawValue) transfer=<redacted> error_domain=\(diagnosticError.domain) code=\(diagnosticError.code)"
                 )
                 failInboundFileTransferControlChannel(
                     "WebRTC file-transfer acknowledgement delivery failed"
@@ -1191,7 +1414,7 @@ extension CrossNetworkWebRTCManager {
                 return
             }
             guard !st.isFinalizing else { return }
-            guard !inboundFileTransferChunkOperationsInFlight.contains(msg.transferId) else {
+            guard inboundFileTransferChunkOperationsInFlight[msg.transferId] == nil else {
                 await sendAck(
                     .init(
                         op: .error,
@@ -1203,8 +1426,21 @@ extension CrossNetworkWebRTCManager {
                 )
                 return
             }
-            inboundFileTransferChunkOperationsInFlight.insert(msg.transferId)
-            defer { inboundFileTransferChunkOperationsInFlight.remove(msg.transferId) }
+            let chunkOperationOwner = InboundFileTransferChunkOperationOwner(
+                token: UUID(),
+                stateToken: st.stateToken,
+                lifecycleToken: st.lifecycleToken,
+                sessionID: st.sessionID
+            )
+            inboundFileTransferChunkOperationsInFlight[msg.transferId] = chunkOperationOwner
+            defer {
+                CrossNetworkExactOwnerDictionary.removeValue(
+                    from: &inboundFileTransferChunkOperationsInFlight,
+                    key: msg.transferId,
+                    expectedOwner: chunkOperationOwner,
+                    owner: { $0 }
+                )
+            }
             guard isAuthorizedCurrentInboundState(st) else {
                 await terminateInboundFileTransfer(
                     st,
@@ -1318,6 +1554,28 @@ extension CrossNetworkWebRTCManager {
                 transferredBytes: st.receivedBytes,
                 totalBytes: st.fileSize
             )
+            let progressResumeDecision = InboundFileTransferProgressResumePolicy.decision(
+                expectedOwner: st.progressOwner,
+                currentOwner: inboundFileTransfers[st.transferId]?.progressOwner,
+                activeLifecycleToken: inboundFileTransferLifecycleToken,
+                activeSessionID: sessionKeys?.sessionId
+            )
+            guard progressResumeDecision == .resume else {
+                await discardStaleInboundIO(
+                    for: st,
+                    context: "stale progress completion"
+                )
+                return
+            }
+            guard inboundSenderAuthorityMatches(st) else {
+                await terminateInboundFileTransfer(
+                    st,
+                    publicMessage: "authenticated sender authority changed",
+                    uiMessage: "Authenticated sender authority changed",
+                    label: "chunkError"
+                )
+                return
+            }
             if st.completeRequestedAt != nil && st.receivedBytes >= st.fileSize {
                 st.isFinalizing = true
                 st.revision &+= 1

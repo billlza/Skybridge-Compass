@@ -29,6 +29,34 @@ pub(crate) fn append_u16_le(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
+pub(crate) fn encode_hpke_sealed_box(
+    suite_wire_id: u16,
+    encapsulated_key: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+    tag: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"HPKE");
+    let version = if nonce.is_empty() && tag.is_empty() {
+        2
+    } else {
+        1
+    };
+    out.push(version);
+    out.extend_from_slice(&suite_wire_id.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&(encapsulated_key.len() as u16).to_le_bytes());
+    out.push(nonce.len() as u8);
+    out.push(tag.len() as u8);
+    out.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
+    out.extend_from_slice(encapsulated_key);
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(ciphertext);
+    out.extend_from_slice(tag);
+    out
+}
+
 pub(crate) fn read_u16_le(data: &[u8], offset: &mut usize) -> Result<u16> {
     let bytes = read_exact(data, offset, 2)?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))

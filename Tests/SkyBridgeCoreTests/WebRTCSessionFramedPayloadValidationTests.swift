@@ -9,6 +9,24 @@ import CoreVideo
 
 @Suite("WebRTCSession Framed Payload Validation Tests")
 struct WebRTCSessionFramedPayloadValidationTests {
+    @Test("发送端拒绝接收端不接受的空分帧负载")
+    func emptyPayloadThrowsTypedError() throws {
+        #expect(!WebRTCFramedPayloadPolicy.isValidPayloadByteCount(0))
+        do {
+            _ = try WebRTCSession.validateFramedPayloadParameters(
+                payloadByteCount: 0,
+                maxChunkBytes: 8 * 1024
+            )
+            Issue.record("应当抛出 invalidFramedPayloadSize 错误")
+        } catch let error as WebRTCSession.WebRTCError {
+            guard case .invalidFramedPayloadSize(let value) = error else {
+                Issue.record("错误类型不正确: \(error)")
+                return
+            }
+            #expect(value == 0)
+        }
+    }
+
     @Test("非法分块大小返回错误而不是触发 precondition 崩溃")
     func invalidChunkSizeThrowsTypedError() throws {
         do {
@@ -29,18 +47,48 @@ struct WebRTCSessionFramedPayloadValidationTests {
         }
     }
 
-    @Test("超出 4 GiB 的分帧负载被拒绝而不是在长度转换时崩溃")
+    @Test("恶意超大分块参数在算术前被拒绝")
+    func oversizedChunkSizeThrowsTypedError() throws {
+        for invalidSize in [
+            WebRTCFramedPayloadPolicy.maximumPayloadByteCount + 1,
+            Int.max
+        ] {
+            do {
+                _ = try WebRTCSession.validateFramedPayloadParameters(
+                    payloadByteCount: 128,
+                    maxChunkBytes: invalidSize
+                )
+                Issue.record("应当抛出 invalidChunkSize 错误")
+            } catch let error as WebRTCSession.WebRTCError {
+                guard case .invalidChunkSize(let value) = error else {
+                    Issue.record("错误类型不正确: \(error)")
+                    continue
+                }
+                #expect(value == invalidSize)
+            }
+        }
+    }
+
+    @Test("发送端拒绝接收端 8 MB 上限之外的分帧负载")
     func oversizedPayloadThrowsTypedError() throws {
+        #expect(
+            try WebRTCSession.validateFramedPayloadParameters(
+                payloadByteCount: WebRTCFramedPayloadPolicy.maximumPayloadByteCount,
+                maxChunkBytes: 8 * 1024
+            ) == UInt32(WebRTCFramedPayloadPolicy.maximumPayloadByteCount)
+        )
+
+        let oversizedByteCount = WebRTCFramedPayloadPolicy.maximumPayloadByteCount + 1
         do {
             _ = try WebRTCSession.validateFramedPayloadParameters(
-                payloadByteCount: Int(UInt32.max) + 1,
+                payloadByteCount: oversizedByteCount,
                 maxChunkBytes: 8 * 1024
             )
             Issue.record("应当抛出 framedPayloadTooLarge 错误")
         } catch let error as WebRTCSession.WebRTCError {
             switch error {
             case .framedPayloadTooLarge(let value):
-                #expect(value == Int(UInt32.max) + 1)
+                #expect(value == oversizedByteCount)
             default:
                 Issue.record("错误类型不正确: \(error)")
             }
@@ -79,6 +127,25 @@ struct WebRTCSessionFramedPayloadValidationTests {
         #expect(chunk[4] == 1)
         #expect(chunk[5] == 0)
         #expect(chunk.suffix(payload.count) == payload)
+    }
+
+    @Test("SBC2 encoder rejects overflowing public offsets without trapping")
+    func screenChunkedEnvelopeRejectsOverflowingOffset() {
+        do {
+            _ = try WebRTCSession.encodeScreenChunkEnvelope(
+                frameId: 1,
+                chunkIndex: 0,
+                chunkCount: 1,
+                totalBytes: Int.max,
+                chunkOffset: Int.max,
+                payload: Data([0x01])
+            )
+            Issue.record("overflowing offset must be rejected")
+        } catch WebRTCSession.WebRTCError.framedPayloadTooLarge {
+            // Expected.
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
     }
 
     @Test("SBC2 sender rejects whole frames that cannot fit the current screen buffer budget")
@@ -534,7 +601,7 @@ struct WebRTCSessionFramedPayloadValidationTests {
             "Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession+StatePolicy.swift",
             "Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCNativeScreenVideoValuePolicy.swift",
             "Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCNativeScreenVideoFrameNormalizer.swift",
-            "Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSessionRuntimeSupport.swift"
+            "Sources/SkyBridgeWebRTCRuntime/WebRTCSessionRuntimeSupport.swift"
         ].map { path in
             try readSource(path)
         }.joined(separator: "\n")

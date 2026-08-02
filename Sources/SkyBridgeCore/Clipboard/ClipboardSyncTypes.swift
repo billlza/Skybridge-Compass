@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SkyBridgeProtocolCore
 import CryptoKit
 
 // MARK: - 剪贴板同步错误
@@ -249,7 +250,7 @@ public struct ClipboardSyncConfiguration: Codable, Sendable {
     /// 默认配置
     public static let `default` = ClipboardSyncConfiguration(
         isEnabled: false,
-        maxContentSize: 10 * 1024 * 1024,  // 10MB
+        maxContentSize: P2PControlFramePolicy.maximumInlineClipboardByteCount,
         syncInterval: 0.5,
         syncImages: true,
         syncFileURLs: false,
@@ -259,7 +260,7 @@ public struct ClipboardSyncConfiguration: Codable, Sendable {
 
     public init(
         isEnabled: Bool = false,
-        maxContentSize: Int = 10 * 1024 * 1024,
+        maxContentSize: Int = P2PControlFramePolicy.maximumInlineClipboardByteCount,
         syncInterval: TimeInterval = 0.5,
         syncImages: Bool = true,
         syncFileURLs: Bool = false,
@@ -267,7 +268,10 @@ public struct ClipboardSyncConfiguration: Codable, Sendable {
         historyRetentionDuration: TimeInterval = 86400 * 7
     ) {
         self.isEnabled = isEnabled
-        self.maxContentSize = maxContentSize
+        self.maxContentSize = min(
+            max(1, maxContentSize),
+            P2PControlFramePolicy.maximumInlineClipboardByteCount
+        )
         self.syncInterval = syncInterval
         self.syncImages = syncImages
         self.syncFileURLs = syncFileURLs

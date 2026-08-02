@@ -74,6 +74,188 @@ public struct DeviceIdentityKeyInfo: Codable, Sendable, Equatable {
     }
 }
 
+/// Fixed, non-secret storage categories for the signed laboratory identity
+/// audit. Real access-group names and persistent references never cross this
+/// boundary.
+@_spi(SkyBridgeSmokeDiagnostics)
+public enum DeviceIdentityLegacyAuditNamespace: String, Codable, Sendable, CaseIterable {
+    case sharedDataProtection = "shared-data-protection"
+    case otherDataProtection = "other-data-protection"
+    case legacyFileKeychain = "legacy-file-keychain"
+}
+
+@_spi(SkyBridgeSmokeDiagnostics)
+public enum DeviceIdentityLegacyAuditState: String, Codable, Sendable {
+    case inspectionUnavailable = "inspection-unavailable"
+    case noIdentity = "no-identity"
+    case legacyMigrationIncomplete = "legacy-migration-incomplete"
+    case legacyMigrationConflict = "legacy-migration-conflict"
+    case legacyMigrationRequiresRotation = "legacy-migration-requires-rotation"
+    case legacyCommittedTupleSelected = "legacy-committed-tuple-selected"
+    case authorityClean = "authority-clean"
+    case matchingLegacyRemnants = "matching-legacy-remnants"
+    case conflictingLegacyRemnants = "conflicting-legacy-remnants"
+}
+
+@_spi(SkyBridgeSmokeDiagnostics)
+public enum DeviceIdentityLegacyAuditComparisonBasis: String, Codable, Sendable {
+    case none
+    case sharedAuthority = "shared-authority"
+    case firstValidatedLegacyKeyInfo = "first-validated-legacy-key-info"
+}
+
+@_spi(SkyBridgeSmokeDiagnostics)
+public enum DeviceIdentityLegacyAuditMismatchDimension: String, Codable, Sendable, CaseIterable {
+    case keyInfoDeviceId = "key-info-device-id"
+    case keyInfoPublicKey = "key-info-public-key"
+    case keyInfoFingerprint = "key-info-fingerprint"
+    case keyInfoCreatedAt = "key-info-created-at"
+    case keyInfoSecureEnclave = "key-info-secure-enclave"
+    case privateKeyPublicKey = "private-key-public-key"
+    case privateKeySecureEnclave = "private-key-secure-enclave"
+    case deviceId = "device-id"
+}
+
+@_spi(SkyBridgeSmokeDiagnostics)
+public struct DeviceIdentityLegacyAuditMismatchCount: Codable, Sendable, Equatable {
+    public let dimension: DeviceIdentityLegacyAuditMismatchDimension
+    public let count: Int
+}
+
+/// Count-only evidence for one value class in one fixed storage category.
+/// `unresolved` is used only when no shared authority exists, so the audit does
+/// not pretend legacy values can be classified against a missing winner.
+@_spi(SkyBridgeSmokeDiagnostics)
+public struct DeviceIdentityLegacyAuditValueCount: Codable, Sendable, Equatable {
+    public let matching: Int
+    public let conflicting: Int
+    public let unresolved: Int
+
+    public var total: Int {
+        matching + conflicting + unresolved
+    }
+}
+
+@_spi(SkyBridgeSmokeDiagnostics)
+public struct DeviceIdentityLegacyAuditNamespaceSummary: Codable, Sendable, Equatable {
+    public let namespace: DeviceIdentityLegacyAuditNamespace
+    public let privateKeys: DeviceIdentityLegacyAuditValueCount
+    public let keyInfos: DeviceIdentityLegacyAuditValueCount
+    public let deviceIds: DeviceIdentityLegacyAuditValueCount
+    public let mismatches: [DeviceIdentityLegacyAuditMismatchCount]
+}
+
+/// A deliberately narrow diagnostic record. It proves only what the current
+/// signed process could read at one instant; it contains no identity value,
+/// fingerprint, application tag, access-group string, or persistent reference.
+@_spi(SkyBridgeSmokeDiagnostics)
+public struct DeviceIdentityLegacyAuditReport: Codable, Sendable, Equatable {
+    public let schemaVersion: UInt8
+    public let state: DeviceIdentityLegacyAuditState
+    public let authorityPresent: Bool
+    public let authorityKeyValidated: Bool
+    public let comparisonBasis: DeviceIdentityLegacyAuditComparisonBasis
+    public let stableAcrossReads: Bool
+    public let inspectionStatus: DeviceIdentityLegacyResidueInspectionStatus
+    public let namespaces: [DeviceIdentityLegacyAuditNamespaceSummary]
+}
+
+/// Fixed, non-secret reasons why non-authoritative legacy residue could not be
+/// inspected after the shared authority and its exact private key were already
+/// validated. These values are safe for signed smoke status and diagnostics;
+/// raw Security.framework errors, tags, access groups, and persistent
+/// references must never cross this boundary.
+@_spi(SkyBridgeSmokeDiagnostics)
+public enum DeviceIdentityLegacyResidueInspectionFailureReason: String, Codable, Sendable {
+    case accessDenied = "access-denied"
+    case keychainUnavailable = "keychain-unavailable"
+    case malformedAttributes = "malformed-attributes"
+    case malformedKeyInfo = "malformed-key-info"
+    case invalidDeviceId = "invalid-device-id"
+    case candidateLimitExceeded = "candidate-limit-exceeded"
+    case keyMaterialUnavailable = "key-material-unavailable"
+    case changedDuringRead = "changed-during-read"
+}
+
+/// Last startup inspection status for residue surrounding a validated shared
+/// authority. The sum type makes it impossible to represent an unavailable
+/// inspection as clean or to attach conflict counts to incomplete evidence.
+@_spi(SkyBridgeSmokeDiagnostics)
+public enum DeviceIdentityLegacyResidueInspectionStatus: Sendable, Equatable {
+    case complete(hasConflicts: Bool)
+    case unavailable(DeviceIdentityLegacyResidueInspectionFailureReason)
+
+    public var schemaVersion: UInt8 { 1 }
+
+    public var inspectionComplete: Bool {
+        if case .complete = self { return true }
+        return false
+    }
+
+    public var failureReason: DeviceIdentityLegacyResidueInspectionFailureReason? {
+        guard case .unavailable(let reason) = self else { return nil }
+        return reason
+    }
+
+    public var hasConflicts: Bool? {
+        guard case .complete(let hasConflicts) = self else { return nil }
+        return hasConflicts
+    }
+}
+
+extension DeviceIdentityLegacyResidueInspectionStatus: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case inspectionComplete
+        case failureReason
+        case hasConflicts
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let schemaVersion = try container.decode(UInt8.self, forKey: .schemaVersion)
+        guard schemaVersion == 1 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Unsupported legacy residue inspection schema"
+            )
+        }
+        let inspectionComplete = try container.decode(
+            Bool.self,
+            forKey: .inspectionComplete
+        )
+        let failureReason = try container.decodeIfPresent(
+            DeviceIdentityLegacyResidueInspectionFailureReason.self,
+            forKey: .failureReason
+        )
+        let hasConflicts = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .hasConflicts
+        )
+        switch (inspectionComplete, failureReason, hasConflicts) {
+        case (true, nil, .some(let conflicts)):
+            self = .complete(hasConflicts: conflicts)
+        case (false, .some(let reason), nil):
+            self = .unavailable(reason)
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .inspectionComplete,
+                in: container,
+                debugDescription: "Incoherent legacy residue inspection status"
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(inspectionComplete, forKey: .inspectionComplete)
+        try container.encodeIfPresent(failureReason, forKey: .failureReason)
+        try container.encodeIfPresent(hasConflicts, forKey: .hasConflicts)
+    }
+}
+
 // MARK: - KEM Identity Key Record
 
 /// KEM 身份密钥记录（本地存储）
@@ -113,6 +295,7 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
     case keyRotationFailed(String)
     case authorityConflict(String)
     case corruptIdentityAuthority(String)
+    case identityMigrationRequired
     case identityMigrationRequiresRotationAndRepinning(String)
     
     public var errorDescription: String? {
@@ -141,11 +324,19 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
             return "Device identity authority conflict: \(reason)"
         case .corruptIdentityAuthority(let reason):
             return "Device identity authority is corrupt or incomplete: \(reason)"
+        case .identityMigrationRequired:
+            return "A legacy device identity exists and requires explicit migration into the shared identity authority"
         case .identityMigrationRequiresRotationAndRepinning(let reason):
             return "Device identity migration requires explicit rotation and peer re-pinning: \(reason)"
         }
     }
 }
+
+#if DEBUG || SKYBRIDGE_TESTING
+enum DeviceIdentityTestingConfigurationError: Error, Sendable, Equatable {
+    case emptyStorageNamespace
+}
+#endif
 
 // MARK: - Device Identity Key Manager
 
@@ -200,6 +391,9 @@ public actor DeviceIdentityKeyManager {
         static let mirroredProtocolSigningPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.ProtocolSigningPublicKey"
         static let mirroredMLDSAPublicKeyDefaultsKey = "SkyBridge.P2P.DeviceIdentity.MLDSA65PublicKey"
         static let inMemorySigningPrivateKey = "com.skybridge.p2p.identity.signing.inmemory.private"
+        static let legacyIdentityMaximumCandidatesPerClass = 64
+        static let legacyKeyInfoMaximumEncodedSize = 4_096
+        static let legacyDeviceIdMaximumEncodedSize = 256
     }
 
     private nonisolated static var useInMemoryKeychain: Bool {
@@ -212,6 +406,13 @@ public actor DeviceIdentityKeyManager {
         #else
         return false
         #endif
+    }
+
+    /// Exposes only the storage lifetime contract, not the environment switch itself.
+    /// Settings restoration uses this to avoid requiring a durable key to exist inside
+    /// an explicitly ephemeral test store. Release builds always return `false`.
+    public nonisolated static var usesEphemeralIdentityStoreForCurrentProcess: Bool {
+        useInMemoryKeychain
     }
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
     private nonisolated static let inMemoryLock = NSLock()
@@ -247,11 +448,29 @@ public actor DeviceIdentityKeyManager {
         #endif
         return sharedIdentityScopeSource
     }
+
+    private enum ExistingIdentityLegacyMigrationPolicy: Equatable {
+        case allow
+        case rejectMutation
+    }
+
+    /// Only this dedicated error may be downgraded to an unavailable residue
+    /// inspection after a shared authority has already been independently
+    /// validated. Unknown programming errors and authority errors still escape.
+    private struct LegacyResidueInspectionError: Error, Sendable, Equatable {
+        let reason: DeviceIdentityLegacyResidueInspectionFailureReason
+    }
     
  // MARK: - Properties
     
- /// 缓存的密钥信息
+    /// 缓存的密钥信息
     private var cachedKeyInfo: DeviceIdentityKeyInfo?
+
+    /// Count-free startup health for legacy residue surrounding the cached
+    /// authority. It is cached with the immutable winner so a validated
+    /// authority does not trigger repeated Keychain scans or authorization UI.
+    private var cachedLegacyResidueInspectionStatus:
+        DeviceIdentityLegacyResidueInspectionStatus?
     
  /// 缓存的 KEM 公钥（按 suite wireId + provider tier）
     private var cachedKEMPublicKeys: [KEMCacheKey: Data] = [:]
@@ -285,8 +504,10 @@ public actor DeviceIdentityKeyManager {
     internal init(
         testingStorageNamespace: String,
         keychainScope: KeychainGenericPasswordScope
-    ) {
-        precondition(!testingStorageNamespace.isEmpty)
+    ) throws {
+        guard !testingStorageNamespace.isEmpty else {
+            throw DeviceIdentityTestingConfigurationError.emptyStorageNamespace
+        }
         self.testingStorageNamespace = testingStorageNamespace
         self.sharedIdentityScopeSource = .explicitForTesting(keychainScope)
     }
@@ -374,20 +595,28 @@ public actor DeviceIdentityKeyManager {
  /// 获取或创建设备身份密钥
  /// - Returns: 密钥信息
     public func getOrCreateIdentityKey() async throws -> DeviceIdentityKeyInfo {
- // 检查缓存
-        if Self.useInMemoryKeychain, let cached = cachedKeyInfo {
+        // The P-256 device authority is add-only and immutable for the lifetime of
+        // an installation (`deleteIdentityKey` refuses to remove it), so a resolved
+        // authority is valid for the whole process. Re-resolving it per call forced
+        // every discovery batch, presence heartbeat and advertisement to replay the
+        // full Keychain + legacy-domain migration scan, which is what produced the
+        // repeating macOS Keychain authorization panels.
+        if let cached = cachedKeyInfo {
             return cached
         }
         
         do {
-            if let existing = try await loadExistingKey() {
+            if let existing = try await loadExistingKey(
+                legacyMigrationPolicy: .allow
+            ) {
                 cachedKeyInfo = existing
                 return existing
             }
         } catch {
             let publicError = Self.publicIdentityError(for: error)
+            let diagnosticCode = Self.identityDiagnosticCode(for: publicError)
             SkyBridgeLogger.p2p.error(
-                "❌ 加载设备身份密钥失败: \(publicError.localizedDescription, privacy: .public)"
+                "Device identity load failed; code=\(diagnosticCode, privacy: .public)"
             )
             throw publicError
         }
@@ -437,16 +666,95 @@ public actor DeviceIdentityKeyManager {
     /// migration failures remain typed errors and are never collapsed into
     /// absence.
     public func existingIdentityKeyInfoStrict() async throws -> DeviceIdentityKeyInfo? {
-        if Self.useInMemoryKeychain, let cachedKeyInfo {
+        // Same immutability argument as `getOrCreateIdentityKey`: a cache hit is a
+        // previously validated authority, never a substitute for a missing one.
+        // A miss still performs the strict Keychain resolution and can return nil.
+        if let cachedKeyInfo {
             return cachedKeyInfo
         }
         do {
-            guard let existing = try await loadExistingKey() else { return nil }
+            guard let existing = try await loadExistingKey(
+                legacyMigrationPolicy: .rejectMutation
+            ) else { return nil }
             cachedKeyInfo = existing
             _deviceId = existing.deviceId
             return existing
         } catch {
             throw Self.publicIdentityError(for: error)
+        }
+    }
+
+    /// Returns the residue-inspection health captured when the current process
+    /// resolved or created its immutable authority. This accessor performs no
+    /// Keychain I/O and never triggers migration or identity creation.
+    @_spi(SkyBridgeSmokeDiagnostics)
+    public func lastLegacyResidueInspectionStatus()
+        -> DeviceIdentityLegacyResidueInspectionStatus? {
+        cachedLegacyResidueInspectionStatus
+    }
+
+    /// Performs a read-only, count-only audit using the same signed Keychain
+    /// scope and legacy enumeration as normal identity startup. This method
+    /// never reconciles, deletes, migrates, creates, or caches identity state.
+    @_spi(SkyBridgeSmokeDiagnostics)
+    public func legacyIdentityAuditReport() throws -> DeviceIdentityLegacyAuditReport {
+        let store = try identityAuthorityStore()
+        let initialAuthority = try DeviceIdentityAuthorityTransaction.resolve(
+            using: store
+        )
+        do {
+            var legacy = try discoverStableLegacyIdentity(using: store)
+            defer { legacy.secureEraseEncodedItems() }
+            let verifiedAuthority = try DeviceIdentityAuthorityTransaction.resolve(
+                using: store
+            )
+            guard initialAuthority == verifiedAuthority else {
+                throw DeviceIdentityAuthorityError
+                    .legacyIdentityChangedDuringAudit
+            }
+            let reconciliation: DeviceIdentityLegacyReconciliationAudit?
+            if let authority = verifiedAuthority {
+                do {
+                    reconciliation = try DeviceIdentityLegacyReconciliation.audit(
+                        legacy.state,
+                        against: authority
+                    )
+                } catch DeviceIdentityAuthorityError.legacyIdentityIncomplete(_) {
+                    throw LegacyResidueInspectionError(reason: .malformedKeyInfo)
+                }
+            } else {
+                reconciliation = try DeviceIdentityLegacyReconciliation
+                    .auditCoherenceWithoutAuthority(legacy.state)
+            }
+            return try makeLegacyIdentityAuditReport(
+                legacy: legacy,
+                authority: verifiedAuthority,
+                reconciliation: reconciliation,
+                authoritativeAccessGroup: store.authoritativeScope.writeAccessGroup
+            )
+        } catch let inspectionError as LegacyResidueInspectionError {
+            let verifiedAuthority = try DeviceIdentityAuthorityTransaction.resolve(
+                using: store
+            )
+            guard initialAuthority == verifiedAuthority else {
+                throw DeviceIdentityAuthorityError
+                    .legacyIdentityChangedDuringAudit
+            }
+            guard verifiedAuthority != nil else {
+                // Without a validated authority, uncertainty about legacy data
+                // remains fatal so it cannot be mistaken for identity absence.
+                throw inspectionError
+            }
+            return DeviceIdentityLegacyAuditReport(
+                schemaVersion: 2,
+                state: .inspectionUnavailable,
+                authorityPresent: true,
+                authorityKeyValidated: true,
+                comparisonBasis: .sharedAuthority,
+                stableAcrossReads: false,
+                inspectionStatus: .unavailable(inspectionError.reason),
+                namespaces: []
+            )
         }
     }
 
@@ -503,8 +811,9 @@ public actor DeviceIdentityKeyManager {
         do {
             _ = try await getOrCreateIdentityKey()
         } catch {
+            let diagnosticCode = Self.identityDiagnosticCode(for: error)
             SkyBridgeLogger.p2p.warning(
-                "⚠️ Prewarm identity key failed: \(error.localizedDescription, privacy: .public)"
+                "Prewarm identity key failed; code=\(diagnosticCode, privacy: .public)"
             )
         }
 
@@ -512,7 +821,7 @@ public actor DeviceIdentityKeyManager {
             _ = try await getOrCreateProtocolSigningKey()
         } catch {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ Prewarm protocol signing key failed: \(error.localizedDescription, privacy: .public)"
+                "Prewarm protocol signing key failed; code=protocol-signing-key-unavailable"
             )
         }
 
@@ -521,7 +830,7 @@ public actor DeviceIdentityKeyManager {
             _ = try await pairingIdentityKEMPublicKeys(using: provider)
         } catch {
             SkyBridgeLogger.p2p.warning(
-                "⚠️ Prewarm pairing KEM identity keys failed: \(error.localizedDescription, privacy: .public)"
+                "Prewarm pairing KEM identity keys failed; code=pairing-kem-identity-unavailable"
             )
         }
     }
@@ -645,23 +954,6 @@ public actor DeviceIdentityKeyManager {
             for: algorithm,
             protection: protection
         ).publicKey
-    }
-
-    /// 仅加载已存在的协议签名公钥；不会在缺失时补建 Keychain 条目。
-    public func existingProtocolSigningPublicKey(
-        for algorithm: ProtocolSigningAlgorithm
-    ) async -> Data? {
-        do {
-            return try await existingProtocolSigningPublicKey(
-                for: algorithm,
-                protection: .softwareKeychain
-            )
-        } catch {
-            SkyBridgeLogger.p2p.warning(
-                "⚠️ 非交互读取现有 \(algorithm.rawValue, privacy: .public) software 协议签名公钥失败: \(error.localizedDescription, privacy: .public)"
-            )
-            return nil
-        }
     }
 
     /// Loads one exact `(algorithm, protection)` authority without creating or
@@ -810,7 +1102,7 @@ public actor DeviceIdentityKeyManager {
         // then elected through the add-only authority CAS. Legacy Secure
         // Enclave material throws an explicit rotation/re-pin error.
         do {
-            _ = try await loadExistingKey()
+            _ = try await loadExistingKey(legacyMigrationPolicy: .allow)
         } catch {
             throw Self.publicIdentityError(for: error)
         }
@@ -1025,7 +1317,7 @@ public actor DeviceIdentityKeyManager {
                     throw error
                 }
                 SkyBridgeLogger.p2p.warning(
-                    "⚠️ pairingIdentity 互操作 KEM 公钥准备失败（suite=\(suite.rawValue, privacy: .public)）：\(error.localizedDescription, privacy: .public)"
+                    "Optional pairing identity KEM public key is unavailable; suite=\(suite.rawValue, privacy: .public) code=optional-kem-identity-unavailable"
                 )
             }
         }
@@ -1150,6 +1442,7 @@ public actor DeviceIdentityKeyManager {
                 isSecureEnclave: false
             )
             try saveKeyInfo(keyInfo)
+            cachedLegacyResidueInspectionStatus = .complete(hasConflicts: false)
             SkyBridgeLogger.p2p.info("Created new in-memory device identity key: \(keyInfo.shortId)")
             return keyInfo
         }
@@ -1217,6 +1510,13 @@ public actor DeviceIdentityKeyManager {
             candidate,
             using: store
         )
+        // A legacy writer may have appeared after the initial empty scan. The
+        // post-claim stable inspection makes that split-brain residue visible
+        // without allowing it to replace or delete the immutable winner.
+        cachedLegacyResidueInspectionStatus = try inspectLegacyResidue(
+            beside: winner,
+            using: store
+        )
         let keyInfo = keyInfo(from: winner)
         publishResolvedIdentity(winner)
         SkyBridgeLogger.p2p.info(
@@ -1235,21 +1535,56 @@ public actor DeviceIdentityKeyManager {
     nonisolated static func publicIdentityError(
         for error: Error
     ) -> DeviceIdentityKeyError {
+        if let inspectionError = error as? LegacyResidueInspectionError {
+            return .corruptIdentityAuthority(
+                "legacy-residue-inspection-\(inspectionError.reason.rawValue)"
+            )
+        }
+        if let keyError = error as? DeviceIdentityKeyError {
+            switch keyError {
+            case .keyGenerationFailed:
+                return .keyGenerationFailed("identity-key-generation-failed")
+            case .incompleteKeyMaterial:
+                return .incompleteKeyMaterial("identity-key-material-incomplete")
+            case .signatureFailed:
+                return .signatureFailed("identity-signature-failed")
+            case .keyRotationFailed:
+                return .keyRotationFailed("identity-rotation-requires-explicit-cutover")
+            case .authorityConflict:
+                return .authorityConflict("identity-authority-conflict")
+            case .corruptIdentityAuthority:
+                return .corruptIdentityAuthority("identity-authority-invalid")
+            case .identityMigrationRequiresRotationAndRepinning:
+                return .identityMigrationRequiresRotationAndRepinning(
+                    "legacy-identity-not-exportable"
+                )
+            case .keyNotFound,
+                 .keyAccessDenied,
+                 .secureEnclaveNotAvailable,
+                 .invalidKeyData,
+                 .keychainError,
+                 .verificationFailed,
+                 .identityMigrationRequired:
+                return keyError
+            }
+        }
         guard let authorityError = error as? DeviceIdentityAuthorityError else {
-            return error as? DeviceIdentityKeyError
-                ?? .corruptIdentityAuthority(error.localizedDescription)
+            return .corruptIdentityAuthority("unexpected-identity-storage-failure")
         }
         switch authorityError {
         case .legacySecureEnclaveRequiresRotationAndRepinning,
              .legacyPrivateKeyNotExportableRequiresRotationAndRepinning:
             return .identityMigrationRequiresRotationAndRepinning(
-                authorityError.localizedDescription
+                "legacy-identity-not-exportable"
             )
+        case .legacyIdentityRequiresExplicitMigration:
+            return .identityMigrationRequired
         case .legacyIdentityConflictsWithAuthority,
+             .legacyIdentityChangedDuringAudit,
              .immutableGenericPasswordConflict,
              .candidateKeyPublicKeyMismatch,
              .candidateCleanupFailed:
-            return .authorityConflict(authorityError.localizedDescription)
+            return .authorityConflict("identity-authority-conflict")
         case .unsupportedRecordVersion,
              .invalidDeviceId,
              .invalidPublicKey,
@@ -1262,7 +1597,40 @@ public actor DeviceIdentityKeyManager {
              .authorityWinnerPublicKeyMismatch,
              .authorityWinnerSecureEnclaveMismatch,
              .legacyIdentityIncomplete:
-            return .corruptIdentityAuthority(authorityError.localizedDescription)
+            return .corruptIdentityAuthority("identity-authority-invalid")
+        }
+    }
+
+    nonisolated static func identityDiagnosticCode(for error: Error) -> String {
+        switch publicIdentityError(for: error) {
+        case .keyGenerationFailed:
+            return "key-generation-failed"
+        case .keyNotFound:
+            return "key-not-found"
+        case .keyAccessDenied:
+            return "key-access-denied"
+        case .secureEnclaveNotAvailable:
+            return "secure-enclave-unavailable"
+        case .invalidKeyData:
+            return "invalid-key-data"
+        case .incompleteKeyMaterial:
+            return "incomplete-key-material"
+        case .keychainError:
+            return "keychain-error"
+        case .signatureFailed:
+            return "signature-failed"
+        case .verificationFailed:
+            return "verification-failed"
+        case .keyRotationFailed:
+            return "rotation-required"
+        case .authorityConflict:
+            return "authority-conflict"
+        case .corruptIdentityAuthority:
+            return "authority-corrupt"
+        case .identityMigrationRequired:
+            return "migration-required"
+        case .identityMigrationRequiresRotationAndRepinning:
+            return "migration-requires-rotation-and-repinning"
         }
     }
 
@@ -1275,8 +1643,11 @@ public actor DeviceIdentityKeyManager {
     }
     
  /// 加载现有密钥
-    private func loadExistingKey() async throws -> DeviceIdentityKeyInfo? {
+    private func loadExistingKey(
+        legacyMigrationPolicy: ExistingIdentityLegacyMigrationPolicy
+    ) async throws -> DeviceIdentityKeyInfo? {
         if Self.useInMemoryKeychain {
+            cachedLegacyResidueInspectionStatus = .complete(hasConflicts: false)
             let key = KeychainConstants.service + "|" + "keyInfo"
             let data = Self.inMemoryGet(key)
             guard let data else { return nil }
@@ -1284,24 +1655,79 @@ public actor DeviceIdentityKeyManager {
         }
 
         let store = try identityAuthorityStore()
-        let legacy = try discoverLegacyIdentity(using: store)
-        if let authority = try DeviceIdentityAuthorityTransaction.resolve(using: store) {
-            let reconciled = try DeviceIdentityLegacyReconciliation.reconcile(
-                legacy.state,
-                with: authority,
-                cleanup: {
-                    try cleanupLegacyIdentity(legacy, using: store)
-                }
+        if let authority = try DeviceIdentityAuthorityTransaction.resolve(
+            using: store
+        ) {
+            cachedLegacyResidueInspectionStatus = try inspectLegacyResidue(
+                beside: authority,
+                using: store
             )
-            publishResolvedIdentity(reconciled)
-            return keyInfo(from: reconciled)
+            publishResolvedIdentity(authority)
+            return keyInfo(from: authority)
         }
+
+        var legacy = try discoverStableLegacyIdentity(using: store)
+        defer { legacy.secureEraseEncodedItems() }
         guard !legacy.state.isEmpty else {
             return nil
         }
+        guard legacyMigrationPolicy == .allow else {
+            throw DeviceIdentityAuthorityError
+                .legacyIdentityRequiresExplicitMigration
+        }
         let migrated = try migrateLegacyIdentity(legacy, using: store)
+        cachedLegacyResidueInspectionStatus = try inspectLegacyResidue(
+            beside: migrated,
+            using: store
+        )
         publishResolvedIdentity(migrated)
         return keyInfo(from: migrated)
+    }
+
+    /// A validated authority remains authoritative even if its obsolete legacy
+    /// residue cannot be inspected. Only the dedicated, typed inspection error
+    /// is converted to degraded health; unknown errors continue to fail.
+    private func inspectLegacyResidue(
+        beside authority: DeviceIdentityAuthorityRecord,
+        using store: DeviceIdentityKeychainAuthorityStore
+    ) throws -> DeviceIdentityLegacyResidueInspectionStatus {
+        do {
+            var legacy = try discoverStableLegacyIdentity(using: store)
+            defer { legacy.secureEraseEncodedItems() }
+            let resolution: DeviceIdentityAuthorityResidueResolution
+            do {
+                resolution = try DeviceIdentityLegacyReconciliation
+                    .resolveValidatedAuthority(
+                        authority,
+                        retaining: legacy.state
+                    )
+            } catch DeviceIdentityAuthorityError.legacyIdentityIncomplete(_) {
+                throw LegacyResidueInspectionError(reason: .malformedKeyInfo)
+            } catch let authorityError as DeviceIdentityAuthorityError {
+                guard let inspectionError = Self.legacyResidueInspectionError(
+                    for: authorityError
+                ) else {
+                    throw authorityError
+                }
+                throw inspectionError
+            }
+            let audit = resolution.residueAudit
+            if audit.hasConflicts {
+                SkyBridgeLogger.p2p.error(
+                    "Legacy identity residue retained beside the validated shared authority; keyInfoConflicts=\(audit.keyInfos.conflicting, privacy: .public) deviceIdConflicts=\(audit.deviceIds.conflicting, privacy: .public) privateKeyConflicts=\(audit.privateKeys.conflicting, privacy: .public)"
+                )
+            } else if !legacy.state.isEmpty {
+                SkyBridgeLogger.p2p.info(
+                    "Matching legacy identity aliases retained beside the validated shared authority"
+                )
+            }
+            return .complete(hasConflicts: audit.hasConflicts)
+        } catch let inspectionError as LegacyResidueInspectionError {
+            SkyBridgeLogger.p2p.error(
+                "Legacy identity residue inspection unavailable beside the validated shared authority; reason=\(inspectionError.reason.rawValue, privacy: .public)"
+            )
+            return .unavailable(inspectionError.reason)
+        }
     }
     
  /// 获取私钥引用
@@ -1365,65 +1791,472 @@ public actor DeviceIdentityKeyManager {
         saveMirroredDeviceId(authority.deviceId)
     }
 
-    private struct LegacyIdentityDiscovery {
+    private struct LegacyIdentityDiscovery: Equatable {
         let privateKeys: [DeviceIdentityLegacyPrivateKeyCandidate]
         var keyInfoItems: [LegacyGenericPasswordCandidate]
         var deviceIdItems: [LegacyGenericPasswordCandidate]
         let state: DeviceIdentityLegacyState
+
+        mutating func secureEraseEncodedItems() {
+            for index in keyInfoItems.indices {
+                keyInfoItems[index].data.secureErase()
+            }
+            for index in deviceIdItems.indices {
+                deviceIdItems[index].data.secureErase()
+            }
+        }
+    }
+
+    private struct MutableLegacyAuditValueCount {
+        var matching = 0
+        var conflicting = 0
+        var unresolved = 0
+
+        mutating func record(matchesAuthority: Bool?) {
+            switch matchesAuthority {
+            case .some(true):
+                matching += 1
+            case .some(false):
+                conflicting += 1
+            case .none:
+                unresolved += 1
+            }
+        }
+
+        var snapshot: DeviceIdentityLegacyAuditValueCount {
+            DeviceIdentityLegacyAuditValueCount(
+                matching: matching,
+                conflicting: conflicting,
+                unresolved: unresolved
+            )
+        }
+    }
+
+    private struct MutableLegacyAuditNamespaceSummary {
+        var privateKeys = MutableLegacyAuditValueCount()
+        var keyInfos = MutableLegacyAuditValueCount()
+        var deviceIds = MutableLegacyAuditValueCount()
+        var mismatches = Dictionary(
+            uniqueKeysWithValues: DeviceIdentityLegacyAuditMismatchDimension
+                .allCases.map { ($0, 0) }
+        )
+
+        mutating func recordMismatch(
+            _ dimension: DeviceIdentityLegacyAuditMismatchDimension
+        ) {
+            mismatches[dimension, default: 0] += 1
+        }
+    }
+
+    private func makeLegacyIdentityAuditReport(
+        legacy: LegacyIdentityDiscovery,
+        authority: DeviceIdentityAuthorityRecord?,
+        reconciliation: DeviceIdentityLegacyReconciliationAudit?,
+        authoritativeAccessGroup: String?
+    ) throws -> DeviceIdentityLegacyAuditReport {
+        let comparisonKeyInfo = authority.map { keyInfo(from: $0) }
+            ?? legacy.state.keyInfos.first
+        let comparisonBasis: DeviceIdentityLegacyAuditComparisonBasis
+        if authority != nil {
+            comparisonBasis = .sharedAuthority
+        } else if comparisonKeyInfo != nil {
+            comparisonBasis = .firstValidatedLegacyKeyInfo
+        } else {
+            comparisonBasis = .none
+        }
+        var summaries = Dictionary(
+            uniqueKeysWithValues: DeviceIdentityLegacyAuditNamespace.allCases.map {
+                ($0, MutableLegacyAuditNamespaceSummary())
+            }
+        )
+
+        for candidate in legacy.privateKeys {
+            let namespace = Self.legacyAuditNamespace(
+                for: candidate.location,
+                authoritativeAccessGroup: authoritativeAccessGroup
+            )
+            let matchesAuthority = comparisonKeyInfo.map {
+                candidate.metadata.publicKey == $0.publicKey
+                    && candidate.metadata.isSecureEnclave == $0.isSecureEnclave
+            }
+            summaries[namespace]?.privateKeys.record(
+                matchesAuthority: matchesAuthority
+            )
+            if let comparisonKeyInfo {
+                if candidate.metadata.publicKey != comparisonKeyInfo.publicKey {
+                    summaries[namespace]?.recordMismatch(.privateKeyPublicKey)
+                }
+                if candidate.metadata.isSecureEnclave
+                    != comparisonKeyInfo.isSecureEnclave {
+                    summaries[namespace]?.recordMismatch(
+                        .privateKeySecureEnclave
+                    )
+                }
+            }
+        }
+        for (candidate, keyInfo) in zip(
+            legacy.keyInfoItems,
+            legacy.state.keyInfos
+        ) {
+            let namespace = Self.legacyAuditNamespace(
+                for: candidate.location,
+                authoritativeAccessGroup: authoritativeAccessGroup
+            )
+            summaries[namespace]?.keyInfos.record(
+                matchesAuthority: comparisonKeyInfo.map { keyInfo == $0 }
+            )
+            if let comparisonKeyInfo {
+                if keyInfo.deviceId != comparisonKeyInfo.deviceId {
+                    summaries[namespace]?.recordMismatch(.keyInfoDeviceId)
+                }
+                if keyInfo.publicKey != comparisonKeyInfo.publicKey {
+                    summaries[namespace]?.recordMismatch(.keyInfoPublicKey)
+                }
+                if keyInfo.pubKeyFP != comparisonKeyInfo.pubKeyFP {
+                    summaries[namespace]?.recordMismatch(.keyInfoFingerprint)
+                }
+                if keyInfo.createdAt != comparisonKeyInfo.createdAt {
+                    summaries[namespace]?.recordMismatch(.keyInfoCreatedAt)
+                }
+                if keyInfo.isSecureEnclave
+                    != comparisonKeyInfo.isSecureEnclave {
+                    summaries[namespace]?.recordMismatch(
+                        .keyInfoSecureEnclave
+                    )
+                }
+            }
+        }
+        for (candidate, deviceId) in zip(
+            legacy.deviceIdItems,
+            legacy.state.deviceIds
+        ) {
+            let namespace = Self.legacyAuditNamespace(
+                for: candidate.location,
+                authoritativeAccessGroup: authoritativeAccessGroup
+            )
+            summaries[namespace]?.deviceIds.record(
+                matchesAuthority: comparisonKeyInfo.map {
+                    deviceId == $0.deviceId
+                }
+            )
+            if let comparisonKeyInfo,
+               deviceId != comparisonKeyInfo.deviceId {
+                summaries[namespace]?.recordMismatch(.deviceId)
+            }
+        }
+
+        let state: DeviceIdentityLegacyAuditState
+        if authority == nil {
+            if legacy.state.isEmpty {
+                state = .noIdentity
+            } else {
+                do {
+                    let committed = try DeviceIdentityLegacyReconciliation
+                        .committedMigrationKeyInfo(from: legacy.state)
+                    _ = try DeviceIdentityLegacyReconciliation
+                        .uniqueCommittedMigrationPrivateKey(
+                            from: legacy.privateKeys,
+                            matching: committed
+                        )
+                    state = .legacyCommittedTupleSelected
+                } catch let authorityError as DeviceIdentityAuthorityError {
+                    switch authorityError {
+                    case .legacySecureEnclaveRequiresRotationAndRepinning,
+                         .legacyPrivateKeyNotExportableRequiresRotationAndRepinning:
+                        state = .legacyMigrationRequiresRotation
+                    case .legacyIdentityIncomplete:
+                        state = .legacyMigrationIncomplete
+                    case .legacyIdentityConflictsWithAuthority:
+                        state = .legacyMigrationConflict
+                    default:
+                        throw authorityError
+                    }
+                }
+            }
+        } else if legacy.state.isEmpty {
+            state = .authorityClean
+        } else if reconciliation?.hasConflicts == true {
+            state = .conflictingLegacyRemnants
+        } else {
+            state = .matchingLegacyRemnants
+        }
+
+        return DeviceIdentityLegacyAuditReport(
+            schemaVersion: 2,
+            state: state,
+            authorityPresent: authority != nil,
+            authorityKeyValidated: authority != nil,
+            comparisonBasis: comparisonBasis,
+            stableAcrossReads: true,
+            inspectionStatus: .complete(
+                hasConflicts: reconciliation?.hasConflicts == true
+            ),
+            namespaces: DeviceIdentityLegacyAuditNamespace.allCases.map { namespace in
+                let summary = summaries[namespace]
+                    ?? MutableLegacyAuditNamespaceSummary()
+                return DeviceIdentityLegacyAuditNamespaceSummary(
+                    namespace: namespace,
+                    privateKeys: summary.privateKeys.snapshot,
+                    keyInfos: summary.keyInfos.snapshot,
+                    deviceIds: summary.deviceIds.snapshot,
+                    mismatches: DeviceIdentityLegacyAuditMismatchDimension
+                        .allCases.map { dimension in
+                            DeviceIdentityLegacyAuditMismatchCount(
+                                dimension: dimension,
+                                count: summary.mismatches[dimension, default: 0]
+                            )
+                        }
+                )
+            }
+        )
+    }
+
+    nonisolated static func legacyAuditNamespace(
+        for location: LegacySecItemLocation,
+        authoritativeAccessGroup: String?
+    ) -> DeviceIdentityLegacyAuditNamespace {
+        guard location.usesDataProtectionKeychain else {
+            return .legacyFileKeychain
+        }
+        if location.actualAccessGroup == authoritativeAccessGroup {
+            return .sharedDataProtection
+        }
+        return .otherDataProtection
+    }
+
+    private func discoverStableLegacyIdentity(
+        using store: DeviceIdentityKeychainAuthorityStore
+    ) throws -> LegacyIdentityDiscovery {
+        var initial = try discoverLegacyIdentity(using: store)
+        var returnedVerifiedSnapshot = false
+        defer {
+            if !returnedVerifiedSnapshot {
+                initial.secureEraseEncodedItems()
+            }
+        }
+        var verified = try discoverLegacyIdentity(using: store)
+        guard initial == verified else {
+            verified.secureEraseEncodedItems()
+            throw LegacyResidueInspectionError(reason: .changedDuringRead)
+        }
+        initial.secureEraseEncodedItems()
+        returnedVerifiedSnapshot = true
+        return verified
+    }
+
+    /// Maps only known storage/data-boundary failures. A nil result means the
+    /// error is not an expected residue-inspection failure and must propagate.
+    nonisolated static func legacyResidueInspectionFailureReason(
+        for error: Error
+    ) -> DeviceIdentityLegacyResidueInspectionFailureReason? {
+        if let inspectionError = error as? LegacyResidueInspectionError {
+            return inspectionError.reason
+        }
+        if let keychainError = error as? KeychainError {
+            switch keychainError {
+            case .itemNotFound, .itemChangedDuringReconciliation:
+                return .changedDuringRead
+            case .decodingError:
+                return .malformedAttributes
+            case .unexpectedError(let status):
+                return legacyResidueInspectionFailureReason(for: status)
+            }
+        }
+        if let keyError = error as? DeviceIdentityKeyError {
+            switch keyError {
+            case .keyAccessDenied:
+                return .accessDenied
+            case .keychainError(let status):
+                return legacyResidueInspectionFailureReason(for: status)
+            case .keyGenerationFailed:
+                return .keyMaterialUnavailable
+            case .keyNotFound:
+                return .changedDuringRead
+            case .invalidKeyData:
+                return .malformedAttributes
+            case .secureEnclaveNotAvailable,
+                 .incompleteKeyMaterial,
+                 .signatureFailed,
+                 .verificationFailed,
+                 .keyRotationFailed,
+                 .authorityConflict,
+                 .corruptIdentityAuthority,
+                 .identityMigrationRequired,
+                 .identityMigrationRequiresRotationAndRepinning:
+                return nil
+            }
+        }
+        if let authorityError = error as? DeviceIdentityAuthorityError {
+            switch authorityError {
+            case .legacyIdentityChangedDuringAudit:
+                return .changedDuringRead
+            case .legacyIdentityIncomplete, .invalidPublicKey:
+                return .malformedAttributes
+            case .unsupportedRecordVersion,
+                 .invalidDeviceId,
+                 .publicKeyFingerprintMismatch,
+                 .invalidPrivateKeyApplicationTag,
+                 .invalidCreatedAt,
+                 .corruptAuthorityRecord,
+                 .authorityWinnerMissing,
+                 .authorityWinnerKeyMissing,
+                 .authorityWinnerPublicKeyMismatch,
+                 .authorityWinnerSecureEnclaveMismatch,
+                 .candidateKeyPublicKeyMismatch,
+                 .candidateCleanupFailed,
+                 .legacyIdentityConflictsWithAuthority,
+                 .legacyIdentityRequiresExplicitMigration,
+                 .legacySecureEnclaveRequiresRotationAndRepinning,
+                 .legacyPrivateKeyNotExportableRequiresRotationAndRepinning,
+                 .immutableGenericPasswordConflict:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func legacyResidueInspectionFailureReason(
+        for status: OSStatus
+    ) -> DeviceIdentityLegacyResidueInspectionFailureReason {
+        switch status {
+        case errSecInteractionNotAllowed,
+             errSecAuthFailed,
+             errSecUserCanceled,
+             errSecMissingEntitlement:
+            return .accessDenied
+        default:
+            return .keychainUnavailable
+        }
+    }
+
+    private nonisolated static func legacyResidueInspectionError(
+        for error: Error
+    ) -> LegacyResidueInspectionError? {
+        guard let reason = legacyResidueInspectionFailureReason(for: error) else {
+            return nil
+        }
+        return LegacyResidueInspectionError(reason: reason)
+    }
+
+    private func performLegacyResidueInspectionOperation<T>(
+        _ operation: () throws -> T
+    ) throws -> T {
+        do {
+            return try operation()
+        } catch let keychainError as KeychainError {
+            guard let inspectionError = Self.legacyResidueInspectionError(
+                for: keychainError
+            ) else {
+                throw keychainError
+            }
+            throw inspectionError
+        } catch let keyError as DeviceIdentityKeyError {
+            guard let inspectionError = Self.legacyResidueInspectionError(
+                for: keyError
+            ) else {
+                throw keyError
+            }
+            throw inspectionError
+        } catch let authorityError as DeviceIdentityAuthorityError {
+            guard let inspectionError = Self.legacyResidueInspectionError(
+                for: authorityError
+            ) else {
+                throw authorityError
+            }
+            throw inspectionError
+        }
     }
 
     private func discoverLegacyIdentity(
         using store: DeviceIdentityKeychainAuthorityStore
     ) throws -> LegacyIdentityDiscovery {
-        let privateKeys = try store.loadLegacyPrivateKeyCandidates(
-            applicationTag: KeychainConstants.signingKeyTag
-        )
-        let keyInfoItems = try KeychainManager.shared
-            .legacyGenericPasswordCandidatesStrict(
-            service: KeychainConstants.service,
-            account: "keyInfo",
-            includeLegacyKeychain: true
-        )
-        let deviceIdItems = try KeychainManager.shared
-            .legacyGenericPasswordCandidatesStrict(
-            service: KeychainConstants.service,
-            account: KeychainConstants.deviceIdKey,
-            includeLegacyKeychain: true
-        )
-        let keyInfos: [DeviceIdentityKeyInfo] = try keyInfoItems.map { item in
-            do {
-                return try JSONDecoder().decode(
-                    DeviceIdentityKeyInfo.self,
-                    from: item.data
-                )
-            } catch {
-                throw DeviceIdentityAuthorityError.legacyIdentityIncomplete(
-                    "keyInfo is not decodable"
-                )
+        var keyInfoItems: [LegacyGenericPasswordCandidate] = []
+        var deviceIdItems: [LegacyGenericPasswordCandidate] = []
+        var discoveryCompleted = false
+        defer {
+            if !discoveryCompleted {
+                for index in keyInfoItems.indices {
+                    keyInfoItems[index].data.secureErase()
+                }
+                for index in deviceIdItems.indices {
+                    deviceIdItems[index].data.secureErase()
+                }
             }
         }
-        let deviceIds: [String] = try deviceIdItems.map { item in
-            guard let value = String(data: item.data, encoding: .utf8),
-                  !value.isEmpty,
-                  value == value.trimmingCharacters(
-                      in: .whitespacesAndNewlines
-                  ) else {
-                throw DeviceIdentityAuthorityError.legacyIdentityIncomplete(
-                    "deviceId is not valid UTF-8 identity data"
+        do {
+            let privateKeys = try performLegacyResidueInspectionOperation {
+                try store.loadLegacyPrivateKeyCandidates(
+                    applicationTag: KeychainConstants.signingKeyTag
                 )
             }
-            return value
-        }
-        return LegacyIdentityDiscovery(
-            privateKeys: privateKeys,
-            keyInfoItems: keyInfoItems,
-            deviceIdItems: deviceIdItems,
-            state: DeviceIdentityLegacyState(
-                keyInfos: keyInfos,
-                deviceIds: deviceIds,
-                privateKeyMetadata: privateKeys.map(\.metadata)
+            keyInfoItems = try performLegacyResidueInspectionOperation {
+                try KeychainManager.shared
+                    .legacyGenericPasswordCandidatesStrict(
+                        service: KeychainConstants.service,
+                        account: "keyInfo",
+                        includeLegacyKeychain: true
+                    )
+            }
+            deviceIdItems = try performLegacyResidueInspectionOperation {
+                try KeychainManager.shared
+                    .legacyGenericPasswordCandidatesStrict(
+                        service: KeychainConstants.service,
+                        account: KeychainConstants.deviceIdKey,
+                        includeLegacyKeychain: true
+                    )
+            }
+            guard privateKeys.count
+                    <= KeychainConstants.legacyIdentityMaximumCandidatesPerClass,
+                  keyInfoItems.count
+                    <= KeychainConstants.legacyIdentityMaximumCandidatesPerClass,
+                  deviceIdItems.count
+                    <= KeychainConstants.legacyIdentityMaximumCandidatesPerClass else {
+                throw LegacyResidueInspectionError(
+                    reason: .candidateLimitExceeded
+                )
+            }
+            let keyInfos: [DeviceIdentityKeyInfo] = try keyInfoItems.map { item in
+                guard item.data.count
+                        <= KeychainConstants.legacyKeyInfoMaximumEncodedSize else {
+                    throw LegacyResidueInspectionError(reason: .malformedKeyInfo)
+                }
+                do {
+                    return try JSONDecoder().decode(
+                        DeviceIdentityKeyInfo.self,
+                        from: item.data
+                    )
+                } catch {
+                    throw LegacyResidueInspectionError(reason: .malformedKeyInfo)
+                }
+            }
+            let deviceIds: [String] = try deviceIdItems.map { item in
+                guard item.data.count
+                        <= KeychainConstants.legacyDeviceIdMaximumEncodedSize,
+                      let value = String(data: item.data, encoding: .utf8),
+                      !value.isEmpty,
+                      value == value.trimmingCharacters(
+                          in: .whitespacesAndNewlines
+                      ),
+                      value.unicodeScalars.allSatisfy({
+                          !CharacterSet.controlCharacters.contains($0)
+                      }) else {
+                    throw LegacyResidueInspectionError(reason: .invalidDeviceId)
+                }
+                return value
+            }
+            let discovery = LegacyIdentityDiscovery(
+                privateKeys: privateKeys,
+                keyInfoItems: keyInfoItems,
+                deviceIdItems: deviceIdItems,
+                state: DeviceIdentityLegacyState(
+                    keyInfos: keyInfos,
+                    deviceIds: deviceIds,
+                    privateKeyMetadata: privateKeys.map(\.metadata)
+                )
             )
-        )
+            discoveryCompleted = true
+            return discovery
+        }
     }
 
     private func migrateLegacyIdentity(
@@ -1431,12 +2264,12 @@ public actor DeviceIdentityKeyManager {
         using store: DeviceIdentityKeychainAuthorityStore
     ) throws -> DeviceIdentityAuthorityRecord {
         let legacyKeyInfo = try DeviceIdentityLegacyReconciliation
-            .migrationKeyInfo(from: legacy.state)
-        guard let sourceKey = legacy.privateKeys.first else {
-            throw DeviceIdentityAuthorityError.legacyIdentityIncomplete(
-                "fixed-tag private key is missing"
+            .committedMigrationKeyInfo(from: legacy.state)
+        let sourceKey = try DeviceIdentityLegacyReconciliation
+            .uniqueCommittedMigrationPrivateKey(
+                from: legacy.privateKeys,
+                matching: legacyKeyInfo
             )
-        }
         var privateKeyRepresentation = try store.exportLegacyPrivateKey(
             sourceKey
         )
@@ -1459,25 +2292,7 @@ public actor DeviceIdentityKeyManager {
             candidateApplicationTag: candidateTag,
             using: store
         )
-        try cleanupLegacyIdentity(legacy, using: store)
         return winner
-    }
-
-    private func cleanupLegacyIdentity(
-        _ legacy: LegacyIdentityDiscovery,
-        using store: DeviceIdentityKeychainAuthorityStore
-    ) throws {
-        for key in legacy.privateKeys {
-            try store.deleteLegacyPrivateKey(at: key.location)
-        }
-        for item in legacy.keyInfoItems {
-            try KeychainManager.shared
-                .deleteLegacyGenericPasswordCandidate(item)
-        }
-        for item in legacy.deviceIdItems {
-            try KeychainManager.shared
-                .deleteLegacyGenericPasswordCandidate(item)
-        }
     }
 
  /// 加载 KEM 身份密钥记录（按 suite + provider tier）

@@ -396,14 +396,37 @@ typedef struct
 
 typedef struct
 {
-	SecPkgInfo* PackageInfo;
+	SecPkgInfoA* PackageInfo;
 	UINT32 NegotiationState;
-} SecPkgContext_NegotiationInfo;
+} SecPkgContext_NegotiationInfoA;
 
 typedef struct
 {
-	SecPkgInfo* PackageInfo;
-} SecPkgContext_PackageInfo;
+	SecPkgInfoW* PackageInfo;
+	UINT32 NegotiationState;
+} SecPkgContext_NegotiationInfoW;
+
+#ifdef UNICODE
+#define SecPkgContext_NegotiationInfo SecPkgContext_NegotiationInfoW
+#else
+#define SecPkgContext_NegotiationInfo SecPkgContext_NegotiationInfoA
+#endif /* UNICODE */
+
+typedef struct
+{
+	SecPkgInfoA* PackageInfo;
+} SecPkgContext_PackageInfoA;
+
+typedef struct
+{
+	SecPkgInfoW* PackageInfo;
+} SecPkgContext_PackageInfoW;
+
+#ifdef UNICODE
+#define SecPkgContext_PackageInfo SecPkgContext_PackageInfoW
+#else
+#define SecPkgContext_PackageInfo SecPkgContext_PackageInfoA
+#endif /* UNICODE */
 
 typedef struct
 {
@@ -665,6 +688,8 @@ typedef struct
 #define SEC_WINNT_AUTH_IDENTITY_MARSHALLED 0x4
 #define SEC_WINNT_AUTH_IDENTITY_ONLY 0x8
 #define SEC_WINNT_AUTH_IDENTITY_EXTENDED 0x100
+
+#define SEC_WINPR_AUTH_IDENTITY_PASSWORD_HASH 0x00800000
 
 #if !defined(_WIN32) || defined(_UWP) || defined(__MINGW32__)
 
@@ -1392,17 +1417,22 @@ extern "C"
 	/* Custom API */
 
 /* Extended SECPKG_ATTR IDs begin at 1000 */
-#define SECPKG_ATTR_AUTH_IDENTITY 1001
-#define SECPKG_ATTR_AUTH_PASSWORD 1002
-#define SECPKG_ATTR_AUTH_NTLM_HASH 1003
-#define SECPKG_ATTR_AUTH_NTLM_MESSAGE 1100
-#define SECPKG_ATTR_AUTH_NTLM_TIMESTAMP 1101
-#define SECPKG_ATTR_AUTH_NTLM_CLIENT_CHALLENGE 1102
-#define SECPKG_ATTR_AUTH_NTLM_SERVER_CHALLENGE 1103
-#define SECPKG_ATTR_AUTH_NTLM_NTPROOF_VALUE 1104
-#define SECPKG_ATTR_AUTH_NTLM_RANDKEY 1105
-#define SECPKG_ATTR_AUTH_NTLM_MIC 1106
-#define SECPKG_ATTR_AUTH_NTLM_MIC_VALUE 1107
+	enum WINPR_C23_ENUM_TYPE(uint32_t)
+	{
+		SECPKG_ATTR_AUTH_IDENTITY = 1001,
+		SECPKG_ATTR_AUTH_PASSWORD = 1002,
+		SECPKG_ATTR_AUTH_NTLM_HASH = 1003,
+		SECPKG_ATTR_AUTH_NTLM_MESSAGE = 1100,
+		SECPKG_ATTR_AUTH_NTLM_TIMESTAMP = 1101,
+		SECPKG_ATTR_AUTH_NTLM_CLIENT_CHALLENGE = 1102,
+		SECPKG_ATTR_AUTH_NTLM_SERVER_CHALLENGE = 1103,
+		SECPKG_ATTR_AUTH_NTLM_NTPROOF_VALUE = 1104,
+		SECPKG_ATTR_AUTH_NTLM_RANDKEY = 1105,
+		SECPKG_ATTR_AUTH_NTLM_MIC = 1106,
+		SECPKG_ATTR_AUTH_NTLM_MIC_VALUE = 1107,
+		SECPKG_ATTR_AUTH_NTLM_HOSTNAME = 1108,
+		SECPKG_ATTR_AUTH_NTLM_HOSTNAME_LEN = 1109
+	};
 
 #define SECPKG_CRED_ATTR_TICKET_LOGON 1200
 

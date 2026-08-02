@@ -32,10 +32,15 @@ struct RemoteDesktopDeviceResolutionCoordinator {
         let directIP = manager.bestIPAddress(for: device)
         let resolvedIP = await resolveIPAddress(for: device)
         let remoteControlPort = preferredRemoteControlPort(for: device)
+        let liveBonjourEndpoints = discoveryManager.liveBonjourServiceEndpoints(
+            for: device,
+            serviceType: .skybridgeRemote
+        )
         let plan = RemoteDesktopLANEndpointCandidateFactory.makePlan(
             remoteControlPort: remoteControlPort,
             directIP: directIP,
             resolvedIP: resolvedIP,
+            liveBonjourEndpoints: liveBonjourEndpoints,
             bonjourService: bonjour,
             activePeerAddress: activePeerAddress,
             remoteServiceType: DiscoveredDevice.remoteControlServiceType
@@ -235,10 +240,27 @@ struct RemoteDesktopDeviceResolutionCoordinator {
     }
 
     private func bonjourServiceIdentity(for device: DiscoveredDevice) -> (name: String, domain: String)? {
+        if let liveAdvertisement = discoveryManager.liveBonjourAdvertisement(
+            for: device,
+            serviceType: .skybridgeRemote
+        ),
+           let name = liveAdvertisement.bonjourServiceName,
+           manager.isPlausibleRemoteServiceInstanceName(name) {
+            let domain = liveAdvertisement.bonjourServiceDomain?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                domain: domain?.isEmpty == false ? domain! : "local."
+            )
+        }
+
         for candidate in identityCandidates(for: device) {
             let hasRemoteServiceEvidence = candidate.bonjourServiceType == DiscoveredDevice.remoteControlServiceType
-                || candidate.services.contains(DiscoveredDevice.remoteControlServiceType)
-                || candidate.id.hasPrefix("bonjour:")
+                || (
+                    candidate.id.hasPrefix("bonjour:")
+                        && candidate.services.contains(DiscoveredDevice.remoteControlServiceType)
+                        && candidate.remoteControlPort != nil
+                )
 
             guard hasRemoteServiceEvidence else { continue }
 
@@ -259,13 +281,21 @@ struct RemoteDesktopDeviceResolutionCoordinator {
     }
 
     /// Prefer the `remoteControlPort` carried by a candidate that advertises the
-    /// explicit `_skybridge-remote._tcp` Bonjour service (the authoritative remote
+    /// explicit `_skybridge-rd._tcp` Bonjour service (the authoritative remote
     /// endpoint), mirroring the file-transfer port-provenance fix. A
     /// session/pairing-derived record can carry a non-advertised port in
     /// `portMap[remoteControlServiceType]` (and gets the remote service appended to
     /// its `services` list when merged via `mergePeerServiceMetadata`), so it must
     /// not win over the real advertised remote-control port.
     private func preferredRemoteControlPort(for device: DiscoveredDevice) -> UInt16? {
+        if let livePort = discoveryManager.liveBonjourAdvertisement(
+            for: device,
+            serviceType: .skybridgeRemote
+        )?.remoteControlPort,
+           livePort > 0 {
+            return livePort
+        }
+
         let candidates = identityCandidates(for: device)
 
         for candidate in candidates where advertisesExplicitRemoteControlService(candidate) {
@@ -282,7 +312,7 @@ struct RemoteDesktopDeviceResolutionCoordinator {
         return nil
     }
 
-    /// True when the candidate carries an explicit `_skybridge-remote._tcp`
+    /// True when the candidate carries an explicit `_skybridge-rd._tcp`
     /// advertisement (Bonjour SRV/TXT provenance) rather than a session/pairing
     /// heartbeat merge. `services` membership alone is not authoritative because
     /// the pairing merge appends `remoteControlServiceType` to `services`.

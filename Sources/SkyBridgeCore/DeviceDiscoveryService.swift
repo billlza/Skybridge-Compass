@@ -1,3 +1,13 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// This type is cross-platform in nature, but the iOS app currently ships its own
+// parallel implementation (DeviceDiscoveryService / DeviceDiscoveryManager). Phase 0 of the iOS/SkyBridgeCore unification only
+// makes the core *compile* for iOS; adopting it on iOS is a later, deliberate migration
+// per type. Excluding it here avoids standing up a second implementation inside one
+// binary. The remaining macOS-only pieces are AppKit-based and must be replaced with
+// platform-neutral equivalents as part of that migration.
+// Tracked in Docs/background-wake-capability-ledger.md.
+#if os(macOS)
 import Foundation
 @preconcurrency import Combine
 import Network
@@ -2007,3 +2017,4 @@ public final class DeviceDiscoveryService: ObservableObject {
         return nil
     }
 }
+#endif

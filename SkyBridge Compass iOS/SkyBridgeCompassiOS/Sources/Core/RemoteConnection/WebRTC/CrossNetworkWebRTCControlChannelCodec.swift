@@ -429,6 +429,8 @@ enum CrossNetworkWebRTCControlChannelCodec {
             return "clipboard"
         case .textMessage:
             return "textMessage"
+        case .textMessageReceipt:
+            return "textMessageReceipt"
         case .pairingIdentityExchange:
             return "pairingIdentityExchange"
         case .kemRefreshRequest:

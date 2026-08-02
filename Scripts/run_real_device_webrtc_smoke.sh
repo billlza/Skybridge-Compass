@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
 source "$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh"
+source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 PROCESS_OWNERSHIP_HELPER="$ROOT_DIR/Scripts/webrtc_smoke_process_ownership.py"
@@ -70,6 +71,8 @@ MIN_ACCEPTANCE_SOAK_SECONDS=10
 DEVICECTL_TIMEOUT_SECONDS="${SKYBRIDGE_DEVICECTL_TIMEOUT_SECONDS:-60}"
 IOS_COPY_TIMEOUT_SECONDS="${SKYBRIDGE_DEVICECTL_COPY_TIMEOUT_SECONDS:-12}"
 IOS_COPY_HARD_TIMEOUT_SECONDS="${SKYBRIDGE_DEVICECTL_COPY_HARD_TIMEOUT_SECONDS:-18}"
+IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_CONSOLE_TIMEOUT_SECONDS:-3600}"
+IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_CONSOLE_CAPTURE_TIMEOUT_SECONDS:-10}"
 RUN_ID="${SKYBRIDGE_SMOKE_WEBRTC_RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 skybridge_smoke_require_safe_run_id "$RUN_ID" "SKYBRIDGE_SMOKE_WEBRTC_RUN_ID"
 
@@ -145,15 +148,21 @@ IOS_MEDIA_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME.webrtc-media.jsonl"
 IOS_DEVICE_INFO_JSON="$ARTIFACT_DIR/device-info.json"
 IOS_LAUNCH_JSON=""
 IOS_LAUNCH_SUMMARY_JSON="$ARTIFACT_DIR/ios-launch.json"
+IOS_PROCESS_CLEANUP_RECEIPT="$ARTIFACT_DIR/ios-process-cleanup.json"
 IOS_BOOTSTRAP_SOURCE=""
 IOS_BOOTSTRAP_TOMBSTONE=""
 IOS_BOOTSTRAP_REMOTE_DIRECTORY="Library/Caches"
 IOS_BOOTSTRAP_FILE_NAME="skybridge-webrtc-smoke-bootstrap-v1.json"
 MAC_PID=""
-IOS_PID=""
+IOS_CONSOLE_PID=""
 MAC_PROCESS_IDENTITY=""
 IOS_PROCESS_IDENTITY=""
-DID_LAUNCH_IOS=0
+IOS_CONSOLE_HANDLE_IDENTITY=""
+IOS_CONSOLE_STDOUT=""
+IOS_CONSOLE_STDERR=""
+IOS_CONSOLE_CAPTURE_DIAGNOSTIC=""
+IOS_CONSOLE_HANDLE_STARTED=0
+IOS_CONSOLE_HANDLE_CAPTURED=0
 DID_COPY_IOS_BOOTSTRAP=0
 MAC_PQC_DEVICE_ID=""
 SESSION_ID=""
@@ -182,7 +191,7 @@ cleanup() {
   local cleanup_status=0
   trap - EXIT
 
-  if [[ "$DID_LAUNCH_IOS" == "1" ]]; then
+  if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]]; then
     copy_round_diagnostics || true
     if ! terminate_ios_app; then
       cleanup_status=1
@@ -245,9 +254,15 @@ initialize_process_ownership_session() {
     echo "Private process-ownership directory was initialized more than once." >&2
     return 1
   fi
+  rm -f -- "$IOS_PROCESS_CLEANUP_RECEIPT"
   PROCESS_OWNERSHIP_PRIVATE_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/skybridge-webrtc-process-ownership.XXXXXX")"
   MAC_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-process-identity.json"
   IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"
+  IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"
+  IOS_CONSOLE_STDOUT="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stdout"
+  IOS_CONSOLE_STDERR="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stderr"
+  IOS_CONSOLE_CAPTURE_DIAGNOSTIC="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log"
+  IOS_LAUNCH_JSON="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-launch.raw.json"
   chmod 0700 "$PROCESS_OWNERSHIP_PRIVATE_DIR"
 }
 
@@ -255,9 +270,22 @@ destroy_process_ownership_session() {
   local cleanup_failed=0
   if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
     local identity_file
-    for identity_file in "$MAC_PROCESS_IDENTITY" "$IOS_PROCESS_IDENTITY"; do
+    for identity_file in \
+      "$MAC_PROCESS_IDENTITY" \
+      "$IOS_PROCESS_IDENTITY" \
+      "$IOS_CONSOLE_HANDLE_IDENTITY" \
+      "$IOS_CONSOLE_STDOUT" \
+      "$IOS_CONSOLE_STDERR" \
+      "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC" \
+      "$IOS_LAUNCH_JSON"; do
       case "$identity_file" in
-        "$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-process-identity.json"|"$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json")
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-process-identity.json"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stdout"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stderr"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log"|\
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-launch.raw.json")
           if [[ -e "$identity_file" || -L "$identity_file" ]] && ! rm -f -- "$identity_file"; then
             echo "Unable to remove private WebRTC process-ownership record: $identity_file" >&2
             cleanup_failed=1
@@ -277,6 +305,11 @@ destroy_process_ownership_session() {
   if (( cleanup_failed == 0 )); then
     MAC_PROCESS_IDENTITY=""
     IOS_PROCESS_IDENTITY=""
+    IOS_CONSOLE_HANDLE_IDENTITY=""
+    IOS_CONSOLE_STDOUT=""
+    IOS_CONSOLE_STDERR=""
+    IOS_CONSOLE_CAPTURE_DIAGNOSTIC=""
+    IOS_LAUNCH_JSON=""
     PROCESS_OWNERSHIP_PRIVATE_DIR=""
   fi
   return "$cleanup_failed"
@@ -330,7 +363,6 @@ destroy_private_auth_session() {
       "$MAC_TOKEN" \
       "$MAC_TENANT" \
       "$MAC_AUTH_BINDING" \
-      "$IOS_LAUNCH_JSON" \
       "$IOS_BOOTSTRAP_SOURCE" \
       "$IOS_BOOTSTRAP_TOMBSTONE" \
       "$AUTH_PRIVATE_DIR/mac-product.entitlements.plist" \
@@ -349,7 +381,7 @@ destroy_private_auth_session() {
       "$AUTH_PRIVATE_DIR"/.bootstrap-tenant.* \
       "$AUTH_PRIVATE_DIR"/.auth-binding.*; do
       case "$private_file" in
-        "$AUTH_PRIVATE_DIR/host.auth-session.json"|"$AUTH_PRIVATE_DIR/mac.code"|"$AUTH_PRIVATE_DIR/mac.token"|"$AUTH_PRIVATE_DIR/mac.tenant"|"$AUTH_PRIVATE_DIR/mac.auth-binding.sha256"|"$AUTH_PRIVATE_DIR/ios-launch.raw.json"|"$AUTH_PRIVATE_DIR/$IOS_BOOTSTRAP_FILE_NAME"|"$AUTH_PRIVATE_DIR/bootstrap-tombstone/$IOS_BOOTSTRAP_FILE_NAME"|"$AUTH_PRIVATE_DIR/mac-product.entitlements.plist"|"$AUTH_PRIVATE_DIR/ios-product.entitlements.plist"|"$AUTH_PRIVATE_DIR/ios-product.mobileprovision.plist"|"$AUTH_PRIVATE_DIR/ios-product.codesign.txt"|"$AUTH_PRIVATE_DIR/ios-distribution-signing-preflight.json"|"$AUTH_PRIVATE_DIR/app-signed-entitlements.plist"|"$AUTH_PRIVATE_DIR/widget-signed-entitlements.plist"|"$AUTH_PRIVATE_DIR"/app-signing-certificate-*|"$AUTH_PRIVATE_DIR"/widget-signing-certificate-*|"$AUTH_PRIVATE_DIR"/ios-signing-certificate-*|"$AUTH_PRIVATE_DIR"/.host.auth-session.*|"$AUTH_PRIVATE_DIR"/.bootstrap-access-token.*|"$AUTH_PRIVATE_DIR"/.bootstrap-tenant.*|"$AUTH_PRIVATE_DIR"/.auth-binding.*)
+        "$AUTH_PRIVATE_DIR/host.auth-session.json"|"$AUTH_PRIVATE_DIR/mac.code"|"$AUTH_PRIVATE_DIR/mac.token"|"$AUTH_PRIVATE_DIR/mac.tenant"|"$AUTH_PRIVATE_DIR/mac.auth-binding.sha256"|"$AUTH_PRIVATE_DIR/$IOS_BOOTSTRAP_FILE_NAME"|"$AUTH_PRIVATE_DIR/bootstrap-tombstone/$IOS_BOOTSTRAP_FILE_NAME"|"$AUTH_PRIVATE_DIR/mac-product.entitlements.plist"|"$AUTH_PRIVATE_DIR/ios-product.entitlements.plist"|"$AUTH_PRIVATE_DIR/ios-product.mobileprovision.plist"|"$AUTH_PRIVATE_DIR/ios-product.codesign.txt"|"$AUTH_PRIVATE_DIR/ios-distribution-signing-preflight.json"|"$AUTH_PRIVATE_DIR/app-signed-entitlements.plist"|"$AUTH_PRIVATE_DIR/widget-signed-entitlements.plist"|"$AUTH_PRIVATE_DIR"/app-signing-certificate-*|"$AUTH_PRIVATE_DIR"/widget-signing-certificate-*|"$AUTH_PRIVATE_DIR"/ios-signing-certificate-*|"$AUTH_PRIVATE_DIR"/.host.auth-session.*|"$AUTH_PRIVATE_DIR"/.bootstrap-access-token.*|"$AUTH_PRIVATE_DIR"/.bootstrap-tenant.*|"$AUTH_PRIVATE_DIR"/.auth-binding.*)
           if [[ -e "$private_file" || -L "$private_file" ]] && ! rm -f -- "$private_file"; then
             echo "Unable to remove private WebRTC auth file: $private_file" >&2
             cleanup_failed=1
@@ -374,7 +406,6 @@ destroy_private_auth_session() {
     MAC_TENANT=""
     MAC_AUTH_BINDING=""
     AUTH_BINDING_DIGEST=""
-    IOS_LAUNCH_JSON=""
     IOS_BOOTSTRAP_SOURCE=""
     IOS_BOOTSTRAP_TOMBSTONE=""
     AUTH_PRIVATE_DIR=""
@@ -737,102 +768,176 @@ terminate_mac_host() {
   return 1
 }
 
-ios_process_ownership_status() {
-  if [[ -z "$IOS_PROCESS_IDENTITY" || ! -f "$IOS_PROCESS_IDENTITY" ]]; then
-    echo "iOS WebRTC process ownership record is unavailable." >&2
-    return 2
+ios_console_handle_is_exact_and_running() {
+  [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] || return 1
+  skybridge_ios_console_handle_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" >/dev/null 2>&1
+}
+
+write_ios_process_cleanup_receipt() {
+  python3 - "$IOS_PROCESS_CLEANUP_RECEIPT" <<'PY'
+import json
+import os
+import pathlib
+import tempfile
+import sys
+
+output = pathlib.Path(sys.argv[1])
+payload = {
+    "cleanupComplete": True,
+    "exactConsoleHandle": True,
+    "pidOnlySignal": False,
+    "remoteAbsenceProven": True,
+    "schemaVersion": 1,
+}
+descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+temporary = pathlib.Path(temporary_name)
+try:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+finally:
+    if temporary.exists():
+        temporary.unlink()
+PY
+}
+
+launch_ios_app_with_console_handle() {
+  if ! skybridge_ios_require_fresh_app_launch \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_DEVICE_ID" \
+    "$IOS_APP_PATH" \
+    "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+    "$DEVICECTL_TIMEOUT_SECONDS"; then
+    return 1
   fi
-  local process_json
-  if [[ -z "$PROCESS_OWNERSHIP_PRIVATE_DIR" || ! -d "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
-    echo "Private WebRTC process-ownership directory is unavailable." >&2
-    return 2
+
+  skybridge_ios_start_console_launch \
+    "$IOS_DEVICE_ID" \
+    "$IOS_BUNDLE_ID" \
+    "$IOS_ENV_JSON" \
+    "$IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS" \
+    "$IOS_LAUNCH_JSON" \
+    "$IOS_CONSOLE_STDOUT" \
+    "$IOS_CONSOLE_STDERR" \
+    IOS_CONSOLE_PID
+  IOS_CONSOLE_HANDLE_STARTED=1
+
+  if ! skybridge_ios_capture_console_handle \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" \
+    "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC" \
+    "$IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS"; then
+    if kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
+      echo "iOS WebRTC console handle is alive but exact ownership capture failed; refusing PID-only cleanup." >&2
+      return 1
+    fi
+    wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+    IOS_CONSOLE_HANDLE_STARTED=0
+    if ! skybridge_ios_require_app_absent_after_handle_exit \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$IOS_DEVICE_ID" \
+      "$IOS_APP_PATH" \
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+      "$DEVICECTL_TIMEOUT_SECONDS"; then
+      echo "iOS WebRTC launch failed before handle capture and remote absence is unproven." >&2
+      return 1
+    fi
+    echo "iOS WebRTC launch command exited before exact console ownership was captured." >&2
+    return 1
   fi
-  process_json="$(mktemp "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-processes.XXXXXX")"
-  rm -f -- "$process_json"
-  if ! xcrun devicectl --timeout "$DEVICECTL_TIMEOUT_SECONDS" device info processes \
-    --device "$IOS_DEVICE_ID" \
-    --json-output "$process_json" \
-    --columns '*' >/dev/null 2>&1; then
-    rm -f -- "$process_json"
-    return 2
+
+  IOS_CONSOLE_HANDLE_CAPTURED=1
+  sleep 0.5
+  if ! ios_console_handle_is_exact_and_running; then
+    echo "iOS WebRTC console launch handle exited or became unverifiable during startup." >&2
+    return 1
   fi
-  local status
-  if python3 "$PROCESS_OWNERSHIP_HELPER" ios-status \
-    --processes-json "$process_json" \
-    --identity "$IOS_PROCESS_IDENTITY"; then
-    status=0
-  else
-    status=$?
-  fi
-  rm -f -- "$process_json"
-  return "$status"
 }
 
 terminate_ios_app() {
-  if [[ -z "$IOS_PID" ]]; then
-    echo "Refusing iOS WebRTC cleanup because the launched process identity was not captured." >&2
-    return 1
-  fi
-  if [[ -z "$IOS_PROCESS_IDENTITY" || ! -f "$IOS_PROCESS_IDENTITY" ]]; then
-    echo "Refusing to terminate the iOS WebRTC PID without its private ownership record." >&2
-    return 1
-  fi
-  local target_pid
-  if ! target_pid="$(python3 "$PROCESS_OWNERSHIP_HELPER" identity-pid \
-    --platform ios \
-    --identity "$IOS_PROCESS_IDENTITY")"; then
-    echo "Refusing to terminate the iOS WebRTC PID because its ownership record is invalid." >&2
-    return 1
-  fi
-  if [[ "$target_pid" != "$IOS_PID" ]]; then
-    echo "Refusing to terminate the iOS WebRTC PID because launch state and ownership record disagree." >&2
+  local exited_ios_pid
+
+  if [[ "$IOS_CONSOLE_HANDLE_CAPTURED" != "1" ]] \
+    || [[ -z "$IOS_CONSOLE_PID" ]] \
+    || [[ ! -f "$IOS_CONSOLE_HANDLE_IDENTITY" ]]; then
+    echo "Refusing iOS WebRTC cleanup because exact console-handle ownership was not captured." >&2
     return 1
   fi
 
-  local process_status
-  if ios_process_ownership_status; then
-    process_status=0
+  local handle_status
+  if skybridge_ios_console_handle_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY"; then
+    handle_status=0
   else
-    process_status=$?
+    handle_status=$?
   fi
-  if (( process_status == 1 )); then
-    rm -f -- "$IOS_PROCESS_IDENTITY"
-    IOS_PID=""
-    return 0
-  fi
-  if (( process_status != 0 )); then
-    echo "Refusing iOS termination: PID, bundle executable, and audit token ownership could not all be verified." >&2
-    return 1
-  fi
-
-  local terminate_status
-  if xcrun devicectl --timeout "$DEVICECTL_TIMEOUT_SECONDS" device process terminate \
-    --device "$IOS_DEVICE_ID" \
-    --pid "$target_pid" >/dev/null 2>&1; then
-    terminate_status=0
-  else
-    terminate_status=$?
-  fi
-  for _ in {1..20}; do
-    if ios_process_ownership_status; then
-      if (( terminate_status != 0 )); then
-        echo "devicectl termination failed while the exact iOS WebRTC process remained alive: pid=$target_pid" >&2
+  case "$handle_status" in
+    0)
+      if ! skybridge_ios_signal_console_handle \
+        "$PROCESS_OWNERSHIP_HELPER" \
+        "$IOS_CONSOLE_PID" \
+        "$IOS_CONSOLE_HANDLE_IDENTITY"; then
+        echo "Failed to signal the exact iOS WebRTC console launch handle." >&2
         return 1
       fi
-      sleep 0.5
-      continue
-    fi
-    process_status=$?
-    if (( process_status == 1 )); then
-      rm -f -- "$IOS_PROCESS_IDENTITY"
-      IOS_PID=""
-      return 0
-    fi
-    echo "Unable to verify exact iOS WebRTC process ownership after termination: pid=$target_pid" >&2
+      ;;
+    1)
+      wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+      ;;
+    *)
+      echo "Refusing iOS WebRTC cleanup because the console launch handle is unverifiable." >&2
+      return 1
+      ;;
+  esac
+
+  if ! skybridge_ios_wait_console_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" \
+    15; then
     return 1
-  done
-  echo "iOS WebRTC product process remains alive after termination request: pid=$target_pid" >&2
-  return 1
+  fi
+  if ! skybridge_ios_capture_exited_console_identity \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_LAUNCH_JSON" \
+    "$IOS_APP_PATH" \
+    "$IOS_PROCESS_IDENTITY"; then
+    echo "Unable to capture the exited iOS WebRTC launch identity." >&2
+    return 1
+  fi
+  if ! exited_ios_pid="$(python3 "$PROCESS_OWNERSHIP_HELPER" identity-pid \
+    --platform ios \
+    --identity "$IOS_PROCESS_IDENTITY")" \
+    || ! [[ "$exited_ios_pid" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Unable to read the exited iOS WebRTC launch PID evidence." >&2
+    return 1
+  fi
+  if ! skybridge_ios_require_app_absent_after_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_DEVICE_ID" \
+    "$IOS_APP_PATH" \
+    "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+    "$DEVICECTL_TIMEOUT_SECONDS"; then
+    return 1
+  fi
+  if ! write_ios_process_cleanup_receipt; then
+    echo "Unable to write the iOS WebRTC process-cleanup receipt." >&2
+    return 1
+  fi
+
+  IOS_CONSOLE_HANDLE_STARTED=0
+  IOS_CONSOLE_HANDLE_CAPTURED=0
+  return 0
 }
 
 regex_escape() {
@@ -1018,6 +1123,14 @@ validate_acceptance_profile() {
 
   if ! [[ "$SMOKE_SOAK_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "SKYBRIDGE_SMOKE_SOAK_SECONDS must be a non-negative integer" >&2
+    exit 2
+  fi
+  if ! [[ "$IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SKYBRIDGE_SMOKE_IOS_CONSOLE_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+  fi
+  if ! [[ "$IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "SKYBRIDGE_SMOKE_IOS_CONSOLE_CAPTURE_TIMEOUT_SECONDS must be a positive integer" >&2
     exit 2
   fi
 
@@ -1955,6 +2068,11 @@ wait_for_file_pattern() {
   local started_at
   started_at="$(date +%s)"
   while true; do
+    if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "Exact iOS WebRTC console launch handle exited or became unverifiable before ${label}." >&2
+      return 1
+    fi
     if [[ -f "$path" ]] && grep -qE "$pattern" "$path"; then
       return 0
     fi
@@ -2053,6 +2171,11 @@ wait_for_ios_pattern() {
   started_at="$(date +%s)"
   while true; do
     copy_ios_file "$remote" "$local_path"
+    if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "Exact iOS WebRTC console launch handle exited or became unverifiable before ${label}." >&2
+      return 1
+    fi
     if [[ -f "$local_path" ]] && grep -qE "$failure_pattern" "$local_path"; then
       echo "iOS smoke failed while waiting for ${label}: $(tail -n 1 "$local_path")" >&2
       return 1
@@ -2475,7 +2598,6 @@ MAC_CODE="$ARTIFACT_DIR/mac.code"
 MAC_TOKEN="$AUTH_PRIVATE_DIR/mac.token"
 MAC_TENANT="$AUTH_PRIVATE_DIR/mac.tenant"
 MAC_AUTH_BINDING="$AUTH_PRIVATE_DIR/mac.auth-binding.sha256"
-IOS_LAUNCH_JSON="$AUTH_PRIVATE_DIR/ios-launch.raw.json"
 precreate_product_output_files
 verify_macos_product_host
 AUTH_SESSION_FILE="$(prepare_auth_session)"
@@ -2552,36 +2674,37 @@ if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]] || ! skybridge_apple_pqc_
   exit 1
 fi
 echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-IOS_XCODE_SIGNING_SETTINGS=()
+IOS_XCODEBUILD_ARGS=(
+  -project "$IOS_PROJECT"
+  -scheme "$IOS_SCHEME"
+  -configuration "$IOS_BUILD_CONFIGURATION"
+  -destination "$IOS_BUILD_DESTINATION"
+  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios"
+  "SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION=$IOS_BUILD_CONFIGURATION"
+  "SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE=$IOS_SOURCE_DIRTY_STATE"
+  "SKYBRIDGE_PACKAGING_GIT_COMMIT=$IOS_SOURCE_COMMIT"
+  "SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"
+  "SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"
+  "SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"
+  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
+  "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"
+)
 if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
   # The project default is Automatic (Xcode-managed) signing. This direct
   # testing-surface device build forces Manual signing on the command line so it is
   # signed by the resolver-selected installed distribution profile (per-target
   # profiles come from the project's PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_*_...)"
   # indirection, fed by the two environment build settings below).
-  IOS_XCODE_SIGNING_SETTINGS=(
+  IOS_XCODEBUILD_ARGS+=(
     "CODE_SIGN_STYLE=Manual"
     "CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"
     "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"
     "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"
   )
 fi
-SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
-  -project "$IOS_PROJECT" \
-  -scheme "$IOS_SCHEME" \
-  -configuration "$IOS_BUILD_CONFIGURATION" \
-  -destination "$IOS_BUILD_DESTINATION" \
-  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
-  "INFOPLIST_KEY_SkyBridgePackagingBuildConfiguration=$IOS_BUILD_CONFIGURATION" \
-  "INFOPLIST_KEY_SkyBridgePackagingGitDirtyState=$IOS_SOURCE_DIRTY_STATE" \
-  "INFOPLIST_KEY_SkyBridgePackagingGitCommit=$IOS_SOURCE_COMMIT" \
-  "INFOPLIST_KEY_SkyBridgePackagingSourceRepository=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}" \
-  "INFOPLIST_KEY_SkyBridgePackagingProductSurface=testing" \
-  "INFOPLIST_KEY_SkyBridgePackagingSwiftActiveCompilationConditions=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING" \
-  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
-  "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING" \
-  "${IOS_XCODE_SIGNING_SETTINGS[@]}" \
-  build >"$IOS_BUILD_LOG" 2>&1
+IOS_XCODEBUILD_ARGS+=(build)
+SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
+  skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG" 2>&1
 
 IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
@@ -2783,28 +2906,7 @@ print(json.dumps(env, ensure_ascii=False))
 PY
 )"
 
-xcrun devicectl --timeout "$DEVICECTL_TIMEOUT_SECONDS" device process launch \
-  --device "$IOS_DEVICE_ID" \
-  --terminate-existing \
-  --environment-variables "$IOS_ENV_JSON" \
-  --json-output "$IOS_LAUNCH_JSON" \
-  "$IOS_BUNDLE_ID" >/dev/null
-chmod 0600 "$IOS_LAUNCH_JSON"
-DID_LAUNCH_IOS=1
-if ! python3 "$PROCESS_OWNERSHIP_HELPER" ios-capture \
-  --launch-json "$IOS_LAUNCH_JSON" \
-  --app-path "$IOS_APP_PATH" \
-  --output "$IOS_PROCESS_IDENTITY"; then
-  echo "Failed to capture the exact iOS WebRTC PID, bundle executable, and audit token." >&2
-  exit 1
-fi
-IOS_PID="$(python3 "$PROCESS_OWNERSHIP_HELPER" identity-pid \
-  --platform ios \
-  --identity "$IOS_PROCESS_IDENTITY")"
-if ! [[ "$IOS_PID" =~ ^[1-9][0-9]*$ ]]; then
-  echo "The iOS WebRTC process ownership record did not contain a valid process identifier." >&2
-  exit 1
-fi
+launch_ios_app_with_console_handle
 python3 - "$IOS_LAUNCH_SUMMARY_JSON" "$IOS_BUNDLE_ID" <<'PY'
 import json
 import os
@@ -2932,6 +3034,9 @@ fi
 
 echo "==> Running WebRTC media doctor"
 run_webrtc_media_doctor "$SESSION_ID"
+copy_round_diagnostics
+echo "==> Closing the exact iOS console launch handle and proving remote app absence"
+terminate_ios_app
 stamp_release_session_evidence "$SESSION_ID"
 write_release_acceptance_manifest
 echo "==> Materializing redacted public WebRTC smoke artifacts"

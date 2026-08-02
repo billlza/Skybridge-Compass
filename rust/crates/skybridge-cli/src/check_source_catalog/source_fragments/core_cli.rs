@@ -14,6 +14,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../main_tests/parse/check.rs"),
     ),
     (
+        "main_tests/parse/connect.rs",
+        include_str!("../../main_tests/parse/connect.rs"),
+    ),
+    (
         "main_tests/parse/crossnet.rs",
         include_str!("../../main_tests/parse/crossnet.rs"),
     ),
@@ -40,6 +44,10 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "main_tests/parse/test.rs",
         include_str!("../../main_tests/parse/test.rs"),
+    ),
+    (
+        "agent_runtime_guard.rs",
+        include_str!("../../agent_runtime_guard.rs"),
     ),
     ("auth_commands.rs", include_str!("../../auth_commands.rs")),
     ("auth_support.rs", include_str!("../../auth_support.rs")),
@@ -69,6 +77,7 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         include_str!("../../cli_dispatch/smoke.rs"),
     ),
     ("cli_metadata.rs", include_str!("../../cli_metadata.rs")),
+    ("cli_output.rs", include_str!("../../cli_output.rs")),
     (
         "cli_test_support.rs",
         include_str!("../../cli_test_support.rs"),
@@ -89,14 +98,6 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     (
         "connection_code/create.rs",
         include_str!("../../connection_code/create.rs"),
-    ),
-    (
-        "connection_code/inline_runtime.rs",
-        include_str!("../../connection_code/inline_runtime.rs"),
-    ),
-    (
-        "connection_code/inline_state.rs",
-        include_str!("../../connection_code/inline_state.rs"),
     ),
     (
         "connection_code/tests.rs",

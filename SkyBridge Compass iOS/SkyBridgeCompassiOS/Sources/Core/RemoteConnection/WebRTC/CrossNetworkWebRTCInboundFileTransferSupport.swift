@@ -1,4 +1,6 @@
 import Foundation
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 
 @available(iOS 17.0, *)
 enum CrossNetworkWebRTCInboundFileTransferPathError: Error {

@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import SkyBridgeProtocolCore
 
 // MARK: - 消息优先级
 
@@ -60,6 +61,7 @@ public enum OfflineMessageType: String, Codable, Sendable, CaseIterable {
 public enum MessageDeliveryStatus: String, Codable, Sendable {
     case pending = "pending"           // 等待发送
     case sending = "sending"           // 发送中
+    case awaitingReceipt = "awaiting_receipt" // 已提交，等待对端认证回执
     case delivered = "delivered"       // 已送达
     case failed = "failed"             // 发送失败
     case expired = "expired"           // 已过期
@@ -68,6 +70,7 @@ public enum MessageDeliveryStatus: String, Codable, Sendable {
         switch self {
         case .pending: return "等待发送"
         case .sending: return "发送中"
+        case .awaitingReceipt: return "等待对端确认"
         case .delivered: return "已送达"
         case .failed: return "发送失败"
         case .expired: return "已过期"
@@ -82,10 +85,19 @@ public enum MessageDeliveryStatus: String, Codable, Sendable {
     }
 }
 
+/// Observable availability of the canonical offline-queue state.
+public enum OfflineQueuePersistenceState: Sendable, Equatable {
+    case loading
+    case ready
+    case blocked(OfflineDeliveryFailureCode)
+}
+
 // MARK: - 排队消息
 
 /// 排队消息
-public struct QueuedMessage: Identifiable, Codable, Sendable {
+public struct QueuedMessage: Identifiable, Codable, Sendable, Equatable {
+    public static let maximumPayloadBytes = 1_048_576
+
     public let id: UUID
     public let targetDeviceID: String
     public let messageType: OfflineMessageType
@@ -96,7 +108,15 @@ public struct QueuedMessage: Identifiable, Codable, Sendable {
     public private(set) var status: MessageDeliveryStatus
     public private(set) var retryCount: Int
     public private(set) var lastAttemptAt: Date?
-    public private(set) var lastError: String?
+    private var lastError: String?
+
+    public var lastFailureCode: OfflineDeliveryFailureCode? {
+        lastError.flatMap(OfflineDeliveryFailureCode.init(rawValue:))
+    }
+
+    var hasValidPersistedFailureCode: Bool {
+        lastError == nil || lastFailureCode != nil
+    }
 
     /// 是否已过期
     public var isExpired: Bool {
@@ -126,35 +146,86 @@ public struct QueuedMessage: Identifiable, Codable, Sendable {
         self.priority = priority
         self.payload = payload
         self.createdAt = Date()
-        self.expiresAt = Date().addingTimeInterval(ttl)
+        self.expiresAt = ttl.isFinite ? Date().addingTimeInterval(ttl) : .distantFuture
         self.status = .pending
         self.retryCount = 0
         self.lastAttemptAt = nil
         self.lastError = nil
     }
 
-    /// 更新状态
-    public mutating func updateStatus(_ newStatus: MessageDeliveryStatus) {
-        self.status = newStatus
+    init(
+        id: UUID,
+        targetDeviceID: String,
+        messageType: OfflineMessageType,
+        priority: MessagePriority,
+        payload: Data,
+        createdAt: Date,
+        expiresAt: Date,
+        status: MessageDeliveryStatus,
+        retryCount: Int,
+        lastAttemptAt: Date?,
+        lastFailureCode: OfflineDeliveryFailureCode?
+    ) {
+        self.id = id
+        self.targetDeviceID = targetDeviceID
+        self.messageType = messageType
+        self.priority = priority
+        self.payload = payload
+        self.createdAt = createdAt
+        self.expiresAt = expiresAt
+        self.status = status
+        self.retryCount = retryCount
+        self.lastAttemptAt = lastAttemptAt
+        self.lastError = lastFailureCode?.rawValue
     }
 
-    /// 记录发送尝试
-    public mutating func recordAttempt(error: String? = nil) {
-        self.retryCount += 1
-        self.lastAttemptAt = Date()
-        self.lastError = error
+    mutating func markSending() {
+        status = .sending
     }
 
-    /// 标记为过期
-    public mutating func markExpired() {
-        self.status = .expired
+    /// Applies a retryable failure and returns whether retry budget was exhausted.
+    @discardableResult
+    mutating func recordRetryableFailure(
+        _ code: OfflineDeliveryFailureCode,
+        maximumRetryCount: Int
+    ) -> Bool {
+        retryCount += 1
+        lastAttemptAt = Date()
+        lastError = code.rawValue
+        let exhausted = retryCount >= maximumRetryCount
+        status = exhausted ? .failed : .pending
+        return exhausted
     }
+
+    mutating func markPermanentFailure(_ code: OfflineDeliveryFailureCode) {
+        status = .failed
+        lastAttemptAt = Date()
+        lastError = code.rawValue
+    }
+
+    mutating func preservePendingAfterCancellation() {
+        status = .pending
+    }
+
+    mutating func recoverInterruptedDelivery() {
+        guard status == .sending else { return }
+        status = .pending
+    }
+
+    mutating func resetForManualRetry() {
+        guard status == .failed else { return }
+        status = .pending
+        retryCount = 0
+        lastAttemptAt = nil
+        lastError = nil
+    }
+
 }
 
 // MARK: - 消息队列配置
 
 /// 离线消息队列配置
-public struct OfflineQueueConfiguration: Codable, Sendable {
+public struct OfflineQueueConfiguration: Codable, Sendable, Equatable {
     /// 最大队列大小
     public var maxQueueSize: Int
 
@@ -215,6 +286,23 @@ public struct OfflineQueueConfiguration: Codable, Sendable {
         self.urgentTTL = urgentTTL
         self.enablePersistence = enablePersistence
         self.priorityOrdering = priorityOrdering
+    }
+
+    func validate() throws {
+        guard maxQueueSize > 0,
+              maxMessagesPerDevice > 0,
+              maxMessagesPerDevice <= maxQueueSize,
+              maxRetryCount > 0,
+              retryInterval.isFinite,
+              retryInterval > 0,
+              retryBackoffFactor.isFinite,
+              retryBackoffFactor >= 1,
+              defaultTTL.isFinite,
+              defaultTTL > 0,
+              (urgentTTL.isFinite ? urgentTTL > 0 : urgentTTL == .infinity),
+              enablePersistence else {
+            throw OfflineQueueError.invalidConfiguration
+        }
     }
 }
 
@@ -277,9 +365,14 @@ public enum OfflineQueueError: Error, Sendable, LocalizedError {
     case deviceQueueFull(deviceID: String)
     case messageExpired
     case messageTooLarge(size: Int, maxSize: Int)
+    case storageCapacityExceeded(actualBytes: Int, maximumBytes: Int)
+    case invalidPayload
     case deviceOffline(deviceID: String)
     case sendFailed(reason: String)
-    case persistenceError(String)
+    case persistenceBlocked(OfflineDeliveryFailureCode)
+    case invalidConfiguration
+    case coordinatedRetryRequired
+    case staleClaim(id: UUID)
     case messageNotFound(id: UUID)
 
     public var errorDescription: String? {
@@ -292,12 +385,22 @@ public enum OfflineQueueError: Error, Sendable, LocalizedError {
             return "消息已过期"
         case .messageTooLarge(let size, let maxSize):
             return "消息过大: \(size) 字节 (最大 \(maxSize) 字节)"
+        case .storageCapacityExceeded(let actualBytes, let maximumBytes):
+            return "离线消息存储容量不足: \(actualBytes) 字节 (最大 \(maximumBytes) 字节)"
+        case .invalidPayload:
+            return "离线消息载荷无效"
         case .deviceOffline(let deviceID):
             return "设备 \(deviceID) 离线"
         case .sendFailed(let reason):
             return "发送失败: \(reason)"
-        case .persistenceError(let reason):
-            return "持久化错误: \(reason)"
+        case .persistenceBlocked:
+            return "离线消息队列持久化不可用"
+        case .invalidConfiguration:
+            return "离线消息队列配置无效"
+        case .coordinatedRetryRequired:
+            return "文本消息必须与会话状态协调后才能重试"
+        case .staleClaim:
+            return "离线消息投递所有权已失效"
         case .messageNotFound(let id):
             return "消息未找到: \(id)"
         }

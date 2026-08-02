@@ -3,7 +3,7 @@ import Foundation
 import PackageDescription
 
 let packageRootPath = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
-let webRTCHeadersIncludePath = "\(packageRootPath)/Sources/Vendor/WebRTCHeaders"
+let webRTCAudioDeviceHeaderOverlayPath = "\(packageRootPath)/Sources/Vendor/WebRTCM150AudioDeviceHeader"
 let macOSAppInfoPlistPath = "\(packageRootPath)/Sources/SkyBridgeCompassApp/Info.plist"
 let latestCStandardFlags = ["-std=gnu23"]
 let latestCXXStandardFlags = ["-std=gnu++23"]
@@ -108,6 +108,18 @@ let package = Package(
         .executable(name: "HandshakeBenchRunner", targets: ["HandshakeBenchRunner"]),
         .executable(name: "MessageSizeBenchRunner", targets: ["MessageSizeBenchRunner"]),
         .library(name: "SkyBridgeProtocolCore", targets: ["SkyBridgeProtocolCore"]),
+        .library(
+            name: "SkyBridgeMessagePersistence",
+            targets: ["SkyBridgeMessagePersistence"]
+        ),
+        // Keep the shared protocol and WebRTC modules in one explicit static image on Apple
+        // platforms. An automatic multi-target product may become a PackageProduct framework;
+        // linking that beside Q-Periapt's static ProtocolCore closure duplicates runtime types.
+        .library(
+            name: "SkyBridgeWebRTCRuntime",
+            type: .static,
+            targets: ["SkyBridgeProtocolCore", "SkyBridgeWebRTCRuntime"]
+        ),
         .library(name: "SkyBridgeAppleTransport", targets: ["SkyBridgeAppleTransport"]),
         .library(name: "SkyBridgeOpus", targets: ["SkyBridgeOpus"]),
         .library(name: "SkyBridgeRealtimeMedia", targets: ["SkyBridgeRealtimeMedia"]),
@@ -121,14 +133,17 @@ let package = Package(
         .library(name: "SkyBridgeWidgetShared", targets: ["SkyBridgeWidgetShared"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-collections", from: "1.4.1"),
-        .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.13.0"),
+        .package(url: "https://github.com/apple/swift-collections", from: "1.6.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssh", from: "0.15.0"),
+        // SkyBridgeCore imports Crypto directly for SSH key parsing/authentication. Keep this
+        // dependency explicit instead of relying on NIOSSH's private transitive dependency.
+        .package(url: "https://github.com/apple/swift-crypto", from: "4.5.1"),
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
-        .package(url: "https://github.com/apple/swift-asn1", from: "1.7.0"),
-        // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        // 注意：上游 149.0.0 发布损坏（资产 SHA256 与其 manifest 声明不符，SwiftPM 必然拉取失败），
-        // 故停留在 148.x；上游修复后再升级。
-        .package(url: "https://github.com/stasel/WebRTC", from: "148.0.0"),
+        .package(url: "https://github.com/apple/swift-asn1", from: "1.7.1"),
+        // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）。
+        // Binary dependencies are exact-pinned so a future upstream release cannot silently
+        // replace reviewed native bytes during a clean resolve.
+        .package(url: "https://github.com/stasel/WebRTC", exact: "150.0.0"),
         .package(path: "Packages/SkyBridgeCameraKit")
     ],
     targets: [
@@ -146,18 +161,6 @@ let package = Package(
         .binaryTarget(
             name: "libopus",
             path: "Sources/Vendor/libopus.xcframework"
-        ),
-        .binaryTarget(
-            name: "FreeRDP",
-            path: "Sources/Vendor/FreeRDP.xcframework"
-        ),
-        .binaryTarget(
-            name: "WinPR",
-            path: "Sources/Vendor/WinPR.xcframework"
-        ),
-        .binaryTarget(
-            name: "FreeRDPClient",
-            path: "Sources/Vendor/FreeRDPClient.xcframework"
         ),
         .target(
             name: "OQSRAII",
@@ -189,7 +192,7 @@ let package = Package(
         ),
         .target(
             name: "SkyBridgeQPeriaptRuntime",
-            dependencies: ["CQPeriapt"],
+            dependencies: ["CQPeriapt", "SkyBridgeProtocolCore"],
             path: "Sources/SkyBridgeQPeriaptRuntime",
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
@@ -197,26 +200,27 @@ let package = Package(
         ),
         .target(
             name: "FreeRDPBridge",
-            dependencies: ["WinPR", "FreeRDP", "FreeRDPClient"],
+            // FreeRDP is deliberately not a link-time dependency. The bridge compiles against
+            // the pinned public headers below and loads the packaged, verified dylib closure via
+            // dlopen/dlsym at runtime. Keeping static archives here would create a second ABI source.
+            dependencies: [],
             path: "Sources/FreeRDPBridge",
             publicHeadersPath: "include",
             cSettings: [
                 .unsafeFlags(latestCStandardFlags),
                 // Apple Silicon 优化编译选项（不要手动定义 TARGET_CPU_*，由 SDK/编译器根据架构提供）
                 .define("APPLE_SILICON_OPTIMIZED", to: "1"),
-                // 真实 FreeRDP/WinPR 3.26.0 头（与 Sources/Vendor/FreeRDPDylibs 的 dylib 版本一一对应）。
+                // The reviewed runtime is built without WinPR's deprecated 3.x API surface.
+                // Compile the bridge against the same header surface to prevent ABI drift.
+                .define("WITHOUT_WINPR_3x_DEPRECATED", to: "1"),
+                .define("WITHOUT_FREERDP_3x_DEPRECATED", to: "1"),
+                // 真实 FreeRDP/WinPR 3.30.0 头（与 Sources/Vendor/FreeRDPDylibs 的 dylib 版本一一对应）。
                 // 让结构体偏移与设置枚举值由编译器解析，取代此前的占位 opaque 类型 + 硬编码 slot/伪造常量。
-                .headerSearchPath("../Vendor/FreeRDPHeaders/include"),
-                // FreeRDP/WinPR 头自带若干 deprecated 标注（如 pVerifyCertificate）以及与
-                // CoreFoundation 同值不同写法的 HRESULT 宏（S_OK/E_FAIL 等）重定义。均为第三方头、
-                // 不可改，仅对本桥接目标抑制这两类告警以满足「零告警」要求；不影响我方代码的告警检查。
-                .unsafeFlags(["-Wno-deprecated-declarations", "-Wno-macro-redefined"])
+                .headerSearchPath("../Vendor/FreeRDPHeaders/include")
             ],
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),
-                .linkedFramework("CoreVideo"),
-                .linkedFramework("VideoToolbox"),
-                .linkedFramework("CoreMedia")
+                .linkedFramework("Security")
             ]
         ),
         .target(
@@ -244,8 +248,7 @@ let package = Package(
             ],
             path: "Sources/LocalLanInteropHost",
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency"),
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
+                .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
         .executableTarget(
@@ -267,8 +270,7 @@ let package = Package(
             ],
             path: "Sources/CurrentPathProbe",
             swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency"),
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
+                .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
         .target(
@@ -285,6 +287,17 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("CryptoKit")
+            ]
+        ),
+        .target(
+            name: "SkyBridgeMessagePersistence",
+            dependencies: [],
+            path: "Sources/SkyBridgeMessagePersistence",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ],
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
             ]
         ),
         .target(
@@ -309,10 +322,28 @@ let package = Package(
             publicHeadersPath: "include",
             cSettings: [
                 .unsafeFlags(latestCStandardFlags),
-                .unsafeFlags(["-I", webRTCHeadersIncludePath])
+                .unsafeFlags(
+                    ["-I", webRTCAudioDeviceHeaderOverlayPath],
+                    .when(platforms: [.macOS])
+                )
             ],
             linkerSettings: [
                 .linkedFramework("AudioToolbox")
+            ]
+        ),
+        .target(
+            name: "SkyBridgeWebRTCRuntime",
+            dependencies: [
+                "SkyBridgeProtocolCore",
+                .product(name: "WebRTC", package: "WebRTC"),
+                .target(
+                    name: "WebRTCAudioDeviceBridge",
+                    condition: .when(platforms: [.macOS])
+                )
+            ],
+            path: "Sources/SkyBridgeWebRTCRuntime",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
         .target(
@@ -352,13 +383,16 @@ let package = Package(
             name: "SkyBridgeCore",
             dependencies: [
                 "SkyBridgeProtocolCore",
+                "SkyBridgeMessagePersistence",
                 "SkyBridgeAppleTransport",
+                "SkyBridgeWebRTCRuntime",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
                 .target(name: "FreeRDPBridge", condition: .when(platforms: [.macOS])),
                 "WebRTCAudioDeviceBridge",
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "SwiftASN1", package: "swift-asn1"),
                 .product(name: "WebRTC", package: "WebRTC"),
                 .product(name: "SkyBridgeCameraKit", package: "SkyBridgeCameraKit"),
@@ -393,8 +427,6 @@ let package = Package(
                 .define("ARM64_NATIVE"),
                 // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
-                // WebRTC binary header overlay (SwiftPM): provide missing public/internal include paths on macOS.
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
                 .define("OQS_ENABLED"),
             ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : [])),
             linkerSettings: [
@@ -442,8 +474,6 @@ let package = Package(
                 .define("ARM64_NATIVE"),
                 // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
-                // SkyBridgeUI depends on SkyBridgeCore -> WebRTC; keep Clang scanner include paths aligned.
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("SwiftUI")
@@ -454,6 +484,7 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "SkyBridgeProtocolCore",
+                "SkyBridgeWebRTCRuntime",
                 "SkyBridgeQPeriaptRuntime",
                 "SkyBridgeUI",
                 "SkyBridgeOpus",
@@ -470,13 +501,19 @@ let package = Package(
                 .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json")
             ],
             swiftSettings: ([
-                // 测试目标同样会导入 WebRTC，保持与主模块一致的头文件覆盖路径，避免 clang 依赖扫描误报。
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ] + (enableApplePQCSDK ? [
                 // 与 SkyBridgeCore 保持一致：否则测试中的 `#if HAS_APPLE_PQC_SDK` 分支会与被测模块不一致
                 .define("HAS_APPLE_PQC_SDK")
             ] : [])),
             linkerSettings: webRTCTestLinkerSettings()
+        ),
+        .testTarget(
+            name: "SkyBridgeMessagePersistenceTests",
+            dependencies: ["SkyBridgeMessagePersistence"],
+            path: "Tests/SkyBridgeMessagePersistenceTests",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
         ),
         .testTarget(
             name: "SkyBridgeQPeriaptRuntimeTests",
@@ -492,11 +529,9 @@ let package = Package(
                 "SkyBridgeBenchmarkSupport"
             ],
             path: "Tests/SkyBridgeBenchTests",
-            swiftSettings: ([
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
-            ] + (enableApplePQCSDK ? [
+            swiftSettings: (enableApplePQCSDK ? [
                 .define("HAS_APPLE_PQC_SDK")
-            ] : []))
+            ] : [])
         ),
         // 小组件共享模型测试
         .testTarget(
@@ -547,8 +582,6 @@ let package = Package(
                 // Apple Silicon特定优化
                 .enableUpcomingFeature("StrictConcurrency"),
                 .define("APPLE_SILICON_OPTIMIZED"),
-                // App target depends transitively on SkyBridgeCore -> WebRTC.
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("AppIntents"),
@@ -588,7 +621,6 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
                 .define("APPLE_SILICON_OPTIMIZED"),
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS])),
             ],
             linkerSettings: [
                 .linkedFramework("AppKit")
@@ -602,9 +634,6 @@ let package = Package(
                 "SkyBridgeBenchmarkSupport"
             ],
             path: "Sources/BaselineBenchRunner",
-            swiftSettings: [
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
-            ],
             linkerSettings: [
                 .linkedFramework("Network"),
                 .linkedFramework("Security"),
@@ -619,9 +648,6 @@ let package = Package(
                 "SkyBridgeBenchmarkSupport"
             ],
             path: "Sources/HandshakeBenchRunner",
-            swiftSettings: [
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
-            ],
             linkerSettings: [
                 .linkedFramework("CryptoKit")
             ]
@@ -631,10 +657,7 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore"
             ],
-            path: "Sources/MessageSizeBenchRunner",
-            swiftSettings: [
-                .unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))
-            ]
+            path: "Sources/MessageSizeBenchRunner"
         ),
         // 小组件共享数据模型 - 轻量级，无外部依赖
         .target(

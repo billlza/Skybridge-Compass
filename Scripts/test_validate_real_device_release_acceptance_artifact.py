@@ -170,6 +170,7 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
         raw_notice_session = "peer:192.0.2.10"
         notice_session_ref = hashlib.sha256(raw_notice_session.encode()).hexdigest()[:24]
         (directory / "mac.status.log").write_text(
+            "identity legacyResidueInspectionComplete=1 conflicts=1 reason=none\n"
             f"remoteControlNoticeShown session={raw_notice_session} transport=p2p\n"
             f"remoteControlNoticePanelPresented session={raw_notice_session} transport=p2p phase=awaitingApproval buttons=collapse,close,reject,approve\n"
             f"remoteControlNoticeHumanApproved session={raw_notice_session} transport=p2p\n"
@@ -262,6 +263,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "preCleanupCandidate": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             },
         )
         self.write_valid_p2p_logs(directory)
@@ -422,6 +427,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "preCleanupCandidate": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             result = self.run_validator("p2p", directory)
@@ -621,6 +630,24 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("requires sourceClean=true", result.stdout)
 
+    def test_p2p_rejects_incomplete_legacy_residue_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.write_valid_p2p_artifact(directory)
+            status_path = directory / "mac.status.log"
+            status_path.write_text(
+                status_path.read_text(encoding="utf-8").replace(
+                    "identity legacyResidueInspectionComplete=1 conflicts=1 reason=none",
+                    "identity legacyResidueInspectionComplete=0 conflicts=unknown reason=keychain-unavailable",
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_validator("p2p", directory)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("complete legacy-residue inspection", result.stdout)
+
     def test_p2p_rejects_approved_without_human_approved_event(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw)
@@ -738,12 +765,54 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "bidirectionalHandshake": True,
                 "macOnlineSource": "debug",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             self.write_valid_p2p_logs(directory)
             result = self.run_validator("p2p", directory)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Debug product-identity signing is diagnostic-only", result.stdout)
+
+    def test_p2p_rejects_signed_lab_host_even_when_other_fields_claim_formal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw)
+            self.write_valid_p2p_artifact(directory)
+            manifest_path = directory / "release-acceptance.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["macHostLaunchMode"] = "packaged-lab"
+            manifest["macHostDiagnosticOnly"] = True
+            manifest["identitySourceStaplerValid"] = False
+            manifest["identitySourceGatekeeperAccepted"] = False
+            self.write_json(manifest_path, manifest)
+
+            result = self.run_validator("p2p", directory)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("macHostLaunchMode must be packaged", result.stdout)
+
+    def test_p2p_rejects_missing_mac_host_distribution_proof(self) -> None:
+        for field, expected in (
+            ("identitySourceStaplerValid", "identitySourceStaplerValid must be true"),
+            (
+                "identitySourceGatekeeperAccepted",
+                "identitySourceGatekeeperAccepted must be true",
+            ),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                self.write_valid_p2p_artifact(directory)
+                manifest_path = directory / "release-acceptance.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest[field] = False
+                self.write_json(manifest_path, manifest)
+
+                result = self.run_validator("p2p", directory)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stdout)
 
     def test_p2p_rejects_stale_packaged_mac_online_source(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -768,6 +837,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "bidirectionalHandshake": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": False,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             self.write_valid_p2p_logs(directory)
@@ -798,6 +871,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "preCleanupCandidate": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             self.write_valid_p2p_logs(directory)
@@ -828,6 +905,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "preCleanupCandidate": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             self.write_valid_p2p_logs(directory)
@@ -859,6 +940,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "preCleanupCandidate": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             self.write_valid_p2p_logs(directory)
@@ -896,6 +981,10 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
                 "preCleanupCandidate": True,
                 "macOnlineSource": "packaged",
                 "macOnlineSourceCurrent": True,
+                "macHostLaunchMode": "packaged",
+                "macHostDiagnosticOnly": False,
+                "identitySourceStaplerValid": True,
+                "identitySourceGatekeeperAccepted": True,
             }
             self.write_json(directory / "release-acceptance.json", manifest)
             self.write_valid_p2p_logs(directory)

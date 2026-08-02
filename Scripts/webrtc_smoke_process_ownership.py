@@ -36,6 +36,7 @@ ABSENT = 1
 UNVERIFIABLE = 2
 IDENTITY_SCHEMA_VERSION = 1
 MAX_IDENTITY_BYTES = 16 * 1024
+MAX_PROCESS_LIST_BYTES = 4 * 1024 * 1024
 MAXCOMLEN = 16
 PROC_PIDTBSDINFO = 3
 PROC_PIDPATHINFO_MAXSIZE = 4 * 1024
@@ -150,7 +151,9 @@ def _atomic_private_json(output_path: pathlib.Path, payload: dict[str, object]) 
             pass
 
 
-def _read_private_json(path: pathlib.Path) -> dict[str, object]:
+def _read_private_json(
+    path: pathlib.Path, maximum_bytes: int = MAX_IDENTITY_BYTES
+) -> dict[str, object]:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -165,7 +168,7 @@ def _read_private_json(path: pathlib.Path) -> dict[str, object]:
             or stat.S_IMODE(metadata.st_mode) != 0o600
         ):
             raise OwnershipError("ownership record must be a private regular file with one link")
-        if metadata.st_size <= 0 or metadata.st_size > MAX_IDENTITY_BYTES:
+        if metadata.st_size <= 0 or metadata.st_size > maximum_bytes:
             raise OwnershipError("ownership record size is outside the permitted boundary")
         with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as handle:
             descriptor = -1
@@ -486,7 +489,7 @@ def _parse_ios_identity(
     return pid, bundle_name, executable_name, executable_path, audit_token
 
 
-def ios_capture(launch_json: pathlib.Path, app_path: pathlib.Path, output: pathlib.Path) -> None:
+def _expected_ios_bundle_executable(app_path: pathlib.Path) -> tuple[str, str]:
     if not app_path.is_absolute() or not app_path.is_dir() or app_path.is_symlink():
         raise OwnershipError("expected iOS app must be an absolute, real app directory")
     info_plist = app_path / "Info.plist"
@@ -501,6 +504,11 @@ def ios_capture(launch_json: pathlib.Path, app_path: pathlib.Path, output: pathl
     expected_local_executable = app_path / executable_name
     if not expected_local_executable.is_file() or not os.access(expected_local_executable, os.X_OK):
         raise OwnershipError("expected iOS bundle executable is missing or not executable")
+    return app_path.name, executable_name
+
+
+def ios_capture(launch_json: pathlib.Path, app_path: pathlib.Path, output: pathlib.Path) -> None:
+    bundle_name, executable_name = _expected_ios_bundle_executable(app_path)
 
     try:
         payload = _read_private_json(launch_json)
@@ -517,14 +525,14 @@ def ios_capture(launch_json: pathlib.Path, app_path: pathlib.Path, output: pathl
         raise OwnershipError("launch audit token is not bound to its process identifier")
     executable_path = _normalized_file_url_path(process.get("executable"), "launch executable")
     executable = pathlib.PurePosixPath(executable_path)
-    if executable.name != executable_name or executable.parent.name != app_path.name:
+    if executable.name != executable_name or executable.parent.name != bundle_name:
         raise OwnershipError("launched iOS process does not match the expected bundle executable")
 
     _atomic_private_json(
         output,
         {
             "auditToken": audit_token,
-            "bundleName": app_path.name,
+            "bundleName": bundle_name,
             "executableName": executable_name,
             "executablePath": executable_path,
             "platform": "ios",
@@ -532,6 +540,45 @@ def ios_capture(launch_json: pathlib.Path, app_path: pathlib.Path, output: pathl
             "schemaVersion": IDENTITY_SCHEMA_VERSION,
         },
     )
+
+
+def ios_presence(processes_json: pathlib.Path, app_path: pathlib.Path) -> int:
+    """Report app presence without treating PID/path as termination authority.
+
+    iPadOS 27 currently exposes only ``processIdentifier`` and ``executable``
+    through ``devicectl device info processes``.  Those fields can safely prove
+    absence or make a fresh-launch preflight fail closed, but they must never
+    authorize a signal because a PID is reusable.
+    """
+
+    try:
+        bundle_name, executable_name = _expected_ios_bundle_executable(app_path)
+        payload = _read_private_json(processes_json, MAX_PROCESS_LIST_BYTES)
+        processes = payload["result"]["runningProcesses"]
+        if not isinstance(processes, list):
+            raise OwnershipError("devicectl runningProcesses must be an array")
+        for entry in processes:
+            if not isinstance(entry, dict):
+                raise OwnershipError("devicectl process entry must be an object")
+            entry_pid = entry.get("processIdentifier")
+            if isinstance(entry_pid, bool) or not isinstance(entry_pid, int) or entry_pid <= 0:
+                raise OwnershipError("devicectl processIdentifier must be a positive integer")
+            executable_path = _normalized_file_url_path(
+                entry.get("executable"), "running executable"
+            )
+            executable = pathlib.PurePosixPath(executable_path)
+            if executable.name == executable_name and executable.parent.name == bundle_name:
+                return MATCH
+    except (KeyError, TypeError, OSError, UnicodeError, json.JSONDecodeError) as error:
+        print(
+            f"process-ownership error: iOS process list is malformed ({type(error).__name__})",
+            file=sys.stderr,
+        )
+        return UNVERIFIABLE
+    except OwnershipError as error:
+        print(f"process-ownership error: {error}", file=sys.stderr)
+        return UNVERIFIABLE
+    return ABSENT
 
 
 def ios_status(processes_json: pathlib.Path, identity_path: pathlib.Path) -> int:
@@ -613,6 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
     ios_status_parser.add_argument("--processes-json", required=True, type=pathlib.Path)
     ios_status_parser.add_argument("--identity", required=True, type=pathlib.Path)
 
+    ios_presence_parser = subparsers.add_parser("ios-presence")
+    ios_presence_parser.add_argument("--processes-json", required=True, type=pathlib.Path)
+    ios_presence_parser.add_argument("--app-path", required=True, type=pathlib.Path)
+
     identity_pid_parser = subparsers.add_parser("identity-pid")
     identity_pid_parser.add_argument("--identity", required=True, type=pathlib.Path)
     identity_pid_parser.add_argument("--platform", choices=("macos", "ios"), required=True)
@@ -636,6 +687,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return MATCH
         if args.command == "ios-status":
             return ios_status(args.processes_json, args.identity)
+        if args.command == "ios-presence":
+            return ios_presence(args.processes_json, args.app_path)
         if args.command == "identity-pid":
             print(identity_pid(args.identity, args.platform))
             return MATCH

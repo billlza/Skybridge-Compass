@@ -34,6 +34,23 @@ public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
     }
 }
 
+/// Atomic authority exported only after Finished key confirmation. Keeping the
+/// protocol key and authenticated SOA identifier together prevents callers
+/// from combining evidence from different handshake attempts.
+@available(macOS 14.0, iOS 17.0, *)
+public struct AuthenticatedHandshakePeerBinding: Sendable, Equatable {
+    public let authority: AuthenticatedRemoteAuthority
+    public let authenticatedRemoteSOAPeerId: Data?
+
+    public init(
+        authority: AuthenticatedRemoteAuthority,
+        authenticatedRemoteSOAPeerId: Data?
+    ) {
+        self.authority = authority
+        self.authenticatedRemoteSOAPeerId = authenticatedRemoteSOAPeerId
+    }
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 enum HandshakeIdentityPinningPolicy {
     static func validate(
@@ -207,7 +224,24 @@ public actor HandshakeDriver {
     private let soaSessionScope: PeerSessionArbiter.SessionScope
     private var soaPairKey: Data?
     private var soaAttemptId: Data?
+
+    /// One-shot capability authorizing this exact handshake attempt to publish
+    /// an established owner. It must be cancelled on every non-success path.
+    private var establishmentReservation: PeerSessionArbiter.EstablishmentReservation?
+    private var soaAttemptRegisteredAsOutgoing = false
+
+    /// Exact owner for the established arbiter slot. Teardown must clear this
+    /// lease instead of deleting whichever session currently owns the pair.
+    private var establishedArbiterLease: PeerSessionArbiter.EstablishedLease?
+
+    /// Serializes Finished publication across actor reentrancy. A cancellation
+    /// or superseding attempt invalidates the token before awaiting cleanup.
+    private var finishedCommitToken: UUID?
+
     private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+    private var authenticatedRemoteSOAPeerId: Data?
+    private var candidateRemoteAuthority: AuthenticatedRemoteAuthority?
+    private var candidateRemoteSOAPeerId: Data?
 
  // MARK: - Initialization
 
@@ -564,10 +598,12 @@ public actor HandshakeDriver {
             throw HandshakeError.alreadyInProgress
         }
 
+        // Make cancellation observable before the first arbiter actor hop.
+        state = .sendingMessageA
         clearAuthenticatedRemoteAuthority()
         currentPeer = peer
 
-        let outboundSOA = resolveOutboundSOAMetadata(for: peer)
+        let outboundSOA = try resolveOutboundSOAMetadata(for: peer)
         if let outboundSOA {
             let pairKey = PeerSessionArbiter.pairKey(
                 localPeerId: outboundSOA.initiatorPeerId,
@@ -586,18 +622,34 @@ public actor HandshakeDriver {
                     )
                 }
             ))
+            guard case .sendingMessageA = state else {
+                if case .accepted(let reservation) = decision {
+                    _ = await sessionArbiter.clearOutgoing(reservation)
+                }
+                throw inactiveOutboundOperationError()
+            }
             switch decision {
-            case .accepted:
+            case .accepted(let reservation):
                 soaPairKey = pairKey
                 soaAttemptId = outboundSOA.attemptId
+                establishmentReservation = reservation
+                soaAttemptRegisteredAsOutgoing = true
+                candidateRemoteSOAPeerId = outboundSOA.targetPeerId
             case .alreadyConnected:
+                state = .idle
+                currentPeer = nil
                 throw HandshakeError.failed(.peerRejected(message: "already_connected"))
             case .alreadyInProgress:
+                state = .idle
+                currentPeer = nil
                 throw HandshakeError.alreadyInProgress
             }
         } else {
             soaPairKey = nil
             soaAttemptId = nil
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
+            candidateRemoteSOAPeerId = nil
         }
 
  // 13.2: 记录握手开始 (Requirement 6.1)
@@ -607,8 +659,14 @@ public actor HandshakeDriver {
         do {
             resolvedIdentity = try await resolveIdentity()
         } catch {
+            guard case .sendingMessageA = state else {
+                throw inactiveOutboundOperationError()
+            }
             await transitionToFailed(.cryptoError(error.localizedDescription))
             throw error
+        }
+        guard case .sendingMessageA = state else {
+            throw inactiveOutboundOperationError()
         }
 
  // 创建握手上下文
@@ -617,23 +675,40 @@ public actor HandshakeDriver {
         let activeProtocolSigningAlgorithm = resolvedIdentity.sigAAlgorithm
             .flatMap(ProtocolSigningAlgorithm.init(from:))
             ?? sigAAlgorithm.flatMap(ProtocolSigningAlgorithm.init(from:))
-        let ctx = try await HandshakeContext.create(
-            role: .initiator,
-            cryptoProvider: cryptoProvider,
-            signatureProvider: signatureProvider,
-            protocolSignatureProvider: protocolSignatureProvider,
-            sePoPSignatureProvider: sePoPSignatureProvider,
-            cryptoPolicy: cryptoPolicy,
-            kemIdentityStore: kemIdentityStore,
-            peerKEMPublicKeys: peerKEMPublicKeys,
-            offeredSuites: offeredSuites,
-            activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
-        )
+        guard case .sendingMessageA = state else {
+            throw inactiveOutboundOperationError()
+        }
+        let ctx: HandshakeContext
+        do {
+            ctx = try await HandshakeContext.create(
+                role: .initiator,
+                cryptoProvider: cryptoProvider,
+                signatureProvider: signatureProvider,
+                protocolSignatureProvider: protocolSignatureProvider,
+                sePoPSignatureProvider: sePoPSignatureProvider,
+                cryptoPolicy: cryptoPolicy,
+                kemIdentityStore: kemIdentityStore,
+                peerKEMPublicKeys: peerKEMPublicKeys,
+                offeredSuites: offeredSuites,
+                activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
+            )
+        } catch {
+            guard case .sendingMessageA = state else {
+                throw inactiveOutboundOperationError()
+            }
+            await transitionToFailed(.cryptoError(error.localizedDescription))
+            throw error
+        }
+        guard case .sendingMessageA = state else {
+            await ctx.zeroize()
+            throw inactiveOutboundOperationError()
+        }
         context = ctx
 
         if policy.requireSecureEnclavePoP, resolvedIdentity.secureEnclaveKeyHandle == nil {
             await ctx.zeroize()
             context = nil
+            await transitionToFailed(.secureEnclavePoPRequired)
             throw HandshakeError.failed(.secureEnclavePoPRequired)
         }
 
@@ -655,29 +730,33 @@ public actor HandshakeDriver {
  // 构建失败时必须 zeroize ( 11.5)
             await ctx.zeroize()
             context = nil
-            if let pairKey = soaPairKey {
-                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            guard case .sendingMessageA = state else {
+                throw inactiveOutboundOperationError()
             }
+            await transitionToFailed(.cryptoError(error.localizedDescription))
             throw error
         }
 
- // 更新状态
-        state = .sendingMessageA
+        guard case .sendingMessageA = state else {
+            await ctx.zeroize()
+            context = nil
+            throw inactiveOutboundOperationError()
+        }
 
  // 发送 MessageA（失败时必须 zeroize - 11.5）
         do {
  // RTT timing must mark the send edge before transport dispatch.
  // Deterministic in-memory transports can deliver MessageB inline during send().
             metricsCollector.recordMessageASent()
-            let padded = HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
+            let padded = try HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
             // Handshake frames use HandshakePadding (SBP1). Do not apply TrafficPadding (SBP2) here.
             // Receiver unwraps SBP1 only.
             try await transport.send(to: peer, data: padded)
         } catch {
             await ctx.zeroize()
             context = nil
-            if let pairKey = soaPairKey {
-                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            guard case .sendingMessageA = state else {
+                throw inactiveOutboundOperationError()
             }
             await transitionToFailed(.transportError(error.localizedDescription))
             throw HandshakeError.failed(.transportError(error.localizedDescription))
@@ -739,7 +818,7 @@ public actor HandshakeDriver {
                         return
                     } catch {
                         SkyBridgeLogger.p2p.error(
-                            "Handshake MessageB timeout task failed unexpectedly: \(error.localizedDescription, privacy: .public)"
+                            "Handshake MessageB timeout task failed unexpectedly: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                         )
                         await self.handleTimeout()
                     }
@@ -803,24 +882,25 @@ public actor HandshakeDriver {
     public func cancel() async {
  // 只有在非 idle 状态才需要取消
         guard case .idle = state else {
-            let negotiatedSuite = await context?.negotiatedSuite
+            finishedCommitToken = nil
+            let contextToInvalidate = context
+            context = nil
+            pendingFinished = nil
+            clearAuthenticatedRemoteAuthority()
+            state = .failed(reason: .cancelled)
+
+            let negotiatedSuite = await contextToInvalidate?.invalidateAndTakeNegotiatedSuite()
             let isFallback = negotiatedSuite.map { cryptoProvider.activeSuite.isPQC && !$0.isPQC }
             let peerId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(currentPeer?.deviceId)
-
- // 清理上下文（必须 zeroize - 11.6）
-            if let ctx = context {
-                await ctx.zeroize()
-                context = nil
-            }
-
-            clearAuthenticatedRemoteAuthority()
 
  // 取消超时任务
             timeoutTask?.cancel()
             timeoutTask = nil
 
-            if let pairKey = soaPairKey {
-                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            await releasePendingArbiterAttempt()
+            if let lease = establishedArbiterLease {
+                establishedArbiterLease = nil
+                _ = await sessionArbiter.clearEstablished(lease)
             }
 
  // 发射取消事件 ( 11.6)
@@ -853,7 +933,6 @@ public actor HandshakeDriver {
  // 使用 finishOnce 统一收敛 (P0 - 11.2)
             finishOnce(with: .failure(HandshakeError.failed(.cancelled)))
 
-            state = .failed(reason: .cancelled)
             return
         }
     }
@@ -867,14 +946,40 @@ public actor HandshakeDriver {
         authenticatedRemoteAuthority
     }
 
-    private func captureAuthenticatedRemoteAuthority(
-        _ authority: AuthenticatedRemoteAuthority?
+    public func getAuthenticatedHandshakePeerBinding() -> AuthenticatedHandshakePeerBinding? {
+        guard let authenticatedRemoteAuthority else { return nil }
+        return AuthenticatedHandshakePeerBinding(
+            authority: authenticatedRemoteAuthority,
+            authenticatedRemoteSOAPeerId: authenticatedRemoteSOAPeerId
+        )
+    }
+
+    public func getEstablishedArbiterLease() -> PeerSessionArbiter.EstablishedLease? {
+        establishedArbiterLease
+    }
+
+    private func captureCandidateRemoteAuthority(
+        _ authority: AuthenticatedRemoteAuthority?,
+        authenticatedRemoteSOAPeerId: Data?
     ) {
-        authenticatedRemoteAuthority = authority
+        candidateRemoteAuthority = authority
+        candidateRemoteSOAPeerId = authority == nil ? nil : authenticatedRemoteSOAPeerId
+    }
+
+    private func promoteCandidateRemoteAuthority() -> Bool {
+        guard let candidateRemoteAuthority else { return false }
+        authenticatedRemoteAuthority = candidateRemoteAuthority
+        authenticatedRemoteSOAPeerId = candidateRemoteSOAPeerId
+        self.candidateRemoteAuthority = nil
+        candidateRemoteSOAPeerId = nil
+        return true
     }
 
     private func clearAuthenticatedRemoteAuthority() {
         authenticatedRemoteAuthority = nil
+        authenticatedRemoteSOAPeerId = nil
+        candidateRemoteAuthority = nil
+        candidateRemoteSOAPeerId = nil
     }
 
  /// 获取最近一次握手的指标 ( 13.2)
@@ -895,19 +1000,22 @@ public actor HandshakeDriver {
         currentPeer = peer
         clearAuthenticatedRemoteAuthority()
         metricsCollector.recordStart()
+        let peerDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(
+            peer.deviceId
+        )
 
         do {
-            SkyBridgeLogger.p2p.info("🧪 mac handleMessageA start peer=\(peer.deviceId, privacy: .public) bytes=\(data.count, privacy: .public)")
-            RemoteControlSmokeStatusWriter.append("mac-handshake messageA-start peer=\(peer.deviceId) bytes=\(data.count)")
+            SkyBridgeLogger.p2p.info("🧪 mac handleMessageA start peer=\(peerDiagnosticLabel, privacy: .public) bytes=\(data.count, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append("mac-handshake messageA-start peer=\(peerDiagnosticLabel) bytes=\(data.count)")
             let messageA = try HandshakeMessageA.decode(from: data)
-            RemoteControlSmokeStatusWriter.append("mac-handshake messageA-decoded peer=\(peer.deviceId) suites=\(messageA.supportedSuites.map { $0.rawValue }.joined(separator: ","))")
+            RemoteControlSmokeStatusWriter.append("mac-handshake messageA-decoded peer=\(peerDiagnosticLabel) suites=\(messageA.supportedSuites.map { $0.rawValue }.joined(separator: ","))")
             let resolvedIdentity = try await resolveIdentity()
-            RemoteControlSmokeStatusWriter.append("mac-handshake identity-resolved peer=\(peer.deviceId) sigA=\(String(describing: resolvedIdentity.sigAAlgorithm))")
+            RemoteControlSmokeStatusWriter.append("mac-handshake identity-resolved peer=\(peerDiagnosticLabel) sigA=\(String(describing: resolvedIdentity.sigAAlgorithm))")
 
  // 响应方通过本地 KEM 私钥解封装 MessageA，不需要读取对端 KEM 公钥。
  // 这样握手响应不会依赖 MainActor 上的信任记录 UI 快照。
             let peerKEMPublicKeys: [CryptoSuite: Data] = [:]
-            RemoteControlSmokeStatusWriter.append("mac-handshake trust-loaded peer=\(peer.deviceId) kemKeys=0 source=responder-not-required")
+            RemoteControlSmokeStatusWriter.append("mac-handshake trust-loaded peer=\(peerDiagnosticLabel) kemKeys=0 source=responder-not-required")
             let activeProtocolSigningAlgorithm = resolvedIdentity.sigAAlgorithm
                 .flatMap(ProtocolSigningAlgorithm.init(from:))
                 ?? sigAAlgorithm.flatMap(ProtocolSigningAlgorithm.init(from:))
@@ -923,27 +1031,27 @@ public actor HandshakeDriver {
                 offeredSuites: offeredSuites,
                 activeProtocolSigningAlgorithm: activeProtocolSigningAlgorithm
             )
-            RemoteControlSmokeStatusWriter.append("mac-handshake context-created peer=\(peer.deviceId)")
+            RemoteControlSmokeStatusWriter.append("mac-handshake context-created peer=\(peerDiagnosticLabel)")
             context = ctx
 
             state = .processingMessageA
 
             // 处理 MessageA
             do {
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA peer=\(peerDiagnosticLabel, privacy: .public)")
                 if policy.requireSecureEnclavePoP, resolvedIdentity.secureEnclaveKeyHandle == nil {
                     throw HandshakeError.failed(.secureEnclavePoPRequired)
                 }
                 let pinnedSEPublicKey: Data?
                 if policy.requireSecureEnclavePoP || messageA.secureEnclaveSignature != nil {
-                    RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-load-start peer=\(peer.deviceId)")
+                    RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-load-start peer=\(peerDiagnosticLabel)")
                     pinnedSEPublicKey = await trustProvider.trustedSecureEnclavePublicKey(for: peer.deviceId)
-                    RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-load-done peer=\(peer.deviceId) present=\(pinnedSEPublicKey != nil ? "1" : "0")")
+                    RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-load-done peer=\(peerDiagnosticLabel) present=\(pinnedSEPublicKey != nil ? "1" : "0")")
                 } else {
                     pinnedSEPublicKey = nil
-                    RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-skipped peer=\(peer.deviceId) reason=not-required")
+                    RemoteControlSmokeStatusWriter.append("mac-handshake se-pin-skipped peer=\(peerDiagnosticLabel) reason=not-required")
                 }
-                RemoteControlSmokeStatusWriter.append("mac-handshake processA-call-start peer=\(peer.deviceId)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake processA-call-start peer=\(peerDiagnosticLabel)")
                 try await ctx.processMessageA(
                     messageA,
                     policy: policy,
@@ -955,11 +1063,11 @@ public actor HandshakeDriver {
                     },
                     secureEnclavePublicKey: pinnedSEPublicKey
                 )
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA done peer=\(peer.deviceId, privacy: .public)")
-                RemoteControlSmokeStatusWriter.append("mac-handshake messageA-processed peer=\(peer.deviceId)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA done peer=\(peerDiagnosticLabel, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake messageA-processed peer=\(peerDiagnosticLabel)")
             } catch {
                 await handleHandshakeError(error, context: ctx)
-                RemoteControlSmokeStatusWriter.append("mac-handshake messageA-process-failed peer=\(peer.deviceId) error=\(error.localizedDescription)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake messageA-process-failed peer=\(peerDiagnosticLabel) \(SkyBridgeDiagnosticRedaction.errorSummary(error))")
                 return
             }
 
@@ -973,7 +1081,7 @@ public actor HandshakeDriver {
                     remotePeerId: soa.initiatorPeerId,
                     scope: soaSessionScope
                 )
-                let decision = await sessionArbiter.evaluateIncoming(
+                let decision = await sessionArbiter.evaluateIncomingWithReservation(
                     pairKey: pairKey,
                     remoteInitiatorPeerId: soa.initiatorPeerId,
                     remoteAttemptId: soa.attemptId,
@@ -983,13 +1091,39 @@ public actor HandshakeDriver {
                     authenticationState: .authenticated,
                     establishedPolicy: authenticatedIncomingEstablishedPolicy
                 )
+                guard case .processingMessageA = state else {
+                    switch decision {
+                    case .accept(let reservation),
+                         .acceptAndReplaceEstablished(let reservation),
+                         .acceptAndSupersedeLocal(let reservation, _, _):
+                        _ = await sessionArbiter.cancelEstablishment(reservation)
+                    case .rejectAlreadyConnected,
+                         .rejectBinding,
+                         .rejectRateLimited,
+                         .rejectLocalWinner:
+                        break
+                    }
+                    return
+                }
                 switch decision {
-                case .accept:
+                case .accept(let reservation):
                     soaPairKey = pairKey
-                case .acceptAndReplaceEstablished:
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .acceptAndReplaceEstablished(let reservation):
                     soaPairKey = pairKey
-                case .acceptAndSupersedeLocal:
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .acceptAndSupersedeLocal(let reservation, _, _):
                     soaPairKey = pairKey
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
                 case .rejectAlreadyConnected:
                     await transitionToFailed(.peerRejected(message: "already_connected"))
                     return
@@ -1014,7 +1148,7 @@ public actor HandshakeDriver {
             let messageB: HandshakeMessageB
             let messageBSecret: SecureBytes
             do {
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB peer=\(peerDiagnosticLabel, privacy: .public)")
  // 获取用于签名的私钥
                 let result = try await ctx.buildMessageB(
                     identityKeyHandle: resolvedIdentity.identityKeyHandle,
@@ -1024,18 +1158,18 @@ public actor HandshakeDriver {
                 )
                 messageB = result.message
                 messageBSecret = result.sharedSecret
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB done peer=\(peer.deviceId, privacy: .public) suite=\(messageB.selectedSuite.rawValue, privacy: .public)")
-                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-built peer=\(peer.deviceId) suite=\(messageB.selectedSuite.rawValue)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB done peer=\(peerDiagnosticLabel, privacy: .public) suite=\(messageB.selectedSuite.rawValue, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-built peer=\(peerDiagnosticLabel) suite=\(messageB.selectedSuite.rawValue)")
             } catch {
                 await handleHandshakeError(error, context: ctx)
-                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-build-failed peer=\(peer.deviceId) error=\(error.localizedDescription)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-build-failed peer=\(peerDiagnosticLabel) \(SkyBridgeDiagnosticRedaction.errorSummary(error))")
                 return
             }
             defer { messageBSecret.zeroize() }
 
  // 发送 MessageB（失败时必须 zeroize - 11.5）
             do {
-                let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
+                let padded = try HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
 #if DEBUG || SKYBRIDGE_TESTING
                 if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] == "mac-host" {
                     SkyBridgeLogger.p2p.info(
@@ -1043,29 +1177,32 @@ public actor HandshakeDriver {
                     )
                 }
 #endif
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA sendMessageB peer=\(peer.deviceId, privacy: .public) bytes=\(padded.count, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA sendMessageB peer=\(peerDiagnosticLabel, privacy: .public) bytes=\(padded.count, privacy: .public)")
                 try await transport.send(to: peer, data: padded)
-                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-sent peer=\(peer.deviceId) bytes=\(padded.count)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-sent peer=\(peerDiagnosticLabel) bytes=\(padded.count)")
             } catch {
                 await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
-                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-send-failed peer=\(peer.deviceId) error=\(error.localizedDescription)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake messageB-send-failed peer=\(peerDiagnosticLabel) \(SkyBridgeDiagnosticRedaction.errorSummary(error))")
                 return
             }
 
  // 响应方在发送 MessageB 后完成
             let sessionKeys: SessionKeys
             do {
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys peer=\(peerDiagnosticLabel, privacy: .public)")
                 sessionKeys = try await ctx.finalizeResponderSessionKeys(sharedSecret: messageBSecret)
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys done peer=\(peer.deviceId, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public)")
-                RemoteControlSmokeStatusWriter.append("mac-handshake responder-keys-finalized peer=\(peer.deviceId) suite=\(sessionKeys.negotiatedSuite.rawValue)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys done peer=\(peerDiagnosticLabel, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake responder-keys-finalized peer=\(peerDiagnosticLabel) suite=\(sessionKeys.negotiatedSuite.rawValue)")
             } catch {
                 await handleHandshakeError(error, context: ctx)
-                RemoteControlSmokeStatusWriter.append("mac-handshake responder-keys-failed peer=\(peer.deviceId) error=\(error.localizedDescription)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake responder-keys-failed peer=\(peerDiagnosticLabel) \(SkyBridgeDiagnosticRedaction.errorSummary(error))")
                 return
             }
 
-            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
+            captureCandidateRemoteAuthority(
+                await ctx.getAuthenticatedRemoteAuthority(),
+                authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
+            )
 
  // 清理敏感数据
             await ctx.zeroize()
@@ -1088,7 +1225,7 @@ public actor HandshakeDriver {
                     return
                 } catch {
                     SkyBridgeLogger.p2p.error(
-                        "Handshake responder timeout task failed unexpectedly: \(error.localizedDescription, privacy: .public)"
+                        "Handshake responder timeout task failed unexpectedly: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                     )
                     await self.handleTimeout()
                 }
@@ -1099,12 +1236,12 @@ public actor HandshakeDriver {
                     direction: .responderToInitiator,
                     sessionKeys: sessionKeys
                 )
-                let padded = HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
+                let padded = try HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
                 try await transport.send(to: peer, data: padded)
-                RemoteControlSmokeStatusWriter.append("mac-handshake finished-sent peer=\(peer.deviceId) bytes=\(padded.count)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake finished-sent peer=\(peerDiagnosticLabel) bytes=\(padded.count)")
             } catch {
                 await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
-                RemoteControlSmokeStatusWriter.append("mac-handshake finished-send-failed peer=\(peer.deviceId) error=\(error.localizedDescription)")
+                RemoteControlSmokeStatusWriter.append("mac-handshake finished-send-failed peer=\(peerDiagnosticLabel) \(SkyBridgeDiagnosticRedaction.errorSummary(error))")
                 return
             }
 
@@ -1196,7 +1333,10 @@ public actor HandshakeDriver {
                 return
             }
 
-            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
+            captureCandidateRemoteAuthority(
+                await ctx.getAuthenticatedRemoteAuthority(),
+                authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
+            )
             await ctx.zeroize()
             context = nil
 
@@ -1217,7 +1357,7 @@ public actor HandshakeDriver {
                     return
                 } catch {
                     SkyBridgeLogger.p2p.error(
-                        "Handshake initiator timeout task failed unexpectedly: \(error.localizedDescription, privacy: .public)"
+                        "Handshake initiator timeout task failed unexpectedly: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                     )
                     await self.handleTimeout()
                 }
@@ -1349,29 +1489,119 @@ public actor HandshakeDriver {
         case .waitingFinished(_, let sessionKeys, let expectingFrom):
             guard verifyFinished(finished, sessionKeys: sessionKeys, expectingFrom: expectingFrom) else {
                 let expectedDirection: HandshakeFinished.Direction = (expectingFrom == .initiator) ? .initiatorToResponder : .responderToInitiator
-                let transcriptPrefix = hexString(Data(sessionKeys.transcriptHash.prefix(8)))
+                let peerDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(
+                    peer.deviceId
+                )
                 SkyBridgeLogger.p2p.error(
-                    "❌ Finished MAC verify failed: peer=\(peer.deviceId, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) expectedDirection=\(expectedDirection.rawValue, privacy: .public) gotDirection=\(finished.direction.rawValue, privacy: .public) transcriptHashPrefix=\(transcriptPrefix, privacy: .public)"
+                    "❌ Finished MAC verify failed: peer=\(peerDiagnosticLabel, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) expectedDirection=\(expectedDirection.rawValue, privacy: .public) gotDirection=\(finished.direction.rawValue, privacy: .public)"
                 )
                 await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
             }
 
+            guard finishedCommitToken == nil else { return }
+            let commitToken = UUID()
+            finishedCommitToken = commitToken
+
             if expectingFrom == .responder {
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
-                    let padded = HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
+                    let padded = try HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
                     try await transport.send(to: peer, data: padded)
                 } catch {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
                     await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
+                    return
+                }
+                guard isCurrentFinishedCommit(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ) else {
                     return
                 }
             }
 
-            state = .established(sessionKeys: sessionKeys)
+            let committedArbiterLease: PeerSessionArbiter.EstablishedLease?
             if let pairKey = soaPairKey {
-                await sessionArbiter.markEstablished(pairKey: pairKey)
+                guard let establishmentReservation,
+                      establishmentReservation.pairKey == pairKey else {
+                    await transitionToFailed(
+                        .invalidMessageFormat("Missing SOA establishment reservation"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+                let lease: PeerSessionArbiter.EstablishedLease
+                do {
+                    lease = try await sessionArbiter.commitEstablished(
+                        establishmentReservation,
+                        sessionId: sessionKeys.sessionId
+                    )
+                } catch let error as PeerSessionArbiter.EstablishmentCommitError {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
+                    let reason: String
+                    switch error {
+                    case .reservationInvalidated:
+                        reason = "soa_establishment_reservation_invalidated"
+                    case .establishedOwnerChanged:
+                        reason = "soa_established_owner_changed"
+                    }
+                    await transitionToFailed(
+                        .peerRejected(message: reason),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                } catch {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
+                    await transitionToFailed(
+                        .peerRejected(message: "soa_establishment_commit_failed"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+                guard isCurrentFinishedCommit(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ) else {
+                    _ = await sessionArbiter.clearEstablished(lease)
+                    return
+                }
+                committedArbiterLease = lease
+            } else {
+                committedArbiterLease = nil
             }
+
+            guard promoteCandidateRemoteAuthority() else {
+                establishedArbiterLease = committedArbiterLease
+                await transitionToFailed(
+                    .invalidMessageFormat(
+                        "Finished verified without an authenticated remote authority"
+                    ),
+                    negotiatedSuite: sessionKeys.negotiatedSuite
+                )
+                return
+            }
+
+            establishedArbiterLease = committedArbiterLease
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
+            finishedCommitToken = nil
+            state = .established(sessionKeys: sessionKeys)
 
             let negotiatedSuite = sessionKeys.negotiatedSuite
             let isFallback = cryptoProvider.activeSuite.isPQC && !negotiatedSuite.isPQC
@@ -1382,6 +1612,11 @@ public actor HandshakeDriver {
                 failureReason: nil
             )
 
+            // Commit the successful state before observability actor hops. Once this
+            // continuation is resumed, later cancellation is teardown of an established
+            // session rather than cancellation of an in-flight Finished commit.
+            finishOnce(with: .success(sessionKeys))
+
             // Phase A (TDSC): start tamper-evident audit chain anchored to transcript hash,
             // and emit an explicit "handshake established" event with session metadata.
             await AuditTrail.shared.beginSession(sessionId: sessionKeys.sessionId, anchor: sessionKeys.transcriptHash)
@@ -1390,10 +1625,10 @@ public actor HandshakeDriver {
                 severity: .info,
                 message: "Handshake established (Finished verified)",
                 context: [
-                    "sessionId": sessionKeys.sessionId,
+                    "sessionId": SkyBridgeDiagnosticRedaction.redacted,
                     "peer": SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peer.deviceId),
                     "suite": negotiatedSuite.rawValue,
-                    "transcriptHash": sessionKeys.transcriptHash.map { String(format: "%02x", $0) }.joined(),
+                    "transcriptHash": SkyBridgeDiagnosticRedaction.redacted,
                     // Paper terminology alignment:
                     // - policy-in-transcript: HandshakePolicy is deterministically encoded into transcriptHash
                     // - transcript binding: sigB/Finished authenticate transcriptHash (covers selectedSuite + policy)
@@ -1408,8 +1643,6 @@ public actor HandshakeDriver {
                 ]
             ))
 
-            finishOnce(with: .success(sessionKeys))
-
         default:
             SkyBridgeLogger.p2p.warning("Unexpected FINISHED in state")
         }
@@ -1423,6 +1656,7 @@ public actor HandshakeDriver {
  /// - 使用 finishOnce 统一收敛
  /// - 记录到 DiscoveryDiagnosticsService 以便用户可见
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        finishedCommitToken = nil
         let contextToInvalidate = context
         context = nil
         pendingFinished = nil
@@ -1430,8 +1664,10 @@ public actor HandshakeDriver {
         state = .failed(reason: reason)
 
         let contextSuite = await contextToInvalidate?.invalidateAndTakeNegotiatedSuite()
-        if let pairKey = soaPairKey {
-            await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+        await releasePendingArbiterAttempt()
+        if let lease = establishedArbiterLease {
+            establishedArbiterLease = nil
+            _ = await sessionArbiter.clearEstablished(lease)
         }
 
  // 记录失败指标
@@ -1475,6 +1711,43 @@ public actor HandshakeDriver {
                 "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
             ]
         ))
+    }
+
+    private func isCurrentFinishedCommit(
+        _ token: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard finishedCommitToken == token,
+              case .waitingFinished(_, let currentKeys, _) = state else {
+            return false
+        }
+        return currentKeys.sessionId == sessionId
+    }
+
+    /// Releases only the reservation owned by this driver incarnation. Clearing
+    /// the local fields before the actor hop prevents a reentrant second cleanup
+    /// from targeting a replacement attempt.
+    private func releasePendingArbiterAttempt() async {
+        let reservation = establishmentReservation
+        let registeredAsOutgoing = soaAttemptRegisteredAsOutgoing
+        establishmentReservation = nil
+        soaAttemptRegisteredAsOutgoing = false
+        soaPairKey = nil
+        soaAttemptId = nil
+
+        guard let reservation else { return }
+        if registeredAsOutgoing {
+            _ = await sessionArbiter.clearOutgoing(reservation)
+        } else {
+            _ = await sessionArbiter.cancelEstablishment(reservation)
+        }
+    }
+
+    private func inactiveOutboundOperationError() -> HandshakeError {
+        if case .failed(let reason) = state {
+            return .failed(reason)
+        }
+        return .failed(.cancelled)
     }
 
  /// 统一收敛成功/失败（防止双 resume）(P0 - 11.2)
@@ -1750,7 +2023,7 @@ public actor HandshakeDriver {
         return value
     }
 
-    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) -> HandshakeSOAMetadata? {
+    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) throws -> HandshakeSOAMetadata? {
         if let soaMetadata {
             return soaMetadata
         }
@@ -1761,7 +2034,7 @@ public actor HandshakeDriver {
             return nil
         }
         let attemptId = Self.randomAttemptId()
-        return try? HandshakeSOAMetadata(
+        return try HandshakeSOAMetadata(
             initiatorPeerId: localSOAPeerId,
             targetPeerId: expectedRemoteSOAPeerId,
             attemptId: attemptId
@@ -1773,10 +2046,10 @@ public actor HandshakeDriver {
         winnerAttemptId: Data
     ) async {
         guard case .idle = state else {
-            if let ctx = context {
-                await ctx.zeroize()
-                context = nil
-            }
+            finishedCommitToken = nil
+            let contextToInvalidate = context
+            context = nil
+            pendingFinished = nil
             timeoutTask?.cancel()
             timeoutTask = nil
             clearAuthenticatedRemoteAuthority()
@@ -1785,6 +2058,14 @@ public actor HandshakeDriver {
                 winnerAttemptId: winnerAttemptId
             )
             state = .failed(reason: reason)
+            if let contextToInvalidate {
+                await contextToInvalidate.zeroize()
+            }
+            await releasePendingArbiterAttempt()
+            if let lease = establishedArbiterLease {
+                establishedArbiterLease = nil
+                _ = await sessionArbiter.clearEstablished(lease)
+            }
             finishOnce(with: .failure(HandshakeError.failed(reason)))
             return
         }

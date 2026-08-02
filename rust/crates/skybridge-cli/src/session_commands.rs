@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 use serde_json::json;
-use skybridge_agent::{
-    load_session_registry, remove_managed_session_control, remove_session_runtime, resolve_paths,
-};
+use skybridge_agent::{disconnect_managed_session, load_session_registry, resolve_paths};
 use skybridge_core::{
     RuntimeSessionRecord, RuntimeSessionRole, RuntimeSessionSource, RuntimeSessionState,
 };
@@ -180,8 +178,7 @@ pub(crate) async fn disconnect(state_dir: Option<PathBuf>, session_id: &str) -> 
     if registry.get(session_id).is_none() {
         bail!("session `{}` not found", session_id);
     }
-    remove_managed_session_control(&paths, session_id).await?;
-    remove_session_runtime(
+    disconnect_managed_session(
         &paths,
         session_id,
         Some("disconnected_by_operator".to_owned()),

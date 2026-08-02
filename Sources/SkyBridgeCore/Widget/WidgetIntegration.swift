@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 // MARK: - Widget Integration
 // 将 Widget 数据服务集成到主应用的各个组件
 // Requirements: 1.3, 3.4, 4.2
@@ -126,3 +131,4 @@ extension DeviceDiscoveryService {
         WidgetUpdateHelper.updateDevices(discoveredDevices, reason: .deviceOnlineStatusChanged)
     }
 }
+#endif

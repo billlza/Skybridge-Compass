@@ -220,11 +220,15 @@ function sign_nested_code() {
   local plugins_dir="${APP_PATH}/Contents/PlugIns"
   local helpers_dir="${APP_PATH}/Contents/Library/LaunchDaemons"
 
-  if [[ -d "${frameworks_dir}" ]]; then
-    while IFS= read -r -d '' dylib; do
-      codesign_target "${dylib}"
-    done < <(find "${frameworks_dir}" -type f \( -name "*.dylib" -o -name "*.so" \) -print0)
+  # Xcode's debug-dylib build mode places loadable code beside the main app and
+  # extension executables, not only under Contents/Frameworks. Sign every
+  # nested dylib/so before signing its containing framework, extension, and app
+  # so hardened-runtime library validation sees one Team ID throughout.
+  while IFS= read -r -d '' dylib; do
+    codesign_target "${dylib}"
+  done < <(find "${APP_PATH}" -type f \( -name "*.dylib" -o -name "*.so" \) -print0)
 
+  if [[ -d "${frameworks_dir}" ]]; then
     while IFS= read -r -d '' framework; do
       codesign_target "${framework}"
     done < <(find "${frameworks_dir}" -type d -name "*.framework" -print0)

@@ -1,7 +1,107 @@
 import XCTest
 import CryptoKit
 import Network
+import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
 @testable import SkyBridgeCompass_iOS
+
+@available(iOS 17.0, *)
+final class AppMessageStrictDecodingTests: XCTestCase {
+    private let message = AppMessage.textMessage(
+        .init(
+            id: UUID(),
+            text: "hello",
+            sentAt: Date(timeIntervalSinceReferenceDate: 42)
+        )
+    )
+
+    func testCanonicalAndExactLegacyRepresentationsDecode() throws {
+        let canonicalData = try JSONEncoder().encode(message)
+        XCTAssertEqual(try AppMessage.decodeWireMessage(from: canonicalData), message)
+
+        let canonicalObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: canonicalData) as? [String: Any]
+        )
+        let payload = try XCTUnwrap(canonicalObject["textMessage"])
+        let legacyData = try JSONSerialization.data(
+            withJSONObject: ["textMessage": ["_0": payload]]
+        )
+
+        XCTAssertEqual(try AppMessage.decodeWireMessage(from: legacyData), message)
+    }
+
+    func testRejectsMissingUnknownAndMultipleDiscriminators() throws {
+        let canonicalData = try JSONEncoder().encode(message)
+        var canonicalObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: canonicalData) as? [String: Any]
+        )
+        let payload = try XCTUnwrap(canonicalObject["textMessage"])
+
+        for object: Any in [
+            [:] as [String: Any],
+            ["futureMessage": [:]] as [String: Any],
+            ["textMessage": payload, "ping": ["id": 7]],
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: object)
+            XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: data))
+        }
+
+        canonicalObject["futureMessage"] = [:]
+        let data = try JSONSerialization.data(withJSONObject: canonicalObject)
+        XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: data))
+    }
+
+    func testSelectedMalformedPayloadCannotFallThroughToAnotherMessageKind() throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "textMessage": ["id": "not-a-uuid", "text": "hello", "sentAt": 42],
+                "ping": ["id": 7],
+            ]
+        )
+
+        XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: data))
+    }
+
+    func testRejectsPayloadThatMixesCurrentAndLegacyRepresentations() throws {
+        let canonicalData = try JSONEncoder().encode(message)
+        let canonicalObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: canonicalData) as? [String: Any]
+        )
+        let payload = try XCTUnwrap(canonicalObject["textMessage"] as? [String: Any])
+        var mixedPayload = payload
+        mixedPayload["_0"] = payload
+        let data = try JSONSerialization.data(
+            withJSONObject: ["textMessage": mixedPayload]
+        )
+
+        XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: data))
+    }
+
+    func testWireDecoderRejectsDuplicateDiscriminatorAndNestedPayloadKeys() throws {
+        let canonicalData = try JSONEncoder().encode(message)
+        let canonicalJSON = try XCTUnwrap(String(data: canonicalData, encoding: .utf8))
+        XCTAssertTrue(canonicalJSON.hasPrefix("{"))
+        XCTAssertTrue(canonicalJSON.hasSuffix("}"))
+        let entry = canonicalJSON.dropFirst().dropLast()
+        let duplicateDiscriminator = Data("{\(entry),\(entry)}".utf8)
+
+        XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: duplicateDiscriminator))
+
+        let messageID = UUID().uuidString
+        let duplicateNestedKey = Data(
+            #"{"textMessage":{"id":"\#(messageID)","text":"hello","text":"tampered","sentAt":42}}"#.utf8
+        )
+        XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: duplicateNestedKey))
+    }
+
+    func testWireDecoderTreatsEscapedAndLiteralDiscriminatorsAsDuplicate() throws {
+        let messageID = UUID().uuidString
+        let data = Data(
+            #"{"textMessage":{"id":"\#(messageID)","text":"one","sentAt":42},"text\u004dessage":{"id":"\#(messageID)","text":"two","sentAt":42}}"#.utf8
+        )
+
+        XCTAssertThrowsError(try AppMessage.decodeWireMessage(from: data))
+    }
+}
 
 final class BonjourServiceIdentitySanitizerTests: XCTestCase {
     func testRejectsSyntheticBonjourIdentityNames() {
@@ -21,6 +121,391 @@ final class BonjourServiceIdentitySanitizerTests: XCTestCase {
             BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName("bonjour:Lza的MacBook Pro@local."),
             "Lza的MacBook Pro"
         )
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class AuthenticatedPairingIdentityAuthorityTests: XCTestCase {
+    private struct Fixture {
+        let deviceId: String
+        let publicKey: Data
+        let fingerprint: String
+        let payload: AppMessage.PairingIdentityExchangePayload
+        let authority: AuthenticatedRemoteAuthority
+    }
+
+    private func fixture(
+        deviceId: String = "id:11111111-2222-4333-8444-555555555555"
+    ) throws -> Fixture {
+        let publicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
+        let keyInfo = AppMessage.ProtocolIdentityPublicKeyInfo(
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            publicKey: publicKey
+        )
+        let fingerprint = try XCTUnwrap(keyInfo.authoritativeFingerprint)
+        return Fixture(
+            deviceId: deviceId,
+            publicKey: publicKey,
+            fingerprint: fingerprint,
+            payload: AppMessage.PairingIdentityExchangePayload(
+                deviceId: deviceId,
+                kemPublicKeys: [
+                    KEMPublicKeyInfo(
+                        suiteWireId: CryptoSuite.xwing.wireId,
+                        publicKey: Data(repeating: 0x51, count: 1_216)
+                    )
+                ],
+                protocolIdentityPublicKeys: [keyInfo]
+            ),
+            authority: AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                protocolPublicKeyFingerprint: fingerprint,
+                protocolPublicKeyBytes: publicKey
+            )
+        )
+    }
+
+    func testSOABindingAuthorizesOnlyAliasesWithTheSameCanonicalSOAIdentity() throws {
+        let fixture = try fixture()
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                from: fixture.deviceId
+            )
+        )
+
+        let result = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+            payload: fixture.payload,
+            sessionBinding: binding,
+            sessionDeviceIds: [
+                "recent:mac:\(fixture.deviceId)",
+                "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            ],
+            operatorApproval: nil
+        )
+
+        XCTAssertEqual(result.declaredDeviceId, fixture.deviceId)
+        XCTAssertEqual(result.authorizedDeviceIds, [fixture.deviceId])
+    }
+
+    func testSOAMismatchRejectsBeforeMutation() async throws {
+        let fixture = try fixture()
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                from: "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            )
+        )
+        var mutationCount = 0
+
+        do {
+            _ = try await AuthenticatedPairingIdentityAuthorityValidator
+                .performAuthorizedMutation(
+                    payload: fixture.payload,
+                    sessionBinding: binding,
+                    sessionDeviceIds: [fixture.deviceId],
+                    operatorApproval: nil
+                ) { _, _ in
+                    mutationCount += 1
+                }
+            XCTFail("A mismatched SOA identity must be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .soaDeviceIdentifierMismatch
+            )
+        }
+        XCTAssertEqual(mutationCount, 0)
+    }
+
+    func testEndpointDeclaredIdentityRejectsBeforeAuthorityIssuance() throws {
+        for endpointDeviceId in [
+            "192.168.10.22",
+            "id:192.168.10.22",
+            "host:192.168.10.22",
+            "bonjour:fixture@local.",
+            "recent:host:192.168.10.22",
+        ] {
+            let fixture = try fixture(deviceId: endpointDeviceId)
+            let binding = AuthenticatedHandshakePeerBinding(
+                authority: fixture.authority,
+                authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                    from: endpointDeviceId
+                )
+            )
+
+            XCTAssertThrowsError(
+                try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                    payload: fixture.payload,
+                    sessionBinding: binding,
+                    sessionDeviceIds: [endpointDeviceId],
+                    operatorApproval: nil
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? PairingIdentityAuthorityValidationError,
+                    .invalidPayload
+                )
+            }
+        }
+    }
+
+    func testNoSOARequiresExactPIBOperatorApproval() throws {
+        let fixture = try fixture()
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: nil
+        )
+        let invalidApproval = PIBOperatorApprovalReceipt(
+            declaredDeviceId: fixture.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fixture.fingerprint,
+            protocolPublicKey: fixture.publicKey,
+            pinSource: "authenticated-handshake"
+        )
+
+        XCTAssertThrowsError(
+            try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                payload: fixture.payload,
+                sessionBinding: binding,
+                sessionDeviceIds: [fixture.deviceId],
+                operatorApproval: invalidApproval
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .missingExactOperatorApproval
+            )
+        }
+
+        let exactApproval = PIBOperatorApprovalReceipt(
+            declaredDeviceId: fixture.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fixture.fingerprint,
+            protocolPublicKey: fixture.publicKey,
+            pinSource: AuthenticatedPairingIdentityAuthorityValidator
+                .pibOperatorApprovalPinSource
+        )
+        let result = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+            payload: fixture.payload,
+            sessionBinding: binding,
+            sessionDeviceIds: ["id:untrusted-alias"],
+            operatorApproval: exactApproval
+        )
+        XCTAssertEqual(result.authorizedDeviceIds, [fixture.deviceId])
+    }
+
+    func testNoSOAAcceptsOnlyExactVerifiedCurrentPathApproval() throws {
+        let fixture = try fixture()
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: nil
+        )
+        let approval = CurrentPathOperatorApprovalReceipt(
+            declaredDeviceId: fixture.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fixture.fingerprint,
+            protocolPublicKey: fixture.publicKey
+        )
+
+        let admitted = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+            payload: fixture.payload,
+            sessionBinding: binding,
+            sessionDeviceIds: ["webrtc-runtime-alias"],
+            operatorApproval: nil,
+            currentPathApproval: approval
+        )
+        XCTAssertEqual(admitted.authorizedDeviceIds, [fixture.deviceId])
+
+        let mismatchedApproval = CurrentPathOperatorApprovalReceipt(
+            declaredDeviceId: "id:different-device",
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fixture.fingerprint,
+            protocolPublicKey: fixture.publicKey
+        )
+        XCTAssertThrowsError(
+            try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                payload: fixture.payload,
+                sessionBinding: binding,
+                sessionDeviceIds: [],
+                operatorApproval: nil,
+                currentPathApproval: mismatchedApproval
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .missingExactOperatorApproval
+            )
+        }
+    }
+
+    func testAcceptedMaterialDigestIgnoresPresentationMetadataButBindsKEMMaterial() throws {
+        let fixture = try fixture()
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                from: fixture.deviceId
+            )
+        )
+        let authority = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+            payload: fixture.payload,
+            sessionBinding: binding,
+            sessionDeviceIds: [fixture.deviceId],
+            operatorApproval: nil
+        )
+        let authorityWithAdditionalAlias = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+            payload: fixture.payload,
+            sessionBinding: binding,
+            sessionDeviceIds: [
+                fixture.deviceId,
+                "recent:mac:ID:11111111-2222-4333-8444-555555555555"
+            ],
+            operatorApproval: nil
+        )
+        let metadataOnlyUpdate = AppMessage.PairingIdentityExchangePayload(
+            deviceId: fixture.deviceId,
+            kemPublicKeys: fixture.payload.kemPublicKeys,
+            protocolIdentityPublicKeys: fixture.payload.protocolIdentityPublicKeys,
+            deviceName: "Renamed Mac",
+            modelName: "MacBook Pro",
+            platform: "macOS",
+            osVersion: "26.5",
+            capabilities: ["file-transfer"],
+            sentAt: Date().addingTimeInterval(10)
+        )
+        let sentAtOnlyUpdate = AppMessage.PairingIdentityExchangePayload(
+            deviceId: fixture.deviceId,
+            kemPublicKeys: fixture.payload.kemPublicKeys,
+            protocolIdentityPublicKeys: fixture.payload.protocolIdentityPublicKeys,
+            sentAt: Date().addingTimeInterval(20)
+        )
+        let rotatedKEM = AppMessage.PairingIdentityExchangePayload(
+            deviceId: fixture.deviceId,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwing.wireId,
+                    publicKey: Data(repeating: 0x52, count: 1_216)
+                )
+            ],
+            protocolIdentityPublicKeys: fixture.payload.protocolIdentityPublicKeys
+        )
+
+        let originalDigest = try P2PConnectionManager
+            .testOnlyAcceptedPairingIdentityMaterialDigest(
+                payload: fixture.payload,
+                authority: authority
+            )
+        let metadataDigest = try P2PConnectionManager
+            .testOnlyAcceptedPairingIdentityMaterialDigest(
+                payload: metadataOnlyUpdate,
+                authority: authority
+            )
+        let rotatedKEMDigest = try P2PConnectionManager
+            .testOnlyAcceptedPairingIdentityMaterialDigest(
+                payload: rotatedKEM,
+                authority: authority
+            )
+        let additionalAliasDigest = try P2PConnectionManager
+            .testOnlyAcceptedPairingIdentityMaterialDigest(
+                payload: fixture.payload,
+                authority: authorityWithAdditionalAlias
+            )
+
+        XCTAssertEqual(originalDigest, metadataDigest)
+        XCTAssertNotEqual(originalDigest, rotatedKEMDigest)
+        XCTAssertEqual(originalDigest, additionalAliasDigest)
+        XCTAssertTrue(
+            P2PConnectionManager.testOnlyPairingIdentityPresentationMaterialChanged(
+                from: fixture.payload,
+                to: metadataOnlyUpdate
+            )
+        )
+        XCTAssertFalse(
+            P2PConnectionManager.testOnlyPairingIdentityPresentationMaterialChanged(
+                from: fixture.payload,
+                to: sentAtOnlyUpdate
+            )
+        )
+        XCTAssertEqual(
+            P2PConnectionManager.testOnlyCanonicalPairingIdentityAuthorityKey(
+                fixture.deviceId
+            ),
+            P2PConnectionManager.testOnlyCanonicalPairingIdentityAuthorityKey(
+                " recent:mac:ID:11111111-2222-4333-8444-555555555555 "
+            )
+        )
+        let aliasPayload = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "recent:mac:ID:11111111-2222-4333-8444-555555555555",
+            kemPublicKeys: fixture.payload.kemPublicKeys,
+            protocolIdentityPublicKeys: fixture.payload.protocolIdentityPublicKeys
+        )
+        XCTAssertEqual(
+            P2PConnectionManager.testOnlyStablePairingPolicyKey(for: fixture.payload),
+            P2PConnectionManager.testOnlyStablePairingPolicyKey(for: aliasPayload)
+        )
+    }
+
+    func testConflictingSOANeverFallsBackToValidPIBApproval() throws {
+        let fixture = try fixture()
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                from: "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            )
+        )
+        let approval = PIBOperatorApprovalReceipt(
+            declaredDeviceId: fixture.deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fixture.fingerprint,
+            protocolPublicKey: fixture.publicKey,
+            pinSource: AuthenticatedPairingIdentityAuthorityValidator
+                .pibOperatorApprovalPinSource
+        )
+
+        XCTAssertThrowsError(
+            try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                payload: fixture.payload,
+                sessionBinding: binding,
+                sessionDeviceIds: [fixture.deviceId],
+                operatorApproval: approval
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .soaDeviceIdentifierMismatch
+            )
+        }
+    }
+
+    func testInvalidDeviceIdentifiersRejectBeforeMutation() async throws {
+        let fixture = try fixture(deviceId: "id:bad\u{0000}device")
+        let binding = AuthenticatedHandshakePeerBinding(
+            authority: fixture.authority,
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                from: fixture.deviceId
+            )
+        )
+        var mutationCount = 0
+
+        do {
+            _ = try await AuthenticatedPairingIdentityAuthorityValidator
+                .performAuthorizedMutation(
+                    payload: fixture.payload,
+                    sessionBinding: binding,
+                    sessionDeviceIds: [],
+                    operatorApproval: nil
+                ) { _, _ in
+                    mutationCount += 1
+                }
+            XCTFail("A control-character device identifier must be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .invalidPayload
+            )
+        }
+        XCTAssertEqual(mutationCount, 0)
     }
 }
 
@@ -459,19 +944,47 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(contentSource.contains("Button(RuntimeLocalization.string(\"关闭\")) { onDecision(.reject) }"))
     }
 
-    func testLegacyPQCVerificationCannotPersistTrustWithoutProtocolIdentityPin() throws {
+    func testLegacyPQCVerificationDelegatesToExactAuthenticatedSessionTrustApproval() throws {
         let pqcSource = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/PQCCryptoManager.swift"
+        )
+        let p2pSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
         )
         let trustedStoreSource = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/TrustedDeviceStore.swift"
         )
 
         XCTAssertFalse(pqcSource.contains("TrustedDeviceStore.shared.trust(device)"))
-        XCTAssertTrue(pqcSource.contains("pinnedFingerprints.count == 1"))
-        XCTAssertTrue(pqcSource.contains("TrustedDeviceStore.shared.trustResolvedPeer"))
+        XCTAssertTrue(pqcSource.contains(".approveCurrentAuthenticatedSessionTrust("))
+        XCTAssertFalse(pqcSource.contains("TrustedDeviceStore.shared.trustResolvedPeer"))
         XCTAssertFalse(pqcSource.contains("expected=\\(expected)"))
         XCTAssertFalse(pqcSource.contains("got=\\(code)"))
+
+        let approvalStart = try XCTUnwrap(
+            p2pSource.range(of: "public func approveCurrentAuthenticatedSessionTrust(")
+        )
+        let approvalEnd = try XCTUnwrap(
+            p2pSource.range(
+                of: "private enum SessionTrustApprovalError",
+                range: approvalStart.upperBound..<p2pSource.endIndex
+            )
+        )
+        let approvalBody = String(
+            p2pSource[approvalStart.lowerBound..<approvalEnd.lowerBound]
+        )
+        for requiredMarker in [
+            "exactAuthenticatedSessionForStableDeviceIdentifier(",
+            "!PeerIdentityAliasResolver.isEndpointAlias(device.id)",
+            "try requireCurrentAuthenticatedConnection(current.receipt)",
+            "Self.constantTimeEqual(verificationCode, expectedCode)",
+            "sessionPairingAuthorityByPeerId[current.peerId]",
+            ".upsertAuthorityBound(",
+            "recordApprovedProtocolIdentityBinding(",
+            ".rollbackAuthorityBoundMutation(protocolMutationReceipt)",
+        ] {
+            XCTAssertTrue(approvalBody.contains(requiredMarker), requiredMarker)
+        }
         XCTAssertFalse(
             trustedStoreSource.contains("guard !normalizedDeclaredDeviceId.isEmpty else {\n            trust(device)"),
             "trustResolvedPeer must not fall back to direct discovery trust when the authenticated declared device id is missing."
@@ -1131,8 +1644,33 @@ final class P2PBootstrapPolicyTests: XCTestCase {
                 of: "public func disconnect(from device: DiscoveredDevice) async -> Bool",
                 range: connectStart.lowerBound..<source.endIndex))
         let connectBody = String(source[connectStart.lowerBound..<connectEnd.lowerBound])
-        XCTAssertTrue(connectBody.contains("let stableProtocolPeerId = stableProtocolIdentityCandidate("))
-        XCTAssertTrue(connectBody.contains("primaryPeerId: preferredTrustedPeerId ?? stableProtocolPeerId ?? resolvedTargetDevice.id"))
+        XCTAssertFalse(connectBody.contains("let stableProtocolPeerId = stableProtocolIdentityCandidate("))
+        XCTAssertTrue(
+            connectBody.contains(
+                "primaryPeerId: preferredTrustedPeerId ?? resolvedTargetDevice.id"
+            )
+        )
+        XCTAssertFalse(connectBody.contains("trustHint: shouldTreatTargetAsTrusted"))
+
+        let canonicalizedStart = try XCTUnwrap(
+            source.range(of: "private func canonicalizedDevice(")
+        )
+        let canonicalizedEnd = try XCTUnwrap(
+            source.range(
+                of: "private func parseBonjourPeerIdentifier(",
+                range: canonicalizedStart.lowerBound..<source.endIndex
+            )
+        )
+        let canonicalizedBody = String(
+            source[canonicalizedStart.lowerBound..<canonicalizedEnd.lowerBound]
+        )
+        XCTAssertTrue(
+            canonicalizedBody.contains("currentSessionHasExactActiveAuthority(")
+        )
+        XCTAssertTrue(canonicalizedBody.contains("isTrusted: effectiveIsTrusted"))
+        XCTAssertFalse(canonicalizedBody.contains("isTrusted: device.isTrusted"))
+        XCTAssertFalse(canonicalizedBody.contains("let effectiveIsTrusted = device.isTrusted"))
+        XCTAssertFalse(canonicalizedBody.contains("TrustedDeviceStore.shared.isTrusted"))
     }
 
     func testStrictInboundHandshakeUsesMessageASOAStableIdentityCandidates() throws {
@@ -1152,7 +1690,9 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(helperBody.contains("soaPeerIdBytes(for: normalizedStablePeerId)"))
         XCTAssertTrue(helperBody.contains("TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint)"))
         XCTAssertTrue(helperBody.contains("ProtocolIdentityTrustStore.shared.deviceIds(containingFingerprint: fingerprint)"))
-        XCTAssertTrue(helperBody.contains("TrustedDeviceStore.shared.trustedDevices"))
+        XCTAssertTrue(helperBody.contains("activeAuthoritySnapshot()"))
+        XCTAssertTrue(helperBody.contains("return []"))
+        XCTAssertFalse(helperBody.contains("TrustedDeviceStore.shared.trustedDevices"))
         XCTAssertTrue(helperBody.contains("PeerIdentityAliasResolver.aliasKeys(for: device)"))
         XCTAssertTrue(helperBody.contains("lastAcceptedPairingIdentityDeviceIdByPeerId"))
 
@@ -1292,35 +1832,72 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             ]
         )
 
-        XCTAssertFalse(
-            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
-                storedProtocolFingerprints: [],
-                storedKEMPublicKeys: [:],
-                payload: payload
-            ),
-            "An active CloudKit metadata row must not turn self-reported bootstrap keys into authority."
-        )
-        XCTAssertFalse(
-            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
-                storedProtocolFingerprints: [String(repeating: "f", count: 64)],
-                storedKEMPublicKeys: [
-                    .xwing: Data(repeating: 0x42, count: 1_216)
-                ],
-                payload: payload
-            ),
-            "Only exact local cryptographic continuity may bypass operator confirmation."
-        )
+        XCTAssertThrowsError(
+            try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                payload: payload,
+                sessionBinding: nil,
+                sessionDeviceIds: [payload.deviceId],
+                operatorApproval: nil
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .missingSessionAuthority
+            )
+        }
     }
 
-    func testPairingIdentityBootstrapRequiresExactExistingProtocolOrKEMPin() throws {
-        let protocolPublicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
-        let protocolKeyInfo = AppMessage.ProtocolIdentityPublicKeyInfo(
+    func testPairingIdentityBootstrapRequiresExactAuthenticatedProtocolAuthority() throws {
+        let authenticatedPublicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
+        let authenticatedKeyInfo = AppMessage.ProtocolIdentityPublicKeyInfo(
             protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
-            publicKey: protocolPublicKey
+            publicKey: authenticatedPublicKey
         )
-        let protocolFingerprint = try XCTUnwrap(protocolKeyInfo.authoritativeFingerprint)
+        let authenticatedFingerprint = try XCTUnwrap(
+            authenticatedKeyInfo.authoritativeFingerprint
+        )
+        let untrustedPublicKey = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
         let kemPublicKey = Data(repeating: 0x51, count: 1_216)
-        let payload = AppMessage.PairingIdentityExchangePayload(
+        let deviceId = "id:11111111-2222-4333-8444-555555555555"
+        let mismatchedPayload = AppMessage.PairingIdentityExchangePayload(
+            deviceId: deviceId,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwing.wireId,
+                    publicKey: kemPublicKey
+                )
+            ],
+            protocolIdentityPublicKeys: [
+                .init(
+                    protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                    publicKey: untrustedPublicKey
+                )
+            ]
+        )
+        let sessionBinding = AuthenticatedHandshakePeerBinding(
+            authority: AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                protocolPublicKeyFingerprint: authenticatedFingerprint,
+                protocolPublicKeyBytes: authenticatedPublicKey
+            ),
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(from: deviceId)
+        )
+
+        XCTAssertThrowsError(
+            try AuthenticatedPairingIdentityAuthorityValidator.issue(
+                payload: mismatchedPayload,
+                sessionBinding: sessionBinding,
+                sessionDeviceIds: [deviceId],
+                operatorApproval: nil
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? PairingIdentityAuthorityValidationError,
+                .payloadAuthorityMismatch
+            )
+        }
+
+        let validPayload = AppMessage.PairingIdentityExchangePayload(
             deviceId: "id:pinned-bootstrap-peer",
             kemPublicKeys: [
                 KEMPublicKeyInfo(
@@ -1328,23 +1905,22 @@ final class P2PBootstrapPolicyTests: XCTestCase {
                     publicKey: kemPublicKey
                 )
             ],
-            protocolIdentityPublicKeys: [protocolKeyInfo]
+            protocolIdentityPublicKeys: [authenticatedKeyInfo]
         )
-
-        XCTAssertTrue(
-            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
-                storedProtocolFingerprints: [protocolFingerprint],
-                storedKEMPublicKeys: [:],
-                payload: payload
+        let validBinding = AuthenticatedHandshakePeerBinding(
+            authority: sessionBinding.authority,
+            authenticatedRemoteSOAPeerId: PeerSessionArbiter.soaPeerId(
+                from: validPayload.deviceId
             )
         )
-        XCTAssertTrue(
-            P2PConnectionManager.pairingIdentityBootstrapMatchesExistingPin(
-                storedProtocolFingerprints: [],
-                storedKEMPublicKeys: [.xwing: kemPublicKey],
-                payload: payload
-            )
+        let authority = try AuthenticatedPairingIdentityAuthorityValidator.issue(
+            payload: validPayload,
+            sessionBinding: validBinding,
+            sessionDeviceIds: [validPayload.deviceId],
+            operatorApproval: nil
         )
+        XCTAssertEqual(authority.protocolPublicKey, authenticatedPublicKey)
+        XCTAssertEqual(authority.protocolPublicKeyFingerprint, authenticatedFingerprint)
     }
 
     func testAllowOnceNeverPersistsPairingPolicy() throws {
@@ -1459,7 +2035,7 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertFalse(source.contains("operator=smoke-auto-approve"))
     }
 
-    func testSKR1RefreshPrefersDirectLANEndpointBeforeBonjourService() throws {
+    func testSKR1RefreshAcceptsProvenanceBoundBonjourAsDirectLANEndpoint() throws {
         let managerSource = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
         )
@@ -1471,27 +2047,34 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         let requestLine = try XCTUnwrap(managerSource.range(of: "let requestLine =", range: skrStart.lowerBound..<managerSource.endIndex))
         let skrBody = String(managerSource[skrStart.lowerBound..<requestLine.lowerBound])
 
-        XCTAssertTrue(skrBody.contains("connectionEndpointCandidates(for: device, preferDirectHostPort: true)"))
-        XCTAssertTrue(skrBody.contains("let routeCandidates = connectionEndpointCandidates(for: device, preferDirectHostPort: true)"))
+        XCTAssertTrue(skrBody.contains("let routeCandidates = connectionEndpointCandidates(for: device)"))
+        XCTAssertFalse(skrBody.contains("preferDirectHostPort"))
         XCTAssertTrue(skrBody.contains("let directEndpoints = routeCandidates.filter"))
         XCTAssertTrue(skrBody.contains("Self.signedLANRefreshEndpointClass($0) == \"direct-host\""))
         XCTAssertTrue(skrBody.contains("let directHostCandidate = !directEndpoints.isEmpty"))
-        XCTAssertTrue(skrBody.contains("throw signedLANRefreshFailure(\"missing direct LAN endpoint candidate\")"))
-        XCTAssertTrue(skrBody.contains("let serviceFallbackEndpoints = routeCandidates.filter"))
+        XCTAssertTrue(skrBody.contains("let bonjourServiceEndpoints = routeCandidates.filter"))
         XCTAssertTrue(skrBody.contains("Self.signedLANRefreshEndpointClass($0) == \"bonjour-service\""))
-        XCTAssertTrue(skrBody.contains("let endpoints = directEndpoints + serviceFallbackEndpoints"))
-        XCTAssertTrue(skrBody.contains("let serviceFallbackCandidateCount = serviceFallbackEndpoints.count"))
+        XCTAssertTrue(skrBody.contains("let endpoints = directEndpoints + bonjourServiceEndpoints"))
+        XCTAssertTrue(skrBody.contains("let directLANCandidate = !endpoints.isEmpty"))
+        XCTAssertTrue(skrBody.contains("guard directLANCandidate else"))
+        XCTAssertTrue(skrBody.contains("missing provenance-bound direct LAN endpoint candidate"))
+        XCTAssertFalse(skrBody.contains("missing direct LAN endpoint candidate"))
+        XCTAssertTrue(skrBody.contains("let bonjourServiceCandidateCount = bonjourServiceEndpoints.count"))
         XCTAssertTrue(source.contains("classicFallbackSuppressed=1"))
-        XCTAssertTrue(source.contains("serviceFallbackCandidates=\\(serviceFallbackCandidateCount)"))
+        XCTAssertTrue(source.contains("bonjourServiceCandidates=\\(bonjourServiceCandidateCount)"))
         XCTAssertTrue(source.contains("bootstrap control connection failed:"))
         XCTAssertFalse(skrBody.contains("establishReadyConnectionWithMetrics(to: routeCandidates"))
-        XCTAssertTrue(source.contains("preferDirectHostPort: Bool = false"))
-        XCTAssertTrue(source.contains("let prefersBonjour = !preferDirectHostPort &&"))
-        XCTAssertTrue(source.contains("if (preferDirectHostPort || !prefersBonjour),"))
+        XCTAssertFalse(source.contains("preferDirectHostPort"))
+        XCTAssertTrue(endpointPolicySource.contains("liveBonjourControlEndpoints"))
+        XCTAssertTrue(endpointPolicySource.contains("discards the"))
+        XCTAssertTrue(endpointPolicySource.contains("live result's interface"))
+        XCTAssertTrue(endpointPolicySource.contains("liveRoute == advertisedRoute"))
         XCTAssertTrue(source.contains("selectedEndpointClass=\\(selectedEndpointClass)"))
         XCTAssertTrue(source.contains("selectedEndpointDirect=\\(selectedEndpointDirect ? 1 : 0)"))
+        XCTAssertTrue(source.contains("selectedEndpointDirectLAN=\\(selectedEndpointDirectLAN ? 1 : 0)"))
         XCTAssertTrue(source.contains("selectedEndpointPeerToPeer=\\(connectionResult.selectedEndpointPeerToPeer ? 1 : 0)"))
         XCTAssertTrue(source.contains("directHostCandidate=\\(directHostCandidate ? 1 : 0)"))
+        XCTAssertTrue(source.contains("directLANCandidate=\\(directLANCandidate ? 1 : 0)"))
         XCTAssertTrue(source.contains("private static func signedLANRefreshEndpointClass"))
         XCTAssertTrue(source.contains("private func makeConnectionParameters(for endpoint: NWEndpoint) -> NWParameters"))
         XCTAssertTrue(source.contains("parameters.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)"))
@@ -1651,8 +2234,8 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             "Protocol payloads must keep the raw local device id; redaction is limited to diagnostics."
         )
         XCTAssertTrue(
-            reviewedPairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"),
-            "Trust/KEM storage keys must remain raw and deterministic."
+            reviewedPairingDiagnostics.contains("AuthorityBoundPairingIdentityPersistence"),
+            "Pairing persistence must pass through the authority-bound transaction."
         )
     }
 
@@ -1764,12 +2347,39 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(receiveBody.contains("connection.cancel()"))
         XCTAssertTrue(receiveBody.contains("prepareProvisionalInboundHandshakeDriver("))
         XCTAssertTrue(receiveBody.contains("reason: \"入站连接首帧不是有效握手协议帧\""))
-        XCTAssertTrue(receiveBody.contains("bodyLen > 0"))
+        XCTAssertTrue(
+            receiveBody.contains(
+                "P2PControlFramePolicy.inboundBodyByteCount(from: length)"
+            )
+        )
         XCTAssertTrue(receiveBody.contains("handleInboundReceiveFailure("))
         XCTAssertTrue(promoteBody.contains("lastKnownDevices[canonicalPeerId] = canonicalDevice"))
         XCTAssertTrue(promoteBody.contains("connectionStatusByDeviceId[canonicalPeerId] = .connecting"))
-        XCTAssertTrue(promoteBody.contains("connections[canonicalPeerId] = connection"))
-        XCTAssertTrue(promoteBody.contains("await transport.setConnection(connection, for: canonicalPeerId)"))
+        XCTAssertTrue(
+            promoteBody.contains("let connectionLease = try installTrackedConnection("),
+            "Inbound promotion must install a generation-aware lease before observers can mutate peer state."
+        )
+        XCTAssertTrue(promoteBody.contains("for: canonicalPeerId"))
+        XCTAssertFalse(
+            promoteBody.contains("connections[canonicalPeerId] = connection"),
+            "Inbound promotion must not bypass generation-aware connection ownership."
+        )
+        let leaseInstall = try XCTUnwrap(
+            promoteBody.range(of: "let connectionLease = try installTrackedConnection(")
+        )
+        let observerInstall = try XCTUnwrap(
+            promoteBody.range(of: "installConnectionObservers(connectionLease, for: canonicalDevice)")
+        )
+        XCTAssertLessThan(
+            leaseInstall.lowerBound,
+            observerInstall.lowerBound,
+            "Inbound observers must never be installed before the connection has an owned lease."
+        )
+        XCTAssertTrue(promoteBody.contains("guard await transport.setConnection("))
+        XCTAssertTrue(promoteBody.contains("leaseSequence: connectionLease.sequence"))
+        XCTAssertTrue(
+            promoteBody.contains("connections.isCurrent(connectionLease, for: canonicalPeerId)")
+        )
         XCTAssertTrue(promoteBody.contains("p2p-inbound promoted-active"))
         XCTAssertTrue(receiveFailureBody.contains("promoteInboundDevice != nil, !isTrackedConnection(connection)"))
         XCTAssertTrue(receiveFailureBody.contains("p2p-inbound provisional-closed"))
@@ -1849,11 +2459,11 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         )
 
         let createStart = try XCTUnwrap(
-            source.range(of: "private func createDevice(from result: NWBrowser.Result")
+            source.range(of: "private func createDevice(")
         )
         let createEnd = try XCTUnwrap(
             source.range(
-                of: "private func isSelfDevice",
+                of: "private func isUnknownValue(",
                 range: createStart.upperBound..<source.endIndex
             )
         )
@@ -1863,23 +2473,99 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertFalse(createDeviceSlice.localizedCaseInsensitiveContains("PeerKEMBootstrapStore"))
         XCTAssertFalse(createDeviceSlice.localizedCaseInsensitiveContains("kemPublic"))
         XCTAssertFalse(createDeviceSlice.contains("KEMPublicKeyInfo"))
-        XCTAssertTrue(source.contains("record[\"kemRefreshVersion\"] = \"1\""))
-
-        let dictionaryStart = try XCTUnwrap(source.range(of: "extension NWTXTRecord"))
-        let dictionarySlice = source[dictionaryStart.lowerBound..<source.endIndex]
-        XCTAssertTrue(dictionarySlice.contains("\"kemRefreshVersion\""))
-        XCTAssertTrue(dictionarySlice.contains("\"kemKeyDigest\""))
-        XCTAssertFalse(dictionarySlice.contains("\"kemPublic"))
-        XCTAssertFalse(dictionarySlice.contains("\"kemPublicKey"))
-        XCTAssertFalse(dictionarySlice.contains("\"suiteWireId"))
-        XCTAssertFalse(dictionarySlice.contains("\"publicKey\""))
+        XCTAssertTrue(createDeviceSlice.contains("let isTrusted = false"))
+        XCTAssertFalse(
+            createDeviceSlice.contains("TrustedDeviceStore.shared.isTrusted")
+        )
+        let extractionStart = try XCTUnwrap(
+            source.range(of: "private func extractTXTRecord(")
+        )
+        let extractionEnd = try XCTUnwrap(
+            source.range(
+                of: "private func identityAliases",
+                range: extractionStart.upperBound..<source.endIndex
+            )
+        )
+        let extractionSlice = source[extractionStart.lowerBound..<extractionEnd.lowerBound]
+        XCTAssertTrue(extractionSlice.contains("BonjourInteropProtocolContract.decodeAdvertisement("))
+        XCTAssertTrue(extractionSlice.contains("let projection = decoded.discoveryProjection"))
+        XCTAssertTrue(createDeviceSlice.contains("advertisement.skyBridgeProjection?.deviceId"))
+        XCTAssertTrue(createDeviceSlice.contains("let advertisedCaps: [String] = []"))
+        XCTAssertTrue(createDeviceSlice.contains("let portMap: [String: UInt16] = [:]"))
+        XCTAssertFalse(extractionSlice.localizedCaseInsensitiveContains("kemPublic"))
+        XCTAssertFalse(extractionSlice.localizedCaseInsensitiveContains("kemKeyDigest"))
+        XCTAssertFalse(extractionSlice.localizedCaseInsensitiveContains("suiteWireId"))
     }
 
-    func testIOSBonjourTXTDictionaryDropsInjectedKEMMaterial() async throws {
+    func testIOSDiscoveryUIRequiresAuthenticatedSessionTrustProjection() throws {
+        let discovery = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+        )
+        let row = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/Components/DeviceRowView.swift"
+        )
+        let settings = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift"
+        )
+
+        let livenessStart = try XCTUnwrap(
+            discovery.range(of: "public func setConnectionLiveness(")
+        )
+        let livenessEnd = try XCTUnwrap(
+            discovery.range(
+                of: "private func resolveBonjourServiceIPAddress(",
+                range: livenessStart.upperBound..<discovery.endIndex
+            )
+        )
+        let liveness = discovery[livenessStart.lowerBound..<livenessEnd.lowerBound]
+        XCTAssertTrue(
+            liveness.contains("DiscoveryConnectionLivenessProjectionPolicy.projection(")
+        )
+        XCTAssertTrue(liveness.contains("cached.isTrusted = projection.isTrusted"))
+        XCTAssertFalse(liveness.contains("identityAliasToDeviceId"))
+        XCTAssertFalse(liveness.contains("canonicalDiscoveredDevice"))
+        XCTAssertTrue(row.contains("if device.isTrusted"))
+        XCTAssertFalse(row.contains("trustedStore.isTrusted(deviceId: device.id)"))
+        XCTAssertTrue(
+            settings.contains(
+                "discoveryManager.discoveredDevices.filter { !$0.isTrusted }"
+            )
+        )
+    }
+
+    func testIOSP2PRejectsShortBodyBeforeAnyBootstrapClassification() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let receiveStart = try XCTUnwrap(
+            source.range(of: "private func startReceiving(")
+        )
+        let receiveEnd = try XCTUnwrap(
+            source.range(
+                of: "private func promoteInboundConnectionForFirstFrame(",
+                range: receiveStart.upperBound..<source.endIndex
+            )
+        )
+        let receive = String(source[receiveStart.lowerBound..<receiveEnd.lowerBound])
+        let exactBodyGuard = try XCTUnwrap(
+            receive.range(of: "guard let payload, payload.count == bodyLen else")
+        )
+        let classification = try XCTUnwrap(
+            receive.range(of: "let classification = await Task.detached")
+        )
+
+        XCTAssertLessThan(exactBodyGuard.lowerBound, classification.lowerBound)
+        XCTAssertTrue(receive.contains("p2p-inbound rx-body-short"))
+        XCTAssertTrue(receive.contains("连接在完整消息体到达前关闭"))
+    }
+
+    func testIOSVersion2BonjourDecoderRejectsInjectedKEMMaterial() async throws {
         var txtRecord = NWTXTRecord()
+        txtRecord["version"] = "2"
         txtRecord["deviceId"] = "id:malicious-mac"
-        txtRecord["name"] = "Malicious Mac"
-        txtRecord["platform"] = "macOS"
+        txtRecord["pubKeyFP"] = String(repeating: "a", count: 64)
+        txtRecord["platform"] = "macos"
+        txtRecord["hs_soa"] = "1"
         txtRecord["kemRefreshVersion"] = "1"
         txtRecord["kemKeyDigest"] = String(repeating: "c", count: 64)
         txtRecord["kemPublicKey"] = "malicious-kem-public-key"
@@ -1888,19 +2574,17 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         txtRecord["publicKey"] = "malicious-public-key"
 
         await KEMTrustStore.shared.clearForTesting()
-        let dictionary = try XCTUnwrap(txtRecord.dictionary)
-
-        XCTAssertEqual(dictionary["deviceId"], "id:malicious-mac")
-        XCTAssertEqual(dictionary["kemRefreshVersion"], "1")
-        XCTAssertEqual(dictionary["kemKeyDigest"], String(repeating: "c", count: 64))
-        XCTAssertNil(dictionary["kemPublicKey"])
-        XCTAssertNil(dictionary["kempublickey"])
-        XCTAssertNil(dictionary["kemPublicKeys"])
-        XCTAssertNil(dictionary["kempublickeys"])
-        XCTAssertNil(dictionary["suiteWireId"])
-        XCTAssertNil(dictionary["suitewireid"])
-        XCTAssertNil(dictionary["publicKey"])
-        XCTAssertNil(dictionary["publickey"])
+        XCTAssertThrowsError(
+            try BonjourInteropProtocolContract.decodeAdvertisement(
+                txtRecord.data,
+                role: .control
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? BonjourInteropProtocolContract.AdvertisementError,
+                .invalidVersion2FieldSet
+            )
+        }
         let trustedKeys = await KEMTrustStore.shared.kemPublicKeys(forAny: ["id:malicious-mac"])
         XCTAssertTrue(trustedKeys.isEmpty)
 
@@ -2497,9 +3181,11 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             source.range(of: "private func ensureInboundRekeyDriverIfNeeded(", range: start.lowerBound..<source.endIndex)
         )
         let body = String(source[start.lowerBound..<end.lowerBound])
-        let commit = try XCTUnwrap(body.range(of: "try await persistAuthenticatedRemoteAuthority("))
+        let commit = try XCTUnwrap(
+            body.range(of: "persistedAuthority = try persistAuthenticatedRemoteAuthority(")
+        )
         let provisionalFinish = try XCTUnwrap(body.range(of: "finishProvisionalInboundConnection("))
-        let sessionKeyPublish = try XCTUnwrap(body.range(of: "setSessionKeys(keys"))
+        let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard setSessionKeys("))
         let connectedPublish = try XCTUnwrap(body.range(of: "connectionStatusByDeviceId[peerId] = .connected"))
         let heartbeatStart = try XCTUnwrap(body.range(of: "startHeartbeatIfNeeded(deviceId: peerId)"))
 
@@ -2508,7 +3194,10 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         XCTAssertLessThan(commit.lowerBound, connectedPublish.lowerBound)
         XCTAssertLessThan(commit.lowerBound, heartbeatStart.lowerBound)
         XCTAssertTrue(body.contains("cleanupBrokenInboundConnection("))
-        XCTAssertTrue(body.contains("await transport?.removeConnection(for: peerId)"))
+        XCTAssertFalse(
+            body.contains("await transport?.removeConnection(for: peerId)"),
+            "Late failure cleanup must not broadly remove a replacement transport connection."
+        )
     }
 
     func testP2POutboundCapturesActualAuthorityBeforePublishingHandshakeKeys() throws {
@@ -2520,13 +3209,28 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             source.range(of: "public func rekeyToPreferPQC(", range: start.lowerBound..<source.endIndex)
         )
         let body = String(source[start.lowerBound..<end.lowerBound])
-        let commit = try XCTUnwrap(body.range(of: "try await persistAuthenticatedRemoteAuthority("))
-        let sessionKeyPublish = try XCTUnwrap(body.range(of: "setSessionKeys(keys"))
+        let commit = try XCTUnwrap(
+            body.range(of: "persistedAuthority = try persistAuthenticatedRemoteAuthority(")
+        )
+        let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard setSessionKeys("))
 
         XCTAssertLessThan(commit.lowerBound, sessionKeyPublish.lowerBound)
-        XCTAssertTrue(body.contains("expectedStableDeviceId: strictTrustContext?.stablePeerId"))
-        XCTAssertTrue(body.contains("error is TrustedDeviceStore.PersistenceError"))
+        XCTAssertFalse(
+            body.contains("expectedStableDeviceId:"),
+            "A peer-claimed stable id must not select the durable authority row."
+        )
+        XCTAssertTrue(body.contains("if let publishedSessionId"))
+        XCTAssertTrue(
+            body.contains(
+                "sessionKeyConnectionGenerationByPeerId[peerId]"
+            )
+        )
+        XCTAssertTrue(body.contains("sessionKeys[peerId]?.sessionId == publishedSessionId"))
         XCTAssertTrue(body.contains("cleanupBrokenInboundConnection("))
+        XCTAssertFalse(
+            body.contains("await transport?.removeConnection(for: device.id)"),
+            "Rekey failure cleanup must remain bound to the exact failed connection."
+        )
 
         let authorityHelperStart = try XCTUnwrap(
             source.range(of: "private func persistAuthenticatedRemoteAuthority(")
@@ -2535,8 +3239,95 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             source.range(of: "private func restoreActiveSessionAfterRekeyFailure(", range: authorityHelperStart.lowerBound..<source.endIndex)
         )
         let authorityHelper = String(source[authorityHelperStart.lowerBound..<authorityHelperEnd.lowerBound])
-        XCTAssertTrue(authorityHelper.contains("driver.getAuthenticatedRemoteAuthority()"))
+        XCTAssertTrue(
+            source.contains("driver.getAuthenticatedHandshakePeerBinding()")
+        )
+        XCTAssertTrue(
+            authorityHelper.contains("uniqueExactActiveProtocolIdentityAuthorityDeviceId(")
+        )
         XCTAssertTrue(authorityHelper.contains("protocolSigningAlgorithm: authority.protocolSigningAlgorithm"))
         XCTAssertTrue(authorityHelper.contains("protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint"))
+    }
+
+    func testPairingVerificationCodeIsDeterministicAndTranscriptBound() {
+        let firstTranscript = Data(repeating: 0x31, count: 32)
+        let secondTranscript = Data(repeating: 0x32, count: 32)
+
+        let first = P2PConnectionManager.pairingVerificationCode(
+            transcriptHash: firstTranscript
+        )
+        let repeated = P2PConnectionManager.pairingVerificationCode(
+            transcriptHash: firstTranscript
+        )
+        let second = P2PConnectionManager.pairingVerificationCode(
+            transcriptHash: secondTranscript
+        )
+
+        XCTAssertEqual(first, repeated)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(first.count, 6)
+        XCTAssertTrue(first.allSatisfy(\.isNumber))
+    }
+
+    func testManualSASApprovalConsumesOneExactAuthenticatedAuthority() throws {
+        let manager = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let approvalStart = try XCTUnwrap(
+            manager.range(of: "public func approveCurrentAuthenticatedSessionTrust(")
+        )
+        let approvalEnd = try XCTUnwrap(
+            manager.range(
+                of: "private enum SessionTrustApprovalError",
+                range: approvalStart.upperBound..<manager.endIndex
+            )
+        )
+        let approval = String(
+            manager[approvalStart.lowerBound..<approvalEnd.lowerBound]
+        )
+
+        XCTAssertTrue(approval.contains("exactAuthenticatedSessionForStableDeviceIdentifier("))
+        XCTAssertTrue(approval.contains("requireCurrentAuthenticatedConnection(current.receipt)"))
+        XCTAssertTrue(approval.contains("sessionPairingAuthorityByPeerId[current.peerId]"))
+        XCTAssertTrue(approval.contains("protocolPublicKeyBytes"))
+        XCTAssertTrue(approval.contains("upsertAuthorityBound("))
+        XCTAssertTrue(approval.contains("recordApprovedProtocolIdentityBinding("))
+        XCTAssertTrue(approval.contains("rollbackAuthorityBoundMutation("))
+        XCTAssertFalse(approval.contains("lookupCandidates("))
+        XCTAssertFalse(approval.contains("currentAuthenticatedSession("))
+        XCTAssertFalse(approval.contains("trustedFingerprints("))
+
+        let protocolProjection = try XCTUnwrap(
+            approval.range(of: ".upsertAuthorityBound(")
+        )
+        let postAwaitReceiptCheck = try XCTUnwrap(
+            approval.range(
+                of: "try requireCurrentAuthenticatedConnection(current.receipt)",
+                range: protocolProjection.upperBound..<approval.endIndex
+            )
+        )
+        let durableActivation = try XCTUnwrap(
+            approval.range(of: "recordApprovedProtocolIdentityBinding(")
+        )
+        XCTAssertLessThan(protocolProjection.lowerBound, postAwaitReceiptCheck.lowerBound)
+        XCTAssertLessThan(postAwaitReceiptCheck.lowerBound, durableActivation.lowerBound)
+
+        let cryptoManager = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/PQCCryptoManager.swift"
+        )
+        let verifyStart = try XCTUnwrap(
+            cryptoManager.range(of: "public func verifyDevice(")
+        )
+        let verifyEnd = try XCTUnwrap(
+            cryptoManager.range(
+                of: "public var providerInfo",
+                range: verifyStart.upperBound..<cryptoManager.endIndex
+            )
+        )
+        let verify = String(cryptoManager[verifyStart.lowerBound..<verifyEnd.lowerBound])
+        XCTAssertTrue(verify.contains("approveCurrentAuthenticatedSessionTrust("))
+        XCTAssertFalse(verify.contains("lookupCandidates("))
+        XCTAssertFalse(verify.contains("trustedFingerprints("))
+        XCTAssertFalse(verify.contains("trustResolvedPeer("))
     }
 }

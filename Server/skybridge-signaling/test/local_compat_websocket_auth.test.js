@@ -49,6 +49,39 @@ test('local compat websocket accepts header session token without putting token 
   assertNoSecretInLogs(session.sessionToken);
 });
 
+test('local compat tenant authority ignores user metadata and defaults to JWT subject', async () => {
+  const accessToken = makeTestJWT({
+    sub: 'verified-local-user',
+    user_metadata: { tenant_id: 'attacker-selected-tenant' }
+  });
+  const challenge = await postJSON('/api/webrtc/admission/challenge', {
+    deviceId: 'tenant-bound-device',
+    protocolSigningAlgorithm: 'ED25519',
+    protocolPublicKeyFingerprint: randomFingerprint()
+  }, {
+    Authorization: `Bearer ${accessToken}`
+  });
+
+  assert.equal(challenge.status, 200);
+  assert.equal(challenge.json.tenantId, 'verified-local-user');
+  assert.equal(challenge.json.userId, 'verified-local-user');
+});
+
+test('local compat tenant request header is only an equality assertion', async () => {
+  const accessToken = makeTestJWT({ sub: 'verified-local-user' });
+  const challenge = await postJSON('/api/webrtc/admission/challenge', {
+    deviceId: 'tenant-pivot-device',
+    protocolSigningAlgorithm: 'ED25519',
+    protocolPublicKeyFingerprint: randomFingerprint()
+  }, {
+    Authorization: `Bearer ${accessToken}`,
+    'X-SkyBridge-Tenant-Id': 'attacker-selected-tenant'
+  });
+
+  assert.equal(challenge.status, 403);
+  assert.deepEqual(challenge.json, { error: 'tenant_id_mismatch' });
+});
+
 test('local compat websocket rejects legacy query session token by default', async () => {
   const session = await registerInitiatorSession();
   const ws = new WebSocket(
@@ -370,6 +403,14 @@ async function startLocalCompatServer(extraEnv = {}) {
   const wsOrigin = `ws://127.0.0.1:${port}`;
   await waitForHealth(httpOrigin, child);
   return { child, httpOrigin, wsOrigin, logs };
+}
+
+function makeTestJWT(payload) {
+  return [
+    Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url'),
+    Buffer.from(JSON.stringify(payload)).toString('base64url'),
+    'test-signature'
+  ].join('.');
 }
 
 async function allocatePort() {

@@ -41,6 +41,15 @@
 
 #include <limits.h>
 
+#if defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 202311L)
+#define WINPR_C23_ENUM_TYPE(x) : x /**
+                               * @brief For C23 and up defines the type of the enum to the enclosed integer type
+                               * @since version 3.27.0
+*/
+#else
+#define WINPR_C23_ENUM_TYPE(x)
+#endif
+
 #if defined(_WIN32) || defined(__MINGW32__)
 #include <wtypes.h>
 
@@ -266,10 +275,8 @@ typedef struct s_LUID
 } LUID, *PLUID;
 
 typedef GUID IID;
-// SkyBridge 本地补丁：在 Apple 上，CoreFoundation 的 CFPlugInCOM.h 已把 REFIID 定义为
-// CFUUIDBytes（通过 clang module 导出，无法用文本 include 守卫跳过），与 winpr 的 `IID*`
-// 冲突导致 typedef 重定义错误。winpr 的 RDP 核心路径（连接/GDI/输入/设置）不使用 REFIID，
-// 故在 Apple 上让位于系统定义，仅非 Apple 平台保留 winpr 定义。
+// SkyBridge local patch: CoreFoundation already exports REFIID on Apple targets.
+// The RDP core paths consumed by FreeRDPBridge do not use WinPR's REFIID alias.
 #ifndef __APPLE__
 typedef IID* REFIID;
 #endif

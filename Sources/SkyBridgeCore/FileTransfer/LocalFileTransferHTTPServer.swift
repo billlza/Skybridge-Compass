@@ -484,6 +484,13 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     }
 
     private func bundleResponse(for linkID: String, request: HTTPRequest) async -> HTTPResponse {
+#if !os(macOS)
+        // 打包下载依赖 /usr/bin/zip（Process），仅 macOS 可用。其它平台明确返回 501，
+        // 而不是静默返回空包或单文件 —— 让调用方看到能力缺失而不是错误的成功。
+        _ = linkID
+        _ = request
+        return makeTextResponse(statusCode: 501, body: "Bundle download is not supported on this platform")
+#else
         guard let link = await callbacks.lookupLink(linkID), link.isActive, !link.isExpired else {
             return makeTextResponse(statusCode: 404, body: "Link not found")
         }
@@ -530,6 +537,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             try? FileManager.default.removeItem(at: temp)
             return makeTextResponse(statusCode: 500, body: "Zip failed")
         }
+#endif
     }
 
     private func fileResponse(for url: URL, linkID: String, rangeHeader: String?) -> HTTPResponse {

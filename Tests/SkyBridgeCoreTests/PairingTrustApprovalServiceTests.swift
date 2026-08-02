@@ -248,7 +248,7 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         _ = try await waitForPendingRequest(service, matching: bareRequest.id)
         service.resolve(bareRequest, decision: .alwaysAllow)
         let bareDecision = await bareDecisionTask.value
-        XCTAssertEqual(bareDecision, .alwaysAllow)
+        XCTAssertEqual(bareDecision, .allowOnce)
         service.userDismissedCurrentPrompt()
 
         let pibTask = Task { @MainActor in
@@ -268,6 +268,50 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         let pibDecision = await pibTask.value
         let cleared = await service.clearPolicy(for: requesterID)
         XCTAssertEqual(pibDecision, .reject)
+        XCTAssertTrue(cleared)
+    }
+
+    func testBareDeviceAlwaysAllowCannotAuthorizeAuthorityBoundPairingRequest() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        let deviceID = "bound-policy:\(UUID().uuidString.lowercased())"
+        let bareRequest = PairingTrustApprovalService.Request(
+            peerEndpoint: "bare-authority-policy-setup",
+            declaredDeviceId: deviceID,
+            displayName: deviceID,
+            kemKeyCount: 1
+        )
+        let bareDecisionTask = Task { @MainActor in
+            await service.decide(for: bareRequest)
+        }
+        _ = try await waitForPendingRequest(service, matching: bareRequest.id)
+        service.resolve(bareRequest, decision: .alwaysAllow)
+        let bareDecision = await bareDecisionTask.value
+        XCTAssertEqual(bareDecision, .allowOnce)
+        service.userDismissedCurrentPrompt()
+
+        let fingerprint = String(repeating: "a", count: 64)
+        let boundRequest = PairingTrustApprovalService.Request(
+            peerEndpoint: "new-authority",
+            declaredDeviceId: deviceID,
+            policyBindingKey: try XCTUnwrap(
+                PairingTrustApprovalService.policyBindingKey(
+                    declaredDeviceId: deviceID,
+                    algorithmRawValue: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+                    protocolPublicKeyFingerprint: fingerprint
+                )
+            ),
+            displayName: deviceID,
+            kemKeyCount: 1
+        )
+        let boundDecisionTask = Task { @MainActor in
+            await service.decide(for: boundRequest)
+        }
+        _ = try await waitForPendingRequest(service, matching: boundRequest.id)
+        service.resolve(boundRequest, decision: .reject)
+        let boundDecision = await boundDecisionTask.value
+        let cleared = await service.clearPolicy(for: deviceID)
+        XCTAssertEqual(boundDecision, .reject)
         XCTAssertTrue(cleared)
     }
 
@@ -308,14 +352,14 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         let sasHash = String(repeating: "9", count: 64)
         let trust = TrustSyncService.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [requesterID])
+        try await trust.removeRecordsForTesting(deviceIds: [requesterID])
         await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterID])
         service.setPolicySaveResultOverrideForTesting(false)
 
-        let cleanup: @MainActor () async -> Void = {
+        let cleanup: @MainActor () async throws -> Void = {
             service.setPolicySaveResultOverrideForTesting(nil)
             service.userDismissedCurrentPrompt()
-            await trust.removeRecordsForTesting(deviceIds: [requesterID])
+            try await trust.removeRecordsForTesting(deviceIds: [requesterID])
             trust.setInMemoryPersistenceForTesting(false)
             await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterID])
         }
@@ -369,10 +413,10 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
                 "A failed Always Allow write must not be reported as a permanent policy."
             )
         } catch {
-            await cleanup()
+            try await cleanup()
             throw error
         }
-        await cleanup()
+        try await cleanup()
     }
 
     func testDerivedBootstrapCachePersistenceFailureIsVisibleButDoesNotUndoAuthorityCommit() async throws {
@@ -387,7 +431,7 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         let trust = TrustSyncService.shared
         let cache = PeerProtocolIdentityBootstrapStore.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [requesterID])
+        try await trust.removeRecordsForTesting(deviceIds: [requesterID])
         await cache.clear(deviceIds: [requesterID])
         await cache.setPersistenceResultOverrideForTesting(false)
 
@@ -431,7 +475,7 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
 
         await cache.setPersistenceResultOverrideForTesting(nil)
         service.userDismissedCurrentPrompt()
-        await trust.removeRecordsForTesting(deviceIds: [requesterID])
+        try await trust.removeRecordsForTesting(deviceIds: [requesterID])
         trust.setInMemoryPersistenceForTesting(false)
         await cache.clear(deviceIds: [requesterID])
     }
@@ -449,14 +493,12 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         let sasHash = String(repeating: "f", count: 64)
         let trust = TrustSyncService.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [requesterId])
+        try await trust.removeRecordsForTesting(deviceIds: [requesterId])
         await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
-        defer {
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [requesterId])
-                trust.setInMemoryPersistenceForTesting(false)
-                await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
-            }
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [requesterId])
+            trust.setInMemoryPersistenceForTesting(false)
+            await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
         }
         let completion = DecisionRecorder()
 
@@ -534,7 +576,7 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         let sasHash = String(repeating: "3", count: 64)
         let trust = TrustSyncService.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [requesterId])
+        try await trust.removeRecordsForTesting(deviceIds: [requesterId])
         await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
 
         do {
@@ -578,14 +620,14 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
             )
         } catch {
             service.userDismissedCurrentPrompt()
-            await trust.removeRecordsForTesting(deviceIds: [requesterId])
+            try await trust.removeRecordsForTesting(deviceIds: [requesterId])
             trust.setInMemoryPersistenceForTesting(false)
             await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
             throw error
         }
 
         service.userDismissedCurrentPrompt()
-        await trust.removeRecordsForTesting(deviceIds: [requesterId])
+        try await trust.removeRecordsForTesting(deviceIds: [requesterId])
         trust.setInMemoryPersistenceForTesting(false)
         await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
     }

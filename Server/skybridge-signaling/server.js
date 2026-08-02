@@ -233,8 +233,6 @@ function trackIceUsageDegraded(sessionId, deviceId, candidateBytes, limits) {
 
 const GLOBAL_MIN_CLIENT_VERSION = String(process.env.GLOBAL_MIN_CLIENT_VERSION || '0.0.0').trim();
 const GLOBAL_MIN_PROTOCOL_VERSION = String(process.env.GLOBAL_MIN_PROTOCOL_VERSION || '0').trim();
-const SIGNALING_BOOTSTRAP_TENANT_MODE = String(process.env.SIGNALING_BOOTSTRAP_TENANT_MODE || '').trim().toLowerCase();
-const SIGNALING_BOOTSTRAP_TENANT_ID = String(process.env.SIGNALING_BOOTSTRAP_TENANT_ID || '').trim();
 const SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY || 'false');
 const SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH = /^(1|true|yes)$/i.test(process.env.SIGNALING_ALLOW_BOOTSTRAP_DEVICE_AUTH || 'false');
 
@@ -1761,26 +1759,42 @@ function tenantIdFromRequest(req) {
 }
 
 function deriveTenantIdFromUser(user) {
-  const candidates = [
+  function protectedIdentityClaim(rawValue) {
+    if (rawValue === undefined || rawValue === null) return null;
+    if (typeof rawValue !== 'string') {
+      throw makeError('invalid_tenant_claims', 401);
+    }
+    const value = rawValue.trim();
+    if (
+      !value
+      || value !== rawValue
+      || Buffer.byteLength(value, 'utf8') > 256
+      || /[\u0000-\u001F\u007F]/.test(value)
+    ) {
+      throw makeError('invalid_tenant_claims', 401);
+    }
+    return value;
+  }
+  const protectedCandidates = [
     user?.appMetadata?.tenant_id,
     user?.appMetadata?.tenantId,
     user?.appMetadata?.org_id,
-    user?.appMetadata?.workspace_id,
-    user?.userMetadata?.tenant_id,
-    user?.userMetadata?.tenantId,
-    user?.userMetadata?.org_id,
-    user?.userMetadata?.workspace_id,
-    SIGNALING_BOOTSTRAP_TENANT_ID
+    user?.appMetadata?.workspace_id
   ];
-  for (const candidate of candidates) {
-    const value = String(candidate || '').trim();
-    if (value) return value;
+  const protectedTenantIds = new Set();
+  for (const candidate of protectedCandidates) {
+    const value = protectedIdentityClaim(candidate);
+    if (value) protectedTenantIds.add(value);
   }
-  if (SIGNALING_BOOTSTRAP_TENANT_MODE === 'user_id') {
-    const userID = String(user?.id || '').trim();
-    if (userID) return userID;
+  if (protectedTenantIds.size > 1) {
+    throw makeError('conflicting_tenant_claims', 401);
   }
-  return '';
+  if (protectedTenantIds.size === 1) {
+    return protectedTenantIds.values().next().value;
+  }
+  const userID = protectedIdentityClaim(user?.id);
+  if (!userID) throw makeError('invalid_user_session', 401);
+  return userID;
 }
 
 function syntheticTenantPolicy(tenantId) {
@@ -1921,14 +1935,15 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
   // never OVERRIDE the JWT-derived tenant. If both are present and disagree, reject:
   // otherwise a forged header could pivot into another tenant — exploitable when
   // SIGNALING_ALLOW_BOOTSTRAP_TENANT_POLICY fabricates a public policy for any tenant.
-  // When the JWT carries no tenant (bootstrap), the supplied value is still honored.
+  // A subject-only JWT is scoped to its verified user id. A request value is only
+  // an equality assertion and can never become tenant authority.
   const derivedTenantId = deriveTenantIdFromUser(user);
   const requestedTenantId = tenantIdFromRequest(req);
   if (requestedTenantId && derivedTenantId && requestedTenantId !== derivedTenantId) {
     console.warn('[security] tenant id override rejected: header/body tenant does not match JWT-derived tenant');
     throw makeError('tenant_id_mismatch', 403);
   }
-  const tenantId = derivedTenantId || requestedTenantId;
+  const tenantId = derivedTenantId;
   if (!tenantId) {
     throw makeError('missing_tenant_id', 400);
   }
@@ -4962,6 +4977,7 @@ module.exports = {
     collectSMSServiceSnapshot,
     computeProtocolIdentityFingerprint,
     evaluateServiceHealth,
+    deriveTenantIdFromUser,
     mtlsBindingErrorForRecord,
     mtlsClientCertificateFingerprintForRequest,
     makeError,

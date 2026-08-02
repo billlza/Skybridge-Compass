@@ -9,6 +9,7 @@
 import Foundation
 import CryptoKit
 import Network
+import SkyBridgeProtocolCore
 #if canImport(OQSRAII)
 import OQSRAII
 #endif
@@ -1306,32 +1307,203 @@ public enum SkyBridgeError: Error, LocalizedError {
 
 // MARK: - P2P Transport Implementation
 
+@available(iOS 17.0, *)
+public enum NWConnectionTransportBindingError: Error, LocalizedError, Sendable, Equatable {
+    case connectionUnavailable
+    case boundCapabilityRequired
+    case staleBinding
+    case peerMismatch
+
+    public var errorDescription: String? {
+        switch self {
+        case .connectionUnavailable:
+            return "No connection is installed for the peer"
+        case .boundCapabilityRequired:
+            return "A lease-bound transport capability is required"
+        case .staleBinding:
+            return "The transport binding was replaced"
+        case .peerMismatch:
+            return "The transport capability does not belong to this peer"
+        }
+    }
+}
+
 /// NWConnection 适配的传输层
 @available(iOS 17.0, *)
 public actor NWConnectionTransport: DiscoveryTransport {
-    private var connections: [String: NWConnection] = [:]
+    /// A capability tied to one exact peer, socket, and monotonic manager
+    /// sequence. Handshake drivers retain this value instead of retaining the
+    /// peer-keyed transport registry, so an old driver cannot borrow a
+    /// replacement socket after actor reentrancy.
+    public struct BoundTransport: DiscoveryTransport {
+        private let owner: NWConnectionTransport
+        private let peerId: String
+        private let connection: NWConnection
+        private let leaseSequence: UInt64
+
+        fileprivate init(
+            owner: NWConnectionTransport,
+            peerId: String,
+            connection: NWConnection,
+            leaseSequence: UInt64
+        ) {
+            self.owner = owner
+            self.peerId = peerId
+            self.connection = connection
+            self.leaseSequence = leaseSequence
+        }
+
+        public func send(to peer: PeerIdentifier, data: Data) async throws {
+            guard peer.deviceId == peerId else {
+                throw NWConnectionTransportBindingError.peerMismatch
+            }
+            try await owner.send(
+                data,
+                to: peerId,
+                expectedConnection: connection,
+                leaseSequence: leaseSequence
+            )
+        }
+    }
+
+    private struct ConnectionBinding {
+        let connection: NWConnection
+        let leaseSequence: UInt64?
+    }
+
+    private var connections: [String: ConnectionBinding] = [:]
     private let queue = DispatchQueue(label: "com.skybridge.transport")
     
     public init() {}
     
-    public func setConnection(_ connection: NWConnection, for peerId: String) {
-        connections[peerId] = connection
+    /// Installs an unsequenced compatibility binding. It can only acquire a
+    /// vacant slot or confirm its own existing socket; it cannot overwrite a
+    /// sequenced P2P binding.
+    @discardableResult
+    public func setConnection(_ connection: NWConnection, for peerId: String) -> Bool {
+        if let current = connections[peerId] {
+            return current.leaseSequence == nil && current.connection === connection
+        }
+        connections[peerId] = ConnectionBinding(
+            connection: connection,
+            leaseSequence: nil
+        )
+        return true
+    }
+
+    /// Installs a P2P connection binding using the manager's monotonic lease
+    /// sequence. A delayed actor hop from an older connection can never replace
+    /// a newer binding for the same peer.
+    @discardableResult
+    public func setConnection(
+        _ connection: NWConnection,
+        for peerId: String,
+        leaseSequence: UInt64
+    ) -> Bool {
+        if let current = connections[peerId],
+           let currentSequence = current.leaseSequence {
+            guard leaseSequence >= currentSequence else { return false }
+            if leaseSequence == currentSequence {
+                return current.connection === connection
+            }
+        }
+        connections[peerId] = ConnectionBinding(
+            connection: connection,
+            leaseSequence: leaseSequence
+        )
+        return true
+    }
+
+    /// Returns a send capability only when the requested connection still owns
+    /// the exact sequenced binding. Every send revalidates the same tuple.
+    public func boundTransport(
+        for peerId: String,
+        expectedConnection: NWConnection,
+        leaseSequence: UInt64
+    ) throws -> BoundTransport {
+        guard let current = connections[peerId],
+              current.connection === expectedConnection,
+              current.leaseSequence == leaseSequence else {
+            throw NWConnectionTransportBindingError.staleBinding
+        }
+        return BoundTransport(
+            owner: self,
+            peerId: peerId,
+            connection: expectedConnection,
+            leaseSequence: leaseSequence
+        )
     }
     
-    public func removeConnection(for peerId: String) {
+    /// Broad removal is limited to unsequenced compatibility bindings. P2P
+    /// callers must release by exact socket (and preferably exact sequence).
+    @discardableResult
+    public func removeConnection(for peerId: String) -> Bool {
+        guard let current = connections[peerId], current.leaseSequence == nil else {
+            return false
+        }
         connections.removeValue(forKey: peerId)
+        return true
+    }
+
+    /// Compatibility release for an unsequenced binding owned by the expected
+    /// socket. Sequenced P2P bindings must use the generation-aware overload.
+    @discardableResult
+    public func removeConnection(
+        _ expectedConnection: NWConnection,
+        for peerId: String
+    ) -> Bool {
+        guard let current = connections[peerId],
+              current.leaseSequence == nil,
+              current.connection === expectedConnection else {
+            return false
+        }
+        connections.removeValue(forKey: peerId)
+        return true
+    }
+
+    /// Removes a sequenced binding only when both socket and generation match.
+    @discardableResult
+    public func removeConnection(
+        _ expectedConnection: NWConnection,
+        for peerId: String,
+        leaseSequence: UInt64
+    ) -> Bool {
+        guard let current = connections[peerId],
+              current.connection === expectedConnection,
+              current.leaseSequence == leaseSequence else {
+            return false
+        }
+        connections.removeValue(forKey: peerId)
+        return true
     }
     
     public func send(to peer: PeerIdentifier, data: Data) async throws {
-        guard let connection = connections[peer.deviceId] else {
-            throw SkyBridgeError.handshakeFailed(reason: "No connection for peer: \(peer.deviceId)")
+        guard let binding = connections[peer.deviceId] else {
+            throw NWConnectionTransportBindingError.connectionUnavailable
         }
+        guard binding.leaseSequence == nil else {
+            throw NWConnectionTransportBindingError.boundCapabilityRequired
+        }
+        try await send(data, over: binding.connection)
+    }
 
+    private func send(
+        _ data: Data,
+        to peerId: String,
+        expectedConnection: NWConnection,
+        leaseSequence: UInt64
+    ) async throws {
+        guard let current = connections[peerId],
+              current.connection === expectedConnection,
+              current.leaseSequence == leaseSequence else {
+            throw NWConnectionTransportBindingError.staleBinding
+        }
+        try await send(data, over: expectedConnection)
+    }
+
+    private func send(_ data: Data, over connection: NWConnection) async throws {
         // 与 macOS 端一致：TCP 流上做 4-byte big-endian length framing
-        var framed = Data()
-        var length = UInt32(data.count).bigEndian
-        framed.append(Data(bytes: &length, count: 4))
-        framed.append(data)
+        let framed = try P2PControlFramePolicy.frame(body: data)
         
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: framed, completion: .contentProcessed { error in

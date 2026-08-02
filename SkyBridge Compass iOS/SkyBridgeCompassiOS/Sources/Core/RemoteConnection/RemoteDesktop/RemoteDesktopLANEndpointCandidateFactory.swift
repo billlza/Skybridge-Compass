@@ -29,6 +29,7 @@ enum RemoteDesktopLANEndpointCandidateFactory {
         remoteControlPort port: UInt16?,
         directIP: String?,
         resolvedIP: String?,
+        liveBonjourEndpoints: [NWEndpoint] = [],
         bonjourService: BonjourServiceIdentity?,
         activePeerAddress: String?,
         remoteServiceType: String
@@ -50,6 +51,14 @@ enum RemoteDesktopLANEndpointCandidateFactory {
                     hostCandidateLogs: &hostCandidateLogs
                 )
             }
+        }
+
+        for endpoint in liveBonjourEndpoints {
+            appendEndpoint(
+                endpoint,
+                to: &endpoints,
+                seen: &seen
+            )
         }
 
         if let bonjourService {

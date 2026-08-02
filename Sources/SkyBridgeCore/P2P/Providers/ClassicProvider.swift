@@ -449,7 +449,7 @@ public struct ClassicCryptoProvider: CryptoProvider, Sendable {
             let privateKey = Curve25519.KeyAgreement.PrivateKey()
             let publicKey = privateKey.publicKey
             
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(
                     suite: activeSuite,
                     usage: usage,
@@ -466,7 +466,7 @@ public struct ClassicCryptoProvider: CryptoProvider, Sendable {
             let privateKey = Curve25519.Signing.PrivateKey()
             let publicKey = privateKey.publicKey
             
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(
                     suite: activeSuite,
                     usage: usage,

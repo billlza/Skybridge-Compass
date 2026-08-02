@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import Network
 import Combine
@@ -524,6 +529,8 @@ private struct DeviceRowView: View {
             return "smartphone"
         case .linux:
             return "server.rack"
+        case .unknown:
+            return "questionmark.circle"
         }
     }
     
@@ -741,4 +748,5 @@ struct P2PConnectionView_Previews: PreviewProvider {
         P2PConnectionView()
     }
 }
+#endif
 #endif

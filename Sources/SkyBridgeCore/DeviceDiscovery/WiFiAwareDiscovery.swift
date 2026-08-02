@@ -56,7 +56,7 @@ public final class WiFiAwareDiscovery: NSObject {
         isRunning = true
         
  // 使用本机名派生 peerID，避免泄露隐私可做 Hash；此处沿用系统名便于开发调试
-        let name = Host.current().localizedName ?? "Mac"
+        let name = LocalHostName.localizedName ?? "Mac"
         let id = MCPeerID(displayName: name)
         peerID = id
         

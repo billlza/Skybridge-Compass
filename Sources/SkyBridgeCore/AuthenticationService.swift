@@ -639,12 +639,6 @@ import Combine
         guard refreshedSession.userIdentifier == sourceSession.userIdentifier else {
             throw AuthenticationError.sessionChangedDuringRefresh
         }
-        if let sourceTenant = sourceSession.nebulaId,
-           let refreshedTenant = refreshedSession.nebulaId,
-           sourceTenant != refreshedTenant {
-            throw AuthenticationError.sessionChangedDuringRefresh
-        }
-
         let sourceHasJWTShape = hasJWTShape(sourceSession.accessToken)
         let refreshedHasJWTShape = hasJWTShape(refreshedSession.accessToken)
         guard !requiresProviderJWTContinuity || (sourceHasJWTShape && refreshedHasJWTShape) else {
@@ -658,13 +652,13 @@ import Combine
         do {
             let sourceAuthority = try validatedJWTAuthority(
                 sourceSession.accessToken,
-                declaredTenantID: sourceSession.nebulaId,
+                declaredTenantID: nil,
                 requireFutureExpiration: false,
                 now: now
             )
             let refreshedAuthority = try validatedJWTAuthority(
                 refreshedSession.accessToken,
-                declaredTenantID: refreshedSession.nebulaId ?? sourceSession.nebulaId,
+                declaredTenantID: nil,
                 requireFutureExpiration: true,
                 now: now
             )
@@ -723,11 +717,7 @@ import Combine
             appMetadata?["tenant_id"],
             appMetadata?["tenantId"],
             appMetadata?["org_id"],
-            appMetadata?["workspace_id"],
-            claims["tenant_id"],
-            claims["tenantId"],
-            claims["org_id"],
-            claims["workspace_id"]
+            appMetadata?["workspace_id"]
         ]
         var tenantValues = Set<String>()
         for candidate in tenantCandidates {

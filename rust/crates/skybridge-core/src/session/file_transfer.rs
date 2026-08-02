@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -37,6 +38,196 @@ pub struct FileTransferDestinationBinding {
     pub requested_peer_ref: String,
     pub remote_device_id: String,
     pub remote_protocol_public_key_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundFileTransferApprovalDecision {
+    Approve,
+    Reject,
+    Expire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboundFileTransferApprovalStatus {
+    PendingDecision,
+    DecisionRequested,
+    AgentApplied,
+    AgentFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundFileTransferApprovalBinding {
+    pub transfer_id: String,
+    pub session_id: String,
+    pub target_runtime_id: String,
+    pub authenticated_peer_device_id: String,
+    pub authenticated_peer_device_name: String,
+    pub authenticated_peer_protocol_fingerprint: String,
+    pub metadata_sha256_hex: String,
+    pub file_name: String,
+    pub file_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundFileTransferApprovalRequest {
+    pub schema_version: u32,
+    pub transfer_id: String,
+    pub session_id: String,
+    pub target_runtime_id: String,
+    pub authenticated_peer_device_id: String,
+    pub authenticated_peer_device_name: String,
+    pub authenticated_peer_protocol_fingerprint: String,
+    pub metadata_sha256_hex: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub status: InboundFileTransferApprovalStatus,
+    pub decision: Option<InboundFileTransferApprovalDecision>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub applied_at: Option<OffsetDateTime>,
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+}
+
+impl InboundFileTransferApprovalRequest {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    pub fn pending(binding: InboundFileTransferApprovalBinding, now: OffsetDateTime) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            transfer_id: binding.transfer_id,
+            session_id: binding.session_id,
+            target_runtime_id: binding.target_runtime_id,
+            authenticated_peer_device_id: binding.authenticated_peer_device_id,
+            authenticated_peer_device_name: binding.authenticated_peer_device_name,
+            authenticated_peer_protocol_fingerprint: binding
+                .authenticated_peer_protocol_fingerprint,
+            metadata_sha256_hex: binding.metadata_sha256_hex,
+            file_name: binding.file_name,
+            file_size: binding.file_size,
+            status: InboundFileTransferApprovalStatus::PendingDecision,
+            decision: None,
+            created_at: now,
+            updated_at: now,
+            applied_at: None,
+            failure_reason: None,
+        }
+    }
+
+    pub fn request_decision(
+        &mut self,
+        decision: InboundFileTransferApprovalDecision,
+        now: OffsetDateTime,
+    ) -> Result<()> {
+        if self.status != InboundFileTransferApprovalStatus::PendingDecision {
+            bail!("inbound file-transfer approval is not pending a decision");
+        }
+        self.status = InboundFileTransferApprovalStatus::DecisionRequested;
+        self.decision = Some(decision);
+        self.updated_at = now;
+        Ok(())
+    }
+
+    pub fn mark_applied(&mut self, now: OffsetDateTime) -> Result<()> {
+        if self.status != InboundFileTransferApprovalStatus::DecisionRequested
+            || self.decision.is_none()
+        {
+            bail!("inbound file-transfer decision is not ready to apply");
+        }
+        self.status = InboundFileTransferApprovalStatus::AgentApplied;
+        self.applied_at = Some(now);
+        self.failure_reason = None;
+        self.updated_at = now;
+        Ok(())
+    }
+
+    pub fn mark_failed(&mut self, reason: impl Into<String>, now: OffsetDateTime) -> Result<()> {
+        if self.status != InboundFileTransferApprovalStatus::DecisionRequested {
+            bail!("inbound file-transfer decision is not ready to fail");
+        }
+        self.status = InboundFileTransferApprovalStatus::AgentFailed;
+        self.failure_reason = Some(reason.into());
+        self.updated_at = now;
+        Ok(())
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            InboundFileTransferApprovalStatus::AgentApplied
+                | InboundFileTransferApprovalStatus::AgentFailed
+        )
+    }
+
+    pub fn registry_key(&self) -> String {
+        format!(
+            "{}:{}{}:{}{}:{}",
+            self.session_id.len(),
+            self.session_id,
+            self.target_runtime_id.len(),
+            self.target_runtime_id,
+            self.transfer_id.len(),
+            self.transfer_id
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundFileTransferApprovalRegistry {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub requests: BTreeMap<String, InboundFileTransferApprovalRequest>,
+}
+
+impl Default for InboundFileTransferApprovalRegistry {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            requests: BTreeMap::new(),
+        }
+    }
+}
+
+impl InboundFileTransferApprovalRegistry {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const MAX_REQUESTS: usize = 128;
+
+    pub fn insert(&mut self, request: InboundFileTransferApprovalRequest) -> Result<()> {
+        let registry_key = request.registry_key();
+        if !self.requests.contains_key(&registry_key) {
+            while self.requests.len() >= Self::MAX_REQUESTS {
+                let Some(oldest_terminal_key) = self
+                    .requests
+                    .iter()
+                    .filter(|(_, existing)| existing.is_terminal())
+                    .min_by(|(left_key, left), (right_key, right)| {
+                        left.updated_at
+                            .cmp(&right.updated_at)
+                            .then_with(|| left_key.cmp(right_key))
+                    })
+                    .map(|(key, _)| key.clone())
+                else {
+                    bail!(
+                        "inbound file-transfer approval registry is full with nonterminal requests"
+                    );
+                };
+                self.requests.remove(&oldest_terminal_key);
+            }
+        }
+        self.requests.insert(registry_key, request);
+        Ok(())
+    }
+
+    pub fn values_sorted(&self) -> Vec<InboundFileTransferApprovalRequest> {
+        let mut values = self.requests.values().cloned().collect::<Vec<_>>();
+        values.sort_by_key(|request| std::cmp::Reverse(request.updated_at));
+        values
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +298,13 @@ impl FileTransferControlRequest {
     }
 
     pub fn is_agent_observed(&self) -> bool {
-        self.status == FileTransferControlRequestStatus::AgentObserved
+        matches!(
+            self.status,
+            FileTransferControlRequestStatus::AgentObserved
+                | FileTransferControlRequestStatus::TransferInProgress
+                | FileTransferControlRequestStatus::TransferCompleted
+                | FileTransferControlRequestStatus::TransferFailed
+        )
     }
 
     pub fn is_transfer_in_progress(&self) -> bool {
@@ -120,6 +317,15 @@ impl FileTransferControlRequest {
 
     pub fn is_transfer_failed(&self) -> bool {
         self.status == FileTransferControlRequestStatus::TransferFailed
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            FileTransferControlRequestStatus::TransferCompleted
+                | FileTransferControlRequestStatus::TransferFailed
+                | FileTransferControlRequestStatus::AgentRejected
+        )
     }
 
     pub fn mark_agent_observed(&mut self, now: OffsetDateTime) {
@@ -177,9 +383,28 @@ impl FileTransferControlRequestRegistry {
     pub const SCHEMA_VERSION: u32 = 1;
     pub const MAX_REQUESTS: usize = 128;
 
-    pub fn insert(&mut self, request: FileTransferControlRequest) {
-        self.requests.insert(request.request_id.clone(), request);
-        self.prune_to_limit();
+    pub fn insert(&mut self, request: FileTransferControlRequest) -> Result<()> {
+        let request_id = request.request_id.clone();
+        if !self.requests.contains_key(&request_id) {
+            while self.requests.len() >= Self::MAX_REQUESTS {
+                let Some(oldest_terminal_id) = self
+                    .requests
+                    .values()
+                    .filter(|existing| existing.is_terminal())
+                    .min_by(|left, right| {
+                        left.updated_at
+                            .cmp(&right.updated_at)
+                            .then_with(|| left.request_id.cmp(&right.request_id))
+                    })
+                    .map(|existing| existing.request_id.clone())
+                else {
+                    bail!("file transfer request registry is full with nonterminal requests");
+                };
+                self.requests.remove(&oldest_terminal_id);
+            }
+        }
+        self.requests.insert(request_id, request);
+        Ok(())
     }
 
     pub fn get(&self, request_id: &str) -> Option<&FileTransferControlRequest> {
@@ -224,28 +449,73 @@ impl FileTransferControlRequestRegistry {
         values.sort_by_key(|request| std::cmp::Reverse(request.updated_at));
         values
     }
-
-    fn prune_to_limit(&mut self) {
-        let overflow = self.requests.len().saturating_sub(Self::MAX_REQUESTS);
-        if overflow == 0 {
-            return;
-        }
-
-        let mut oldest_keys = self
-            .requests
-            .values()
-            .map(|request| (request.updated_at, request.request_id.clone()))
-            .collect::<Vec<_>>();
-        oldest_keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        for (_, key) in oldest_keys.into_iter().take(overflow) {
-            self.requests.remove(&key);
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inbound_binding(index: u128, runtime_id: String) -> InboundFileTransferApprovalBinding {
+        InboundFileTransferApprovalBinding {
+            transfer_id: uuid::Uuid::from_u128(index + 1).hyphenated().to_string(),
+            session_id: "session-approval".to_owned(),
+            target_runtime_id: runtime_id,
+            authenticated_peer_device_id: "peer-device".to_owned(),
+            authenticated_peer_device_name: "Peer".to_owned(),
+            authenticated_peer_protocol_fingerprint: "fingerprint".to_owned(),
+            metadata_sha256_hex: "11".repeat(32),
+            file_name: "payload.bin".to_owned(),
+            file_size: 4,
+        }
+    }
+
+    #[test]
+    fn inbound_approval_registry_evicts_terminal_composite_key_at_capacity() {
+        let now = OffsetDateTime::now_utc();
+        let mut registry = InboundFileTransferApprovalRegistry::default();
+        for index in 0..InboundFileTransferApprovalRegistry::MAX_REQUESTS as u128 {
+            let mut request = InboundFileTransferApprovalRequest::pending(
+                inbound_binding(index, format!("runtime-{index}")),
+                now,
+            );
+            request
+                .request_decision(InboundFileTransferApprovalDecision::Expire, now)
+                .expect("request expiry");
+            request.mark_applied(now).expect("apply expiry");
+            registry.insert(request).expect("insert terminal approval");
+        }
+        let replacement = InboundFileTransferApprovalRequest::pending(
+            inbound_binding(10_000, "runtime-current".to_owned()),
+            now,
+        );
+        let replacement_key = replacement.registry_key();
+        registry
+            .insert(replacement)
+            .expect("bounded insertion must evict one terminal composite key");
+        assert_eq!(
+            registry.requests.len(),
+            InboundFileTransferApprovalRegistry::MAX_REQUESTS
+        );
+        assert!(registry.requests.contains_key(&replacement_key));
+    }
+
+    #[test]
+    fn inbound_approval_composite_key_separates_runtime_incarnations() {
+        let now = OffsetDateTime::now_utc();
+        let first = InboundFileTransferApprovalRequest::pending(
+            inbound_binding(7, "runtime-a".to_owned()),
+            now,
+        );
+        let second = InboundFileTransferApprovalRequest::pending(
+            inbound_binding(7, "runtime-b".to_owned()),
+            now,
+        );
+        assert_ne!(first.registry_key(), second.registry_key());
+        let mut registry = InboundFileTransferApprovalRegistry::default();
+        registry.insert(first).expect("insert first runtime");
+        registry.insert(second).expect("insert second runtime");
+        assert_eq!(registry.requests.len(), 2);
+    }
 
     #[test]
     fn file_transfer_request_registry_tracks_pending_send_by_session() {
@@ -266,7 +536,7 @@ mod tests {
                 remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
             },
         );
-        registry.insert(request);
+        registry.insert(request).expect("insert pending request");
 
         let pending = registry.pending_for_session("session-1");
         assert_eq!(pending.len(), 1);
@@ -323,12 +593,14 @@ mod tests {
         request.mark_agent_observed(now);
         request.mark_transfer_started(now);
         assert!(request.is_transfer_in_progress());
+        assert!(request.is_agent_observed());
         assert!(request.transfer_started_at.is_some());
         assert!(!request.receipt_verified);
 
         request.record_bytes_transferred(10, now);
         request.mark_transfer_completed(10, now);
         assert!(request.is_transfer_completed());
+        assert!(request.is_agent_observed());
         assert!(request.receipt_verified);
         assert!(request.receipt_sha256_match);
         assert_eq!(request.bytes_transferred, 10);
@@ -337,6 +609,7 @@ mod tests {
         let mut failing = request.clone();
         failing.mark_transfer_failed("sha256 mismatch", now);
         assert!(failing.is_transfer_failed());
+        assert!(failing.is_agent_observed());
         assert!(!failing.receipt_verified);
         assert_eq!(failing.failure_reason.as_deref(), Some("sha256 mismatch"));
     }
@@ -368,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn file_transfer_request_registry_prunes_oldest_entries_to_declared_limit() {
+    fn file_transfer_request_registry_prunes_only_oldest_terminal_entries() {
         let mut registry = FileTransferControlRequestRegistry::default();
         let base = OffsetDateTime::now_utc() - time::Duration::hours(1);
         for index in 0..(FileTransferControlRequestRegistry::MAX_REQUESTS + 2) {
@@ -389,7 +662,10 @@ mod tests {
                 },
             );
             request.updated_at = base + time::Duration::seconds(index as i64);
-            registry.insert(request);
+            request.mark_transfer_failed("terminal history", request.updated_at);
+            registry
+                .insert(request)
+                .expect("terminal history should remain bounded");
         }
 
         assert_eq!(
@@ -399,5 +675,52 @@ mod tests {
         assert!(registry.get("request-000").is_none());
         assert!(registry.get("request-001").is_none());
         assert!(registry.get("request-002").is_some());
+    }
+
+    #[test]
+    fn file_transfer_request_registry_rejects_insert_when_all_entries_are_nonterminal() {
+        let mut registry = FileTransferControlRequestRegistry::default();
+        for index in 0..FileTransferControlRequestRegistry::MAX_REQUESTS {
+            registry
+                .insert(FileTransferControlRequest::pending_send(
+                    format!("request-{index:03}"),
+                    "session-1",
+                    "runtime-1",
+                    FileTransferSourceSnapshot {
+                        source_path: format!("/private/source-{index:03}.bin"),
+                        size_bytes: 0,
+                        sha256_hex:
+                            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                                .to_owned(),
+                    },
+                    FileTransferDestinationBinding {
+                        requested_peer_ref: "remote-device".to_owned(),
+                        remote_device_id: "remote-device".to_owned(),
+                        remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
+                    },
+                ))
+                .expect("fill active registry");
+        }
+        let before = registry.clone();
+        let error = registry
+            .insert(FileTransferControlRequest::pending_send(
+                "overflow",
+                "session-2",
+                "runtime-2",
+                FileTransferSourceSnapshot {
+                    source_path: "/private/overflow.bin".to_owned(),
+                    size_bytes: 0,
+                    sha256_hex: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_owned(),
+                },
+                FileTransferDestinationBinding {
+                    requested_peer_ref: "remote-device".to_owned(),
+                    remote_device_id: "remote-device".to_owned(),
+                    remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
+                },
+            ))
+            .expect_err("all-active registry must reject without eviction");
+        assert!(error.to_string().contains("nonterminal"));
+        assert_eq!(registry, before);
     }
 }

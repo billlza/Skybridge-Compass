@@ -205,7 +205,7 @@ mod tests {
             entry.id == "remote_desktop_capability_snapshot_registry_gate" && entry.covered
         }));
         assert!(report.checks.iter().any(|entry| {
-            entry.id == "remote_desktop_pending_request_registry_gate" && entry.covered
+            entry.id == "remote_desktop_unavailable_fail_closed_gate" && entry.covered
         }));
         Ok(())
     }

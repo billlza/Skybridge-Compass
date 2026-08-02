@@ -8,7 +8,7 @@
 
 > **⚠️ 实现状态（2026-06-16）**：本 ADR 是**已批准的架构目标（approved target architecture）**，其中
 > 大部分跨平台内容尚未落地。当前实现仅 **Apple↔Apple**：macOS 主机端通过 SkyBridge 私有 PQC 握手 +
-> Bonjour `_skybridge-remote._tcp` 提供远程控制，**只接受已登记信任的 Apple 对端**。
+> Bonjour `_skybridge-rd._tcp` 提供远程控制，**只接受已登记信任的 Apple 对端**。
 > 下表中 §6.7 / §1 的 **Apple ↔ Windows/Android/Linux 的 “WebRTC DataChannel MVP 互通路径” 目前尚未接线**：
 > WebRTC 子系统没有任何调用进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`）。
 > Windows/Android/Linux 的 MsQuic / Quinn / Wi-Fi Aware / Avahi 原生栈同样为目标设计，尚无构建目标。

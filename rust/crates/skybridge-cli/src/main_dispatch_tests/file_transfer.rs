@@ -1,6 +1,6 @@
 use anyhow::Result;
-use clap::Parser;
 use skybridge_agent::{
+    enqueue_file_transfer_send_request_for_established_session,
     load_file_transfer_request_registry, observe_file_transfer_requests_for_established_session,
     resolve_paths, upsert_session_runtime,
 };
@@ -9,32 +9,22 @@ use skybridge_core::{
     RuntimeSessionState, SessionReadiness,
 };
 
-use crate::Cli;
 use crate::cli_test_support::make_test_dir;
 
 #[tokio::test]
-async fn file_transfer_dispatch_registers_pending_send_without_live_success() -> Result<()> {
+async fn file_transfer_registry_registers_pending_send_without_live_success() -> Result<()> {
     let state_dir = make_test_dir("file-transfer-dispatch")?;
-    let state = state_dir.display().to_string();
     let paths = resolve_paths(Some(state_dir.clone()))?;
     seed_handshake_complete_session(&paths, "session-1").await?;
     let source_path = state_dir.join("payload.bin");
     tokio::fs::write(&source_path, b"hello").await?;
-    let source = source_path.display().to_string();
 
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "file",
-        "send",
-        &source,
-        "--to",
-        "remote-device",
-        "--session-id",
+    enqueue_file_transfer_send_request_for_established_session(
+        &paths,
         "session-1",
-        "--json",
-    ])
+        "remote-device",
+        &source_path,
+    )
     .await?;
 
     let request_registry = load_file_transfer_request_registry(&paths).await?;
@@ -57,19 +47,12 @@ async fn file_transfer_dispatch_registers_pending_send_without_live_success() ->
     assert!(pending[0].is_pending_agent_observation());
 
     assert!(
-        dispatch_args([
-            "skybridge",
-            "--state-dir",
-            &state,
-            "file",
-            "send",
-            &source,
-            "--to",
-            "remote-device",
-            "--session-id",
+        enqueue_file_transfer_send_request_for_established_session(
+            &paths,
             "session-1",
-            "--json",
-        ])
+            "remote-device",
+            &source_path,
+        )
         .await
         .is_err(),
         "duplicate pending file-transfer requests must fail closed"
@@ -85,19 +68,12 @@ async fn file_transfer_dispatch_registers_pending_send_without_live_success() ->
         "agent-observed file-transfer request must leave no pending queue item"
     );
 
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "file",
-        "send",
-        &source,
-        "--to",
-        "remote-device",
-        "--session-id",
+    enqueue_file_transfer_send_request_for_established_session(
+        &paths,
         "session-1",
-        "--json",
-    ])
+        "remote-device",
+        &source_path,
+    )
     .await?;
     let request_registry = load_file_transfer_request_registry(&paths).await?;
     let pending = request_registry.pending_for_session("session-1");
@@ -110,27 +86,18 @@ async fn file_transfer_dispatch_registers_pending_send_without_live_success() ->
 #[tokio::test]
 async fn file_transfer_dispatch_rejects_session_without_current_handshake() -> Result<()> {
     let state_dir = make_test_dir("file-transfer-dispatch-no-handshake")?;
-    let state = state_dir.display().to_string();
     let paths = resolve_paths(Some(state_dir.clone()))?;
     seed_transport_only_session(&paths, "session-transport-only").await?;
     let source_path = state_dir.join("payload.bin");
     tokio::fs::write(&source_path, b"hello").await?;
-    let source = source_path.display().to_string();
 
     assert!(
-        dispatch_args([
-            "skybridge",
-            "--state-dir",
-            &state,
-            "file",
-            "send",
-            &source,
-            "--to",
-            "remote-device",
-            "--session-id",
+        enqueue_file_transfer_send_request_for_established_session(
+            &paths,
             "session-transport-only",
-            "--json",
-        ])
+            "remote-device",
+            &source_path,
+        )
         .await
         .is_err(),
         "file transfer requests must require current handshake-complete evidence"
@@ -149,27 +116,18 @@ async fn file_transfer_dispatch_rejects_session_without_current_handshake() -> R
 #[tokio::test]
 async fn file_transfer_dispatch_rejects_destination_mismatch_without_peer_leakage() -> Result<()> {
     let state_dir = make_test_dir("file-transfer-dispatch-destination-mismatch")?;
-    let state = state_dir.display().to_string();
     let paths = resolve_paths(Some(state_dir.clone()))?;
     seed_handshake_complete_session(&paths, "session-1").await?;
     let source_path = state_dir.join("payload.bin");
     tokio::fs::write(&source_path, b"hello").await?;
-    let source = source_path.display().to_string();
 
     assert!(
-        dispatch_args([
-            "skybridge",
-            "--state-dir",
-            &state,
-            "file",
-            "send",
-            &source,
-            "--to",
-            "wrong-peer-secret",
-            "--session-id",
+        enqueue_file_transfer_send_request_for_established_session(
+            &paths,
             "session-1",
-            "--json",
-        ])
+            "wrong-peer-secret",
+            &source_path,
+        )
         .await
         .is_err(),
         "destination mismatch must fail closed"
@@ -178,10 +136,6 @@ async fn file_transfer_dispatch_rejects_destination_mismatch_without_peer_leakag
     assert!(request_registry.pending_for_session("session-1").is_empty());
 
     Ok(())
-}
-
-async fn dispatch_args<const N: usize>(args: [&str; N]) -> Result<()> {
-    crate::dispatch(Cli::try_parse_from(args)?).await
 }
 
 async fn seed_handshake_complete_session(

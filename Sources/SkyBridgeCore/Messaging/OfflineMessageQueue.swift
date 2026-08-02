@@ -1,104 +1,175 @@
-//
-// OfflineMessageQueue.swift
-// SkyBridgeCore
-//
-// 离线消息队列服务
-// 支持 macOS 14.0+, 兼容 macOS 15.x 和 26.x
-//
-// 设计特点:
-// - 使用 Actor 实现线程安全的队列管理
-// - 支持优先级排序和指数退避重试
-// - 设备上线时自动投递
-// - 持久化存储支持断电恢复
-//
-
 import Foundation
 import OSLog
+import SkyBridgeMessagePersistence
+import SkyBridgeProtocolCore
 
-// MARK: - 离线消息队列服务
+enum UnifiedOfflineQueueMutation: Sendable {
+    case cancel(queueID: String)
+    case cancelAll(targetDeviceID: String)
+    case clear
+    case retryFailed
+}
 
-/// 离线消息队列 - 使用 Actor 确保线程安全
+/// Durable offline queue with one exact-owner worker per target device.
 @MainActor
 public final class OfflineMessageQueue: ObservableObject {
-
-    // MARK: - Singleton
+    public typealias SendHandler = @MainActor @Sendable (
+        _ message: QueuedMessage
+    ) async -> OfflineDeliveryDisposition
+    typealias ClaimAdmissionGate = @MainActor @Sendable (
+        _ claim: OfflineMessageClaim
+    ) async -> Void
 
     public static let shared = OfflineMessageQueue()
 
-    // MARK: - Published Properties
+    @Published public private(set) var configuration: OfflineQueueConfiguration
+    @Published public private(set) var statistics: QueueStatistics = .empty
+    @Published public private(set) var isProcessing = false
+    @Published public private(set) var persistenceState: OfflineQueuePersistenceState = .loading
+    @Published public private(set) var configurationPersistenceState: OfflineQueuePersistenceState
 
-    /// 配置
-    @Published public var configuration: OfflineQueueConfiguration {
-        didSet { saveConfiguration() }
+    public var sendHandler: SendHandler?
+
+    private struct DeviceWorker {
+        let ownerToken: UUID
+        let task: Task<Void, Never>
+        let activeClaimMessageID: UUID?
     }
 
-    /// 队列统计
-    @Published public private(set) var statistics: QueueStatistics = .empty
-
-    /// 是否正在处理
-    @Published public private(set) var isProcessing: Bool = false
-
-    // MARK: - Private Properties
-
-    private let logger = Logger(subsystem: "com.skybridge.compass", category: "OfflineQueue")
-    private let queueActor = MessageQueueActor()
-
-    // 在线设备集合
-    private var onlineDevices: Set<String> = []
-
-    // 处理任务
-    private var processingTask: Task<Void, Never>?
-
-    // 发送回调
-    public var sendHandler: ((_ message: QueuedMessage) async throws -> Void)?
-
-    private static let queueStore = CodablePersistenceStore<[QueuedMessage]>(
+    private static let defaultQueueStore = CodablePersistenceStore<[QueuedMessage]>(
         location: .protectedApplicationSupport(
             path: "OfflineQueue/queue.json",
             legacyUserDefaultsKey: "com.skybridge.offline.queue"
         )
     )
-    private static let configurationStore = CodablePersistenceStore<OfflineQueueConfiguration>(
-        location: .protectedApplicationSupport(
-            path: "OfflineQueue/configuration.json",
-            legacyUserDefaultsKey: "com.skybridge.offline.config"
+    private static let defaultConfigurationStore: CodablePersistenceStore<OfflineQueueConfiguration> = {
+        let encoder = JSONEncoder()
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(
+            positiveInfinity: "Infinity",
+            negativeInfinity: "-Infinity",
+            nan: "NaN"
         )
-    )
+        let decoder = JSONDecoder()
+        decoder.nonConformingFloatDecodingStrategy = .convertFromString(
+            positiveInfinity: "Infinity",
+            negativeInfinity: "-Infinity",
+            nan: "NaN"
+        )
+        return CodablePersistenceStore<OfflineQueueConfiguration>(
+            location: .protectedApplicationSupport(
+                path: "OfflineQueue/configuration.json",
+                legacyUserDefaultsKey: "com.skybridge.offline.config"
+            ),
+            encoder: encoder,
+            decoder: decoder
+        )
+    }()
 
-    // MARK: - Initialization
+    private let logger = Logger(subsystem: "com.skybridge.compass", category: "OfflineQueue")
+    private let repository: OfflineMessageQueueRepository
+    private let usesUnifiedRepository: Bool
+    private let configurationStore: CodablePersistenceStore<OfflineQueueConfiguration>
+    private let automaticallyStartsProcessing: Bool
+    private let claimAdmissionGate: ClaimAdmissionGate?
+    private var unifiedMutationHandler: (@MainActor @Sendable (
+        UnifiedOfflineQueueMutation
+    ) async throws -> Void)?
+    private var onlineDevices: Set<String> = []
+    private var deviceWorkers: [String: DeviceWorker] = [:]
+    private var cancellationRequestedMessageIDs: Set<UUID> = []
+    private var cancellationRequestedDeviceIDs: Set<String> = []
+    private var isClearingAll = false
+    private var periodicProcessingTask: Task<Void, Never>?
+    private var bootstrapTask: Task<Void, Never>?
+    private var latestRepositoryGeneration: UInt64 = 0
+    private var unifiedMessages: [UUID: QueuedMessage] = [:]
 
-    private init() {
-        self.configuration = Self.loadConfiguration() ?? .default
-
-        Task {
-            await loadPersistedQueue()
-            startProcessing()
-        }
-
-        logger.info("📬 离线消息队列已初始化")
+    private convenience init() {
+        self.init(
+            queueStore: Self.defaultQueueStore,
+            configurationStore: Self.defaultConfigurationStore,
+            automaticallyStartsProcessing: false,
+            usesUnifiedRepository: true
+        )
     }
 
-    // MARK: - Public Methods
+    convenience init(
+        queueStore: CodablePersistenceStore<[QueuedMessage]>,
+        configurationStore: CodablePersistenceStore<OfflineQueueConfiguration>,
+        automaticallyStartsProcessing: Bool,
+        claimAdmissionGate: ClaimAdmissionGate? = nil
+    ) {
+        self.init(
+            queueStore: queueStore,
+            configurationStore: configurationStore,
+            automaticallyStartsProcessing: automaticallyStartsProcessing,
+            claimAdmissionGate: claimAdmissionGate,
+            usesUnifiedRepository: false
+        )
+    }
 
-    /// 入队消息
-    /// - Parameters:
-    ///   - targetDeviceID: 目标设备 ID
-    ///   - messageType: 消息类型
-    ///   - priority: 优先级
-    ///   - payload: 消息载荷
-    ///   - ttl: 有效时间（秒）
-    /// - Returns: 入队的消息
+    private init(
+        queueStore: CodablePersistenceStore<[QueuedMessage]>,
+        configurationStore: CodablePersistenceStore<OfflineQueueConfiguration>,
+        automaticallyStartsProcessing: Bool,
+        claimAdmissionGate: ClaimAdmissionGate? = nil,
+        usesUnifiedRepository: Bool
+    ) {
+        self.repository = OfflineMessageQueueRepository(store: queueStore)
+        self.usesUnifiedRepository = usesUnifiedRepository
+        self.configurationStore = configurationStore
+        self.automaticallyStartsProcessing = automaticallyStartsProcessing
+        self.claimAdmissionGate = claimAdmissionGate
+
+        do {
+            let loadedConfiguration = try configurationStore.loadOrThrow() ?? .default
+            try loadedConfiguration.validate()
+            self.configuration = loadedConfiguration
+            self.configurationPersistenceState = .ready
+        } catch is OfflineQueueError {
+            self.configuration = .default
+            self.configurationPersistenceState = .blocked(.stateConflict)
+        } catch {
+            self.configuration = .default
+            self.configurationPersistenceState = .blocked(.persistenceFailure)
+        }
+
+        bootstrapTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.bootstrap()
+        }
+    }
+
     @discardableResult
     public func enqueue(
-        targetDeviceID: String,
+        targetDeviceID rawTargetDeviceID: String,
         messageType: OfflineMessageType,
         priority: MessagePriority = .normal,
         payload: Data,
         ttl: TimeInterval? = nil
     ) async throws -> QueuedMessage {
-
-        let effectiveTTL = ttl ?? (priority == .urgent ? configuration.urgentTTL : configuration.defaultTTL)
-
+        guard !usesUnifiedRepository else {
+            throw OfflineQueueError.coordinatedRetryRequired
+        }
+        try requireConfigurationReady()
+        let targetDeviceID = try DeviceTextMessagePolicy.normalizedTargetDeviceIdentifier(
+            rawTargetDeviceID
+        )
+        guard !payload.isEmpty else {
+            throw OfflineQueueError.invalidPayload
+        }
+        guard payload.count <= QueuedMessage.maximumPayloadBytes else {
+            throw OfflineQueueError.messageTooLarge(
+                size: payload.count,
+                maxSize: QueuedMessage.maximumPayloadBytes
+            )
+        }
+        let effectiveTTL = ttl
+            ?? (priority == .urgent ? configuration.urgentTTL : configuration.defaultTTL)
+        guard effectiveTTL > 0,
+              effectiveTTL.isFinite || effectiveTTL == .infinity else {
+            throw OfflineQueueError.invalidConfiguration
+        }
         let message = QueuedMessage(
             targetDeviceID: targetDeviceID,
             messageType: messageType,
@@ -106,412 +177,733 @@ public final class OfflineMessageQueue: ObservableObject {
             payload: payload,
             ttl: effectiveTTL
         )
-
-        // 检查队列容量
-        let stats = await queueActor.getStatistics()
-        if stats.totalMessages >= configuration.maxQueueSize {
-            throw OfflineQueueError.queueFull
+        try await applyRepositoryMutation {
+            try await repository.enqueue(message, configuration: configuration)
         }
-
-        // 检查设备队列容量
-        let deviceCount = stats.deviceBreakdown[targetDeviceID] ?? 0
-        if deviceCount >= configuration.maxMessagesPerDevice {
-            throw OfflineQueueError.deviceQueueFull(deviceID: targetDeviceID)
-        }
-
-        // 入队
-        await queueActor.enqueue(message)
-
-        // 更新统计
-        await updateStatistics()
-
-        // 持久化
-        await persistQueue()
-
-        logger.info("📬 消息已入队: \(message.id), 目标: \(targetDeviceID), 类型: \(messageType.rawValue)")
-
-        // 如果设备在线，立即尝试发送
+        logger.info("📬 offline message enqueued: message_ref=\(message.id.uuidString, privacy: .public)")
         if onlineDevices.contains(targetDeviceID) {
-            Task {
-                await processMessagesForDevice(targetDeviceID)
-            }
+            scheduleProcessing(for: targetDeviceID)
         }
-
         return message
     }
 
-    /// 批量入队
-    public func enqueueBatch(_ messages: [(targetDeviceID: String, messageType: OfflineMessageType, priority: MessagePriority, payload: Data)]) async throws -> [QueuedMessage] {
-        var results: [QueuedMessage] = []
-
-        for msg in messages {
-            let queued = try await enqueue(
-                targetDeviceID: msg.targetDeviceID,
-                messageType: msg.messageType,
-                priority: msg.priority,
-                payload: msg.payload
-            )
-            results.append(queued)
+    public func enqueueBatch(
+        _ messages: [(
+            targetDeviceID: String,
+            messageType: OfflineMessageType,
+            priority: MessagePriority,
+            payload: Data
+        )]
+    ) async throws -> [QueuedMessage] {
+        guard !usesUnifiedRepository else {
+            throw OfflineQueueError.coordinatedRetryRequired
         }
-
-        return results
-    }
-
-    /// 取消消息
-    public func cancel(messageID: UUID) async throws {
-        guard await queueActor.remove(messageID: messageID) else {
-            throw OfflineQueueError.messageNotFound(id: messageID)
-        }
-
-        await updateStatistics()
-        await persistQueue()
-
-        logger.info("📬 消息已取消: \(messageID)")
-    }
-
-    /// 取消设备的所有消息
-    public func cancelAllMessages(for deviceID: String) async {
-        await queueActor.removeAllForDevice(deviceID)
-        await updateStatistics()
-        await persistQueue()
-
-        logger.info("📬 已取消设备 \(deviceID) 的所有消息")
-    }
-
-    /// 清空队列
-    public func clearAll() async {
-        await queueActor.clearAll()
-        await updateStatistics()
-        await persistQueue()
-
-        logger.info("📬 队列已清空")
-    }
-
-    /// 获取设备的待发消息
-    public func getPendingMessages(for deviceID: String) async -> [QueuedMessage] {
-        await queueActor.getMessagesForDevice(deviceID)
-    }
-
-    /// 获取所有待发消息
-    public func getAllPendingMessages() async -> [QueuedMessage] {
-        await queueActor.getAllMessages()
-    }
-
-    /// 设备上线通知
-    public func deviceOnline(_ deviceID: String) async {
-        onlineDevices.insert(deviceID)
-        logger.info("📬 设备上线: \(deviceID)")
-
-        // 处理该设备的待发消息
-        await processMessagesForDevice(deviceID)
-    }
-
-    /// 设备离线通知
-    public func deviceOffline(_ deviceID: String) {
-        onlineDevices.remove(deviceID)
-        logger.info("📬 设备离线: \(deviceID)")
-    }
-
-    /// 手动重试失败的消息
-    public func retryFailed() async {
-        await queueActor.resetFailedMessages()
-        await updateStatistics()
-
-        logger.info("📬 已重置失败消息")
-
-        // 触发处理
-        await processAllDevices()
-    }
-
-    // MARK: - Private Methods - Processing
-
-    /// 开始后台处理
-    private func startProcessing() {
-        processingTask?.cancel()
-
-        processingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.periodicProcessing()
-
-                // 等待重试间隔
-                try? await Task.sleep(for: .seconds(self?.configuration.retryInterval ?? 30))
-            }
-        }
-    }
-
-    /// 周期性处理
-    private func periodicProcessing() async {
-        // 清理过期消息
-        let expiredCount = await queueActor.cleanupExpired()
-        if expiredCount > 0 {
-            logger.info("📬 清理了 \(expiredCount) 条过期消息")
-        }
-
-        // 处理在线设备的消息
-        await processAllDevices()
-
-        // 更新统计
-        await updateStatistics()
-
-        // 持久化
-        await persistQueue()
-    }
-
-    /// 处理所有在线设备的消息
-    private func processAllDevices() async {
-        for deviceID in onlineDevices {
-            await processMessagesForDevice(deviceID)
-        }
-    }
-
-    /// 处理特定设备的消息
-    private func processMessagesForDevice(_ deviceID: String) async {
-        guard let sendHandler else { return }
-
-        isProcessing = true
-        defer { isProcessing = false }
-
-        // 获取该设备的待发消息（按优先级排序）
-        let messages = await queueActor.getReadyMessages(for: deviceID, config: configuration)
-
+        try requireConfigurationReady()
+        var queuedMessages: [QueuedMessage] = []
+        queuedMessages.reserveCapacity(messages.count)
         for message in messages {
-            // 检查是否过期
-            if message.isExpired {
-                await queueActor.updateStatus(messageID: message.id, status: .expired)
-                continue
+            let deviceID = try DeviceTextMessagePolicy.normalizedTargetDeviceIdentifier(
+                message.targetDeviceID
+            )
+            guard !message.payload.isEmpty else {
+                throw OfflineQueueError.invalidPayload
             }
-
-            // 标记为发送中
-            await queueActor.updateStatus(messageID: message.id, status: .sending)
-
-            do {
-                try await sendHandler(message)
-
-                // 发送成功
-                await queueActor.updateStatus(messageID: message.id, status: .delivered)
-                logger.debug("📬 消息已送达: \(message.id)")
-
-            } catch {
-                // 发送失败，记录尝试
-                let newRetryCount = message.retryCount + 1
-
-                if newRetryCount >= configuration.maxRetryCount {
-                    // 超过最大重试次数
-                    await queueActor.updateStatus(messageID: message.id, status: .failed, error: error.localizedDescription)
-                    logger.warning("📬 消息发送失败（超过重试次数）: \(message.id)")
-                } else {
-                    // 记录重试并回到待发状态
-                    await queueActor.recordRetryAttempt(messageID: message.id, error: error.localizedDescription)
-                    logger.debug("📬 消息将重试: \(message.id), 第 \(newRetryCount) 次")
-                }
+            guard message.payload.count <= QueuedMessage.maximumPayloadBytes else {
+                throw OfflineQueueError.messageTooLarge(
+                    size: message.payload.count,
+                    maxSize: QueuedMessage.maximumPayloadBytes
+                )
             }
+            let ttl = message.priority == .urgent
+                ? configuration.urgentTTL
+                : configuration.defaultTTL
+            queuedMessages.append(
+                QueuedMessage(
+                    targetDeviceID: deviceID,
+                    messageType: message.messageType,
+                    priority: message.priority,
+                    payload: message.payload,
+                    ttl: ttl
+                )
+            )
         }
-    }
-
-    /// 更新统计信息
-    private func updateStatistics() async {
-        statistics = await queueActor.getStatistics()
-    }
-
-    // MARK: - Private Methods - Persistence
-
-    /// 持久化队列
-    private func persistQueue() async {
-        guard configuration.enablePersistence else { return }
-
-        let messages = await queueActor.getAllMessages()
-
-        do {
-            try Self.queueStore.save(messages)
-        } catch {
-            logger.error("📬 持久化队列失败: \(error.localizedDescription)")
+        try await applyRepositoryMutation {
+            try await repository.enqueueBatch(
+                queuedMessages,
+                configuration: configuration
+            )
         }
+        for deviceID in Set(queuedMessages.map(\.targetDeviceID))
+        where onlineDevices.contains(deviceID) {
+            scheduleProcessing(for: deviceID)
+        }
+        return queuedMessages
     }
 
-    /// 加载持久化的队列
-    private func loadPersistedQueue() async {
-        guard configuration.enablePersistence,
-              let messages = Self.queueStore.load() else {
+    public func cancel(messageID: UUID) async throws {
+        try requireConfigurationReady()
+        if usesUnifiedRepository {
+            try await performUnifiedMutation(
+                .cancel(queueID: messageID.uuidString.lowercased())
+            )
+            logger.info("📬 unified offline message cancelled: message_ref=\(messageID.uuidString, privacy: .public)")
             return
         }
-
-        // 过滤掉已过期的消息
-        let validMessages = messages.filter { !$0.isExpired && !$0.status.isTerminal }
-
-        for message in validMessages {
-            await queueActor.enqueue(message)
-        }
-
-        await updateStatistics()
-
-        logger.info("📬 已恢复 \(validMessages.count) 条消息")
-    }
-
-    private func saveConfiguration() {
-        try? Self.configurationStore.save(configuration)
-    }
-
-    private static func loadConfiguration() -> OfflineQueueConfiguration? {
-        Self.configurationStore.load()
-    }
-}
-
-// MARK: - 消息队列 Actor
-
-/// 消息队列 Actor - 线程安全的队列操作
-actor MessageQueueActor {
-
-    private var messages: [UUID: QueuedMessage] = [:]
-    private var deliveryHistory: [UUID: MessageDeliveryResult] = [:]
-
-    // MARK: - Queue Operations
-
-    func enqueue(_ message: QueuedMessage) {
-        messages[message.id] = message
-    }
-
-    func remove(messageID: UUID) -> Bool {
-        messages.removeValue(forKey: messageID) != nil
-    }
-
-    func removeAllForDevice(_ deviceID: String) {
-        messages = messages.filter { $0.value.targetDeviceID != deviceID }
-    }
-
-    func clearAll() {
-        messages.removeAll()
-    }
-
-    // MARK: - Query Operations
-
-    func getMessagesForDevice(_ deviceID: String) -> [QueuedMessage] {
-        messages.values
-            .filter { $0.targetDeviceID == deviceID && !$0.status.isTerminal }
-            .sorted { $0.priority > $1.priority }
-    }
-
-    func getAllMessages() -> [QueuedMessage] {
-        Array(messages.values)
-    }
-
-    /// 获取准备好发送的消息
-    func getReadyMessages(for deviceID: String, config: OfflineQueueConfiguration) -> [QueuedMessage] {
-        let now = Date()
-
-        return messages.values
-            .filter { message in
-                guard message.targetDeviceID == deviceID else { return false }
-                guard message.status == .pending else { return false }
-                guard !message.isExpired else { return false }
-
-                // 检查重试间隔（指数退避）
-                if let lastAttempt = message.lastAttemptAt {
-                    let backoff = config.retryInterval * pow(config.retryBackoffFactor, Double(message.retryCount - 1))
-                    let nextRetryTime = lastAttempt.addingTimeInterval(backoff)
-                    guard now >= nextRetryTime else { return false }
-                }
-
-                return true
-            }
-            .sorted { $0.priority > $1.priority }
-    }
-
-    // MARK: - Status Updates
-
-    func updateStatus(messageID: UUID, status: MessageDeliveryStatus, error: String? = nil) {
-        guard var message = messages[messageID] else { return }
-        message.updateStatus(status)
-
-        if let error {
-            message.recordAttempt(error: error)
-        }
-
-        messages[messageID] = message
-
-        // 如果是终态，记录投递结果
-        if status.isTerminal {
-            let result = MessageDeliveryResult(
+        cancellationRequestedMessageIDs.insert(messageID)
+        cancelWorker(holdingClaimFor: messageID)
+        defer { cancellationRequestedMessageIDs.remove(messageID) }
+        try await applyRepositoryMutation {
+            try await repository.cancel(
                 messageID: messageID,
-                deviceID: message.targetDeviceID,
-                success: status == .delivered,
-                error: error,
-                retryCount: message.retryCount
+                configuration: configuration
             )
-            deliveryHistory[messageID] = result
+        }
+        logger.info("📬 offline message cancelled: message_ref=\(messageID.uuidString, privacy: .public)")
+    }
+
+    public func cancelAllMessages(for rawDeviceID: String) async throws {
+        try requireConfigurationReady()
+        let deviceID = try DeviceTextMessagePolicy.normalizedTargetDeviceIdentifier(rawDeviceID)
+        if usesUnifiedRepository {
+            try await performUnifiedMutation(.cancelAll(targetDeviceID: deviceID))
+            logger.info("📬 unified offline messages cancelled for peer")
+            return
+        }
+        cancellationRequestedDeviceIDs.insert(deviceID)
+        cancelWorker(for: deviceID)
+        defer { cancellationRequestedDeviceIDs.remove(deviceID) }
+        try await applyRepositoryMutation {
+            try await repository.cancelAll(
+                for: deviceID,
+                configuration: configuration
+            )
+        }
+        logger.info("📬 offline messages cancelled for peer")
+    }
+
+    /// Explicitly clears queued deliveries. Unified mode never treats this as a
+    /// corruption-recovery escape hatch; an unavailable SQLite authority stays
+    /// blocked and requires a separate quarantine workflow.
+    public func clearAll() async throws {
+        if usesUnifiedRepository {
+            try requireConfigurationReady()
+            try await performUnifiedMutation(.clear)
+            logger.info("📬 unified offline queue explicitly cleared")
+            return
+        }
+        isClearingAll = true
+        cancelAllWorkers()
+        defer { isClearingAll = false }
+        do {
+            apply(try await repository.bootstrap(configuration: configuration))
+        } catch let error as OfflineQueueError {
+            guard case .persistenceBlocked = error else {
+                await refreshFromRepository()
+                throw error
+            }
+            await refreshFromRepository()
+        } catch {
+            await refreshFromRepository()
+            throw error
+        }
+        try await applyRepositoryMutation {
+            try await repository.clearAll()
+        }
+        logger.info("📬 offline queue explicitly cleared")
+    }
+
+    public func getPendingMessages(for rawDeviceID: String) async throws -> [QueuedMessage] {
+        try requireConfigurationReady()
+        let deviceID = try DeviceTextMessagePolicy.normalizedTargetDeviceIdentifier(rawDeviceID)
+        if usesUnifiedRepository {
+            try applyUnifiedSnapshot(
+                try await UnifiedDeviceMessagingRuntime.shared.currentSnapshot()
+            )
+            return unifiedMessages.values
+                .filter { $0.targetDeviceID == deviceID && !$0.status.isTerminal }
+                .sorted(by: Self.unifiedDeliveryOrder)
+        }
+        return try await readRepository {
+            try await repository.messagesForDevice(deviceID, configuration: configuration)
         }
     }
 
-    func updateForRetry(_ message: QueuedMessage) {
-        var updated = message
-        updated.updateStatus(.pending)
-        messages[message.id] = updated
+    public func getAllPendingMessages() async throws -> [QueuedMessage] {
+        try requireConfigurationReady()
+        if usesUnifiedRepository {
+            try applyUnifiedSnapshot(
+                try await UnifiedDeviceMessagingRuntime.shared.currentSnapshot()
+            )
+            return unifiedMessages.values
+                .filter { !$0.status.isTerminal }
+                .sorted(by: Self.unifiedDeliveryOrder)
+        }
+        let messages = try await readRepository {
+            try await repository.allMessages(configuration: configuration)
+        }
+        return messages.filter { !$0.status.isTerminal }
     }
 
-    /// 记录重试尝试
-    func recordRetryAttempt(messageID: UUID, error: String?) {
-        guard var message = messages[messageID] else { return }
-        message.recordAttempt(error: error)
-        message.updateStatus(.pending)
-        messages[messageID] = message
-    }
-
-    func resetFailedMessages() {
-        for (id, var message) in messages where message.status == .failed {
-            message.updateStatus(.pending)
-            messages[id] = message
+    public func deviceOnline(_ rawDeviceID: String) async {
+        if usesUnifiedRepository {
+            do {
+                let deviceID = try DeviceTextMessagePolicy
+                    .normalizedTargetDeviceIdentifier(rawDeviceID)
+                try applyUnifiedSnapshot(
+                    try await UnifiedDeviceMessagingRuntime.shared.bootstrap()
+                )
+                onlineDevices.insert(deviceID)
+            } catch {
+                persistenceState = .blocked(.persistenceFailure)
+                logger.error("📬 unified offline queue could not accept online transition")
+            }
+            return
+        }
+        do {
+            try requireConfigurationReady()
+            let deviceID = try DeviceTextMessagePolicy.normalizedTargetDeviceIdentifier(rawDeviceID)
+            _ = try await repository.bootstrap(configuration: configuration)
+            guard !Task.isCancelled else { return }
+            onlineDevices.insert(deviceID)
+            scheduleProcessing(for: deviceID)
+            logger.info("📬 offline queue peer online")
+        } catch {
+            await refreshFromRepository()
+            logger.error("📬 offline queue could not accept online transition")
         }
     }
 
-    // MARK: - Cleanup
-
-    func cleanupExpired() -> Int {
-        var expiredCount = 0
-
-        for (id, message) in messages where message.isExpired && !message.status.isTerminal {
-            var updated = message
-            updated.markExpired()
-            messages[id] = updated
-            expiredCount += 1
+    public func deviceOffline(_ rawDeviceID: String) {
+        let deviceID: String
+        do {
+            deviceID = try DeviceTextMessagePolicy
+                .normalizedTargetDeviceIdentifier(rawDeviceID)
+        } catch {
+            logger.error("📬 offline queue rejected invalid offline peer identifier")
+            return
         }
-
-        return expiredCount
+        onlineDevices.remove(deviceID)
+        if usesUnifiedRepository { return }
+        cancelWorker(for: deviceID)
+        logger.info("📬 offline queue peer offline")
     }
 
-    // MARK: - Statistics
+    public func retryFailed() async throws {
+        try requireConfigurationReady()
+        if usesUnifiedRepository {
+            try await performUnifiedMutation(.retryFailed)
+            return
+        }
+        try await applyRepositoryMutation {
+            try await repository.resetFailed(configuration: configuration)
+        }
+        for deviceID in onlineDevices {
+            scheduleProcessing(for: deviceID)
+        }
+    }
 
-    func getStatistics() -> QueueStatistics {
-        let allMessages = Array(messages.values)
+    private func bootstrap() async {
+        if usesUnifiedRepository {
+            do {
+                try applyUnifiedSnapshot(
+                    try await UnifiedDeviceMessagingRuntime.shared.bootstrap()
+                )
+                logger.info("📬 unified offline queue initialized")
+            } catch {
+                persistenceState = .blocked(.persistenceFailure)
+                logger.error("📬 unified offline queue bootstrap blocked")
+            }
+            return
+        }
+        do {
+            try requireConfigurationReady()
+            let snapshot = try await repository.bootstrap(configuration: configuration)
+            apply(snapshot)
+            if automaticallyStartsProcessing {
+                startPeriodicProcessing()
+            }
+            logger.info("📬 offline queue initialized")
+        } catch {
+            await refreshFromRepository()
+            logger.error("📬 offline queue bootstrap blocked")
+        }
+    }
 
-        let pending = allMessages.filter { $0.status == .pending }.count
-        let sending = allMessages.filter { $0.status == .sending }.count
-        let delivered = allMessages.filter { $0.status == .delivered }.count
-        let failed = allMessages.filter { $0.status == .failed }.count
-        let expired = allMessages.filter { $0.status == .expired }.count
+    private func startPeriodicProcessing() {
+        periodicProcessingTask?.cancel()
+        periodicProcessingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.periodicProcessing()
+                do {
+                    try await Task.sleep(for: .seconds(self.configuration.retryInterval))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.logger.error("📬 offline queue retry timer failed")
+                    return
+                }
+            }
+        }
+    }
 
-        // 设备分布
+    private func periodicProcessing() async {
+        do {
+            try requireConfigurationReady()
+            let cleanup = try await repository.cleanupExpired(configuration: configuration)
+            apply(cleanup.snapshot)
+            if cleanup.removedCount > 0 {
+                logger.info("📬 expired offline messages pruned: count=\(cleanup.removedCount, privacy: .public)")
+            }
+        } catch {
+            await refreshFromRepository()
+            logger.error("📬 offline queue expiry cleanup blocked")
+            return
+        }
+        for deviceID in onlineDevices {
+            scheduleProcessing(for: deviceID)
+        }
+    }
+
+    private func scheduleProcessing(for deviceID: String) {
+        guard !usesUnifiedRepository else { return }
+        guard onlineDevices.contains(deviceID),
+              !isClearingAll,
+              !cancellationRequestedDeviceIDs.contains(deviceID),
+              deviceWorkers[deviceID] == nil,
+              sendHandler != nil else {
+            return
+        }
+        let ownerToken = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.runDeviceWorker(deviceID: deviceID, ownerToken: ownerToken)
+        }
+        deviceWorkers[deviceID] = DeviceWorker(
+            ownerToken: ownerToken,
+            task: task,
+            activeClaimMessageID: nil
+        )
+        isProcessing = true
+    }
+
+    private func runDeviceWorker(deviceID: String, ownerToken: UUID) async {
+        defer {
+            let shouldReplaceCancelledWorker = Task.isCancelled
+                && onlineDevices.contains(deviceID)
+            if deviceWorkers[deviceID]?.ownerToken == ownerToken {
+                deviceWorkers.removeValue(forKey: deviceID)
+            }
+            isProcessing = !deviceWorkers.isEmpty
+            if shouldReplaceCancelledWorker {
+                scheduleProcessing(for: deviceID)
+            }
+        }
+
+        while onlineDevices.contains(deviceID), !Task.isCancelled {
+            let claim: OfflineMessageClaim
+            do {
+                guard let nextClaim = try await repository.claimNextReadyMessage(
+                    for: deviceID,
+                    ownerToken: ownerToken,
+                    configuration: configuration
+                ) else {
+                    await refreshFromRepository()
+                    return
+                }
+                claim = nextClaim
+                guard recordActiveClaim(
+                    claim.message.id,
+                    deviceID: deviceID,
+                    ownerToken: ownerToken
+                ) else {
+                    await restorePendingIfCurrent(claim)
+                    return
+                }
+                await refreshFromRepository()
+            } catch {
+                await refreshFromRepository()
+                logger.error("📬 offline message claim failed")
+                return
+            }
+
+            if let claimAdmissionGate {
+                await claimAdmissionGate(claim)
+            }
+
+            let claimIsCurrent: Bool
+            do {
+                claimIsCurrent = try await repository.isClaimCurrent(
+                    claim,
+                    configuration: configuration
+                )
+            } catch {
+                clearActiveClaim(
+                    claim.message.id,
+                    deviceID: deviceID,
+                    ownerToken: ownerToken
+                )
+                await refreshFromRepository()
+                logger.error("📬 offline message claim revalidation failed")
+                return
+            }
+
+            guard claimIsCurrent else {
+                clearActiveClaim(
+                    claim.message.id,
+                    deviceID: deviceID,
+                    ownerToken: ownerToken
+                )
+                await refreshFromRepository()
+                return
+            }
+
+            guard isSendAllowed(
+                claim: claim,
+                deviceID: deviceID,
+                ownerToken: ownerToken
+            ), let sendHandler else {
+                await restorePendingIfCurrent(claim)
+                clearActiveClaim(
+                    claim.message.id,
+                    deviceID: deviceID,
+                    ownerToken: ownerToken
+                )
+                return
+            }
+
+            let disposition = await sendHandler(claim.message)
+            do {
+                let snapshot = try await repository.resolve(
+                    claim,
+                    disposition: disposition,
+                    configuration: configuration
+                )
+                apply(snapshot)
+                clearActiveClaim(
+                    claim.message.id,
+                    deviceID: deviceID,
+                    ownerToken: ownerToken
+                )
+            } catch {
+                clearActiveClaim(
+                    claim.message.id,
+                    deviceID: deviceID,
+                    ownerToken: ownerToken
+                )
+                await refreshFromRepository()
+                logger.error("📬 offline message disposition persistence failed")
+                return
+            }
+
+            switch disposition {
+            case .cancelled:
+                return
+            case .delivered, .retryable, .permanentFailure:
+                continue
+            }
+        }
+    }
+
+    private func cancelWorker(for deviceID: String) {
+        deviceWorkers[deviceID]?.task.cancel()
+    }
+
+    private func cancelWorker(holdingClaimFor messageID: UUID) {
+        for worker in deviceWorkers.values where worker.activeClaimMessageID == messageID {
+            worker.task.cancel()
+        }
+    }
+
+    private func cancelAllWorkers() {
+        for worker in deviceWorkers.values {
+            worker.task.cancel()
+        }
+    }
+
+    private func recordActiveClaim(
+        _ messageID: UUID,
+        deviceID: String,
+        ownerToken: UUID
+    ) -> Bool {
+        guard let worker = deviceWorkers[deviceID],
+              worker.ownerToken == ownerToken,
+              worker.activeClaimMessageID == nil else {
+            return false
+        }
+        deviceWorkers[deviceID] = DeviceWorker(
+            ownerToken: ownerToken,
+            task: worker.task,
+            activeClaimMessageID: messageID
+        )
+        return true
+    }
+
+    private func clearActiveClaim(
+        _ messageID: UUID,
+        deviceID: String,
+        ownerToken: UUID
+    ) {
+        guard let worker = deviceWorkers[deviceID],
+              worker.ownerToken == ownerToken,
+              worker.activeClaimMessageID == messageID else {
+            return
+        }
+        deviceWorkers[deviceID] = DeviceWorker(
+            ownerToken: ownerToken,
+            task: worker.task,
+            activeClaimMessageID: nil
+        )
+    }
+
+    private func isSendAllowed(
+        claim: OfflineMessageClaim,
+        deviceID: String,
+        ownerToken: UUID
+    ) -> Bool {
+        guard !Task.isCancelled,
+              onlineDevices.contains(deviceID),
+              !isClearingAll,
+              !cancellationRequestedMessageIDs.contains(claim.message.id),
+              !cancellationRequestedDeviceIDs.contains(deviceID),
+              let worker = deviceWorkers[deviceID],
+              worker.ownerToken == ownerToken,
+              worker.activeClaimMessageID == claim.message.id else {
+            return false
+        }
+        return true
+    }
+
+    private func restorePendingIfCurrent(_ claim: OfflineMessageClaim) async {
+        do {
+            guard try await repository.isClaimCurrent(
+                claim,
+                configuration: configuration
+            ) else {
+                await refreshFromRepository()
+                return
+            }
+            apply(
+                try await repository.resolve(
+                    claim,
+                    disposition: .cancelled,
+                    configuration: configuration
+                )
+            )
+        } catch let error as OfflineQueueError {
+            if case .staleClaim = error {
+                await refreshFromRepository()
+                return
+            }
+            await refreshFromRepository()
+            logger.error("📬 offline message cancellation persistence failed")
+        } catch {
+            await refreshFromRepository()
+            logger.error("📬 offline message cancellation persistence failed")
+        }
+    }
+
+    private func apply(_ snapshot: OfflineMessageQueueSnapshot) {
+        guard snapshot.generation >= latestRepositoryGeneration else { return }
+        latestRepositoryGeneration = snapshot.generation
+        statistics = snapshot.statistics
+        persistenceState = snapshot.persistenceState
+    }
+
+    func installUnifiedMutationHandler(
+        _ handler: @escaping @MainActor @Sendable (
+            UnifiedOfflineQueueMutation
+        ) async throws -> Void
+    ) {
+        guard usesUnifiedRepository else { return }
+        unifiedMutationHandler = handler
+    }
+
+    private func performUnifiedMutation(
+        _ mutation: UnifiedOfflineQueueMutation
+    ) async throws {
+        guard let unifiedMutationHandler else {
+            throw OfflineQueueError.coordinatedRetryRequired
+        }
+        do {
+            try await unifiedMutationHandler(mutation)
+        } catch let error as DeviceMessagingRepositoryError {
+            switch error {
+            case .messageNotFound(let messageID):
+                throw OfflineQueueError.messageNotFound(id: messageID)
+            case .intentNotFound(let queueID):
+                guard let messageID = UUID(uuidString: queueID) else {
+                    throw OfflineQueueError.persistenceBlocked(.stateConflict)
+                }
+                throw OfflineQueueError.messageNotFound(id: messageID)
+            case .invalidRecord(let reasonCode)
+                    where reasonCode == "in_flight_delivery_prevents_cancel":
+                throw OfflineQueueError.coordinatedRetryRequired
+            case .invalidRecord(let reasonCode)
+                    where reasonCode == "delivery_intent_capacity_exceeded":
+                throw OfflineQueueError.queueFull
+            default:
+                throw OfflineQueueError.persistenceBlocked(.persistenceFailure)
+            }
+        } catch let error as OfflineQueueError {
+            throw error
+        } catch {
+            throw OfflineQueueError.persistenceBlocked(.persistenceFailure)
+        }
+    }
+
+    func applyUnifiedSnapshot(_ snapshot: MessageRepositorySnapshot) throws {
+        guard snapshot.generation >= latestRepositoryGeneration else { return }
+        var mapped: [UUID: QueuedMessage] = [:]
+        mapped.reserveCapacity(snapshot.deliveryIntents.count)
+        for intent in snapshot.deliveryIntents {
+            guard let id = UUID(uuidString: intent.queueID),
+                  let messageType = OfflineMessageType(rawValue: intent.messageType),
+                  let priority = MessagePriority(rawValue: intent.priority) else {
+                throw OfflineQueueError.persistenceBlocked(.stateConflict)
+            }
+            let status: MessageDeliveryStatus
+            switch intent.state {
+            case .pending: status = .pending
+            case .sending: status = .sending
+            case .awaitingReceipt: status = .awaitingReceipt
+            case .failed: status = .failed
+            }
+            let failureCode = intent.failureCode.flatMap(OfflineDeliveryFailureCode.init(rawValue:))
+                ?? (intent.failureCode == nil ? nil : .stateConflict)
+            mapped[id] = QueuedMessage(
+                id: id,
+                targetDeviceID: intent.targetDeviceID,
+                messageType: messageType,
+                priority: priority,
+                payload: intent.payload,
+                createdAt: intent.createdAt,
+                expiresAt: intent.expiresAt ?? .distantFuture,
+                status: status,
+                retryCount: intent.retryCount,
+                lastAttemptAt: intent.lastAttemptAt,
+                lastFailureCode: failureCode
+            )
+        }
+        latestRepositoryGeneration = snapshot.generation
+        unifiedMessages = mapped
+        statistics = Self.unifiedStatistics(Array(mapped.values))
+        isProcessing = snapshot.deliveryIntents.contains { $0.state == .sending }
+        persistenceState = .ready
+    }
+
+    private static func unifiedDeliveryOrder(
+        _ lhs: QueuedMessage,
+        _ rhs: QueuedMessage
+    ) -> Bool {
+        if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func unifiedStatistics(_ messages: [QueuedMessage]) -> QueueStatistics {
+        let now = Date()
+        let pending = messages.filter { $0.status == .pending }
+        let active = messages.filter { !$0.status.isTerminal }
         var deviceBreakdown: [String: Int] = [:]
-        for message in allMessages where !message.status.isTerminal {
+        for message in active {
             deviceBreakdown[message.targetDeviceID, default: 0] += 1
         }
-
-        // 平均等待时间
-        let pendingMessages = allMessages.filter { $0.status == .pending }
-        let totalWaitTime = pendingMessages.reduce(0.0) { $0 + $1.waitingDuration }
-        let avgWaitTime = pendingMessages.isEmpty ? 0 : totalWaitTime / Double(pendingMessages.count)
-
-        // 最老消息年龄
-        let oldestAge = pendingMessages.map { $0.waitingDuration }.max()
-
         return QueueStatistics(
-            totalMessages: allMessages.count,
-            pendingMessages: pending,
-            sendingMessages: sending,
-            deliveredMessages: delivered,
-            failedMessages: failed,
-            expiredMessages: expired,
+            totalMessages: messages.count,
+            pendingMessages: pending.count,
+            sendingMessages: messages.filter {
+                $0.status == .sending || $0.status == .awaitingReceipt
+            }.count,
+            deliveredMessages: messages.filter { $0.status == .delivered }.count,
+            failedMessages: messages.filter { $0.status == .failed }.count,
+            expiredMessages: messages.filter { $0.status == .expired }.count,
             deviceBreakdown: deviceBreakdown,
-            averageWaitTime: avgWaitTime,
-            oldestMessageAge: oldestAge
+            averageWaitTime: pending.isEmpty
+                ? 0
+                : pending.reduce(0) { $0 + now.timeIntervalSince($1.createdAt) }
+                    / Double(pending.count),
+            oldestMessageAge: active.map { now.timeIntervalSince($0.createdAt) }.max()
         )
+    }
+
+    private func refreshFromRepository() async {
+        apply(await repository.currentSnapshot())
+    }
+
+    private func applyRepositoryMutation(
+        _ operation: @MainActor () async throws -> OfflineMessageQueueSnapshot
+    ) async throws {
+        do {
+            apply(try await operation())
+        } catch {
+            await refreshFromRepository()
+            throw error
+        }
+    }
+
+    private func readRepository<Value: Sendable>(
+        _ operation: @MainActor () async throws -> Value
+    ) async throws -> Value {
+        do {
+            return try await operation()
+        } catch {
+            await refreshFromRepository()
+            throw error
+        }
+    }
+
+    public func updateConfiguration(_ updated: OfflineQueueConfiguration) throws {
+        try requireConfigurationReady()
+        do {
+            try updated.validate()
+            try configurationStore.save(updated)
+            configuration = updated
+            if automaticallyStartsProcessing {
+                startPeriodicProcessing()
+            }
+        } catch let error as OfflineQueueError {
+            throw error
+        } catch {
+            configurationPersistenceState = .blocked(.persistenceFailure)
+            periodicProcessingTask?.cancel()
+            cancelAllWorkers()
+            logger.error("📬 offline queue configuration update rejected")
+            throw OfflineQueueError.persistenceBlocked(.persistenceFailure)
+        }
+    }
+
+    /// Explicit recovery for corrupt configuration bytes. The unreadable
+    /// payload is quarantined before a validated default is written.
+    public func resetConfigurationForRecovery() async throws {
+        guard case .blocked = configurationPersistenceState else { return }
+        configurationPersistenceState = .loading
+        let store = configurationStore
+        do {
+            try await CodablePersistenceStoreIOCoordinator.shared.perform(
+                identity: store.persistenceIdentity
+            ) {
+                _ = try store.quarantineExistingPayload()
+                try store.save(.default)
+            }
+            configuration = .default
+            configurationPersistenceState = .ready
+            await bootstrap()
+        } catch {
+            configurationPersistenceState = .blocked(.persistenceFailure)
+            throw OfflineQueueError.persistenceBlocked(.persistenceFailure)
+        }
+    }
+
+    private func requireConfigurationReady() throws {
+        guard case .ready = configurationPersistenceState else {
+            let code: OfflineDeliveryFailureCode
+            if case .blocked(let blockedCode) = configurationPersistenceState {
+                code = blockedCode
+            } else {
+                code = .persistenceFailure
+            }
+            throw OfflineQueueError.persistenceBlocked(code)
+        }
     }
 }

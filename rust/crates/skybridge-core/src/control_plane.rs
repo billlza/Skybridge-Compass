@@ -5,9 +5,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::{AuthSession, ProtocolIdentityBinding, ProtocolSigningAlgorithm, base64_url_encode};
+use crate::external_http::{decode_json_response, inspect_json_response, transport_error};
+use crate::{
+    AuthSession, CurrentPathOriginPolicy, OriginTransportPolicy, ProtocolIdentityBinding,
+    ProtocolSigningAlgorithm, SignalingWebSocketRequest, base64_url_encode,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionChallenge {
     pub challenge_id: String,
     pub nonce: String,
@@ -20,6 +24,25 @@ pub struct AdmissionChallenge {
     pub state: String,
     pub issued_at_millis: i64,
     pub expires_at_millis: i64,
+}
+
+impl std::fmt::Debug for AdmissionChallenge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmissionChallenge")
+            .field("challenge_id", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field("tenant_id", &"<redacted>")
+            .field("user_id", &"<redacted>")
+            .field("device_id", &"<redacted>")
+            .field("client_ip_hash", &"<redacted>")
+            .field("client_version", &self.client_version)
+            .field("protocol_version", &self.protocol_version)
+            .field("state", &self.state)
+            .field("issued_at_millis", &self.issued_at_millis)
+            .field("expires_at_millis", &self.expires_at_millis)
+            .finish()
+    }
 }
 
 impl AdmissionChallenge {
@@ -39,7 +62,7 @@ impl AdmissionChallenge {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdmissionLease {
     pub token: String,
     pub state: String,
@@ -47,13 +70,35 @@ pub struct AdmissionLease {
     pub expires_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for AdmissionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmissionLease")
+            .field("token", &"<redacted>")
+            .field("state", &self.state)
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnAdmissionLease {
     pub token: String,
     pub expires_in: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for TurnAdmissionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnAdmissionLease")
+            .field("token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnCredentials {
     pub username: String,
     pub password: String,
@@ -66,7 +111,21 @@ pub struct TurnCredentials {
     pub mode: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for TurnCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnCredentials")
+            .field("username", &"<redacted>")
+            .field("password", &"<redacted>")
+            .field("ttl", &self.ttl)
+            .field("uri_count", &self.uris.len())
+            .field("expires_at", &self.expires_at)
+            .field("mode", &self.mode)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionCodeLease {
     pub code: String,
     pub session_id: String,
@@ -76,7 +135,21 @@ pub struct ConnectionCodeLease {
     pub signaling_server_origin: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for ConnectionCodeLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectionCodeLease")
+            .field("code", &"<redacted>")
+            .field("session_id", &"<redacted>")
+            .field("session_token", &"<redacted>")
+            .field("turn_admission_lease", &self.turn_admission_lease)
+            .field("expires_in", &self.expires_in)
+            .field("signaling_server_origin", &self.signaling_server_origin)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionCodeLookup {
     pub session_id: String,
     pub session_token: String,
@@ -89,7 +162,30 @@ pub struct ConnectionCodeLookup {
     pub initiator_device_name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for ConnectionCodeLookup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectionCodeLookup")
+            .field("session_id", &"<redacted>")
+            .field("session_token", &"<redacted>")
+            .field("turn_admission_lease", &self.turn_admission_lease)
+            .field("expires_in", &self.expires_in)
+            .field("signaling_server_origin", &self.signaling_server_origin)
+            .field("initiator_device_id", &"<redacted>")
+            .field(
+                "initiator_protocol_signing_algorithm",
+                &self.initiator_protocol_signing_algorithm,
+            )
+            .field("initiator_protocol_public_key_fingerprint", &"<redacted>")
+            .field(
+                "initiator_device_name_present",
+                &self.initiator_device_name.is_some(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionLease {
     pub session_id: String,
     pub session_token: String,
@@ -99,7 +195,21 @@ pub struct SessionLease {
     pub signaling_server_origin: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for SessionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionLease")
+            .field("session_id", &"<redacted>")
+            .field("session_token", &"<redacted>")
+            .field("qr_bootstrap_token", &"<redacted>")
+            .field("turn_admission_lease", &self.turn_admission_lease)
+            .field("expires_in", &self.expires_in)
+            .field("signaling_server_origin", &self.signaling_server_origin)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedeemedSessionLease {
     pub session_id: String,
     pub session_token: String,
@@ -111,7 +221,26 @@ pub struct RedeemedSessionLease {
     pub initiator_protocol_public_key_fingerprint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for RedeemedSessionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RedeemedSessionLease")
+            .field("session_id", &"<redacted>")
+            .field("session_token", &"<redacted>")
+            .field("turn_admission_lease", &self.turn_admission_lease)
+            .field("expires_in", &self.expires_in)
+            .field("signaling_server_origin", &self.signaling_server_origin)
+            .field("initiator_device_id", &"<redacted>")
+            .field(
+                "initiator_protocol_signing_algorithm",
+                &self.initiator_protocol_signing_algorithm,
+            )
+            .field("initiator_protocol_public_key_fingerprint", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredDevice {
     pub id: serde_json::Value,
     pub tenant_id: String,
@@ -121,6 +250,25 @@ pub struct RegisteredDevice {
     pub protocol_public_key_fingerprint: String,
     pub device_name: String,
     pub status: String,
+}
+
+impl std::fmt::Debug for RegisteredDevice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisteredDevice")
+            .field("id", &"<redacted>")
+            .field("tenant_id", &"<redacted>")
+            .field("user_id", &"<redacted>")
+            .field("device_id", &"<redacted>")
+            .field(
+                "protocol_signing_algorithm",
+                &self.protocol_signing_algorithm,
+            )
+            .field("protocol_public_key_fingerprint", &"<redacted>")
+            .field("device_name", &"<redacted>")
+            .field("status", &self.status)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,13 +295,27 @@ pub struct ControlPlaneRawProbe {
     pub body: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignalServerClient {
     client: Client,
     pub base_url: String,
     pub api_key: String,
     pub client_version: String,
     pub protocol_version: String,
+    transport_policy: OriginTransportPolicy,
+}
+
+impl std::fmt::Debug for SignalServerClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SignalServerClient")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("client_version", &self.client_version)
+            .field("protocol_version", &self.protocol_version)
+            .field("transport_policy", &self.transport_policy)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SignalServerClient {
@@ -167,7 +329,13 @@ impl SignalServerClient {
             .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_owned());
         let protocol_version =
             std::env::var("SKYBRIDGE_PROTOCOL_VERSION").unwrap_or_else(|_| "1".to_owned());
-        Self::new(base_url, api_key, client_version, protocol_version)
+        Self::new_with_transport_policy(
+            base_url,
+            api_key,
+            client_version,
+            protocol_version,
+            OriginTransportPolicy::from_environment()?,
+        )
     }
 
     pub fn new(
@@ -176,7 +344,26 @@ impl SignalServerClient {
         client_version: impl Into<String>,
         protocol_version: impl Into<String>,
     ) -> Result<Self> {
-        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        Self::new_with_transport_policy(
+            base_url,
+            api_key,
+            client_version,
+            protocol_version,
+            OriginTransportPolicy::SecureOnly,
+        )
+    }
+
+    pub fn new_with_transport_policy(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        client_version: impl Into<String>,
+        protocol_version: impl Into<String>,
+        transport_policy: OriginTransportPolicy,
+    ) -> Result<Self> {
+        let base_url = CurrentPathOriginPolicy::canonical_origin_with_policy(
+            base_url.into().trim(),
+            transport_policy,
+        )?;
         let api_key = api_key.into().trim().to_owned();
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(20))
@@ -188,7 +375,16 @@ impl SignalServerClient {
             api_key,
             client_version: client_version.into(),
             protocol_version: protocol_version.into(),
+            transport_policy,
         })
+    }
+
+    pub fn canonical_signaling_origin(&self, origin: &str) -> Result<String> {
+        CurrentPathOriginPolicy::canonical_websocket_origin_with_policy(
+            origin,
+            self.transport_policy,
+        )
+        .map_err(Into::into)
     }
 
     pub async fn request_admission_challenge(
@@ -729,21 +925,24 @@ impl SignalServerClient {
         signaling_server_origin: &str,
         session_id: &str,
         session_token: &str,
-    ) -> Result<url::Url> {
-        let canonical_origin =
-            crate::CurrentPathOriginPolicy::canonical_origin(signaling_server_origin)?;
-        let ws_origin = if canonical_origin.starts_with("https://") {
-            canonical_origin.replacen("https://", "wss://", 1)
-        } else {
-            canonical_origin.replacen("http://", "ws://", 1)
+    ) -> Result<SignalingWebSocketRequest> {
+        let canonical_origin = self.canonical_signaling_origin(signaling_server_origin)?;
+        let mut url = url::Url::parse(&canonical_origin)?;
+        let websocket_scheme = match url.scheme() {
+            "https" => "wss",
+            "http" => "ws",
+            "wss" => "wss",
+            "ws" => "ws",
+            _ => bail!("invalid signaling websocket origin"),
         };
-        let mut url = url::Url::parse(&format!("{ws_origin}/ws"))?;
+        url.set_scheme(websocket_scheme)
+            .map_err(|_| anyhow!("invalid signaling websocket origin"))?;
+        url.set_path("/ws");
         url.query_pairs_mut()
             .append_pair("shard", session_id)
-            .append_pair("st", session_token)
             .append_pair("cv", &self.client_version)
             .append_pair("pv", &self.protocol_version);
-        Ok(url)
+        SignalingWebSocketRequest::new(url, session_id, session_token)
     }
 
     async fn json_request<RequestBody, ResponseBody>(
@@ -784,30 +983,20 @@ impl SignalServerClient {
             request = request.json(body);
         }
         let response = request.send().await.map_err(|error| {
-            if error.is_timeout() {
-                anyhow!("control-plane request timed out: {} {}", method_label, path)
-            } else if error.is_connect() {
-                anyhow!(
-                    "control-plane connection failed: {} {}: {}",
-                    method_label,
-                    path,
-                    error
-                )
-            } else {
-                anyhow!(
-                    "control-plane request failed: {} {}: {}",
-                    method_label,
-                    path,
-                    error
-                )
-            }
+            let transport = transport_error("control plane", "request", &error);
+            anyhow!(
+                "control-plane {method_label} {} failed: {transport}",
+                safe_path(path)
+            )
         })?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!("control-plane request failed ({}): {}", status, body);
-        }
-        Ok(response.json::<ResponseBody>().await?)
+        decode_json_response(response, "control plane", "request")
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "control-plane {method_label} {} failed: {error}",
+                    safe_path(path)
+                )
+            })
     }
 
     async fn raw_json_request<RequestBody>(
@@ -837,33 +1026,40 @@ impl SignalServerClient {
         }
 
         let response = request.send().await.map_err(|error| {
-            if error.is_timeout() {
-                anyhow!("control-plane request timed out: {} {}", method_label, path)
-            } else if error.is_connect() {
-                anyhow!(
-                    "control-plane connection failed: {} {}: {}",
-                    method_label,
-                    path,
-                    error
-                )
-            } else {
-                anyhow!(
-                    "control-plane request failed: {} {}: {}",
-                    method_label,
-                    path,
-                    error
-                )
-            }
+            let transport = transport_error("control plane", "diagnostic probe", &error);
+            anyhow!(
+                "control-plane {method_label} {} probe failed: {transport}",
+                safe_path(path)
+            )
         })?;
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        let body =
-            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text }));
+        let inspected = inspect_json_response(response, "control plane", "diagnostic probe")
+            .await
+            .map_err(|error| {
+                anyhow!(
+                    "control-plane {method_label} {} probe failed: {error}",
+                    safe_path(path)
+                )
+            })?;
         Ok(ControlPlaneRawProbe {
-            status_code: status.as_u16(),
-            success: status.is_success(),
-            body,
+            status_code: inspected.status.as_u16(),
+            success: inspected.status.is_success(),
+            body: inspected.body,
         })
+    }
+}
+
+fn safe_path(path: &str) -> &str {
+    if path.starts_with('/')
+        && path.len() <= 256
+        && !path.contains('?')
+        && !path.contains('#')
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte))
+    {
+        path
+    } else {
+        "<redacted-path>"
     }
 }
 
@@ -899,4 +1095,161 @@ pub fn make_room_session_bootstrap_idempotency_key(
         )
         .as_bytes(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn spawn_one_shot_response(status: &str, body: String) -> Result<String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let status = status.to_owned();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept mock request");
+            let mut request = vec![0_u8; 8192];
+            let _ = stream.read(&mut request).await.expect("read mock request");
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write mock response");
+        });
+        Ok(format!("http://{address}"))
+    }
+
+    fn loopback_client(base_url: &str) -> Result<SignalServerClient> {
+        SignalServerClient::new_with_transport_policy(
+            base_url,
+            "api-key-secret",
+            "test-client",
+            "1",
+            OriginTransportPolicy::AllowPlaintextLoopback,
+        )
+    }
+
+    #[test]
+    fn signal_server_origin_is_secure_by_default_and_plaintext_is_loopback_only() {
+        assert!(SignalServerClient::new("http://127.0.0.1:8080", "key", "client", "1").is_err());
+        assert!(
+            SignalServerClient::new_with_transport_policy(
+                "http://127.0.0.1:8080",
+                "key",
+                "client",
+                "1",
+                OriginTransportPolicy::AllowPlaintextLoopback,
+            )
+            .is_ok()
+        );
+        assert!(
+            SignalServerClient::new_with_transport_policy(
+                "http://192.168.1.20:8080",
+                "key",
+                "client",
+                "1",
+                OriginTransportPolicy::AllowPlaintextLoopback,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_debug_output_is_redacted() {
+        let credentials = TurnCredentials {
+            username: "turn-user-secret".to_owned(),
+            password: "turn-password-secret".to_owned(),
+            ttl: 60,
+            uris: vec!["turns:turn.example:5349".to_owned()],
+            expires_at: None,
+            mode: Some("relay".to_owned()),
+        };
+        let lease = SessionLease {
+            session_id: "session-1".to_owned(),
+            session_token: "session-token-secret".to_owned(),
+            qr_bootstrap_token: "qr-bootstrap-secret".to_owned(),
+            turn_admission_lease: TurnAdmissionLease {
+                token: "turn-admission-secret".to_owned(),
+                expires_in: 60,
+            },
+            expires_in: 60,
+            signaling_server_origin: "https://signal.example".to_owned(),
+        };
+        let client = SignalServerClient::new(
+            "https://signal.example",
+            "api-key-secret",
+            "test-client",
+            "1",
+        )
+        .expect("secure client");
+        let debug = format!("{credentials:?}\n{lease:?}\n{client:?}");
+        for secret in [
+            "turn-user-secret",
+            "turn-password-secret",
+            "session-token-secret",
+            "qr-bootstrap-secret",
+            "turn-admission-secret",
+            "api-key-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_control_plane_body_is_bounded_and_not_echoed() -> Result<()> {
+        let secret = "response-token-secret";
+        let padding = "x".repeat(crate::external_http::MAX_EXTERNAL_ERROR_BODY_BYTES * 2);
+        let base_url = spawn_one_shot_response(
+            "401 Unauthorized",
+            serde_json::json!({
+                "error": "invalid_session",
+                "sessionToken": secret,
+                "message": padding,
+            })
+            .to_string(),
+        )
+        .await?;
+        let error = loopback_client(&base_url)?
+            .probe_health()
+            .await
+            .expect_err("rejected health probe must fail");
+        let message = format!("{error:#}");
+        assert!(message.contains("HTTP 401"));
+        assert!(message.contains("body_truncated=true"));
+        assert!(!message.contains(secret));
+        assert!(!message.contains(&padding));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn diagnostic_probe_redacts_credentials_and_rejects_invalid_success_json() -> Result<()> {
+        let base_url = spawn_one_shot_response(
+            "401 Unauthorized",
+            serde_json::json!({
+                "error": "invalid_session",
+                "sessionToken": "response-token-secret",
+                "rejectReason": "expired",
+            })
+            .to_string(),
+        )
+        .await?;
+        let probe = loopback_client(&base_url)?
+            .probe_json_endpoint("/health")
+            .await?;
+        assert!(!probe.success);
+        assert!(probe.body.get("sessionToken").is_none());
+        assert_eq!(probe.body["rejectReason"], "expired");
+
+        let invalid_json_url =
+            spawn_one_shot_response("200 OK", "not-json-response".to_owned()).await?;
+        let error = loopback_client(&invalid_json_url)?
+            .probe_json_endpoint("/health")
+            .await
+            .expect_err("2xx non-JSON diagnostic response must fail closed");
+        assert!(error.to_string().contains("invalid JSON"));
+        Ok(())
+    }
 }

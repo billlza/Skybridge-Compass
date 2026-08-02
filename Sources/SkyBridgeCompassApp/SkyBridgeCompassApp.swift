@@ -143,6 +143,10 @@ struct SkyBridgeCompassApp: App {
     private let macOnlineSmokeBootMarker: Void = MacOnlineIPadSmokeBootMarker.appendIfNeeded(uiRole: "app-init-pre-state")
 #endif
 
+ /// 远程通知接收端。SwiftUI 没有对应入口，静默推送唤醒必须经由 NSApplicationDelegate。
+    @NSApplicationDelegateAdaptor(RemoteNotificationAppDelegate.self)
+    private var remoteNotificationDelegate
+
  /// 启动协调器 - 管理分阶段加载
     @StateObject private var startupCoordinator = StartupCoordinator.shared
 
@@ -805,7 +809,11 @@ struct SkyBridgeCompassApp: App {
         guard shouldRun else { return }
         #endif
 
-        _ = TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
+        do {
+            _ = try TrafficPadding.wrapIfEnabled(Data("boot".utf8), label: "boot")
+        } catch {
+            fatalError("Traffic-padding boot self-test failed: \(error.localizedDescription)")
+        }
         Task(priority: .utility) {
             try? await TrafficPaddingStats.shared.flushToCSV()
         }

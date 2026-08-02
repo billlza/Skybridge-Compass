@@ -16,7 +16,7 @@ packages:
     path: ..
   WebRTC:
     url: https://github.com/stasel/WebRTC
-    from: 148.0.0
+    exactVersion: 150.0.0
   SkyBridgeCameraKitLocal:
     path: ../Packages/SkyBridgeCameraKit
 
@@ -35,13 +35,20 @@ targets:
         NEBULA_CLIENT_ID: "skybridge_compass_ios"
         NEBULA_CLIENT_SECRET: ""
         SKYBRIDGE_ENABLE_APPLE_SIGN_IN: true
+        SkyBridgePackagingBuildConfiguration: "$(SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION)"
+        SkyBridgePackagingGitDirtyState: "$(SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE)"
+        SkyBridgePackagingGitCommit: "$(SKYBRIDGE_PACKAGING_GIT_COMMIT)"
+        SkyBridgePackagingSourceInputDigest: "$(SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST)"
+        SkyBridgePackagingSourceRepository: "$(SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY)"
+        SkyBridgePackagingProductSurface: "$(SKYBRIDGE_PACKAGING_PRODUCT_SURFACE)"
+        SkyBridgePackagingSwiftActiveCompilationConditions: "$(SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS)"
         NSSupportsLiveActivities: true
         NSLocalNetworkUsageDescription: "SkyBridge 需要访问本地网络以发现和连接附近设备。"
         NSBonjourServices:
           - _skybridge._tcp
           - _skybridge._udp
-          - _skybridge-transfer._tcp
-          - _skybridge-remote._tcp
+          - _skybridge-xfer._tcp
+          - _skybridge-rd._tcp
           - _companion-link._tcp
           - _airdrop._tcp
           - _sftp-ssh._tcp
@@ -72,12 +79,6 @@ targets:
           - UIInterfaceOrientationLandscapeRight
     sources:
       - path: SkyBridgeCompassiOS/Sources
-      - path: ../Sources/SkyBridgeProtocolCore/RemoteConnection/ClassicTransferSafety.swift
-        group: SkyBridgeCompassiOS/Sources/Core/FileTransfer
-      - path: ../Sources/SkyBridgeProtocolCore/RemoteConnection/STUNMessageCodec.swift
-        group: SkyBridgeCompassiOS/Sources/Core/Network
-      - path: ../Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/InboundFileTransferIOActor.swift
-        group: SkyBridgeCompassiOS/Sources/Core/FileTransfer
       - path: "SkyBridgeCompassiOS/Supporting Files/LaunchScreen.storyboard"
         buildPhase: resources
       - path: SkyBridgeCompassiOS/Resources
@@ -92,6 +93,10 @@ targets:
         product: OQSRAII
       - package: SkyBridgeRoot
         product: SkyBridgeRealtimeMedia
+      - package: SkyBridgeRoot
+        product: SkyBridgeWebRTCRuntime
+      - package: SkyBridgeRoot
+        product: SkyBridgeMessagePersistence
       - package: SkyBridgeCameraKitLocal
         product: SkyBridgeCameraKit
       - target: SkyBridgeCompass-Widgets
@@ -101,10 +106,22 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.ios
         DEVELOPMENT_TEAM: YKUPL7Z869
         TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         INFOPLIST_FILE: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
         SWIFT_STRICT_CONCURRENCY: complete
         OTHER_CFLAGS: "$(inherited)"
         OTHER_CPLUSPLUSFLAGS: "$(inherited)"
+        # Custom provenance keys live in the explicit Info.plist and are expanded
+        # before signing. Normal developer builds stay truthfully unbound; release
+        # and physical-smoke producers must override every value explicitly.
+        SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION: unbound
+        SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE: unbound
+        SKYBRIDGE_PACKAGING_GIT_COMMIT: unbound
+        SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST: unbound
+        SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY: unbound
+        SKYBRIDGE_PACKAGING_PRODUCT_SURFACE: unbound
+        SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS: unbound
         # Apple CryptoKit PQC symbols are enabled only after Scripts/apple_pqc_sdk_probe.sh
         # proves the selected toolchain can typecheck them. The default stays empty so
         # stable iOS 17+ build lanes remain portable and fail closed.
@@ -172,11 +189,19 @@ targets:
     hostApplication: SkyBridgeCompass-iOS
     sources:
       - path: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/WebRTCRuntimeLifecycleTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/CrossNetworkFileTransferInboundAdmissionPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
       - path: ../Tests/SkyBridgeCoreTests/Fixtures/QPeriaptABI2/signed-policy-vectors.json
         group: SkyBridgeCompassiOSTests/Fixtures/QPeriaptABI2
         buildPhase: resources
     dependencies:
       - target: SkyBridgeCompass-iOS
+      - package: SkyBridgeRoot
+        product: SkyBridgeWebRTCRuntime
+        link: false
+        embed: false
       - sdk: AppIntents.framework
     settings:
       base:

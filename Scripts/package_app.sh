@@ -178,6 +178,24 @@ function is_release_distribution_context() {
   [[ "${PACKAGE_CONTEXT}" == "release_dmg" ]]
 }
 
+function verify_native_vendor_provenance() {
+  local family_label="$1"
+  local provenance_path="$2"
+
+  if [[ ! -f "${provenance_path}" || -L "${provenance_path}" ]]; then
+    echo "错误：${family_label} 原生依赖缺少普通文件 provenance：${provenance_path}" >&2
+    exit 1
+  fi
+  if ! python3 "${ROOT_DIR}/Scripts/native_vendor_provenance.py" verify \
+    --lock "${ROOT_DIR}/Config/native-dependencies.lock.json" \
+    --repository-root "${ROOT_DIR}" \
+    --provenance "${provenance_path}"; then
+    echo "错误：${family_label} 原生依赖与锁文件、构建配方或当前 artifact bytes 不一致。" >&2
+    exit 1
+  fi
+  log "校验通过：${family_label} 原生 artifact provenance"
+}
+
 function git_value_or_unknown() {
   local git_dir="$1"
   shift
@@ -1020,9 +1038,6 @@ if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" || "${SKYBRIDGE_PACKAGE_ALLOW_SWIFTPM_
 fi
 
 VENDOR_XCFRAMEWORKS=(
-  "${ROOT_DIR}/Sources/Vendor/FreeRDP.xcframework"
-  "${ROOT_DIR}/Sources/Vendor/FreeRDPClient.xcframework"
-  "${ROOT_DIR}/Sources/Vendor/WinPR.xcframework"
   "${ROOT_DIR}/Sources/Vendor/liboqs.xcframework"
   "${ROOT_DIR}/Sources/Vendor/libopus.xcframework"
 )
@@ -1044,6 +1059,15 @@ if [[ "${IS_ADHOC_SIGNING}" -eq 1 ]]; then
   log "签名模式: ad-hoc"
 else
   log "签名模式: certificate (${SIGN_IDENTITY})"
+fi
+
+verify_native_vendor_provenance \
+  "liboqs" \
+  "${ROOT_DIR}/Sources/Vendor/liboqs.provenance.json"
+if [[ -d "${ROOT_DIR}/Sources/Vendor/FreeRDPDylibs" ]] || is_release_distribution_context; then
+  verify_native_vendor_provenance \
+    "FreeRDP runtime" \
+    "${ROOT_DIR}/Sources/Vendor/FreeRDPRuntime.provenance.json"
 fi
 
 skybridge_assert_xcframeworks_support_macos_arch "${BUILD_ARCH}" "${VENDOR_XCFRAMEWORKS[@]}"
@@ -1191,7 +1215,15 @@ while IFS= read -r linked_framework; do
   found_framework=1
 done <<< "${linked_frameworks}"
 
-# 嵌入 FreeRDP 动态库（>=3.26 最小依赖集），让 RDP 远程桌面自包含、无需用户安装 Homebrew freerdp。
+if otool -L "${APP_BIN}" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
+  skybridge_assert_webrtc_m150_framework "${FW_DIR}/WebRTC.framework" || {
+    echo "错误：打包前 WebRTC.framework 不是审核通过的 M150 macOS 原始二进制。" >&2
+    exit 1
+  }
+  log "校验通过：WebRTC.framework 为 exact M150 审核字节（重签名前）"
+fi
+
+# 嵌入 FreeRDP 3.30.0 最小动态闭包，让 RDP 远程桌面自包含、无需用户安装 Homebrew freerdp。
 # 来源：Scripts/build_freerdp_dylibs.sh 预构建、并已重定位到 @loader_path 的 dylib 集合；
 # bridge（Sources/FreeRDPBridge/CBFreeRDPClient.m）运行时优先从 Contents/Frameworks 加载 libfreerdp3.dylib。
 # 随后由 resign_embedded_code 统一以 Developer ID 重签名（它会签名 Frameworks 下所有 *.dylib）。
@@ -1199,7 +1231,13 @@ FREERDP_DYLIB_DIR="${ROOT_DIR}/Sources/Vendor/FreeRDPDylibs"
 freerdp_dylibs=("${FREERDP_DYLIB_DIR}"/*.dylib(N))
 if (( ${#freerdp_dylibs} )); then
   if is_release_distribution_context; then
-    for required_dylib in libfreerdp3.dylib libfreerdp-client3.dylib libwinpr3.dylib libssl.3.dylib libcrypto.3.dylib; do
+    for required_dylib in \
+      libfreerdp3.dylib \
+      libwinpr3.dylib \
+      libssl.4.dylib \
+      libcrypto.4.dylib \
+      libjansson.4.dylib \
+      liburiparser.1.dylib; do
       if [[ ! -f "${FREERDP_DYLIB_DIR}/${required_dylib}" ]]; then
         echo "错误：release_dmg 打包缺少必要的 FreeRDP 动态库：${FREERDP_DYLIB_DIR}/${required_dylib}" >&2
         echo "请先运行 Scripts/build_freerdp_dylibs.sh 生成完整自包含 dylib closure。" >&2
@@ -1218,7 +1256,7 @@ else
     echo "请先运行 Scripts/build_freerdp_dylibs.sh；正式 DMG 禁止回退用户机器上的 Homebrew libfreerdp3。" >&2
     exit 1
   fi
-  log "ℹ️ 未找到预构建 FreeRDP 动态库（${FREERDP_DYLIB_DIR}）；RDP 将回退 Homebrew libfreerdp3。运行 Scripts/build_freerdp_dylibs.sh 可使其自包含。"
+  log "ℹ️ 未找到预构建 FreeRDP 动态库（${FREERDP_DYLIB_DIR}）；当前非发布构建中的 RDP 功能不可用。运行 Scripts/build_freerdp_dylibs.sh 可生成受验证运行时。"
 fi
 
 # 兼容历史 rpath（@executable_path/../lib），同时保留标准 Frameworks 布局。
@@ -1332,6 +1370,22 @@ validate_core_metal_shader_sources "${CORE_RESOURCE_BUNDLE}/Contents/Resources"
 # 额外拷贝源资源目录，供 LaunchServices app icon 与运行态 Dock 图标按主 bundle 解析。
 SRC_RES_DIR="${ROOT_DIR}/Sources/SkyBridgeCompassApp/Resources"
 copy_source_app_resources_to_main_bundle "${SRC_RES_DIR}" "${RES_DIR}"
+
+NATIVE_LICENSES_DIR="${ROOT_DIR}/Sources/Vendor/NativeLicenses"
+THIRD_PARTY_NOTICES_DIR="${RES_DIR}/ThirdPartyNotices"
+if is_release_distribution_context; then
+  for required_notice_family in FreeRDP-runtime liboqs WebRTC; do
+    [[ -d "${NATIVE_LICENSES_DIR}/${required_notice_family}" ]] || {
+      echo "错误：发布包缺少原生依赖许可证目录：${NATIVE_LICENSES_DIR}/${required_notice_family}" >&2
+      exit 1
+    }
+  done
+fi
+if [[ -d "${NATIVE_LICENSES_DIR}" ]]; then
+  rm -rf "${THIRD_PARTY_NOTICES_DIR}"
+  ditto "${NATIVE_LICENSES_DIR}" "${THIRD_PARTY_NOTICES_DIR}"
+  log "已嵌入原生依赖许可证与 NOTICE：${THIRD_PARTY_NOTICES_DIR}"
+fi
 
 # 使用 plutil 注入/修正必要的关键键值
 log "校验并修正 Info.plist 关键键值"

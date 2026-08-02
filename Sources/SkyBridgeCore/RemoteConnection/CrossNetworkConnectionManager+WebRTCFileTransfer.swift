@@ -234,7 +234,7 @@ extension CrossNetworkConnectionManager {
             sessionID: sessionID,
             packetType: .fileTransfer
         )
-        let padded = TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-file")
+        let padded = try TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-file")
         try await sendFramed(padded, over: session)
     }
 
@@ -344,7 +344,7 @@ extension CrossNetworkConnectionManager {
                 op: .metadata,
                 transferId: transferId,
                 senderDeviceId: senderDeviceId,
-                senderDeviceName: Host.current().localizedName,
+                senderDeviceName: LocalHostName.localizedName,
                 fileName: url.lastPathComponent,
                 fileSize: fileSize,
                 chunkSize: chunkSize,

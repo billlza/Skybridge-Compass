@@ -354,7 +354,8 @@ public final class PairingTrustApprovalService: ObservableObject {
     public func persistedPolicyDecision(for request: Request) async -> Decision? {
         guard await ensurePolicyLoaded() else { return .reject }
         let deviceId = request.declaredDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+        let bindingKey = request.policyBindingKey?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let bindingKey,
            !bindingKey.isEmpty,
            let raw = policyByDeviceId[bindingKey],
            let policy = Decision(rawValue: raw) {
@@ -368,8 +369,13 @@ public final class PairingTrustApprovalService: ObservableObject {
 
         if let raw = policyByDeviceId[deviceId], let policy = Decision(rawValue: raw) {
             switch policy {
-            case .alwaysAllow, .reject:
+            case .reject:
                 return policy
+            case .alwaysAllow:
+                // Device-only allow entries cannot prove which protocol key the
+                // operator approved. Keep global reject semantics, but never use
+                // a legacy/bare allow as identity authority.
+                return nil
             case .allowOnce:
                 break
             }
@@ -940,6 +946,10 @@ public final class PairingTrustApprovalService: ObservableObject {
            !bindingKey.isEmpty {
             updatedPolicy[bindingKey] = decision.rawValue
         } else if !deviceId.isEmpty {
+            if decision == .alwaysAllow {
+                pendingResolutionNotice = "已允许本次连接，但缺少协议身份绑定，不能保存“始终允许”。下次连接仍会再次询问。"
+                return .allowOnce
+            }
             updatedPolicy[deviceId] = decision.rawValue
         }
         guard updatedPolicy.count <= Self.maximumPolicyEntries else {

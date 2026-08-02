@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 
 /// XPC 客户端（连接提权的 PowerMetrics Helper）。
@@ -287,3 +292,4 @@ final class PowerMetricsServiceClient: @unchecked Sendable {
     func fetchSnapshot(completion: @escaping (Data?) -> Void)
     func fetchServiceInfo(completion: @escaping (Data?) -> Void)
 }
+#endif

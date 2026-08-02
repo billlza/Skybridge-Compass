@@ -31,6 +31,56 @@ public enum DarwinSecurePathPolicy {
             isDirectory: standardized.hasDirectoryPath
         )
     }
+
+    struct DirectoryTraversalPlan: Equatable {
+        let anchorURL: URL
+        let relativeComponents: [String]
+        let requiresOwnedAnchor: Bool
+    }
+
+    /// Mobile application sandboxes grant access to the app container without granting
+    /// directory traversal across every ancestor above that container. Anchor descriptor
+    /// traversal at the system-provided container root, then keep `O_NOFOLLOW` for every
+    /// application-controlled descendant. Targets outside the trusted root retain the
+    /// stricter filesystem-root traversal and therefore fail closed when the sandbox denies it.
+    static func directoryTraversalPlan(
+        targetURL: URL,
+        trustedContainerRootURL: URL?
+    ) throws -> DirectoryTraversalPlan {
+        let target = try canonicalizingSystemRootAlias(targetURL)
+        if let trustedContainerRootURL {
+            let trustedRoot = try canonicalizingSystemRootAlias(trustedContainerRootURL)
+            let trustedRootPath = trustedRoot.path == "/"
+                ? "/"
+                : trustedRoot.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    .withLeadingSlash
+            let targetPath = target.path
+            if targetPath == trustedRootPath
+                || targetPath.hasPrefix(trustedRootPath + "/") {
+                let suffix = targetPath.dropFirst(trustedRootPath.count)
+                return DirectoryTraversalPlan(
+                    anchorURL: URL(
+                        fileURLWithPath: trustedRootPath,
+                        isDirectory: true
+                    ),
+                    relativeComponents: suffix.split(separator: "/").map(String.init),
+                    requiresOwnedAnchor: true
+                )
+            }
+        }
+
+        return DirectoryTraversalPlan(
+            anchorURL: URL(fileURLWithPath: "/", isDirectory: true),
+            relativeComponents: Array(target.pathComponents.dropFirst()),
+            requiresOwnedAnchor: false
+        )
+    }
+}
+
+private extension String {
+    var withLeadingSlash: String {
+        hasPrefix("/") ? self : "/\(self)"
+    }
 }
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -891,12 +941,53 @@ public actor InboundFileTransferIOActor {
             throw InboundFileTransferIOError.invalidDestination("directory must be an absolute file URL")
         }
         let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
-        var currentFD = Darwin.open("/", flags)
+        let trustedContainerRoot: URL?
+        #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
+        trustedContainerRoot = URL(
+            fileURLWithPath: NSHomeDirectory(),
+            isDirectory: true
+        )
+        #else
+        trustedContainerRoot = nil
+        #endif
+        let traversalPlan: DarwinSecurePathPolicy.DirectoryTraversalPlan
+        do {
+            traversalPlan = try DarwinSecurePathPolicy.directoryTraversalPlan(
+                targetURL: standardized,
+                trustedContainerRootURL: trustedContainerRoot
+            )
+        } catch {
+            throw InboundFileTransferIOError.invalidDestination(
+                "directory traversal anchor is invalid"
+            )
+        }
+        var currentFD = Darwin.open(traversalPlan.anchorURL.path, flags)
         guard currentFD >= 0 else {
-            throw InboundFileTransferIOError.invalidDestination("root directory open failed")
+            throw InboundFileTransferIOError.invalidDestination(
+                traversalPlan.requiresOwnedAnchor
+                    ? "trusted container root open failed"
+                    : "root directory open failed"
+            )
         }
 
-        let components = Array(standardized.pathComponents.dropFirst())
+        if traversalPlan.requiresOwnedAnchor {
+            var anchorStatus = stat()
+            guard fstat(currentFD, &anchorStatus) == 0,
+                  isDirectory(anchorStatus.st_mode),
+                  anchorStatus.st_uid == geteuid() else {
+                let closeResult = Darwin.close(currentFD)
+                guard closeResult == 0 else {
+                    throw InboundFileTransferIOError.invalidDestination(
+                        "trusted container root validation close failed"
+                    )
+                }
+                throw InboundFileTransferIOError.invalidDestination(
+                    "trusted container root validation failed"
+                )
+            }
+        }
+
+        let components = traversalPlan.relativeComponents
         for (index, component) in components.enumerated() {
             guard !component.isEmpty, component != ".", component != "..", component != "/" else {
                 let closeResult = Darwin.close(currentFD)

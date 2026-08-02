@@ -4,8 +4,44 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  __test: { asyncRoute, makeError }
+  __test: { asyncRoute, deriveTenantIdFromUser, makeError }
 } = require('../server');
+
+test('tenant derivation ignores user-controlled metadata', () => {
+  assert.equal(
+    deriveTenantIdFromUser({
+      id: 'verified-user-id',
+      appMetadata: {},
+      userMetadata: { tenant_id: 'attacker-selected-tenant' }
+    }),
+    'verified-user-id'
+  );
+});
+
+test('tenant derivation rejects conflicting protected claims', () => {
+  assert.throws(
+    () => deriveTenantIdFromUser({
+      id: 'verified-user-id',
+      appMetadata: {
+        tenant_id: 'protected-tenant-a',
+        workspace_id: 'protected-tenant-b'
+      },
+      userMetadata: {}
+    }),
+    (error) => error.code === 'conflicting_tenant_claims' && error.statusCode === 401
+  );
+});
+
+test('tenant derivation accepts protected app metadata', () => {
+  assert.equal(
+    deriveTenantIdFromUser({
+      id: 'verified-user-id',
+      appMetadata: { tenant_id: 'protected-tenant' },
+      userMetadata: { tenant_id: 'attacker-selected-tenant' }
+    }),
+    'protected-tenant'
+  );
+});
 
 function responseRecorder() {
   return {

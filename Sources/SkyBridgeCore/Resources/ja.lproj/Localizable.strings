@@ -676,7 +676,7 @@
 "remote.connectionMode.far" = "遠距離";
 "remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
 "remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
-"remote.connectionMode.far.description" = "遠距離 RDP — ネットワークを跨いでも安定（FreeRDP 3.x + GFX-AVC444）";
+"remote.connectionMode.far.description" = "手動 RDP（制限付きプレビュー）— FreeRDP 3.30 ソフトウェア GDI、厳密な証明書検証、チャネルリダイレクトなし";
 "common.unknown" = "不明";
 "profile.title" = "プロフィール";
 "action.close" = "閉じる";
@@ -876,6 +876,7 @@
 "remote.form.recommended.body" = "多くの場合、IP/ポートの手入力は不要です。デバイス検出でデバイスを選んで接続してください。";
 "remote.form.openDeviceDiscovery" = "デバイス検出を開く";
 "remote.form.advanced.section" = "上級：手動設定（RDP/VNC/SSH）";
+"remote.form.rdp.certificateNotice" = "RDP は、証明書チェーンが macOS に信頼され、ホスト名が一致するエンドポイントのみを受け入れます。手動の信頼が必要な未知、自己署名、または変更された証明書は拒否されます。このバージョンには証明書登録や TOFU フローはありません。";
 "monitor.title" = "システム監視";
 "monitor.status.monitoring" = "監視中";
 "monitor.status.initializing" = "初期化中...";

@@ -5,6 +5,76 @@ import Network
 
 @MainActor
 final class FileTransferSettingsRuntimeTests: XCTestCase {
+    func testDefaultReceiveDirectoryPreservesEachPlatformLayout() {
+        let downloads = URL(fileURLWithPath: "/Users/test/Downloads", isDirectory: true)
+        let documents = URL(fileURLWithPath: "/container/Documents", isDirectory: true)
+
+        XCTAssertEqual(
+            FileTransferDirectoryLayout.defaultReceiveDirectory(
+                platform: .macOS,
+                downloadsDirectory: downloads,
+                documentsDirectory: documents
+            ),
+            downloads.appendingPathComponent("SkyBridge", isDirectory: true)
+        )
+        XCTAssertEqual(
+            FileTransferDirectoryLayout.defaultReceiveDirectory(
+                platform: .iOS,
+                downloadsDirectory: downloads,
+                documentsDirectory: documents
+            ),
+            documents.appendingPathComponent("Downloads", isDirectory: true)
+        )
+    }
+
+    func testDefaultReceiveDirectoryFailsWhenDurablePlatformRootIsUnavailable() {
+        XCTAssertNil(
+            FileTransferDirectoryLayout.defaultReceiveDirectory(
+                platform: .macOS,
+                downloadsDirectory: nil,
+                documentsDirectory: URL(fileURLWithPath: "/unused", isDirectory: true)
+            )
+        )
+        XCTAssertNil(
+            FileTransferDirectoryLayout.defaultReceiveDirectory(
+                platform: .iOS,
+                downloadsDirectory: URL(fileURLWithPath: "/unused", isDirectory: true),
+                documentsDirectory: nil
+            )
+        )
+    }
+
+    func testIOSReceiveDirectoryCandidatesNeverFallBackToHiddenApplicationSupport() {
+        let explicit = URL(fileURLWithPath: "/container/Documents/Chosen", isDirectory: true)
+        let canonical = URL(fileURLWithPath: "/container/Documents/Downloads", isDirectory: true)
+        let hidden = URL(fileURLWithPath: "/container/Library/Application Support/SkyBridge/Received Files", isDirectory: true)
+
+        XCTAssertEqual(
+            FileTransferDirectoryLayout.receiveDirectoryCandidates(
+                platform: .iOS,
+                explicitDirectory: explicit,
+                defaultDirectory: canonical,
+                applicationSupportDirectory: hidden
+            ),
+            [explicit, canonical]
+        )
+    }
+
+    func testMacReceiveDirectoryCandidatesKeepDocumentedFallbackAndDeduplicate() {
+        let canonical = URL(fileURLWithPath: "/Users/test/Downloads/SkyBridge", isDirectory: true)
+        let appSupport = URL(fileURLWithPath: "/Users/test/Library/Application Support/SkyBridge/Received Files", isDirectory: true)
+
+        XCTAssertEqual(
+            FileTransferDirectoryLayout.receiveDirectoryCandidates(
+                platform: .macOS,
+                explicitDirectory: canonical,
+                defaultDirectory: canonical,
+                applicationSupportDirectory: appSupport
+            ),
+            [canonical, appSupport]
+        )
+    }
+
     func testResumableRetryDecisionHonorsAutoRetrySwitch() {
         XCTAssertFalse(
             ResumableTransferRetryDecision.shouldScheduleAutomaticRetry(

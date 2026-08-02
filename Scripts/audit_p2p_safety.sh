@@ -9,25 +9,19 @@
 
 set -e
 
-P2P_DIR="Sources/SkyBridgeCore/P2P"
 FAILED=0
 
 echo "=== P2P Safety Audit ==="
 echo ""
 
-# 1. precondition/fatalError 必须为 0（允许已评审的局部类型不变量）
-echo "1. Checking for precondition/fatalError in P2P directory..."
-PRECONDITION_VIOLATIONS=$(grep -rE "precondition\(|fatalError\(" "$P2P_DIR" 2>/dev/null | grep -v "// ALLOWED" || true)
-PRECONDITION_VIOLATIONS=$(echo "$PRECONDITION_VIOLATIONS" | grep -vE "CryptoProviderProtocol\\.swift:.*precondition\\(publicKey\\.(suite|usage) == privateKey\\.(suite|usage)," || true)
-PRECONDITION_COUNT=$(echo "$PRECONDITION_VIOLATIONS" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
-
-if [ "$PRECONDITION_COUNT" -gt 0 ]; then
-    echo "   FAIL: Found $PRECONDITION_COUNT precondition/fatalError in P2P directory"
-    echo "   Details:"
-    echo "$PRECONDITION_VIOLATIONS" | sed '/^[[:space:]]*$/d' | sed 's/^/      /'
+# 1. Remotely reachable P2P code must never terminate the process. The scanner
+# is intentionally fail-closed and has no source comments or file allow-list.
+echo "1. Checking Apple P2P sources for process-terminating traps..."
+if ! python3 Scripts/check_p2p_no_traps.py; then
+    echo "   FAIL: Found a P2P process-termination path or an incomplete scan"
     FAILED=1
 else
-    echo "   PASS: No precondition/fatalError in P2P directory"
+    echo "   PASS: No precondition/preconditionFailure/fatalError in Apple P2P sources"
 fi
 
 echo ""
@@ -69,7 +63,8 @@ fi
 
 echo ""
 echo "4. Checking unknown/unsupported suite fallback deny gate..."
-if ! python3 Scripts/check_unknown_suite_fallback_gate.py; then
+if ! python3 -m unittest Scripts/test_check_unknown_suite_fallback_gate.py \
+    || ! python3 Scripts/check_unknown_suite_fallback_gate.py; then
     echo "   FAIL: unknown/unsupported suite fallback deny gate failed"
     FAILED=1
 else

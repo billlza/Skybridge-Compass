@@ -376,21 +376,26 @@ public class CloudKitSyncManager: ObservableObject {
     }
 
     private func shouldDeduplicateForegroundRefresh(now: Date = Date()) -> Bool {
+        guard let authoritySnapshot = try? TrustedDeviceStore.shared
+            .authorityRecordsSnapshot() else {
+            return false
+        }
         guard activeTrustedDeviceSync == nil,
               lastSyncErrorMessage == nil,
               let lastSyncDate,
               now.timeIntervalSince(lastSyncDate) >= 0,
               now.timeIntervalSince(lastSyncDate) < foregroundDeduplicationInterval,
-              lastSuccessfulTrustedDeviceSnapshot == TrustedDeviceStore.shared.trustedDevices else {
+              lastSuccessfulTrustedDeviceSnapshot == authoritySnapshot else {
             return false
         }
         return true
     }
 
     private func performTrustedDeviceSync() async throws -> [TrustedDeviceStore.TrustedDevice] {
+        _ = try TrustedDeviceStore.shared.authorityRecordsSnapshot()
         if let testingSyncOperation {
             try await testingSyncOperation()
-            return TrustedDeviceStore.shared.trustedDevices
+            return try TrustedDeviceStore.shared.authorityRecordsSnapshot()
         }
 
         if let initializationFailureReason {
@@ -407,12 +412,12 @@ public class CloudKitSyncManager: ObservableObject {
         try await TrustedDeviceStore.shared.mergeFromCloudWithoutBlockingMainActor(remoteTrusted)
 
         // 3) 将本地可信设备 upsert 到云端（以 deviceId 为 recordName）
-        let localTrusted = TrustedDeviceStore.shared.trustedDevices
+        let localTrusted = try TrustedDeviceStore.shared.authorityRecordsSnapshot()
         try await upsertTrustedDevices(
             localTrusted,
             database: database
         )
-        return TrustedDeviceStore.shared.trustedDevices
+        return try TrustedDeviceStore.shared.authorityRecordsSnapshot()
     }
 
     private func completeTrustedDeviceSync(

@@ -397,7 +397,6 @@ PRIVATE_DIR_RECORD="$TMP_DIR/private-dir-record"
   MAC_AUTH_BINDING=""
   export AUTH_BINDING_DIGEST=""
   export ACCEPTANCE_CANDIDATE_READY=0
-  IOS_LAUNCH_JSON=""
   IOS_BOOTSTRAP_SOURCE=""
   IOS_BOOTSTRAP_TOMBSTONE=""
   IOS_BOOTSTRAP_FILE_NAME="skybridge-webrtc-smoke-bootstrap-v1.json"
@@ -408,14 +407,12 @@ PRIVATE_DIR_RECORD="$TMP_DIR/private-dir-record"
   MAC_TOKEN="$AUTH_PRIVATE_DIR/mac.token"
   MAC_TENANT="$AUTH_PRIVATE_DIR/mac.tenant"
   MAC_AUTH_BINDING="$AUTH_PRIVATE_DIR/mac.auth-binding.sha256"
-  IOS_LAUNCH_JSON="$AUTH_PRIVATE_DIR/ios-launch.raw.json"
   umask 077
   : >"$AUTH_SESSION_FILE"
   : >"$MAC_CODE"
   : >"$MAC_TOKEN"
   : >"$MAC_TENANT"
   : >"$MAC_AUTH_BINDING"
-  : >"$IOS_LAUNCH_JSON"
   printf '%s\n' "$AUTH_PRIVATE_DIR" >"$PRIVATE_DIR_RECORD"
 )
 PRIVATE_DIR="$(<"$PRIVATE_DIR_RECORD")"
@@ -533,6 +530,15 @@ payload = {
     "acceptanceEligible": False,
     "cleanupComplete": False,
     "diagnosticOnly": True,
+    "iosBinaryTestSurfaceDetected": False,
+    "iosProductSurface": "production",
+    "iosProductionIdentityAlgorithm": "mldsa87",
+    "iosProductionIdentityLifecycleVerified": True,
+    "iosProductionIdentityProof": True,
+    "iosProductionIdentityProtection": "secureEnclaveRequired",
+    "iosProductionProduct": True,
+    "iosSwiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
+    "iosTestingCompilationCondition": False,
     "preCleanupCandidate": True,
     "schemaVersion": 1,
     "transport": "webrtc",
@@ -576,8 +582,8 @@ FAILED_CLEANUP_DIR_RECORD="$TMP_DIR/failed-cleanup-dir-record"
 set +e
 (
   eval "$CLEANUP_FUNCTIONS"
-  eval 'copy_round_diagnostics() { :; }; terminate_ios_app() { :; }; copy_mac_media_diagnostics() { :; }; terminate_mac_host() { :; }'
-  eval 'DID_LAUNCH_IOS=0'
+  eval 'copy_round_diagnostics() { :; }; terminate_ios_app() { :; }; copy_mac_media_diagnostics() { :; }; terminate_mac_host() { :; }; destroy_process_ownership_session() { :; }'
+  IOS_CONSOLE_HANDLE_STARTED=0
   DID_COPY_IOS_BOOTSTRAP=0
   AUTH_SESSION_FILE=""
   AUTH_PRIVATE_DIR=""
@@ -587,7 +593,6 @@ set +e
   MAC_AUTH_BINDING=""
   export AUTH_BINDING_DIGEST=""
   export ACCEPTANCE_CANDIDATE_READY=0
-  IOS_LAUNCH_JSON=""
   IOS_BOOTSTRAP_SOURCE=""
   IOS_BOOTSTRAP_TOMBSTONE=""
   IOS_BOOTSTRAP_FILE_NAME="skybridge-webrtc-smoke-bootstrap-v1.json"
@@ -614,8 +619,8 @@ PRESERVED_STATUS_DIR_RECORD="$TMP_DIR/preserved-status-dir-record"
 set +e
 (
   eval "$CLEANUP_FUNCTIONS"
-  eval 'copy_round_diagnostics() { :; }; terminate_ios_app() { :; }; copy_mac_media_diagnostics() { :; }; terminate_mac_host() { :; }'
-  eval 'DID_LAUNCH_IOS=0'
+  eval 'copy_round_diagnostics() { :; }; terminate_ios_app() { :; }; copy_mac_media_diagnostics() { :; }; terminate_mac_host() { :; }; destroy_process_ownership_session() { :; }'
+  IOS_CONSOLE_HANDLE_STARTED=0
   DID_COPY_IOS_BOOTSTRAP=0
   AUTH_SESSION_FILE=""
   AUTH_PRIVATE_DIR=""
@@ -625,7 +630,6 @@ set +e
   MAC_AUTH_BINDING=""
   export AUTH_BINDING_DIGEST=""
   export ACCEPTANCE_CANDIDATE_READY=0
-  IOS_LAUNCH_JSON=""
   IOS_BOOTSTRAP_SOURCE=""
   IOS_BOOTSTRAP_TOMBSTONE=""
   IOS_BOOTSTRAP_FILE_NAME="skybridge-webrtc-smoke-bootstrap-v1.json"
@@ -656,7 +660,9 @@ if xcrun swiftc -typecheck -warnings-as-errors "$SWIFT_WARNING_FIXTURE" >"$TMP_D
   echo "Expected -warnings-as-errors to reject the Swift warning fixture" >&2
   exit 1
 fi
-grep -Fq "error: 'deprecatedFixture()' is deprecated" "$TMP_DIR/swiftc.log"
+grep -Fq "error:" "$TMP_DIR/swiftc.log"
+grep -Fq "deprecatedFixture" "$TMP_DIR/swiftc.log"
+grep -Fq "fixture warning" "$TMP_DIR/swiftc.log"
 
 # Prove the shared xcodebuild wrapper materializes both Swift and Clang warnings-as-errors settings.
 mkdir -p "$TMP_DIR/bin"
@@ -684,8 +690,6 @@ grep -Fq -- "MAC_CODE=\"\$ARTIFACT_DIR/mac.code\"" "$SMOKE_SCRIPT"
 grep -Fq -- "MAC_TOKEN=\"\$AUTH_PRIVATE_DIR/mac.token\"" "$SMOKE_SCRIPT"
 grep -Fq -- "MAC_TENANT=\"\$AUTH_PRIVATE_DIR/mac.tenant\"" "$SMOKE_SCRIPT"
 grep -Fq -- "MAC_AUTH_BINDING=\"\$AUTH_PRIVATE_DIR/mac.auth-binding.sha256\"" "$SMOKE_SCRIPT"
-grep -Fq -- "IOS_LAUNCH_JSON=\"\$AUTH_PRIVATE_DIR/ios-launch.raw.json\"" "$SMOKE_SCRIPT"
-grep -Fq -- "chmod 0600 \"\$IOS_LAUNCH_JSON\"" "$SMOKE_SCRIPT"
 grep -Fq -- 'umask 077' "$SMOKE_SCRIPT"
 grep -Fq -- 'chmod 0700 "$ARTIFACT_DIR"' "$SMOKE_SCRIPT"
 grep -Fq -- 'device copy to' "$SMOKE_SCRIPT"

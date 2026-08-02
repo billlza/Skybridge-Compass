@@ -48,43 +48,28 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
         }
     }
 
-    func testSessionTenantCannotUseJWTSubjectAsTenantClaim() throws {
+    func testSessionTenantMayOnlyAssertJWTSubjectFallback() throws {
         let accessToken = try makeAccessToken(payload: ["sub": "NEBULA-session"])
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try CrossNetworkTenantIdentifierPolicy.resolve(
                 accessToken: accessToken,
                 explicitTenantID: nil,
                 sessionTenantID: "NEBULA-session",
                 sessionUserIdentifier: "NEBULA-session"
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? CrossNetworkTenantIdentifierPolicy.ResolutionError,
-                .missingTenantClaim
-            )
-        }
+            ),
+            "NEBULA-session"
+        )
     }
 
-    func testAppAndRootTenantClaimKeysAreAcceptedWhenCoherent() throws {
-        let cases: [(container: String?, key: String)] = [
-            ("app_metadata", "tenant_id"),
-            ("app_metadata", "tenantId"),
-            ("app_metadata", "org_id"),
-            ("app_metadata", "workspace_id"),
-            (nil, "tenant_id"),
-            (nil, "tenantId"),
-            (nil, "org_id"),
-            (nil, "workspace_id")
-        ]
+    func testProtectedAppMetadataTenantClaimKeysAreAcceptedWhenCoherent() throws {
+        let keys = ["tenant_id", "tenantId", "org_id", "workspace_id"]
 
-        for testCase in cases {
-            var payload: [String: Any] = ["sub": "user-1"]
-            if let container = testCase.container {
-                payload[container] = [testCase.key: "tenant-1"]
-            } else {
-                payload[testCase.key] = "tenant-1"
-            }
+        for key in keys {
+            let payload: [String: Any] = [
+                "sub": "user-1",
+                "app_metadata": [key: "tenant-1"]
+            ]
             let accessToken = try makeAccessToken(payload: payload)
             XCTAssertEqual(
                 try CrossNetworkTenantIdentifierPolicy.resolve(
@@ -94,7 +79,7 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
                     sessionUserIdentifier: "user-1"
                 ),
                 "tenant-1",
-                "Expected \(testCase.container ?? "root").\(testCase.key) to be accepted."
+                "Expected app_metadata.\(key) to be accepted."
             )
         }
     }
@@ -102,15 +87,17 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
     func testConflictingSignedTenantClaimsAreRejected() throws {
         let accessToken = try makeAccessToken(payload: [
             "sub": "user-1",
-            "tenant_id": "root-tenant",
-            "app_metadata": ["tenant_id": "app-tenant"]
+            "app_metadata": [
+                "tenant_id": "app-tenant",
+                "workspace_id": "other-app-tenant"
+            ]
         ])
 
         XCTAssertThrowsError(
             try CrossNetworkTenantIdentifierPolicy.resolve(
                 accessToken: accessToken,
-                explicitTenantID: "root-tenant",
-                sessionTenantID: "root-tenant",
+                explicitTenantID: nil,
+                sessionTenantID: nil,
                 sessionUserIdentifier: "user-1"
             )
         ) { error in
@@ -137,7 +124,7 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
         ) { error in
             XCTAssertEqual(
                 error as? CrossNetworkTenantIdentifierPolicy.ResolutionError,
-                .missingTenantClaim
+                .tenantIdentityMismatch
             )
         }
     }
@@ -169,28 +156,18 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
         }
     }
 
-    func testOpaqueLegacyTokenUsesUserIdentifierOnlyWithoutDeclaredTenant() throws {
-        XCTAssertEqual(
+    func testOpaqueLegacyTokenIsNeverAuthenticatedTenantAuthority() throws {
+        XCTAssertThrowsError(
             try CrossNetworkTenantIdentifierPolicy.resolve(
                 accessToken: "opaque-legacy-token",
                 explicitTenantID: nil,
                 sessionTenantID: nil,
                 sessionUserIdentifier: "legacy-user"
-            ),
-            "legacy-user"
-        )
-
-        XCTAssertThrowsError(
-            try CrossNetworkTenantIdentifierPolicy.resolve(
-                accessToken: "opaque-legacy-token",
-                explicitTenantID: "declared-tenant",
-                sessionTenantID: "declared-tenant",
-                sessionUserIdentifier: "legacy-user"
             )
         ) { error in
             XCTAssertEqual(
                 error as? CrossNetworkTenantIdentifierPolicy.ResolutionError,
-                .missingTenantClaim
+                .invalidJWTClaims
             )
         }
     }
@@ -199,7 +176,7 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
         let nonJSONPayloadToken = "header.\(Self.base64URLEncodedString(from: Data("not-json".utf8))).signature"
         let nonStringClaimToken = try makeAccessToken(payload: [
             "sub": "user-1",
-            "tenant_id": 42
+            "app_metadata": ["tenant_id": 42]
         ])
 
         for accessToken in [
@@ -223,16 +200,20 @@ final class CrossNetworkTenantIdentifierPolicyTests: XCTestCase {
         }
     }
 
-    func testMissingTokenDoesNotPromoteSessionUserToOpaqueLegacyAuthority() throws {
-        XCTAssertEqual(
+    func testMissingTokenDoesNotPromoteSessionUserToAuthority() throws {
+        XCTAssertThrowsError(
             try CrossNetworkTenantIdentifierPolicy.resolve(
                 accessToken: nil,
                 explicitTenantID: nil,
                 sessionTenantID: nil,
                 sessionUserIdentifier: "session-user"
-            ),
-            ""
-        )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkTenantIdentifierPolicy.ResolutionError,
+                .invalidJWTClaims
+            )
+        }
     }
 
     private func makeAccessToken(payload: [String: Any]) throws -> String {

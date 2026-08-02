@@ -40,6 +40,46 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
         XCTAssertTrue(packageApp.contains("require_release_git_provenance \"${git_commit}\" \"${git_branch}\" \"${git_dirty}\""))
         XCTAssertTrue(packageApp.contains("release_dmg 打包要求 Git worktree 为 clean"))
 
+        let liboqsProvenanceGate = try XCTUnwrap(
+            packageApp.range(of: "\"${ROOT_DIR}/Sources/Vendor/liboqs.provenance.json\"")
+        )
+        let freeRDPProvenanceGate = try XCTUnwrap(
+            packageApp.range(of: "\"${ROOT_DIR}/Sources/Vendor/FreeRDPRuntime.provenance.json\"")
+        )
+        let releaseBuild = try XCTUnwrap(packageApp.range(of: "swift build \\\n"))
+        let freeRDPCopy = try XCTUnwrap(
+            packageApp.range(of: "cp -f \"${dylib}\" \"${FW_DIR}/\"")
+        )
+        XCTAssertLessThan(liboqsProvenanceGate.lowerBound, releaseBuild.lowerBound)
+        XCTAssertLessThan(freeRDPProvenanceGate.lowerBound, releaseBuild.lowerBound)
+        XCTAssertLessThan(freeRDPProvenanceGate.lowerBound, freeRDPCopy.lowerBound)
+        XCTAssertTrue(packageApp.contains("native_vendor_provenance.py\" verify"))
+        XCTAssertTrue(packageApp.contains("artifact bytes 不一致"))
+        for requiredRuntime in [
+            "libfreerdp3.dylib",
+            "libwinpr3.dylib",
+            "libssl.4.dylib",
+            "libcrypto.4.dylib",
+            "libjansson.4.dylib",
+            "liburiparser.1.dylib",
+        ] {
+            XCTAssertTrue(packageApp.contains(requiredRuntime))
+        }
+        XCTAssertFalse(packageApp.contains("libssl.3.dylib"))
+        XCTAssertFalse(packageApp.contains("libcrypto.3.dylib"))
+
+        let nativeLock = try repositorySource("Config/native-dependencies.lock.json")
+        let freeRDPRecipe = try repositorySource("Scripts/build_freerdp_dylibs.sh")
+        XCTAssertTrue(nativeLock.contains("\"version\": \"4.0.1\""))
+        XCTAssertTrue(nativeLock.contains("\"ref\": \"openssl-4.0.1\""))
+        XCTAssertTrue(nativeLock.contains("1e963a8680ec78ad2072792c7a1a71f3c530bd2e"))
+        XCTAssertTrue(nativeLock.contains("libssl.4.dylib;libcrypto.4.dylib"))
+        XCTAssertTrue(nativeLock.contains("\"build_jobs\": \"8\""))
+        XCTAssertTrue(freeRDPRecipe.contains("openssl-4.0.1-mkinstallvars-defaults.patch"))
+        XCTAssertTrue(freeRDPRecipe.contains("libssl.4.dylib"))
+        XCTAssertTrue(freeRDPRecipe.contains("libcrypto.4.dylib"))
+        XCTAssertTrue(freeRDPRecipe.contains("--build-input \"build_jobs=$BUILD_JOBS\""))
+
         let readiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
         XCTAssertTrue(readiness.contains("validate_release_binary_provenance_strings"))
         XCTAssertTrue(readiness.contains("validate_release_app_binary_provenance_strings"))

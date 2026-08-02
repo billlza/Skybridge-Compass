@@ -13,6 +13,120 @@ import Foundation
 public actor TrafficPaddingStats {
     public static let shared = TrafficPaddingStats()
 
+    private enum Submission: Sendable {
+        case wrap(label: String, rawBytes: Int, paddedBytes: Int)
+        case unwrap(label: String, totalBytes: Int, rawBytes: Int)
+    }
+
+    private final class AdmissionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cachedEnabled = false
+        private var refreshAfterUptime: TimeInterval = 0
+
+        func isEnabled(load: () -> Bool) -> Bool {
+            let now = ProcessInfo.processInfo.systemUptime
+            return lock.withLock {
+                if now >= refreshAfterUptime {
+                    cachedEnabled = load()
+                    refreshAfterUptime = now + 1
+                }
+                return cachedEnabled
+            }
+        }
+
+        func invalidate() {
+            lock.withLock { refreshAfterUptime = 0 }
+        }
+    }
+
+    private final class SubmissionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private let maximumPendingEvents = 256
+        private var pending: [Submission] = []
+        private var drainScheduled = false
+
+        func enqueue(_ event: Submission) {
+            let shouldSchedule = lock.withLock { () -> Bool in
+                if pending.count < maximumPendingEvents {
+                    pending.append(event)
+                }
+                guard !drainScheduled, !pending.isEmpty else { return false }
+                drainScheduled = true
+                return true
+            }
+            guard shouldSchedule else { return }
+            Task { await drain() }
+        }
+
+        private func drain() async {
+            while let batch = nextBatch() {
+                for event in batch {
+                    switch event {
+                    case .wrap(let label, let rawBytes, let paddedBytes):
+                        await TrafficPaddingStats.shared.recordWrap(
+                            label: label,
+                            rawBytes: rawBytes,
+                            paddedBytes: paddedBytes
+                        )
+                    case .unwrap(let label, let totalBytes, let rawBytes):
+                        await TrafficPaddingStats.shared.recordUnwrap(
+                            label: label,
+                            totalBytes: totalBytes,
+                            rawBytes: rawBytes
+                        )
+                    }
+                }
+            }
+        }
+
+        private func nextBatch() -> [Submission]? {
+            lock.withLock {
+                guard !pending.isEmpty else {
+                    drainScheduled = false
+                    return nil
+                }
+                let batch = pending
+                pending.removeAll(keepingCapacity: true)
+                return batch
+            }
+        }
+
+        func waitUntilDrained() async {
+            while lock.withLock({ drainScheduled || !pending.isEmpty }) {
+                await Task.yield()
+            }
+        }
+    }
+
+    private static let admissionGate = AdmissionGate()
+    private static let submissionGate = SubmissionGate()
+
+    public static func submitWrap(label: String, rawBytes: Int, paddedBytes: Int) {
+        guard admissionGate.isEnabled(load: { Config.fromUserDefaults().enabled }) else {
+            return
+        }
+        submissionGate.enqueue(
+            .wrap(label: label, rawBytes: rawBytes, paddedBytes: paddedBytes)
+        )
+    }
+
+    public static func submitUnwrap(label: String, totalBytes: Int, rawBytes: Int) {
+        guard admissionGate.isEnabled(load: { Config.fromUserDefaults().enabled }) else {
+            return
+        }
+        submissionGate.enqueue(
+            .unwrap(label: label, totalBytes: totalBytes, rawBytes: rawBytes)
+        )
+    }
+
+    public static func refreshSubmissionAdmission() {
+        admissionGate.invalidate()
+    }
+
+    public static func waitForPendingSubmissions() async {
+        await submissionGate.waitUntilDrained()
+    }
+
     public struct LabelStats: Sendable {
         public var wraps: UInt64 = 0
         public var unwraps: UInt64 = 0
@@ -25,6 +139,8 @@ public actor TrafficPaddingStats {
     private var lastFlushAttemptAt: Date = .distantPast
     private var pendingEvents: Int = 0
     private var didPrintPathHint: Bool = false
+    private static let maximumTrackedLabels = 64
+    private static let maximumTrackedLabelLength = 64
 
     private init() {}
 
@@ -70,11 +186,12 @@ public actor TrafficPaddingStats {
         let cfg = Config.fromUserDefaults()
         guard cfg.enabled else { return }
 
+        let label = boundedLabel(label)
         var st = labels[label] ?? LabelStats()
         st.wraps += 1
         st.rawBytes += UInt64(max(0, rawBytes))
         st.paddedBytes += UInt64(max(0, paddedBytes))
-        st.bucketCounts[paddedBytes, default: 0] += 1
+        st.bucketCounts[Self.byteCountBucket(paddedBytes), default: 0] += 1
         labels[label] = st
 
         pendingEvents += 1
@@ -85,15 +202,36 @@ public actor TrafficPaddingStats {
         let cfg = Config.fromUserDefaults()
         guard cfg.enabled else { return }
 
+        let label = boundedLabel(label)
         var st = labels[label] ?? LabelStats()
         st.unwraps += 1
         st.rawBytes += UInt64(max(0, rawBytes))
         st.paddedBytes += UInt64(max(0, totalBytes))
-        st.bucketCounts[totalBytes, default: 0] += 1
+        st.bucketCounts[Self.byteCountBucket(totalBytes), default: 0] += 1
         labels[label] = st
 
         pendingEvents += 1
         await maybeFlush(cfg: cfg)
+    }
+
+    private func boundedLabel(_ label: String) -> String {
+        let truncated = String(label.prefix(Self.maximumTrackedLabelLength))
+        let candidate = truncated.isEmpty ? "traffic" : truncated
+        if labels[candidate] != nil {
+            return candidate
+        }
+        if labels.count < Self.maximumTrackedLabels - 1 { return candidate }
+        return "other"
+    }
+
+    private nonisolated static func byteCountBucket(_ byteCount: Int) -> Int {
+        guard byteCount > 0 else { return 0 }
+        var upperBound = 256
+        let maximumBucket = 8 * 1_024 * 1_024
+        while upperBound < byteCount, upperBound < maximumBucket {
+            upperBound *= 2
+        }
+        return min(upperBound, maximumBucket)
     }
 
     private func maybeFlush(cfg: Config) async {

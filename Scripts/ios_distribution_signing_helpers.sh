@@ -159,9 +159,9 @@ skybridge_write_ios_distribution_product_proof() {
   esac
 
   rm -f -- "${app_certificate_prefix}"* "${widget_certificate_prefix}"*
-  if ! /usr/bin/codesign --display --extract-certificates "$app_certificate_prefix" "$app_path" >/dev/null 2>&1 || \
+  if ! /usr/bin/codesign --display --extract-certificates="$app_certificate_prefix" "$app_path" >/dev/null 2>&1 || \
      [[ ! -s "$app_leaf_certificate" ]] || \
-     ! /usr/bin/codesign --display --extract-certificates "$widget_certificate_prefix" "$widget_path" >/dev/null 2>&1 || \
+     ! /usr/bin/codesign --display --extract-certificates="$widget_certificate_prefix" "$widget_path" >/dev/null 2>&1 || \
      [[ ! -s "$widget_leaf_certificate" ]]; then
     echo "Unable to extract the iOS app and Widget leaf signing certificates." >&2
     return 1

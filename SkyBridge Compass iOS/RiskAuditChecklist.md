@@ -27,8 +27,8 @@ Scope: Crypto / Handshake / Networking / UI
 
 | File | Risk | Checklist | Status |
 | --- | --- | --- | --- |
-| `Packages/OQSRAIILocal/Sources/OQSRAII/include/OQSRAII.h` | R4 | C1,C2,C3,C6 | ✅ Done (evidence: `Packages/OQSRAIILocal/Sources/OQSRAII/include/OQSRAII.h:1`) |
-| `Packages/OQSRAIILocal/Sources/OQSRAII/src/OQSRAII.cpp` | R4 | C1,C2,C3,C6 | ✅ Done (evidence: `Packages/OQSRAIILocal/Sources/OQSRAII/src/OQSRAII.cpp:1`) |
+| `../Sources/OQSRAII/include/OQSRAII.h` | R4 | C1,C2,C3,C6 | ✅ Done (evidence: `../Sources/OQSRAII/include/OQSRAII.h:1`) |
+| `../Sources/OQSRAII/src/OQSRAII.cpp` | R4 | C1,C2,C3,C6 | ✅ Done (evidence: `../Sources/OQSRAII/src/OQSRAII.cpp:1`) |
 | `SkyBridgeCompassiOS/Sources/Core/CoreTypes.swift` | R4 | C1,C2,C3,C6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/CoreTypes.swift:88`) |
 | `SkyBridgeCompassiOS/Sources/Core/CryptoProviderFactory.swift` | R3 | C3,C4,C6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/CryptoProviderFactory.swift:229`) |
 | `SkyBridgeCompassiOS/Sources/Core/CryptoProviderProtocol.swift` | R3 | C3,C4,C6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/CryptoProviderProtocol.swift:126`) |
@@ -95,10 +95,10 @@ Scope: Crypto / Handshake / Networking / UI
 | `SkyBridgeCompassiOS/Sources/Core/Messaging/OfflineMessageQueue.swift` | R2 | N2,N3,N4,N6 | Reviewed 2026-02-28 |
 | `SkyBridgeCompassiOS/Sources/Core/Network/STUNClient.swift` | R3 | N1,N2,N3,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/Network/STUNClient.swift:18`) |
 | `SkyBridgeCompassiOS/Sources/Core/P2P/P2PConnectionService.swift` | R4 | N1,N2,N3,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/P2P/P2PConnectionService.swift:2`) |
-| `SkyBridgeCompassiOS/Sources/Core/P2P/P2PModels.swift` | R2 | N1,N6 | Pending |
+| `SkyBridgeCompassiOS/Sources/Core/P2P/P2PModels.swift` | R2 | N1,N6 | Reviewed 2026-07-30; legacy `P2PMessage.fileTransferRequest` schema intentionally not parity-certified and must remain unused until a shared DTO migration |
 | `SkyBridgeCompassiOS/Sources/Core/QRCode/QRCodeManager.swift` | R2 | N1,N5,N6 | Pending |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferIntegrity.swift` | R4 | N1,N4,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferIntegrity.swift:75`) |
-| `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferWire.swift` | R4 | N1,N2,N4,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkFileTransferWire.swift:14`) |
+| `../Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWire.swift` | R4 | N1,N2,N4,N5,N6 | ✅ Shared single source (iOS local copy removed; evidence: `../Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferInboundAdmissionPolicy.swift`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkInboundChunkQueue.swift` | R3 | N2,N3,N4 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkInboundChunkQueue.swift:4`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkServerConfig.swift` | R4 | N1,N2,N3,N4,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkServerConfig.swift:4`) |
 | `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift` | R4 | N1,N2,N3,N5,N6 | ✅ Done (evidence: `SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkSignalServerClient.swift:5`) |

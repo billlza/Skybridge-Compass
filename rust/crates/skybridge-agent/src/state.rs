@@ -10,27 +10,33 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use skybridge_core::{
-    AuthSession, AuthState, EnrollmentStatus, FileTransferControlRequest,
-    FileTransferControlRequestRegistry, FileTransferDestinationBinding, FileTransferSourceSnapshot,
-    LocalIdentityState, ManagedSessionControl, ManagedSessionControlRegistry,
-    NearbyDiscoveredDevice, NearbyDiscoverySnapshot, NearbyDiscoverySnapshotRegistry,
-    NearbyDiscoveryTrustStatus, NebulaOAuthClient, ProtocolIdentityBinding,
-    ProtocolSigningAlgorithm, RemoteDesktopCapabilitySnapshot,
+    AuthSession, AuthState, CrossNetworkTransferId, EnrollmentStatus, FileTransferControlRequest,
+    FileTransferControlRequestRegistry, FileTransferControlRequestStatus,
+    FileTransferDestinationBinding, FileTransferSourceSnapshot, InboundFileTransferApprovalBinding,
+    InboundFileTransferApprovalDecision, InboundFileTransferApprovalRegistry,
+    InboundFileTransferApprovalRequest, InboundFileTransferApprovalStatus, LocalIdentityState,
+    MAX_TRANSFER_BYTES, ManagedSessionControl, ManagedSessionControlRegistry,
+    ManagedSessionDesiredState, NearbyDiscoveredDevice, NearbyDiscoverySnapshot,
+    NearbyDiscoverySnapshotRegistry, NearbyDiscoveryTrustStatus, NebulaOAuthClient,
+    ProtocolIdentityBinding, ProtocolSigningAlgorithm, RemoteDesktopCapabilitySnapshot,
     RemoteDesktopCapabilitySnapshotRegistry, RemoteDesktopControlAction,
     RemoteDesktopControlRequest, RemoteDesktopControlRequestPayload,
-    RemoteDesktopControlRequestRegistry, RemoteDesktopObservedMode, RemoteDesktopResolutionRequest,
-    RuntimeSessionRecord, RuntimeSessionState, RuntimeSessionTransportEvent,
-    RustPqcIdentityMaterial, SessionReadiness, SessionRegistry, SignalingLifecycleEvent,
-    mldsa_generate_keypair, mldsa_sign_detached, mldsa_verify_detached,
+    RemoteDesktopControlRequestRegistry, RemoteDesktopControlRequestStatus,
+    RemoteDesktopObservedMode, RemoteDesktopResolutionRequest, RuntimeAuthenticatedPeerObservation,
+    RuntimeSelectedIceRouteObservation, RuntimeSessionKeepaliveStatus, RuntimeSessionRecord,
+    RuntimeSessionState, RuntimeSessionTransportEvent, RustPqcIdentityMaterial, SessionReadiness,
+    SessionRegistry, SignalingLifecycleEvent, SignalingLifecyclePhase, SignalingSessionHealth,
+    make_runtime_id, mldsa_generate_keypair, mldsa_sign_detached, mldsa_verify_detached,
     remote_desktop_fps_request_supported, remote_desktop_resolution_preset_matches,
     should_refresh_access_token, xwing_generate_keypair,
 };
 use time::OffsetDateTime;
 use tokio::fs;
 
-use crate::runtime::{AgentPaths, restrict_dir_permissions, restrict_file_permissions};
+use crate::runtime::{AgentPaths, restrict_dir_permissions};
 
 static SESSION_REGISTRY_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static MANAGED_SESSION_CONTROLS_PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct DeviceIdentityMaterial {
@@ -131,6 +137,74 @@ impl StoredKemIdentityKey {
     const SCHEMA_VERSION: u32 = 1;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct AuthSessionGeneration {
+    schema_version: u32,
+    generation: u64,
+}
+
+impl AuthSessionGeneration {
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn next(self) -> Result<Self> {
+        Ok(Self {
+            schema_version: Self::SCHEMA_VERSION,
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("auth session generation overflow"))?,
+        })
+    }
+}
+
+impl Default for AuthSessionGeneration {
+    fn default() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            generation: 0,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManagedSessionRegistrationJournal {
+    schema_version: u32,
+    previous_session: Option<RuntimeSessionRecord>,
+    previous_control: Option<ManagedSessionControl>,
+    session: RuntimeSessionRecord,
+    control: ManagedSessionControl,
+}
+
+impl ManagedSessionRegistrationJournal {
+    const SCHEMA_VERSION: u32 = 3;
+}
+
+const LEGACY_MANAGED_SESSION_CONTROL_SCHEMA_VERSION: u32 = 2;
+const LEGACY_MANAGED_SESSION_REGISTRATION_JOURNAL_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedSessionRegistrationJournalState {
+    RemovedDurably,
+    RecoveryPending,
+}
+
+#[derive(Debug)]
+pub struct ManagedSessionRegistrationCommit {
+    pub sessions: SessionRegistry,
+    pub controls: ManagedSessionControlRegistry,
+    pub journal_state: ManagedSessionRegistrationJournalState,
+}
+
+/// Atomically observed state for one immutable managed-session registration.
+/// A worker incarnation change remains `Current`; replacing the registration
+/// under the same public session id becomes `Replaced`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManagedSessionRegistrationObservation {
+    Current(Box<RuntimeSessionRecord>),
+    Missing,
+    Replaced,
+}
+
 pub async fn ensure_device_identity(paths: &AgentPaths) -> Result<DeviceIdentityMaterial> {
     ensure_identity_layout(paths).await?;
     let _identity_lock = acquire_protocol_identity_lock(paths).await?;
@@ -223,12 +297,20 @@ pub async fn ensure_rust_pqc_identity_for_algorithm(
 }
 
 pub async fn load_auth_session(paths: &AgentPaths) -> Result<Option<AuthSession>> {
-    load_json::<AuthSession>(&auth_session_file(paths)).await
+    ensure_identity_layout(paths).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    load_auth_session_unlocked(paths).await
 }
 
 pub async fn store_auth_session(paths: &AgentPaths, session: &AuthSession) -> Result<()> {
     ensure_identity_layout(paths).await?;
-    write_json(&auth_session_file(paths), session).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    store_auth_session_unlocked(paths, session).await
+}
+
+async fn store_auth_session_unlocked(paths: &AgentPaths, session: &AuthSession) -> Result<()> {
+    advance_auth_session_generation_unlocked(paths).await?;
+    write_json_atomic_private(&auth_session_file(paths), session).await?;
     let mut identity = crate::runtime::load_identity_state(paths)
         .await?
         .unwrap_or_else(|| LocalIdentityState::placeholder(current_hostname(), new_device_id()));
@@ -239,6 +321,8 @@ pub async fn store_auth_session(paths: &AgentPaths, session: &AuthSession) -> Re
 
 pub async fn clear_auth_session(paths: &AgentPaths) -> Result<()> {
     ensure_identity_layout(paths).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    advance_auth_session_generation_unlocked(paths).await?;
     match fs::remove_file(auth_session_file(paths)).await {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -253,7 +337,8 @@ pub async fn clear_auth_session(paths: &AgentPaths) -> Result<()> {
 }
 
 pub async fn refresh_auth_session_if_needed(paths: &AgentPaths) -> Result<Option<AuthSession>> {
-    let Some(session) = load_auth_session(paths).await? else {
+    let (session, expected_generation) = load_auth_session_snapshot(paths).await?;
+    let Some(session) = session else {
         return Ok(None);
     };
     let Some(refresh_token) = session.refresh_token.as_deref() else {
@@ -262,6 +347,7 @@ pub async fn refresh_auth_session_if_needed(paths: &AgentPaths) -> Result<Option
     if !should_refresh_access_token(&session.access_token, 300) {
         return Ok(Some(session));
     }
+    let expected_session = session.clone();
     let oauth = NebulaOAuthClient::from_env()?;
     let token = oauth.refresh_token(refresh_token).await?;
     let refreshed = AuthSession {
@@ -272,8 +358,32 @@ pub async fn refresh_auth_session_if_needed(paths: &AgentPaths) -> Result<Option
         display_name: session.display_name,
         issued_at: OffsetDateTime::now_utc(),
     };
-    store_auth_session(paths, &refreshed).await?;
+    store_refreshed_auth_session_if_unchanged(
+        paths,
+        &expected_session,
+        expected_generation,
+        &refreshed,
+    )
+    .await?;
     Ok(Some(refreshed))
+}
+
+async fn store_refreshed_auth_session_if_unchanged(
+    paths: &AgentPaths,
+    expected_session: &AuthSession,
+    expected_generation: u64,
+    refreshed: &AuthSession,
+) -> Result<()> {
+    ensure_identity_layout(paths).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    let current = load_auth_session_unlocked(paths).await?;
+    let current_generation = load_auth_session_generation_unlocked(paths).await?;
+    if current.as_ref() != Some(expected_session)
+        || current_generation.generation != expected_generation
+    {
+        bail!("auth session changed while token refresh was in flight");
+    }
+    store_auth_session_unlocked(paths, refreshed).await
 }
 
 pub async fn update_enrollment_status(
@@ -281,6 +391,8 @@ pub async fn update_enrollment_status(
     status: EnrollmentStatus,
     device_name: Option<&str>,
 ) -> Result<LocalIdentityState> {
+    ensure_identity_layout(paths).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
     let mut identity = crate::runtime::load_identity_state(paths)
         .await?
         .ok_or_else(|| anyhow!("device identity not initialized"))?;
@@ -291,6 +403,42 @@ pub async fn update_enrollment_status(
     identity.device.updated_at = OffsetDateTime::now_utc();
     persist_identity(paths, &identity).await?;
     Ok(identity)
+}
+
+async fn load_auth_session_unlocked(paths: &AgentPaths) -> Result<Option<AuthSession>> {
+    load_json::<AuthSession>(&auth_session_file(paths)).await
+}
+
+async fn load_auth_session_snapshot(paths: &AgentPaths) -> Result<(Option<AuthSession>, u64)> {
+    ensure_identity_layout(paths).await?;
+    let _identity_lock = acquire_protocol_identity_lock(paths).await?;
+    let session = load_auth_session_unlocked(paths).await?;
+    let generation = load_auth_session_generation_unlocked(paths).await?;
+    Ok((session, generation.generation))
+}
+
+async fn load_auth_session_generation_unlocked(
+    paths: &AgentPaths,
+) -> Result<AuthSessionGeneration> {
+    let generation = load_json::<AuthSessionGeneration>(&auth_session_generation_file(paths))
+        .await?
+        .unwrap_or_default();
+    if generation.schema_version != AuthSessionGeneration::SCHEMA_VERSION {
+        bail!(
+            "unsupported auth session generation schema version {}; expected {}",
+            generation.schema_version,
+            AuthSessionGeneration::SCHEMA_VERSION
+        );
+    }
+    Ok(generation)
+}
+
+async fn advance_auth_session_generation_unlocked(
+    paths: &AgentPaths,
+) -> Result<AuthSessionGeneration> {
+    let next = load_auth_session_generation_unlocked(paths).await?.next()?;
+    write_json_atomic_private(&auth_session_generation_file(paths), &next).await?;
+    Ok(next)
 }
 
 pub async fn load_session_registry(paths: &AgentPaths) -> Result<SessionRegistry> {
@@ -306,58 +454,1122 @@ pub async fn load_session_registry(paths: &AgentPaths) -> Result<SessionRegistry
     .context("session registry read task panicked")?
 }
 
-pub async fn store_session_registry(paths: &AgentPaths, registry: &SessionRegistry) -> Result<()> {
-    ensure_identity_layout(paths).await?;
-    let registry_path = session_registry_file(paths);
-    let lock_path = session_registry_lock_file(paths);
-    let registry = registry.clone();
-    tokio::task::spawn_blocking(move || {
-        let _process_guard = lock_session_registry_process()?;
-        let _file_lock = lock_session_registry_file(&lock_path, true)?;
-        store_session_registry_unlocked(&registry_path, &registry)
-    })
-    .await
-    .context("session registry write task panicked")?
-}
-
 pub async fn load_managed_session_controls(
     paths: &AgentPaths,
 ) -> Result<ManagedSessionControlRegistry> {
     ensure_identity_layout(paths).await?;
-    Ok(
-        load_json::<ManagedSessionControlRegistry>(&session_controls_file(paths))
-            .await?
-            .unwrap_or_default(),
-    )
+    let registry_path = session_controls_file(paths);
+    let lock_path = managed_session_controls_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_managed_session_controls_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, false)?;
+        load_managed_session_controls_unlocked(&registry_path)
+    })
+    .await
+    .context("managed session controls read task panicked")?
 }
 
-pub async fn store_managed_session_controls(
+/// Reads the runtime record and immutable registration authority under the
+/// same shared locks used by registration, worker handoff, and disconnect.
+/// This prevents a caller from combining a runtime from one registration with
+/// control authority from another registration that reused the session id.
+pub async fn observe_managed_session_registration(
     paths: &AgentPaths,
-    registry: &ManagedSessionControlRegistry,
-) -> Result<()> {
+    session_id: &str,
+    expected_registration_id: &str,
+) -> Result<ManagedSessionRegistrationObservation> {
+    validate_registration_id(expected_registration_id)
+        .context("expected managed registration id is invalid")?;
     ensure_identity_layout(paths).await?;
-    write_json(&session_controls_file(paths), registry).await
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let expected_registration_id = expected_registration_id.to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, false)?;
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, false)?;
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let controls = load_managed_session_controls_unlocked(&control_registry_path)?;
+        let session = sessions.get(&session_id);
+        let control = controls.get(&session_id);
+
+        let Some(control) = control else {
+            return Ok(if session.is_some() {
+                ManagedSessionRegistrationObservation::Replaced
+            } else {
+                ManagedSessionRegistrationObservation::Missing
+            });
+        };
+        if control.registration_id != expected_registration_id {
+            return Ok(ManagedSessionRegistrationObservation::Replaced);
+        }
+        if control.desired_state != ManagedSessionDesiredState::Active {
+            bail!("managed registration no longer owns active control authority");
+        }
+        let session = session
+            .ok_or_else(|| anyhow!("managed registration has no matching runtime session"))?;
+        if control.target_runtime_id != session.runtime_id {
+            bail!("managed registration control/runtime incarnation mismatch");
+        }
+        Ok(ManagedSessionRegistrationObservation::Current(Box::new(
+            session.clone(),
+        )))
+    })
+    .await
+    .context("managed session registration observation task panicked")?
+}
+
+/// A short-lived, cross-process read permit for one managed runtime
+/// incarnation. The shared registry locks are held for the permit lifetime, so
+/// any replacement/stop mutation (which takes the same locks exclusively)
+/// linearizes either before permit acquisition or after permit release.
+///
+/// Callers must scope this permit to one external side effect. It must never be
+/// retained for an entire worker lifetime; operation-specific timeouts belong
+/// at boundaries whose cancellation semantics are actually guaranteed.
+pub(crate) struct RuntimeIncarnationPermit {
+    _session_registry_lock: std::fs::File,
+    _control_registry_lock: std::fs::File,
+    session_registry_path: PathBuf,
+    control_registry_path: PathBuf,
+    session_id: String,
+    expected_runtime_id: String,
+    expected_registration_id: Option<String>,
+}
+
+impl RuntimeIncarnationPermit {
+    pub(crate) async fn validate_after_effect(self: &std::sync::Arc<Self>) -> Result<()> {
+        let permit = std::sync::Arc::clone(self);
+        tokio::task::spawn_blocking(move || permit.validate_current_unlocked())
+            .await
+            .context("runtime incarnation permit validation task panicked")?
+    }
+
+    fn validate_current_unlocked(&self) -> Result<()> {
+        validate_runtime_incarnation_unlocked(
+            &self.session_registry_path,
+            &self.control_registry_path,
+            &self.session_id,
+            &self.expected_runtime_id,
+            self.expected_registration_id.as_deref(),
+        )
+    }
+}
+
+pub(crate) async fn acquire_runtime_incarnation_permit(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<std::sync::Arc<RuntimeIncarnationPermit>> {
+    acquire_runtime_incarnation_permit_with_registration(
+        paths,
+        session_id,
+        expected_runtime_id,
+        None,
+    )
+    .await
+}
+
+async fn acquire_runtime_incarnation_permit_with_registration(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    expected_registration_id: Option<&str>,
+) -> Result<std::sync::Arc<RuntimeIncarnationPermit>> {
+    if let Some(registration_id) = expected_registration_id {
+        validate_registration_id(registration_id)
+            .context("expected managed registration id is invalid")?;
+    }
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let expected_registration_id = expected_registration_id.map(str::to_owned);
+
+    tokio::task::spawn_blocking(move || {
+        // This order matches all combined session/control mutations.
+        let session_lock = lock_session_registry_file(&session_registry_lock_path, false)?;
+        let control_lock = lock_session_registry_file(&control_registry_lock_path, false)?;
+        validate_runtime_incarnation_unlocked(
+            &session_registry_path,
+            &control_registry_path,
+            &session_id,
+            &expected_runtime_id,
+            expected_registration_id.as_deref(),
+        )?;
+        Ok(std::sync::Arc::new(RuntimeIncarnationPermit {
+            _session_registry_lock: session_lock,
+            _control_registry_lock: control_lock,
+            session_registry_path,
+            control_registry_path,
+            session_id,
+            expected_runtime_id,
+            expected_registration_id,
+        }))
+    })
+    .await
+    .context("runtime incarnation permit acquisition task panicked")?
+}
+
+/// A handshake receipt whose registry authority remains held until the value
+/// is dropped. Callers should keep this value alive through their synchronous
+/// success serialization/output so a replacement or disconnect cannot
+/// linearize between final verification and the reported success.
+pub struct VerifiedManagedHandshakeReceipt {
+    pub session_id: String,
+    pub runtime_id: String,
+    pub remote_device_id: String,
+    pub remote_device_name: Option<String>,
+    pub remote_protocol_public_key_fingerprint: String,
+    pub negotiated_suite: String,
+    pub authenticated_peer: RuntimeAuthenticatedPeerObservation,
+    pub selected_ice_route: RuntimeSelectedIceRouteObservation,
+    _permit: std::sync::Arc<RuntimeIncarnationPermit>,
+}
+
+struct VerifiedManagedHandshakeEvidence {
+    runtime_id: String,
+    remote_device_id: String,
+    remote_protocol_public_key_fingerprint: String,
+    negotiated_suite: String,
+    authenticated_peer: RuntimeAuthenticatedPeerObservation,
+    selected_ice_route: RuntimeSelectedIceRouteObservation,
+}
+
+pub async fn verify_managed_handshake_receipt(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_registration_id: &str,
+    expected_runtime_id: &str,
+    expected_negotiated_suite: &str,
+) -> Result<VerifiedManagedHandshakeReceipt> {
+    let permit = acquire_runtime_incarnation_permit_with_registration(
+        paths,
+        session_id,
+        expected_runtime_id,
+        Some(expected_registration_id),
+    )
+    .await?;
+    let session_registry_path = permit.session_registry_path.clone();
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let expected_negotiated_suite = expected_negotiated_suite.to_owned();
+    let receipt = tokio::task::spawn_blocking(move || {
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("managed handshake receipt has no runtime session"))?;
+        if session.runtime_id != expected_runtime_id || !session.is_active() {
+            bail!("managed handshake receipt no longer belongs to an active runtime incarnation");
+        }
+        let negotiated_suite = match &session.readiness {
+            SessionReadiness::HandshakeComplete {
+                session_id: receipt_session_id,
+                negotiated_suite,
+            } if receipt_session_id == &session_id
+                && negotiated_suite == &expected_negotiated_suite =>
+            {
+                negotiated_suite.clone()
+            }
+            SessionReadiness::HandshakeComplete { .. } => {
+                bail!("managed handshake receipt changed before success reporting")
+            }
+            SessionReadiness::Idle | SessionReadiness::TransportReady { .. } => {
+                bail!("managed handshake is not complete at success reporting")
+            }
+        };
+        let remote_device_id = session
+            .remote_device_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!("managed handshake receipt is missing remote device identity")
+            })?;
+        let remote_protocol_public_key_fingerprint = session
+            .remote_protocol_public_key_fingerprint
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("managed handshake receipt is missing peer fingerprint"))?;
+        let authenticated_peer = session.authenticated_peer.clone().ok_or_else(|| {
+            anyhow!("managed connection receipt is missing authenticated peer capabilities")
+        })?;
+        if authenticated_peer.device_id != remote_device_id {
+            bail!("managed connection receipt peer observation changed identity");
+        }
+        let selected_ice_route = session.selected_ice_route.clone().ok_or_else(|| {
+            anyhow!("managed connection receipt is missing selected ICE route evidence")
+        })?;
+        let handshake_completed_at = session.handshake_completed_at.ok_or_else(|| {
+            anyhow!("managed connection receipt is missing handshake completion time")
+        })?;
+        if authenticated_peer.observed_at < handshake_completed_at
+            || selected_ice_route.observed_at < handshake_completed_at
+        {
+            bail!("managed connection receipt reused evidence from an earlier handshake");
+        }
+        let now = OffsetDateTime::now_utc();
+        let heartbeat_age = now - authenticated_peer.observed_at;
+        let route_age = now - selected_ice_route.observed_at;
+        let freshness = time::Duration::seconds(15);
+        if heartbeat_age.is_negative() || heartbeat_age > freshness {
+            bail!("managed connection receipt authenticated peer observation is stale");
+        }
+        if route_age.is_negative() || route_age > freshness {
+            bail!("managed connection receipt selected ICE route observation is stale");
+        }
+        Ok(VerifiedManagedHandshakeEvidence {
+            runtime_id: session.runtime_id.clone(),
+            remote_device_id,
+            remote_protocol_public_key_fingerprint,
+            negotiated_suite,
+            authenticated_peer,
+            selected_ice_route,
+        })
+    })
+    .await
+    .context("managed handshake receipt verification task panicked")??;
+
+    Ok(VerifiedManagedHandshakeReceipt {
+        session_id: permit.session_id.clone(),
+        runtime_id: receipt.runtime_id,
+        remote_device_id: receipt.remote_device_id,
+        remote_device_name: Some(receipt.authenticated_peer.device_name.clone()),
+        remote_protocol_public_key_fingerprint: receipt.remote_protocol_public_key_fingerprint,
+        negotiated_suite: receipt.negotiated_suite,
+        authenticated_peer: receipt.authenticated_peer,
+        selected_ice_route: receipt.selected_ice_route,
+        _permit: permit,
+    })
+}
+
+fn validate_runtime_incarnation_unlocked(
+    session_registry_path: &Path,
+    control_registry_path: &Path,
+    session_id: &str,
+    expected_runtime_id: &str,
+    expected_registration_id: Option<&str>,
+) -> Result<()> {
+    let controls = load_managed_session_controls_unlocked(control_registry_path)?;
+    let control = controls
+        .get(session_id)
+        .ok_or_else(|| anyhow!("managed runtime incarnation has no control authority"))?;
+    if control.target_runtime_id != expected_runtime_id
+        || control.desired_state != ManagedSessionDesiredState::Active
+    {
+        bail!("managed runtime incarnation no longer owns active control authority");
+    }
+    if expected_registration_id.is_some_and(|expected| control.registration_id != expected) {
+        bail!("managed runtime incarnation belongs to a replacement registration");
+    }
+
+    let sessions = load_session_registry_unlocked(session_registry_path)?;
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| anyhow!("managed runtime incarnation has no runtime session"))?;
+    if session.runtime_id != expected_runtime_id || !session.is_active() {
+        bail!("managed runtime incarnation no longer owns an active runtime session");
+    }
+    Ok(())
 }
 
 pub async fn upsert_managed_session_control(
     paths: &AgentPaths,
     mut control: ManagedSessionControl,
 ) -> Result<ManagedSessionControlRegistry> {
-    let mut registry = load_managed_session_controls(paths).await?;
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, false)?;
+        let session_registry = load_session_registry_unlocked(&session_registry_path)?;
+        let session = session_registry.get(&control.session_id).ok_or_else(|| {
+            anyhow!("managed session control requires a matching runtime session")
+        })?;
+        if session.role != control.role
+            || session.source != control.source
+            || session.local_device_id != control.local_device_id
+            || session.signaling_server_origin != control.signaling_server_origin
+        {
+            bail!("managed session control metadata does not match its runtime session");
+        }
+        control.target_runtime_id = session.runtime_id.clone();
+        control.updated_at = OffsetDateTime::now_utc();
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, true)?;
+        let mut registry = load_managed_session_controls_unlocked(&control_registry_path)?;
+        registry.insert(control)?;
+        store_managed_session_controls_unlocked(&control_registry_path, &registry)?;
+        Ok(registry)
+    })
+    .await
+    .context("managed session control mutation task panicked")?
+}
+
+/// Registers the runtime record and its control authority as one journaled
+/// operation. Both registry locks remain held until both durable files and the
+/// journal commit marker have been synchronized.
+pub async fn register_managed_session(
+    paths: &AgentPaths,
+    session: RuntimeSessionRecord,
+    mut control: ManagedSessionControl,
+) -> Result<ManagedSessionRegistrationCommit> {
+    ensure_identity_layout(paths).await?;
+    validate_managed_session_registration(&session, &control, true)?;
+    control.target_runtime_id = session.runtime_id.clone();
+    control.schema_version = ManagedSessionControl::SCHEMA_VERSION;
     control.updated_at = OffsetDateTime::now_utc();
-    registry.insert(control);
-    store_managed_session_controls(paths, &registry).await?;
-    Ok(registry)
+
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    let journal_path = managed_session_registration_journal_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, true)?;
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, true)?;
+
+        recover_registration_journal_unlocked(
+            &session_registry_path,
+            &control_registry_path,
+            &journal_path,
+        )?;
+        let mut sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let mut controls = load_managed_session_controls_unlocked(&control_registry_path)?;
+        let previous_session = sessions.get(&session.session_id).cloned();
+        let previous_control = controls.get(&control.session_id).cloned();
+        // Preflight both bounded registries before publishing the intent.
+        sessions.insert(session.clone())?;
+        controls.insert(control.clone())?;
+        let journal = ManagedSessionRegistrationJournal {
+            schema_version: ManagedSessionRegistrationJournal::SCHEMA_VERSION,
+            previous_session,
+            previous_control,
+            session,
+            control,
+        };
+        commit_registration_unlocked(
+            &session_registry_path,
+            &control_registry_path,
+            &journal_path,
+            &journal,
+            sessions,
+            controls,
+            remove_private_file_durably,
+        )
+    })
+    .await
+    .context("managed session registration task panicked")?
+}
+
+/// Repairs only fail-closed registry asymmetry before the supervisor starts.
+/// A journaled registration is completed; unjournaled active orphans are
+/// disconnected and orphaned controls are removed.
+pub(crate) async fn recover_managed_session_state(
+    paths: &AgentPaths,
+) -> Result<ManagedSessionRegistrationJournalState> {
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    let journal_path = managed_session_registration_journal_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, true)?;
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, true)?;
+
+        migrate_legacy_managed_session_controls_unlocked(&control_registry_path)?;
+        discard_legacy_registration_journal_unlocked(&journal_path)?;
+        let journal_state = recover_registration_journal_unlocked(
+            &session_registry_path,
+            &control_registry_path,
+            &journal_path,
+        )?;
+        let mut sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let mut controls = load_managed_session_controls_unlocked(&control_registry_path)?;
+        let orphaned_active_sessions = sessions
+            .sessions
+            .values()
+            .filter(|session| {
+                session.is_active()
+                    && !controls.get(&session.session_id).is_some_and(|control| {
+                        managed_session_registration_matches(session, control)
+                    })
+            })
+            .map(|session| session.session_id.clone())
+            .collect::<Vec<_>>();
+        for session_id in orphaned_active_sessions {
+            if !sessions.mark_disconnected(
+                &session_id,
+                Some("orphaned managed runtime recovered at agent startup".to_owned()),
+            ) {
+                bail!("orphaned managed runtime disappeared during startup recovery");
+            }
+        }
+        controls.sessions.retain(|session_id, control| {
+            sessions.get(session_id).is_some_and(|session| {
+                session.is_active() && managed_session_registration_matches(session, control)
+            })
+        });
+
+        // Persist the fail-closed runtime state first. A crash before the
+        // control cleanup cannot make a terminal runtime runnable again.
+        store_session_registry_unlocked(&session_registry_path, &sessions)?;
+        store_managed_session_controls_unlocked(&control_registry_path, &controls)?;
+        Ok(journal_state)
+    })
+    .await
+    .context("managed session startup recovery task panicked")?
+}
+
+fn recover_registration_journal_unlocked(
+    session_registry_path: &Path,
+    control_registry_path: &Path,
+    journal_path: &Path,
+) -> Result<ManagedSessionRegistrationJournalState> {
+    let Some(journal) = load_registration_journal_unlocked(journal_path)? else {
+        return Ok(ManagedSessionRegistrationJournalState::RemovedDurably);
+    };
+    if journal.schema_version != ManagedSessionRegistrationJournal::SCHEMA_VERSION {
+        bail!(
+            "unsupported managed session registration journal schema version {}; expected {}",
+            journal.schema_version,
+            ManagedSessionRegistrationJournal::SCHEMA_VERSION
+        );
+    }
+    validate_managed_session_registration(&journal.session, &journal.control, false)?;
+    let mut sessions = load_session_registry_unlocked(session_registry_path)?;
+    let mut controls = load_managed_session_controls_unlocked(control_registry_path)?;
+    if !registration_entry_is_replayable(
+        sessions.get(&journal.session.session_id),
+        journal.previous_session.as_ref(),
+        &journal.session,
+    ) {
+        bail!("managed session registration journal conflicts with persisted runtime session");
+    }
+    if !registration_entry_is_replayable(
+        controls.get(&journal.control.session_id),
+        journal.previous_control.as_ref(),
+        &journal.control,
+    ) {
+        bail!("managed session registration journal conflicts with persisted control authority");
+    }
+    sessions.insert(journal.session)?;
+    controls.insert(journal.control)?;
+    store_session_registry_unlocked(session_registry_path, &sessions)?;
+    store_managed_session_controls_unlocked(control_registry_path, &controls)?;
+    Ok(match remove_private_file_durably(journal_path) {
+        Ok(()) => ManagedSessionRegistrationJournalState::RemovedDurably,
+        Err(_) => ManagedSessionRegistrationJournalState::RecoveryPending,
+    })
+}
+
+/// Schema-v2 registration journals predate immutable registration ownership.
+/// Replaying one would mint or overwrite live authority from an ownerless
+/// record. Recovery therefore durably discards only that known legacy schema;
+/// any partially persisted session/control pair is then handled by the normal
+/// fail-closed orphan reconciliation in `recover_managed_session_state`.
+fn discard_legacy_registration_journal_unlocked(path: &Path) -> Result<()> {
+    let Some(journal) = load_registration_journal_unlocked(path)? else {
+        return Ok(());
+    };
+    if journal.schema_version == LEGACY_MANAGED_SESSION_REGISTRATION_JOURNAL_SCHEMA_VERSION {
+        remove_private_file_durably(path)
+            .context("failed to discard ownerless legacy managed session registration journal")?;
+    }
+    Ok(())
+}
+
+fn registration_entry_is_replayable<T: PartialEq>(
+    current: Option<&T>,
+    previous: Option<&T>,
+    committed: &T,
+) -> bool {
+    current == Some(committed) || current == previous
+}
+
+fn commit_registration_unlocked<C>(
+    session_registry_path: &Path,
+    control_registry_path: &Path,
+    journal_path: &Path,
+    journal: &ManagedSessionRegistrationJournal,
+    sessions: SessionRegistry,
+    controls: ManagedSessionControlRegistry,
+    cleanup_journal: C,
+) -> Result<ManagedSessionRegistrationCommit>
+where
+    C: FnOnce(&Path) -> Result<()>,
+{
+    let body = serde_json::to_vec_pretty(journal)
+        .context("failed to encode managed session registration journal")?;
+    write_private_file_atomically(journal_path, &body)?;
+    store_session_registry_unlocked(session_registry_path, &sessions)?;
+    store_managed_session_controls_unlocked(control_registry_path, &controls)?;
+    let journal_state = match cleanup_journal(journal_path) {
+        Ok(()) => ManagedSessionRegistrationJournalState::RemovedDurably,
+        Err(_) => ManagedSessionRegistrationJournalState::RecoveryPending,
+    };
+    Ok(ManagedSessionRegistrationCommit {
+        sessions,
+        controls,
+        journal_state,
+    })
+}
+
+fn load_registration_journal_unlocked(
+    path: &Path,
+) -> Result<Option<ManagedSessionRegistrationJournal>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("managed session registration journal is not a regular file")
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect managed session registration journal {}",
+                    path.display()
+                )
+            });
+        }
+    }
+    let body = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "failed to read managed session registration journal {}",
+            path.display()
+        )
+    })?;
+    serde_json::from_str(&body)
+        .with_context(|| {
+            format!(
+                "failed to decode managed session registration journal {}",
+                path.display()
+            )
+        })
+        .map(Some)
+}
+
+fn validate_managed_session_registration(
+    session: &RuntimeSessionRecord,
+    control: &ManagedSessionControl,
+    allow_unbound_control: bool,
+) -> Result<()> {
+    if !session.is_active() {
+        bail!("managed session registration requires an active runtime session");
+    }
+    if control.schema_version != ManagedSessionControl::SCHEMA_VERSION
+        || control.desired_state != ManagedSessionDesiredState::Active
+    {
+        bail!("managed session registration requires an active current-schema control");
+    }
+    validate_registration_id(&control.registration_id)
+        .context("managed session registration id is invalid")?;
+    if !allow_unbound_control && control.target_runtime_id != session.runtime_id {
+        bail!("managed session registration control is not bound to its runtime incarnation");
+    }
+    if allow_unbound_control
+        && !control.target_runtime_id.is_empty()
+        && control.target_runtime_id != session.runtime_id
+    {
+        bail!("managed session registration control targets another runtime incarnation");
+    }
+    if session.session_id != control.session_id
+        || session.role != control.role
+        || session.source != control.source
+        || session.local_device_id != control.local_device_id
+        || session.signaling_server_origin != control.signaling_server_origin
+    {
+        bail!("managed session registration metadata does not match");
+    }
+    Ok(())
+}
+
+fn managed_session_registration_matches(
+    session: &RuntimeSessionRecord,
+    control: &ManagedSessionControl,
+) -> bool {
+    control.desired_state == ManagedSessionDesiredState::Active
+        && control.target_runtime_id == session.runtime_id
+        && session.session_id == control.session_id
+        && session.role == control.role
+        && session.source == control.source
+        && session.local_device_id == control.local_device_id
+        && session.signaling_server_origin == control.signaling_server_origin
+}
+
+fn validate_registration_id(registration_id: &str) -> Result<()> {
+    let parsed =
+        uuid::Uuid::parse_str(registration_id).context("managed registration id must be a UUID")?;
+    if parsed.get_version_num() != 7 || parsed.hyphenated().to_string() != registration_id {
+        bail!("managed registration id must be a canonical UUIDv7");
+    }
+    Ok(())
+}
+
+/// Starts one fresh managed-worker incarnation and returns its immutable
+/// control binding. All persisted transport/readiness evidence belongs to the
+/// previous incarnation and is cleared before network work begins.
+pub(crate) async fn begin_managed_session_incarnation(
+    paths: &AgentPaths,
+    expected_control: &ManagedSessionControl,
+) -> Result<ManagedSessionControl> {
+    ensure_identity_layout(paths).await?;
+    let expected_control = expected_control.clone();
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    let remote_registry_path = remote_desktop_request_registry_file(paths);
+    let remote_registry_lock_path = remote_desktop_request_registry_lock_file(paths);
+    let file_registry_path = file_transfer_request_registry_file(paths);
+    let file_registry_lock_path = file_transfer_request_registry_lock_file(paths);
+    let inbound_approval_path = inbound_file_transfer_approval_registry_file(paths);
+    let inbound_approval_lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, true)?;
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, true)?;
+        let _remote_file_lock = lock_session_registry_file(&remote_registry_lock_path, true)?;
+        let _file_transfer_file_lock = lock_session_registry_file(&file_registry_lock_path, true)?;
+        let _inbound_approval_file_lock =
+            lock_session_registry_file(&inbound_approval_lock_path, true)?;
+
+        let mut sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let mut controls = load_managed_session_controls_unlocked(&control_registry_path)?;
+        let mut remote_requests =
+            load_remote_desktop_request_registry_unlocked(&remote_registry_path)?;
+        let mut file_requests = load_file_transfer_request_registry_unlocked(&file_registry_path)?;
+        let mut inbound_approvals =
+            load_inbound_file_transfer_approval_registry_unlocked(&inbound_approval_path)?;
+
+        let current_control = controls
+            .get(&expected_control.session_id)
+            .ok_or_else(|| anyhow!("managed session control disappeared before worker start"))?;
+        if current_control != &expected_control {
+            bail!("managed session control was replaced before worker start");
+        }
+        let record = sessions
+            .sessions
+            .get_mut(&expected_control.session_id)
+            .ok_or_else(|| anyhow!("managed session runtime disappeared before worker start"))?;
+        if record.role != expected_control.role
+            || record.source != expected_control.source
+            || record.local_device_id != expected_control.local_device_id
+            || record.signaling_server_origin != expected_control.signaling_server_origin
+        {
+            bail!("managed session runtime metadata mismatched its control before worker start");
+        }
+
+        let new_runtime_id = make_runtime_id(&expected_control.session_id);
+        let now = OffsetDateTime::now_utc();
+        for request in file_requests.requests.values_mut().filter(|request| {
+            request.session_id == expected_control.session_id && !request.is_terminal()
+        }) {
+            match request.status {
+                FileTransferControlRequestStatus::PendingAgentObservation => {
+                    request.status = FileTransferControlRequestStatus::AgentRejected;
+                    request.failure_reason =
+                        Some("managed runtime ended before agent observation".to_owned());
+                    request.updated_at = now;
+                }
+                FileTransferControlRequestStatus::AgentObserved
+                | FileTransferControlRequestStatus::TransferInProgress => {
+                    request
+                        .mark_transfer_failed("managed runtime ended before verified receipt", now);
+                }
+                FileTransferControlRequestStatus::TransferCompleted
+                | FileTransferControlRequestStatus::TransferFailed
+                | FileTransferControlRequestStatus::AgentRejected => {}
+            }
+        }
+        for request in remote_requests.requests.values_mut().filter(|request| {
+            request.session_id == expected_control.session_id
+                && request.status == RemoteDesktopControlRequestStatus::PendingAgentObservation
+        }) {
+            request.status = RemoteDesktopControlRequestStatus::AgentRejected;
+            request.updated_at = now;
+        }
+        expire_inbound_file_approvals_for_incarnation(
+            &mut inbound_approvals,
+            &expected_control.session_id,
+            None,
+            now,
+        )?;
+
+        record.runtime_id = new_runtime_id.clone();
+        record.state = RuntimeSessionState::Connecting;
+        record.lifecycle_phase = SignalingLifecyclePhase::Idle;
+        record.signaling_health = SignalingSessionHealth::Healthy;
+        record.signaling_backend = None;
+        record.signaling_generation = None;
+        record.readiness = SessionReadiness::Idle;
+        record.last_established_readiness = None;
+        record.transport_preserved = false;
+        record.keepalive = RuntimeSessionKeepaliveStatus::default();
+        record.authenticated_peer = None;
+        record.selected_ice_route = None;
+        record.last_error = None;
+        record.last_transport_error = None;
+        record.transport_ready_at = None;
+        record.handshake_completed_at = None;
+        record.created_at = now;
+        record.updated_at = now;
+        record.closed_at = None;
+
+        let mut next_control = expected_control;
+        next_control.schema_version = ManagedSessionControl::SCHEMA_VERSION;
+        next_control.target_runtime_id = new_runtime_id;
+        next_control.updated_at = now;
+        controls.insert(next_control.clone())?;
+
+        // Persist requests first so no old claimed work can regain authority if
+        // a later registry write fails. A partial multi-file write remains
+        // fail-closed because session/control runtime ids must match to spawn.
+        store_file_transfer_request_registry_unlocked(&file_registry_path, &file_requests)?;
+        store_inbound_file_transfer_approval_registry_unlocked(
+            &inbound_approval_path,
+            &inbound_approvals,
+        )?;
+        store_remote_desktop_request_registry_unlocked(&remote_registry_path, &remote_requests)?;
+        store_session_registry_unlocked(&session_registry_path, &sessions)?;
+        store_managed_session_controls_unlocked(&control_registry_path, &controls)?;
+        Ok(next_control)
+    })
+    .await
+    .context("managed session incarnation start task panicked")?
+}
+
+pub(crate) async fn finish_managed_session_incarnation_requests(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<()> {
+    ensure_identity_layout(paths).await?;
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let remote_registry_path = remote_desktop_request_registry_file(paths);
+    let remote_registry_lock_path = remote_desktop_request_registry_lock_file(paths);
+    let file_registry_path = file_transfer_request_registry_file(paths);
+    let file_registry_lock_path = file_transfer_request_registry_lock_file(paths);
+    let inbound_approval_path = inbound_file_transfer_approval_registry_file(paths);
+    let inbound_approval_lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _remote_file_lock = lock_session_registry_file(&remote_registry_lock_path, true)?;
+        let _file_transfer_file_lock = lock_session_registry_file(&file_registry_lock_path, true)?;
+        let _inbound_approval_file_lock =
+            lock_session_registry_file(&inbound_approval_lock_path, true)?;
+        let mut remote_requests =
+            load_remote_desktop_request_registry_unlocked(&remote_registry_path)?;
+        let mut file_requests = load_file_transfer_request_registry_unlocked(&file_registry_path)?;
+        let mut inbound_approvals =
+            load_inbound_file_transfer_approval_registry_unlocked(&inbound_approval_path)?;
+        let now = OffsetDateTime::now_utc();
+
+        for request in file_requests.requests.values_mut().filter(|request| {
+            request.session_id == session_id
+                && request.target_runtime_id == expected_runtime_id
+                && !request.is_terminal()
+        }) {
+            match request.status {
+                FileTransferControlRequestStatus::PendingAgentObservation => {
+                    request.status = FileTransferControlRequestStatus::AgentRejected;
+                    request.failure_reason =
+                        Some("managed runtime ended before agent observation".to_owned());
+                    request.updated_at = now;
+                }
+                FileTransferControlRequestStatus::AgentObserved
+                | FileTransferControlRequestStatus::TransferInProgress => request
+                    .mark_transfer_failed("managed runtime ended before verified receipt", now),
+                FileTransferControlRequestStatus::TransferCompleted
+                | FileTransferControlRequestStatus::TransferFailed
+                | FileTransferControlRequestStatus::AgentRejected => {}
+            }
+        }
+        for request in remote_requests.requests.values_mut().filter(|request| {
+            request.session_id == session_id
+                && request.target_runtime_id == expected_runtime_id
+                && request.status == RemoteDesktopControlRequestStatus::PendingAgentObservation
+        }) {
+            request.status = RemoteDesktopControlRequestStatus::AgentRejected;
+            request.updated_at = now;
+        }
+        expire_inbound_file_approvals_for_incarnation(
+            &mut inbound_approvals,
+            &session_id,
+            Some(&expected_runtime_id),
+            now,
+        )?;
+        store_file_transfer_request_registry_unlocked(&file_registry_path, &file_requests)?;
+        store_inbound_file_transfer_approval_registry_unlocked(
+            &inbound_approval_path,
+            &inbound_approvals,
+        )?;
+        store_remote_desktop_request_registry_unlocked(&remote_registry_path, &remote_requests)?;
+        Ok(())
+    })
+    .await
+    .context("managed session request finalization task panicked")?
 }
 
 pub async fn remove_managed_session_control(
     paths: &AgentPaths,
     session_id: &str,
 ) -> Result<ManagedSessionControlRegistry> {
-    let mut registry = load_managed_session_controls(paths).await?;
-    registry.remove(session_id);
-    store_managed_session_controls(paths, &registry).await?;
-    Ok(registry)
+    let session_id = session_id.to_owned();
+    mutate_managed_session_controls(paths, move |registry| {
+        registry.remove(&session_id);
+        registry.clone()
+    })
+    .await
+}
+
+/// Operator-visible disconnect transaction.
+///
+/// A live control is first persisted as `Stopped`, then the runtime record is
+/// marked disconnected, and only after both writes succeed is the control
+/// removed. Any failure after the first write therefore leaves a durable
+/// stopped retry anchor and cannot respawn the worker as active.
+pub async fn disconnect_managed_session(
+    paths: &AgentPaths,
+    session_id: &str,
+    reason: Option<String>,
+) -> Result<SessionRegistry> {
+    let outcome = disconnect_managed_session_transaction(
+        paths,
+        session_id,
+        ManagedSessionDisconnectOwner::Any,
+        reason,
+    )
+    .await?;
+    debug_assert!(outcome.matched_owner);
+    Ok(outcome.sessions)
+}
+
+/// Disconnects only the exact managed runtime incarnation supplied by the caller.
+///
+/// Session and control registries remain locked for the entire stop/disconnect/remove
+/// transaction. A stale CLI attempt therefore cannot disconnect a replacement that
+/// reused the same public session id.
+pub async fn disconnect_managed_session_if_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    reason: Option<String>,
+) -> Result<bool> {
+    if expected_runtime_id.trim().is_empty() {
+        bail!("expected managed runtime incarnation must not be empty");
+    }
+    disconnect_managed_session_transaction(
+        paths,
+        session_id,
+        ManagedSessionDisconnectOwner::Runtime(expected_runtime_id.to_owned()),
+        reason,
+    )
+    .await
+    .map(|outcome| outcome.matched_owner)
+}
+
+/// Disconnects the current worker incarnation only when it still belongs to
+/// the caller's immutable registration. A normal worker handoff is followed
+/// through `target_runtime_id`; a replacement registration is never touched.
+pub async fn disconnect_managed_session_if_registration(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_registration_id: &str,
+    reason: Option<String>,
+) -> Result<bool> {
+    validate_registration_id(expected_registration_id)
+        .context("expected managed registration id is invalid")?;
+    disconnect_managed_session_transaction(
+        paths,
+        session_id,
+        ManagedSessionDisconnectOwner::Registration(expected_registration_id.to_owned()),
+        reason,
+    )
+    .await
+    .map(|outcome| outcome.matched_owner)
+}
+
+enum ManagedSessionDisconnectOwner {
+    Any,
+    Runtime(String),
+    Registration(String),
+}
+
+struct ManagedSessionDisconnectOutcome {
+    sessions: SessionRegistry,
+    matched_owner: bool,
+}
+
+async fn disconnect_managed_session_transaction(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_owner: ManagedSessionDisconnectOwner,
+    reason: Option<String>,
+) -> Result<ManagedSessionDisconnectOutcome> {
+    ensure_identity_layout(paths).await?;
+    let session_id = session_id.to_owned();
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, true)?;
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, true)?;
+        let mut sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let runtime_id = match sessions.get(&session_id) {
+            Some(session) => session.runtime_id.clone(),
+            None if !matches!(&expected_owner, ManagedSessionDisconnectOwner::Any) => {
+                return Ok(ManagedSessionDisconnectOutcome {
+                    sessions,
+                    matched_owner: false,
+                });
+            }
+            None => bail!("session `{session_id}` not found"),
+        };
+        if matches!(
+            &expected_owner,
+            ManagedSessionDisconnectOwner::Runtime(expected) if expected != &runtime_id
+        ) {
+            return Ok(ManagedSessionDisconnectOutcome {
+                sessions,
+                matched_owner: false,
+            });
+        }
+        let mut controls = match load_managed_session_controls_unlocked(&control_registry_path) {
+            Ok(controls) => controls,
+            Err(control_error) => {
+                if matches!(
+                    &expected_owner,
+                    ManagedSessionDisconnectOwner::Registration(_)
+                ) {
+                    return Err(control_error.context(
+                        "managed registration authority was unavailable; exact cleanup made no runtime change",
+                    ));
+                }
+                if !sessions.mark_disconnected(&session_id, reason) {
+                    bail!("session `{session_id}` disappeared during disconnect");
+                }
+                return match store_session_registry_unlocked(&session_registry_path, &sessions) {
+                    Ok(()) => Err(control_error.context(
+                        "managed control registry was unavailable; runtime session was still persisted as disconnected fail-closed",
+                    )),
+                    Err(session_error) => Err(control_error.context(format!(
+                        "managed control registry was unavailable and runtime disconnect persistence also failed: {session_error:#}"
+                    ))),
+                };
+            }
+        };
+
+        if let ManagedSessionDisconnectOwner::Registration(expected_registration_id) =
+            &expected_owner
+        {
+            let Some(control) = controls.get(&session_id) else {
+                return Ok(ManagedSessionDisconnectOutcome {
+                    sessions,
+                    matched_owner: false,
+                });
+            };
+            if &control.registration_id != expected_registration_id {
+                return Ok(ManagedSessionDisconnectOutcome {
+                    sessions,
+                    matched_owner: false,
+                });
+            }
+            if control.target_runtime_id != runtime_id {
+                bail!("managed session control/runtime incarnation mismatch during disconnect");
+            }
+        }
+
+        let had_control = if let Some(control) = controls.sessions.get_mut(&session_id) {
+            if control.target_runtime_id != runtime_id {
+                bail!("managed session control/runtime incarnation mismatch during disconnect");
+            }
+            control.desired_state = ManagedSessionDesiredState::Stopped;
+            control.updated_at = OffsetDateTime::now_utc();
+            store_managed_session_controls_unlocked(&control_registry_path, &controls)?;
+            true
+        } else {
+            false
+        };
+
+        if !sessions.mark_disconnected(&session_id, reason) {
+            bail!("session `{session_id}` disappeared during disconnect");
+        }
+        store_session_registry_unlocked(&session_registry_path, &sessions)?;
+
+        if had_control {
+            controls.remove(&session_id);
+            store_managed_session_controls_unlocked(&control_registry_path, &controls)?;
+        }
+        Ok(ManagedSessionDisconnectOutcome {
+            sessions,
+            matched_owner: true,
+        })
+    })
+    .await
+    .context("managed session disconnect task panicked")?
+}
+
+pub(crate) async fn remove_managed_session_control_if_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    mutate_managed_session_controls(paths, move |registry| {
+        let matches_incarnation = registry
+            .get(&session_id)
+            .is_some_and(|control| control.target_runtime_id == expected_runtime_id);
+        if matches_incarnation {
+            registry.remove(&session_id);
+        }
+        matches_incarnation
+    })
+    .await
+}
+
+pub(crate) async fn stop_managed_session_control_if_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    mutate_managed_session_controls(paths, move |registry| {
+        let Some(control) = registry.sessions.get_mut(&session_id) else {
+            return false;
+        };
+        if control.target_runtime_id != expected_runtime_id {
+            return false;
+        }
+        control.desired_state = ManagedSessionDesiredState::Stopped;
+        control.updated_at = OffsetDateTime::now_utc();
+        true
+    })
+    .await
 }
 
 pub async fn load_remote_desktop_request_registry(
@@ -388,6 +1600,381 @@ pub async fn load_file_transfer_request_registry(
     })
     .await
     .context("file transfer request registry read task panicked")?
+}
+
+pub async fn load_inbound_file_transfer_approval_registry(
+    paths: &AgentPaths,
+) -> Result<InboundFileTransferApprovalRegistry> {
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_lock_path = session_registry_lock_file(paths);
+    let registry_path = inbound_file_transfer_approval_registry_file(paths);
+    let lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _session_lock = lock_session_registry_file(&session_lock_path, false)?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
+        if reconcile_inbound_file_approvals(&mut registry, &sessions, OffsetDateTime::now_utc())? {
+            store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+        }
+        Ok(registry)
+    })
+    .await
+    .context("inbound file approval registry read task panicked")?
+}
+
+pub(crate) async fn authenticated_file_transfer_peer_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<RuntimeAuthenticatedPeerObservation> {
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_lock_path = session_registry_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _session_lock = lock_session_registry_file(&session_lock_path, false)?;
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("inbound file metadata has no managed session"))?;
+        if session.runtime_id != expected_runtime_id || !session.is_active() {
+            bail!("inbound file metadata no longer belongs to the active runtime incarnation");
+        }
+        match &session.readiness {
+            SessionReadiness::HandshakeComplete {
+                session_id: receipt_session_id,
+                ..
+            } if receipt_session_id == &session_id => {}
+            _ => bail!("inbound file metadata requires current handshake-complete evidence"),
+        }
+        let peer = session.authenticated_peer.clone().ok_or_else(|| {
+            anyhow!("inbound file metadata is missing authenticated peer evidence")
+        })?;
+        if session.remote_device_id.as_deref() != Some(peer.device_id.as_str())
+            || session
+                .remote_protocol_public_key_fingerprint
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            bail!("inbound file metadata authenticated peer binding is incomplete");
+        }
+        Ok(peer)
+    })
+    .await
+    .context("authenticated inbound file peer lookup task panicked")?
+}
+
+pub(crate) struct InboundFileTransferApprovalRegistration {
+    pub(crate) session_id: String,
+    pub(crate) expected_runtime_id: String,
+    pub(crate) transfer_id: String,
+    pub(crate) metadata_sha256_hex: String,
+    pub(crate) file_name: String,
+    pub(crate) file_size: u64,
+    pub(crate) claimed_sender_device_id: Option<String>,
+}
+
+pub(crate) async fn register_inbound_file_transfer_approval_for_runtime(
+    paths: &AgentPaths,
+    registration: InboundFileTransferApprovalRegistration,
+) -> Result<InboundFileTransferApprovalRequest> {
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_lock_path = session_registry_lock_file(paths);
+    let registry_path = inbound_file_transfer_approval_registry_file(paths);
+    let registry_lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+    let InboundFileTransferApprovalRegistration {
+        session_id,
+        expected_runtime_id,
+        transfer_id,
+        metadata_sha256_hex,
+        file_name,
+        file_size,
+        claimed_sender_device_id,
+    } = registration;
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _session_lock = lock_session_registry_file(&session_lock_path, false)?;
+        let _approval_lock = lock_session_registry_file(&registry_lock_path, true)?;
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("inbound file approval has no managed session"))?;
+        if session.runtime_id != expected_runtime_id || !session.is_active() {
+            bail!("inbound file approval no longer belongs to the active runtime incarnation");
+        }
+        match &session.readiness {
+            SessionReadiness::HandshakeComplete {
+                session_id: receipt_session_id,
+                ..
+            } if receipt_session_id == &session_id => {}
+            _ => bail!("inbound file approval requires current handshake-complete evidence"),
+        }
+        let handshake_completed_at = session
+            .handshake_completed_at
+            .ok_or_else(|| anyhow!("inbound file approval is missing handshake completion time"))?;
+        let authenticated_peer = session.authenticated_peer.as_ref().ok_or_else(|| {
+            anyhow!("inbound file approval is missing authenticated peer evidence")
+        })?;
+        if authenticated_peer.observed_at < handshake_completed_at
+            || session.remote_device_id.as_deref() != Some(authenticated_peer.device_id.as_str())
+        {
+            bail!("inbound file approval authenticated peer evidence is stale or inconsistent");
+        }
+        if claimed_sender_device_id
+            .as_deref()
+            .is_some_and(|claimed| claimed != authenticated_peer.device_id)
+        {
+            bail!("inbound file metadata senderDeviceId does not match the authenticated peer");
+        }
+        let authenticated_peer_protocol_fingerprint = session
+            .remote_protocol_public_key_fingerprint
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                anyhow!("inbound file approval is missing authenticated peer fingerprint")
+            })?;
+
+        let now = OffsetDateTime::now_utc();
+        let candidate = InboundFileTransferApprovalRequest::pending(
+            InboundFileTransferApprovalBinding {
+                transfer_id: transfer_id.clone(),
+                session_id: session_id.clone(),
+                target_runtime_id: expected_runtime_id.clone(),
+                authenticated_peer_device_id: authenticated_peer.device_id.clone(),
+                authenticated_peer_device_name: authenticated_peer.device_name.clone(),
+                authenticated_peer_protocol_fingerprint,
+                metadata_sha256_hex,
+                file_name,
+                file_size,
+            },
+            now,
+        );
+        validate_inbound_file_transfer_approval_request(&candidate)?;
+        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
+        let reconciled = reconcile_inbound_file_approvals(&mut registry, &sessions, now)?;
+        let registry_key = candidate.registry_key();
+        if let Some(existing) = registry.requests.get(&registry_key) {
+            if inbound_approval_binding(existing) != inbound_approval_binding(&candidate) {
+                bail!("inbound file transferId conflicts with an existing approval binding");
+            }
+            let existing = existing.clone();
+            if reconciled {
+                store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+            }
+            return Ok(existing);
+        }
+        registry.insert(candidate.clone())?;
+        store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+        Ok(candidate)
+    })
+    .await
+    .context("inbound file approval registration task panicked")?
+}
+
+pub async fn request_inbound_file_transfer_decision(
+    paths: &AgentPaths,
+    session_id: &str,
+    transfer_id: &str,
+    decision: InboundFileTransferApprovalDecision,
+) -> Result<InboundFileTransferApprovalRequest> {
+    if decision == InboundFileTransferApprovalDecision::Expire {
+        bail!("expire is reserved for the agent approval timeout policy");
+    }
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_lock_path = session_registry_lock_file(paths);
+    let registry_path = inbound_file_transfer_approval_registry_file(paths);
+    let lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let transfer_id = transfer_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _session_lock = lock_session_registry_file(&session_lock_path, false)?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let active_runtime_id = sessions
+            .get(&session_id)
+            .filter(|session| session.is_active())
+            .map(|session| session.runtime_id.clone())
+            .ok_or_else(|| anyhow!("inbound file approval session is not active"))?;
+        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
+        let matches = registry
+            .requests
+            .iter()
+            .filter(|(_, request)| {
+                request.session_id == session_id
+                    && request.target_runtime_id == active_runtime_id
+                    && request.transfer_id == transfer_id
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let [registry_key] = matches.as_slice() else {
+            if matches.is_empty() {
+                bail!("inbound file approval request not found");
+            }
+            bail!("inbound file approval request is ambiguous across runtime incarnations");
+        };
+        let request = registry
+            .requests
+            .get_mut(registry_key)
+            .ok_or_else(|| anyhow!("inbound file approval request disappeared"))?;
+        if request.status == InboundFileTransferApprovalStatus::DecisionRequested
+            && request.decision == Some(decision)
+        {
+            return Ok(request.clone());
+        }
+        request.request_decision(decision, OffsetDateTime::now_utc())?;
+        let result = request.clone();
+        store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+        Ok(result)
+    })
+    .await
+    .context("inbound file approval decision task panicked")?
+}
+
+pub(crate) async fn observe_inbound_file_transfer_decisions_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<Vec<InboundFileTransferApprovalRequest>> {
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_lock_path = session_registry_lock_file(paths);
+    let registry_path = inbound_file_transfer_approval_registry_file(paths);
+    let registry_lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _session_lock = lock_session_registry_file(&session_lock_path, false)?;
+        let _approval_lock = lock_session_registry_file(&registry_lock_path, true)?;
+        let sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("inbound file decision has no managed session"))?;
+        if session.runtime_id != expected_runtime_id || !session.is_active() {
+            bail!("inbound file decision no longer belongs to the active runtime incarnation");
+        }
+        let authenticated_peer = session.authenticated_peer.as_ref().ok_or_else(|| {
+            anyhow!("inbound file decision is missing authenticated peer evidence")
+        })?;
+        if session.remote_device_id.as_deref() != Some(authenticated_peer.device_id.as_str()) {
+            bail!("inbound file decision authenticated peer identity changed");
+        }
+
+        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
+        let now = OffsetDateTime::now_utc();
+        let changed = reconcile_inbound_file_approvals(&mut registry, &sessions, now)?;
+        let mut decisions = Vec::new();
+        for request in registry.requests.values_mut().filter(|request| {
+            request.session_id == session_id && request.target_runtime_id == expected_runtime_id
+        }) {
+            if request.authenticated_peer_device_id != authenticated_peer.device_id {
+                bail!("inbound file decision authenticated peer binding changed");
+            }
+            if session.remote_protocol_public_key_fingerprint.as_deref()
+                != Some(request.authenticated_peer_protocol_fingerprint.as_str())
+            {
+                bail!("inbound file decision authenticated peer fingerprint changed");
+            }
+            if request.status == InboundFileTransferApprovalStatus::DecisionRequested {
+                decisions.push(request.clone());
+            }
+        }
+        if changed {
+            store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+        }
+        decisions.sort_by_key(|request| request.updated_at);
+        Ok(decisions)
+    })
+    .await
+    .context("inbound file approval observation task panicked")?
+}
+
+pub(crate) async fn mark_inbound_file_transfer_decision_applied_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    transfer_id: &str,
+    expected_runtime_id: &str,
+) -> Result<InboundFileTransferApprovalRequest> {
+    transition_inbound_file_transfer_decision_for_runtime(
+        paths,
+        session_id,
+        transfer_id,
+        expected_runtime_id,
+        |request| request.mark_applied(OffsetDateTime::now_utc()),
+    )
+    .await
+}
+
+pub(crate) async fn mark_inbound_file_transfer_decision_failed_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    transfer_id: &str,
+    expected_runtime_id: &str,
+) -> Result<InboundFileTransferApprovalRequest> {
+    transition_inbound_file_transfer_decision_for_runtime(
+        paths,
+        session_id,
+        transfer_id,
+        expected_runtime_id,
+        |request| {
+            request.mark_failed(
+                "agent failed to apply inbound file decision",
+                OffsetDateTime::now_utc(),
+            )
+        },
+    )
+    .await
+}
+
+async fn transition_inbound_file_transfer_decision_for_runtime<F>(
+    paths: &AgentPaths,
+    session_id: &str,
+    transfer_id: &str,
+    expected_runtime_id: &str,
+    transition: F,
+) -> Result<InboundFileTransferApprovalRequest>
+where
+    F: FnOnce(&mut InboundFileTransferApprovalRequest) -> Result<()> + Send + 'static,
+{
+    ensure_identity_layout(paths).await?;
+    let registry_path = inbound_file_transfer_approval_registry_file(paths);
+    let lock_path = inbound_file_transfer_approval_registry_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let transfer_id = transfer_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
+        let registry_key = registry
+            .requests
+            .iter()
+            .find(|(_, request)| {
+                request.session_id == session_id
+                    && request.target_runtime_id == expected_runtime_id
+                    && request.transfer_id == transfer_id
+            })
+            .map(|(key, _)| key.clone())
+            .ok_or_else(|| anyhow!("inbound file approval request not found"))?;
+        let request = registry
+            .requests
+            .get_mut(&registry_key)
+            .ok_or_else(|| anyhow!("inbound file approval request disappeared"))?;
+        transition(request)?;
+        let result = request.clone();
+        store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+        Ok(result)
+    })
+    .await
+    .context("inbound file approval transition task panicked")?
 }
 
 pub async fn load_nearby_discovery_snapshot_registry(
@@ -554,13 +2141,6 @@ pub async fn enqueue_remote_desktop_request_for_established_session(
                 existing.request_id
             );
         }
-        if request_registry.requests.len() >= RemoteDesktopControlRequestRegistry::MAX_REQUESTS {
-            bail!(
-                "remote desktop request registry is full at {} entries; wait for agent observation before adding more requests",
-                RemoteDesktopControlRequestRegistry::MAX_REQUESTS
-            );
-        }
-
         let request = RemoteDesktopControlRequest::pending(
             uuid::Uuid::now_v7().to_string(),
             bound_session_id,
@@ -568,7 +2148,7 @@ pub async fn enqueue_remote_desktop_request_for_established_session(
             action,
             payload,
         );
-        request_registry.insert(request.clone());
+        request_registry.insert(request.clone())?;
         store_remote_desktop_request_registry_unlocked(
             &request_registry_path,
             &request_registry,
@@ -583,8 +2163,23 @@ pub async fn observe_remote_desktop_requests_for_established_session(
     paths: &AgentPaths,
     session_id: &str,
 ) -> Result<Vec<RemoteDesktopControlRequest>> {
+    let registry = load_session_registry(paths).await?;
+    let runtime_id = registry
+        .get(session_id)
+        .ok_or_else(|| anyhow!("session `{session_id}` not found"))?
+        .runtime_id
+        .clone();
+    observe_remote_desktop_requests_for_runtime(paths, session_id, &runtime_id).await
+}
+
+pub(crate) async fn observe_remote_desktop_requests_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<Vec<RemoteDesktopControlRequest>> {
     ensure_identity_layout(paths).await?;
     let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
     let session_registry_path = session_registry_file(paths);
     let session_registry_lock_path = session_registry_lock_file(paths);
     let request_registry_path = remote_desktop_request_registry_file(paths);
@@ -602,56 +2197,55 @@ pub async fn observe_remote_desktop_requests_for_established_session(
                 session.state
             );
         }
-        let target_runtime_id = session.runtime_id.clone();
+        if session.runtime_id != expected_runtime_id {
+            bail!("managed runtime incarnation no longer owns remote desktop observation");
+        }
 
         let _request_file_lock = lock_session_registry_file(&request_registry_lock_path, true)?;
         let mut request_registry =
             load_remote_desktop_request_registry_unlocked(&request_registry_path)?;
-        if request_registry.pending_for_session(&session_id).is_empty() {
+        let pending = request_registry.pending_for_session(&session_id);
+        if pending.is_empty() {
             return Ok(Vec::new());
         }
-        if session.effective_established_readiness().is_none() {
-            bail!(
-                "session `{session_id}` has no established transport or handshake evidence for remote desktop request observation"
-            );
-        }
-        let stale_pending = request_registry
-            .pending_for_session(&session_id)
-            .into_iter()
-            .find(|request| request.target_runtime_id != target_runtime_id);
-        if let Some(request) = stale_pending {
-            bail!(
-                "remote desktop request `{}` targets stale runtime for session `{session_id}`",
-                request.request_id
-            );
-        }
-
-        let pending_ids =
-            request_registry.pending_ids_for_session_runtime(&session_id, &target_runtime_id);
-        if pending_ids.is_empty() {
-            return Ok(Vec::new());
-        }
+        let stale_ids = pending
+            .iter()
+            .filter(|request| request.target_runtime_id != expected_runtime_id)
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
         let now = OffsetDateTime::now_utc();
-        let mut observed = Vec::with_capacity(pending_ids.len());
+        for request_id in stale_ids {
+            let request = request_registry
+                .requests
+                .get_mut(&request_id)
+                .ok_or_else(|| anyhow!("stale remote desktop request disappeared"))?;
+            request.status = RemoteDesktopControlRequestStatus::AgentRejected;
+            request.updated_at = now;
+        }
+        let pending_ids =
+            request_registry.pending_ids_for_session_runtime(&session_id, &expected_runtime_id);
+        // The standalone Rust runtime does not have a screen-capture/media/input
+        // backend. Legacy request files must therefore terminate as rejected;
+        // agent observation is not an application receipt and must never be
+        // promoted to a success-adjacent state.
         for request_id in pending_ids {
             let request = request_registry
                 .requests
                 .get_mut(&request_id)
-                .ok_or_else(|| anyhow!("remote desktop pending request `{request_id}` disappeared"))?;
+                .ok_or_else(|| {
+                    anyhow!("remote desktop pending request `{request_id}` disappeared")
+                })?;
             if !request.is_pending_agent_observation() {
                 bail!(
                     "remote desktop request `{}` is not pending agent observation",
                     request.request_id
                 );
             }
-            request.mark_agent_observed(now);
-            observed.push(request.clone());
+            request.status = RemoteDesktopControlRequestStatus::AgentRejected;
+            request.updated_at = now;
         }
-        store_remote_desktop_request_registry_unlocked(
-            &request_registry_path,
-            &request_registry,
-        )?;
-        Ok(observed)
+        store_remote_desktop_request_registry_unlocked(&request_registry_path, &request_registry)?;
+        Ok(Vec::new())
     })
     .await
     .context("remote desktop request observation task panicked")?
@@ -661,8 +2255,23 @@ pub async fn observe_file_transfer_requests_for_established_session(
     paths: &AgentPaths,
     session_id: &str,
 ) -> Result<Vec<FileTransferControlRequest>> {
+    let registry = load_session_registry(paths).await?;
+    let runtime_id = registry
+        .get(session_id)
+        .ok_or_else(|| anyhow!("session `{session_id}` not found"))?
+        .runtime_id
+        .clone();
+    observe_file_transfer_requests_for_runtime(paths, session_id, &runtime_id).await
+}
+
+pub(crate) async fn observe_file_transfer_requests_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<Vec<FileTransferControlRequest>> {
     ensure_identity_layout(paths).await?;
     let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
     let session_registry_path = session_registry_file(paths);
     let session_registry_lock_path = session_registry_lock_file(paths);
     let request_registry_path = file_transfer_request_registry_file(paths);
@@ -680,12 +2289,40 @@ pub async fn observe_file_transfer_requests_for_established_session(
                 session.state
             );
         }
-        let target_runtime_id = session.runtime_id.clone();
+        if session.runtime_id != expected_runtime_id {
+            bail!("managed runtime incarnation no longer owns file transfer observation");
+        }
 
         let _request_file_lock = lock_session_registry_file(&request_registry_lock_path, true)?;
         let mut request_registry =
             load_file_transfer_request_registry_unlocked(&request_registry_path)?;
-        if request_registry.pending_for_session(&session_id).is_empty() {
+        let pending = request_registry.pending_for_session(&session_id);
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stale_ids = pending
+            .iter()
+            .filter(|request| request.target_runtime_id != expected_runtime_id)
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
+        let now = OffsetDateTime::now_utc();
+        for request_id in stale_ids {
+            let request = request_registry
+                .requests
+                .get_mut(&request_id)
+                .ok_or_else(|| anyhow!("stale file transfer request disappeared"))?;
+            request.status = FileTransferControlRequestStatus::AgentRejected;
+            request.failure_reason =
+                Some("request targets an inactive managed runtime".to_owned());
+            request.updated_at = now;
+        }
+        let pending_ids = request_registry
+            .pending_ids_for_session_runtime(&session_id, &expected_runtime_id);
+        if pending_ids.is_empty() {
+            store_file_transfer_request_registry_unlocked(
+                &request_registry_path,
+                &request_registry,
+            )?;
             return Ok(Vec::new());
         }
         if !matches!(
@@ -699,23 +2336,6 @@ pub async fn observe_file_transfer_requests_for_established_session(
                 "session `{session_id}` has no current handshake-complete evidence for file transfer request observation"
             );
         }
-        let stale_pending = request_registry
-            .pending_for_session(&session_id)
-            .into_iter()
-            .find(|request| request.target_runtime_id != target_runtime_id);
-        if let Some(request) = stale_pending {
-            bail!(
-                "file transfer request `{}` targets stale runtime for session `{session_id}`",
-                request.request_id
-            );
-        }
-
-        let pending_ids =
-            request_registry.pending_ids_for_session_runtime(&session_id, &target_runtime_id);
-        if pending_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let now = OffsetDateTime::now_utc();
         let mut observed = Vec::with_capacity(pending_ids.len());
         for request_id in pending_ids {
             let request = request_registry
@@ -774,6 +2394,154 @@ where
     .context("file transfer request update task panicked")?
 }
 
+async fn transition_file_transfer_request<F>(
+    paths: &AgentPaths,
+    request_id: &str,
+    expected_runtime_id: &str,
+    transition: F,
+) -> Result<FileTransferControlRequest>
+where
+    F: FnOnce(&mut FileTransferControlRequest) -> Result<()> + Send + 'static,
+{
+    ensure_identity_layout(paths).await?;
+    let request_id = request_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let request_registry_path = file_transfer_request_registry_file(paths);
+    let request_registry_lock_path = file_transfer_request_registry_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, false)?;
+        let session_registry = load_session_registry_unlocked(&session_registry_path)?;
+        let _request_file_lock = lock_session_registry_file(&request_registry_lock_path, true)?;
+        let mut request_registry =
+            load_file_transfer_request_registry_unlocked(&request_registry_path)?;
+        let request = request_registry
+            .requests
+            .get_mut(&request_id)
+            .ok_or_else(|| anyhow!("file transfer request `{request_id}` not found"))?;
+        require_runtime_incarnation(&session_registry, &request.session_id, &expected_runtime_id)?;
+        if request.target_runtime_id != expected_runtime_id {
+            bail!("file transfer request belongs to a different runtime incarnation");
+        }
+        transition(request)?;
+        let updated = request.clone();
+        store_file_transfer_request_registry_unlocked(&request_registry_path, &request_registry)?;
+        Ok(updated)
+    })
+    .await
+    .context("file transfer request transition task panicked")?
+}
+
+pub(crate) async fn reject_file_transfer_request_for_runtime(
+    paths: &AgentPaths,
+    request_id: &str,
+    expected_runtime_id: &str,
+    reason: &'static str,
+) -> Result<FileTransferControlRequest> {
+    transition_file_transfer_request(paths, request_id, expected_runtime_id, move |request| {
+        if request.status == FileTransferControlRequestStatus::AgentRejected
+            && request.failure_reason.as_deref() == Some(reason)
+        {
+            return Ok(());
+        }
+        if request.status != FileTransferControlRequestStatus::AgentObserved {
+            bail!("file transfer rejection requires an observed request");
+        }
+        request.status = FileTransferControlRequestStatus::AgentRejected;
+        request.failure_reason = Some(reason.to_owned());
+        request.updated_at = OffsetDateTime::now_utc();
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn start_file_transfer_request_for_runtime(
+    paths: &AgentPaths,
+    request_id: &str,
+    expected_runtime_id: &str,
+) -> Result<FileTransferControlRequest> {
+    transition_file_transfer_request(paths, request_id, expected_runtime_id, |request| {
+        if request.status != FileTransferControlRequestStatus::AgentObserved {
+            bail!("file transfer start requires an observed request");
+        }
+        request.mark_transfer_started(OffsetDateTime::now_utc());
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn record_file_transfer_progress_for_runtime(
+    paths: &AgentPaths,
+    request_id: &str,
+    expected_runtime_id: &str,
+    bytes_transferred: u64,
+) -> Result<FileTransferControlRequest> {
+    transition_file_transfer_request(paths, request_id, expected_runtime_id, move |request| {
+        if request.status != FileTransferControlRequestStatus::TransferInProgress {
+            bail!("file transfer progress requires an in-progress request");
+        }
+        if bytes_transferred < request.bytes_transferred
+            || bytes_transferred > request.source.size_bytes
+        {
+            bail!("file transfer progress violates the bounded monotonic byte count");
+        }
+        request.record_bytes_transferred(bytes_transferred, OffsetDateTime::now_utc());
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn complete_file_transfer_request_for_runtime(
+    paths: &AgentPaths,
+    request_id: &str,
+    expected_runtime_id: &str,
+    bytes_transferred: u64,
+) -> Result<FileTransferControlRequest> {
+    transition_file_transfer_request(paths, request_id, expected_runtime_id, move |request| {
+        if request.status == FileTransferControlRequestStatus::TransferCompleted
+            && request.bytes_transferred == bytes_transferred
+        {
+            return Ok(());
+        }
+        if request.status != FileTransferControlRequestStatus::TransferInProgress {
+            bail!("file transfer completion requires an in-progress request");
+        }
+        if bytes_transferred != request.source.size_bytes {
+            bail!("file transfer completion byte count does not match the source snapshot");
+        }
+        request.mark_transfer_completed(bytes_transferred, OffsetDateTime::now_utc());
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn fail_file_transfer_request_for_runtime(
+    paths: &AgentPaths,
+    request_id: &str,
+    expected_runtime_id: &str,
+    reason: String,
+) -> Result<FileTransferControlRequest> {
+    transition_file_transfer_request(paths, request_id, expected_runtime_id, move |request| {
+        if request.status == FileTransferControlRequestStatus::TransferFailed
+            && request.failure_reason.as_deref() == Some(reason.as_str())
+        {
+            return Ok(());
+        }
+        if !matches!(
+            request.status,
+            FileTransferControlRequestStatus::AgentObserved
+                | FileTransferControlRequestStatus::TransferInProgress
+        ) {
+            bail!("file transfer failure requires an observed or in-progress request");
+        }
+        request.mark_transfer_failed(reason, OffsetDateTime::now_utc());
+        Ok(())
+    })
+    .await
+}
+
 pub async fn enqueue_file_transfer_send_request_for_established_session(
     paths: &AgentPaths,
     session_id: &str,
@@ -810,9 +2578,14 @@ pub async fn enqueue_file_transfer_send_request_for_established_session(
                     existing.request_id
                 );
             }
-            if request_registry.requests.len() >= FileTransferControlRequestRegistry::MAX_REQUESTS {
+            if request_registry.requests.len() >= FileTransferControlRequestRegistry::MAX_REQUESTS
+                && !request_registry
+                    .requests
+                    .values()
+                    .any(FileTransferControlRequest::is_terminal)
+            {
                 bail!(
-                    "file transfer request registry is full at {} entries; wait for agent observation before adding more requests",
+                    "file transfer request registry is full at {} nonterminal entries",
                     FileTransferControlRequestRegistry::MAX_REQUESTS
                 );
             }
@@ -834,13 +2607,6 @@ pub async fn enqueue_file_transfer_send_request_for_established_session(
                 existing.request_id
             );
         }
-        if request_registry.requests.len() >= FileTransferControlRequestRegistry::MAX_REQUESTS {
-            bail!(
-                "file transfer request registry is full at {} entries; wait for agent observation before adding more requests",
-                FileTransferControlRequestRegistry::MAX_REQUESTS
-            );
-        }
-
         let request = FileTransferControlRequest::pending_send(
             uuid::Uuid::now_v7().to_string(),
             session_binding.session_id,
@@ -853,7 +2619,7 @@ pub async fn enqueue_file_transfer_send_request_for_established_session(
                     session_binding.remote_protocol_public_key_fingerprint,
             },
         );
-        request_registry.insert(request.clone());
+        request_registry.insert(request.clone())?;
         store_file_transfer_request_registry_unlocked(
             &request_registry_path,
             &request_registry,
@@ -933,9 +2699,9 @@ pub async fn upsert_session_runtime(
     paths: &AgentPaths,
     record: RuntimeSessionRecord,
 ) -> Result<SessionRegistry> {
-    mutate_session_registry(paths, move |registry| {
-        registry.insert(record);
-        registry.clone()
+    try_mutate_session_registry(paths, move |registry| {
+        registry.insert(record)?;
+        Ok(registry.clone())
     })
     .await
 }
@@ -953,6 +2719,7 @@ pub async fn remove_session_runtime(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn disconnect_session_if_active(
     paths: &AgentPaths,
     session_id: &str,
@@ -974,6 +2741,91 @@ pub(crate) async fn disconnect_session_if_active(
     .await
 }
 
+pub(crate) async fn disconnect_session_if_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    reason: Option<String>,
+) -> Result<bool> {
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    mutate_session_registry(paths, move |registry| {
+        let Some(record) = registry.get(&session_id) else {
+            return false;
+        };
+        if record.runtime_id != expected_runtime_id {
+            return false;
+        }
+        if matches!(
+            record.state,
+            RuntimeSessionState::Disconnected | RuntimeSessionState::Failed
+        ) {
+            return true;
+        }
+        registry.mark_disconnected(&session_id, reason)
+    })
+    .await
+}
+
+pub(crate) async fn apply_transport_event_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    event: RuntimeSessionTransportEvent,
+) -> Result<SessionRegistry> {
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let event_session_id = session_id.clone();
+    try_mutate_authorized_runtime_session(
+        paths,
+        &session_id,
+        &expected_runtime_id,
+        move |registry| {
+            registry.apply_transport_event(&event_session_id, event);
+            Ok(registry.clone())
+        },
+    )
+    .await
+}
+
+pub(crate) async fn apply_signaling_event_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    event: SignalingLifecycleEvent,
+) -> Result<SessionRegistry> {
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let event_session_id = session_id.clone();
+    try_mutate_authorized_runtime_session(
+        paths,
+        &session_id,
+        &expected_runtime_id,
+        move |registry| {
+            registry.apply_signaling_event(&event_session_id, &event);
+            Ok(registry.clone())
+        },
+    )
+    .await
+}
+
+fn require_runtime_incarnation<'a>(
+    registry: &'a SessionRegistry,
+    session_id: &str,
+    expected_runtime_id: &str,
+) -> Result<&'a RuntimeSessionRecord> {
+    let record = registry
+        .get(session_id)
+        .ok_or_else(|| anyhow!("managed runtime session is missing"))?;
+    if record.runtime_id != expected_runtime_id {
+        bail!("managed runtime incarnation no longer owns the session");
+    }
+    if !record.is_active() {
+        bail!("managed runtime incarnation no longer owns an active session");
+    }
+    Ok(record)
+}
+
 pub async fn apply_transport_event(
     paths: &AgentPaths,
     session_id: &str,
@@ -987,19 +2839,6 @@ pub async fn apply_transport_event(
     .await
 }
 
-pub(crate) async fn apply_signaling_event(
-    paths: &AgentPaths,
-    session_id: &str,
-    event: SignalingLifecycleEvent,
-) -> Result<SessionRegistry> {
-    let session_id = session_id.to_owned();
-    mutate_session_registry(paths, move |registry| {
-        registry.apply_signaling_event(&session_id, &event);
-        registry.clone()
-    })
-    .await
-}
-
 pub async fn update_session_remote_peer(
     paths: &AgentPaths,
     session_id: &str,
@@ -1008,15 +2847,97 @@ pub async fn update_session_remote_peer(
     remote_protocol_public_key_fingerprint: Option<String>,
 ) -> Result<SessionRegistry> {
     let session_id = session_id.to_owned();
-    let remote_device_id = remote_device_id.into();
-    mutate_session_registry(paths, move |registry| {
-        registry.update_remote_peer(
-            &session_id,
-            remote_device_id,
-            remote_device_name,
-            remote_protocol_public_key_fingerprint,
-        );
-        registry.clone()
+    let remote_device_id = remote_device_id.into().trim().to_owned();
+    if remote_device_id.is_empty()
+        || remote_device_id.len() > 256
+        || remote_device_id
+            .chars()
+            .any(|character| character.is_control())
+    {
+        bail!("remote device id is empty or violates the session metadata boundary");
+    }
+    try_mutate_session_registry(paths, move |registry| {
+        let record = registry
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow!("runtime session is missing while binding remote peer"))?;
+        if record
+            .remote_device_id
+            .as_deref()
+            .is_some_and(|expected| expected != remote_device_id)
+        {
+            bail!("remote device id did not match the pre-bound session peer");
+        }
+        if let Some(observed_fingerprint) = remote_protocol_public_key_fingerprint.as_deref()
+            && record
+                .remote_protocol_public_key_fingerprint
+                .as_deref()
+                .is_some_and(|expected| !expected.eq_ignore_ascii_case(observed_fingerprint))
+        {
+            bail!("remote protocol identity did not match the pre-bound session peer");
+        }
+        record.remote_device_id.get_or_insert(remote_device_id);
+        if remote_device_name.is_some() {
+            record.remote_device_name = remote_device_name;
+        }
+        if record.remote_protocol_public_key_fingerprint.is_none() {
+            record.remote_protocol_public_key_fingerprint = remote_protocol_public_key_fingerprint;
+        }
+        record.updated_at = OffsetDateTime::now_utc();
+        Ok(registry.clone())
+    })
+    .await
+}
+
+pub(crate) async fn update_session_remote_peer_for_runtime(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    remote_device_id: impl Into<String>,
+    remote_device_name: Option<String>,
+    remote_protocol_public_key_fingerprint: Option<String>,
+) -> Result<SessionRegistry> {
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    let remote_device_id = remote_device_id.into().trim().to_owned();
+    if remote_device_id.is_empty()
+        || remote_device_id.len() > 256
+        || remote_device_id
+            .chars()
+            .any(|character| character.is_control())
+    {
+        bail!("remote device id is empty or violates the session metadata boundary");
+    }
+    try_mutate_session_registry(paths, move |registry| {
+        require_runtime_incarnation(registry, &session_id, &expected_runtime_id)?;
+        let record = registry
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow!("runtime session is missing while binding remote peer"))?;
+        if record
+            .remote_device_id
+            .as_deref()
+            .is_some_and(|expected| expected != remote_device_id)
+        {
+            bail!("remote device id did not match the pre-bound session peer");
+        }
+        if let Some(observed_fingerprint) = remote_protocol_public_key_fingerprint.as_deref()
+            && record
+                .remote_protocol_public_key_fingerprint
+                .as_deref()
+                .is_some_and(|expected| !expected.eq_ignore_ascii_case(observed_fingerprint))
+        {
+            bail!("remote protocol identity did not match the pre-bound session peer");
+        }
+        record.remote_device_id.get_or_insert(remote_device_id);
+        if remote_device_name.is_some() {
+            record.remote_device_name = remote_device_name;
+        }
+        if record.remote_protocol_public_key_fingerprint.is_none() {
+            record.remote_protocol_public_key_fingerprint = remote_protocol_public_key_fingerprint;
+        }
+        record.updated_at = OffsetDateTime::now_utc();
+        Ok(registry.clone())
     })
     .await
 }
@@ -1295,7 +3216,7 @@ fn validate_kem_identity_lengths(
 }
 
 async fn persist_identity(paths: &AgentPaths, identity: &LocalIdentityState) -> Result<()> {
-    write_json(&paths.identity_file, identity).await
+    write_json_atomic_private(&paths.identity_file, identity).await
 }
 
 async fn ensure_identity_layout(paths: &AgentPaths) -> Result<()> {
@@ -1339,6 +3260,13 @@ fn lock_session_registry_process() -> Result<std::sync::MutexGuard<'static, ()>>
         .map_err(|_| anyhow!("session registry process lock poisoned"))
 }
 
+fn lock_managed_session_controls_process() -> Result<std::sync::MutexGuard<'static, ()>> {
+    MANAGED_SESSION_CONTROLS_PROCESS_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow!("managed session controls process lock poisoned"))
+}
+
 fn lock_session_registry_file(path: &Path, exclusive: bool) -> Result<std::fs::File> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -1367,28 +3295,102 @@ fn load_session_registry_unlocked(path: &Path) -> Result<SessionRegistry> {
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
     };
+    if registry.sessions.len() > SessionRegistry::MAX_SESSIONS {
+        bail!(
+            "session registry has {} entries in {}; max {}",
+            registry.sessions.len(),
+            path.display(),
+            SessionRegistry::MAX_SESSIONS
+        );
+    }
     registry.schema_version = SessionRegistry::SCHEMA_VERSION;
     Ok(registry)
 }
 
+fn load_managed_session_controls_unlocked(path: &Path) -> Result<ManagedSessionControlRegistry> {
+    let registry = match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str::<ManagedSessionControlRegistry>(&body)
+            .with_context(|| format!("failed to decode {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ManagedSessionControlRegistry::default()
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    validate_managed_session_control_registry(path, &registry)?;
+    Ok(registry)
+}
+
+/// Upgrades the only supported legacy control schema while holding the
+/// combined session/control recovery locks. A legacy record has no immutable
+/// registration owner, so it is deliberately migrated as `Stopped`; startup
+/// recovery then disconnects its runtime and removes the retry anchor. Even a
+/// transitional legacy payload carrying an id remains stopped because its
+/// schema did not establish the immutable-owner contract.
+fn migrate_legacy_managed_session_controls_unlocked(path: &Path) -> Result<()> {
+    let mut registry = match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str::<ManagedSessionControlRegistry>(&body)
+            .with_context(|| format!("failed to decode {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    validate_managed_session_control_registry_shape(path, &registry)?;
+
+    let mut changed = false;
+    for (session_id, control) in &mut registry.sessions {
+        match control.schema_version {
+            ManagedSessionControl::SCHEMA_VERSION => {
+                validate_registration_id(&control.registration_id).with_context(|| {
+                    format!("managed session control `{session_id}` has an invalid registration id")
+                })?;
+            }
+            LEGACY_MANAGED_SESSION_CONTROL_SCHEMA_VERSION => {
+                if control.registration_id.is_empty() {
+                    control.registration_id = uuid::Uuid::now_v7().hyphenated().to_string();
+                } else {
+                    validate_registration_id(&control.registration_id).with_context(|| {
+                        format!(
+                            "legacy managed session control `{session_id}` has an invalid registration id"
+                        )
+                    })?;
+                }
+                control.desired_state = ManagedSessionDesiredState::Stopped;
+                control.schema_version = ManagedSessionControl::SCHEMA_VERSION;
+                control.updated_at = OffsetDateTime::now_utc();
+                changed = true;
+            }
+            version => {
+                bail!(
+                    "unsupported managed session control schema version {version} for session `{session_id}`; expected {} or legacy {}",
+                    ManagedSessionControl::SCHEMA_VERSION,
+                    LEGACY_MANAGED_SESSION_CONTROL_SCHEMA_VERSION
+                );
+            }
+        }
+    }
+    if changed {
+        store_managed_session_controls_unlocked(path, &registry)?;
+    }
+    Ok(())
+}
+
+fn store_managed_session_controls_unlocked(
+    path: &Path,
+    registry: &ManagedSessionControlRegistry,
+) -> Result<()> {
+    validate_managed_session_control_registry(path, registry)?;
+    let mut registry = registry.clone();
+    registry.schema_version = ManagedSessionControlRegistry::SCHEMA_VERSION;
+    let body = serde_json::to_vec_pretty(&registry).context("failed to encode json")?;
+    write_private_file_atomically(path, &body)
+}
+
 fn store_session_registry_unlocked(path: &Path, registry: &SessionRegistry) -> Result<()> {
     let body = serde_json::to_vec_pretty(registry).context("failed to encode json")?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow!("session registry path missing filename"))?
-        .to_string_lossy();
-    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::now_v7()));
-    std::fs::write(&temp_path, body)
-        .with_context(|| format!("failed to write {}", temp_path.display()))?;
-    restrict_file_permissions_blocking(&temp_path)?;
-    #[cfg(windows)]
-    if path.exists() {
-        std::fs::remove_file(path)
-            .with_context(|| format!("failed to replace {}", path.display()))?;
-    }
-    std::fs::rename(&temp_path, path)
-        .with_context(|| format!("failed to persist {}", path.display()))?;
-    restrict_file_permissions_blocking(path)
+    write_private_file_atomically(path, &body)
 }
 
 fn load_remote_desktop_request_registry_unlocked(
@@ -1422,6 +3424,23 @@ fn load_file_transfer_request_registry_unlocked(
         }
     };
     validate_file_transfer_request_registry(path, &registry)?;
+    Ok(registry)
+}
+
+fn load_inbound_file_transfer_approval_registry_unlocked(
+    path: &Path,
+) -> Result<InboundFileTransferApprovalRegistry> {
+    let registry = match std::fs::read_to_string(path) {
+        Ok(body) => serde_json::from_str::<InboundFileTransferApprovalRegistry>(&body)
+            .with_context(|| format!("failed to decode {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            InboundFileTransferApprovalRegistry::default()
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()));
+        }
+    };
+    validate_inbound_file_transfer_approval_registry(path, &registry)?;
     Ok(registry)
 }
 
@@ -1509,6 +3528,17 @@ fn store_file_transfer_request_registry_unlocked(
     std::fs::rename(&temp_path, path)
         .with_context(|| format!("failed to persist {}", path.display()))?;
     restrict_file_permissions_blocking(path)
+}
+
+fn store_inbound_file_transfer_approval_registry_unlocked(
+    path: &Path,
+    registry: &InboundFileTransferApprovalRegistry,
+) -> Result<()> {
+    validate_inbound_file_transfer_approval_registry(path, registry)?;
+    let mut registry = registry.clone();
+    registry.schema_version = InboundFileTransferApprovalRegistry::SCHEMA_VERSION;
+    let body = serde_json::to_vec_pretty(&registry).context("failed to encode json")?;
+    write_private_file_atomically(path, &body)
 }
 
 fn store_nearby_discovery_snapshot_registry_unlocked(
@@ -1759,6 +3789,195 @@ fn validate_file_transfer_request_registry(
     Ok(())
 }
 
+fn inbound_approval_binding(
+    request: &InboundFileTransferApprovalRequest,
+) -> (&str, &str, &str, &str, &str, &str, &str, u64) {
+    (
+        &request.transfer_id,
+        &request.session_id,
+        &request.target_runtime_id,
+        &request.authenticated_peer_device_id,
+        &request.authenticated_peer_protocol_fingerprint,
+        &request.metadata_sha256_hex,
+        &request.file_name,
+        request.file_size,
+    )
+}
+
+fn reconcile_inbound_file_approvals(
+    registry: &mut InboundFileTransferApprovalRegistry,
+    sessions: &SessionRegistry,
+    now: OffsetDateTime,
+) -> Result<bool> {
+    let mut changed = false;
+    let expiry = time::Duration::minutes(5);
+    for request in registry
+        .requests
+        .values_mut()
+        .filter(|request| !request.is_terminal())
+    {
+        let current_authority = sessions
+            .get(&request.session_id)
+            .filter(|session| {
+                session.is_active() && session.runtime_id == request.target_runtime_id
+            })
+            .and_then(|session| {
+                session.authenticated_peer.as_ref().filter(|peer| {
+                    session.remote_device_id.as_deref() == Some(peer.device_id.as_str())
+                        && peer.device_id == request.authenticated_peer_device_id
+                        && session.remote_protocol_public_key_fingerprint.as_deref()
+                            == Some(request.authenticated_peer_protocol_fingerprint.as_str())
+                })
+            })
+            .is_some();
+        if !current_authority {
+            request.status = InboundFileTransferApprovalStatus::DecisionRequested;
+            request.decision = Some(InboundFileTransferApprovalDecision::Expire);
+            request.applied_at = None;
+            request.failure_reason = None;
+            request.updated_at = now;
+            request.mark_applied(now)?;
+            changed = true;
+            continue;
+        }
+        if request.status == InboundFileTransferApprovalStatus::PendingDecision
+            && now >= request.created_at
+            && now - request.created_at >= expiry
+        {
+            request.request_decision(InboundFileTransferApprovalDecision::Expire, now)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn expire_inbound_file_approvals_for_incarnation(
+    registry: &mut InboundFileTransferApprovalRegistry,
+    session_id: &str,
+    expected_runtime_id: Option<&str>,
+    now: OffsetDateTime,
+) -> Result<()> {
+    for request in registry.requests.values_mut().filter(|request| {
+        request.session_id == session_id
+            && expected_runtime_id.is_none_or(|runtime_id| request.target_runtime_id == runtime_id)
+            && !request.is_terminal()
+    }) {
+        request.status = InboundFileTransferApprovalStatus::DecisionRequested;
+        request.decision = Some(InboundFileTransferApprovalDecision::Expire);
+        request.applied_at = None;
+        request.failure_reason = None;
+        request.updated_at = now;
+        request.mark_applied(now)?;
+    }
+    Ok(())
+}
+
+fn validate_inbound_file_transfer_approval_registry(
+    path: &Path,
+    registry: &InboundFileTransferApprovalRegistry,
+) -> Result<()> {
+    if registry.schema_version != InboundFileTransferApprovalRegistry::SCHEMA_VERSION {
+        bail!(
+            "unsupported inbound file approval registry schema version {} in {}; expected {}",
+            registry.schema_version,
+            path.display(),
+            InboundFileTransferApprovalRegistry::SCHEMA_VERSION
+        );
+    }
+    if registry.requests.len() > InboundFileTransferApprovalRegistry::MAX_REQUESTS {
+        bail!("inbound file approval registry exceeds bounded capacity");
+    }
+    for (registry_key, request) in &registry.requests {
+        if registry_key != &request.registry_key() {
+            bail!("inbound file approval registry key does not match its bound identities");
+        }
+        validate_inbound_file_transfer_approval_request(request)?;
+    }
+    Ok(())
+}
+
+fn validate_inbound_file_transfer_approval_request(
+    request: &InboundFileTransferApprovalRequest,
+) -> Result<()> {
+    if request.schema_version != InboundFileTransferApprovalRequest::SCHEMA_VERSION {
+        bail!("unsupported inbound file approval request schema version");
+    }
+    CrossNetworkTransferId::parse(request.transfer_id.clone())?;
+    for (field, value) in [
+        ("session_id", request.session_id.as_str()),
+        ("target_runtime_id", request.target_runtime_id.as_str()),
+        (
+            "authenticated_peer_device_id",
+            request.authenticated_peer_device_id.as_str(),
+        ),
+        (
+            "authenticated_peer_device_name",
+            request.authenticated_peer_device_name.as_str(),
+        ),
+        (
+            "authenticated_peer_protocol_fingerprint",
+            request.authenticated_peer_protocol_fingerprint.as_str(),
+        ),
+    ] {
+        if value.is_empty()
+            || value.trim() != value
+            || value.len() > 1024
+            || value.chars().any(char::is_control)
+        {
+            bail!("inbound file approval {field} is invalid");
+        }
+    }
+    if request.metadata_sha256_hex.len() != 64
+        || !request
+            .metadata_sha256_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        bail!("inbound file approval metadata digest must be lowercase SHA-256 hex");
+    }
+    if request.file_name.is_empty()
+        || request.file_name.trim() != request.file_name
+        || request.file_name.len() > 255
+        || request.file_name == "."
+        || request.file_name == ".."
+        || request.file_name.chars().any(|character| {
+            character.is_control() || matches!(character, '/' | '\\' | '\u{2044}' | '\u{2215}')
+        })
+        || request.file_size > MAX_TRANSFER_BYTES
+    {
+        bail!("inbound file approval metadata is outside the bounded file contract");
+    }
+    let state_is_valid = match request.status {
+        InboundFileTransferApprovalStatus::PendingDecision => {
+            request.decision.is_none()
+                && request.applied_at.is_none()
+                && request.failure_reason.is_none()
+        }
+        InboundFileTransferApprovalStatus::DecisionRequested => {
+            request.decision.is_some()
+                && request.applied_at.is_none()
+                && request.failure_reason.is_none()
+        }
+        InboundFileTransferApprovalStatus::AgentApplied => {
+            request.decision.is_some()
+                && request.applied_at.is_some()
+                && request.failure_reason.is_none()
+        }
+        InboundFileTransferApprovalStatus::AgentFailed => {
+            request.decision.is_some()
+                && request.applied_at.is_none()
+                && request
+                    .failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.is_empty() && reason.len() <= 128)
+        }
+    };
+    if !state_is_valid || request.updated_at < request.created_at {
+        bail!("inbound file approval state transition is invalid");
+    }
+    Ok(())
+}
+
 fn validate_file_transfer_request(request: &FileTransferControlRequest) -> Result<()> {
     if request.schema_version != FileTransferControlRequest::SCHEMA_VERSION {
         bail!(
@@ -1875,6 +4094,11 @@ fn validate_nearby_discovered_device(scan_id: &str, device: &NearbyDiscoveredDev
         );
     }
     validate_public_snapshot_text("display_name", &device.display_name)?;
+    if looks_like_network_locator(&device.display_name) {
+        bail!(
+            "nearby discovery display_name for device_ref in scan `{scan_id}` must not expose a network locator"
+        );
+    }
     if device.connectable
         && !matches!(
             device.trust_status,
@@ -1914,14 +4138,48 @@ fn validate_public_snapshot_text(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn looks_like_network_locator(value: &str) -> bool {
+pub(crate) fn looks_like_network_locator(value: &str) -> bool {
     let trimmed = value.trim();
-    trimmed.contains(':')
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    trimmed.parse::<std::net::IpAddr>().is_ok()
+        || trimmed.contains(':')
         || trimmed.contains('/')
-        || trimmed.ends_with(".local")
-        || trimmed
-            .split('.')
-            .all(|segment| !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit()))
+        || trimmed.contains('\\')
+        || trimmed.contains('@')
+        || lower == "localhost"
+        || lower.ends_with(".local")
+        || lower.contains("://")
+        || looks_like_dns_name(trimmed)
+}
+
+fn looks_like_dns_name(value: &str) -> bool {
+    let candidate = value.strip_suffix('.').unwrap_or(value);
+    if candidate.len() > 253 || !candidate.contains('.') {
+        return false;
+    }
+    let mut labels = candidate.split('.').peekable();
+    let mut final_label = None;
+    while let Some(label) = labels.next() {
+        if label.is_empty()
+            || label.len() > 63
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            || label.starts_with('-')
+            || label.ends_with('-')
+        {
+            return false;
+        }
+        if labels.peek().is_none() {
+            final_label = Some(label);
+        }
+    }
+    final_label.is_some_and(|label| {
+        label.len() >= 2 && label.bytes().any(|byte| byte.is_ascii_alphabetic())
+    })
 }
 
 fn file_transfer_source_snapshot(source_path: &PathBuf) -> Result<FileTransferSourceSnapshot> {
@@ -1938,6 +4196,7 @@ fn file_transfer_source_snapshot(source_path: &PathBuf) -> Result<FileTransferSo
     if !metadata.is_file() {
         bail!("file transfer source path must refer to a regular file");
     }
+    validate_file_transfer_source_size(metadata.len())?;
     let source_path = canonical_source
         .to_str()
         .ok_or_else(|| anyhow!("file transfer source path must be valid UTF-8"))?
@@ -1947,6 +4206,13 @@ fn file_transfer_source_snapshot(source_path: &PathBuf) -> Result<FileTransferSo
         size_bytes: metadata.len(),
         sha256_hex: sha256_file_hex(&mut file)?,
     })
+}
+
+fn validate_file_transfer_source_size(size_bytes: u64) -> Result<()> {
+    if size_bytes > MAX_TRANSFER_BYTES {
+        bail!("file transfer source exceeds the protocol size limit");
+    }
+    Ok(())
 }
 
 fn sha256_file_hex(file: &mut std::fs::File) -> Result<String> {
@@ -2094,6 +4360,15 @@ fn validate_remote_desktop_observed_mode(
 }
 
 fn restrict_file_permissions_blocking(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "private state file {} is not a regular file",
+            path.display()
+        );
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2104,6 +4379,85 @@ fn restrict_file_permissions_blocking(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_managed_session_control_registry(
+    path: &Path,
+    registry: &ManagedSessionControlRegistry,
+) -> Result<()> {
+    validate_managed_session_control_registry_shape(path, registry)?;
+    for (session_id, control) in &registry.sessions {
+        if control.schema_version != ManagedSessionControl::SCHEMA_VERSION {
+            bail!(
+                "unsupported managed session control schema version {} for session `{}`; expected {}",
+                control.schema_version,
+                session_id,
+                ManagedSessionControl::SCHEMA_VERSION
+            );
+        }
+        validate_registration_id(&control.registration_id).with_context(|| {
+            format!("managed session control `{session_id}` has an invalid registration id")
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_managed_session_control_registry_shape(
+    path: &Path,
+    registry: &ManagedSessionControlRegistry,
+) -> Result<()> {
+    if registry.schema_version != ManagedSessionControlRegistry::SCHEMA_VERSION {
+        bail!(
+            "unsupported managed session control registry schema version {} in {}; expected {}",
+            registry.schema_version,
+            path.display(),
+            ManagedSessionControlRegistry::SCHEMA_VERSION
+        );
+    }
+    if registry.sessions.len() > ManagedSessionControlRegistry::MAX_SESSIONS {
+        bail!(
+            "managed session control registry has {} entries in {}; max {}",
+            registry.sessions.len(),
+            path.display(),
+            ManagedSessionControlRegistry::MAX_SESSIONS
+        );
+    }
+    for (session_id, control) in &registry.sessions {
+        if session_id.is_empty() || control.session_id.is_empty() {
+            bail!("managed session control identifiers must not be empty");
+        }
+        if session_id != &control.session_id {
+            bail!("managed session control key does not match its session identifier");
+        }
+        if control.local_device_id.trim().is_empty()
+            || control.signaling_server_origin.trim().is_empty()
+            || control.signaling_session_token.is_empty()
+        {
+            bail!("managed session control `{session_id}` is missing required runtime authority");
+        }
+    }
+    Ok(())
+}
+
+async fn mutate_managed_session_controls<R, F>(paths: &AgentPaths, update: F) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut ManagedSessionControlRegistry) -> R + Send + 'static,
+{
+    ensure_identity_layout(paths).await?;
+    let registry_path = session_controls_file(paths);
+    let lock_path = managed_session_controls_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_managed_session_controls_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        let mut registry = load_managed_session_controls_unlocked(&registry_path)?;
+        let output = update(&mut registry);
+        registry.schema_version = ManagedSessionControlRegistry::SCHEMA_VERSION;
+        store_managed_session_controls_unlocked(&registry_path, &registry)?;
+        Ok(output)
+    })
+    .await
+    .context("managed session controls mutation task panicked")?
 }
 
 async fn mutate_session_registry<R, F>(paths: &AgentPaths, update: F) -> Result<R>
@@ -2127,15 +4481,65 @@ where
     .context("session registry mutation task panicked")?
 }
 
-async fn write_json<T>(path: &Path, value: &T) -> Result<()>
+async fn try_mutate_session_registry<R, F>(paths: &AgentPaths, update: F) -> Result<R>
 where
-    T: Serialize,
+    R: Send + 'static,
+    F: FnOnce(&mut SessionRegistry) -> Result<R> + Send + 'static,
 {
-    let body = serde_json::to_vec_pretty(value).context("failed to encode json")?;
-    fs::write(path, body)
-        .await
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    restrict_file_permissions(path).await
+    ensure_identity_layout(paths).await?;
+    let registry_path = session_registry_file(paths);
+    let lock_path = session_registry_lock_file(paths);
+    tokio::task::spawn_blocking(move || {
+        let _process_guard = lock_session_registry_process()?;
+        let _file_lock = lock_session_registry_file(&lock_path, true)?;
+        let mut registry = load_session_registry_unlocked(&registry_path)?;
+        let output = update(&mut registry)?;
+        registry.schema_version = SessionRegistry::SCHEMA_VERSION;
+        store_session_registry_unlocked(&registry_path, &registry)?;
+        Ok(output)
+    })
+    .await
+    .context("fallible session registry mutation task panicked")?
+}
+
+async fn try_mutate_authorized_runtime_session<R, F>(
+    paths: &AgentPaths,
+    session_id: &str,
+    expected_runtime_id: &str,
+    update: F,
+) -> Result<R>
+where
+    R: Send + 'static,
+    F: FnOnce(&mut SessionRegistry) -> Result<R> + Send + 'static,
+{
+    ensure_identity_layout(paths).await?;
+    let session_registry_path = session_registry_file(paths);
+    let session_registry_lock_path = session_registry_lock_file(paths);
+    let control_registry_path = session_controls_file(paths);
+    let control_registry_lock_path = managed_session_controls_lock_file(paths);
+    let session_id = session_id.to_owned();
+    let expected_runtime_id = expected_runtime_id.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _session_process_guard = lock_session_registry_process()?;
+        let _control_process_guard = lock_managed_session_controls_process()?;
+        let _session_file_lock = lock_session_registry_file(&session_registry_lock_path, true)?;
+        let _control_file_lock = lock_session_registry_file(&control_registry_lock_path, false)?;
+        let controls = load_managed_session_controls_unlocked(&control_registry_path)?;
+        let mut sessions = load_session_registry_unlocked(&session_registry_path)?;
+        let session = require_runtime_incarnation(&sessions, &session_id, &expected_runtime_id)?;
+        let control = controls
+            .get(&session_id)
+            .ok_or_else(|| anyhow!("managed runtime has no control authority"))?;
+        if !managed_session_registration_matches(session, control) {
+            bail!("managed runtime no longer owns matching active control authority");
+        }
+        let output = update(&mut sessions)?;
+        sessions.schema_version = SessionRegistry::SCHEMA_VERSION;
+        store_session_registry_unlocked(&session_registry_path, &sessions)?;
+        Ok(output)
+    })
+    .await
+    .context("authorized runtime session mutation task panicked")?
 }
 
 async fn write_json_atomic_private<T>(path: &Path, value: &T) -> Result<()>
@@ -2207,10 +4611,43 @@ fn write_private_file_atomically(path: &Path, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn remove_private_file_durably(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to remove private file {}", path.display()));
+        }
+    }
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("private file path missing parent directory"))?;
+        std::fs::File::open(parent)
+            .with_context(|| format!("failed to open {} for sync", parent.display()))?
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 async fn load_json<T>(path: &Path) -> Result<Option<T>>
 where
     T: for<'de> Deserialize<'de>,
 {
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("private JSON path {} is not a regular file", path.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect private JSON {}", path.display()));
+        }
+    }
     match fs::read_to_string(path).await {
         Ok(body) => {
             let decoded = serde_json::from_str(&body)
@@ -2224,6 +4661,10 @@ where
 
 fn auth_session_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.identity_dir.join("auth-session.json")
+}
+
+fn auth_session_generation_file(paths: &AgentPaths) -> std::path::PathBuf {
+    paths.identity_dir.join("auth-session-generation.json")
 }
 
 fn signing_key_file(paths: &AgentPaths) -> std::path::PathBuf {
@@ -2258,6 +4699,14 @@ fn session_controls_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.session_controls_file.clone()
 }
 
+fn managed_session_registration_journal_file(paths: &AgentPaths) -> std::path::PathBuf {
+    paths.runtime_dir.join("managed-session-registration.json")
+}
+
+fn managed_session_controls_lock_file(paths: &AgentPaths) -> std::path::PathBuf {
+    paths.session_controls_lock_file.clone()
+}
+
 fn nearby_discovery_snapshot_registry_file(paths: &AgentPaths) -> std::path::PathBuf {
     paths.nearby_discovery_snapshots_file.clone()
 }
@@ -2273,6 +4722,18 @@ fn file_transfer_request_registry_file(paths: &AgentPaths) -> std::path::PathBuf
 
 fn file_transfer_request_registry_lock_file(paths: &AgentPaths) -> std::path::PathBuf {
     file_transfer_request_registry_file(paths).with_file_name("file-transfer-requests.json.lock")
+}
+
+fn inbound_file_transfer_approval_registry_file(paths: &AgentPaths) -> std::path::PathBuf {
+    paths
+        .runtime_dir
+        .join("inbound-file-transfer-approvals.json")
+}
+
+fn inbound_file_transfer_approval_registry_lock_file(paths: &AgentPaths) -> std::path::PathBuf {
+    paths
+        .runtime_dir
+        .join("inbound-file-transfer-approvals.json.lock")
 }
 
 fn remote_desktop_request_registry_file(paths: &AgentPaths) -> std::path::PathBuf {
@@ -2307,7 +4768,10 @@ fn new_device_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skybridge_core::{RuntimeSessionRole, RuntimeSessionSource, SessionReadiness};
+    use skybridge_core::{
+        RuntimeSessionRole, RuntimeSessionSource, SessionReadiness, SignalingBackend,
+        SignalingHandleId,
+    };
 
     fn test_paths(name: &str) -> AgentPaths {
         crate::runtime::resolve_paths(Some(std::env::temp_dir().join(format!(
@@ -2329,6 +4793,215 @@ mod tests {
             parse_optional_protocol_signing_algorithm(None).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn file_transfer_source_size_enforces_protocol_boundary_before_hashing() {
+        validate_file_transfer_source_size(MAX_TRANSFER_BYTES)
+            .expect("the protocol limit itself is allowed");
+        assert!(validate_file_transfer_source_size(MAX_TRANSFER_BYTES + 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn identity_load_rejects_a_preplaced_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let paths = test_paths("identity-symlink");
+        ensure_identity_layout(&paths)
+            .await
+            .expect("create private identity layout");
+        let victim = paths.root.join("identity-victim.json");
+        let victim_bytes = b"external identity bytes";
+        tokio::fs::write(&victim, victim_bytes)
+            .await
+            .expect("seed victim");
+        symlink(&victim, &paths.identity_file).expect("preplace identity symlink");
+
+        let error = crate::runtime::load_identity_state(&paths)
+            .await
+            .expect_err("identity symlink must fail closed");
+        assert!(error.to_string().contains("not a regular file"));
+        assert_eq!(
+            tokio::fs::read(&victim).await.expect("read victim"),
+            victim_bytes
+        );
+        assert!(
+            tokio::fs::symlink_metadata(&paths.identity_file)
+                .await
+                .expect("identity symlink metadata")
+                .file_type()
+                .is_symlink()
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_store_atomically_replaces_a_symlink_without_writing_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let paths = test_paths("auth-symlink");
+        ensure_identity_layout(&paths)
+            .await
+            .expect("create private identity layout");
+        let victim = paths.root.join("auth-victim.json");
+        let victim_bytes = b"external auth bytes";
+        tokio::fs::write(&victim, victim_bytes)
+            .await
+            .expect("seed victim");
+        let auth_path = auth_session_file(&paths);
+        symlink(&victim, &auth_path).expect("preplace auth symlink");
+        let session = AuthSession {
+            access_token: "access-secret".to_owned(),
+            refresh_token: Some("refresh-secret".to_owned()),
+            user_identifier: "user-1".to_owned(),
+            nebula_id: None,
+            display_name: "User".to_owned(),
+            issued_at: OffsetDateTime::now_utc(),
+        };
+
+        store_auth_session(&paths, &session)
+            .await
+            .expect("atomic auth replacement");
+        assert_eq!(
+            tokio::fs::read(&victim).await.expect("read victim"),
+            victim_bytes
+        );
+        let auth_metadata = tokio::fs::symlink_metadata(&auth_path)
+            .await
+            .expect("auth metadata");
+        assert!(auth_metadata.is_file());
+        assert!(!auth_metadata.file_type().is_symlink());
+        assert_eq!(
+            load_auth_session(&paths)
+                .await
+                .expect("load auth")
+                .expect("stored auth"),
+            session
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn refresh_cas_cannot_resurrect_a_session_cleared_while_refresh_was_in_flight() {
+        let paths = test_paths("auth-refresh-logout-cas");
+        ensure_device_identity(&paths)
+            .await
+            .expect("initialize identity");
+        let original = AuthSession {
+            access_token: "expired-access".to_owned(),
+            refresh_token: Some("refresh-secret".to_owned()),
+            user_identifier: "user-1".to_owned(),
+            nebula_id: None,
+            display_name: "User".to_owned(),
+            issued_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        store_auth_session(&paths, &original)
+            .await
+            .expect("store original auth");
+        let (refresh_snapshot, expected_generation) = load_auth_session_snapshot(&paths)
+            .await
+            .expect("load refresh CAS snapshot");
+        assert_eq!(refresh_snapshot.as_ref(), Some(&original));
+        let refreshed = AuthSession {
+            access_token: "new-access".to_owned(),
+            refresh_token: Some("new-refresh".to_owned()),
+            issued_at: OffsetDateTime::now_utc(),
+            ..original.clone()
+        };
+
+        clear_auth_session(&paths)
+            .await
+            .expect("logout while refresh is in flight");
+        let error = store_refreshed_auth_session_if_unchanged(
+            &paths,
+            &original,
+            expected_generation,
+            &refreshed,
+        )
+        .await
+        .expect_err("stale refresh must not recreate a cleared session");
+        assert!(error.to_string().contains("changed while token refresh"));
+        assert!(
+            load_auth_session(&paths)
+                .await
+                .expect("load auth after logout")
+                .is_none()
+        );
+        let identity = crate::runtime::load_identity_state(&paths)
+            .await
+            .expect("load identity")
+            .expect("identity");
+        assert_eq!(identity.auth_state, AuthState::LoggedOut);
+        assert!(identity.account_id.is_none());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_login_and_enrollment_preserve_both_identity_updates() {
+        let paths = test_paths("auth-enrollment-serialization");
+        ensure_device_identity(&paths)
+            .await
+            .expect("initialize identity");
+        let session = AuthSession {
+            access_token: "access-secret".to_owned(),
+            refresh_token: None,
+            user_identifier: "user-concurrent".to_owned(),
+            nebula_id: None,
+            display_name: "Concurrent User".to_owned(),
+            issued_at: OffsetDateTime::now_utc(),
+        };
+        let login_paths = paths.clone();
+        let enrollment_paths = paths.clone();
+        let (login, enrollment) = tokio::join!(
+            async move { store_auth_session(&login_paths, &session).await },
+            async move {
+                update_enrollment_status(
+                    &enrollment_paths,
+                    EnrollmentStatus::Enrolled,
+                    Some("Enrolled Device"),
+                )
+                .await
+            }
+        );
+        login.expect("concurrent login");
+        enrollment.expect("concurrent enrollment");
+
+        let identity = crate::runtime::load_identity_state(&paths)
+            .await
+            .expect("load identity")
+            .expect("identity");
+        assert_eq!(identity.auth_state, AuthState::LoggedIn);
+        assert_eq!(identity.account_id.as_deref(), Some("user-concurrent"));
+        assert_eq!(
+            identity.device.enrollment_status,
+            EnrollmentStatus::Enrolled
+        );
+        assert_eq!(identity.device.device_name, "Enrolled Device");
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[test]
+    fn atomic_private_write_failure_cleans_temp_and_preserves_existing_destination() {
+        let paths = test_paths("atomic-private-failure");
+        std::fs::create_dir_all(&paths.identity_dir).expect("create identity directory");
+        let destination = paths.identity_dir.join("destination-is-directory");
+        std::fs::create_dir(&destination).expect("seed destination directory");
+
+        let error = write_private_file_atomically(&destination, b"secret")
+            .expect_err("directory destination must reject atomic file publication");
+        assert!(error.to_string().contains("failed to persist"));
+        assert!(destination.is_dir());
+        let temp_prefix = ".destination-is-directory.tmp-";
+        assert!(
+            std::fs::read_dir(&paths.identity_dir)
+                .expect("list identity directory")
+                .filter_map(|entry| entry.ok())
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(temp_prefix)),
+            "failed atomic publication must not leave secret temp files"
+        );
+        std::fs::remove_dir_all(&paths.root).ok();
     }
 
     #[test]
@@ -2445,6 +5118,1400 @@ mod tests {
             .expect("session should seed");
     }
 
+    fn managed_session_control(session_id: &str) -> ManagedSessionControl {
+        ManagedSessionControl::new(
+            session_id,
+            RuntimeSessionRole::Initiator,
+            RuntimeSessionSource::Code,
+            "local-device",
+            "https://signal.example.com",
+            format!("session-token-{session_id}"),
+            None,
+        )
+    }
+
+    fn managed_registration_pair(
+        session_id: &str,
+    ) -> (RuntimeSessionRecord, ManagedSessionControl) {
+        let session = RuntimeSessionRecord::new(
+            format!("runtime-{session_id}"),
+            session_id,
+            RuntimeSessionRole::Initiator,
+            RuntimeSessionSource::Code,
+            "https://signal.example.com",
+            "local-device",
+            Some("remote-device".to_owned()),
+            Some("Remote Device".to_owned()),
+            Some("peer-fingerprint".to_owned()),
+            RuntimeSessionState::Connecting,
+        );
+        let mut control = managed_session_control(session_id);
+        control.target_runtime_id = session.runtime_id.clone();
+        (session, control)
+    }
+
+    fn attach_verified_connection_evidence(session: &mut RuntimeSessionRecord) {
+        let now = OffsetDateTime::now_utc();
+        session.handshake_completed_at = Some(now);
+        session.authenticated_peer = Some(RuntimeAuthenticatedPeerObservation {
+            device_id: "remote-device".to_owned(),
+            device_name: "Remote Device".to_owned(),
+            platform: Some("ios".to_owned()),
+            capabilities: Some(vec!["file_transfer".to_owned()]),
+            file_transfer_port: Some(8080),
+            remote_control_port: None,
+            sbwc_counter: 1,
+            observed_at: now,
+        });
+        session.selected_ice_route = Some(RuntimeSelectedIceRouteObservation {
+            remote_address: "192.0.2.10".to_owned(),
+            remote_port: 49152,
+            protocol: "udp".to_owned(),
+            local_candidate_type: "host".to_owned(),
+            remote_candidate_type: "host".to_owned(),
+            kind: skybridge_core::RuntimeSessionRouteKind::Direct,
+            observed_at: now,
+        });
+    }
+
+    fn inbound_approval_request(
+        session_id: &str,
+        runtime_id: &str,
+        transfer_seed: u128,
+        peer_name: &str,
+    ) -> InboundFileTransferApprovalRequest {
+        InboundFileTransferApprovalRequest::pending(
+            InboundFileTransferApprovalBinding {
+                transfer_id: uuid::Uuid::from_u128(transfer_seed + 1)
+                    .hyphenated()
+                    .to_string(),
+                session_id: session_id.to_owned(),
+                target_runtime_id: runtime_id.to_owned(),
+                authenticated_peer_device_id: "remote-device".to_owned(),
+                authenticated_peer_device_name: peer_name.to_owned(),
+                authenticated_peer_protocol_fingerprint: "peer-fingerprint".to_owned(),
+                metadata_sha256_hex: "22".repeat(32),
+                file_name: "payload.bin".to_owned(),
+                file_size: 4,
+            },
+            OffsetDateTime::now_utc(),
+        )
+    }
+
+    #[test]
+    fn stale_inbound_approvals_are_terminalized_before_capacity_reuse() {
+        let now = OffsetDateTime::now_utc();
+        let (mut current, _) = managed_registration_pair("approval-recovery");
+        current.runtime_id = "runtime-current".to_owned();
+        current.readiness = SessionReadiness::HandshakeComplete {
+            session_id: current.session_id.clone(),
+            negotiated_suite: "X-Wing".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut current);
+        let mut sessions = SessionRegistry::default();
+        sessions.insert(current).expect("insert current session");
+        let mut approvals = InboundFileTransferApprovalRegistry::default();
+        for index in 0..InboundFileTransferApprovalRegistry::MAX_REQUESTS as u128 {
+            approvals
+                .insert(inbound_approval_request(
+                    "approval-recovery",
+                    &format!("runtime-stale-{index}"),
+                    index,
+                    "Remote Device",
+                ))
+                .expect("fill stale approval registry");
+        }
+        assert!(
+            reconcile_inbound_file_approvals(&mut approvals, &sessions, now)
+                .expect("reconcile stale approvals")
+        );
+        assert!(
+            approvals
+                .requests
+                .values()
+                .all(|request| request.is_terminal())
+        );
+        let current = inbound_approval_request(
+            "approval-recovery",
+            "runtime-current",
+            10_000,
+            "Remote Device",
+        );
+        let current_key = current.registry_key();
+        approvals
+            .insert(current)
+            .expect("terminal stale entries must be evictable");
+        assert_eq!(
+            approvals.requests.len(),
+            InboundFileTransferApprovalRegistry::MAX_REQUESTS
+        );
+        assert!(approvals.requests.contains_key(&current_key));
+    }
+
+    #[test]
+    fn authenticated_peer_rename_does_not_change_approval_authority() {
+        let now = OffsetDateTime::now_utc();
+        let (mut current, _) = managed_registration_pair("approval-rename");
+        current.runtime_id = "runtime-current".to_owned();
+        current.readiness = SessionReadiness::HandshakeComplete {
+            session_id: current.session_id.clone(),
+            negotiated_suite: "X-Wing".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut current);
+        current
+            .authenticated_peer
+            .as_mut()
+            .expect("authenticated peer")
+            .device_name = "Renamed Device".to_owned();
+        let mut sessions = SessionRegistry::default();
+        sessions.insert(current).expect("insert current session");
+        let request = inbound_approval_request(
+            "approval-rename",
+            "runtime-current",
+            1,
+            "Old Display Snapshot",
+        );
+        let key = request.registry_key();
+        let mut approvals = InboundFileTransferApprovalRegistry::default();
+        approvals.insert(request).expect("insert approval");
+        assert!(
+            !reconcile_inbound_file_approvals(&mut approvals, &sessions, now)
+                .expect("rename is not an authority change")
+        );
+        assert_eq!(
+            approvals.requests.get(&key).expect("approval").status,
+            InboundFileTransferApprovalStatus::PendingDecision
+        );
+    }
+
+    #[test]
+    fn persistent_approval_registry_is_the_pending_timeout_authority() {
+        let now = OffsetDateTime::now_utc();
+        let (mut current, _) = managed_registration_pair("approval-timeout");
+        current.runtime_id = "runtime-current".to_owned();
+        current.readiness = SessionReadiness::HandshakeComplete {
+            session_id: current.session_id.clone(),
+            negotiated_suite: "X-Wing".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut current);
+        let mut sessions = SessionRegistry::default();
+        sessions.insert(current).expect("insert current session");
+        let mut request =
+            inbound_approval_request("approval-timeout", "runtime-current", 2, "Remote Device");
+        request.created_at = now - time::Duration::minutes(6);
+        request.updated_at = request.created_at;
+        let key = request.registry_key();
+        let mut approvals = InboundFileTransferApprovalRegistry::default();
+        approvals.insert(request).expect("insert approval");
+
+        assert!(
+            reconcile_inbound_file_approvals(&mut approvals, &sessions, now)
+                .expect("reconcile expired pending approval")
+        );
+        let expired = approvals.requests.get(&key).expect("expired approval");
+        assert_eq!(
+            expired.status,
+            InboundFileTransferApprovalStatus::DecisionRequested
+        );
+        assert_eq!(
+            expired.decision,
+            Some(InboundFileTransferApprovalDecision::Expire)
+        );
+        assert!(expired.applied_at.is_none());
+    }
+
+    fn persist_registration_journal(
+        paths: &AgentPaths,
+        session: RuntimeSessionRecord,
+        control: ManagedSessionControl,
+    ) {
+        persist_registration_journal_with_previous(paths, None, None, session, control);
+    }
+
+    fn persist_registration_journal_with_previous(
+        paths: &AgentPaths,
+        previous_session: Option<RuntimeSessionRecord>,
+        previous_control: Option<ManagedSessionControl>,
+        session: RuntimeSessionRecord,
+        control: ManagedSessionControl,
+    ) {
+        let journal = ManagedSessionRegistrationJournal {
+            schema_version: ManagedSessionRegistrationJournal::SCHEMA_VERSION,
+            previous_session,
+            previous_control,
+            session,
+            control,
+        };
+        let body = serde_json::to_vec_pretty(&journal).expect("encode registration journal");
+        write_private_file_atomically(&managed_session_registration_journal_file(paths), &body)
+            .expect("persist registration journal");
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_stops_ownerless_legacy_controls() {
+        let paths = test_paths("registration-ownerless-legacy-control");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session, control) = managed_registration_pair("legacy-ownerless");
+        let mut sessions = SessionRegistry::default();
+        sessions.insert(session).expect("insert legacy session");
+        store_session_registry_unlocked(&session_registry_file(&paths), &sessions)
+            .expect("persist legacy session");
+
+        let mut controls = ManagedSessionControlRegistry::default();
+        controls.insert(control).expect("insert legacy control");
+        let mut legacy = serde_json::to_value(controls).expect("encode legacy controls");
+        let legacy_control = legacy["sessions"]["legacy-ownerless"]
+            .as_object_mut()
+            .expect("legacy control object");
+        legacy_control.insert(
+            "schema_version".to_owned(),
+            serde_json::Value::from(LEGACY_MANAGED_SESSION_CONTROL_SCHEMA_VERSION),
+        );
+        legacy_control.remove("registration_id");
+        write_private_file_atomically(
+            &session_controls_file(&paths),
+            &serde_json::to_vec_pretty(&legacy).expect("serialize legacy controls"),
+        )
+        .expect("persist legacy controls");
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("legacy ownerless state should recover fail-closed");
+        let recovered = load_session_registry(&paths).await.expect("load sessions");
+        assert_eq!(
+            recovered
+                .get("legacy-ownerless")
+                .expect("legacy runtime audit evidence")
+                .state,
+            RuntimeSessionState::Disconnected
+        );
+        assert!(
+            load_managed_session_controls(&paths)
+                .await
+                .expect("load controls")
+                .sessions
+                .is_empty()
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn current_control_without_registration_id_is_rejected() {
+        let paths = test_paths("registration-current-missing-owner");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (_, control) = managed_registration_pair("current-missing-owner");
+        let mut controls = ManagedSessionControlRegistry::default();
+        controls.insert(control).expect("insert control");
+        let mut malformed = serde_json::to_value(controls).expect("encode controls");
+        malformed["sessions"]["current-missing-owner"]
+            .as_object_mut()
+            .expect("control object")
+            .remove("registration_id");
+        write_private_file_atomically(
+            &session_controls_file(&paths),
+            &serde_json::to_vec_pretty(&malformed).expect("serialize malformed controls"),
+        )
+        .expect("persist malformed controls");
+
+        let error = load_managed_session_controls(&paths)
+            .await
+            .expect_err("current ownerless control must fail closed");
+        assert!(error.to_string().contains("invalid registration id"));
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_discards_ownerless_legacy_registration_journal() {
+        let paths = test_paths("registration-ownerless-legacy-journal");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session, control) = managed_registration_pair("legacy-journal");
+        let journal = ManagedSessionRegistrationJournal {
+            schema_version: LEGACY_MANAGED_SESSION_REGISTRATION_JOURNAL_SCHEMA_VERSION,
+            previous_session: None,
+            previous_control: None,
+            session,
+            control,
+        };
+        let mut legacy = serde_json::to_value(journal).expect("encode legacy journal");
+        legacy["control"]
+            .as_object_mut()
+            .expect("journal control")
+            .remove("registration_id");
+        write_private_file_atomically(
+            &managed_session_registration_journal_file(&paths),
+            &serde_json::to_vec_pretty(&legacy).expect("serialize legacy journal"),
+        )
+        .expect("persist legacy journal");
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("legacy journal should be discarded fail-closed");
+        assert!(!managed_session_registration_journal_file(&paths).exists());
+        assert!(
+            load_session_registry(&paths)
+                .await
+                .expect("load sessions")
+                .sessions
+                .is_empty()
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_completes_journal_only_registration() {
+        let paths = test_paths("registration-journal-only");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session, control) = managed_registration_pair("journal-only");
+        persist_registration_journal(&paths, session.clone(), control.clone());
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("recover journal-only registration");
+
+        assert_eq!(
+            load_session_registry(&paths)
+                .await
+                .expect("load sessions")
+                .get(&session.session_id),
+            Some(&session)
+        );
+        assert_eq!(
+            load_managed_session_controls(&paths)
+                .await
+                .expect("load controls")
+                .get(&control.session_id),
+            Some(&control)
+        );
+        assert!(!managed_session_registration_journal_file(&paths).exists());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_completes_session_only_journal_stage() {
+        let paths = test_paths("registration-session-only");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session, control) = managed_registration_pair("session-only");
+        let mut sessions = SessionRegistry::default();
+        sessions.insert(session.clone()).expect("insert session");
+        store_session_registry_unlocked(&session_registry_file(&paths), &sessions)
+            .expect("persist session-only stage");
+        persist_registration_journal(&paths, session.clone(), control.clone());
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("recover session-only journal stage");
+        assert_eq!(
+            load_managed_session_controls(&paths)
+                .await
+                .expect("load controls")
+                .get(&control.session_id),
+            Some(&control)
+        );
+        assert!(!managed_session_registration_journal_file(&paths).exists());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_completes_control_only_journal_stage() {
+        let paths = test_paths("registration-control-only");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session, control) = managed_registration_pair("control-only");
+        let mut controls = ManagedSessionControlRegistry::default();
+        controls.insert(control.clone()).expect("insert control");
+        store_managed_session_controls_unlocked(&session_controls_file(&paths), &controls)
+            .expect("persist control-only stage");
+        persist_registration_journal(&paths, session.clone(), control.clone());
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("recover control-only journal stage");
+        assert_eq!(
+            load_session_registry(&paths)
+                .await
+                .expect("load sessions")
+                .get(&session.session_id),
+            Some(&session)
+        );
+        assert!(!managed_session_registration_journal_file(&paths).exists());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_rejects_conflicting_registration_journal() {
+        let paths = test_paths("registration-conflict");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (journal_session, control) = managed_registration_pair("conflicting");
+        let mut persisted_session = journal_session.clone();
+        persisted_session.runtime_id = "runtime-conflicting-replacement".to_owned();
+        let mut sessions = SessionRegistry::default();
+        sessions
+            .insert(persisted_session.clone())
+            .expect("insert conflicting session");
+        store_session_registry_unlocked(&session_registry_file(&paths), &sessions)
+            .expect("persist conflicting session");
+        persist_registration_journal(&paths, journal_session, control);
+
+        let error = recover_managed_session_state(&paths)
+            .await
+            .expect_err("conflicting journal must fail closed");
+        assert!(error.to_string().contains("conflicts"));
+        assert!(managed_session_registration_journal_file(&paths).exists());
+        assert_eq!(
+            load_session_registry(&paths)
+                .await
+                .expect("load sessions")
+                .get("conflicting"),
+            Some(&persisted_session)
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn replacement_registration_journal_is_redo_safe_at_every_registry_write_window() {
+        for (label, session_committed, control_committed) in [
+            ("before-writes", false, false),
+            ("after-session", true, false),
+            ("after-control", false, true),
+            ("after-both", true, true),
+        ] {
+            let paths = test_paths(&format!("registration-replacement-{label}"));
+            ensure_identity_layout(&paths).await.expect("create layout");
+            let (previous_session, previous_control) =
+                managed_registration_pair("replacement-crash");
+            let mut committed_session = previous_session.clone();
+            committed_session.runtime_id = "runtime-replacement-committed".to_owned();
+            let mut committed_control = previous_control.clone();
+            committed_control.target_runtime_id = committed_session.runtime_id.clone();
+            committed_control.signaling_session_token = "replacement-token".to_owned();
+
+            let mut sessions = SessionRegistry::default();
+            sessions
+                .insert(if session_committed {
+                    committed_session.clone()
+                } else {
+                    previous_session.clone()
+                })
+                .expect("insert crash-window session");
+            let mut controls = ManagedSessionControlRegistry::default();
+            controls
+                .insert(if control_committed {
+                    committed_control.clone()
+                } else {
+                    previous_control.clone()
+                })
+                .expect("insert crash-window control");
+            store_session_registry_unlocked(&session_registry_file(&paths), &sessions)
+                .expect("persist crash-window session");
+            store_managed_session_controls_unlocked(&session_controls_file(&paths), &controls)
+                .expect("persist crash-window control");
+            persist_registration_journal_with_previous(
+                &paths,
+                Some(previous_session),
+                Some(previous_control),
+                committed_session.clone(),
+                committed_control.clone(),
+            );
+
+            recover_managed_session_state(&paths)
+                .await
+                .expect("redo replacement registration");
+            assert_eq!(
+                load_session_registry(&paths)
+                    .await
+                    .expect("load sessions")
+                    .get("replacement-crash"),
+                Some(&committed_session),
+                "session redo mismatch for {label}"
+            );
+            assert_eq!(
+                load_managed_session_controls(&paths)
+                    .await
+                    .expect("load controls")
+                    .get("replacement-crash"),
+                Some(&committed_control),
+                "control redo mismatch for {label}"
+            );
+            assert!(!managed_session_registration_journal_file(&paths).exists());
+            let _ = tokio::fs::remove_dir_all(&paths.root).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn committed_registration_reports_cleanup_pending_and_recovers_journal() {
+        let paths = test_paths("registration-cleanup-failure");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session, control) = managed_registration_pair("cleanup-failure");
+        let mut sessions = SessionRegistry::default();
+        sessions.insert(session.clone()).expect("insert session");
+        let mut controls = ManagedSessionControlRegistry::default();
+        controls.insert(control.clone()).expect("insert control");
+        let journal = ManagedSessionRegistrationJournal {
+            schema_version: ManagedSessionRegistrationJournal::SCHEMA_VERSION,
+            previous_session: None,
+            previous_control: None,
+            session: session.clone(),
+            control: control.clone(),
+        };
+
+        let commit = commit_registration_unlocked(
+            &session_registry_file(&paths),
+            &session_controls_file(&paths),
+            &managed_session_registration_journal_file(&paths),
+            &journal,
+            sessions,
+            controls,
+            |_| bail!("injected journal cleanup failure"),
+        )
+        .expect("committed pair must not be reported as registration failure");
+        assert_eq!(
+            commit.journal_state,
+            ManagedSessionRegistrationJournalState::RecoveryPending
+        );
+        assert!(managed_session_registration_journal_file(&paths).exists());
+        assert_eq!(commit.sessions.get(&session.session_id), Some(&session));
+        assert_eq!(commit.controls.get(&control.session_id), Some(&control));
+
+        assert_eq!(
+            recover_managed_session_state(&paths)
+                .await
+                .expect("replay committed journal"),
+            ManagedSessionRegistrationJournalState::RemovedDurably
+        );
+        assert!(!managed_session_registration_journal_file(&paths).exists());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_fails_closed_for_unjournaled_orphans_and_mismatch() {
+        let paths = test_paths("registration-orphans");
+        ensure_identity_layout(&paths).await.expect("create layout");
+        let (session_only, _) = managed_registration_pair("orphan-session");
+        let (_, control_only) = managed_registration_pair("orphan-control");
+        let (mismatched_session, mut mismatched_control) =
+            managed_registration_pair("mismatched-pair");
+        mismatched_control.target_runtime_id = "runtime-other".to_owned();
+        let mut sessions = SessionRegistry::default();
+        sessions
+            .insert(session_only)
+            .expect("insert session orphan");
+        sessions
+            .insert(mismatched_session)
+            .expect("insert mismatched session");
+        let mut controls = ManagedSessionControlRegistry::default();
+        controls
+            .insert(control_only)
+            .expect("insert control orphan");
+        controls
+            .insert(mismatched_control)
+            .expect("insert mismatched control");
+        store_session_registry_unlocked(&session_registry_file(&paths), &sessions)
+            .expect("persist sessions");
+        store_managed_session_controls_unlocked(&session_controls_file(&paths), &controls)
+            .expect("persist controls");
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("recover unjournaled asymmetry");
+        let recovered_sessions = load_session_registry(&paths).await.expect("load sessions");
+        for session_id in ["orphan-session", "mismatched-pair"] {
+            let session = recovered_sessions
+                .get(session_id)
+                .expect("session retained");
+            assert_eq!(session.state, RuntimeSessionState::Disconnected);
+            assert_eq!(
+                session.last_error.as_deref(),
+                Some("orphaned managed runtime recovered at agent startup")
+            );
+        }
+        let recovered_controls = load_managed_session_controls(&paths)
+            .await
+            .expect("load controls");
+        assert!(recovered_controls.sessions.is_empty());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_is_idempotent_after_a_consistent_registration() {
+        let paths = test_paths("registration-idempotent");
+        let (session, control) = managed_registration_pair("idempotent");
+        register_managed_session(&paths, session, control)
+            .await
+            .expect("register consistent pair");
+
+        recover_managed_session_state(&paths)
+            .await
+            .expect("first recovery");
+        let first_sessions = load_session_registry(&paths).await.expect("first sessions");
+        let first_controls = load_managed_session_controls(&paths)
+            .await
+            .expect("first controls");
+        recover_managed_session_state(&paths)
+            .await
+            .expect("second recovery");
+        assert_eq!(
+            load_session_registry(&paths)
+                .await
+                .expect("second sessions"),
+            first_sessions
+        );
+        assert_eq!(
+            load_managed_session_controls(&paths)
+                .await
+                .expect("second controls"),
+            first_controls
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn queued_runtime_events_cannot_resurrect_an_operator_disconnected_session() {
+        let paths = test_paths("queued-event-after-disconnect");
+        let (session, control) = managed_registration_pair("queued-terminal");
+        let runtime_id = session.runtime_id.clone();
+        register_managed_session(&paths, session, control)
+            .await
+            .expect("register managed session");
+        disconnect_managed_session(
+            &paths,
+            "queued-terminal",
+            Some("operator_requested".to_owned()),
+        )
+        .await
+        .expect("disconnect session");
+
+        apply_transport_event_for_runtime(
+            &paths,
+            "queued-terminal",
+            &runtime_id,
+            RuntimeSessionTransportEvent::HandshakeComplete {
+                negotiated_suite: "X25519+ML-KEM-768".to_owned(),
+                peer_protocol_public_key_fingerprint: "peer-fingerprint".to_owned(),
+            },
+        )
+        .await
+        .expect_err("queued handshake must lose runtime authority");
+        apply_signaling_event_for_runtime(
+            &paths,
+            "queued-terminal",
+            &runtime_id,
+            SignalingLifecycleEvent::new(
+                SignalingHandleId {
+                    session_id: "queued-terminal".to_owned(),
+                    backend: SignalingBackend::Native,
+                    generation: 7,
+                },
+                SignalingLifecyclePhase::Bound,
+            ),
+        )
+        .await
+        .expect_err("queued bound event must lose runtime authority");
+
+        let registry = load_session_registry(&paths)
+            .await
+            .expect("load terminal session");
+        let terminal = registry.get("queued-terminal").expect("session retained");
+        assert_eq!(terminal.state, RuntimeSessionState::Disconnected);
+        assert_eq!(terminal.readiness, SessionReadiness::Idle);
+        assert_eq!(terminal.last_error.as_deref(), Some("operator_requested"));
+        assert!(terminal.closed_at.is_some());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_receipt_blocks_disconnect_and_replacement_until_drop() {
+        let paths = test_paths("verified-receipt-permit");
+        let (mut session, control) = managed_registration_pair("receipt-disconnect");
+        session.state = RuntimeSessionState::Bound;
+        session.readiness = SessionReadiness::HandshakeComplete {
+            session_id: session.session_id.clone(),
+            negotiated_suite: "X25519+ML-KEM-768".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut session);
+        let runtime_id = session.runtime_id.clone();
+        let registration_id = control.registration_id.clone();
+        register_managed_session(&paths, session, control)
+            .await
+            .expect("register receipt session");
+        let receipt = verify_managed_handshake_receipt(
+            &paths,
+            "receipt-disconnect",
+            &registration_id,
+            &runtime_id,
+            "X25519+ML-KEM-768",
+        )
+        .await
+        .expect("verify receipt");
+        let disconnect_paths = paths.clone();
+        let mut disconnect = tokio::spawn(async move {
+            disconnect_managed_session(
+                &disconnect_paths,
+                "receipt-disconnect",
+                Some("operator_requested".to_owned()),
+            )
+            .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut disconnect)
+                .await
+                .is_err(),
+            "disconnect must wait for the final receipt permit"
+        );
+        drop(receipt);
+        tokio::time::timeout(std::time::Duration::from_secs(2), disconnect)
+            .await
+            .expect("disconnect resumes after receipt drop")
+            .expect("disconnect task does not panic")
+            .expect("disconnect succeeds");
+
+        let (mut replacement, replacement_control) =
+            managed_registration_pair("receipt-replacement");
+        replacement.state = RuntimeSessionState::Bound;
+        replacement.readiness = SessionReadiness::HandshakeComplete {
+            session_id: replacement.session_id.clone(),
+            negotiated_suite: "X25519+ML-KEM-768".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut replacement);
+        let original_runtime_id = replacement.runtime_id.clone();
+        let original_registration_id = replacement_control.registration_id.clone();
+        register_managed_session(&paths, replacement, replacement_control)
+            .await
+            .expect("register replacement target");
+        let receipt = verify_managed_handshake_receipt(
+            &paths,
+            "receipt-replacement",
+            &original_registration_id,
+            &original_runtime_id,
+            "X25519+ML-KEM-768",
+        )
+        .await
+        .expect("verify replacement receipt");
+        let (mut replacement, mut replacement_control) =
+            managed_registration_pair("receipt-replacement");
+        replacement.runtime_id = "runtime-receipt-new".to_owned();
+        replacement_control.target_runtime_id = replacement.runtime_id.clone();
+        let replacement_paths = paths.clone();
+        let mut replacement_task = tokio::spawn(async move {
+            register_managed_session(&replacement_paths, replacement, replacement_control).await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut replacement_task,)
+                .await
+                .is_err(),
+            "replacement must wait for the final receipt permit"
+        );
+        drop(receipt);
+        tokio::time::timeout(std::time::Duration::from_secs(2), replacement_task)
+            .await
+            .expect("replacement resumes after receipt drop")
+            .expect("replacement task does not panic")
+            .expect("replacement succeeds");
+        assert_eq!(
+            load_session_registry(&paths)
+                .await
+                .expect("load replacement")
+                .get("receipt-replacement")
+                .expect("replacement exists")
+                .runtime_id,
+            "runtime-receipt-new"
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn verified_receipt_rejects_replaced_registration_even_with_same_runtime_id() {
+        let paths = test_paths("verified-receipt-registration-replaced");
+        let (mut session, control) = managed_registration_pair("receipt-owner-replaced");
+        session.state = RuntimeSessionState::Bound;
+        session.readiness = SessionReadiness::HandshakeComplete {
+            session_id: session.session_id.clone(),
+            negotiated_suite: "X25519+ML-KEM-768".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut session);
+        let runtime_id = session.runtime_id.clone();
+        let original_registration_id = control.registration_id.clone();
+        register_managed_session(&paths, session.clone(), control)
+            .await
+            .expect("register original receipt owner");
+
+        let mut replacement_control = managed_session_control("receipt-owner-replaced");
+        replacement_control.target_runtime_id = runtime_id.clone();
+        assert_ne!(
+            replacement_control.registration_id, original_registration_id,
+            "replacement must have distinct immutable ownership"
+        );
+        register_managed_session(&paths, session, replacement_control)
+            .await
+            .expect("replace registration while retaining runtime id");
+
+        let error = match verify_managed_handshake_receipt(
+            &paths,
+            "receipt-owner-replaced",
+            &original_registration_id,
+            &runtime_id,
+            "X25519+ML-KEM-768",
+        )
+        .await
+        {
+            Ok(_) => panic!("old registration must not receive replacement receipt"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("replacement registration"));
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_managed_session_control_mutations_are_atomic() {
+        let paths = test_paths("concurrent-managed-controls");
+        seed_session(&paths, "session-first", RuntimeSessionState::Connecting).await;
+        seed_session(&paths, "session-second", RuntimeSessionState::Connecting).await;
+        seed_session(
+            &paths,
+            "session-after-corruption",
+            RuntimeSessionState::Connecting,
+        )
+        .await;
+        let first_paths = paths.clone();
+        let second_paths = paths.clone();
+        let (first, second) = tokio::join!(
+            upsert_managed_session_control(&first_paths, managed_session_control("session-first")),
+            upsert_managed_session_control(
+                &second_paths,
+                managed_session_control("session-second")
+            )
+        );
+        first.expect("first managed control mutation should succeed");
+        second.expect("second managed control mutation should succeed");
+
+        let registry = load_managed_session_controls(&paths)
+            .await
+            .expect("managed controls should reload after concurrent mutations");
+        assert!(registry.get("session-first").is_some());
+        assert!(registry.get("session-second").is_some());
+        let persisted: ManagedSessionControlRegistry = serde_json::from_slice(
+            &tokio::fs::read(&paths.session_controls_file)
+                .await
+                .expect("managed control registry should be readable"),
+        )
+        .expect("managed control registry should remain complete JSON");
+        assert_eq!(persisted.sessions.len(), 2);
+
+        let mut entries = tokio::fs::read_dir(&paths.runtime_dir)
+            .await
+            .expect("runtime directory should be readable");
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .expect("runtime directory entry should be readable")
+        {
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".session-controls.json.tmp-"),
+                "atomic persistence must not leave a temporary control registry behind"
+            );
+        }
+
+        tokio::fs::write(&paths.session_controls_file, b"{not-json")
+            .await
+            .expect("corrupt managed controls should be seeded");
+        let error = upsert_managed_session_control(
+            &paths,
+            managed_session_control("session-after-corruption"),
+        )
+        .await
+        .expect_err("corrupt managed controls must fail closed");
+        assert!(error.to_string().contains("failed to decode"));
+        assert_eq!(
+            tokio::fs::read_to_string(&paths.session_controls_file)
+                .await
+                .expect("corrupt managed controls should remain available for diagnosis"),
+            "{not-json"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn managed_session_control_mutation_waits_for_its_dedicated_file_lock() {
+        let paths = test_paths("managed-control-lock-contention");
+        seed_session(&paths, "session-contended", RuntimeSessionState::Connecting).await;
+        ensure_identity_layout(&paths)
+            .await
+            .expect("managed control layout should be created");
+        let blocking_lock = lock_session_registry_file(&paths.session_controls_lock_file, true)
+            .expect("test should acquire the managed control file lock");
+        let mutation_paths = paths.clone();
+        let mut mutation = tokio::spawn(async move {
+            upsert_managed_session_control(
+                &mutation_paths,
+                managed_session_control("session-contended"),
+            )
+            .await
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut mutation)
+                .await
+                .is_err(),
+            "managed control mutation must not bypass its held file lock"
+        );
+        drop(blocking_lock);
+        let registry = tokio::time::timeout(std::time::Duration::from_secs(2), mutation)
+            .await
+            .expect("managed control mutation should resume after lock release")
+            .expect("managed control mutation task should not panic")
+            .expect("managed control mutation should succeed after lock release");
+        assert!(registry.get("session-contended").is_some());
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn managed_incarnation_resets_evidence_and_terminally_closes_old_requests() {
+        let paths = test_paths("managed-incarnation-reset");
+        seed_file_transfer_session(&paths, "session-incarnation").await;
+        upsert_managed_session_control(&paths, managed_session_control("session-incarnation"))
+            .await
+            .expect("persist initial managed control");
+
+        let source = paths.root.join("incarnation-source.bin");
+        tokio::fs::write(&source, b"payload")
+            .await
+            .expect("seed transfer source");
+        let file_request = enqueue_file_transfer_send_request_for_established_session(
+            &paths,
+            "session-incarnation",
+            "remote-device",
+            &source,
+        )
+        .await
+        .expect("enqueue old-incarnation file request");
+        observe_file_transfer_requests_for_runtime(
+            &paths,
+            "session-incarnation",
+            "runtime-session-incarnation",
+        )
+        .await
+        .expect("claim old-incarnation file request");
+        start_file_transfer_request_for_runtime(
+            &paths,
+            &file_request.request_id,
+            "runtime-session-incarnation",
+        )
+        .await
+        .expect("start old-incarnation file request");
+        let remote_request = enqueue_remote_desktop_request_for_established_session(
+            &paths,
+            "session-incarnation",
+            RemoteDesktopControlAction::Stop,
+            RemoteDesktopControlRequestPayload::default(),
+        )
+        .await
+        .expect("enqueue old-incarnation remote request");
+
+        let initial_control = load_managed_session_controls(&paths)
+            .await
+            .expect("load initial control")
+            .get("session-incarnation")
+            .expect("initial control")
+            .clone();
+        let next_control = begin_managed_session_incarnation(&paths, &initial_control)
+            .await
+            .expect("start fresh managed incarnation");
+        assert_eq!(
+            next_control.registration_id, initial_control.registration_id,
+            "worker handoff must preserve immutable registration ownership"
+        );
+        assert_ne!(
+            next_control.target_runtime_id,
+            "runtime-session-incarnation"
+        );
+
+        let sessions = load_session_registry(&paths)
+            .await
+            .expect("load reset session");
+        let session = sessions.get("session-incarnation").expect("reset session");
+        assert_eq!(session.runtime_id, next_control.target_runtime_id);
+        assert_eq!(session.state, RuntimeSessionState::Connecting);
+        assert_eq!(session.readiness, SessionReadiness::Idle);
+        assert!(session.last_established_readiness.is_none());
+        assert!(!session.transport_preserved);
+        assert!(session.transport_ready_at.is_none());
+        assert!(session.handshake_completed_at.is_none());
+        assert!(session.authenticated_peer.is_none());
+        assert!(session.selected_ice_route.is_none());
+
+        let file_registry = load_file_transfer_request_registry(&paths)
+            .await
+            .expect("load finalized file requests");
+        let finalized_file = file_registry
+            .get(&file_request.request_id)
+            .expect("old file request");
+        assert_eq!(
+            finalized_file.status,
+            FileTransferControlRequestStatus::TransferFailed
+        );
+        assert_eq!(
+            finalized_file.failure_reason.as_deref(),
+            Some("managed runtime ended before verified receipt")
+        );
+        let remote_registry = load_remote_desktop_request_registry(&paths)
+            .await
+            .expect("load finalized remote requests");
+        assert_eq!(
+            remote_registry
+                .get(&remote_request.request_id)
+                .expect("old remote request")
+                .status,
+            RemoteDesktopControlRequestStatus::AgentRejected
+        );
+
+        let late_completion = complete_file_transfer_request_for_runtime(
+            &paths,
+            &file_request.request_id,
+            "runtime-session-incarnation",
+            file_request.source.size_bytes,
+        )
+        .await;
+        assert!(late_completion.is_err());
+        assert_eq!(
+            load_file_transfer_request_registry(&paths)
+                .await
+                .expect("reload finalized request")
+                .get(&file_request.request_id)
+                .expect("old file request")
+                .status,
+            FileTransferControlRequestStatus::TransferFailed
+        );
+
+        assert!(
+            disconnect_managed_session_if_registration(
+                &paths,
+                "session-incarnation",
+                &initial_control.registration_id,
+                Some("registration-owned cleanup".to_owned()),
+            )
+            .await
+            .expect("registration cleanup follows worker handoff")
+        );
+        assert_eq!(
+            load_session_registry(&paths)
+                .await
+                .expect("load cleaned session")
+                .get("session-incarnation")
+                .expect("session audit evidence")
+                .state,
+            RuntimeSessionState::Disconnected
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn stale_worker_cleanup_cannot_stop_disconnect_or_remove_replacement() {
+        let paths = test_paths("managed-incarnation-replacement");
+        seed_session(
+            &paths,
+            "session-replacement",
+            RuntimeSessionState::Connecting,
+        )
+        .await;
+        let old_control = managed_session_control("session-replacement");
+        let old_registration_id = old_control.registration_id.clone();
+        upsert_managed_session_control(&paths, old_control)
+            .await
+            .expect("persist old control");
+        let old_runtime_id = "runtime-session-replacement";
+
+        upsert_session_runtime(
+            &paths,
+            RuntimeSessionRecord::new(
+                "runtime-replacement-new",
+                "session-replacement",
+                RuntimeSessionRole::Initiator,
+                RuntimeSessionSource::Code,
+                "https://signal.example.com",
+                "local-device",
+                None,
+                None,
+                None,
+                RuntimeSessionState::Connecting,
+            ),
+        )
+        .await
+        .expect("publish replacement runtime");
+        upsert_managed_session_control(&paths, managed_session_control("session-replacement"))
+            .await
+            .expect("publish replacement control");
+
+        assert_eq!(
+            observe_managed_session_registration(
+                &paths,
+                "session-replacement",
+                &old_registration_id,
+            )
+            .await
+            .expect("observe stale registration"),
+            ManagedSessionRegistrationObservation::Replaced
+        );
+
+        assert!(!stop_managed_session_control_if_runtime(
+            &paths,
+            "session-replacement",
+            old_runtime_id,
+        )
+        .await
+        .expect("stale stop CAS"));
+        assert!(
+            !disconnect_session_if_runtime(
+                &paths,
+                "session-replacement",
+                old_runtime_id,
+                Some("stale worker exit".to_owned()),
+            )
+            .await
+            .expect("stale disconnect CAS")
+        );
+        assert!(
+            !remove_managed_session_control_if_runtime(
+                &paths,
+                "session-replacement",
+                old_runtime_id,
+            )
+            .await
+            .expect("stale remove CAS")
+        );
+        assert!(
+            !disconnect_managed_session_if_runtime(
+                &paths,
+                "session-replacement",
+                old_runtime_id,
+                Some("stale CLI cleanup".to_owned()),
+            )
+            .await
+            .expect("stale managed disconnect CAS")
+        );
+        assert!(
+            !disconnect_managed_session_if_registration(
+                &paths,
+                "session-replacement",
+                &old_registration_id,
+                Some("stale registration cleanup".to_owned()),
+            )
+            .await
+            .expect("stale registration disconnect CAS")
+        );
+        assert!(
+            apply_transport_event_for_runtime(
+                &paths,
+                "session-replacement",
+                old_runtime_id,
+                RuntimeSessionTransportEvent::TransportReady,
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            update_session_remote_peer_for_runtime(
+                &paths,
+                "session-replacement",
+                old_runtime_id,
+                "stale-peer",
+                None,
+                None,
+            )
+            .await
+            .is_err()
+        );
+
+        let controls = load_managed_session_controls(&paths)
+            .await
+            .expect("load replacement control");
+        let control = controls
+            .get("session-replacement")
+            .expect("replacement control survives");
+        assert_eq!(control.target_runtime_id, "runtime-replacement-new");
+        assert_ne!(control.registration_id, old_registration_id);
+        assert_eq!(control.desired_state, ManagedSessionDesiredState::Active);
+        let sessions = load_session_registry(&paths)
+            .await
+            .expect("load replacement runtime");
+        let session = sessions
+            .get("session-replacement")
+            .expect("replacement runtime survives");
+        assert_eq!(session.runtime_id, "runtime-replacement-new");
+        assert_eq!(session.state, RuntimeSessionState::Connecting);
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn typed_file_transitions_never_reopen_or_overwrite_terminal_failure() {
+        let paths = test_paths("typed-file-terminal");
+        seed_file_transfer_session(&paths, "session-terminal").await;
+        let source = paths.root.join("terminal-source.bin");
+        tokio::fs::write(&source, b"payload")
+            .await
+            .expect("seed transfer source");
+        let request = enqueue_file_transfer_send_request_for_established_session(
+            &paths,
+            "session-terminal",
+            "remote-device",
+            &source,
+        )
+        .await
+        .expect("enqueue transfer");
+        observe_file_transfer_requests_for_runtime(
+            &paths,
+            "session-terminal",
+            "runtime-session-terminal",
+        )
+        .await
+        .expect("observe transfer");
+        fail_file_transfer_request_for_runtime(
+            &paths,
+            &request.request_id,
+            "runtime-session-terminal",
+            "transport failed".to_owned(),
+        )
+        .await
+        .expect("persist terminal failure");
+        fail_file_transfer_request_for_runtime(
+            &paths,
+            &request.request_id,
+            "runtime-session-terminal",
+            "transport failed".to_owned(),
+        )
+        .await
+        .expect("identical terminal failure is idempotent");
+        assert!(
+            start_file_transfer_request_for_runtime(
+                &paths,
+                &request.request_id,
+                "runtime-session-terminal",
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            complete_file_transfer_request_for_runtime(
+                &paths,
+                &request.request_id,
+                "runtime-session-terminal",
+                request.source.size_bytes,
+            )
+            .await
+            .is_err()
+        );
+        let stored = load_file_transfer_request_registry(&paths)
+            .await
+            .expect("load terminal request");
+        let stored = stored.get(&request.request_id).expect("terminal request");
+        assert_eq!(
+            stored.status,
+            FileTransferControlRequestStatus::TransferFailed
+        );
+        assert_eq!(stored.failure_reason.as_deref(), Some("transport failed"));
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn failed_disconnect_cas_leaves_stopped_control_as_retry_anchor() {
+        let paths = test_paths("managed-stop-anchor");
+        seed_session(&paths, "session-anchor", RuntimeSessionState::Connecting).await;
+        upsert_managed_session_control(&paths, managed_session_control("session-anchor"))
+            .await
+            .expect("persist managed control");
+        assert!(
+            stop_managed_session_control_if_runtime(
+                &paths,
+                "session-anchor",
+                "runtime-session-anchor",
+            )
+            .await
+            .expect("persist stopped desired state")
+        );
+
+        upsert_session_runtime(
+            &paths,
+            RuntimeSessionRecord::new(
+                "runtime-session-anchor-replaced",
+                "session-anchor",
+                RuntimeSessionRole::Initiator,
+                RuntimeSessionSource::Code,
+                "https://signal.example.com",
+                "local-device",
+                None,
+                None,
+                None,
+                RuntimeSessionState::Connecting,
+            ),
+        )
+        .await
+        .expect("simulate replacement before disconnect CAS");
+        let disconnected = disconnect_session_if_runtime(
+            &paths,
+            "session-anchor",
+            "runtime-session-anchor",
+            Some("old worker exit".to_owned()),
+        )
+        .await
+        .expect("disconnect CAS should be observable");
+        assert!(!disconnected);
+        let control = load_managed_session_controls(&paths)
+            .await
+            .expect("load stopped control")
+            .get("session-anchor")
+            .expect("stopped control remains")
+            .clone();
+        assert_eq!(control.desired_state, ManagedSessionDesiredState::Stopped);
+        assert_eq!(control.target_runtime_id, "runtime-session-anchor");
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test]
+    async fn operator_disconnect_persists_session_terminal_state_before_removing_control() {
+        let paths = test_paths("managed-operator-disconnect");
+        seed_session(
+            &paths,
+            "session-operator-disconnect",
+            RuntimeSessionState::Connecting,
+        )
+        .await;
+        upsert_managed_session_control(
+            &paths,
+            managed_session_control("session-operator-disconnect"),
+        )
+        .await
+        .expect("persist managed control");
+
+        let sessions = disconnect_managed_session(
+            &paths,
+            "session-operator-disconnect",
+            Some("operator_requested".to_owned()),
+        )
+        .await
+        .expect("disconnect managed session");
+        let session = sessions
+            .get("session-operator-disconnect")
+            .expect("terminal session remains inspectable");
+        assert_eq!(session.state, RuntimeSessionState::Disconnected);
+        assert_eq!(session.last_error.as_deref(), Some("operator_requested"));
+        assert!(
+            load_managed_session_controls(&paths)
+                .await
+                .expect("load controls")
+                .get("session-operator-disconnect")
+                .is_none(),
+            "control is removed only after terminal session persistence succeeds"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_registry_updates_preserve_both_mutations() {
         let paths = test_paths("concurrent-registry-updates");
@@ -2481,6 +6548,61 @@ mod tests {
         assert_eq!(
             record.remote_protocol_public_key_fingerprint.as_deref(),
             Some("fingerprint")
+        );
+
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prebound_remote_peer_metadata_cannot_be_overwritten() {
+        let paths = test_paths("prebound-remote-peer-metadata");
+        seed_session(&paths, "session-1", RuntimeSessionState::Connecting).await;
+
+        update_session_remote_peer(
+            &paths,
+            "session-1",
+            "remote-device",
+            Some("Trusted Peer".to_owned()),
+            Some("trusted-fingerprint".to_owned()),
+        )
+        .await
+        .expect("first observed peer metadata should bind the session");
+
+        let substituted_id =
+            update_session_remote_peer(&paths, "session-1", "substituted-device", None, None)
+                .await
+                .expect_err("a different signaling device id must not replace the bound peer");
+        assert!(
+            substituted_id
+                .to_string()
+                .contains("pre-bound session peer")
+        );
+
+        let substituted_fingerprint = update_session_remote_peer(
+            &paths,
+            "session-1",
+            "remote-device",
+            None,
+            Some("substituted-fingerprint".to_owned()),
+        )
+        .await
+        .expect_err("a different protocol fingerprint must not replace the bound peer");
+        assert!(
+            substituted_fingerprint
+                .to_string()
+                .contains("pre-bound session peer")
+        );
+
+        let registry = load_session_registry(&paths)
+            .await
+            .expect("session registry should remain readable");
+        let record = registry
+            .get("session-1")
+            .expect("bound session should remain present");
+        assert_eq!(record.remote_device_id.as_deref(), Some("remote-device"));
+        assert_eq!(
+            record.remote_protocol_public_key_fingerprint.as_deref(),
+            Some("trusted-fingerprint")
         );
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
@@ -2576,21 +6698,30 @@ mod tests {
             "a session must not accept an unbounded queue of pending requests"
         );
 
-        let observed = observe_remote_desktop_requests_for_established_session(&paths, "session-1")
-            .await
-            .expect("established active session should observe pending remote desktop requests");
-        assert_eq!(observed.len(), 1);
-        assert_eq!(observed[0].session_id, "session-1");
-        assert!(observed[0].is_agent_observed());
-        assert!(!observed[0].is_pending_agent_observation());
+        let observed =
+            observe_remote_desktop_requests_for_runtime(&paths, "session-1", "runtime-session-1")
+                .await
+                .expect("standalone runtime should reject legacy pending remote desktop requests");
+        assert!(
+            observed.is_empty(),
+            "backend-unavailable requests must never be reported as agent-observed"
+        );
         let registry = load_remote_desktop_request_registry(&paths)
             .await
-            .expect("observed request registry should load");
+            .expect("rejected request registry should load");
         assert!(registry.pending_for_session("session-1").is_empty());
+        assert_eq!(
+            registry
+                .values_sorted()
+                .first()
+                .expect("legacy request should remain auditable")
+                .status,
+            RemoteDesktopControlRequestStatus::AgentRejected
+        );
         assert!(
-            observe_remote_desktop_requests_for_established_session(&paths, "session-1")
+            observe_remote_desktop_requests_for_runtime(&paths, "session-1", "runtime-session-1",)
                 .await
-                .expect("observed session should not produce duplicate observations")
+                .expect("rejected session should not produce observations")
                 .is_empty()
         );
 
@@ -2598,13 +6729,15 @@ mod tests {
         let mut stale_registry = load_remote_desktop_request_registry(&paths)
             .await
             .expect("request registry should load before seeding stale request");
-        stale_registry.insert(RemoteDesktopControlRequest::pending(
-            "stale-request-1",
-            "session-stale-runtime",
-            "old-runtime",
-            RemoteDesktopControlAction::Stop,
-            RemoteDesktopControlRequestPayload::default(),
-        ));
+        stale_registry
+            .insert(RemoteDesktopControlRequest::pending(
+                "stale-request-1",
+                "session-stale-runtime",
+                "old-runtime",
+                RemoteDesktopControlAction::Stop,
+                RemoteDesktopControlRequestPayload::default(),
+            ))
+            .expect("insert stale remote request");
         tokio::fs::write(
             &paths.remote_desktop_requests_file,
             serde_json::to_vec_pretty(&stale_registry).expect("stale registry should serialize"),
@@ -2612,22 +6745,29 @@ mod tests {
         .await
         .expect("stale request registry should be seeded");
         assert!(
-            observe_remote_desktop_requests_for_established_session(
+            observe_remote_desktop_requests_for_runtime(
                 &paths,
-                "session-stale-runtime"
+                "session-stale-runtime",
+                "runtime-session-stale-runtime",
             )
             .await
-            .is_err(),
-            "agent observe must reject stale-runtime pending requests"
+            .expect("stale request should be terminally rejected")
+            .is_empty()
         );
         let stale_registry = load_remote_desktop_request_registry(&paths)
             .await
             .expect("stale registry should remain loadable");
-        assert_eq!(
+        assert!(
             stale_registry
                 .pending_for_session("session-stale-runtime")
-                .len(),
-            1
+                .is_empty()
+        );
+        assert_eq!(
+            stale_registry
+                .get("stale-request-1")
+                .expect("stale request")
+                .status,
+            RemoteDesktopControlRequestStatus::AgentRejected
         );
 
         seed_session(&paths, "session-2", RuntimeSessionState::Disconnected).await;
@@ -2706,6 +6846,7 @@ mod tests {
         };
         record.readiness = readiness.clone();
         record.last_established_readiness = Some(readiness);
+        attach_verified_connection_evidence(&mut record);
         upsert_session_runtime(paths, record)
             .await
             .expect("file transfer session should seed");
@@ -2773,11 +6914,13 @@ mod tests {
             "a session must not accept an unbounded queue of pending file transfer requests"
         );
 
-        let observed = observe_file_transfer_requests_for_established_session(&paths, "session-1")
-            .await
-            .expect(
-                "handshake-complete active session should observe pending file transfer requests",
-            );
+        let observed = observe_file_transfer_requests_for_runtime(
+            &paths,
+            "session-1",
+            "runtime-session-1",
+        )
+        .await
+        .expect("handshake-complete active session should observe pending file transfer requests");
         assert_eq!(observed.len(), 1);
         assert_eq!(observed[0].session_id, "session-1");
         assert!(observed[0].is_agent_observed());
@@ -2787,7 +6930,7 @@ mod tests {
             .expect("observed request registry should load");
         assert!(registry.pending_for_session("session-1").is_empty());
         assert!(
-            observe_file_transfer_requests_for_established_session(&paths, "session-1")
+            observe_file_transfer_requests_for_runtime(&paths, "session-1", "runtime-session-1",)
                 .await
                 .expect("observed session should not produce duplicate file transfer observations")
                 .is_empty()
@@ -2797,74 +6940,87 @@ mod tests {
         let mut stale_registry = load_file_transfer_request_registry(&paths)
             .await
             .expect("file transfer registry should load before seeding stale request");
-        stale_registry.insert(FileTransferControlRequest::pending_send(
-            "stale-file-request-1",
-            "session-stale-runtime",
-            "old-runtime",
-            FileTransferSourceSnapshot {
-                source_path: "/private/stale.bin".to_owned(),
-                size_bytes: 5,
-                sha256_hex: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                    .to_owned(),
-            },
-            FileTransferDestinationBinding {
-                requested_peer_ref: "remote-device".to_owned(),
-                remote_device_id: "remote-device".to_owned(),
-                remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
-            },
-        ));
+        stale_registry
+            .insert(FileTransferControlRequest::pending_send(
+                "stale-file-request-1",
+                "session-stale-runtime",
+                "old-runtime",
+                FileTransferSourceSnapshot {
+                    source_path: "/private/stale.bin".to_owned(),
+                    size_bytes: 5,
+                    sha256_hex: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        .to_owned(),
+                },
+                FileTransferDestinationBinding {
+                    requested_peer_ref: "remote-device".to_owned(),
+                    remote_device_id: "remote-device".to_owned(),
+                    remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
+                },
+            ))
+            .expect("insert stale file request");
         store_file_transfer_request_registry_unlocked(
             &paths.file_transfer_requests_file,
             &stale_registry,
         )
         .expect("stale file transfer request should be persisted");
-        let stale_observe =
-            observe_file_transfer_requests_for_established_session(&paths, "session-stale-runtime")
-                .await
-                .expect_err("stale-runtime file transfer request must fail closed");
-        assert!(
-            stale_observe.to_string().contains("stale runtime"),
-            "stale runtime failure should be explicit: {stale_observe}"
-        );
+        let stale_observe = observe_file_transfer_requests_for_runtime(
+            &paths,
+            "session-stale-runtime",
+            "runtime-session-stale-runtime",
+        )
+        .await
+        .expect("stale-runtime file transfer request must be rejected terminally");
+        assert!(stale_observe.is_empty());
         let stale_registry = load_file_transfer_request_registry(&paths)
             .await
             .expect("file transfer registry should survive stale observe failure");
-        assert_eq!(
+        assert!(
             stale_registry
                 .pending_for_session("session-stale-runtime")
-                .len(),
-            1
+                .is_empty()
+        );
+        assert_eq!(
+            stale_registry
+                .get("stale-file-request-1")
+                .expect("stale file request")
+                .status,
+            FileTransferControlRequestStatus::AgentRejected
         );
 
         seed_session(&paths, "transport-only", RuntimeSessionState::Bound).await;
         let mut transport_only_registry = load_file_transfer_request_registry(&paths)
             .await
             .expect("file transfer registry should load before transport-only pending seed");
-        transport_only_registry.insert(FileTransferControlRequest::pending_send(
-            "transport-only-file-request-1",
-            "transport-only",
-            "runtime-transport-only",
-            FileTransferSourceSnapshot {
-                source_path: "/private/transport-only.bin".to_owned(),
-                size_bytes: 5,
-                sha256_hex: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                    .to_owned(),
-            },
-            FileTransferDestinationBinding {
-                requested_peer_ref: "remote-device".to_owned(),
-                remote_device_id: "remote-device".to_owned(),
-                remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
-            },
-        ));
+        transport_only_registry
+            .insert(FileTransferControlRequest::pending_send(
+                "transport-only-file-request-1",
+                "transport-only",
+                "runtime-transport-only",
+                FileTransferSourceSnapshot {
+                    source_path: "/private/transport-only.bin".to_owned(),
+                    size_bytes: 5,
+                    sha256_hex: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        .to_owned(),
+                },
+                FileTransferDestinationBinding {
+                    requested_peer_ref: "remote-device".to_owned(),
+                    remote_device_id: "remote-device".to_owned(),
+                    remote_protocol_public_key_fingerprint: "fingerprint".to_owned(),
+                },
+            ))
+            .expect("insert transport-only file request");
         store_file_transfer_request_registry_unlocked(
             &paths.file_transfer_requests_file,
             &transport_only_registry,
         )
         .expect("transport-only file transfer request should be persisted");
-        let transport_only_observe =
-            observe_file_transfer_requests_for_established_session(&paths, "transport-only")
-                .await
-                .expect_err("transport-only file transfer pending request must fail closed");
+        let transport_only_observe = observe_file_transfer_requests_for_runtime(
+            &paths,
+            "transport-only",
+            "runtime-transport-only",
+        )
+        .await
+        .expect_err("transport-only file transfer pending request must fail closed");
         assert!(
             transport_only_observe
                 .to_string()
@@ -2985,20 +7141,22 @@ mod tests {
         let paths = test_paths("remote-desktop-request-malformed-registry");
         seed_session(&paths, "session-1", RuntimeSessionState::Bound).await;
         let mut registry = RemoteDesktopControlRequestRegistry::default();
-        registry.insert(RemoteDesktopControlRequest::pending(
-            "request-1",
-            "session-1",
-            "runtime-session-1",
-            RemoteDesktopControlAction::SetFps,
-            RemoteDesktopControlRequestPayload {
-                resolution: Some(RemoteDesktopResolutionRequest::Preset {
-                    id: "1920x1080".to_owned(),
-                    width: 1920,
-                    height: 1080,
-                }),
-                fps: Some(60),
-            },
-        ));
+        registry
+            .insert(RemoteDesktopControlRequest::pending(
+                "request-1",
+                "session-1",
+                "runtime-session-1",
+                RemoteDesktopControlAction::SetFps,
+                RemoteDesktopControlRequestPayload {
+                    resolution: Some(RemoteDesktopResolutionRequest::Preset {
+                        id: "1920x1080".to_owned(),
+                        width: 1920,
+                        height: 1080,
+                    }),
+                    fps: Some(60),
+                },
+            ))
+            .expect("insert remote desktop request");
         tokio::fs::write(
             &paths.remote_desktop_requests_file,
             serde_json::to_vec_pretty(&registry).expect("malformed registry should serialize"),
@@ -3119,6 +7277,31 @@ mod tests {
         assert!(
             !error.contains("192.168.0.10"),
             "locator rejection must not echo the raw locator"
+        );
+
+        let locator_display_name = upsert_nearby_discovery_snapshot(
+            &paths,
+            NearbyDiscoverySnapshot::new(
+                "scan-4",
+                "agent_owned_nearby_discovery_snapshot",
+                vec![NearbyDiscoveredDevice::new(
+                    "nearby-device-4",
+                    "host.example.com",
+                    skybridge_core::NearbyDiscoveryEndpointClass::LocalNetwork,
+                    NearbyDiscoveryTrustStatus::Candidate,
+                    vec!["file_transfer".to_owned()],
+                    false,
+                )],
+                300,
+            ),
+        )
+        .await;
+        let error = locator_display_name
+            .expect_err("display_name must reject DNS locators")
+            .to_string();
+        assert!(
+            !error.contains("host.example.com"),
+            "locator rejection must not echo the raw display name"
         );
 
         let _ = tokio::fs::remove_dir_all(&paths.root).await;

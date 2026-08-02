@@ -754,6 +754,207 @@ final class FileTransferManagerSecurityTests: XCTestCase {
         )
     }
 
+    func testClassicTransferRegistryDelayedOldOwnerCannotRemoveReplacementSession() async {
+        let sessionId = "registry-owned-session-\(UUID().uuidString)"
+        let peerId = "id:\(UUID().uuidString.lowercased())"
+        let registry = ClassicTransferSessionRegistry.shared
+        let oldSnapshot = ClassicTransferSessionSnapshot(
+            sessionId: sessionId,
+            matchDeviceId: peerId,
+            resolvedPeerDeviceId: peerId,
+            aliases: [peerId],
+            endpointHostOrIP: "10.0.0.8",
+            capabilities: ["old"],
+            sessionKeys: Self.mockSessionKeys(sessionId: "old-\(sessionId)")
+        )
+        let replacementSnapshot = ClassicTransferSessionSnapshot(
+            sessionId: sessionId,
+            matchDeviceId: peerId,
+            resolvedPeerDeviceId: peerId,
+            aliases: [peerId],
+            endpointHostOrIP: "10.0.0.9",
+            capabilities: ["replacement"],
+            sessionKeys: Self.mockSessionKeys(sessionId: "replacement-\(sessionId)")
+        )
+
+        let oldLease = await registry.upsertOwned(session: oldSnapshot)
+        let replacementLease = await registry.upsertOwned(session: replacementSnapshot)
+
+        let didRemoveOldOwner = await registry.remove(ifOwned: oldLease)
+        XCTAssertFalse(didRemoveOldOwner)
+        await registry.remove(sessionId: sessionId)
+        await registry.remove(peerKeys: [peerId])
+
+        let sessionsAfterDelayedCleanup = await registry.activeSessions()
+        XCTAssertEqual(
+            sessionsAfterDelayedCleanup.first(where: { $0.sessionId == sessionId })?.capabilities,
+            ["replacement"]
+        )
+        let didRemoveReplacement = await registry.remove(ifOwned: replacementLease)
+        XCTAssertTrue(didRemoveReplacement)
+        let sessionsAfterExactCleanup = await registry.activeSessions()
+        XCTAssertFalse(sessionsAfterExactCleanup.contains(where: { $0.sessionId == sessionId }))
+    }
+
+    func testClassicTransferRegistryHeartbeatRefreshKeepsExactOwnerAndIdentityUntilTTL() async {
+        let sessionId = "registry-refresh-\(UUID().uuidString)"
+        let registry = ClassicTransferSessionRegistry.shared
+        let establishedAt = Date()
+        let snapshot = ClassicTransferSessionSnapshot(
+            sessionId: sessionId,
+            matchDeviceId: "id:authenticated-peer",
+            resolvedPeerDeviceId: "id:authenticated-peer",
+            aliases: ["id:authenticated-peer", "host:10.0.0.8"],
+            endpointHostOrIP: "10.0.0.8",
+            capabilities: ["file_transfer", "fileTransferPort=9000"],
+            sessionKeys: Self.mockSessionKeys(sessionId: sessionId),
+            lastSeenAt: establishedAt
+        )
+        let lease = await registry.upsertOwned(session: snapshot)
+        let refreshedAt = establishedAt.addingTimeInterval(
+            ClassicTransferSessionRegistry.sessionSnapshotTimeToLive - 1
+        )
+
+        let didRefresh = await registry.refreshIfOwned(
+            lease,
+            capabilities: ["file_transfer", "classic_resume"],
+            fileTransferPort: 9528,
+            now: refreshedAt
+        )
+        XCTAssertTrue(didRefresh)
+        var sessions = await registry.activeSessions(
+            now: refreshedAt.addingTimeInterval(
+                ClassicTransferSessionRegistry.sessionSnapshotTimeToLive
+            )
+        )
+        let refreshed = try? XCTUnwrap(
+            sessions.first(where: { $0.sessionId == sessionId })
+        )
+        XCTAssertEqual(refreshed?.matchDeviceId, snapshot.matchDeviceId)
+        XCTAssertEqual(refreshed?.resolvedPeerDeviceId, snapshot.resolvedPeerDeviceId)
+        XCTAssertEqual(refreshed?.aliases, snapshot.aliases)
+        XCTAssertEqual(refreshed?.endpointHostOrIP, snapshot.endpointHostOrIP)
+        XCTAssertTrue(refreshed?.capabilities.contains("fileTransferPort=9528") == true)
+        XCTAssertFalse(refreshed?.capabilities.contains("fileTransferPort=9000") == true)
+
+        sessions = await registry.activeSessions(
+            now: refreshedAt.addingTimeInterval(
+                ClassicTransferSessionRegistry.sessionSnapshotTimeToLive + 0.001
+            )
+        )
+        XCTAssertFalse(sessions.contains(where: { $0.sessionId == sessionId }))
+        let didRemoveExpiredLease = await registry.remove(ifOwned: lease)
+        XCTAssertFalse(didRemoveExpiredLease)
+    }
+
+    func testClassicTransferRegistryRejectsLateHeartbeatAndStaleReplacementOwner() async {
+        let expiredSessionId = "registry-expired-refresh-\(UUID().uuidString)"
+        let replacementSessionId = "registry-replacement-refresh-\(UUID().uuidString)"
+        let registry = ClassicTransferSessionRegistry.shared
+        let now = Date()
+
+        let expiredSnapshot = ClassicTransferSessionSnapshot(
+            sessionId: expiredSessionId,
+            matchDeviceId: "id:expired-peer",
+            resolvedPeerDeviceId: "id:expired-peer",
+            aliases: ["id:expired-peer"],
+            endpointHostOrIP: "10.0.0.7",
+            capabilities: ["original"],
+            sessionKeys: Self.mockSessionKeys(sessionId: expiredSessionId),
+            lastSeenAt: now
+        )
+        let expiredLease = await registry.upsertOwned(session: expiredSnapshot)
+        let didRefreshExpiredLease = await registry.refreshIfOwned(
+            expiredLease,
+            capabilities: ["late"],
+            now: now.addingTimeInterval(
+                ClassicTransferSessionRegistry.sessionSnapshotTimeToLive + 0.001
+            )
+        )
+        XCTAssertFalse(didRefreshExpiredLease)
+
+        let oldSnapshot = ClassicTransferSessionSnapshot(
+            sessionId: replacementSessionId,
+            matchDeviceId: "id:old-peer",
+            resolvedPeerDeviceId: "id:old-peer",
+            aliases: ["id:old-peer"],
+            endpointHostOrIP: "10.0.0.8",
+            capabilities: ["old"],
+            sessionKeys: Self.mockSessionKeys(sessionId: "old-\(replacementSessionId)"),
+            lastSeenAt: now
+        )
+        let replacementSnapshot = ClassicTransferSessionSnapshot(
+            sessionId: replacementSessionId,
+            matchDeviceId: "id:replacement-peer",
+            resolvedPeerDeviceId: "id:replacement-peer",
+            aliases: ["id:replacement-peer"],
+            endpointHostOrIP: "10.0.0.9",
+            capabilities: ["replacement"],
+            sessionKeys: Self.mockSessionKeys(sessionId: "replacement-\(replacementSessionId)"),
+            lastSeenAt: now
+        )
+        let oldLease = await registry.upsertOwned(session: oldSnapshot)
+        let replacementLease = await registry.upsertOwned(session: replacementSnapshot)
+
+        let didRefreshOldOwner = await registry.refreshIfOwned(
+            oldLease,
+            capabilities: ["attacker-overwrite"],
+            fileTransferPort: 1,
+            now: now.addingTimeInterval(1)
+        )
+        XCTAssertFalse(didRefreshOldOwner)
+        let sessions = await registry.activeSessions(now: now.addingTimeInterval(1))
+        let replacement = sessions.first(where: { $0.sessionId == replacementSessionId })
+        XCTAssertEqual(replacement?.matchDeviceId, replacementSnapshot.matchDeviceId)
+        XCTAssertEqual(replacement?.capabilities, replacementSnapshot.capabilities)
+        let didRemoveReplacement = await registry.remove(ifOwned: replacementLease)
+        XCTAssertTrue(didRemoveReplacement)
+    }
+
+    func testClassicTransferRegistryDelayedOldConnectionTeardownCannotRemoveReplacement() async {
+        let peerKey = "id:\(UUID().uuidString.lowercased())"
+        let device = P2PDevice(
+            id: peerKey,
+            name: "Replacement Peer",
+            type: .macOS,
+            address: "127.0.0.1",
+            port: 9,
+            osVersion: "macOS",
+            capabilities: ["file_transfer"],
+            publicKey: Data(),
+            lastSeen: Date()
+        )
+        let oldNetworkConnection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let replacementNetworkConnection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let oldConnection = P2PConnection(device: device, connection: oldNetworkConnection)
+        let replacementConnection = P2PConnection(
+            device: device,
+            connection: replacementNetworkConnection
+        )
+        defer {
+            oldNetworkConnection.cancel()
+            replacementNetworkConnection.cancel()
+        }
+
+        let registry = ClassicTransferSessionRegistry.shared
+        let oldLease = await registry.upsertOwned(
+            connection: oldConnection,
+            peerKeys: [peerKey]
+        )
+        let replacementLease = await registry.upsertOwned(
+            connection: replacementConnection,
+            peerKeys: [peerKey]
+        )
+
+        let staleRemoval = await registry.remove(ifOwned: oldLease)
+        XCTAssertFalse(staleRemoval)
+        let activeAfterStaleRemoval = await registry.activeConnections()
+        XCTAssertTrue(activeAfterStaleRemoval.contains(where: { $0 === replacementConnection }))
+        XCTAssertFalse(activeAfterStaleRemoval.contains(where: { $0 === oldConnection }))
+        let replacementRemoval = await registry.remove(ifOwned: replacementLease)
+        XCTAssertTrue(replacementRemoval)
+    }
+
     func testClassicTransferRegistryReturnsNewestLiveSnapshotAndPrunesStaleOnes() async {
         let oldSessionId = "registry-old-\(UUID().uuidString)"
         let freshSessionId = "registry-fresh-\(UUID().uuidString)"

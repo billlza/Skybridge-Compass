@@ -4,7 +4,7 @@
 
 File transfer must consume the shared route contract instead of inventing local routing heuristics.
 
-`file_transfer` capability is not a LAN endpoint. It can make transfer UI available, but it must not synthesize `_skybridge-transfer._tcp` or a guessed host/port route.
+`file_transfer` capability is not a LAN endpoint. It can make transfer UI available, but it must not synthesize `_skybridge-xfer._tcp` or a guessed host/port route.
 
 ## Route Resolution Order
 

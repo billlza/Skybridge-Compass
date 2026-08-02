@@ -315,13 +315,35 @@ struct SkyBridgeCompassApp: App {
         }
 
         do {
-            _ = try await IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()
+            try await PairingAcceptancePersistence.recoverIfNeeded(
+                policyParticipant: connectionManager
+            )
         } catch {
+            let reasonCode = "pairing_identity_authority_recovery_failed"
+            connectionManager.reportAdvertisingBlockedByStartupFailure(
+                reason: reasonCode
+            )
             SkyBridgeLogger.shared.error(
-                "❌ Current-path authority 恢复失败；监听、发现与能力广告保持停用: \(error.localizedDescription)"
+                "⛔️ 启动已阻断：pairing acceptance authority 恢复失败 code=\(reasonCode) errorDomain=\(String(reflecting: type(of: error)))"
             )
             return
         }
+
+        do {
+            try await DeviceMessagingService.shared.prepare()
+            DeviceMessagingService.shared.start()
+        } catch {
+            let reasonCode = "device_messaging_repository_unavailable"
+            connectionManager.reportAdvertisingBlockedByStartupFailure(reason: reasonCode)
+            SkyBridgeLogger.shared.error(
+                "⛔️ 启动已阻断：统一消息仓库未就绪 code=\(reasonCode)"
+            )
+            return
+        }
+
+        // P2PConnectionManager owns authority readiness inside its supervised listening
+        // transaction. The App must still request the desired listening state when authority is
+        // temporarily unavailable; otherwise no supervisor exists to retry it later.
 
         do {
             switch try await QPeriaptIOSRuntime.prepareProductionSession() {
@@ -361,7 +383,8 @@ struct SkyBridgeCompassApp: App {
         // 3. KVS 在线态必须来自真实可拨号的控制监听器，而不是 App 进程存活状态。
         configureICloudPresenceReadiness()
 
-        // 4. 启动 P2P 监听器（按后台策略）
+        // 4. 启动 P2P 监听器（按后台策略）。authority 仍在 manager 事务内 fail-closed，
+        //    但 desired state 会先登记，以便可恢复错误无需 scene 切换即可重试。
         if SettingsManager.instance.allowBackgroundConnection || scenePhase == .active {
             do {
                 SkyBridgeLogger.shared.info("⏱️ 启动步骤开始：P2P 监听器")
@@ -389,9 +412,10 @@ struct SkyBridgeCompassApp: App {
 
         // 7. Clipboard Sync wiring（最小闭环）：本地剪贴板变化 -> 广播给已握手连接
         ClipboardManager.shared.onLocalClipboardChanged = { data, mimeType in
-            Task { @MainActor in
-                await P2PConnectionManager.instance.broadcastClipboard(data: data, mimeType: mimeType)
-            }
+            try await P2PConnectionManager.instance.broadcastClipboard(
+                data: data,
+                mimeType: mimeType
+            )
         }
 
         // 8. 应用剪贴板设置（启用/图片/URL/大小/历史/轮询/限速）
@@ -509,6 +533,27 @@ struct SkyBridgeCompassApp: App {
 
         switch phase {
         case .active:
+            do {
+                try await PairingAcceptancePersistence.recoverIfNeeded(
+                    policyParticipant: connectionManager
+                )
+                guard PairingAcceptancePersistence.isRecoveryReady else {
+                    throw PairingAcceptancePersistenceError.recoveryRequired
+                }
+            } catch {
+                let reasonCode = "pairing_identity_authority_recovery_failed"
+                discoveryManager.stopDiscovery()
+                connectionManager.stopListening()
+                await FileTransferRuntime.shared.stop()
+                ICloudDevicePresenceService.shared.stop()
+                connectionManager.reportAdvertisingBlockedByStartupFailure(
+                    reason: reasonCode
+                )
+                SkyBridgeLogger.shared.error(
+                    "⛔️ 前台恢复已阻断：pairing acceptance authority 未就绪 code=\(reasonCode) errorDomain=\(String(reflecting: type(of: error)))"
+                )
+                return
+            }
             backgroundTeardownTask?.cancel()
             backgroundTeardownTask = nil
             discoveryManager.retryAuthorizationBlockedBrowsers()
@@ -518,6 +563,13 @@ struct SkyBridgeCompassApp: App {
                 try await connectionManager.startListening()
             } catch {
                 SkyBridgeLogger.shared.error("❌ 前台恢复 P2P 监听器失败: \(error.localizedDescription)")
+            }
+            do {
+                try await FileTransferRuntime.shared.startIfNeeded()
+            } catch {
+                SkyBridgeLogger.shared.error(
+                    "❌ 前台恢复文件传输监听器失败，文件传输能力保持撤销: \(error.localizedDescription)"
+                )
             }
             // 回到前台：在监听器启动结果确定后重启 presence。start() 会立即发布一次。
             ICloudDevicePresenceService.shared.start()

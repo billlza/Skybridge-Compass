@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -9,7 +14,7 @@ enum PersistenceStoreLocation: Sendable {
 }
 
 enum CodablePersistenceStoreError: Error, CustomNSError, Sendable {
-    case payloadTooLarge
+    case payloadTooLarge(actualBytes: Int, maximumBytes: Int)
 
     static let errorDomain = "SkyBridge.CodablePersistenceStore"
 
@@ -20,7 +25,15 @@ enum CodablePersistenceStoreError: Error, CustomNSError, Sendable {
         }
     }
 
-    var errorUserInfo: [String: Any] { [:] }
+    var errorUserInfo: [String: Any] {
+        switch self {
+        case let .payloadTooLarge(actualBytes, maximumBytes):
+            return [
+                "actualBytes": actualBytes,
+                "maximumBytes": maximumBytes
+            ]
+        }
+    }
 }
 
 struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
@@ -111,8 +124,7 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
         case let .protectedApplicationSupport(path, legacyUserDefaultsKey):
             let url = try resolvedURL(for: path)
             try ensureParentDirectory(for: url)
-            try data.write(to: url, options: .atomic)
-            try applyFileProtection(to: url)
+            try replaceWithProtectedData(data, at: url)
             if let legacyUserDefaultsKey {
                 defaults.removeObject(forKey: legacyUserDefaultsKey)
             }
@@ -130,6 +142,36 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
                 try fileManager.removeItem(at: url)
             }
             if let legacyUserDefaultsKey {
+                defaults.removeObject(forKey: legacyUserDefaultsKey)
+            }
+        }
+    }
+
+    /// Moves unreadable state aside before an explicit recovery reset. Ordinary
+    /// loads and saves never call this method, so corruption evidence cannot be
+    /// overwritten by a default value accidentally.
+    func quarantine() throws {
+        let suffix = "quarantine-\(UUID().uuidString)"
+        switch location {
+        case let .userDefaults(key):
+            guard let data = defaults.data(forKey: key) else { return }
+            defaults.set(data, forKey: "\(key).\(suffix)")
+            defaults.removeObject(forKey: key)
+
+        case let .protectedApplicationSupport(path, legacyUserDefaultsKey):
+            let url = try resolvedURL(for: path)
+            if fileManager.fileExists(atPath: url.path) {
+                let quarantineURL = url.deletingLastPathComponent()
+                    .appendingPathComponent("\(url.lastPathComponent).\(suffix)")
+                try applyFileProtection(to: url)
+                try atomicallyReplace(quarantineURL, withPreparedFileAt: url)
+            }
+            if let legacyUserDefaultsKey,
+               let legacyData = defaults.data(forKey: legacyUserDefaultsKey) {
+                defaults.set(
+                    legacyData,
+                    forKey: "\(legacyUserDefaultsKey).\(suffix)"
+                )
                 defaults.removeObject(forKey: legacyUserDefaultsKey)
             }
         }
@@ -201,12 +243,87 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
 #endif
     }
 
+    /// Prepares a fully protected sibling file before a single atomic rename.
+    /// No throwing operation is performed against the committed file after the
+    /// rename, so a reported save failure cannot conceal a changed primary.
+    private func replaceWithProtectedData(_ data: Data, at destinationURL: URL) throws {
+        let temporaryURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(
+                ".\(destinationURL.lastPathComponent).prepared-\(UUID().uuidString)",
+                isDirectory: false
+            )
+        var preparedFileExists = false
+
+        do {
+            guard !fileManager.fileExists(atPath: temporaryURL.path) else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            // From this point the UUID-scoped path belongs to this transaction.
+            // Mark ownership before writing so a partial write is also cleaned.
+            preparedFileExists = true
+#if canImport(UIKit) && !os(macOS)
+            try data.write(
+                to: temporaryURL,
+                options: [
+                    .withoutOverwriting,
+                    .completeFileProtectionUntilFirstUserAuthentication
+                ]
+            )
+#else
+            try data.write(to: temporaryURL, options: .withoutOverwriting)
+#endif
+            try applyFileProtection(to: temporaryURL)
+            try atomicallyReplace(destinationURL, withPreparedFileAt: temporaryURL)
+            preparedFileExists = false
+        } catch {
+            guard preparedFileExists,
+                  fileManager.fileExists(atPath: temporaryURL.path) else {
+                throw error
+            }
+            do {
+                try fileManager.removeItem(at: temporaryURL)
+            } catch let cleanupError {
+                throw PreparedPersistenceFileCleanupError(
+                    operationError: error,
+                    cleanupError: cleanupError
+                )
+            }
+            throw error
+        }
+    }
+
+    private func atomicallyReplace(
+        _ destinationURL: URL,
+        withPreparedFileAt temporaryURL: URL
+    ) throws {
+        let result: Int32 = temporaryURL.withUnsafeFileSystemRepresentation { temporaryPath in
+            destinationURL.withUnsafeFileSystemRepresentation { destinationPath in
+                guard let temporaryPath, let destinationPath else {
+                    errno = EINVAL
+                    return Int32(-1)
+                }
+                return rename(temporaryPath, destinationPath)
+            }
+        }
+        guard result == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
     private func validatePayloadSize(_ byteCount: Int) throws {
         guard let maximumPayloadBytes else { return }
         guard byteCount <= maximumPayloadBytes else {
-            throw CodablePersistenceStoreError.payloadTooLarge
+            throw CodablePersistenceStoreError.payloadTooLarge(
+                actualBytes: byteCount,
+                maximumBytes: maximumPayloadBytes
+            )
         }
     }
+}
+
+private struct PreparedPersistenceFileCleanupError: Error {
+    let operationError: Error
+    let cleanupError: Error
 }
 
 struct FileTransferHistoryPersistence: Sendable {

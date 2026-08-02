@@ -27,10 +27,61 @@ where
     T: serde::Serialize,
 {
     let body = serde_json::to_vec_pretty(value).context("failed to encode json")?;
-    fs::write(path, body)
-        .await
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    restrict_file_permissions(path).await
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("json path is missing its filename"))?
+        .to_string_lossy();
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::now_v7()));
+    let publish_result: Result<()> = async {
+        use tokio::io::AsyncWriteExt;
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .await
+            .with_context(|| format!("failed to create {}", temp_path.display()))?;
+        file.write_all(&body)
+            .await
+            .with_context(|| format!("failed to write {}", temp_path.display()))?;
+        file.flush()
+            .await
+            .with_context(|| format!("failed to flush {}", temp_path.display()))?;
+        file.sync_all()
+            .await
+            .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+        drop(file);
+        restrict_file_permissions(&temp_path).await?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(path)
+                .await
+                .with_context(|| format!("failed to replace {}", path.display()))?;
+        }
+        fs::rename(&temp_path, path)
+            .await
+            .with_context(|| format!("failed to publish {}", path.display()))?;
+        restrict_file_permissions(path).await
+    }
+    .await;
+    if let Err(error) = publish_result {
+        match fs::remove_file(&temp_path).await {
+            Ok(()) => Err(error),
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
+                Err(error)
+            }
+            Err(cleanup_error) => Err(error.context(format!(
+                "failed to clean temporary json file {}: {cleanup_error}",
+                temp_path.display()
+            ))),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) async fn append_event_line(path: &Path, event: StructuredEvent) -> Result<()> {
@@ -58,6 +109,17 @@ pub(super) async fn load_json<T>(path: &Path) -> Result<Option<T>>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
+    match fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            anyhow::bail!("private JSON path {} is not a regular file", path.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect private JSON {}", path.display()));
+        }
+    }
     match fs::read_to_string(path).await {
         Ok(body) => {
             let decoded = serde_json::from_str(&body)
@@ -70,6 +132,16 @@ where
 }
 
 pub(crate) async fn restrict_dir_permissions(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("failed to inspect directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "private state directory {} is not a regular directory",
+            path.display()
+        );
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -84,6 +156,16 @@ pub(crate) async fn restrict_dir_permissions(path: &Path) -> Result<()> {
 }
 
 pub(crate) async fn restrict_file_permissions(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .await
+        .with_context(|| format!("failed to inspect file {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "private state file {} is not a regular file",
+            path.display()
+        );
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

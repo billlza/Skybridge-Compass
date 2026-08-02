@@ -1,16 +1,8 @@
 name: skybridge-cli-packaging
 
 on:
+  workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/skybridge-cli-*"
-      - "Scripts/test_skybridge_cli_release_workflow_contract.py"
-      - "rust-toolchain.toml"
-      - "rust/**"
-      - "Docs/cli-install-release.md"
-      - "Docs/signaling-lifecycle-contract.md"
-      - "Docs/failure-matrix-and-recovery.md"
-      - "README.md"
   push:
     branches:
       - main
@@ -39,9 +31,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Checkout pinned Q-Periapt source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: billlza/q-periapt
+          ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Verify the pinned Cargo path dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependency_path="$PWD/External/pqt_hybrid_suite"
+          [[ -f "$dependency_path/Cargo.toml" ]]
+          [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "5664fd86a617f92b620ea37e7692d3417d0e307d" ]]
+
       - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component llvm-tools-preview
+          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
           rustup override set 1.94.0
           [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
 
@@ -57,14 +66,20 @@ jobs:
       - name: Read workspace version
         run: python rust/scripts/workspace_version.py
 
+      - name: Install the pinned dependency auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit locked dependencies
+        run: cargo audit --deny warnings --file rust/Cargo.lock
+
       - name: Check formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all --check
 
-      - name: Check session runtime tests
-        run: CARGO_TARGET_DIR=/tmp/skybridge-core-packaging cargo test --manifest-path rust/Cargo.toml -p skybridge-core session::tests
+      - name: Check workspace tests
+        run: CARGO_TARGET_DIR=/tmp/skybridge-workspace-tests cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets
 
-      - name: Check CLI compilation
-        run: CARGO_TARGET_DIR=/tmp/skybridge-cli-packaging cargo check --manifest-path rust/Cargo.toml -p skybridge
+      - name: Check workspace lint
+        run: CARGO_TARGET_DIR=/tmp/skybridge-workspace-clippy cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
 
       - name: Validate npm wrapper scripts
         run: |

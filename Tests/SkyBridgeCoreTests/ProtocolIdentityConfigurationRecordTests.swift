@@ -2,6 +2,34 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class ProtocolIdentityConfigurationRecordTests: XCTestCase {
+    func testTestProcessReportsEphemeralIdentityStorageLifetime() {
+        XCTAssertTrue(DeviceIdentityKeyManager.usesEphemeralIdentityStoreForCurrentProcess)
+    }
+
+    func testEphemeralIdentityStoreProvisionsStoredSelectionWithoutMutatingDurablePolicy() {
+        XCTAssertEqual(
+            ProtocolIdentityAuthorityRestorationPolicy.action(
+                shouldProvisionDefault: false,
+                usesEphemeralIdentityStore: true
+            ),
+            .provision
+        )
+        XCTAssertEqual(
+            ProtocolIdentityAuthorityRestorationPolicy.action(
+                shouldProvisionDefault: false,
+                usesEphemeralIdentityStore: false
+            ),
+            .requireExisting
+        )
+        XCTAssertEqual(
+            ProtocolIdentityAuthorityRestorationPolicy.action(
+                shouldProvisionDefault: true,
+                usesEphemeralIdentityStore: false
+            ),
+            .provision
+        )
+    }
+
     func testAtomicRecordRoundTripsAlgorithmAndProtectionTogether() throws {
         let record = ProtocolIdentityConfigurationRecord(
             algorithm: .mlDSA87,

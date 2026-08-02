@@ -21,6 +21,22 @@ printf '%s\n' "Test Suite 'All tests' started" >"${TEST_LOG}"
 "${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null
 
 printf '%s\n' \
+  "objc[4242]: Class UIAccessibilityLoaderWebShared is implemented in both /System/Library/AccessibilityBundles/WebCore.axbundle/WebCore and /System/Library/AccessibilityBundles/WebKit.axbundle/WebKit. This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed." \
+  "Test Suite 'All tests' started" >"${TEST_LOG}"
+"${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null
+
+printf '%s\n' \
+  "objc[4242]: Class UnknownRuntimeClass is implemented in both /System/Library/Frameworks/First.framework/First and /System/Library/Frameworks/Second.framework/Second." \
+  "Test Suite 'All tests' started" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' \
+  "objc[4242]: Class UIAccessibilityLoaderWebShared is implemented in both /System/Library/AccessibilityBundles/WebCore.axbundle/WebCore and /System/Library/AccessibilityBundles/WebKit.axbundle/WebKit." \
+  "objc[4242]: Class UIAccessibilityLoaderWebShared is implemented in both /System/Library/AccessibilityBundles/WebCore.axbundle/WebCore and /System/Library/AccessibilityBundles/WebKit.axbundle/WebKit." \
+  "Test Suite 'All tests' started" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' \
   "Test Suite 'All tests' started" \
   "[plugin] AddInstanceForFactory: No factory registered for id F8BB1C28" >"${TEST_LOG}"
 expect_failure
@@ -36,6 +52,15 @@ printf '%s\n' "Test Suite 'All tests' started" >"${TEST_LOG}"
 expect_failure
 
 printf '%s\n' "SwiftExplicitDependencyGeneratePcm IOSurface-ABCDE.pcm" >"${BUILD_LOG}"
+
+printf '%s\n' \
+  "objc[4242]: Class _TtC21SkyBridgeProtocolCore11SecureBytes is implemented in both /tmp/SkyBridgeAppleRuntime.framework/SkyBridgeAppleRuntime and /tmp/SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS." \
+  "This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed." \
+  "Test Suite 'All tests' started" >"${TEST_LOG}"
+expect_failure
+
+printf '%s\n' "Test Suite 'All tests' started" >"${TEST_LOG}"
+"${VALIDATOR}" "${BUILD_LOG}" "${TEST_LOG}" >/dev/null
 
 printf '%s\n' \
   "IOSurfaceClientSetSurfaceNotify failed e00002c7" \

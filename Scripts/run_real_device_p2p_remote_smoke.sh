@@ -8,8 +8,10 @@ source "$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/framework_artifact_helpers.sh"
+source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
+PROCESS_OWNERSHIP_HELPER="$ROOT_DIR/Scripts/webrtc_smoke_process_ownership.py"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_p2p_remote_smoke_$(date +%Y%m%d_%H%M%S)}"
 PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
@@ -25,7 +27,10 @@ IOS_BUILD_DESTINATION="${SKYBRIDGE_IOS_BUILD_DESTINATION:-generic/platform=iOS}"
 IOS_BUILD_CONFIGURATION="${SKYBRIDGE_SMOKE_IOS_BUILD_CONFIGURATION:-Release}"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-240}"
 IOS_LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_LAUNCH_TIMEOUT_SECONDS:-$((SMOKE_TIMEOUT_SECONDS + 60))}"
+DEVICECTL_TIMEOUT_SECONDS="${SKYBRIDGE_DEVICECTL_TIMEOUT_SECONDS:-60}"
+IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS:-10}"
 SMOKE_REMOTE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
+IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_CONSOLE_TIMEOUT_SECONDS:-$((SMOKE_TIMEOUT_SECONDS + SMOKE_REMOTE_TIMEOUT_SECONDS + 300))}"
 SMOKE_MIN_FPS="${SKYBRIDGE_SMOKE_MIN_FPS:-59}"
 SMOKE_TARGET_FPS="${SKYBRIDGE_SMOKE_TARGET_FPS:-60}"
 SMOKE_SOAK_SECONDS="${SKYBRIDGE_SMOKE_SOAK_SECONDS:-10}"
@@ -48,6 +53,8 @@ PQC_TRUST_MODE="${SKYBRIDGE_SMOKE_PQC_TRUST_MODE:-actual}"
 KEYCHAIN_MODE="${SKYBRIDGE_SMOKE_KEYCHAIN_MODE:-system}"
 LAB_RUN="${SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN:-0}"
 MAC_HOST_LAUNCH_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-packaged}"
+IDENTITY_AUDIT_ONLY="${SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY:-0}"
+IDENTITY_AUDIT_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IDENTITY_AUDIT_TIMEOUT_SECONDS:-120}"
 SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE="${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-1}"
 SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-Mac Smoke Operator}"
 SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-mac-smoke-nebula}"
@@ -59,6 +66,21 @@ SMOKE_BUILD_DIR="${SKYBRIDGE_P2P_SMOKE_BUILD_DIR:-$ROOT_DIR/.build/real-device-p
 if [[ "$SMOKE_BUILD_DIR" != /* ]]; then
   SMOKE_BUILD_DIR="$ROOT_DIR/$SMOKE_BUILD_DIR"
 fi
+SOURCE_INPUT_DIGEST_TOOL="$ROOT_DIR/Scripts/source_input_digest.py"
+SOURCE_INPUT_BINDING_LOG="$ARTIFACT_DIR/source-input-binding.log"
+SOURCE_INPUT_BINDING_PROOF="$ARTIFACT_DIR/source-input-binding.json"
+SOURCE_INPUT_PATHS=(
+  Package.swift
+  Package.resolved
+  project.yml
+  Config
+  Sources
+  Scripts
+  Packages
+  "SkyBridge Compass iOS"
+)
+IOS_SOURCE_INPUT_DIGEST=""
+IOS_SOURCE_INPUT_FILE_COUNT=""
 
 case "$PQC_TRUST_MODE" in
   user|actual|injected) ;;
@@ -104,6 +126,52 @@ else
   IOS_EXPECTED_ENTITLEMENTS="$IOS_DEBUG_ENTITLEMENTS"
 fi
 
+case "$MAC_HOST_LAUNCH_MODE" in
+  packaged|packaged-lab|direct) ;;
+  *)
+    echo "Unsupported SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=$MAC_HOST_LAUNCH_MODE (expected: packaged, packaged-lab, direct)" >&2
+    exit 2
+    ;;
+esac
+if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" && "$LAB_RUN" != "1" ]]; then
+  echo "SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged-lab requires SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1." >&2
+  exit 2
+fi
+
+case "$IDENTITY_AUDIT_ONLY" in
+  0|1) ;;
+  *)
+    echo "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+if [[ ! "$IDENTITY_AUDIT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
+  || (( IDENTITY_AUDIT_TIMEOUT_SECONDS < 30 || IDENTITY_AUDIT_TIMEOUT_SECONDS > 300 )); then
+  echo "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_TIMEOUT_SECONDS must be an integer from 30 through 300" >&2
+  exit 2
+fi
+if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+  if [[ "$LAB_RUN" != "1" || "$MAC_HOST_LAUNCH_MODE" != "packaged-lab" ]]; then
+    echo "The identity audit is diagnostic-only and requires LAB_RUN=1 with MAC_HOST_LAUNCH_MODE=packaged-lab." >&2
+    exit 2
+  fi
+  if [[ "$KEYCHAIN_MODE" != "system" ]]; then
+    echo "The identity audit requires the persistent system Keychain view." >&2
+    exit 2
+  fi
+fi
+
+mac_host_uses_signed_app_bundle() {
+  case "$MAC_HOST_LAUNCH_MODE" in
+    packaged|packaged-lab) return 0 ;;
+    direct) return 1 ;;
+    *)
+      echo "Invalid macOS host mode reached the signed-app boundary: $MAC_HOST_LAUNCH_MODE" >&2
+      return 2
+      ;;
+  esac
+}
+
 if [[ "$LAB_RUN" != "1" ]]; then
   acceptance_violations=()
   [[ "$PQC_TRUST_MODE" != "injected" ]] \
@@ -128,14 +196,6 @@ if [[ "$LAB_RUN" != "1" ]]; then
     exit 2
   fi
 fi
-
-case "$MAC_HOST_LAUNCH_MODE" in
-  packaged|direct) ;;
-  *)
-    echo "Unsupported SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=$MAC_HOST_LAUNCH_MODE (expected: packaged, direct)" >&2
-    exit 2
-    ;;
-esac
 
 case "$IOS_LAUNCH_TIMEOUT_SECONDS" in
   ''|*[!0-9]*)
@@ -196,9 +256,9 @@ def connected_ipad_identifiers(payload):
         if not has_install_application_capability(device):
             continue
         identifier = (
-            string_value(device.get("identifier"))
-            or string_value(nested_value(device, "hardwareProperties", "udid"))
+            string_value(nested_value(device, "hardwareProperties", "udid"))
             or string_value(nested_value(device, "deviceProperties", "udid"))
+            or string_value(device.get("identifier"))
         )
         if identifier:
             identifiers.append(identifier)
@@ -302,10 +362,10 @@ def load_devicectl_device_list(context):
             print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
             raise SystemExit(1)
 
-def connected_ipad_identifiers(payload):
+def connected_ipad_records(payload):
     result = payload.get("result", {}) if isinstance(payload, dict) else {}
     devices = result.get("devices", []) if isinstance(result, dict) else []
-    identifiers = []
+    records = []
     for device in devices:
         if not isinstance(device, dict) or not is_connected_devicectl_device(device):
             continue
@@ -315,13 +375,19 @@ def connected_ipad_identifiers(payload):
             continue
         if not has_install_application_capability(device):
             continue
-        candidates = [
+        hardware_udid = (
+            string_value(nested_value(device, "hardwareProperties", "udid"))
+            or string_value(nested_value(device, "deviceProperties", "udid"))
+        )
+        candidates = {
             string_value(device.get("identifier")),
             string_value(nested_value(device, "hardwareProperties", "udid")),
             string_value(nested_value(device, "deviceProperties", "udid")),
-        ]
-        identifiers.extend(candidate for candidate in candidates if candidate)
-    return identifiers
+        }
+        candidates.discard("")
+        if hardware_udid and candidates:
+            records.append((candidates, hardware_udid))
+    return records
 
 def is_connected_devicectl_device(device):
     connection = device.get("connectionProperties", {})
@@ -379,11 +445,17 @@ if not target:
     raise SystemExit("No real iPad target UDID was selected.")
 
 payload = load_devicectl_device_list("validating the real iPad target UDID")
-if target not in set(connected_ipad_identifiers(payload)):
+matches = [
+    hardware_udid
+    for identifiers, hardware_udid in connected_ipad_records(payload)
+    if target in identifiers
+]
+if len(matches) != 1:
     raise SystemExit(f"Selected real-device target is not a connected iPad according to devicectl JSON: {target}")
+print(matches[0])
 PY
 }
-validate_real_ipad_device_id
+IOS_PROVISIONING_DEVICE_ID="$(validate_real_ipad_device_id)"
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 HOST_STATUS_ARTIFACT="$ARTIFACT_DIR/mac.status.log"
 HOST_PQC_REPORT_ARTIFACT="$ARTIFACT_DIR/mac.pqc.json"
@@ -431,6 +503,14 @@ MAC_ONLINE_WIDGET_SIGNED_ENTITLEMENTS="$MAC_HOST_SIGNING_DIR/mac-online-widget-s
 MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH=""
 MAC_HOST_PRODUCT_TEAM_IDENTIFIER=""
 MAC_HOST_PRODUCT_AUTHORITY=""
+MAC_HOST_PRODUCT_CDHASH=""
+MAC_HOST_PRODUCT_WIDGET_CDHASH=""
+MAC_HOST_PRODUCT_EXECUTABLE_SHA256=""
+MAC_HOST_PRODUCT_WIDGET_EXECUTABLE_SHA256=""
+MAC_HOST_PRODUCT_PROFILE_SHA256=""
+MAC_HOST_PRODUCT_WIDGET_PROFILE_SHA256=""
+MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID=0
+MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED=0
 MAC_HOST_HELPER_REGISTERED=0
 MAC_ONLINE_APP_REGISTERED=0
 MAC_ONLINE_APP_SOURCE="not-run"
@@ -454,7 +534,7 @@ IOS_LISTENER_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_LISTENER_STATUS_NAME"
 IOS_CONSOLE_STDERR="$ARTIFACT_DIR/ios-console.stderr.log"
 IOS_COPY_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_TIMEOUT_SECONDS:-15}"
 IOS_COPY_HARD_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_HARD_TIMEOUT_SECONDS:-25}"
-IOS_COPY_STATUS_APP_CACHE="${SKYBRIDGE_IOS_COPY_STATUS_APP_CACHE:-0}"
+IOS_COPY_STATUS_APP_CACHE="${SKYBRIDGE_IOS_COPY_STATUS_APP_CACHE:-1}"
 IOS_BUILD_LOG="$ARTIFACT_DIR/ios-build.log"
 IOS_PRODUCT_PROOF="$ARTIFACT_DIR/ios-product-proof.json"
 P2P_APPROVAL_PROOF="$ARTIFACT_DIR/p2p-approval-proof.json"
@@ -468,15 +548,24 @@ IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=""
 IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=""
 IOS_DISTRIBUTION_IDENTITY_HASH=""
 LAUNCH_RESULT_JSON="$ARTIFACT_DIR/ios-launch.json"
+IOS_PROCESS_CLEANUP_RECEIPT="$ARTIFACT_DIR/ios-process-cleanup.json"
 IOS_PROCESS_LIST_JSON="$ARTIFACT_DIR/ios-processes.json"
 IOS_PROCESS_LIST_LOG="$ARTIFACT_DIR/ios-processes.log"
 IOS_PROCESS_LIST_STDERR="$ARTIFACT_DIR/ios-processes.stderr.log"
 DEVICE_INFO_TXT="$ARTIFACT_DIR/device-info.txt"
 HOST_PID=""
+MAC_HOST_STARTED=0
 MAC_SOURCE_PID=""
 MAC_ONLINE_PID=""
 IOS_CONSOLE_PID=""
-IOS_APP_PID=""
+IOS_CONSOLE_HANDLE_STARTED=0
+IOS_CONSOLE_HANDLE_CAPTURED=0
+IOS_PREINSTALL_ABSENCE_PROVEN=0
+PROCESS_OWNERSHIP_PRIVATE_DIR=""
+IOS_PROCESS_IDENTITY=""
+IOS_CONSOLE_HANDLE_IDENTITY=""
+IOS_CONSOLE_CAPTURE_DIAGNOSTIC=""
+P2P_NOTICE_SESSION=""
 COMMON_REMOTE_SMOKE_FAILURE_PATTERN='classic fallback|compatibility fallback|fallback=true|legacyFallback=true|pipeline=stillImageFallback|orientation=verticalFlip|orientation=horizontalFlip|orientation=inverted|renderOrientation=verticalFlip|renderOrientation=horizontalFlip|renderOrientation=inverted|已立即回退|已回退到|fallback producer|perf=extreme.*h264|h264.*perf=extreme|suite_rejected_unknown|wireId=0x0000|wireId=0X0000|unknown suite|unknown-suite|signed LAN KEM refresh rejected|signed LAN KEM refresh failed|PIB-1 protocol identity binding failed|PIB-1 protocol identity binding rejected|PIB-1 protocol identity binding timed out|lifecycle=request>rejected|lifecycle=missing-kem>failed|lifecycle=identity-oob>failed|lifecycle=identity-oob>timeout|remoteControlNoticeRejected .*missing_required_notice_metadata|render-main-path-failed|strict-media-failed|already_connected|rejectAlreadyConnected|对端拒绝连接：already_connected|Peer rejected handshake: already_connected'
 IOS_REMOTE_SMOKE_FAILURE_PATTERN="failed stage=|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|crossNetwork=1|audioRxPlaybackDrop=[1-9][0-9]*|audioRxJitterEvicted=[1-9][0-9]*|audioRxUnderflow=[1-9][0-9]*|audioRxRebuffer=[1-9][0-9]*|jitterEvicted=[1-9][0-9]*|playbackDrop=[1-9][0-9]*|datagrams=[1-9][0-9][0-9]+ .*probable=rx-decode-stalled|HEVC 连续失败|临时降级 H\\.264|codec=h264"
 HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=mac-host|failed stage=mac-smoke-source|failed stage=(identity|handshake|remote-desktop|remote-control|media)|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
@@ -614,6 +703,13 @@ sync_macos_smoke_host_artifacts() {
   local destination_path
   local pair
 
+  if [[ "$MAC_HOST_STARTED" == "1" ]]; then
+    if [[ ! -s "$HOST_STATUS" ]] || [[ ! -s "$HOST_PQC_REPORT" ]] || [[ ! -f "$HOST_STDOUT" ]]; then
+      echo "Required macOS smoke host evidence is missing after the host was launched." >&2
+      return 1
+    fi
+  fi
+
   for pair in \
     "$HOST_STATUS|$HOST_STATUS_ARTIFACT" \
     "$HOST_PQC_REPORT|$HOST_PQC_REPORT_ARTIFACT" \
@@ -626,6 +722,145 @@ sync_macos_smoke_host_artifacts() {
       return 1
     fi
   done
+}
+
+tracked_process_executable() {
+  local pid="$1"
+  /usr/sbin/lsof -a -p "$pid" -d txt -Fn 2>/dev/null \
+    | awk '/^n/ { print substr($0, 2); exit }'
+}
+
+terminate_tracked_process() {
+  local pid="$1"
+  local label="$2"
+  local expected_executable="$3"
+  local actual_executable
+  local expected_canonical
+  local actual_canonical
+  local attempt
+
+  [[ -n "$pid" ]] || return 0
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    wait "$pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if ! actual_executable="$(tracked_process_executable "$pid")" || [[ -z "$actual_executable" ]]; then
+    echo "Unable to resolve the executable for tracked $label process PID $pid." >&2
+    return 1
+  fi
+  expected_canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$expected_executable")"
+  actual_canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$actual_executable")"
+  if [[ "$actual_canonical" != "$expected_canonical" ]]; then
+    echo "Refusing to terminate $label because PID $pid is not owned by the expected executable." >&2
+    return 1
+  fi
+
+  if ! kill -TERM "$pid" >/dev/null 2>&1; then
+    echo "Unable to signal tracked $label process PID $pid." >&2
+    return 1
+  fi
+  for attempt in {1..50}; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  if ! actual_executable="$(tracked_process_executable "$pid")"; then
+    echo "Unable to revalidate $label before force termination." >&2
+    return 1
+  fi
+  actual_canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$actual_executable")"
+  if [[ "$actual_canonical" != "$expected_canonical" ]]; then
+    echo "Refusing to force-terminate $label after its tracked PID identity changed." >&2
+    return 1
+  fi
+  if ! kill -KILL "$pid" >/dev/null 2>&1; then
+    echo "Unable to force-terminate tracked $label process PID $pid." >&2
+    return 1
+  fi
+  for attempt in {1..20}; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "Tracked $label process PID $pid remained alive after bounded termination." >&2
+  return 1
+}
+
+compute_source_input_snapshot() {
+  local snapshot
+  local digest
+  local file_count
+  local extra
+
+  if [[ ! -f "$SOURCE_INPUT_DIGEST_TOOL" || -L "$SOURCE_INPUT_DIGEST_TOOL" ]]; then
+    echo "Source-input digest tool is missing or symlinked." >&2
+    return 1
+  fi
+  if ! snapshot="$(
+    python3 "$SOURCE_INPUT_DIGEST_TOOL" \
+      --root "$ROOT_DIR" \
+      "${SOURCE_INPUT_PATHS[@]}"
+  )"; then
+    return 1
+  fi
+  read -r digest file_count extra <<<"$snapshot"
+  if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]] || \
+     [[ ! "$file_count" =~ ^[1-9][0-9]*$ ]] || \
+     [[ -n "$extra" ]]; then
+    echo "Source-input digest tool returned malformed output." >&2
+    return 1
+  fi
+  printf '%s %s\n' "$digest" "$file_count"
+}
+
+capture_source_input_binding() {
+  local snapshot
+  if ! snapshot="$(compute_source_input_snapshot)"; then
+    return 1
+  fi
+  read -r IOS_SOURCE_INPUT_DIGEST IOS_SOURCE_INPUT_FILE_COUNT <<<"$snapshot"
+  printf '%s stage=initial digest=%s files=%s matched=1\n' \
+    "$(timestamp_utc)" \
+    "$IOS_SOURCE_INPUT_DIGEST" \
+    "$IOS_SOURCE_INPUT_FILE_COUNT" \
+    >"$SOURCE_INPUT_BINDING_LOG"
+}
+
+verify_source_input_binding_unchanged() {
+  local stage="$1"
+  local snapshot
+  local current_digest
+  local current_file_count
+  local matched=0
+
+  if ! snapshot="$(compute_source_input_snapshot)"; then
+    return 1
+  fi
+  read -r current_digest current_file_count <<<"$snapshot"
+  if [[ "$current_digest" == "$IOS_SOURCE_INPUT_DIGEST" && \
+        "$current_file_count" == "$IOS_SOURCE_INPUT_FILE_COUNT" ]]; then
+    matched=1
+  fi
+  printf '%s stage=%s digest=%s files=%s matched=%s\n' \
+    "$(timestamp_utc)" "$stage" "$current_digest" "$current_file_count" "$matched" \
+    >>"$SOURCE_INPUT_BINDING_LOG"
+  printf '{"schemaVersion":1,"algorithm":"sha256","stage":"%s","sourceInputDigest":"%s","currentDigest":"%s","fileCount":%s,"currentFileCount":%s,"matched":%s}\n' \
+    "$stage" \
+    "$IOS_SOURCE_INPUT_DIGEST" \
+    "$current_digest" \
+    "$IOS_SOURCE_INPUT_FILE_COUNT" \
+    "$current_file_count" \
+    "$([[ "$matched" == "1" ]] && printf true || printf false)" \
+    >"$SOURCE_INPUT_BINDING_PROOF"
+  if [[ "$matched" != "1" ]]; then
+    echo "Source inputs changed while producing the $stage smoke product; refusing mixed-source evidence." >&2
+    return 1
+  fi
 }
 
 capture_ios_release_source_provenance() {
@@ -657,6 +892,7 @@ capture_ios_release_source_provenance() {
     echo "Formal P2P acceptance requires a clean Git worktree; current source provenance is dirty." >&2
     return 1
   fi
+  capture_source_input_binding
 }
 
 resolve_ios_distribution_signing_inputs() {
@@ -671,7 +907,7 @@ resolve_ios_distribution_signing_inputs() {
     "$IOS_TEAM_IDENTIFIER" \
     "$IOS_BUNDLE_ID" \
     "$IOS_WIDGET_BUNDLE_ID" \
-    "$IOS_DEVICE_ID"
+    "$IOS_PROVISIONING_DEVICE_ID"
 
   IOS_APP_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
   IOS_WIDGET_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
@@ -713,10 +949,51 @@ write_ios_p2p_product_proof() {
     "$LAB_RUN" \
     "$IOS_SOURCE_REVISION" \
     "$IOS_SOURCE_CLEAN" \
-    "$IOS_DEVICE_ID" \
+    "$IOS_PROVISIONING_DEVICE_ID" \
     "$IOS_APP_DISTRIBUTION_PROFILE" \
     "$IOS_WIDGET_DISTRIBUTION_PROFILE" \
     "$ROOT_DIR/Scripts/verify_ios_distribution_product.py"
+}
+
+verify_ios_product_source_input_binding() {
+  local product_digest
+  local executable_name
+  local executable_path
+  local executable_sha256
+  local info_plist_sha256
+
+  product_digest="$(
+    /usr/libexec/PlistBuddy \
+      -c 'Print :SkyBridgePackagingSourceInputDigest' \
+      "$IOS_APP_PATH/Info.plist" 2>/dev/null || true
+  )"
+  if [[ "$product_digest" != "$IOS_SOURCE_INPUT_DIGEST" ]]; then
+    echo "The signed iOS product is not bound to the measured source-input digest." >&2
+    return 1
+  fi
+  executable_name="$(
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$IOS_APP_PATH/Info.plist" 2>/dev/null || true
+  )"
+  executable_path="$IOS_APP_PATH/$executable_name"
+  if [[ -z "$executable_name" || ! -f "$executable_path" ]]; then
+    echo "The exact iOS app executable is missing from the source-bound product." >&2
+    return 1
+  fi
+  executable_sha256="$(shasum -a 256 "$executable_path" | awk '{print $1}')"
+  info_plist_sha256="$(shasum -a 256 "$IOS_APP_PATH/Info.plist" | awk '{print $1}')"
+  if [[ ! "$executable_sha256" =~ ^[0-9a-f]{64}$ || \
+        ! "$info_plist_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Unable to bind the exact iOS executable and signed Info.plist bytes." >&2
+    return 1
+  fi
+  printf '{"schemaVersion":1,"algorithm":"sha256","stage":"product","sourceInputDigest":"%s","currentDigest":"%s","fileCount":%s,"currentFileCount":%s,"matched":true,"appExecutableSHA256":"%s","infoPlistSHA256":"%s"}\n' \
+    "$IOS_SOURCE_INPUT_DIGEST" \
+    "$IOS_SOURCE_INPUT_DIGEST" \
+    "$IOS_SOURCE_INPUT_FILE_COUNT" \
+    "$IOS_SOURCE_INPUT_FILE_COUNT" \
+    "$executable_sha256" \
+    "$info_plist_sha256" \
+    >"$SOURCE_INPUT_BINDING_PROOF"
 }
 
 finalize_release_acceptance_manifests_after_cleanup() {
@@ -728,9 +1005,216 @@ finalize_release_acceptance_manifests_after_cleanup() {
     --public-manifest "$public_manifest"
 }
 
+initialize_ios_process_ownership_session() {
+  if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
+    echo "Private P2P remote process-ownership directory was initialized more than once." >&2
+    return 1
+  fi
+  rm -f -- "$IOS_PROCESS_CLEANUP_RECEIPT"
+  PROCESS_OWNERSHIP_PRIVATE_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/skybridge-p2p-remote-process-ownership.XXXXXX")"
+  IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"
+  IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"
+  IOS_CONSOLE_CAPTURE_DIAGNOSTIC="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log"
+  chmod 0700 "$PROCESS_OWNERSHIP_PRIVATE_DIR"
+}
+
+destroy_ios_process_ownership_session() {
+  local cleanup_failed=0
+  local private_path
+
+  [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]] || return 0
+  for private_path in \
+    "$IOS_PROCESS_IDENTITY" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" \
+    "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC"; do
+    case "$private_path" in
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"|\
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"|\
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log")
+        if [[ -e "$private_path" || -L "$private_path" ]] \
+          && ! rm -f -- "$private_path"; then
+          echo "Unable to remove a private P2P remote process-ownership record." >&2
+          cleanup_failed=1
+        fi
+        ;;
+      *)
+        echo "Refusing to remove an unexpected P2P remote process-ownership path." >&2
+        cleanup_failed=1
+        ;;
+    esac
+  done
+  if ! rmdir -- "$PROCESS_OWNERSHIP_PRIVATE_DIR" 2>/dev/null; then
+    echo "Private P2P remote process-ownership directory is not empty or could not be removed." >&2
+    cleanup_failed=1
+  fi
+  return "$cleanup_failed"
+}
+
+write_ios_process_cleanup_receipt() {
+  python3 - "$IOS_PROCESS_CLEANUP_RECEIPT" <<'PY'
+import json
+import os
+import pathlib
+import tempfile
+import sys
+
+output = pathlib.Path(sys.argv[1])
+payload = {
+    "cleanupComplete": True,
+    "exactConsoleHandle": True,
+    "pidOnlySignal": False,
+    "remoteAbsenceProven": True,
+    "schemaVersion": 1,
+}
+descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+temporary = pathlib.Path(temporary_name)
+try:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+finally:
+    if temporary.exists():
+        temporary.unlink()
+PY
+}
+
+ios_console_handle_is_exact_and_running() {
+  [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] \
+    && [[ -n "$IOS_CONSOLE_PID" ]] \
+    && [[ -f "$IOS_CONSOLE_HANDLE_IDENTITY" ]] \
+    && skybridge_ios_console_handle_status \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$IOS_CONSOLE_PID" \
+      "$IOS_CONSOLE_HANDLE_IDENTITY" >/dev/null 2>&1
+}
+
+finish_failed_ios_console_launch_without_process() {
+  local handle_status
+
+  if skybridge_ios_console_handle_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" >/dev/null 2>&1; then
+    handle_status=0
+  else
+    handle_status=$?
+  fi
+  if (( handle_status != 1 )); then
+    echo "Refusing no-process launch cleanup because the exact console handle is not proven absent." >&2
+    return 1
+  fi
+  if ! skybridge_ios_wait_console_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" \
+    15; then
+    return 1
+  fi
+  if ! skybridge_ios_require_app_absent_after_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_DEVICE_ID" \
+    "$IOS_APP_PATH" \
+    "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+    "$DEVICECTL_TIMEOUT_SECONDS"; then
+    return 1
+  fi
+
+  IOS_CONSOLE_HANDLE_STARTED=0
+  IOS_CONSOLE_HANDLE_CAPTURED=0
+  IOS_CONSOLE_PID=""
+  return 0
+}
+
+terminate_ios_remote_smoke_app_exact() {
+  local reason="${1:?missing iOS P2P remote termination reason}"
+  local exited_ios_pid
+  local handle_status
+
+  if [[ "$IOS_CONSOLE_HANDLE_STARTED" != "1" ]] \
+    || [[ "$IOS_CONSOLE_HANDLE_CAPTURED" != "1" ]] \
+    || [[ -z "$IOS_CONSOLE_PID" ]] \
+    || [[ ! -f "$IOS_CONSOLE_HANDLE_IDENTITY" ]]; then
+    echo "Refusing iOS P2P remote cleanup because exact console-handle ownership was not captured." >&2
+    return 1
+  fi
+
+  if skybridge_ios_console_handle_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY"; then
+    handle_status=0
+  else
+    handle_status=$?
+  fi
+  case "$handle_status" in
+    0)
+      if ! skybridge_ios_signal_console_handle \
+        "$PROCESS_OWNERSHIP_HELPER" \
+        "$IOS_CONSOLE_PID" \
+        "$IOS_CONSOLE_HANDLE_IDENTITY"; then
+        echo "Failed to signal the exact iOS P2P remote console launch handle." >&2
+        return 1
+      fi
+      ;;
+    1)
+      wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+      ;;
+    *)
+      echo "Refusing iOS P2P remote cleanup because the console launch handle is unverifiable." >&2
+      return 1
+      ;;
+  esac
+
+  if ! skybridge_ios_wait_console_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_CONSOLE_PID" \
+    "$IOS_CONSOLE_HANDLE_IDENTITY" \
+    15; then
+    return 1
+  fi
+  if ! skybridge_ios_capture_exited_console_identity \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$LAUNCH_RESULT_JSON" \
+    "$IOS_APP_PATH" \
+    "$IOS_PROCESS_IDENTITY"; then
+    echo "Unable to capture the exited iOS P2P remote launch identity." >&2
+    return 1
+  fi
+  if ! exited_ios_pid="$(python3 "$PROCESS_OWNERSHIP_HELPER" identity-pid \
+    --platform ios \
+    --identity "$IOS_PROCESS_IDENTITY")" \
+    || ! [[ "$exited_ios_pid" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Unable to read the exited iOS P2P remote launch PID evidence." >&2
+    return 1
+  fi
+  if ! skybridge_ios_require_app_absent_after_handle_exit \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$IOS_DEVICE_ID" \
+    "$IOS_APP_PATH" \
+    "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+    "$DEVICECTL_TIMEOUT_SECONDS"; then
+    return 1
+  fi
+  if ! write_ios_process_cleanup_receipt; then
+    echo "Unable to write the iOS P2P remote process-cleanup receipt." >&2
+    return 1
+  fi
+
+  append_host_status "ios-remote-smoke terminated exactConsoleHandle=1 remoteAbsence=1 reason=$reason"
+  IOS_CONSOLE_HANDLE_STARTED=0
+  IOS_CONSOLE_HANDLE_CAPTURED=0
+  IOS_CONSOLE_PID=""
+  return 0
+}
+
 cleanup() {
   local original_status=$?
   local cleanup_status=0
+  local ios_cleanup_status=0
   local launch_services_was_mutated=0
   trap - EXIT
 
@@ -740,23 +1224,56 @@ cleanup() {
   fi
 
   if [[ -n "${IOS_DEVICE_ID:-}" && ( -s "${IOS_STATUS_LOCAL:-}" || -n "${IOS_CONSOLE_PID:-}" ) ]]; then
+    copy_ios_status || true
     copy_ios_trace || true
   fi
-  if [[ -n "$IOS_CONSOLE_PID" ]]; then
-    kill "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
-    wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+  if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]]; then
+    if ! terminate_ios_remote_smoke_app_exact "trap-cleanup"; then
+      ios_cleanup_status=1
+      cleanup_status=1
+      echo "failed stage=cleanup phase=ios-process reason=exact-process-exit-unverified" >&2
+    fi
+  elif [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]]; then
+    ios_cleanup_status=1
+    cleanup_status=1
+    echo "failed stage=cleanup phase=ios-process reason=inconsistent-console-handle-state" >&2
+  fi
+  if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
+    if (( ios_cleanup_status == 0 )); then
+      if ! destroy_ios_process_ownership_session; then
+        cleanup_status=1
+        echo "failed stage=cleanup phase=ios-process reason=private-ownership-remove-failed" >&2
+      fi
+    else
+      echo "Preserving private P2P remote ownership diagnostics after unverifiable cleanup: $PROCESS_OWNERSHIP_PRIVATE_DIR" >&2
+    fi
   fi
   if [[ -n "$HOST_PID" ]]; then
-    kill "$HOST_PID" >/dev/null 2>&1 || true
-    wait "$HOST_PID" >/dev/null 2>&1 || true
+    local expected_host_executable="$MAC_APP_BIN"
+    case "$MAC_HOST_LAUNCH_MODE" in
+      direct) expected_host_executable="$MAC_DIRECT_BIN" ;;
+      packaged|packaged-lab) ;;
+      *)
+        cleanup_status=1
+        echo "failed stage=cleanup phase=mac-host-process reason=invalid-launch-mode" >&2
+        ;;
+    esac
+    if ! terminate_tracked_process "$HOST_PID" "macOS smoke host" "$expected_host_executable"; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=mac-host-process reason=exact-process-exit-unverified" >&2
+    fi
   fi
   if [[ -n "$MAC_SOURCE_PID" ]]; then
-    kill "$MAC_SOURCE_PID" >/dev/null 2>&1 || true
-    wait "$MAC_SOURCE_PID" >/dev/null 2>&1 || true
+    if ! terminate_tracked_process "$MAC_SOURCE_PID" "macOS smoke source" "$MAC_SOURCE_DIRECT_BIN"; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=mac-source-process reason=exact-process-exit-unverified" >&2
+    fi
   fi
   if [[ -n "$MAC_ONLINE_PID" ]]; then
-    kill "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
-    wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
+    if ! terminate_tracked_process "$MAC_ONLINE_PID" "macOS online iPad client" "$MAC_ONLINE_APP_BIN"; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=mac-online-process reason=exact-process-exit-unverified" >&2
+    fi
   fi
   if [[ "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" ]]; then
     if ! cleanup_macos_online_ipad_launch_services_registration; then
@@ -1182,6 +1699,9 @@ verify_macos_smoke_host_product_signing_context() {
   local product_signed_identifier
   local product_authority
   local product_identity_hash
+  local product_cdhash
+  local product_executable_sha256
+  local product_profile_sha256
   local product_widget_executable_name
   local product_widget_executable
   local product_widget_bundle_identifier
@@ -1190,6 +1710,23 @@ verify_macos_smoke_host_product_signing_context() {
   local product_widget_team_identifier
   local product_widget_authority
   local product_widget_identity_hash
+  local product_widget_cdhash
+  local product_widget_executable_sha256
+  local product_widget_profile_sha256
+
+  case "$MAC_HOST_LAUNCH_MODE" in
+    packaged) ;;
+    packaged-lab)
+      if [[ "$LAB_RUN" != "1" ]]; then
+        echo "packaged-lab signing verification requires an explicit lab run." >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "Product signing context cannot be used by macOS host mode: $MAC_HOST_LAUNCH_MODE" >&2
+      return 1
+      ;;
+  esac
 
   if [[ ! -d "$MAC_HOST_PRODUCT_APP_BUNDLE" ]]; then
     echo "Packaged macOS product app is required for acceptance host signing: $MAC_HOST_PRODUCT_APP_BUNDLE" >&2
@@ -1204,7 +1741,7 @@ verify_macos_smoke_host_product_signing_context() {
     echo "Packaged macOS product Info.plist is missing: $product_info_plist" >&2
     return 1
   fi
-  if [[ ! -f "$MAC_HOST_PRODUCT_PROFILE" ]]; then
+  if [[ ! -f "$MAC_HOST_PRODUCT_PROFILE" || -L "$MAC_HOST_PRODUCT_PROFILE" ]]; then
     echo "Packaged macOS product embedded provisioning profile is required: $MAC_HOST_PRODUCT_PROFILE" >&2
     return 1
   fi
@@ -1256,13 +1793,20 @@ verify_macos_smoke_host_product_signing_context() {
     echo "Packaged macOS product Widget signature verification failed: $MAC_HOST_PRODUCT_WIDGET_BUNDLE" >&2
     return 1
   fi
-  if ! /usr/bin/xcrun stapler validate "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
-    echo "Packaged macOS product does not have a valid stapled notarization ticket." >&2
-    return 1
-  fi
-  if ! /usr/sbin/spctl --assess --type execute "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
-    echo "Packaged macOS product failed Gatekeeper assessment." >&2
-    return 1
+  if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
+    if ! /usr/bin/xcrun stapler validate "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
+      echo "Packaged macOS product does not have a valid stapled notarization ticket." >&2
+      return 1
+    fi
+    MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID=1
+    if ! /usr/sbin/spctl --assess --type execute "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null; then
+      echo "Packaged macOS product failed Gatekeeper assessment." >&2
+      return 1
+    fi
+    MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED=1
+  else
+    MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID=0
+    MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED=0
   fi
   if ! product_metadata="$(/usr/bin/codesign --display --verbose=4 "$MAC_HOST_PRODUCT_APP_BUNDLE" 2>&1)"; then
     echo "Unable to read the packaged macOS product signature metadata." >&2
@@ -1272,6 +1816,7 @@ verify_macos_smoke_host_product_signing_context() {
   product_signed_identifier="$(printf '%s\n' "$product_metadata" | sed -n 's/^Identifier=//p' | head -n 1)"
   MAC_HOST_PRODUCT_TEAM_IDENTIFIER="$(printf '%s\n' "$product_metadata" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
   product_authority="$(printf '%s\n' "$product_metadata" | sed -n 's/^Authority=//p' | head -n 1)"
+  product_cdhash="$(printf '%s\n' "$product_metadata" | sed -n 's/^CDHash=//p' | head -n 1)"
   if [[ "$product_signed_identifier" != "$MAC_HOST_PRODUCT_BUNDLE_ID" ]]; then
     echo "Packaged macOS product signed identifier mismatch: expected=$MAC_HOST_PRODUCT_BUNDLE_ID actual=${product_signed_identifier:-missing}" >&2
     return 1
@@ -1295,6 +1840,7 @@ verify_macos_smoke_host_product_signing_context() {
   product_widget_signed_identifier="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^Identifier=//p' | head -n 1)"
   product_widget_team_identifier="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
   product_widget_authority="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^Authority=//p' | head -n 1)"
+  product_widget_cdhash="$(printf '%s\n' "$product_widget_metadata" | sed -n 's/^CDHash=//p' | head -n 1)"
   if [[ "$product_widget_signed_identifier" != "$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID" ]]; then
     echo "Packaged macOS product Widget signed identifier mismatch: expected=$MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID actual=${product_widget_signed_identifier:-missing}" >&2
     return 1
@@ -1393,7 +1939,100 @@ verify_macos_smoke_host_product_signing_context() {
   MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH="$product_identity_hash"
   MAC_HOST_PRODUCT_AUTHORITY="$product_authority"
 
-  append_host_status "mac-host-product-signing-context source=packaged-product signature=developer-id bundleIdentifier=product team=matched appProfile=developer-id-current widgetProfile=developer-id-current certificate=profile-bound-shared entitlements=app-widget-exact keychainIdentity=unique"
+  product_executable_sha256="$(shasum -a 256 "$product_executable" | awk '{print $1}')"
+  product_widget_executable_sha256="$(shasum -a 256 "$product_widget_executable" | awk '{print $1}')"
+  product_profile_sha256="$(shasum -a 256 "$MAC_HOST_PRODUCT_PROFILE" | awk '{print $1}')"
+  product_widget_profile_sha256="$(shasum -a 256 "$MAC_HOST_PRODUCT_WIDGET_PROFILE" | awk '{print $1}')"
+  if [[ ! "$product_cdhash" =~ ^[0-9a-fA-F]{40,64}$ || \
+        ! "$product_widget_cdhash" =~ ^[0-9a-fA-F]{40,64}$ || \
+        ! "$product_executable_sha256" =~ ^[0-9a-f]{64}$ || \
+        ! "$product_widget_executable_sha256" =~ ^[0-9a-f]{64}$ || \
+        ! "$product_profile_sha256" =~ ^[0-9a-f]{64}$ || \
+        ! "$product_widget_profile_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Packaged-product signing context hashes are missing or malformed." >&2
+    return 1
+  fi
+  MAC_HOST_PRODUCT_CDHASH="$(printf '%s' "$product_cdhash" | tr '[:upper:]' '[:lower:]')"
+  MAC_HOST_PRODUCT_WIDGET_CDHASH="$(printf '%s' "$product_widget_cdhash" | tr '[:upper:]' '[:lower:]')"
+  MAC_HOST_PRODUCT_EXECUTABLE_SHA256="$product_executable_sha256"
+  MAC_HOST_PRODUCT_WIDGET_EXECUTABLE_SHA256="$product_widget_executable_sha256"
+  MAC_HOST_PRODUCT_PROFILE_SHA256="$product_profile_sha256"
+  MAC_HOST_PRODUCT_WIDGET_PROFILE_SHA256="$product_widget_profile_sha256"
+
+  append_host_status "mac-host-product-signing-context source=packaged-product mode=$MAC_HOST_LAUNCH_MODE signature=developer-id bundleIdentifier=product team=matched appProfile=developer-id-current widgetProfile=developer-id-current certificate=profile-bound-shared entitlements=app-widget-exact keychainIdentity=unique stapler=$([[ "$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID" == "1" ]] && echo valid || echo skipped) spctl=$([[ "$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED" == "1" ]] && echo accepted || echo skipped) diagnosticOnly=$([[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" ]] && echo 1 || echo 0)"
+}
+
+verify_macos_smoke_host_identity_source_unchanged() {
+  local product_info_plist="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/Info.plist"
+  local widget_info_plist="$MAC_HOST_PRODUCT_WIDGET_BUNDLE/Contents/Info.plist"
+  local product_executable_name
+  local widget_executable_name
+  local product_executable
+  local widget_executable
+  local product_metadata
+  local widget_metadata
+  local product_cdhash
+  local widget_cdhash
+  local product_executable_sha256
+  local widget_executable_sha256
+  local product_profile_sha256
+  local widget_profile_sha256
+
+  case "$MAC_HOST_LAUNCH_MODE" in
+    packaged) ;;
+    packaged-lab)
+      [[ "$LAB_RUN" == "1" ]] || {
+        echo "packaged-lab identity freshness verification requires an explicit lab run." >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "Product identity freshness verification reached invalid mode: $MAC_HOST_LAUNCH_MODE" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ -L "$MAC_HOST_PRODUCT_APP_BUNDLE" || \
+        -L "$MAC_HOST_PRODUCT_PROFILE" || \
+        -L "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" || \
+        -L "$MAC_HOST_PRODUCT_WIDGET_PROFILE" ]]; then
+    echo "Packaged-product identity source became symlinked after verification." >&2
+    return 1
+  fi
+  if ! /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAC_HOST_PRODUCT_APP_BUNDLE" >/dev/null || \
+     ! /usr/bin/codesign --verify --strict --verbose=2 "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" >/dev/null; then
+    echo "Packaged-product identity source signature changed after verification." >&2
+    return 1
+  fi
+
+  product_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$product_info_plist" 2>/dev/null || true)"
+  widget_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$widget_info_plist" 2>/dev/null || true)"
+  product_executable="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/MacOS/$product_executable_name"
+  widget_executable="$MAC_HOST_PRODUCT_WIDGET_BUNDLE/Contents/MacOS/$widget_executable_name"
+  if [[ ! -x "$product_executable" || ! -x "$widget_executable" || \
+        ! -f "$MAC_HOST_PRODUCT_PROFILE" || ! -f "$MAC_HOST_PRODUCT_WIDGET_PROFILE" ]]; then
+    echo "Packaged-product identity source files disappeared after verification." >&2
+    return 1
+  fi
+
+  product_metadata="$(/usr/bin/codesign --display --verbose=4 "$MAC_HOST_PRODUCT_APP_BUNDLE" 2>&1)" || return 1
+  widget_metadata="$(/usr/bin/codesign --display --verbose=4 "$MAC_HOST_PRODUCT_WIDGET_BUNDLE" 2>&1)" || return 1
+  product_cdhash="$(printf '%s\n' "$product_metadata" | sed -n 's/^CDHash=//p' | head -n 1 | tr '[:upper:]' '[:lower:]')"
+  widget_cdhash="$(printf '%s\n' "$widget_metadata" | sed -n 's/^CDHash=//p' | head -n 1 | tr '[:upper:]' '[:lower:]')"
+  product_executable_sha256="$(shasum -a 256 "$product_executable" | awk '{print $1}')"
+  widget_executable_sha256="$(shasum -a 256 "$widget_executable" | awk '{print $1}')"
+  product_profile_sha256="$(shasum -a 256 "$MAC_HOST_PRODUCT_PROFILE" | awk '{print $1}')"
+  widget_profile_sha256="$(shasum -a 256 "$MAC_HOST_PRODUCT_WIDGET_PROFILE" | awk '{print $1}')"
+
+  if [[ "$product_cdhash" != "$MAC_HOST_PRODUCT_CDHASH" || \
+        "$widget_cdhash" != "$MAC_HOST_PRODUCT_WIDGET_CDHASH" || \
+        "$product_executable_sha256" != "$MAC_HOST_PRODUCT_EXECUTABLE_SHA256" || \
+        "$widget_executable_sha256" != "$MAC_HOST_PRODUCT_WIDGET_EXECUTABLE_SHA256" || \
+        "$product_profile_sha256" != "$MAC_HOST_PRODUCT_PROFILE_SHA256" || \
+        "$widget_profile_sha256" != "$MAC_HOST_PRODUCT_WIDGET_PROFILE_SHA256" ]]; then
+    echo "Packaged-product identity source changed between verification and helper signing." >&2
+    return 1
+  fi
 }
 
 prepare_macos_smoke_host_app_bundle() {
@@ -1417,6 +2056,22 @@ prepare_macos_smoke_host_app_bundle() {
   local helper_identifier
   local helper_team_identifier
   local helper_authority
+  local embedded_profile_sha256
+
+  case "$MAC_HOST_LAUNCH_MODE" in
+    packaged) ;;
+    packaged-lab)
+      [[ "$LAB_RUN" == "1" ]] || {
+        echo "packaged-lab helper preparation requires an explicit lab run." >&2
+        exit 1
+      }
+      ;;
+    *)
+      echo "Signed helper preparation reached invalid mode: $MAC_HOST_LAUNCH_MODE" >&2
+      exit 1
+      ;;
+  esac
+  verify_macos_smoke_host_identity_source_unchanged || exit 1
 
   if [[ ! -x "$source_bin" ]]; then
     echo "macOS LAN host executable not found: $source_bin" >&2
@@ -1486,6 +2141,11 @@ prepare_macos_smoke_host_app_bundle() {
   mv "$embedded_core_resource_root/Info.plist" "$embedded_core_resource_contents/Info.plist"
   cp "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"
   chmod +x "$macos_dir/LocalLanInteropHost"
+  embedded_profile_sha256="$(shasum -a 256 "$embedded_profile" | awk '{print $1}')"
+  if [[ "$embedded_profile_sha256" != "$MAC_HOST_PRODUCT_PROFILE_SHA256" ]]; then
+    echo "Copied smoke-host profile does not match the verified identity-source profile hash." >&2
+    exit 1
+  fi
 
   if [[ ! -d "$embedded_core_resource_bundle" || -L "$embedded_core_resource_bundle" ]]; then
     echo "Embedded SkyBridgeCore resource bundle is missing or symlinked after the explicit copy." >&2
@@ -1523,8 +2183,8 @@ prepare_macos_smoke_host_app_bundle() {
     -c 'Add :NSBonjourServices array' \
     -c 'Add :NSBonjourServices:0 string _skybridge._tcp' \
     -c 'Add :NSBonjourServices:1 string _skybridge._udp' \
-    -c 'Add :NSBonjourServices:2 string _skybridge-transfer._tcp' \
-    -c 'Add :NSBonjourServices:3 string _skybridge-remote._tcp' \
+    -c 'Add :NSBonjourServices:2 string _skybridge-xfer._tcp' \
+    -c 'Add :NSBonjourServices:3 string _skybridge-rd._tcp' \
     "$plist_path" >/dev/null
   /usr/bin/codesign --force --timestamp=none --options runtime --sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" "$macos_dir/WebRTC.framework" >/dev/null
   /usr/bin/codesign \
@@ -1560,6 +2220,11 @@ prepare_macos_smoke_host_app_bundle() {
     echo "Signed smoke host embedded profile differs from the verified packaged-product profile." >&2
     exit 1
   fi
+  embedded_profile_sha256="$(shasum -a 256 "$embedded_profile" | awk '{print $1}')"
+  if [[ "$embedded_profile_sha256" != "$MAC_HOST_PRODUCT_PROFILE_SHA256" ]]; then
+    echo "Signed smoke-host profile hash differs from the verified identity-source profile." >&2
+    exit 1
+  fi
   if ! skybridge_write_signed_entitlements "$MAC_APP_BUNDLE" "$MAC_HOST_SIGNED_ENTITLEMENTS"; then
     echo "Unable to extract the signed smoke host entitlements." >&2
     exit 1
@@ -1586,10 +2251,14 @@ PY
   then
     exit 1
   fi
+  if ! verify_macos_smoke_host_identity_source_unchanged; then
+    echo "Packaged-product identity source changed while the helper was being signed." >&2
+    exit 1
+  fi
   clear_runtime_bundle_quarantine_if_present "$MAC_APP_BUNDLE" "product-identity smoke host"
   MAC_APP_BIN="$macos_dir/LocalLanInteropHost"
   register_macos_smoke_host_app_bundle
-  append_host_status "mac-host-signing source=packaged-product signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSealed=1"
+  append_host_status "mac-host-signing source=packaged-product mode=$MAC_HOST_LAUNCH_MODE signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSealed=1 identitySourceStaplerValid=$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID identitySourceGatekeeperAccepted=$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED diagnosticOnly=$([[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" ]] && echo 1 || echo 0)"
 }
 
 register_launch_services_app_bundle() {
@@ -1849,6 +2518,7 @@ open_macos_smoke_host_app_bundle() {
     --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=$KEYCHAIN_IN_MEMORY" \
     --env "SB_PQC_PREFERRED_SUITE=$HOST_PREFERRED_SUITE" \
     --env "SKYBRIDGE_SMOKE_ROLE=mac-host" \
+    --env "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY=$IDENTITY_AUDIT_ONLY" \
     --env "SKYBRIDGE_SMOKE_STATUS_FILE=$HOST_STATUS" \
     --env "SKYBRIDGE_SMOKE_PQC_REPORT_FILE=$HOST_PQC_REPORT" \
     --env "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE=$EXPECTED_TARGET_SUITE" \
@@ -1876,7 +2546,6 @@ start_macos_smoke_host_directly() {
   SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" \
   "$MAC_DIRECT_BIN" >"$HOST_STDOUT" 2>&1 &
   HOST_PID="$!"
-  append_host_status "launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"
 }
 
 start_macos_smoke_source_host() {
@@ -1894,13 +2563,179 @@ start_macos_smoke_source_host() {
   append_host_status "launch method=direct-app-binary pid=$MAC_SOURCE_PID role=mac-smoke-source binary=swiftpm-build-product"
 }
 
+validate_identity_audit_output() {
+  python3 - "$HOST_STDOUT" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+metadata = os.lstat(path)
+if not stat.S_ISREG(metadata.st_mode):
+    raise SystemExit("Identity audit output is not a regular file")
+if metadata.st_mode & 0o077:
+    raise SystemExit("Identity audit output permissions are too broad")
+if metadata.st_size <= 0 or metadata.st_size > 64 * 1024:
+    raise SystemExit("Identity audit output size is outside the bounded contract")
+
+with open(path, "r", encoding="utf-8") as handle:
+    lines = [line.strip() for line in handle if line.strip()]
+if len(lines) != 1:
+    raise SystemExit("Identity audit output must contain exactly one JSON record")
+payload = json.loads(lines[0])
+
+expected_top_level = {
+    "authorityKeyValidated",
+    "authorityPresent",
+    "comparisonBasis",
+    "inspectionStatus",
+    "namespaces",
+    "schemaVersion",
+    "stableAcrossReads",
+    "state",
+}
+if set(payload) != expected_top_level:
+    raise SystemExit("Identity audit output has an unexpected top-level field")
+if payload.get("schemaVersion") != 2:
+    raise SystemExit("Identity audit output is not schema v2")
+authority_present = payload.get("authorityPresent")
+authority_validated = payload.get("authorityKeyValidated")
+comparison_basis = payload.get("comparisonBasis")
+if not isinstance(authority_present, bool) or not isinstance(authority_validated, bool):
+    raise SystemExit("Identity audit authority state is not boolean")
+inspection = payload.get("inspectionStatus")
+if not isinstance(inspection, dict) or inspection.get("schemaVersion") != 1:
+    raise SystemExit("Identity audit inspection status is invalid")
+inspection_complete = inspection.get("inspectionComplete")
+if not isinstance(inspection_complete, bool):
+    raise SystemExit("Identity audit inspection completeness is not boolean")
+if not inspection_complete:
+    expected_inspection_fields = {
+        "schemaVersion",
+        "inspectionComplete",
+        "failureReason",
+    }
+    allowed_failure_reasons = {
+        "access-denied",
+        "keychain-unavailable",
+        "malformed-attributes",
+        "malformed-key-info",
+        "invalid-device-id",
+        "candidate-limit-exceeded",
+        "key-material-unavailable",
+        "changed-during-read",
+    }
+    if set(inspection) != expected_inspection_fields:
+        raise SystemExit("Unavailable identity audit inspection has unexpected fields")
+    if inspection.get("failureReason") not in allowed_failure_reasons:
+        raise SystemExit("Unavailable identity audit inspection has an invalid reason")
+    if (
+        authority_present is not True
+        or authority_validated is not True
+        or comparison_basis != "shared-authority"
+        or payload.get("state") != "inspection-unavailable"
+        or payload.get("stableAcrossReads") is not False
+        or payload.get("namespaces") != []
+    ):
+        raise SystemExit("Unavailable identity audit is not bound to a validated authority")
+    print(lines[0])
+    raise SystemExit(0)
+
+if set(inspection) != {"schemaVersion", "inspectionComplete", "hasConflicts"}:
+    raise SystemExit("Complete identity audit inspection has unexpected fields")
+if not isinstance(inspection.get("hasConflicts"), bool):
+    raise SystemExit("Complete identity audit conflict state is not boolean")
+if payload.get("stableAcrossReads") is not True:
+    raise SystemExit("Complete identity audit is not a stable snapshot")
+if authority_present:
+    if authority_validated is not True or comparison_basis != "shared-authority":
+        raise SystemExit("Identity audit did not bind its comparison to the validated authority")
+    allowed_states = {
+        "authority-clean",
+        "matching-legacy-remnants",
+        "conflicting-legacy-remnants",
+    }
+else:
+    if authority_validated is not False or comparison_basis not in {
+        "none",
+        "first-validated-legacy-key-info",
+    }:
+        raise SystemExit("Identity audit returned an invalid authority-absent comparison basis")
+    allowed_states = {
+        "no-identity",
+        "legacy-migration-incomplete",
+        "legacy-migration-conflict",
+        "legacy-migration-requires-rotation",
+        "legacy-committed-tuple-selected",
+    }
+if payload.get("state") not in allowed_states:
+    raise SystemExit("Identity audit state is inconsistent with authority presence")
+
+expected_namespaces = [
+    "shared-data-protection",
+    "other-data-protection",
+    "legacy-file-keychain",
+]
+expected_dimensions = [
+    "key-info-device-id",
+    "key-info-public-key",
+    "key-info-fingerprint",
+    "key-info-created-at",
+    "key-info-secure-enclave",
+    "private-key-public-key",
+    "private-key-secure-enclave",
+    "device-id",
+]
+namespaces = payload.get("namespaces")
+if not isinstance(namespaces, list) or [item.get("namespace") for item in namespaces] != expected_namespaces:
+    raise SystemExit("Identity audit namespace order is invalid")
+
+def validate_count(value):
+    if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 64:
+        raise SystemExit("Identity audit count is outside the bounded contract")
+
+for namespace in namespaces:
+    if set(namespace) != {"namespace", "privateKeys", "keyInfos", "deviceIds", "mismatches"}:
+        raise SystemExit("Identity audit namespace has an unexpected field")
+    for key in ("privateKeys", "keyInfos", "deviceIds"):
+        counts = namespace.get(key)
+        if not isinstance(counts, dict) or set(counts) != {"matching", "conflicting", "unresolved"}:
+            raise SystemExit("Identity audit value count has an unexpected field")
+        for value in counts.values():
+            validate_count(value)
+    mismatches = namespace.get("mismatches")
+    if not isinstance(mismatches, list) or [item.get("dimension") for item in mismatches] != expected_dimensions:
+        raise SystemExit("Identity audit mismatch dimension order is invalid")
+    for mismatch in mismatches:
+        if set(mismatch) != {"dimension", "count"}:
+            raise SystemExit("Identity audit mismatch has an unexpected field")
+        validate_count(mismatch["count"])
+
+print(lines[0])
+PY
+}
+
 start_macos_smoke_host() {
   : >"$HOST_STDOUT"
 
-  if [[ "$MAC_HOST_LAUNCH_MODE" == "direct" ]]; then
-    start_macos_smoke_host_directly
-    return $?
-  fi
+  case "$MAC_HOST_LAUNCH_MODE" in
+    direct)
+      start_macos_smoke_host_directly
+      return $?
+      ;;
+    packaged) ;;
+    packaged-lab)
+      if [[ "$LAB_RUN" != "1" ]]; then
+        append_host_status "failed stage=mac-host phase=launch reason=packaged-lab-without-lab-run"
+        return 1
+      fi
+      ;;
+    *)
+      append_host_status "failed stage=mac-host phase=launch reason=invalid-launch-mode"
+      return 1
+      ;;
+  esac
 
   local open_status
   if open_macos_smoke_host_app_bundle; then
@@ -1912,12 +2747,29 @@ start_macos_smoke_host() {
     return "$open_status"
   fi
 
+  if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+    local audit_started_at
+    audit_started_at="$(date +%s)"
+    while true; do
+      if [[ -s "$HOST_STDOUT" ]] \
+        && grep -Fq '"schemaVersion":2' "$HOST_STDOUT"; then
+        validate_identity_audit_output
+        return 0
+      fi
+      if (( "$(date +%s)" - audit_started_at >= IDENTITY_AUDIT_TIMEOUT_SECONDS )); then
+        echo "Timed out waiting for the signed read-only identity audit." >&2
+        print_smoke_tail_for_operator 20 "$HOST_STDOUT"
+        return 1
+      fi
+      sleep 0.25
+    done
+  fi
+
   local started_at
   started_at="$(date +%s)"
   while true; do
     HOST_PID="$(find_macos_smoke_host_pid)"
     if [[ -n "$HOST_PID" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
-      append_host_status "launch method=packaged-product-app-bundle pid=$HOST_PID identity=verified signature=developer-id profile=developer-id-current certificate=profile-bound entitlements=least-privilege keychainAccess=product"
       return 0
     fi
     if (( "$(date +%s)" - started_at >= 15 )); then
@@ -1928,6 +2780,30 @@ start_macos_smoke_host() {
     fi
     sleep 0.25
   done
+}
+
+record_macos_smoke_host_launch_evidence() {
+  if [[ -z "$HOST_PID" ]] || ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+    append_host_status "failed stage=mac-host phase=launch-evidence reason=host-pid-not-running"
+    echo "macOS smoke host exited before launch evidence could be bound to its reset status file." >&2
+    return 1
+  fi
+
+  case "$MAC_HOST_LAUNCH_MODE" in
+    direct)
+      append_host_status "launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"
+      ;;
+    packaged)
+      append_host_status "launch method=packaged-product-app-bundle pid=$HOST_PID mode=packaged identity=verified signature=developer-id profile=developer-id-current certificate=profile-bound entitlements=least-privilege keychainAccess=product stapler=valid spctl=accepted diagnosticOnly=0"
+      ;;
+    packaged-lab)
+      append_host_status "launch method=signed-lab-app-bundle pid=$HOST_PID mode=packaged-lab identity=verified signature=developer-id profile=developer-id-current certificate=profile-bound entitlements=least-privilege keychainAccess=product stapler=skipped spctl=skipped diagnosticOnly=1"
+      ;;
+    *)
+      append_host_status "failed stage=mac-host phase=launch-evidence reason=invalid-launch-mode"
+      return 1
+      ;;
+  esac
 }
 
 append_ios_status() {
@@ -4092,7 +4968,7 @@ verify_mac_control_port_reachable() {
   while true; do
     if tcp_port_reachable "$host" "$port" "$probe_error"
     then
-      append_host_status "mac-control-port reachable=1 host=$host port=$port source=pre-ios-probe"
+      append_host_status "mac-control-port reachable=1 host=$host port=$port source=local-self-probe"
       return 0
     fi
 
@@ -4119,7 +4995,7 @@ verify_mac_remote_port_listening() {
   while true; do
     if tcp_port_reachable "$host" "$port" "$probe_error"
     then
-      append_host_status "mac-remote-control-port reachable=1 host=$host port=$port source=pre-ios-probe"
+      append_host_status "mac-remote-control-port reachable=1 host=$host port=$port source=local-self-probe"
       return 0
     fi
 
@@ -4134,6 +5010,28 @@ verify_mac_remote_port_listening() {
     fi
     sleep 0.5
   done
+}
+
+verify_host_pid_owns_listener_port() {
+  local port="$1"
+  local label="$2"
+  local owning_pids
+
+  if [[ -z "$HOST_PID" ]] || ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+    append_host_status "failed stage=mac-host phase=listener-ownership reason=host-pid-not-running label=$label port=$port"
+    return 1
+  fi
+  if ! owning_pids="$(/usr/sbin/lsof -nP -a -p "$HOST_PID" -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null)"; then
+    append_host_status "failed stage=mac-host phase=listener-ownership reason=lsof-no-listener label=$label port=$port"
+    echo "macOS smoke host PID does not own the expected $label listener on port $port." >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$owning_pids" | grep -Fxq "$HOST_PID"; then
+    append_host_status "failed stage=mac-host phase=listener-ownership reason=pid-mismatch label=$label port=$port"
+    echo "macOS $label listener is not owned by the tracked smoke host PID." >&2
+    return 1
+  fi
+  append_host_status "mac-listener-owned pid=$HOST_PID label=$label port=$port source=pid-socket"
 }
 
 tcp_port_reachable() {
@@ -4174,8 +5072,9 @@ wait_for_file_pattern() {
       return 1
     fi
     fail_if_forbidden_fallback_evidence "$IOS_STATUS_LOCAL" "$label" || return 1
-    if [[ -n "$IOS_CONSOLE_PID" ]] && ! kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
-      echo "iOS console process exited while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
+    if [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "The exact iOS console launch handle exited or became unverifiable while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
       print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
       print_smoke_tail_for_operator 80 "$IOS_CONSOLE_STDERR"
       return 1
@@ -4664,8 +5563,9 @@ wait_for_ios_status_pattern() {
     if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE "$pattern" "$IOS_STATUS_LOCAL"; then
       return 0
     fi
-    if [[ -n "$IOS_CONSOLE_PID" ]] && ! kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
-      echo "iOS console process exited while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
+    if [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] \
+      && ! ios_console_handle_is_exact_and_running; then
+      echo "The exact iOS console launch handle exited or became unverifiable while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
       print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
       print_smoke_tail_for_operator 80 "$IOS_CONSOLE_STDERR"
       return 1
@@ -5722,6 +6622,11 @@ launch_result_indicates_locked_device() {
     || { [[ -f "$IOS_CONSOLE_STDERR" ]] && grep -qE 'Locked|could not be unlocked|device.*locked|Device.*locked|RequestDenied' "$IOS_CONSOLE_STDERR"; }
 }
 
+launch_result_indicates_explicit_failure() {
+  [[ -f "$LAUNCH_RESULT_JSON" ]] \
+    && grep -qE '"outcome"[[:space:]]*:[[:space:]]*"failed"|CoreDeviceError|FBSOpenApplication' "$LAUNCH_RESULT_JSON"
+}
+
 report_ios_launch_failure() {
   local reason="$1"
   copy_ios_status
@@ -5733,63 +6638,6 @@ report_ios_launch_failure() {
   skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_CONSOLE_STDERR" "$IOS_DEVICE_ID" >&2 || true
   echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
   skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_STATUS_LOCAL" "$IOS_DEVICE_ID" >&2 || true
-}
-
-record_ios_launch_pid_from_result() {
-  IOS_APP_PID="$(python3 - "$LAUNCH_RESULT_JSON" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-except (FileNotFoundError, json.JSONDecodeError):
-    raise SystemExit(0)
-
-process = payload.get("result", {}).get("process", {})
-pid = process.get("processIdentifier")
-if isinstance(pid, int) and pid > 0:
-    print(pid)
-PY
-)"
-  if [[ -n "$IOS_APP_PID" ]]; then
-    return 0
-  fi
-
-  rm -f "$IOS_PROCESS_LIST_JSON" "$IOS_PROCESS_LIST_LOG" "$IOS_PROCESS_LIST_STDERR"
-  if ! xcrun devicectl device info processes \
-    --device "$IOS_DEVICE_ID" \
-    --timeout 20 \
-    --json-output "$IOS_PROCESS_LIST_JSON" \
-    --columns '*' >"$IOS_PROCESS_LIST_LOG" 2>"$IOS_PROCESS_LIST_STDERR"; then
-    return 0
-  fi
-
-  IOS_APP_PID="$(python3 - "$IOS_PROCESS_LIST_JSON" "$IOS_SCHEME" <<'PY'
-import json
-import sys
-
-path, executable_name = sys.argv[1:]
-try:
-    with open(path, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-except (FileNotFoundError, json.JSONDecodeError):
-    raise SystemExit(0)
-
-expected_suffix = f"/{executable_name}.app/{executable_name}"
-for process in payload.get("result", {}).get("runningProcesses", []):
-    executable = process.get("executable")
-    pid = process.get("processIdentifier")
-    if not isinstance(executable, str) or not isinstance(pid, int) or pid <= 0:
-        continue
-    if executable.endswith(expected_suffix) or executable.endswith(f"/{executable_name}"):
-        print(pid)
-        raise SystemExit(0)
-PY
-)"
-  if [[ -n "$IOS_APP_PID" ]]; then
-    append_host_status "ios-remote-smoke launch-pid pid=$IOS_APP_PID source=device-process-list"
-  fi
 }
 
 validate_ios_launch_notice_identity_env() {
@@ -5857,43 +6705,13 @@ terminate_ios_remote_smoke_app_for_notice_disconnect() {
   if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
     return 0
   fi
-
-  if [[ -z "$IOS_APP_PID" ]]; then
-    record_ios_launch_pid_from_result
-  fi
-  if [[ -z "$IOS_APP_PID" ]]; then
-    append_host_status "failed stage=remote-control-notice phase=disconnect reason=missing-ios-app-pid"
-    echo "Unable to terminate iOS app for remote-control notice disconnect proof: missing launch PID." >&2
-    return 1
-  fi
-
-  if ! xcrun devicectl device process terminate --device "$IOS_DEVICE_ID" --pid "$IOS_APP_PID" >/dev/null 2>&1; then
-    append_host_status "failed stage=remote-control-notice phase=disconnect reason=ios-terminate-failed pid=$IOS_APP_PID"
-    echo "Failed to terminate iOS app pid=$IOS_APP_PID for remote-control notice disconnect proof." >&2
-    return 1
-  fi
-  append_host_status "ios-remote-smoke terminated pid=$IOS_APP_PID reason=remote-control-notice-disconnect-proof"
-  IOS_APP_PID=""
-
-  if [[ -n "$IOS_CONSOLE_PID" ]]; then
-    local console_wait_started_at
-    console_wait_started_at="$(date +%s)"
-    while kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; do
-      if (( "$(date +%s)" - console_wait_started_at >= 10 )); then
-        kill "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
-        break
-      fi
-      sleep 0.5
-    done
-    wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
-    IOS_CONSOLE_PID=""
-  fi
-
+  terminate_ios_remote_smoke_app_exact "remote-control-notice-disconnect-proof"
   copy_ios_status
 }
 
 write_p2p_remote_control_approval_proof() {
-  python3 - "$HOST_STATUS" "$P2P_APPROVAL_PROOF" <<'PY'
+  local approved_session
+  if ! approved_session="$(python3 - "$HOST_STATUS" "$P2P_APPROVAL_PROOF" <<'PY'
 import hashlib
 import json
 import os
@@ -5978,7 +6796,17 @@ try:
 finally:
     if temporary_path.exists():
         temporary_path.unlink()
+print(session)
 PY
+)"; then
+    return 1
+  fi
+  if [[ -z "$approved_session" || "$approved_session" =~ [[:space:]] ]] \
+    || (( ${#approved_session} > 256 )); then
+    echo "P2P approval proof returned an invalid session identifier." >&2
+    return 1
+  fi
+  P2P_NOTICE_SESSION="$approved_session"
 }
 
 wait_for_remote_control_notice_lifecycle() {
@@ -5995,44 +6823,100 @@ wait_for_remote_control_notice_lifecycle() {
   write_p2p_remote_control_approval_proof
 }
 
+wait_for_same_session_notice_disconnected() {
+  local started_at
+  local lifecycle_status
+
+  if [[ -z "$P2P_NOTICE_SESSION" ]]; then
+    echo "Cannot verify P2P notice disconnect without the approved session identifier." >&2
+    return 1
+  fi
+  started_at="$(date +%s)"
+  while true; do
+    fail_if_host_exited "same-session macOS remote-control notice disconnect" || return 1
+    fail_if_smoke_source_exited "same-session macOS remote-control notice disconnect" || return 1
+    if python3 "$ROOT_DIR/Scripts/check_p2p_notice_disconnect.py" \
+      "$HOST_STATUS" \
+      "$P2P_NOTICE_SESSION"; then
+      return 0
+    else
+      lifecycle_status=$?
+    fi
+    if (( lifecycle_status == 2 )); then
+      echo "P2P remote-control notice disconnect evidence is ambiguous or invalid." >&2
+      print_smoke_tail_for_operator 80 "$HOST_STATUS"
+      return 1
+    fi
+    if (( "$(date +%s)" - started_at >= 30 )); then
+      echo "Timed out waiting for the approved P2P notice session to disconnect." >&2
+      print_smoke_tail_for_operator 80 "$HOST_STATUS"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 wait_for_remote_control_notice_disconnected() {
   if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
+    terminate_ios_remote_smoke_app_exact "smoke-complete"
+    copy_ios_status
     return 0
   fi
 
   terminate_ios_remote_smoke_app_for_notice_disconnect
-  wait_for_file_pattern "$HOST_STATUS" 'remoteControlNoticeDisconnected .*transport=p2p' 30 "macOS remote-control notice disconnect"
+  wait_for_same_session_notice_disconnected
 }
 
 launch_ios_remote_smoke_app() {
   local started_at
   local attempt=1
+  local handle_status
   started_at="$(date +%s)"
   while true; do
+    if [[ "$IOS_PREINSTALL_ABSENCE_PROVEN" != "1" ]]; then
+      echo "Refusing iOS smoke launch because pre-install app absence was not proven." >&2
+      return 1
+    fi
     rm -f "$LAUNCH_RESULT_JSON" "$IOS_STATUS_LOCAL" "$IOS_STATUS_APP_CACHE_LOCAL" "$IOS_STATUS_CONSOLE_SNAPSHOT" "$IOS_LISTENER_STATUS_LOCAL" "$IOS_CONSOLE_STDERR"
-    xcrun devicectl device process launch \
-      --device "$IOS_DEVICE_ID" \
-      --terminate-existing \
-      --console \
-      --timeout "$IOS_LAUNCH_TIMEOUT_SECONDS" \
-      --environment-variables "$IOS_ENV_JSON" \
-      --json-output "$LAUNCH_RESULT_JSON" \
-      "$IOS_BUNDLE_ID" >"$IOS_STATUS_LOCAL" 2>"$IOS_CONSOLE_STDERR" &
-    IOS_CONSOLE_PID="$!"
+    skybridge_ios_start_console_launch \
+      "$IOS_DEVICE_ID" \
+      "$IOS_BUNDLE_ID" \
+      "$IOS_ENV_JSON" \
+      "$IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS" \
+      "$LAUNCH_RESULT_JSON" \
+      "$IOS_STATUS_LOCAL" \
+      "$IOS_CONSOLE_STDERR" \
+      IOS_CONSOLE_PID \
+      1
+    IOS_CONSOLE_HANDLE_STARTED=1
 
-    local attempt_started_at
-    attempt_started_at="$(date +%s)"
-    while true; do
+    if ! skybridge_ios_capture_console_handle \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$IOS_CONSOLE_PID" \
+      "$IOS_CONSOLE_HANDLE_IDENTITY" \
+      "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC" \
+      "$IOS_CONSOLE_HANDLE_CAPTURE_TIMEOUT_SECONDS"; then
+      if kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
+        echo "iOS P2P remote console handle is alive but exact ownership capture failed; refusing PID-only cleanup." >&2
+        return 1
+      fi
+      wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
+      IOS_CONSOLE_HANDLE_STARTED=0
+      IOS_CONSOLE_PID=""
+      if ! skybridge_ios_require_app_absent_after_handle_exit \
+        "$PROCESS_OWNERSHIP_HELPER" \
+        "$IOS_DEVICE_ID" \
+        "$IOS_APP_PATH" \
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+        "$DEVICECTL_TIMEOUT_SECONDS"; then
+        report_ios_launch_failure "launch handle exited before capture and remote absence is unproven"
+        return 1
+      fi
       if launch_result_indicates_profile_trust_failure; then
         report_ios_launch_failure "code signature/profile/trust rejected by device"
         return 1
       fi
       if launch_result_indicates_locked_device; then
-        if kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
-          kill "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
-        fi
-        wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
-        IOS_CONSOLE_PID=""
         if (( "$(date +%s)" - started_at >= IOS_LAUNCH_TIMEOUT_SECONDS )); then
           report_ios_launch_failure "device remained locked for ${IOS_LAUNCH_TIMEOUT_SECONDS}s"
           echo "Unlock the iPad/iPhone and rerun; this is a real-device precondition, not a remote desktop media pass." >&2
@@ -6041,27 +6925,61 @@ launch_ios_remote_smoke_app() {
         echo "    iOS remote launch attempt ${attempt} was denied because the device is locked; unlock the device, keep it awake, and waiting..." >&2
         attempt=$((attempt + 1))
         sleep 5
-        break
+        continue
       fi
-      if [[ -f "$LAUNCH_RESULT_JSON" ]] && grep -qE '"outcome"[[:space:]]*:[[:space:]]*"failed"|CoreDeviceError|FBSOpenApplication' "$LAUNCH_RESULT_JSON"; then
-        report_ios_launch_failure "devicectl launch failed"
+      report_ios_launch_failure "devicectl launch exited before exact console ownership was captured"
+      return 1
+    fi
+
+    IOS_CONSOLE_HANDLE_CAPTURED=1
+    sleep 0.5
+    if skybridge_ios_console_handle_status \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$IOS_CONSOLE_PID" \
+      "$IOS_CONSOLE_HANDLE_IDENTITY" >/dev/null 2>&1; then
+      return 0
+    else
+      handle_status=$?
+    fi
+    if (( handle_status == 1 )) \
+      && { launch_result_indicates_locked_device \
+        || launch_result_indicates_profile_trust_failure \
+        || launch_result_indicates_explicit_failure; }; then
+      if ! finish_failed_ios_console_launch_without_process; then
+        report_ios_launch_failure "failed launch exited but remote app absence could not be proven"
         return 1
       fi
-      if ! kill -0 "$IOS_CONSOLE_PID" >/dev/null 2>&1; then
-        wait "$IOS_CONSOLE_PID" >/dev/null 2>&1 || true
-        if [[ -f "$LAUNCH_RESULT_JSON" ]] && grep -qE '"outcome"[[:space:]]*:[[:space:]]*"failed"|CoreDeviceError|FBSOpenApplication' "$LAUNCH_RESULT_JSON"; then
-          report_ios_launch_failure "devicectl launch process exited with failure"
+      if launch_result_indicates_locked_device; then
+        if (( "$(date +%s)" - started_at >= IOS_LAUNCH_TIMEOUT_SECONDS )); then
+          report_ios_launch_failure "device remained locked for ${IOS_LAUNCH_TIMEOUT_SECONDS}s"
           return 1
         fi
-        record_ios_launch_pid_from_result
-        return 0
+        attempt=$((attempt + 1))
+        sleep 5
+        continue
       fi
-      if (( "$(date +%s)" - attempt_started_at >= 8 )); then
-        record_ios_launch_pid_from_result
-        return 0
+      if launch_result_indicates_profile_trust_failure; then
+        report_ios_launch_failure "code signature/profile/trust rejected by device"
+      else
+        report_ios_launch_failure "devicectl rejected the launch before creating an app process"
       fi
-      sleep 1
-    done
+      return 1
+    fi
+    if ! terminate_ios_remote_smoke_app_exact "startup-exit"; then
+      report_ios_launch_failure "console launch handle became unverifiable during startup"
+      return 1
+    fi
+    if (( handle_status == 1 )) && launch_result_indicates_locked_device; then
+      if (( "$(date +%s)" - started_at >= IOS_LAUNCH_TIMEOUT_SECONDS )); then
+        report_ios_launch_failure "device remained locked for ${IOS_LAUNCH_TIMEOUT_SECONDS}s"
+        return 1
+      fi
+      attempt=$((attempt + 1))
+      sleep 5
+      continue
+    fi
+    report_ios_launch_failure "console launch handle exited before P2P startup completed"
+    return 1
   done
 }
 
@@ -6089,8 +7007,8 @@ if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
   resolve_ios_distribution_signing_inputs
 fi
 
-if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
-  echo "==> Verifying packaged-product signing context for the macOS LAN host"
+if mac_host_uses_signed_app_bundle; then
+  echo "==> Verifying product-identity signing context for the macOS LAN host ($MAC_HOST_LAUNCH_MODE)"
   verify_macos_smoke_host_product_signing_context
 fi
 
@@ -6120,6 +7038,8 @@ echo "==> Building macOS LAN host"
   swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost
 ) >"$ARTIFACT_DIR/macos-build.log"
 
+verify_source_input_binding_unchanged "mac-build"
+
 if [[ ! -x "$MAC_DIRECT_BIN" ]]; then
   echo "macOS LAN host executable not found: $MAC_DIRECT_BIN" >&2
   exit 1
@@ -6129,14 +7049,19 @@ if [[ ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then
   exit 1
 fi
 
-if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
+if mac_host_uses_signed_app_bundle; then
   prepare_macos_smoke_host_app_bundle
 fi
 
 echo "==> Starting macOS LAN host"
 start_macos_smoke_host
+if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+  echo "==> Signed read-only identity audit completed; this diagnostic is never release-acceptance evidence."
+  exit 2
+fi
+MAC_HOST_STARTED=1
 
-if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
+if mac_host_uses_signed_app_bundle; then
   wait_for_file_pattern \
     "$HOST_STATUS" \
     'remote-control-localization requiredKeys=20 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
@@ -6144,6 +7069,7 @@ if [[ "$MAC_HOST_LAUNCH_MODE" == "packaged" ]]; then
     "embedded signed SkyBridgeCore localization contract"
 fi
 wait_for_file_pattern "$HOST_STATUS" 'ready discovery=_skybridge._tcp' 60 "macOS host ready"
+record_macos_smoke_host_launch_evidence
 MAC_REMOTE_PORT="$(python3 - "$HOST_STATUS" <<'PY'
 import re
 import sys
@@ -6151,7 +7077,7 @@ import sys
 port = ""
 with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as handle:
     for line in handle:
-        match = re.search(r"\bready remote=_skybridge-remote\._tcp port=([1-9][0-9]{0,4})\b", line)
+        match = re.search(r"\bready remote=_skybridge-rd\._tcp port=([1-9][0-9]{0,4})\b", line)
         if match:
             value = int(match.group(1))
             if 0 < value <= 65535:
@@ -6160,7 +7086,7 @@ print(port)
 PY
 )"
 if [[ -z "$MAC_REMOTE_PORT" ]]; then
-  echo "macOS host did not report a concrete _skybridge-remote._tcp remote-control port." >&2
+  echo "macOS host did not report a concrete _skybridge-rd._tcp remote-control port." >&2
   exit 1
 fi
 MAC_CONTROL_PORT="$(python3 - "$HOST_STATUS" <<'PY'
@@ -6182,6 +7108,8 @@ if [[ -z "$MAC_CONTROL_PORT" ]]; then
   echo "macOS host did not report a concrete _skybridge._tcp control port." >&2
   exit 1
 fi
+verify_host_pid_owns_listener_port "$MAC_CONTROL_PORT" "control"
+verify_host_pid_owns_listener_port "$MAC_REMOTE_PORT" "remote-control"
 MAC_CONTROL_HOST="${SKYBRIDGE_SMOKE_MAC_CONTROL_HOST:-$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname)}"
 if [[ -z "$MAC_CONTROL_HOST" ]]; then
   echo "macOS host LAN address could not be determined for real-device smoke." >&2
@@ -6231,41 +7159,41 @@ if ! skybridge_apple_pqc_sdk_probe_succeeded; then
   exit 1
 fi
 echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-IOS_XCODE_SIGNING_SETTINGS=()
+IOS_XCODEBUILD_ARGS=(
+  -project "$IOS_PROJECT"
+  -scheme "$IOS_SCHEME"
+  -configuration "$IOS_BUILD_CONFIGURATION"
+  -destination "$IOS_BUILD_DESTINATION"
+  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios"
+  "SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION=$IOS_BUILD_CONFIGURATION"
+  "SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE=$IOS_SOURCE_DIRTY_STATE"
+  "SKYBRIDGE_PACKAGING_GIT_COMMIT=$IOS_SOURCE_REVISION"
+  "SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST=$IOS_SOURCE_INPUT_DIGEST"
+  "SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"
+  "SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"
+  "SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"
+  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
+  "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"
+)
 if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
-  # The project default is Automatic (Xcode-managed) signing. This direct
-  # testing-surface device build must instead be signed by the resolver-selected
-  # installed distribution profile so the measured signing/profile proof matches,
-  # so it forces Manual signing on the command line.
   # The project default is Automatic (Xcode-managed) signing. This direct
   # testing-surface device build must instead be signed by the resolver-selected
   # installed distribution profile so the measured signing/profile proof matches,
   # so it forces Manual signing on the command line. Per-target profiles come from
   # the project's PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_*_...)" indirection,
   # fed by the two environment build settings below.
-  IOS_XCODE_SIGNING_SETTINGS=(
+  IOS_XCODEBUILD_ARGS+=(
     "CODE_SIGN_STYLE=Manual"
     "CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"
     "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"
     "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"
   )
 fi
-SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
-  -project "$IOS_PROJECT" \
-  -scheme "$IOS_SCHEME" \
-  -configuration "$IOS_BUILD_CONFIGURATION" \
-  -destination "$IOS_BUILD_DESTINATION" \
-  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
-  "INFOPLIST_KEY_SkyBridgePackagingBuildConfiguration=$IOS_BUILD_CONFIGURATION" \
-  "INFOPLIST_KEY_SkyBridgePackagingGitDirtyState=$IOS_SOURCE_DIRTY_STATE" \
-  "INFOPLIST_KEY_SkyBridgePackagingGitCommit=$IOS_SOURCE_REVISION" \
-  "INFOPLIST_KEY_SkyBridgePackagingSourceRepository=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}" \
-  "INFOPLIST_KEY_SkyBridgePackagingProductSurface=testing" \
-  "INFOPLIST_KEY_SkyBridgePackagingSwiftActiveCompilationConditions=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING" \
-  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
-  "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING" \
-  "${IOS_XCODE_SIGNING_SETTINGS[@]}" \
-  build >"$IOS_BUILD_LOG"
+IOS_XCODEBUILD_ARGS+=(build)
+SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
+  skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG"
+
+verify_source_input_binding_unchanged "ios-build"
 
 IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
@@ -6288,6 +7216,19 @@ if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   exit 1
 fi
 write_ios_p2p_product_proof "$IOS_EMBEDDED_PROFILE" "$IOS_WIDGET_EMBEDDED_PROFILE"
+verify_ios_product_source_input_binding
+
+initialize_ios_process_ownership_session
+if ! skybridge_ios_require_fresh_app_launch \
+  "$PROCESS_OWNERSHIP_HELPER" \
+  "$IOS_DEVICE_ID" \
+  "$IOS_APP_PATH" \
+  "$PROCESS_OWNERSHIP_PRIVATE_DIR" \
+  "$DEVICECTL_TIMEOUT_SECONDS"; then
+  exit 1
+fi
+IOS_PREINSTALL_ABSENCE_PROVEN=1
+append_host_status "ios-preinstall appAbsence=1 terminateExistingLaunch=1"
 
 echo "==> Installing iOS app on real device"
 if [[ "$PRESERVE_INSTALL" != "1" ]]; then
@@ -6317,9 +7258,6 @@ IOS_ENV_JSON="$(
   SKYBRIDGE_DEVICE_ID="$IOS_SMOKE_DEVICE_ID" \
   SKYBRIDGE_SMOKE_TARGET_DEVICE_ID="$MAC_PQC_DEVICE_ID" \
   SKYBRIDGE_SMOKE_TARGET_NAME="$MAC_TARGET_NAME" \
-  SKYBRIDGE_SMOKE_TARGET_HOST="$MAC_CONTROL_HOST" \
-  SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT="$MAC_CONTROL_PORT" \
-  SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT="$MAC_REMOTE_PORT" \
   SKYBRIDGE_SMOKE_TIMEOUT_SECONDS="$SMOKE_TIMEOUT_SECONDS" \
   SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS="$SMOKE_REMOTE_TIMEOUT_SECONDS" \
   SKYBRIDGE_SMOKE_STATUS_BASENAME="$IOS_STATUS_NAME" \
@@ -6349,9 +7287,6 @@ keys = [
     "SKYBRIDGE_DEVICE_ID",
     "SKYBRIDGE_SMOKE_TARGET_DEVICE_ID",
     "SKYBRIDGE_SMOKE_TARGET_NAME",
-    "SKYBRIDGE_SMOKE_TARGET_HOST",
-    "SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT",
-    "SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT",
     "SKYBRIDGE_SMOKE_TIMEOUT_SECONDS",
     "SKYBRIDGE_SMOKE_REMOTE_DESKTOP_TIMEOUT_SECONDS",
     "SKYBRIDGE_SMOKE_STATUS_BASENAME",
@@ -6446,6 +7381,9 @@ python3 - \
   "$MAC_TO_IOS_CRYPTO_HANDSHAKE_COMPLETE" \
   "$MAC_ONLINE_APP_SOURCE" \
   "$MAC_ONLINE_APP_SOURCE_CURRENT" \
+  "$MAC_HOST_LAUNCH_MODE" \
+  "$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID" \
+  "$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED" \
   "$P2P_APPROVAL_PROOF" \
   "$IOS_PRODUCT_PROOF" <<'PY'
 import json
@@ -6462,6 +7400,9 @@ import sys
     reverse_crypto,
     mac_online_source,
     mac_online_source_current,
+    mac_host_launch_mode,
+    mac_host_stapler_valid,
+    mac_host_gatekeeper_accepted,
     approval_proof_path,
     ios_product_proof_path,
 ) = sys.argv[1:]
@@ -6528,6 +7469,11 @@ has_reverse_crypto = reverse_crypto == "1"
 has_current_packaged_mac_online = (
     mac_online_source == "packaged" and mac_online_source_current == "1"
 )
+has_formal_mac_host_identity = (
+    mac_host_launch_mode == "packaged"
+    and mac_host_stapler_valid == "1"
+    and mac_host_gatekeeper_accepted == "1"
+)
 pre_cleanup_candidate = (
     not is_lab
     and trust_mode != "injected"
@@ -6535,6 +7481,7 @@ pre_cleanup_candidate = (
     and has_reverse_run
     and has_reverse_crypto
     and has_current_packaged_mac_online
+    and has_formal_mac_host_identity
     and human_approval
     and not runtime_auto_approval
     and ios_product_ready
@@ -6563,6 +7510,10 @@ payload = {
     "bidirectionalHandshake": has_reverse_crypto,
     "macOnlineSource": mac_online_source,
     "macOnlineSourceCurrent": mac_online_source_current == "1",
+    "macHostLaunchMode": mac_host_launch_mode,
+    "macHostDiagnosticOnly": mac_host_launch_mode != "packaged",
+    "identitySourceStaplerValid": mac_host_stapler_valid == "1",
+    "identitySourceGatekeeperAccepted": mac_host_gatekeeper_accepted == "1",
     "iosBuildConfiguration": ios_product_proof.get("configuration"),
     "iosReleaseConfiguration": ios_product_proof.get("releaseConfiguration") is True,
     "iosSourceClean": ios_product_proof.get("sourceClean") is True,

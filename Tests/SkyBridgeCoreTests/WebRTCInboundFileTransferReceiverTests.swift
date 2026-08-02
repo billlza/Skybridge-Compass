@@ -1,10 +1,27 @@
 import CryptoKit
+import SkyBridgeProtocolCore
 import XCTest
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
+    func testMetadataAckCannotEnterInboundRequestQueue() {
+        assertInvalidQueuedOperationRejected(.metadataAck)
+    }
+
+    func testErrorCannotEnterInboundRequestQueue() {
+        assertInvalidQueuedOperationRejected(.error)
+    }
+
+    func testChunkAckCannotEnterInboundRequestQueue() {
+        assertInvalidQueuedOperationRejected(.chunkAck)
+    }
+
+    func testCompleteAckCannotEnterInboundRequestQueue() {
+        assertInvalidQueuedOperationRejected(.completeAck)
+    }
+
     func testMetadataAckUsesInjectedDestinationAndCleanupRemovesPartial() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -307,6 +324,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
                 chunkSize: 4,
                 totalChunks: 1
             ),
+            encodedPayloadByteCount: 256,
             sessionID: "session",
             endpointDescription: "peer",
             keys: Self.sessionKeys(),
@@ -324,6 +342,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
                 chunkSize: 4,
                 totalChunks: 1
             ),
+            encodedPayloadByteCount: 256,
             sessionID: "session",
             endpointDescription: "peer",
             keys: Self.sessionKeys(),
@@ -384,6 +403,7 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
                     chunkSize: 4,
                     totalChunks: 1
                 ),
+                encodedPayloadByteCount: 256,
                 sessionID: "session",
                 endpointDescription: "peer",
                 keys: Self.sessionKeys(),
@@ -402,6 +422,253 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         for transferID in transferIDs {
             XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferID).path))
         }
+    }
+
+    func testRetainedByteBudgetIncludesActiveAndQueuedOperationsUntilCleanup() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let approvalStarted = expectation(description: "approval started")
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            maxConcurrentInboundTransfers: 1,
+            maxGlobalConcurrentInboundTransfers: 1,
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { _ in
+                approvalStarted.fulfill()
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch is CancellationError {
+                    return .approved
+                } catch {
+                    XCTFail("Unexpected approval wait error: \(error)")
+                }
+                return .rejected(reason: "unexpected approval completion")
+            }
+        )
+        let transferID = UUID().uuidString
+        let metadataCharge = 256
+
+        try receiver.enqueueInboundRequest(
+            metadata(
+                transferId: transferID,
+                fileSize: 1,
+                chunkSize: 1,
+                totalChunks: 1
+            ),
+            encodedPayloadByteCount: metadataCharge,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in },
+            resumeSenderWaiter: { _ in },
+            onFatalError: { error in XCTFail("Queued operation failed: \(error)") }
+        )
+        await fulfillment(of: [approvalStarted], timeout: 1)
+
+        let maximumFrameBytes = CrossNetworkFileTransferWireDecoder
+            .maximumEncodedPayloadByteCount
+        let queuedChunk = chunk(
+            transferId: transferID,
+            index: 0,
+            data: Data([0x01])
+        )
+        let fullFrameCount = (
+            CrossNetworkFileTransferInboundAdmissionPolicy.maximumRetainedOperationBytes
+                - metadataCharge
+        ) / maximumFrameBytes
+        for _ in 0..<fullFrameCount {
+            try receiver.enqueueInboundRequest(
+                queuedChunk,
+                encodedPayloadByteCount: maximumFrameBytes,
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { _, _ in },
+                failSenderWaiters: { _, _ in },
+                resumeSenderWaiter: { _ in },
+                onFatalError: { error in XCTFail("Queued operation failed: \(error)") }
+            )
+        }
+        let exactRemainder = CrossNetworkFileTransferInboundAdmissionPolicy
+            .maximumRetainedOperationBytes - receiver.retainedInboundOperationByteCount
+        try receiver.enqueueInboundRequest(
+            queuedChunk,
+            encodedPayloadByteCount: exactRemainder,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { _, _ in },
+            failSenderWaiters: { _, _ in },
+            resumeSenderWaiter: { _ in },
+            onFatalError: { error in XCTFail("Queued operation failed: \(error)") }
+        )
+
+        XCTAssertEqual(
+            receiver.retainedInboundOperationByteCount,
+            CrossNetworkFileTransferInboundAdmissionPolicy.maximumRetainedOperationBytes
+        )
+        XCTAssertEqual(receiver.retainedInboundOperationCount, fullFrameCount + 2)
+        XCTAssertThrowsError(
+            try receiver.enqueueInboundRequest(
+                queuedChunk,
+                encodedPayloadByteCount: 1,
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { _, _ in },
+                failSenderWaiters: { _, _ in },
+                resumeSenderWaiter: { _ in },
+                onFatalError: { _ in }
+            )
+        ) { error in
+            guard case WebRTCInboundFileTransferReceiver.InboundOperationQueueError
+                .retainedByteCapacityExceeded = error else {
+                return XCTFail("Expected retained-byte rejection, got \(error)")
+            }
+        }
+
+        await receiver.cleanupOnChannelClosed().value
+
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 0)
+        XCTAssertEqual(receiver.retainedInboundOperationByteCount, 0)
+    }
+
+    func testActiveLaneLimitCannotExceedSessionGlobalOrHardCeiling() {
+        XCTAssertEqual(
+            WebRTCInboundFileTransferReceiver.activeInboundOperationLaneLimit(
+                sessionLimit: 8,
+                globalLimit: 16
+            ),
+            8
+        )
+        XCTAssertEqual(
+            WebRTCInboundFileTransferReceiver.activeInboundOperationLaneLimit(
+                sessionLimit: 20,
+                globalLimit: 10
+            ),
+            10
+        )
+        XCTAssertEqual(
+            WebRTCInboundFileTransferReceiver.activeInboundOperationLaneLimit(
+                sessionLimit: 64,
+                globalLimit: 100
+            ),
+            32
+        )
+    }
+
+    func testCompletedOperationReleasesReservationBeforeWorkerExit() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let responseSent = expectation(description: "rejection response sent")
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { _ in .rejected(reason: "operator_rejected") }
+        )
+
+        try receiver.enqueueInboundRequest(
+            metadata(
+                transferId: UUID().uuidString,
+                fileSize: 1,
+                chunkSize: 1,
+                totalChunks: 1
+            ),
+            encodedPayloadByteCount: CrossNetworkFileTransferWireDecoder
+                .maximumEncodedPayloadByteCount,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: { message, _ in
+                XCTAssertEqual(message.op, .error)
+                responseSent.fulfill()
+            },
+            failSenderWaiters: { _, _ in },
+            resumeSenderWaiter: { _ in },
+            onFatalError: { error in XCTFail("Operation failed: \(error)") }
+        )
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 1)
+
+        await fulfillment(of: [responseSent], timeout: 1)
+        await Task.yield()
+
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 0)
+        XCTAssertEqual(receiver.retainedInboundOperationByteCount, 0)
+        await receiver.cleanupOnChannelClosed().value
+    }
+
+    func testFatalLaneReleasesActiveAndPendingReservationsExactlyOnce() async throws {
+        enum InjectedFailure: Error { case sendFailed }
+
+        let fatalSendStarted = expectation(description: "fatal send started")
+        let fatalReported = expectation(description: "fatal error reported")
+        var resumeFatalSend: CheckedContinuation<Void, Never>?
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { nil },
+            maxConcurrentInboundTransfers: 1,
+            maxGlobalConcurrentInboundTransfers: 1,
+            senderAuthorityProvider: { _ in Self.senderAuthority() }
+        )
+        let transferID = UUID().uuidString
+        let sendMessage: WebRTCInboundFileTransferReceiver.SendMessage = { _, _ in
+            fatalSendStarted.fulfill()
+            await withCheckedContinuation { continuation in
+                resumeFatalSend = continuation
+            }
+            throw InjectedFailure.sendFailed
+        }
+        let onFatalError: @MainActor (Error) -> Void = { error in
+            guard error is InjectedFailure else {
+                return XCTFail("Expected injected failure, got \(error)")
+            }
+            fatalReported.fulfill()
+        }
+
+        try receiver.enqueueInboundRequest(
+            metadata(
+                transferId: transferID,
+                fileSize: 1,
+                chunkSize: 1,
+                totalChunks: 1
+            ),
+            encodedPayloadByteCount: 1_024,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: sendMessage,
+            failSenderWaiters: { _, _ in },
+            resumeSenderWaiter: { _ in },
+            onFatalError: onFatalError
+        )
+        await fulfillment(of: [fatalSendStarted], timeout: 1)
+        try receiver.enqueueInboundRequest(
+            CrossNetworkFileTransferMessage(
+                op: .cancel,
+                transferId: transferID,
+                message: "sender cancelled"
+            ),
+            encodedPayloadByteCount: 512,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: sendMessage,
+            failSenderWaiters: { _, _ in },
+            resumeSenderWaiter: { _ in },
+            onFatalError: onFatalError
+        )
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 2)
+        XCTAssertEqual(receiver.retainedInboundOperationByteCount, 1_536)
+
+        resumeFatalSend?.resume()
+        await fulfillment(of: [fatalReported], timeout: 1)
+        await Task.yield()
+
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 0)
+        XCTAssertEqual(receiver.retainedInboundOperationByteCount, 0)
+        await receiver.cleanupOnChannelClosed().value
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 0)
+        XCTAssertEqual(receiver.retainedInboundOperationByteCount, 0)
     }
 
     #if os(macOS)
@@ -1047,7 +1314,45 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
     private func makeFixture() throws -> ReceiverFixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("WebRTCInboundFileTransferReceiverTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false
+        )
         return ReceiverFixture(directory: directory)
+    }
+
+    private func assertInvalidQueuedOperationRejected(
+        _ operation: CrossNetworkFileTransferOp,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { nil },
+            senderAuthorityProvider: { _ in Self.senderAuthority() }
+        )
+        let message = CrossNetworkFileTransferMessage(
+            op: operation,
+            transferId: UUID().uuidString
+        )
+
+        do {
+            try receiver.enqueueInboundRequest(
+                message,
+                encodedPayloadByteCount: 128,
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { _, _ in },
+                failSenderWaiters: { _, _ in },
+                resumeSenderWaiter: { _ in },
+                onFatalError: { _ in }
+            )
+            XCTFail("Non-request operation entered the inbound request queue", file: file, line: line)
+        } catch WebRTCInboundFileTransferReceiver.InboundOperationQueueError.invalidRequestOperation(let rejectedOperation) {
+            XCTAssertEqual(rejectedOperation.rawValue, operation.rawValue, file: file, line: line)
+        } catch {
+            XCTFail("expected invalidRequestOperation, got \(error)", file: file, line: line)
+        }
     }
 
     private func repositorySource(_ relativePath: String) throws -> String {
@@ -1111,8 +1416,19 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
             directory.appendingPathComponent(".skybridge-\(transferId).partial")
         }
 
-        func cleanup() {
-            try? FileManager.default.removeItem(at: directory)
+        func cleanup(
+            file: StaticString = #filePath,
+            line: UInt = #line
+        ) {
+            do {
+                try FileManager.default.removeItem(at: directory)
+            } catch {
+                XCTFail(
+                    "Failed to remove owned receiver fixture: \(error)",
+                    file: file,
+                    line: line
+                )
+            }
         }
     }
 }

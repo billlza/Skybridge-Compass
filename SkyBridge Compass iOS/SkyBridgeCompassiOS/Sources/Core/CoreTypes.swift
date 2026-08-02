@@ -8,9 +8,15 @@
 
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 #if canImport(Security)
 import Security
 #endif
+
+/// The iOS application now consumes the same secure-memory implementation as
+/// the shared macOS core. Keeping this alias in the existing core-types surface
+/// avoids a parallel type while callers migrate without wrapper allocations.
+public typealias SecureBytes = SkyBridgeProtocolCore.SecureBytes
 
 // MARK: - CryptoTier
 
@@ -512,206 +518,6 @@ public enum SigningKeyHandle: @unchecked Sendable {
     #endif
     case callback(any SigningCallback)
 }
-
-// MARK: - SecureBytes
-
-/// 安全字节容器 - deinit 时擦除内存
-public final class SecureBytes: @unchecked Sendable {
-    
-    private let pointer: UnsafeMutableRawPointer
-    private let count: Int
-    private let accessLock = NSRecursiveLock()
-
-    public typealias WipingFunction = @Sendable (UnsafeMutableRawPointer, Int) -> Void
-
-#if DEBUG || SKYBRIDGE_TESTING
-    private final class WipingFunctionStorage: @unchecked Sendable {
-        private let lock = NSLock()
-        private var function: WipingFunction
-
-        init(function: @escaping WipingFunction) {
-            self.function = function
-        }
-
-        func load() -> WipingFunction {
-            lock.lock()
-            defer { lock.unlock() }
-            return function
-        }
-
-        func store(_ function: @escaping WipingFunction) {
-            lock.lock()
-            self.function = function
-            lock.unlock()
-        }
-    }
-
-    private static let wipingFunctionStorage = WipingFunctionStorage { pointer, count in
-        secureZeroMemory(pointer, count)
-    }
-
-    /// Test-only zeroization probe. The storage is synchronized for concurrent tests.
-    public static var wipingFunction: WipingFunction {
-        get { wipingFunctionStorage.load() }
-        set { wipingFunctionStorage.store(newValue) }
-    }
-#else
-    /// Immutable production zeroization entry point.
-    internal static let wipingFunction: WipingFunction = { pointer, count in
-        secureZeroMemory(pointer, count)
-    }
-#endif
-    
-    public init(count: Int) {
-        precondition(count >= 0, "SecureBytes count must not be negative")
-        self.count = count
-        let allocSize = max(count, 1)
-        self.pointer = UnsafeMutableRawPointer.allocate(
-            byteCount: allocSize,
-            alignment: MemoryLayout<UInt8>.alignment
-        )
-        if count > 0 {
-            pointer.initializeMemory(as: UInt8.self, repeating: 0, count: count)
-        }
-    }
-    
-    public init(data: Data) {
-        self.count = data.count
-        let allocSize = max(data.count, 1)
-        self.pointer = UnsafeMutableRawPointer.allocate(
-            byteCount: allocSize,
-            alignment: MemoryLayout<UInt8>.alignment
-        )
-        if data.count > 0 {
-            data.withUnsafeBytes { src in
-                guard let base = src.baseAddress else { return }
-                pointer.copyMemory(from: base, byteCount: data.count)
-            }
-        }
-    }
-    
-    public init(bytes: [UInt8]) {
-        self.count = bytes.count
-        let allocSize = max(bytes.count, 1)
-        self.pointer = UnsafeMutableRawPointer.allocate(
-            byteCount: allocSize,
-            alignment: MemoryLayout<UInt8>.alignment
-        )
-        if bytes.count > 0 {
-            bytes.withUnsafeBytes { src in
-                guard let base = src.baseAddress else { return }
-                pointer.copyMemory(from: base, byteCount: bytes.count)
-            }
-        }
-    }
-    
-    deinit {
-        if count > 0 {
-            Self.wipingFunction(pointer, count)
-        }
-        pointer.deallocate()
-    }
-    
-    public var byteCount: Int { count }
-    public var isEmpty: Bool { count == 0 }
-    
-    public var data: Data {
-        copyData()
-    }
-
-    /// Returns a Data value with storage independent of this SecureBytes instance.
-    public func copyData() -> Data {
-        accessLock.lock()
-        defer { accessLock.unlock() }
-        guard count > 0 else { return Data() }
-        return Data(bytes: pointer, count: count)
-    }
-    
-    public func unsafeRawBytes() -> Data { copyData() }
-    public var bytes: Data { copyData() }
-    
-    public func withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
-        accessLock.lock()
-        defer { accessLock.unlock() }
-        return try body(UnsafeRawBufferPointer(start: pointer, count: count))
-    }
-    
-    public func withUnsafeMutableBytes<R>(_ body: (UnsafeMutableRawBufferPointer) throws -> R) rethrows -> R {
-        accessLock.lock()
-        defer { accessLock.unlock() }
-        return try body(UnsafeMutableRawBufferPointer(start: pointer, count: count))
-    }
-    
-    public func zeroize() {
-        accessLock.lock()
-        defer { accessLock.unlock() }
-        if count > 0 {
-            Self.wipingFunction(pointer, count)
-        }
-    }
-}
-
-extension SecureBytes: ContiguousBytes {}
-
-// MARK: - Secure Zero
-
-#if canImport(Darwin)
-import Darwin
-
-private typealias ExplicitBzeroFn = @convention(c) (UnsafeMutableRawPointer?, Int) -> Void
-private typealias MemsetSFn = @convention(c) (UnsafeMutableRawPointer?, Int, Int32, Int) -> Int32
-
-/// Resolve secure-zero functions once and retain the process-image handle for the
-/// process lifetime instead of repeatedly acquiring a handle for every wipe.
-private final class SecureZeroSymbols: @unchecked Sendable {
-    static let shared = SecureZeroSymbols()
-
-    let explicitBzero: ExplicitBzeroFn?
-    let memsetS: MemsetSFn?
-    private let processHandle: UnsafeMutableRawPointer?
-
-    private init() {
-        let handle = dlopen(nil, RTLD_NOW)
-        processHandle = handle
-        if let handle {
-            explicitBzero = dlsym(handle, "explicit_bzero").map {
-                unsafeBitCast($0, to: ExplicitBzeroFn.self)
-            }
-            memsetS = dlsym(handle, "memset_s").map {
-                unsafeBitCast($0, to: MemsetSFn.self)
-            }
-        } else {
-            explicitBzero = nil
-            memsetS = nil
-        }
-    }
-}
-
-private func secureZeroMemory(_ ptr: UnsafeMutableRawPointer, _ count: Int) {
-    let symbols = SecureZeroSymbols.shared
-    if let fn = symbols.explicitBzero {
-        fn(ptr, count)
-        return
-    }
-    if let fn = symbols.memsetS {
-        _ = fn(ptr, count, 0, count)
-        return
-    }
-    let bytes = ptr.assumingMemoryBound(to: UInt8.self)
-    for i in 0..<count {
-        bytes[i] = 0
-    }
-    withExtendedLifetime(ptr) { _ in }
-}
-#else
-private func secureZeroMemory(_ ptr: UnsafeMutableRawPointer, _ count: Int) {
-    let bytes = ptr.assumingMemoryBound(to: UInt8.self)
-    for i in 0..<count {
-        bytes[i] = 0
-    }
-    withExtendedLifetime(ptr) { _ in }
-}
-#endif
 
 // MARK: - SessionKeys
 

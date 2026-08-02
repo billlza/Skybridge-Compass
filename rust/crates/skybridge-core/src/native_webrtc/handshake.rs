@@ -1,8 +1,9 @@
 use anyhow::Result;
 
 use crate::{
-    ClassicHandleResult, ClassicInitiatorConfig, ClassicInitiatorHandshake, PqcInitiatorConfig,
-    PqcInitiatorHandshake, PqcResponderConfig, PqcResponderHandshake,
+    ClassicHandleResult, ClassicInitiatorConfig, ClassicInitiatorHandshake, ClassicResponderConfig,
+    ClassicResponderHandshake, PqcInitiatorConfig, PqcInitiatorHandshake, PqcResponderConfig,
+    PqcResponderHandshake,
 };
 
 #[derive(Debug)]
@@ -13,6 +14,7 @@ enum NativeInitiatorHandshake {
 
 #[derive(Debug)]
 enum NativeResponderHandshake {
+    Classic(ClassicResponderHandshake),
     Pqc(PqcResponderHandshake),
 }
 
@@ -39,51 +41,13 @@ impl NativeInitiatorHandshake {
             Self::Pqc(handshake) => handshake.handle_frame(frame),
         }
     }
-
-    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.build_heartbeat_frame(),
-            Self::Pqc(handshake) => handshake.build_heartbeat_frame(),
-        }
-    }
-
-    fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.build_pong_frame(id),
-            Self::Pqc(handshake) => handshake.build_pong_frame(id),
-        }
-    }
-
-    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Classic(handshake) => handshake.build_ping_frame(id),
-            Self::Pqc(handshake) => handshake.build_ping_frame(id),
-        }
-    }
 }
 
 impl NativeResponderHandshake {
     fn handle_frame(&mut self, frame: &[u8]) -> Result<ClassicHandleResult> {
         match self {
+            Self::Classic(handshake) => handshake.handle_frame(frame),
             Self::Pqc(handshake) => handshake.handle_frame(frame),
-        }
-    }
-
-    fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        match self {
-            Self::Pqc(handshake) => handshake.build_heartbeat_frame(),
-        }
-    }
-
-    fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Pqc(handshake) => handshake.build_pong_frame(id),
-        }
-    }
-
-    fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match self {
-            Self::Pqc(handshake) => handshake.build_ping_frame(id),
         }
     }
 }
@@ -107,6 +71,12 @@ impl NativeSessionHandshake {
         )))
     }
 
+    pub(super) fn classic_responder(config: ClassicResponderConfig) -> Result<Self> {
+        Ok(Self(NativeSessionHandshakeKind::Responder(
+            NativeResponderHandshake::Classic(ClassicResponderHandshake::new(config)?),
+        )))
+    }
+
     pub(super) fn start(&mut self) -> Result<Vec<u8>> {
         match &mut self.0 {
             NativeSessionHandshakeKind::Initiator(handshake) => handshake.start(),
@@ -118,27 +88,6 @@ impl NativeSessionHandshake {
         match &mut self.0 {
             NativeSessionHandshakeKind::Initiator(handshake) => handshake.handle_frame(frame),
             NativeSessionHandshakeKind::Responder(handshake) => handshake.handle_frame(frame),
-        }
-    }
-
-    pub(super) fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        match &self.0 {
-            NativeSessionHandshakeKind::Initiator(handshake) => handshake.build_heartbeat_frame(),
-            NativeSessionHandshakeKind::Responder(handshake) => handshake.build_heartbeat_frame(),
-        }
-    }
-
-    pub(super) fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match &self.0 {
-            NativeSessionHandshakeKind::Initiator(handshake) => handshake.build_pong_frame(id),
-            NativeSessionHandshakeKind::Responder(handshake) => handshake.build_pong_frame(id),
-        }
-    }
-
-    pub(super) fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        match &self.0 {
-            NativeSessionHandshakeKind::Initiator(handshake) => handshake.build_ping_frame(id),
-            NativeSessionHandshakeKind::Responder(handshake) => handshake.build_ping_frame(id),
         }
     }
 }

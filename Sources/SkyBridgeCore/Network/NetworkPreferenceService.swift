@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // NetworkPreferenceService.swift
 // SkyBridgeCore
@@ -491,3 +496,4 @@ public extension Notification.Name {
     static let betterNetworkAvailable = Notification.Name("com.skybridge.betterNetworkAvailable")
     static let networkConnectionChanged = Notification.Name("com.skybridge.networkConnectionChanged")
 }
+#endif

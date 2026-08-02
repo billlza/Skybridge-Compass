@@ -10,65 +10,10 @@ final class LocalP2PSmokeHarness {
     private static let xwingSuiteWireID: UInt16 = 0x0001
     private static let mlkem768SuiteWireID: UInt16 = 0x0101
     private static let mlkem768FSSuiteWireID: UInt16 = 0x0102
-    private static let remoteControlRoutePreflightProbePayload = Data(
-        "SKYBRIDGE_REMOTE_ROUTE_PROBE_V1\n".utf8
-    )
-
     private var didStart = false
     private let runStartedAt = Date()
 
     private init() {}
-
-    private final class ControlRouteProbeGate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var continuation: CheckedContinuation<Void, Error>?
-        private var result: Result<Void, Error>?
-
-        func finish(_ result: Result<Void, Error>) {
-            lock.lock()
-            guard self.result == nil else {
-                lock.unlock()
-                return
-            }
-            self.result = result
-            let continuation = continuation
-            self.continuation = nil
-            lock.unlock()
-
-            guard let continuation else { return }
-            switch result {
-            case .success:
-                continuation.resume()
-            case .failure(let error):
-                continuation.resume(throwing: error)
-            }
-        }
-
-        func wait(timeoutSeconds: Double) async throws {
-            let timeoutTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(timeoutSeconds))
-                guard !Task.isCancelled else { return }
-                self?.finish(.failure(P2PError.connectionFailed))
-            }
-            defer { timeoutTask.cancel() }
-
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                lock.lock()
-                if let result {
-                    lock.unlock()
-                    switch result {
-                    case .success:
-                        continuation.resume()
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                    return
-                }
-                self.continuation = continuation
-                lock.unlock()
-            }
-        }
-    }
 
     var isEnabled: Bool {
         role == "ios-p2p-client"
@@ -87,18 +32,6 @@ final class LocalP2PSmokeHarness {
     private var targetDeviceName: String {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_TARGET_NAME"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    }
-
-    private var targetControlHost: String? {
-        environmentValue("SKYBRIDGE_SMOKE_TARGET_HOST")
-    }
-
-    private var targetControlPort: UInt16? {
-        positiveEnvironmentUInt16("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT")
-    }
-
-    private var targetRemoteControlPort: UInt16? {
-        positiveEnvironmentUInt16("SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT")
     }
 
     private var expectsPQCRekey: Bool {
@@ -167,14 +100,6 @@ final class LocalP2PSmokeHarness {
         return value
     }
 
-    private func positiveEnvironmentUInt16(_ name: String) -> UInt16? {
-        guard let value = positiveEnvironmentInteger(name),
-              value <= Int(UInt16.max) else {
-            return nil
-        }
-        return UInt16(value)
-    }
-
     private func positiveEnvironmentDouble(_ name: String) -> Double? {
         guard let raw = environmentValue(name),
               let value = Double(raw),
@@ -187,6 +112,7 @@ final class LocalP2PSmokeHarness {
     func startIfNeeded() async {
         guard isEnabled, !didStart else { return }
         didStart = true
+        defer { SkyBridgeDiagnosticTrace.flush() }
 
         let reporter: SmokeStatusReporter
         do {
@@ -276,16 +202,12 @@ final class LocalP2PSmokeHarness {
 
             if selectedDevice == nil,
                let target = resolveTargetDevice(from: discoveryManager.discoveredDevices) {
-                let routedTarget = applySmokePinnedControlRoute(to: target, reporter: reporter)
-                guard await verifySmokePinnedControlRouteIfNeeded(reporter: reporter) else {
+                guard verifyDiscoveredControlRoute(target, reporter: reporter) else {
                     return
                 }
-                guard await verifySmokePinnedRemoteControlRouteIfNeeded(reporter: reporter) else {
-                    return
-                }
-                selectedDevice = routedTarget
+                selectedDevice = target
                 reporter.append(
-                    "target id=\(Self.sanitize(routedTarget.id)) name=\(Self.sanitize(routedTarget.name))"
+                    "target id=\(Self.sanitize(target.id)) name=\(Self.sanitize(target.name))"
                 )
             }
 
@@ -657,254 +579,42 @@ final class LocalP2PSmokeHarness {
         }
     }
 
-    private func applySmokePinnedControlRoute(
-        to target: DiscoveredDevice,
+    private func verifyDiscoveredControlRoute(
+        _ target: DiscoveredDevice,
         reporter: SmokeStatusReporter
-    ) -> DiscoveredDevice {
-        let controlService = "_skybridge._tcp"
-        let remoteService = DiscoveredDevice.remoteControlServiceType
-        let previousHost = target.ipAddress
-        let previousPort = target.portMap[controlService]
-        let previousRemotePort = target.portMap[remoteService]
-        var updated = target
-        var changed = false
-
-        if let host = targetControlHost {
-            updated.ipAddress = host
-            changed = changed || previousHost != host
-        }
-        if let port = targetControlPort {
-            updated.portMap[controlService] = port
-            if !updated.services.contains(controlService) {
-                updated.services.append(controlService)
-            }
-            if updated.bonjourServiceType == nil {
-                updated.bonjourServiceType = controlService
-            }
-            changed = changed || previousPort != port
-        }
-        if let remotePort = targetRemoteControlPort {
-            updated.portMap[remoteService] = remotePort
-            if !updated.services.contains(remoteService) {
-                updated.services.append(remoteService)
-            }
-            changed = changed || previousRemotePort != remotePort
-        }
-
-        if changed {
+    ) -> Bool {
+        let liveEndpoints = DeviceDiscoveryManager.instance.liveBonjourServiceEndpoints(
+            for: target,
+            serviceType: .skybridge
+        )
+        let endpoints = P2PConnectionEndpointPolicy.connectionEndpointCandidates(
+            for: target,
+            liveBonjourControlEndpoints: liveEndpoints
+        )
+        guard !endpoints.isEmpty,
+              endpoints.count == liveEndpoints.count,
+              case .service(let name, let type, let domain, let interface) = endpoints[0],
+              type == DiscoveryServiceType.skybridge.rawValue else {
             reporter.append(
-                """
-                target-route source=smoke-env host=\(Self.sanitize(updated.ipAddress ?? "-")) \
-                controlPort=\(updated.portMap[controlService].map(String.init) ?? "-") \
-                remotePort=\(updated.portMap[remoteService].map(String.init) ?? "-") \
-                previousHost=\(Self.sanitize(previousHost ?? "-")) previousControlPort=\(previousPort.map(String.init) ?? "-") \
-                previousRemotePort=\(previousRemotePort.map(String.init) ?? "-")
-                """
+                "failed stage=control-route error=missing_provenance_bound_bonjour_service_endpoint"
             )
-        }
-        return updated
-    }
-
-    private func verifySmokePinnedControlRouteIfNeeded(
-        reporter: SmokeStatusReporter
-    ) async -> Bool {
-        guard let host = targetControlHost,
-              let port = targetControlPort,
-              let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            return true
+            return false
         }
 
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: endpointPort)
-        let variants: [(label: String, includePeerToPeer: Bool)] = [
-            ("direct", false),
-            ("peer-to-peer", true)
-        ]
-        var failures: [String] = []
-
-        for variant in variants {
-            reporter.append(
-                """
-                control-route-preflight start host=\(Self.sanitize(host)) port=\(port) \
-                mode=\(variant.label) includePeerToPeer=\(variant.includePeerToPeer ? 1 : 0)
-                """
-            )
-            do {
-                try await probeSmokeControlRoute(
-                    endpoint: endpoint,
-                    label: variant.label,
-                    includePeerToPeer: variant.includePeerToPeer,
-                    markerPrefix: "control-route-preflight",
-                    reporter: reporter
-                )
-                reporter.append(
-                    """
-                    control-route-preflight ready host=\(Self.sanitize(host)) port=\(port) \
-                    mode=\(variant.label)
-                    """
-                )
-                return true
-            } catch {
-                let detail = "\(variant.label):\(Self.sanitize(error.localizedDescription))"
-                failures.append(detail)
-                reporter.append(
-                    """
-                    control-route-preflight failed host=\(Self.sanitize(host)) port=\(port) \
-                    mode=\(variant.label) error=\(Self.sanitize(error.localizedDescription))
-                    """
-                )
-            }
+        let observedInterfaces = endpoints.compactMap { endpoint -> String? in
+            guard case .service(_, _, _, let interface) = endpoint else { return nil }
+            return interface?.name
         }
 
         reporter.append(
             """
-            failed stage=control-route-preflight error=ios_app_nwconnection_unable_to_reach_mac_control_port \
-            host=\(Self.sanitize(host)) port=\(port) attempts=\(Self.sanitize(failures.joined(separator: ",")))
+            control-route source=bonjour-service name=\(Self.sanitize(name)) \
+            type=\(Self.sanitize(type)) domain=\(Self.sanitize(domain)) includePeerToPeer=1 \
+            routeCount=\(endpoints.count) preferredInterface=\(Self.sanitize(interface?.name ?? "unspecified")) \
+            observedInterfaces=\(Self.sanitize(observedInterfaces.joined(separator: ",")))
             """
         )
-        return false
-    }
-
-    private func verifySmokePinnedRemoteControlRouteIfNeeded(
-        reporter: SmokeStatusReporter
-    ) async -> Bool {
-        guard let host = targetControlHost,
-              let port = targetRemoteControlPort,
-              let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            return true
-        }
-
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: endpointPort)
-        let variants: [(label: String, includePeerToPeer: Bool)] = [
-            ("direct", false),
-            ("peer-to-peer", true)
-        ]
-        var failures: [String] = []
-
-        for variant in variants {
-            reporter.append(
-                """
-                remote-route-preflight start host=\(Self.sanitize(host)) port=\(port) \
-                mode=\(variant.label) includePeerToPeer=\(variant.includePeerToPeer ? 1 : 0)
-                """
-            )
-            do {
-                try await probeSmokeControlRoute(
-                    endpoint: endpoint,
-                    label: variant.label,
-                    includePeerToPeer: variant.includePeerToPeer,
-                    markerPrefix: "remote-route-preflight",
-                    probePayload: Self.remoteControlRoutePreflightProbePayload,
-                    reporter: reporter
-                )
-                reporter.append(
-                    """
-                    remote-route-preflight ready host=\(Self.sanitize(host)) port=\(port) \
-                    mode=\(variant.label)
-                    """
-                )
-                return true
-            } catch {
-                let detail = "\(variant.label):\(Self.sanitize(error.localizedDescription))"
-                failures.append(detail)
-                reporter.append(
-                    """
-                    remote-route-preflight failed host=\(Self.sanitize(host)) port=\(port) \
-                    mode=\(variant.label) error=\(Self.sanitize(error.localizedDescription))
-                    """
-                )
-            }
-        }
-
-        reporter.append(
-            """
-            failed stage=remote-route-preflight error=ios_app_nwconnection_unable_to_reach_mac_remote_control_port \
-            host=\(Self.sanitize(host)) port=\(port) attempts=\(Self.sanitize(failures.joined(separator: ",")))
-            """
-        )
-        return false
-    }
-
-    private func probeSmokeControlRoute(
-        endpoint: NWEndpoint,
-        label: String,
-        includePeerToPeer: Bool,
-        markerPrefix: String,
-        probePayload: Data? = nil,
-        reporter: SmokeStatusReporter
-    ) async throws {
-        let parameters = NWParameters.tcp
-        parameters.includePeerToPeer = includePeerToPeer
-        parameters.allowLocalEndpointReuse = true
-        if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
-            tcp.noDelay = true
-            tcp.enableKeepalive = true
-            tcp.keepaliveIdle = 30
-            tcp.keepaliveInterval = 15
-            tcp.keepaliveCount = 4
-        }
-
-        let connection = NWConnection(to: endpoint, using: parameters)
-        let gate = ControlRouteProbeGate()
-        let endpointDescription = String(describing: endpoint)
-        connection.stateUpdateHandler = { state in
-            switch state {
-            case .setup:
-                reporter.append("\(markerPrefix) state=setup mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
-            case .preparing:
-                reporter.append("\(markerPrefix) state=preparing mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
-            case .waiting(let error):
-                reporter.append(
-                    """
-                    \(markerPrefix) state=waiting mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
-                    error=\(Self.sanitize(error.localizedDescription))
-                    """
-                )
-            case .ready:
-                reporter.append("\(markerPrefix) state=ready mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
-                if let probePayload {
-                    connection.send(content: probePayload, completion: .contentProcessed { error in
-                        if let error {
-                            reporter.append(
-                                """
-                                \(markerPrefix) probe-send=failed mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
-                                error=\(Self.sanitize(error.localizedDescription))
-                                """
-                            )
-                            gate.finish(.failure(error))
-                        } else {
-                            reporter.append(
-                                """
-                                \(markerPrefix) probe-send=ok mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
-                                bytes=\(probePayload.count)
-                                """
-                            )
-                            gate.finish(.success(()))
-                        }
-                    })
-                } else {
-                    gate.finish(.success(()))
-                }
-            case .failed(let error):
-                reporter.append(
-                    """
-                    \(markerPrefix) state=failed mode=\(label) endpoint=\(Self.sanitize(endpointDescription)) \
-                    error=\(Self.sanitize(error.localizedDescription))
-                    """
-                )
-                gate.finish(.failure(error))
-            case .cancelled:
-                reporter.append("\(markerPrefix) state=cancelled mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
-            @unknown default:
-                reporter.append("\(markerPrefix) state=unknown mode=\(label) endpoint=\(Self.sanitize(endpointDescription))")
-            }
-        }
-        connection.start(queue: .global(qos: .userInitiated))
-        defer {
-            connection.stateUpdateHandler = nil
-            connection.cancel()
-        }
-
-        try await gate.wait(timeoutSeconds: 8.0)
+        return true
     }
 
     private func decodeBase64Key(

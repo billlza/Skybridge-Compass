@@ -91,12 +91,10 @@ final class PeerTrustLookupTests: XCTestCase {
         let trust = TrustSyncService.shared
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [canonicalId])
-        defer {
+        try await trust.removeRecordsForTesting(deviceIds: [canonicalId])
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [canonicalId])
             trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [canonicalId])
-            }
         }
 
         _ = try await trust.addTrustRecord(
@@ -128,17 +126,13 @@ final class PeerTrustLookupTests: XCTestCase {
         let cleanupIds = ["id:conflict-a", "id:conflict-b"]
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: cleanupIds)
+        try await trust.removeRecordsForTesting(deviceIds: cleanupIds)
         await bootstrapStore.clearForTesting()
 
-        defer {
+        addTeardownBlock { @MainActor [trust, bootstrapStore] in
+            try await trust.removeRecordsForTesting(deviceIds: cleanupIds)
             trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: cleanupIds)
-            }
-            Task {
-                await bootstrapStore.clearForTesting()
-            }
+            await bootstrapStore.clearForTesting()
         }
 
         _ = try await trust.addTrustRecord(

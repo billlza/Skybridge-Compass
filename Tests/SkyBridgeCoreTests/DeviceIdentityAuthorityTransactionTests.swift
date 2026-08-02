@@ -1,7 +1,8 @@
 import CryptoKit
 import os
+import Security
 import XCTest
-@testable import SkyBridgeCore
+@_spi(SkyBridgeSmokeDiagnostics) @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
 final class DeviceIdentityAuthorityTransactionTests: XCTestCase {
@@ -363,7 +364,7 @@ final class DeviceIdentityAuthorityTransactionTests: XCTestCase {
         XCTAssertTrue(store.snapshot().keys.isEmpty)
     }
 
-    func testAuthorityReconciliationAcceptsMatchingPartialRemnants() throws {
+    func testAuthorityResidueAuditAcceptsMatchingPartialRemnants() throws {
         let authority = makeRecord(
             deviceId: "matching-remnants",
             createdAt: Date(timeIntervalSince1970: 1_680_000_000)
@@ -379,45 +380,230 @@ final class DeviceIdentityAuthorityTransactionTests: XCTestCase {
             ]
         )
 
-        XCTAssertNoThrow(
-            try DeviceIdentityLegacyReconciliation.validate(
-                legacy,
-                matches: authority
+        let resolution = try DeviceIdentityLegacyReconciliation
+            .resolveValidatedAuthority(
+                authority,
+                retaining: legacy
             )
+        XCTAssertEqual(resolution.authority, authority)
+        XCTAssertFalse(resolution.residueAudit.hasConflicts)
+        XCTAssertEqual(
+            resolution.residueAudit.deviceIds,
+            DeviceIdentityLegacyComparisonCount(matching: 1, conflicting: 0)
+        )
+        XCTAssertEqual(
+            resolution.residueAudit.privateKeys,
+            DeviceIdentityLegacyComparisonCount(matching: 1, conflicting: 0)
         )
     }
 
-    func testAuthorityReconciliationConflictPersistsAcrossRetry() throws {
-        let authority = makeRecord(deviceId: "authority-a")
-        let conflicting = makeRecord(deviceId: "legacy-b")
+    func testAuthorityAuditClassifiesEachLegacyValueWithoutExposingIt() throws {
+        let authority = makeRecord(
+            deviceId: "audit-authority",
+            createdAt: Date(timeIntervalSince1970: 1_681_000_000)
+        )
+        let conflicting = makeRecord(
+            deviceId: "audit-conflict",
+            createdAt: authority.createdAt
+        )
+        let matchingMetadata = DeviceIdentityPrivateKeyMetadata(
+            publicKey: authority.publicKey,
+            isSecureEnclave: authority.isSecureEnclave
+        )
+        let conflictingMetadata = DeviceIdentityPrivateKeyMetadata(
+            publicKey: conflicting.publicKey,
+            isSecureEnclave: conflicting.isSecureEnclave
+        )
         let legacy = DeviceIdentityLegacyState(
-            keyInfos: [legacyKeyInfo(from: conflicting)],
-            deviceIds: [conflicting.deviceId],
-            privateKeyMetadata: [
-                DeviceIdentityPrivateKeyMetadata(
-                    publicKey: conflicting.publicKey,
-                    isSecureEnclave: conflicting.isSecureEnclave
+            keyInfos: [
+                legacyKeyInfo(from: authority),
+                legacyKeyInfo(from: conflicting)
+            ],
+            deviceIds: [authority.deviceId, conflicting.deviceId],
+            privateKeyMetadata: [matchingMetadata, conflictingMetadata]
+        )
+
+        let audit = try DeviceIdentityLegacyReconciliation.audit(
+            legacy,
+            against: authority
+        )
+
+        XCTAssertEqual(
+            audit.keyInfos,
+            DeviceIdentityLegacyComparisonCount(matching: 1, conflicting: 1)
+        )
+        XCTAssertEqual(
+            audit.deviceIds,
+            DeviceIdentityLegacyComparisonCount(matching: 1, conflicting: 1)
+        )
+        XCTAssertEqual(
+            audit.privateKeys,
+            DeviceIdentityLegacyComparisonCount(matching: 1, conflicting: 1)
+        )
+        XCTAssertTrue(audit.hasConflicts)
+    }
+
+    func testAuthorityAuditTreatsCreatedAtOnlyMismatchAsConflict() throws {
+        let authority = makeRecord(
+            deviceId: "created-at-authority",
+            createdAt: Date(timeIntervalSince1970: 1_682_000_000)
+        )
+        let legacyKeyInfo = DeviceIdentityKeyInfo(
+            deviceId: authority.deviceId,
+            pubKeyFP: authority.publicKeyFingerprint,
+            publicKey: authority.publicKey,
+            keyType: .p256Signing,
+            createdAt: authority.createdAt.addingTimeInterval(1),
+            isSecureEnclave: authority.isSecureEnclave
+        )
+
+        let audit = try DeviceIdentityLegacyReconciliation.audit(
+            DeviceIdentityLegacyState(keyInfos: [legacyKeyInfo]),
+            against: authority
+        )
+
+        XCTAssertEqual(audit.keyInfos.matching, 0)
+        XCTAssertEqual(audit.keyInfos.conflicting, 1)
+        XCTAssertTrue(audit.hasConflicts)
+    }
+
+    func testLegacyAuditWithoutAuthorityClassifiesConflictingPrivateKeys() throws {
+        let reference = makeRecord(deviceId: "legacy-reference")
+        let conflicting = makeRecord(deviceId: "legacy-conflict")
+        let audit = try XCTUnwrap(
+            DeviceIdentityLegacyReconciliation.auditCoherenceWithoutAuthority(
+                DeviceIdentityLegacyState(
+                    keyInfos: [legacyKeyInfo(from: reference)],
+                    deviceIds: [reference.deviceId],
+                    privateKeyMetadata: [
+                        DeviceIdentityPrivateKeyMetadata(
+                            publicKey: reference.publicKey,
+                            isSecureEnclave: reference.isSecureEnclave
+                        ),
+                        DeviceIdentityPrivateKeyMetadata(
+                            publicKey: conflicting.publicKey,
+                            isSecureEnclave: conflicting.isSecureEnclave
+                        )
+                    ]
+                )
+            )
+        )
+
+        XCTAssertEqual(audit.keyInfos.matching, 1)
+        XCTAssertEqual(audit.deviceIds.matching, 1)
+        XCTAssertEqual(audit.privateKeys.matching, 1)
+        XCTAssertEqual(audit.privateKeys.conflicting, 1)
+        XCTAssertTrue(audit.hasConflicts)
+    }
+
+    func testLegacyAuditWithoutKeyInfoHasNoComparisonBasis() throws {
+        let audit = try DeviceIdentityLegacyReconciliation
+            .auditCoherenceWithoutAuthority(
+                DeviceIdentityLegacyState(deviceIds: ["orphan-device-id"])
+            )
+        XCTAssertNil(audit)
+    }
+
+    func testLegacyAuditNamespaceClassificationNeverReturnsAccessGroupNames() throws {
+        let sharedGroup = "TEAM.group.com.skybridge.compass"
+        let shared = LegacySecItemLocation(
+            actualAccessGroup: sharedGroup,
+            usesDataProtectionKeychain: true,
+            persistentReference: Data([0x01])
+        )
+        let other = LegacySecItemLocation(
+            actualAccessGroup: "TEAM.com.skybridge.compass",
+            usesDataProtectionKeychain: true,
+            persistentReference: Data([0x02])
+        )
+        let legacy = LegacySecItemLocation(
+            actualAccessGroup: nil,
+            usesDataProtectionKeychain: false,
+            persistentReference: Data([0x03])
+        )
+
+        XCTAssertEqual(
+            DeviceIdentityKeyManager.legacyAuditNamespace(
+                for: shared,
+                authoritativeAccessGroup: sharedGroup
+            ),
+            .sharedDataProtection
+        )
+        XCTAssertEqual(
+            DeviceIdentityKeyManager.legacyAuditNamespace(
+                for: other,
+                authoritativeAccessGroup: sharedGroup
+            ),
+            .otherDataProtection
+        )
+        XCTAssertEqual(
+            DeviceIdentityKeyManager.legacyAuditNamespace(
+                for: legacy,
+                authoritativeAccessGroup: sharedGroup
+            ),
+            .legacyFileKeychain
+        )
+    }
+
+    func testLegacyAuditJSONContainsOnlyFixedCategoriesAndCounts() throws {
+        let zero = DeviceIdentityLegacyAuditValueCount(
+            matching: 0,
+            conflicting: 0,
+            unresolved: 0
+        )
+        let report = DeviceIdentityLegacyAuditReport(
+            schemaVersion: 2,
+            state: .conflictingLegacyRemnants,
+            authorityPresent: true,
+            authorityKeyValidated: true,
+            comparisonBasis: .sharedAuthority,
+            stableAcrossReads: true,
+            inspectionStatus: .complete(hasConflicts: true),
+            namespaces: [
+                DeviceIdentityLegacyAuditNamespaceSummary(
+                    namespace: .otherDataProtection,
+                    privateKeys: DeviceIdentityLegacyAuditValueCount(
+                        matching: 0,
+                        conflicting: 1,
+                        unresolved: 0
+                    ),
+                    keyInfos: zero,
+                    deviceIds: zero,
+                    mismatches: [
+                        DeviceIdentityLegacyAuditMismatchCount(
+                            dimension: .privateKeyPublicKey,
+                            count: 1
+                        )
+                    ]
                 )
             ]
         )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let encoded = try encoder.encode(report)
+        let json = try XCTUnwrap(String(data: encoded, encoding: .utf8))
 
-        for _ in 0..<2 {
-            XCTAssertThrowsError(
-                try DeviceIdentityLegacyReconciliation.validate(
-                    legacy,
-                    matches: authority
-                )
-            ) { error in
-                XCTAssertEqual(
-                    error as? DeviceIdentityAuthorityError,
-                    .legacyIdentityConflictsWithAuthority
-                )
-            }
+        XCTAssertTrue(json.contains("\"state\":\"conflicting-legacy-remnants\""))
+        XCTAssertTrue(json.contains("\"namespace\":\"other-data-protection\""))
+        XCTAssertTrue(json.contains("\"conflicting\":1"))
+        XCTAssertTrue(json.contains("\"stableAcrossReads\":true"))
+        XCTAssertTrue(json.contains("\"inspectionComplete\":true"))
+        XCTAssertTrue(json.contains("\"hasConflicts\":true"))
+        XCTAssertTrue(json.contains("\"dimension\":\"private-key-public-key\""))
+        for forbidden in [
+            "TEAM.group.com.skybridge.compass",
+            "secret-device-id-value",
+            "secret-public-key-value",
+            "secret-fingerprint-value",
+            "secret-persistent-reference-value",
+            "secret-application-tag-value"
+        ] {
+            XCTAssertFalse(json.contains(forbidden), "Audit JSON leaked \(forbidden)")
         }
     }
 
-    func testAuthorityReconciliationRetriesCleanupAfterCrashWindow() throws {
-        let authority = makeRecord(deviceId: "cleanup-retry")
+    func testValidatedAuthorityRetainsMatchingLegacyAliases() throws {
+        let authority = makeRecord(deviceId: "retained-match")
         let legacy = DeviceIdentityLegacyState(
             keyInfos: [legacyKeyInfo(from: authority)],
             deviceIds: [authority.deviceId],
@@ -428,34 +614,23 @@ final class DeviceIdentityAuthorityTransactionTests: XCTestCase {
                 )
             ]
         )
-        var cleanupAttempts = 0
 
-        XCTAssertThrowsError(
-            try DeviceIdentityLegacyReconciliation.reconcile(
-                legacy,
-                with: authority,
-                cleanup: {
-                    cleanupAttempts += 1
-                    throw FakeStoreError.cleanupRefused
-                }
+        let resolution = try DeviceIdentityLegacyReconciliation
+            .resolveValidatedAuthority(
+                authority,
+                retaining: legacy
             )
-        ) { error in
-            XCTAssertEqual(error as? FakeStoreError, .cleanupRefused)
-        }
-        XCTAssertEqual(cleanupAttempts, 1)
 
-        let resolved = try DeviceIdentityLegacyReconciliation.reconcile(
-            legacy,
-            with: authority,
-            cleanup: { cleanupAttempts += 1 }
-        )
-        XCTAssertEqual(resolved, authority)
-        XCTAssertEqual(cleanupAttempts, 2)
+        XCTAssertEqual(resolution.authority, authority)
+        XCTAssertFalse(resolution.residueAudit.hasConflicts)
+        XCTAssertEqual(resolution.residueAudit.keyInfos.matching, 1)
+        XCTAssertEqual(resolution.residueAudit.deviceIds.matching, 1)
+        XCTAssertEqual(resolution.residueAudit.privateKeys.matching, 1)
     }
 
-    func testAuthorityConflictNeverDeletesLegacyEvidence() throws {
-        let authority = makeRecord(deviceId: "cleanup-authority")
-        let conflicting = makeRecord(deviceId: "cleanup-conflict")
+    func testValidatedAuthoritySurvivesConflictingResidueAndReportsIt() throws {
+        let authority = makeRecord(deviceId: "retained-authority")
+        let conflicting = makeRecord(deviceId: "retained-conflict")
         let legacy = DeviceIdentityLegacyState(
             keyInfos: [legacyKeyInfo(from: conflicting)],
             deviceIds: [conflicting.deviceId],
@@ -466,62 +641,99 @@ final class DeviceIdentityAuthorityTransactionTests: XCTestCase {
                 )
             ]
         )
-        var cleanupWasCalled = false
+
+        let resolution = try DeviceIdentityLegacyReconciliation
+            .resolveValidatedAuthority(
+                authority,
+                retaining: legacy
+            )
+
+        XCTAssertEqual(resolution.authority, authority)
+        XCTAssertTrue(resolution.residueAudit.hasConflicts)
+        XCTAssertEqual(resolution.residueAudit.keyInfos.conflicting, 1)
+        XCTAssertEqual(resolution.residueAudit.deviceIds.conflicting, 1)
+        XCTAssertEqual(resolution.residueAudit.privateKeys.conflicting, 1)
+    }
+
+    func testCommittedLegacyRecoverySelectsTheUniqueKeyInfoBoundPrivateKey() throws {
+        let committed = makeRecord(deviceId: "committed-legacy")
+        let abandonedA = makeRecord(deviceId: "abandoned-a")
+        let abandonedB = makeRecord(deviceId: "abandoned-b")
+        let committedKeyInfo = legacyKeyInfo(from: committed)
+        let candidates = [abandonedA, committed, abandonedB].enumerated().map {
+            index, record in
+            DeviceIdentityLegacyPrivateKeyCandidate(
+                location: LegacySecItemLocation(
+                    actualAccessGroup: nil,
+                    usesDataProtectionKeychain: false,
+                    persistentReference: Data([UInt8(index + 1)])
+                ),
+                metadata: DeviceIdentityPrivateKeyMetadata(
+                    publicKey: record.publicKey,
+                    isSecureEnclave: record.isSecureEnclave
+                )
+            )
+        }
+        let state = DeviceIdentityLegacyState(
+            keyInfos: [committedKeyInfo],
+            deviceIds: ["partially-staged-device-id"],
+            privateKeyMetadata: candidates.map(\.metadata)
+        )
+
+        let selectedKeyInfo = try DeviceIdentityLegacyReconciliation
+            .committedMigrationKeyInfo(from: state)
+        let selectedKey = try DeviceIdentityLegacyReconciliation
+            .uniqueCommittedMigrationPrivateKey(
+                from: candidates,
+                matching: selectedKeyInfo
+            )
+
+        XCTAssertEqual(selectedKeyInfo, committedKeyInfo)
+        XCTAssertEqual(selectedKey, candidates[1])
+    }
+
+    func testCommittedLegacyRecoveryRejectsAmbiguousMatchingPrivateKeys() throws {
+        let committed = makeRecord(deviceId: "ambiguous-legacy")
+        let keyInfo = legacyKeyInfo(from: committed)
+        let metadata = DeviceIdentityPrivateKeyMetadata(
+            publicKey: committed.publicKey,
+            isSecureEnclave: committed.isSecureEnclave
+        )
+        let candidates = (1...2).map { value in
+            DeviceIdentityLegacyPrivateKeyCandidate(
+                location: LegacySecItemLocation(
+                    actualAccessGroup: nil,
+                    usesDataProtectionKeychain: false,
+                    persistentReference: Data([UInt8(value)])
+                ),
+                metadata: metadata
+            )
+        }
 
         XCTAssertThrowsError(
-            try DeviceIdentityLegacyReconciliation.reconcile(
-                legacy,
-                with: authority,
-                cleanup: { cleanupWasCalled = true }
-            )
+            try DeviceIdentityLegacyReconciliation
+                .uniqueCommittedMigrationPrivateKey(
+                    from: candidates,
+                    matching: keyInfo
+                )
         ) { error in
             XCTAssertEqual(
                 error as? DeviceIdentityAuthorityError,
                 .legacyIdentityConflictsWithAuthority
             )
         }
-        XCTAssertFalse(cleanupWasCalled)
     }
 
-    func testLegacyMigrationRequiresEveryNamespaceToDescribeOneIdentity() throws {
-        let candidate = makeRecord(
-            deviceId: "one-legacy-identity",
-            createdAt: Date(timeIntervalSince1970: 1_675_000_000)
-        )
-        let keyInfo = legacyKeyInfo(from: candidate)
-        let metadata = DeviceIdentityPrivateKeyMetadata(
-            publicKey: candidate.publicKey,
-            isSecureEnclave: false
-        )
-        let consistent = DeviceIdentityLegacyState(
-            keyInfos: [keyInfo, keyInfo],
-            deviceIds: [candidate.deviceId, candidate.deviceId],
-            privateKeyMetadata: [metadata, metadata]
+    func testCommittedLegacyRecoveryRejectsDivergentKeyInfoRecords() throws {
+        let first = makeRecord(deviceId: "first-commit")
+        let second = makeRecord(deviceId: "second-commit")
+        let state = DeviceIdentityLegacyState(
+            keyInfos: [legacyKeyInfo(from: first), legacyKeyInfo(from: second)]
         )
 
-        XCTAssertEqual(
-            try DeviceIdentityLegacyReconciliation.migrationKeyInfo(
-                from: consistent
-            ),
-            keyInfo
-        )
-
-        let other = makeRecord(deviceId: "other-legacy-identity")
-        let conflicting = DeviceIdentityLegacyState(
-            keyInfos: [keyInfo, legacyKeyInfo(from: other)],
-            deviceIds: [candidate.deviceId, other.deviceId],
-            privateKeyMetadata: [
-                metadata,
-                DeviceIdentityPrivateKeyMetadata(
-                    publicKey: other.publicKey,
-                    isSecureEnclave: false
-                )
-            ]
-        )
         XCTAssertThrowsError(
-            try DeviceIdentityLegacyReconciliation.migrationKeyInfo(
-                from: conflicting
-            )
+            try DeviceIdentityLegacyReconciliation
+                .committedMigrationKeyInfo(from: state)
         ) { error in
             XCTAssertEqual(
                 error as? DeviceIdentityAuthorityError,
@@ -568,6 +780,93 @@ final class DeviceIdentityAuthorityTransactionTests: XCTestCase {
         ) else {
             return XCTFail("Corrupt authority must remain typed")
         }
+        guard case .identityMigrationRequired = DeviceIdentityKeyManager
+            .publicIdentityError(
+                for: DeviceIdentityAuthorityError
+                    .legacyIdentityRequiresExplicitMigration
+            ) else {
+            return XCTFail("Read-only resolution must expose pending migration")
+        }
+    }
+
+    func testPublicIdentityErrorNeverExposesAuthorityStorageMetadata() {
+        let secretTag = "com.skybridge.secret.identity-tag"
+        let secretService = "com.skybridge.secret.service"
+        let secretAccount = "secret-account"
+        let errors: [Error] = [
+            DeviceIdentityAuthorityError.authorityWinnerKeyMissing(secretTag),
+            DeviceIdentityAuthorityError.immutableGenericPasswordConflict(
+                service: secretService,
+                account: secretAccount
+            ),
+            DeviceIdentityAuthorityError.candidateCleanupFailed("secret-reason")
+        ]
+
+        for error in errors {
+            let description = DeviceIdentityKeyManager.publicIdentityError(
+                for: error
+            ).localizedDescription
+            XCTAssertFalse(description.contains(secretTag))
+            XCTAssertFalse(description.contains(secretService))
+            XCTAssertFalse(description.contains(secretAccount))
+            XCTAssertFalse(description.contains("secret-reason"))
+        }
+    }
+
+    func testLegacyResidueInspectionMapsOnlyKnownBoundaryFailures() {
+        XCTAssertEqual(
+            DeviceIdentityKeyManager.legacyResidueInspectionFailureReason(
+                for: KeychainError.unexpectedError(errSecInteractionNotAllowed)
+            ),
+            .accessDenied
+        )
+        XCTAssertEqual(
+            DeviceIdentityKeyManager.legacyResidueInspectionFailureReason(
+                for: DeviceIdentityKeyError.keychainError(errSecNotAvailable)
+            ),
+            .keychainUnavailable
+        )
+        XCTAssertEqual(
+            DeviceIdentityKeyManager.legacyResidueInspectionFailureReason(
+                for: DeviceIdentityAuthorityError
+                    .legacyIdentityIncomplete("must-not-escape")
+            ),
+            .malformedAttributes
+        )
+        XCTAssertNil(
+            DeviceIdentityKeyManager.legacyResidueInspectionFailureReason(
+                for: FakeStoreError.cleanupRefused
+            ),
+            "Unknown programming errors must not be downgraded"
+        )
+    }
+
+    func testLegacyResidueInspectionStatusCannotRepresentUnavailableAsClean() throws {
+        let status = DeviceIdentityLegacyResidueInspectionStatus.unavailable(
+            .malformedKeyInfo
+        )
+        XCTAssertFalse(status.inspectionComplete)
+        XCTAssertNil(status.hasConflicts)
+        XCTAssertEqual(status.failureReason, .malformedKeyInfo)
+
+        let encoded = try JSONEncoder().encode(status)
+        let json = try XCTUnwrap(
+            String(data: encoded, encoding: .utf8)
+        )
+        XCTAssertTrue(json.contains("malformed-key-info"))
+        XCTAssertFalse(json.contains("privateKeyApplicationTag"))
+        XCTAssertFalse(json.contains("accessGroup"))
+        XCTAssertFalse(json.contains("persistentReference"))
+
+        let incoherent = Data(
+            #"{"schemaVersion":1,"inspectionComplete":true,"failureReason":"malformed-key-info"}"#.utf8
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(
+                DeviceIdentityLegacyResidueInspectionStatus.self,
+                from: incoherent
+            )
+        )
     }
 
     func testManagerCallbackUsesInjectedActorSigner() async throws {

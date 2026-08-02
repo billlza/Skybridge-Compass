@@ -6,6 +6,9 @@ import os
 public enum QPeriaptCryptoAdmissionError: Error, LocalizedError, Sendable, Equatable {
     case waiterLimitExceeded(maximum: Int)
     case waitDeadlineExceeded
+    case invalidMaximumWaiters(Int)
+    case invalidMaximumWaitDuration
+    case ownerMismatch
 
     public var errorDescription: String? {
         switch self {
@@ -13,6 +16,12 @@ public enum QPeriaptCryptoAdmissionError: Error, LocalizedError, Sendable, Equat
             return "Q-Periapt crypto admission waiter limit exceeded: maximum=\(maximum)"
         case .waitDeadlineExceeded:
             return "Q-Periapt crypto admission wait exceeded the operation deadline"
+        case .invalidMaximumWaiters(let value):
+            return "Q-Periapt crypto admission maximum waiters must not be negative: \(value)"
+        case .invalidMaximumWaitDuration:
+            return "Q-Periapt crypto admission maximum wait duration must be positive"
+        case .ownerMismatch:
+            return "Q-Periapt crypto admission permit owner mismatch"
         }
     }
 }
@@ -58,7 +67,7 @@ public enum QPeriaptNativeError: Error, LocalizedError, Sendable, Equatable {
 /// One owner plus a bounded FIFO of waiters before CPU-heavy native work.
 /// Absolute deadlines remain attached to permits across queue handoff.
 actor QPeriaptCryptoAdmissionGate {
-    static let shared = QPeriaptCryptoAdmissionGate()
+    static let shared = QPeriaptCryptoAdmissionGate(validatedDefaults: ())
 
     private struct Permit {
         let token: UUID
@@ -80,6 +89,17 @@ actor QPeriaptCryptoAdmissionGate {
     private var ownerToken: UUID?
     private var waiters: [Waiter] = []
 
+    private init(validatedDefaults: Void) {
+        _ = validatedDefaults
+        maximumWaiters = 8
+        maximumWaitDuration = .seconds(30)
+        sleepUntilDeadline = { duration in
+            try await Task.sleep(for: duration)
+        }
+        now = { ContinuousClock().now }
+        beforeWaiterAppendForTesting = {}
+    }
+
     init(
         maximumWaiters: Int = 8,
         maximumWaitDuration: Duration = .seconds(30),
@@ -90,9 +110,13 @@ actor QPeriaptCryptoAdmissionGate {
             ContinuousClock().now
         },
         beforeWaiterAppendForTesting: @escaping @Sendable () -> Void = {}
-    ) {
-        precondition(maximumWaiters >= 0)
-        precondition(maximumWaitDuration > .zero)
+    ) throws {
+        guard maximumWaiters >= 0 else {
+            throw QPeriaptCryptoAdmissionError.invalidMaximumWaiters(maximumWaiters)
+        }
+        guard maximumWaitDuration > .zero else {
+            throw QPeriaptCryptoAdmissionError.invalidMaximumWaitDuration
+        }
         self.maximumWaiters = maximumWaiters
         self.maximumWaitDuration = maximumWaitDuration
         self.sleepUntilDeadline = sleepUntilDeadline
@@ -115,12 +139,18 @@ actor QPeriaptCryptoAdmissionGate {
         _ operation: @Sendable () async throws -> Result
     ) async throws -> Result {
         let permit = try await acquire()
-        defer { release(token: permit.token) }
-        try validate(permit: permit)
-        try Task.checkCancellation()
-        let result = try await operation()
-        try Task.checkCancellation()
-        return result
+        let operationResult: Swift.Result<Result, any Error>
+        do {
+            try validate(permit: permit)
+            try Task.checkCancellation()
+            let result = try await operation()
+            try Task.checkCancellation()
+            operationResult = .success(result)
+        } catch {
+            operationResult = .failure(error)
+        }
+        try release(token: permit.token)
+        return try operationResult.get()
     }
 
     private func acquire() async throws -> Permit {
@@ -212,8 +242,10 @@ actor QPeriaptCryptoAdmissionGate {
         waiters = activeWaiters
     }
 
-    private func release(token: UUID) {
-        precondition(ownerToken == token, "Only the active Q-Periapt admission owner may release it")
+    private func release(token: UUID) throws {
+        guard ownerToken == token else {
+            throw QPeriaptCryptoAdmissionError.ownerMismatch
+        }
         while !waiters.isEmpty {
             let next = waiters.removeFirst()
             next.deadlineTask.cancel()
@@ -494,8 +526,8 @@ public struct QPeriaptNativeAdapter<Secret: QPeriaptSecretBuffer>: Sendable {
     ) {
         try Self.requireCompatibleRuntime()
 
-        let skPQ = Secret(count: Int(Q_PERIAPT_MLKEM768_SK_LEN))
-        let skTraditional = Secret(count: Int(Q_PERIAPT_X25519_LEN))
+        let skPQ = try Secret(count: Int(Q_PERIAPT_MLKEM768_SK_LEN))
+        let skTraditional = try Secret(count: Int(Q_PERIAPT_X25519_LEN))
         var pkPQ = Data(repeating: 0, count: Int(Q_PERIAPT_MLKEM768_PK_LEN))
         var pkTraditional = Data(repeating: 0, count: Int(Q_PERIAPT_X25519_LEN))
 
@@ -536,14 +568,16 @@ public struct QPeriaptNativeAdapter<Secret: QPeriaptSecretBuffer>: Sendable {
         publicKey.append(pkPQ)
         publicKey.append(pkTraditional)
 
-        let privateKey = Secret(count: Self.privateKeyLength)
-        privateKey.withUnsafeMutableBytes { privateKeyRaw in
+        let privateKey = try Secret(count: Self.privateKeyLength)
+        do {
+            try privateKey.withUnsafeMutableBytes { privateKeyRaw in
             var destinationOffset = 0
-            func append(_ source: UnsafeRawBufferPointer) {
-                precondition(source.count <= privateKeyRaw.count - destinationOffset)
-                guard let sourceAddress = source.baseAddress,
+            func append(_ source: UnsafeRawBufferPointer) throws {
+                guard destinationOffset <= privateKeyRaw.count,
+                      source.count <= privateKeyRaw.count - destinationOffset,
+                      let sourceAddress = source.baseAddress,
                       let destinationAddress = privateKeyRaw.baseAddress else {
-                    preconditionFailure("Q-Periapt ABI2 key material unexpectedly had no storage")
+                    throw QPeriaptNativeError.keyBlobAssemblyFailed
                 }
                 destinationAddress
                     .advanced(by: destinationOffset)
@@ -551,11 +585,17 @@ public struct QPeriaptNativeAdapter<Secret: QPeriaptSecretBuffer>: Sendable {
                 destinationOffset += source.count
             }
 
-            skPQ.withUnsafeBytes(append)
-            skTraditional.withUnsafeBytes(append)
-            pkPQ.withUnsafeBytes(append)
-            pkTraditional.withUnsafeBytes(append)
-            precondition(destinationOffset == privateKeyRaw.count)
+                try skPQ.withUnsafeBytes(append)
+                try skTraditional.withUnsafeBytes(append)
+                try pkPQ.withUnsafeBytes(append)
+                try pkTraditional.withUnsafeBytes(append)
+                guard destinationOffset == privateKeyRaw.count else {
+                    throw QPeriaptNativeError.keyBlobAssemblyFailed
+                }
+            }
+        } catch {
+            privateKey.zeroize()
+            throw error
         }
         guard publicKey.count == Self.publicKeyLength,
               privateKey.byteCount == Self.privateKeyLength else {
@@ -574,7 +614,7 @@ public struct QPeriaptNativeAdapter<Secret: QPeriaptSecretBuffer>: Sendable {
 
         var ctPQ = Data(repeating: 0, count: Int(Q_PERIAPT_MLKEM768_CT_LEN))
         var ctTraditional = Data(repeating: 0, count: Int(Q_PERIAPT_X25519_LEN))
-        let sharedSecret = Secret(count: Self.sharedSecretLength)
+        let sharedSecret = try Secret(count: Self.sharedSecretLength)
 
         let status = session.decision.encoded.withUnsafeBytes { decisionRaw in
             recipientPublicKey.withUnsafeBytes { publicKeyRaw in
@@ -632,7 +672,7 @@ public struct QPeriaptNativeAdapter<Secret: QPeriaptSecretBuffer>: Sendable {
         try Self.validatePrivateKeyLength(privateKey.byteCount)
         try Self.validateEncapsulatedKeyLength(encapsulatedKey.count)
 
-        let sharedSecret = Secret(count: Self.sharedSecretLength)
+        let sharedSecret = try Secret(count: Self.sharedSecretLength)
         let status = session.decision.encoded.withUnsafeBytes { decisionRaw in
             privateKey.withUnsafeBytes { privateKeyRaw in
                 encapsulatedKey.withUnsafeBytes { ciphertextRaw in

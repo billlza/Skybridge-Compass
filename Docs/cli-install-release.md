@@ -3,24 +3,26 @@
 ## Distribution Policy
 
 Rust binaries remain the source of truth.
-Package managers must download the exact same signed release artifacts instead of rebuilding the protocol core.
+Package managers must download the exact same source-bound release artifacts instead of rebuilding the protocol core. The current workflow binds those bytes into a source/run handoff with `release-manifest.json` and `SHA256SUMS.txt`; public publication remains blocked until platform publisher-signature and notarization proofs are verified.
 
 Supported install surfaces for v1:
 
 - macOS
   - Apple Silicon only
-  - signed official binary archive
+  - checksum- and manifest-verified official binary archive
   - Homebrew formula
   - npm wrapper
 - Linux
-  - signed official binary archive
+  - checksum- and manifest-verified official binary archive
   - npm wrapper
 - Windows
-  - signed official binary archive / zip
+  - checksum- and manifest-verified official binary archive / zip
   - npm wrapper
 
 The npm wrapper is a thin downloader / launcher only.
 It must not become the only delivery path for the protocol core.
+
+Public tag publication is currently fail-closed: the workflow builds and verifies the exact multi-platform handoff, then fails the explicit publisher-signing gate. GitHub/npm/Homebrew publication remains disabled until macOS signing/notarization and Windows publisher-signature proofs are produced and verified.
 
 ## Current SkyBridge CLI Workspace
 
@@ -31,9 +33,21 @@ display name is SkyBridge CLI; the installed command and binary name remain
 Local build and test:
 
 ```bash
+git clone --filter=blob:none --no-checkout \
+  https://github.com/billlza/q-periapt.git \
+  External/pqt_hybrid_suite
+git -C External/pqt_hybrid_suite checkout --detach \
+  5664fd86a617f92b620ea37e7692d3417d0e307d
+test "$(git -C External/pqt_hybrid_suite rev-parse HEAD)" = \
+  5664fd86a617f92b620ea37e7692d3417d0e307d
 cargo test --manifest-path rust/Cargo.toml
 cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 ```
+
+The Q-Periapt feature remains default-off, but Cargo still resolves optional
+path-dependency manifests. Local builds and CI therefore use the same pinned,
+gitignored `External/pqt_hybrid_suite` checkout; an unrelated sibling checkout
+is not part of the build contract.
 
 Current runtime configuration comes from environment variables:
 
@@ -145,30 +159,34 @@ Repository assets:
 
 The npm package downloads the matching platform archive during `postinstall`, verifies `SHA256SUMS.txt`, and then launches the installed binary through a thin `bin/skybridge.js` shim.
 
-Optional Homebrew tap publisher:
+Homebrew tap publisher:
 
 - `rust/scripts/publish_homebrew_formula.sh`
-- release workflow activates it only when these are configured:
-  - `HOMEBREW_TAP_GITHUB_TOKEN` secret
-  - `HOMEBREW_TAP_REPOSITORY` repository variable
-  - optional `HOMEBREW_TAP_FORMULA_PATH` repository variable
-  - optional `HOMEBREW_TAP_BRANCH` repository variable
+- a protected tag publication requires the GitHub App and tap configuration:
+  - `HOMEBREW_TAP_APP_PRIVATE_KEY` environment secret
+  - `HOMEBREW_TAP_APP_CLIENT_ID`, `HOMEBREW_TAP_OWNER`, and `HOMEBREW_TAP_REPOSITORY` environment variables
+  - `HOMEBREW_TAP_FORMULA_PATH` environment variable under `Formula/`
+  - `HOMEBREW_TAP_BRANCH=main`
+- the workflow mints the short-lived `HOMEBREW_TAP_GITHUB_TOKEN`; no long-lived tap token is read directly
 
 ## CI Workflows
 
 - packaging validation
   - `.github/workflows/skybridge-cli-packaging.yml`
   - runs on push / pull request
-  - checks Rust formatting, session tests, CLI compile, npm wrapper script syntax, single-target release build, npm staging, and Homebrew formula rendering
+  - audits locked dependencies; checks full-workspace Rust formatting, tests, and strict lint; validates npm/shell/release contracts; builds one Linux archive; stages npm and Homebrew outputs
 - release build
   - `.github/workflows/skybridge-cli-release.yml`
   - `workflow_dispatch` performs a dry-run artifact build and uploads the assembled release bundle as a workflow artifact
-  - pushing a `skybridge-cli-v<version>` tag performs the full release flow:
+  - pushing a `skybridge-cli-v<version>` tag performs the protected build/verification flow:
+    - reruns the full verification gate before build
+    - runs core/agent/crossnet/CLI tests natively on every target runner
+      - non-macOS crossnet coverage proves the portable contract and platform gating only; even the macOS runner does not replace a signed Mac App socket smoke
     - builds all supported release archives
     - writes `SHA256SUMS.txt`
     - writes `release-manifest.json`
     - renders `skybridge.rb`
     - packs the npm wrapper tarball
-    - uploads assets to the GitHub release
-    - publishes the npm wrapper if `NPM_TOKEN` is configured
-    - publishes the Homebrew formula into the configured tap if the tap secret/variables are configured
+    - uploads the immutable handoff as a workflow artifact
+    - fails the public-release signing gate until platform publisher proofs exist
+  - after that gate is replaced by real signature/notarization verification, the already-defined publication chain can upload assets to GitHub, publish npm through trusted publishing/OIDC, validate Homebrew, and mint a short-lived GitHub App token for the tap

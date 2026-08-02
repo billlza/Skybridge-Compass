@@ -115,6 +115,57 @@ positive_root="$(make_fixture positive)"
 bash "${CHECK_SCRIPT}" --root "${positive_root}" --static-only >/dev/null \
   || fail "positive fixture should pass static validation"
 
+automatic_webrtc_runtime_root="$(make_fixture automatic-webrtc-runtime)"
+python3 - "${automatic_webrtc_runtime_root}/Package.swift" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = '''        .library(
+            name: "SkyBridgeWebRTCRuntime",
+            type: .static,
+            targets: ["SkyBridgeProtocolCore", "SkyBridgeWebRTCRuntime"]
+        ),
+'''
+replacement = '''        .library(
+            name: "SkyBridgeWebRTCRuntime",
+            targets: ["SkyBridgeProtocolCore", "SkyBridgeWebRTCRuntime"]
+        ),
+'''
+if needle not in text:
+    raise SystemExit("missing explicit static WebRTC runtime product in fixture")
+path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+PY
+expect_failure_contains \
+  "automatic WebRTC runtime product rejected" \
+  "根 Package.swift 必须声明显式 static SkyBridgeWebRTCRuntime 聚合产品" \
+  bash "${CHECK_SCRIPT}" --root "${automatic_webrtc_runtime_root}" --static-only
+
+linked_hosted_runtime_root="$(make_fixture linked-hosted-runtime)"
+python3 - "${linked_hosted_runtime_root}/SkyBridge Compass iOS/project.yml" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = '''      - package: SkyBridgeRoot
+        product: SkyBridgeWebRTCRuntime
+        link: false
+        embed: false
+'''
+replacement = '''      - package: SkyBridgeRoot
+        product: SkyBridgeWebRTCRuntime
+'''
+if needle not in text:
+    raise SystemExit("missing hosted-test non-linking runtime dependency in fixture")
+path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
+PY
+expect_failure_contains \
+  "hosted test must not relink shared runtime" \
+  "project.yml 的 hosted tests 必须以 link:false/embed:false 依赖 SkyBridgeWebRTCRuntime" \
+  bash "${CHECK_SCRIPT}" --root "${linked_hosted_runtime_root}" --static-only
+
 missing_simulator_build_swift_gate_root="$(make_fixture missing-simulator-build-swift-gate)"
 remove_warning_setting_from_stage \
   "${missing_simulator_build_swift_gate_root}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh" \
@@ -169,6 +220,28 @@ expect_failure_contains \
   "device test stage missing Swift warnings-as-errors" \
   "iOS 真机 XCTest lane 的 test-without-building 阶段必须设置 SWIFT_TREAT_WARNINGS_AS_ERRORS=YES" \
   bash "${CHECK_SCRIPT}" --root "${missing_device_test_swift_gate_root}" --static-only
+
+missing_simulator_locked_packages_root="$(make_fixture missing-simulator-locked-packages)"
+remove_warning_setting_from_stage \
+  "${missing_simulator_locked_packages_root}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh" \
+  continued-command \
+  build-for-testing \
+  -disableAutomaticPackageResolution
+expect_failure_contains \
+  "simulator build stage permits automatic package resolution" \
+  "iOS 模拟器 XCTest lane 的 build-for-testing 阶段必须设置 -disableAutomaticPackageResolution" \
+  bash "${CHECK_SCRIPT}" --root "${missing_simulator_locked_packages_root}" --static-only
+
+missing_device_package_updates_root="$(make_fixture missing-device-package-updates)"
+remove_warning_setting_from_stage \
+  "${missing_device_package_updates_root}/SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh" \
+  array-append \
+  test-without-building \
+  -skipPackageUpdates
+expect_failure_contains \
+  "device test stage permits package updates" \
+  "iOS 真机 XCTest lane 的 test-without-building 阶段必须设置 -skipPackageUpdates" \
+  bash "${CHECK_SCRIPT}" --root "${missing_device_package_updates_root}" --static-only
 
 missing_pqc_sdk_root="$(make_fixture missing-pqc-sdk-setting)"
 python3 - "${missing_pqc_sdk_root}/SkyBridge Compass iOS/project.yml" <<'PY'

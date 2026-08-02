@@ -1589,7 +1589,7 @@ actor SignalServerClientCompat {
         return try Self.resolveAuthenticatedTenantID(
             accessToken: accessToken,
             explicitTenantID: explicitTenantID,
-            sessionTenantID: session?.nebulaId,
+            sessionTenantID: nil,
             legacyUserIdentifier: session?.userIdentifier
         )
     }
@@ -1629,7 +1629,7 @@ actor SignalServerClientCompat {
         let tenantID = try Self.resolveAuthenticatedTenantID(
             accessToken: bearerToken,
             explicitTenantID: explicitTenantID,
-            sessionTenantID: identitySession?.nebulaId,
+            sessionTenantID: nil,
             legacyUserIdentifier: identitySession?.userIdentifier
         )
         guard !tenantID.isEmpty else {
@@ -1680,11 +1680,17 @@ actor SignalServerClientCompat {
             return session
         }
 
+        let authenticatedTenantID = try Self.resolveAuthenticatedTenantID(
+            accessToken: session.accessToken,
+            explicitTenantID: explicitTenantID,
+            sessionTenantID: nil,
+            legacyUserIdentifier: session.userIdentifier
+        )
         let refreshBinding = AccessTokenRefreshBinding(
             refreshToken: refreshToken,
             accessToken: session.accessToken,
             userIdentifier: session.userIdentifier,
-            tenantID: session.nebulaId,
+            tenantID: authenticatedTenantID,
             explicitTenantID: explicitTenantID
         )
         if let existingRefreshOperation = accessTokenRefreshOperation {
@@ -1805,13 +1811,13 @@ actor SignalServerClientCompat {
         let originalTenantID = try resolveAuthenticatedTenantID(
             accessToken: original.accessToken,
             explicitTenantID: explicitTenantID,
-            sessionTenantID: original.nebulaId,
+            sessionTenantID: nil,
             legacyUserIdentifier: original.userIdentifier
         )
         let refreshedTenantID = try resolveAuthenticatedTenantID(
             accessToken: accessToken,
             explicitTenantID: explicitTenantID,
-            sessionTenantID: original.nebulaId,
+            sessionTenantID: nil,
             legacyUserIdentifier: original.userIdentifier
         )
         guard !originalTenantID.isEmpty, refreshedTenantID == originalTenantID else {
@@ -1928,11 +1934,7 @@ actor SignalServerClientCompat {
             appMetadata?["tenant_id"],
             appMetadata?["tenantId"],
             appMetadata?["org_id"],
-            appMetadata?["workspace_id"],
-            claims["tenant_id"],
-            claims["tenantId"],
-            claims["org_id"],
-            claims["workspace_id"]
+            appMetadata?["workspace_id"]
         ]
         let tenantValues = try Set(tenantCandidates.compactMap(validatedIdentityClaim))
         guard tenantValues.count <= 1 else {
@@ -1998,40 +2000,23 @@ actor SignalServerClientCompat {
             return trimmed.isEmpty ? nil : trimmed
         }
 
-        let explicit = normalized(explicitTenantID)
-        let sessionTenant = normalized(sessionTenantID)
-        if let explicit, let sessionTenant, explicit != sessionTenant {
+        guard let token = normalized(accessToken) else {
+            throw ClientError.missingAuthentication
+        }
+        let identity = try resolveAuthenticatedJWTIdentity(
+            accessToken: token,
+            expectedUserIdentifier: normalized(legacyUserIdentifier)
+        )
+        let expectedTenants = Set(
+            [explicitTenantID, sessionTenantID].compactMap(normalized)
+        )
+        guard expectedTenants.count <= 1 else {
             throw ClientError.tenantIdentityMismatch
         }
-
-        let token = normalized(accessToken)
-        if let token, token.utf8.count > maximumAuthenticationTokenBytes {
-            throw ClientError.invalidAuthenticationClaims
+        if let expectedTenant = expectedTenants.first,
+           expectedTenant != identity.effectiveTenantID {
+            throw ClientError.tenantIdentityMismatch
         }
-        let jwtIdentity: AuthenticatedJWTIdentity?
-        if let token {
-            jwtIdentity = try validatedJWTIdentityClaims(accessToken: token)
-        } else {
-            jwtIdentity = nil
-        }
-        let legacyIdentity = normalized(legacyUserIdentifier)
-        if let jwtIdentity, let legacyIdentity, legacyIdentity != jwtIdentity.subject {
-            throw ClientError.userIdentityMismatch
-        }
-        let declaredTenant = explicit ?? sessionTenant
-        if let declaredTenant {
-            guard let tokenTenant = jwtIdentity?.explicitTenantID else {
-                throw ClientError.missingTenantClaim
-            }
-            guard tokenTenant == declaredTenant else {
-                throw ClientError.tenantIdentityMismatch
-            }
-            return tokenTenant
-        }
-
-        if let jwtIdentity {
-            return jwtIdentity.effectiveTenantID
-        }
-        return legacyIdentity ?? ""
+        return identity.effectiveTenantID
     }
 }

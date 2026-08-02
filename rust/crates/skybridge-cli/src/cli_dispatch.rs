@@ -64,12 +64,16 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 crate::crossnet_commands::disconnect(output.json).await
             }
             CrossnetSubcommand::Status(args) => crate::crossnet_commands::status(args).await,
-            CrossnetSubcommand::Settings(args) => match args.command {
-                None => crate::crossnet_commands::settings(args.output.json).await,
-                Some(crate::CrossnetSettingsSubcommand::Set(set_args)) => {
-                    crate::crossnet_commands::settings_set(set_args).await
+            CrossnetSubcommand::Settings(args) => {
+                let outer_json = args.output.json;
+                match args.command {
+                    None => crate::crossnet_commands::settings(outer_json).await,
+                    Some(crate::CrossnetSettingsSubcommand::Set(mut set_args)) => {
+                        set_args.output.json |= outer_json;
+                        crate::crossnet_commands::settings_set(set_args).await
+                    }
                 }
-            },
+            }
         },
         Commands::Session(session) => match session.command {
             SessionSubcommand::Ls(output) => session_ls(cli.state_dir, output.json).await,
@@ -102,7 +106,7 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
         Commands::File(file) => match file.command {
             FileSubcommand::Send(args) => crate::file_commands::send(cli.state_dir, args).await,
             FileSubcommand::Receive(args) => {
-                crate::file_commands::receive_placeholder(args.output.json)
+                crate::file_commands::receive(cli.state_dir, args).await
             }
             FileSubcommand::History(output) => {
                 crate::file_commands::history(cli.state_dir, output.json).await
@@ -123,16 +127,24 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 diagnose_webrtc_media(webrtc_media).await
             }
         },
-        Commands::Doctor(args) => match args.command {
-            Some(DoctorSubcommand::Signaling(signaling)) => doctor_signaling(signaling).await,
-            Some(DoctorSubcommand::MediaLease(media_lease)) => {
-                doctor_media_lease(media_lease).await
+        Commands::Doctor(args) => {
+            let outer_json = args.output.json;
+            match args.command {
+                Some(DoctorSubcommand::Signaling(mut signaling)) => {
+                    signaling.output.json |= outer_json;
+                    doctor_signaling(signaling).await
+                }
+                Some(DoctorSubcommand::MediaLease(mut media_lease)) => {
+                    media_lease.output.json |= outer_json;
+                    doctor_media_lease(media_lease).await
+                }
+                Some(DoctorSubcommand::WebRtcMedia(mut webrtc_media)) => {
+                    webrtc_media.output.json |= outer_json;
+                    doctor_webrtc_media(webrtc_media).await
+                }
+                None => doctor(cli.state_dir, outer_json).await,
             }
-            Some(DoctorSubcommand::WebRtcMedia(webrtc_media)) => {
-                doctor_webrtc_media(webrtc_media).await
-            }
-            None => doctor(cli.state_dir, args.output.json).await,
-        },
+        }
         Commands::Smoke(smoke) => smoke::dispatch_smoke_command(smoke).await,
         Commands::Capabilities(output) => {
             crate::operator_capabilities::print_operator_capabilities(output.json)

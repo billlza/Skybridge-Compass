@@ -223,10 +223,10 @@ final class HandshakeCryptoPolicyParityTests: XCTestCase {
 
     func testMLDSA87MessageAReassemblesAcrossEightKiBWebRTCControlChunks() throws {
         let message = makeMLDSA87MessageA(signatureLength: Self.mlDSA87SignatureLength)
-        let payload = HandshakePadding.wrapIfEnabled(
+        let payload = try HandshakePadding.wrapIfEnabled(
             message.encoded,
             label: "test/webrtc",
-            maxTotalBytes: CrossNetworkWebRTCHandshakeLimits.maxPaddedPayloadBytes
+            maximumPaddingTargetByteCount: CrossNetworkWebRTCHandshakeLimits.maxPaddedPayloadBytes
         )
         var framed = Data()
         var payloadLength = UInt32(payload.count).bigEndian

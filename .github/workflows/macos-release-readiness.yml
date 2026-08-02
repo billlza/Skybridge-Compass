@@ -14,6 +14,7 @@ on:
       - "Scripts/**"
       - "fastlane/**"
       - "README.md"
+      - "rust/**"
   push:
     paths:
       - ".github/actionlint.yaml"
@@ -27,6 +28,7 @@ on:
       - "Scripts/**"
       - "fastlane/**"
       - "README.md"
+      - "rust/**"
   workflow_dispatch:
     inputs:
       release_artifact_run_id:
@@ -65,7 +67,7 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
@@ -80,6 +82,12 @@ jobs:
 
       - name: Self-Test Swift Filter Guardrail
         run: bash Scripts/test_run_swift_test_filter.sh
+
+      - name: Self-Test Apple P2P No-Trap Guardrail
+        run: python3 Scripts/test_check_p2p_no_traps.py
+
+      - name: Enforce Apple P2P No-Trap Guardrail
+        run: python3 Scripts/check_p2p_no_traps.py
 
       - name: Self-Test Real-Device Release Acceptance Artifacts
         run: python3 Scripts/test_validate_real_device_release_acceptance_artifact.py
@@ -158,12 +166,12 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
       - name: Checkout Pinned Q-Periapt Source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: billlza/q-periapt
           ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
@@ -220,7 +228,7 @@ jobs:
       SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
@@ -258,7 +266,7 @@ jobs:
 
       - name: Download Connectivity Matrix Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.CONNECTIVITY_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/connectivity
@@ -267,7 +275,7 @@ jobs:
 
       - name: Download P2P Remote Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.P2P_REMOTE_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/p2p-remote
@@ -276,7 +284,7 @@ jobs:
 
       - name: Download WebRTC Remote Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.WEBRTC_REMOTE_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/webrtc-remote
@@ -285,7 +293,7 @@ jobs:
 
       - name: Download File Transfer Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.FILE_TRANSFER_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/file-transfer
@@ -294,7 +302,7 @@ jobs:
 
       - name: Download P2P Security Notice Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.P2P_NOTICE_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/p2p-notice
@@ -303,7 +311,7 @@ jobs:
 
       - name: Download WebRTC Security Notice Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.WEBRTC_NOTICE_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/webrtc-notice
@@ -312,7 +320,7 @@ jobs:
 
       - name: Download AppKit Security Notice Panel Artifact
         if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ env.NOTICE_PANEL_ARTIFACT_NAME }}
           path: Artifacts/release-gate-raw/notice-panel
@@ -634,7 +642,7 @@ jobs:
 
       - name: Upload Signed Release Handoff
         if: inputs.publish_update_release == true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-signed-release-handoff
           path: |
@@ -718,7 +726,7 @@ jobs:
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
@@ -730,7 +738,7 @@ jobs:
           bash Scripts/verify_xcode_toolchain.sh
 
       - name: Download Signed Release Handoff
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: macos-signed-release-handoff
           path: ${{ runner.temp }}/macos-signed-release-handoff-download
@@ -824,7 +832,7 @@ jobs:
             --key-id "$UPDATE_MANIFEST_KEY_ID"
 
       - name: Upload Immutable Release Publish Proof
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-update-publish-proof-${{ inputs.publish_release_tag }}
           path: ${{ runner.temp }}/macos-update-publish-output/macos-stable.publish-proof.json

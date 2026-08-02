@@ -34,10 +34,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-uniffi = { version = "0.31.1", optional = true, features = ["tokio"] }
+uniffi = { version = "0.31.2", optional = true, features = ["tokio"] }
 
 [build-dependencies]
-cbindgen = "0.29"
+cbindgen = "0.29.4"
 
 [dev-dependencies]
 serde_json.workspace = true

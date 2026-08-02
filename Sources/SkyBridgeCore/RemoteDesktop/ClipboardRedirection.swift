@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 //
 // ClipboardRedirection.swift
 // SkyBridge Compass Pro
@@ -206,3 +211,4 @@ public final class ClipboardRedirectionManager: ObservableObject, @unchecked Sen
 // MARK: - 导入 CryptoKit 用于哈希计算
 
 import CryptoKit
+#endif

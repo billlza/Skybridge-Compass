@@ -31,7 +31,9 @@ hmac.workspace = true
 hpke.workspace = true
 fips203.workspace = true
 fips204.workspace = true
+rand.workspace = true
 rand_core.workspace = true
+rtc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -49,9 +51,9 @@ webbrowser.workspace = true
 x25519-dalek.workspace = true
 
 # EXPERIMENTAL, DEFAULT-OFF (gated by the `q-periapt` feature): the Q-Periapt PQ/T
-# hybrid KEM crates, depended on by path. CI prepares this sibling from a pinned
-# checkout; local builds may use the same sibling or set up External/pqt_hybrid_suite
-# through the vendor build scripts.
-q-periapt-core = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-core", optional = true }
-q-periapt-kem = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-kem", optional = true }
-q-periapt-backends = { path = "../../../../pqt_hybrid_suite/crates/q-periapt-backends", optional = true }
+# hybrid KEM crates, depended on by path. CI and local builds resolve the same
+# pinned, gitignored External/pqt_hybrid_suite checkout; unrelated sibling
+# worktrees are deliberately outside the Cargo build contract.
+q-periapt-core = { path = "../../../External/pqt_hybrid_suite/crates/q-periapt-core", optional = true }
+q-periapt-kem = { path = "../../../External/pqt_hybrid_suite/crates/q-periapt-kem", optional = true }
+q-periapt-backends = { path = "../../../External/pqt_hybrid_suite/crates/q-periapt-backends", optional = true }

@@ -107,7 +107,25 @@ extern "C"
 		WINPR_ATTR_NODISCARD pcRailServerSystemParam ServerSystemParam;
 		WINPR_ATTR_NODISCARD pcRailClientSystemCommand ClientSystemCommand;
 		WINPR_ATTR_NODISCARD pcRailClientHandshake ClientHandshake;
+
+		/** @brief (optional) callback when a [MS-RDPERP] 2.2.2.2.1 Handshake PDU
+		 * (TS_RAIL_ORDER_HANDSHAKE) is received. A default implementation exists and responds with
+		 * the current \ref FreeRDP_ClientBuild
+		 *
+		 *  @bug before 3.27.0 the response was sent before this callback was invoked. Now the
+		 * default implementation provides this and if overridden by client implementations they
+		 * must handle the response themselves.
+		 */
 		WINPR_ATTR_NODISCARD pcRailServerHandshake ServerHandshake;
+
+		/** @brief (optional) callback when a [MS-RDPERP] 2.2.2.2.3 HandshakeEx PDU
+		 * (TS_RAIL_ORDER_HANDSHAKE_EX) is received. A default implementation exists and responds
+		 * with the current \ref FreeRDP_ClientBuild
+		 *
+		 *  @bug before 3.27.0 the response was sent before this callback was invoked. Now the
+		 * default implementation provides this and if overridden by client implementations they
+		 * must handle the response themselves.
+		 */
 		WINPR_ATTR_NODISCARD pcRailServerHandshakeEx ServerHandshakeEx;
 		WINPR_ATTR_NODISCARD pcRailClientNotifyEvent ClientNotifyEvent;
 		WINPR_ATTR_NODISCARD pcRailClientWindowMove ClientWindowMove;
@@ -129,7 +147,11 @@ extern "C"
 		WINPR_ATTR_NODISCARD pcRailClientSnapArrange ClientSnapArrange;
 		WINPR_ATTR_NODISCARD pcRailServerGetAppidResponseExtended ServerGetAppidResponseExtended;
 		WINPR_ATTR_NODISCARD pcRailClientCompartmentInfo ClientCompartmentInfo;
-		WINPR_ATTR_NODISCARD pcRailOnOpen OnOpen;
+#if !defined(WITHOUT_FREERDP_3x_DEPRECATED)
+		WINPR_DEPRECATED_VAR("[since 3.27.0] unused", WINPR_ATTR_NODISCARD pcRailOnOpen OnOpen);
+#else
+	    void* reserved;
+#endif
 		WINPR_ATTR_NODISCARD pcRailClientTextScale ClientTextScale;
 		WINPR_ATTR_NODISCARD pcRailClientCaretBlinkRate ClientCaretBlinkRate;
 	};

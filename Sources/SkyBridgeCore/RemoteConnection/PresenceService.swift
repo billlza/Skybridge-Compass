@@ -228,7 +228,7 @@ public final class PresenceService: ObservableObject {
 
     private static func localDeviceName() -> String {
         #if canImport(AppKit)
-        let name = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let name = LocalHostName.localizedName ?? ProcessInfo.processInfo.hostName
         #else
         let name = ProcessInfo.processInfo.hostName
         #endif

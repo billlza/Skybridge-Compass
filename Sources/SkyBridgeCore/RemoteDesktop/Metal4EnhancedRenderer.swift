@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 // Metal4EnhancedRenderer.swift
 // Metal 4 + MetalFX 增强渲染器（Apple Silicon M1-M5 专属优化）
 // 完全兼容现有 RemoteFrameRenderer 接口，零侵入式升级
@@ -689,3 +694,4 @@ fileprivate final class SimpleSpatialScaler: MTLFXSpatialScaler {
 }
 #endif
 import MetalPerformanceShaders
+#endif

@@ -647,10 +647,8 @@ public actor KeychainManager {
                     )
                 )
             }
-            return discoveries.sorted { lhs, rhs in
-                lhs.location.persistentReference.lexicographicallyPrecedes(
-                    rhs.location.persistentReference
-                )
+            return discoveries.sorted {
+                $0.location.isOrderedBefore($1.location)
             }
         }
 
@@ -668,9 +666,6 @@ public actor KeychainManager {
                 kSecReturnPersistentRef as String: true,
                 kSecMatchLimit as String: kSecMatchLimitAll
             ]
-            if returnData {
-                query[kSecReturnData as String] = true
-            }
             applyDataProtectionKeychain(usesDataProtection, to: &query)
             forbidKeychainAuthenticationUI(&query)
 
@@ -692,15 +687,6 @@ public actor KeychainManager {
                 throw KeychainError.decodingError
             }
             for row in rows {
-                let data: Data?
-                if returnData {
-                    guard let returnedData = row[kSecValueData as String] as? Data else {
-                        throw KeychainError.decodingError
-                    }
-                    data = returnedData
-                } else {
-                    data = nil
-                }
                 guard let persistentReference = row[
                           kSecValuePersistentRef as String
                       ] as? Data,
@@ -721,6 +707,9 @@ public actor KeychainManager {
                     usesDataProtectionKeychain: usesDataProtection,
                     persistentReference: persistentReference
                 )
+                let data = returnData
+                    ? try loadLegacyGenericPasswordDataStrict(at: location)
+                    : nil
                 guard seenLocations.insert(location).inserted else {
                     continue
                 }
@@ -734,7 +723,43 @@ public actor KeychainManager {
                 )
             }
         }
-        return discoveries
+        return discoveries.sorted {
+            $0.location.isOrderedBefore($1.location)
+        }
+    }
+
+    /// Loads one discovery result by its exact persistent reference. On macOS,
+    /// the legacy file Keychain rejects a broad query that simultaneously asks
+    /// for attributes, persistent references, and secret data with
+    /// `errSecParam`. Splitting enumeration from the secret read also keeps the
+    /// later mutation authority bound to the exact item selected above.
+    private nonisolated func loadLegacyGenericPasswordDataStrict(
+        at location: LegacySecItemLocation
+    ) throws -> Data {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        location.applyPersistentReferenceMatch(to: &query)
+        applyDataProtectionKeychain(
+            location.usesDataProtectionKeychain,
+            to: &query
+        )
+        forbidKeychainAuthenticationUI(&query)
+
+        var item: CFTypeRef?
+        switch SecItemCopyMatching(query as CFDictionary, &item) {
+        case errSecSuccess:
+            guard let data = item as? Data else {
+                throw KeychainError.decodingError
+            }
+            return data
+        case errSecItemNotFound:
+            throw KeychainError.itemChangedDuringReconciliation
+        case let status:
+            throw KeychainError.unexpectedError(status)
+        }
     }
 
     /// Deletes exactly one item discovered above. Persistent references are the

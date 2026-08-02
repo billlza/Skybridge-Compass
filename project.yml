@@ -60,12 +60,14 @@ targets:
         INFOPLIST_FILE: XcodeSupport/SkyBridgeCompassMac/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: ""
         CODE_SIGN_ENTITLEMENTS: XcodeSupport/SkyBridgeCompassMac/SkyBridgeCompassMac.local.entitlements
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         LD_RUNPATH_SEARCH_PATHS:
           - $(inherited)
           - "@executable_path/../Frameworks"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) APPLE_SILICON_OPTIMIZED ARM64_NATIVE"
-        OTHER_SWIFT_FLAGS: "$(inherited) -Xcc -I -Xcc $(PROJECT_DIR)/Sources/Vendor/WebRTCHeaders"
+        OTHER_SWIFT_FLAGS: "$(inherited)"
         OTHER_CFLAGS: "$(inherited)"
         OTHER_CPLUSPLUSFLAGS: "$(inherited)"
     dependencies:
@@ -123,6 +125,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.compass.pro.widgets
         INFOPLIST_FILE: Sources/SkyBridgeCompassWidgets/Info.plist
         SKIP_INSTALL: YES
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
         LD_RUNPATH_SEARCH_PATHS:
           - $(inherited)
           - "@executable_path/../Frameworks"

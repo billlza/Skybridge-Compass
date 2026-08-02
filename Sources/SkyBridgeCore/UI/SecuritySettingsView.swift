@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import CryptoKit
 import os.log
@@ -784,6 +789,8 @@ private struct TrustedDeviceRow: View {
             return "smartphone"
         case .linux:
             return "server.rack"
+        case .unknown:
+            return "questionmark.circle"
         }
     }
     
@@ -1113,4 +1120,5 @@ struct SecuritySettingsView_Previews: PreviewProvider {
         SecuritySettingsView(securityManager: P2PSecurityManager())
     }
 }
+#endif
 #endif

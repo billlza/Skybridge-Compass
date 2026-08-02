@@ -14,8 +14,9 @@ from apple_provisioning_profile import load_verified_profile
 
 EXPECTED_ARGUMENT_COUNT = 27
 
-# A nested Widget shares only its own keychain-access-group and the App Group
-# container with the host App. It must never independently carry the host
+# A release Widget carries only its own keychain-access-group (a Debug lab
+# Widget deliberately carries none) plus the App Group container with the host
+# App. It must never independently carry the host
 # App's sensitive capabilities. If any of these entitlements is signed into the
 # Widget it indicates a provisioning/entitlement regression that would widen the
 # nested target's authority beyond its contract, so the formal proof must fail
@@ -106,6 +107,25 @@ def profile_value_covers(profile_value: str, requested: str) -> bool:
     return profile_value.endswith(".*") and requested.startswith(profile_value[:-1])
 
 
+def required_keychain_groups(
+    *,
+    bundle_identifier: str,
+    expected_team: str,
+    is_app: bool,
+    configuration: str,
+    lab_run: bool,
+) -> set[str]:
+    application_group = f"{expected_team}.{bundle_identifier}"
+    if is_app:
+        return {
+            application_group,
+            f"{expected_team}.group.com.skybridge.compass",
+        }
+    if lab_run and configuration == "Debug":
+        return set()
+    return {application_group}
+
+
 def analyze_target(
     profile_path: Path,
     signed_entitlements_path: Path,
@@ -119,6 +139,8 @@ def analyze_target(
     expected_team: str,
     device_identifier: str,
     expected_entitlements: dict,
+    configuration: str,
+    lab_run: bool,
 ) -> dict:
     profile = load_profile(profile_path)
     with signed_entitlements_path.open("rb") as handle:
@@ -144,9 +166,13 @@ def analyze_target(
             profile_application_identifier == expected_application_identifier,
         )
     )
-    expected_keychain_groups = {expected_application_identifier}
-    if is_app:
-        expected_keychain_groups.add(f"{expected_team}.group.com.skybridge.compass")
+    expected_keychain_group_set = required_keychain_groups(
+        bundle_identifier=bundle_identifier,
+        expected_team=expected_team,
+        is_app=is_app,
+        configuration=configuration,
+        lab_run=lab_run,
+    )
     signed_keychain_groups = {
         str(value).strip()
         for value in signed_entitlements.get("keychain-access-groups", [])
@@ -158,13 +184,13 @@ def analyze_target(
         if isinstance(value, str) and value.strip()
     }
     keychain_groups_verified = (
-        signed_keychain_groups == expected_keychain_groups
+        signed_keychain_groups == expected_keychain_group_set
         and all(
             any(
                 profile_value_covers(profile_value, requested)
                 for profile_value in profile_keychain_groups
             )
-            for requested in expected_keychain_groups
+            for requested in expected_keychain_group_set
         )
     )
     get_task_allow = (
@@ -361,6 +387,8 @@ def main(argv: list[str]) -> None:
         expected_team=expected_team,
         device_identifier=device_identifier,
         expected_entitlements=expected_entitlements,
+        configuration=configuration,
+        lab_run=lab_run,
     )
     widget = analyze_target(
         widget_profile_path,
@@ -374,6 +402,8 @@ def main(argv: list[str]) -> None:
         expected_team=expected_team,
         device_identifier=device_identifier,
         expected_entitlements=expected_entitlements,
+        configuration=configuration,
+        lab_run=lab_run,
     )
 
     release_configuration = configuration == "Release"
@@ -402,7 +432,18 @@ def main(argv: list[str]) -> None:
         )
     )
     if not profile_verified:
-        raise RuntimeError("iOS product profile/signature proof failed")
+        failed_fields = []
+        if not signature_verified:
+            failed_fields.append("signatureVerified")
+        failed_fields.extend(
+            f"app.{key}" for key in required_target_fields if app[key] is not True
+        )
+        failed_fields.extend(
+            f"widget.{key}" for key in required_target_fields if widget[key] is not True
+        )
+        raise RuntimeError(
+            "iOS product profile/signature proof failed: " + ",".join(failed_fields)
+        )
     if not lab_run and not all(
         (
             release_configuration,

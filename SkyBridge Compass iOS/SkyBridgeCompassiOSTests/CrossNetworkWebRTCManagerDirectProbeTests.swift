@@ -1,10 +1,245 @@
 import XCTest
 import CryptoKit
+import enum SkyBridgeProtocolCore.BoundedPaddingEnvelopePolicyError
+import enum SkyBridgeProtocolCore.WebRTCFramedPayloadPolicy
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
 final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
     private var inboundProbeCounter: UInt64 = 0
+
+    func testFramedPayloadSenderAndReceiversShareEightMegabyteBoundary() throws {
+        let maximumPayloadByteCount = WebRTCFramedPayloadPolicy.maximumPayloadByteCount
+        XCTAssertEqual(maximumPayloadByteCount, 8_000_000)
+        XCTAssertFalse(WebRTCFramedPayloadPolicy.isValidPayloadByteCount(0))
+        XCTAssertThrowsError(
+            try WebRTCSession.validateFramedPayloadParameters(
+                payloadByteCount: 0,
+                maxChunkBytes: 8 * 1_024
+            )
+        ) { error in
+            guard let webRTCError = error as? WebRTCSession.WebRTCError,
+                  case .invalidFramedPayloadSize(let rejectedByteCount) = webRTCError else {
+                return XCTFail("Expected invalidFramedPayloadSize, got \(error)")
+            }
+            XCTAssertEqual(rejectedByteCount, 0)
+        }
+        XCTAssertEqual(
+            try WebRTCSession.validateFramedPayloadParameters(
+                payloadByteCount: maximumPayloadByteCount,
+                maxChunkBytes: 8 * 1_024
+            ),
+            UInt32(maximumPayloadByteCount)
+        )
+
+        let oversizedPayloadByteCount = maximumPayloadByteCount + 1
+        XCTAssertThrowsError(
+            try WebRTCSession.validateFramedPayloadParameters(
+                payloadByteCount: oversizedPayloadByteCount,
+                maxChunkBytes: 8 * 1_024
+            )
+        ) { error in
+            guard let webRTCError = error as? WebRTCSession.WebRTCError,
+                  case .framedPayloadTooLarge(let rejectedByteCount) = webRTCError else {
+                return XCTFail("Expected framedPayloadTooLarge, got \(error)")
+            }
+            XCTAssertEqual(rejectedByteCount, oversizedPayloadByteCount)
+        }
+        for invalidChunkByteCount in [maximumPayloadByteCount + 1, Int.max] {
+            XCTAssertThrowsError(
+                try WebRTCSession.validateFramedPayloadParameters(
+                    payloadByteCount: 128,
+                    maxChunkBytes: invalidChunkByteCount
+                )
+            ) { error in
+                guard let webRTCError = error as? WebRTCSession.WebRTCError,
+                      case .invalidChunkSize(let rejectedByteCount) = webRTCError else {
+                    return XCTFail("Expected invalidChunkSize, got \(error)")
+                }
+                XCTAssertEqual(rejectedByteCount, invalidChunkByteCount)
+            }
+        }
+
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let controlReceiverStart = try XCTUnwrap(
+            source.range(of: "nonisolated func receiveLoop(")
+        )
+        let controlReceiverEnd = try XCTUnwrap(
+            source.range(
+                of: "private func failAuthenticatedWebRTCChannel(",
+                range: controlReceiverStart.upperBound..<source.endIndex
+            )
+        )
+        let controlReceiver = String(
+            source[controlReceiverStart.lowerBound..<controlReceiverEnd.lowerBound]
+        )
+        XCTAssertTrue(
+            controlReceiver.contains(
+                "let maxInboundFrameBytes = WebRTCFramedPayloadPolicy.maximumPayloadByteCount"
+            )
+        )
+        XCTAssertFalse(controlReceiver.contains("maxInboundFrameBytes = 8_000_000"))
+        let directAdmission = try XCTUnwrap(
+            controlReceiver.range(
+                of: "guard WebRTCFramedPayloadPolicy.isValidPayloadByteCount(chunk.count)"
+            )
+        )
+        let directSecureProbe = try XCTUnwrap(
+            controlReceiver.range(of: "Self.openDirectControlProbePayload(chunk")
+        )
+        let directTrafficUnwrap = try XCTUnwrap(
+            controlReceiver.range(of: "try TrafficPadding.unwrapIfNeeded(")
+        )
+        let directOverflow = try XCTUnwrap(
+            controlReceiver.range(
+                of: "await inbound.failOverflow()",
+                range: directAdmission.upperBound..<controlReceiver.endIndex
+            )
+        )
+        let directFailure = try XCTUnwrap(
+            controlReceiver.range(
+                of: "await failAuthenticatedWebRTCChannel(",
+                range: directOverflow.upperBound..<controlReceiver.endIndex
+            )
+        )
+        let directFailureReturn = try XCTUnwrap(
+            controlReceiver.range(
+                of: "\n                    return",
+                range: directFailure.upperBound..<controlReceiver.endIndex
+            )
+        )
+        XCTAssertLessThan(directAdmission.lowerBound, directSecureProbe.lowerBound)
+        XCTAssertLessThan(directAdmission.lowerBound, directTrafficUnwrap.lowerBound)
+        XCTAssertLessThan(directAdmission.lowerBound, directOverflow.lowerBound)
+        XCTAssertLessThan(directOverflow.lowerBound, directFailure.lowerBound)
+        XCTAssertLessThan(directFailure.lowerBound, directFailureReturn.lowerBound)
+        XCTAssertTrue(controlReceiver.contains("control_inbound_frame_too_large"))
+
+        let screenReceiverStart = try XCTUnwrap(
+            source.range(of: "nonisolated func receiveScreenLoop(")
+        )
+        let screenReceiverEnd = try XCTUnwrap(
+            source.range(
+                of: "nonisolated private func decodeDirectScreenChannelPayloadIfFresh(",
+                range: screenReceiverStart.upperBound..<source.endIndex
+            )
+        )
+        let screenReceiver = String(
+            source[screenReceiverStart.lowerBound..<screenReceiverEnd.lowerBound]
+        )
+        XCTAssertTrue(
+            screenReceiver.contains(
+                "let maxInboundFrameBytes = WebRTCFramedPayloadPolicy.maximumPayloadByteCount"
+            )
+        )
+        XCTAssertFalse(screenReceiver.contains("maxInboundFrameBytes = 8_000_000"))
+    }
+
+    func testScreenChannelProbeRoutesExactMaximumToLengthParserAndRejectsMaximumPlusOne() {
+        let maximum = WebRTCFramedPayloadPolicy.maximumPayloadByteCount
+        let decoder = CrossNetworkWebRTCManager.ScreenChannelWireDecoder(
+            maxInboundFrameBytes: maximum
+        )
+
+        func prefix(_ value: Int) -> Data {
+            var encoded = UInt32(value).bigEndian
+            return withUnsafeBytes(of: &encoded) { Data($0) }
+        }
+
+        XCTAssertFalse(decoder.shouldKeepOutOfLengthParser(prefix(maximum)))
+        XCTAssertTrue(decoder.shouldKeepOutOfLengthParser(prefix(maximum + 1)))
+    }
+
+    func testScreenChunkEncoderRejectsOverflowingPublicOffsetWithoutTrap() {
+        XCTAssertThrowsError(
+            try WebRTCSession.encodeScreenChunkEnvelope(
+                frameId: 1,
+                chunkIndex: 0,
+                chunkCount: 1,
+                totalBytes: Int.max,
+                chunkOffset: Int.max,
+                payload: Data([0x01])
+            )
+        ) { error in
+            guard let webRTCError = error as? WebRTCSession.WebRTCError,
+                  case .framedPayloadTooLarge = webRTCError else {
+                return XCTFail("Expected framedPayloadTooLarge, got \(error)")
+            }
+        }
+    }
+
+    func testInboundChunkQueueEnforcesExactSharedLimitBeforeResumingWaiter() async throws {
+        let maximum = WebRTCFramedPayloadPolicy.maximumPayloadByteCount
+        let exactQueue = InboundChunkQueue(
+            maximumChunkByteCount: maximum,
+            maxPendingBytes: 32 * 1_024 * 1_024,
+            maxPendingChunks: 4
+        )
+        let exact = Data(repeating: 0xA5, count: maximum)
+        let exactPushResult = await exactQueue.push(exact)
+        XCTAssertEqual(exactPushResult, .accepted)
+        let exactReceived = try await exactQueue.next()
+        XCTAssertEqual(exactReceived.count, maximum)
+
+        let overflowQueue = InboundChunkQueue(
+            maximumChunkByteCount: maximum,
+            maxPendingBytes: 32 * 1_024 * 1_024,
+            maxPendingChunks: 4
+        )
+        let waiter = Task { try await overflowQueue.next() }
+        for _ in 0..<1_000 {
+            if await overflowQueue.testOnlyWaiterCount() == 1 { break }
+            await Task.yield()
+        }
+        let waiterCount = await overflowQueue.testOnlyWaiterCount()
+        XCTAssertEqual(waiterCount, 1)
+
+        let overflowPushResult = await overflowQueue.push(
+            Data(repeating: 0x5A, count: maximum + 1)
+        )
+        XCTAssertEqual(overflowPushResult, .overflow)
+        do {
+            _ = try await waiter.value
+            XCTFail("An oversized chunk must fail the active waiter")
+        } catch InboundChunkQueue.QueueError.overflow {
+            // Expected: the queue fails closed instead of delivering the bytes.
+        } catch {
+            XCTFail("Expected queue overflow, got \(error)")
+        }
+    }
+
+    func testBoundedTrafficUnwrapRejectsBeforeBodyCopyAtSharedWebRTCLimit() throws {
+        let maximum = WebRTCFramedPayloadPolicy.maximumPayloadByteCount
+        let exact = Data(repeating: 0x7A, count: maximum)
+        XCTAssertEqual(
+            try TrafficPadding.unwrapIfNeeded(
+                exact,
+                label: "test/exact-webrtc-limit",
+                maximumOutputByteCount: maximum
+            ).count,
+            maximum
+        )
+
+        XCTAssertThrowsError(
+            try TrafficPadding.unwrapIfNeeded(
+                Data(repeating: 0x7B, count: maximum + 1),
+                label: "test/oversized-webrtc-limit",
+                maximumOutputByteCount: maximum
+            )
+        ) { error in
+            guard case BoundedPaddingEnvelopePolicyError.payloadExceedsMaximum(
+                let actual,
+                let rejectedMaximum
+            ) = error else {
+                XCTFail("Expected payloadExceedsMaximum, got \(error)")
+                return
+            }
+            XCTAssertEqual(actual, maximum + 1)
+            XCTAssertEqual(rejectedMaximum, maximum)
+        }
+    }
 
     func testStrictWebRTCJoinBootstrapValidatesAndBindsMLDSA87Authority() throws {
         let remoteDeviceId = "device-\(UUID().uuidString.lowercased())"
@@ -1116,7 +1351,7 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         return chunks
     }
 
-    func testWebRTCAuthorityCommitPrecedesAllInitialAndRekeyStatePublication() throws {
+    func testWebRTCApplicationPublicationRequiresPairingMaterialAdmission() throws {
         let source = try readRepositorySource(
             "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
         )
@@ -1126,54 +1361,330 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
             source.range(of: "nonisolated private static func webRTCPQCRekeyProvider", range: outboundInitialStart.lowerBound..<source.endIndex)
         )
         let outboundInitial = String(source[outboundInitialStart.lowerBound..<outboundInitialEnd.lowerBound])
-        assertAuthorityCommitPrecedesPublishedSession(
-            in: outboundInitial,
-            sessionKeyNeedle: "self.sessionKeys = keys",
-            connectedNeedle: "self.state = .connected",
-            routeNeedle: "await self.sendLocalAuthenticatedRouteBindings("
-        )
-        XCTAssertTrue(outboundInitial.contains("driver.getAuthenticatedRemoteAuthority()"))
+        XCTAssertTrue(outboundInitial.contains("driver.getAuthenticatedHandshakePeerBinding()"))
+        XCTAssertTrue(outboundInitial.contains("self.sessionKeys = keys"))
+        XCTAssertTrue(outboundInitial.contains("sendPairingIdentityExchangeOverWebRTC("))
+        XCTAssertFalse(outboundInitial.contains("self.state = .connected"))
+        XCTAssertFalse(outboundInitial.contains("await self.sendLocalAuthenticatedRouteBindings("))
 
         let inboundRekeyStart = try XCTUnwrap(source.range(of: "private func syncInboundPQCRekeyState("))
         let inboundRekeyEnd = try XCTUnwrap(
             source.range(of: "private func syncInboundInitialHandshakeState(", range: inboundRekeyStart.lowerBound..<source.endIndex)
         )
         let inboundRekey = String(source[inboundRekeyStart.lowerBound..<inboundRekeyEnd.lowerBound])
-        assertAuthorityCommitPrecedesPublishedSession(
-            in: inboundRekey,
-            sessionKeyNeedle: "sessionKeys = keys",
-            connectedNeedle: "state = .connected",
-            routeNeedle: "await sendLocalAuthenticatedRouteBindings("
-        )
         XCTAssertTrue(inboundRekey.contains("stage: \"inbound-rekey\""))
+        assertOrderedMarkers(
+            [
+                "persistCurrentPathTrust(",
+                "sessionKeys = keys",
+                "publishApplicationReadyIfCurrent(",
+                "await sendLocalAuthenticatedRouteBindings("
+            ],
+            in: inboundRekey
+        )
 
         let inboundInitialStart = try XCTUnwrap(source.range(of: "private func syncInboundInitialHandshakeState("))
         let inboundInitialEnd = try XCTUnwrap(
             source.range(of: "func sendAppMessageOverWebRTC(", range: inboundInitialStart.lowerBound..<source.endIndex)
         )
         let inboundInitial = String(source[inboundInitialStart.lowerBound..<inboundInitialEnd.lowerBound])
-        assertAuthorityCommitPrecedesPublishedSession(
-            in: inboundInitial,
-            sessionKeyNeedle: "sessionKeys = keys",
-            connectedNeedle: "state = .connected",
-            routeNeedle: "await sendLocalAuthenticatedRouteBindings("
-        )
         XCTAssertTrue(inboundInitial.contains("stage: \"inbound-initial\""))
+        XCTAssertTrue(inboundInitial.contains("sessionKeys = keys"))
+        XCTAssertFalse(inboundInitial.contains("state = .connected"))
+        XCTAssertFalse(inboundInitial.contains("await sendLocalAuthenticatedRouteBindings("))
 
         let outboundRekeyStart = try XCTUnwrap(source.range(of: "func maybeStartPQCRekeyOverWebRTC("))
         let outboundRekeyEnd = try XCTUnwrap(
             source.range(of: "private extension CrossNetworkWebRTCManager", range: outboundRekeyStart.lowerBound..<source.endIndex)
         )
         let outboundRekey = String(source[outboundRekeyStart.lowerBound..<outboundRekeyEnd.lowerBound])
-        assertAuthorityCommitPrecedesPublishedSession(
-            in: outboundRekey,
-            sessionKeyNeedle: "sessionKeys = rekeyed",
-            connectedNeedle: "state = .connected",
-            routeNeedle: "await sendLocalAuthenticatedRouteBindings("
-        )
-        XCTAssertTrue(outboundRekey.contains("driver.getAuthenticatedRemoteAuthority()"))
+        XCTAssertTrue(outboundRekey.contains("getAuthenticatedHandshakePeerBinding()"))
         XCTAssertTrue(outboundRekey.contains("error is CurrentPathAuthorityCommitError"))
         XCTAssertTrue(outboundRekey.contains("stage: \"outbound-rekey\""))
+        assertOrderedMarkers(
+            [
+                "persistCurrentPathTrust(",
+                "sessionKeys = rekeyed",
+                "publishApplicationReadyIfCurrent(",
+                "await sendLocalAuthenticatedRouteBindings("
+            ],
+            in: outboundRekey
+        )
+
+        let pairingHandlerStart = try XCTUnwrap(
+            source.range(of: "func handleInboundAppMessageOverWebRTC(")
+        )
+        let pairingHandlerEnd = try XCTUnwrap(
+            source.range(
+                of: "func maybeStartPQCRekeyOverWebRTC(",
+                range: pairingHandlerStart.lowerBound..<source.endIndex
+            )
+        )
+        let pairingHandler = String(
+            source[pairingHandlerStart.lowerBound..<pairingHandlerEnd.lowerBound]
+        )
+        assertOrderedMarkers(
+            [
+                "PairingAcceptancePersistence.begin(",
+                "let sendOutcome = try await sendPairingIdentityExchangeOverWebRTC(",
+                "installPairingMaterialAdmissionIfCurrent(",
+                "publishApplicationReadyIfCurrent(",
+                "await sendLocalAuthenticatedRouteBindings("
+            ],
+            in: pairingHandler
+        )
+        XCTAssertEqual(
+            source.components(separatedBy: "state = .connected(sessionId: sessionId)").count - 1,
+            1,
+            "Only the exact pairing admission publication helper may publish connected."
+        )
+    }
+
+    func testPairingAdmissionIsBoundToExactSessionObjectIncarnation() {
+        let sessionA = NSObject()
+        let replacementSession = NSObject()
+        let digest = Data(repeating: 0xA5, count: 32)
+        let admission = CrossNetworkWebRTCManager.PairingMaterialAdmissionOwner(
+            sessionId: "same-session-id",
+            sessionObjectIdentifier: ObjectIdentifier(sessionA),
+            acceptedMaterialDigest: digest
+        )
+
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy.isCurrentAdmission(
+                admission,
+                sessionId: "same-session-id",
+                sessionObjectIdentifier: ObjectIdentifier(sessionA)
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy.isCurrentAdmission(
+                admission,
+                sessionId: "same-session-id",
+                sessionObjectIdentifier: ObjectIdentifier(replacementSession)
+            ),
+            "An admitted old object must not unlock a replacement that reuses the session ID."
+        )
+    }
+
+    func testPairingReplyCacheRejectsNewIncarnationAndNilDigestWithinTenSeconds() {
+        let sessionA = NSObject()
+        let replacementSession = NSObject()
+        let now = Date(timeIntervalSinceReferenceDate: 10_000)
+        let digest = Data(repeating: 0x4B, count: 32)
+        let exactReply = CrossNetworkWebRTCManager.PairingIdentityReplyObservation(
+            sessionId: "same-session-id",
+            sessionObjectIdentifier: ObjectIdentifier(sessionA),
+            acceptedMaterialDigest: digest,
+            sentAt: now.addingTimeInterval(-1)
+        )
+
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy
+                .canReusePairingIdentityReply(
+                    exactReply,
+                    sessionId: "same-session-id",
+                    sessionObjectIdentifier: ObjectIdentifier(sessionA),
+                    acceptedMaterialDigest: digest,
+                    now: now,
+                    reuseInterval: 10
+                )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy
+                .canReusePairingIdentityReply(
+                    exactReply,
+                    sessionId: "same-session-id",
+                    sessionObjectIdentifier: ObjectIdentifier(replacementSession),
+                    acceptedMaterialDigest: digest,
+                    now: now,
+                    reuseInterval: 10
+                )
+        )
+
+        let proactiveSend = CrossNetworkWebRTCManager.PairingIdentityReplyObservation(
+            sessionId: "same-session-id",
+            sessionObjectIdentifier: ObjectIdentifier(sessionA),
+            acceptedMaterialDigest: nil,
+            sentAt: now.addingTimeInterval(-1)
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy
+                .canReusePairingIdentityReply(
+                    proactiveSend,
+                    sessionId: "same-session-id",
+                    sessionObjectIdentifier: ObjectIdentifier(sessionA),
+                    acceptedMaterialDigest: digest,
+                    now: now,
+                    reuseInterval: 10
+                ),
+            "A proactive nil-digest send is not a reciprocal reply to accepted remote material."
+        )
+    }
+
+    func testPairingAdmissionDeadlineIsFixedAndBoundToExactIncarnation() {
+        let session = NSObject()
+        let replacement = NSObject()
+        let expiresAt = Date(timeIntervalSinceReferenceDate: 20_000)
+        let deadline = CrossNetworkWebRTCManager.PairingMaterialAdmissionDeadline(
+            sessionId: "same-session-id",
+            sessionObjectIdentifier: ObjectIdentifier(session),
+            expiresAt: expiresAt
+        )
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy
+                .isAdmissionDeadlineExpired(
+                    deadline,
+                    sessionId: "same-session-id",
+                    sessionObjectIdentifier: ObjectIdentifier(session),
+                    now: expiresAt.addingTimeInterval(-1)
+                )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy
+                .isAdmissionDeadlineExpired(
+                    deadline,
+                    sessionId: "same-session-id",
+                    sessionObjectIdentifier: ObjectIdentifier(session),
+                    now: expiresAt
+                )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.PairingMaterialAdmissionPolicy
+                .isAdmissionDeadlineExpired(
+                    deadline,
+                    sessionId: "same-session-id",
+                    sessionObjectIdentifier: ObjectIdentifier(replacement),
+                    now: expiresAt.addingTimeInterval(60)
+                ),
+            "An old deadline must not terminate a replacement with the same session ID."
+        )
+    }
+
+    func testPreAdmissionControlWhitelistExcludesEveryBusinessMessage() {
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .pairingIdentityExchange(.init(deviceId: "peer", kemPublicKeys: []))
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .heartbeat(.init())
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .ping(.init(id: 1))
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .pong(.init(id: 1))
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .peerDisconnecting(.init())
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .textMessage(.init(text: "must-not-persist"))
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.isPairingAdmissionBootstrapMessage(
+                .clipboard(.init(mimeType: "text/plain", dataBase64: ""))
+            )
+        )
+    }
+
+    func testPreAdmissionBusinessPathsHaveCentralNoSideEffectGates() throws {
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        XCTAssertTrue(source.contains("pairing-admission drop app-control"))
+        XCTAssertTrue(source.contains("pairing-admission drop business-packet"))
+        XCTAssertTrue(source.contains("pairing-admission drop high-throughput"))
+        XCTAssertTrue(source.contains("pairing-admission drop screen-payload"))
+        XCTAssertTrue(source.contains("pendingRemoteVideoTrackBeforeAdmission"))
+        XCTAssertTrue(source.contains("guard applicationTrafficAdmitted else"))
+        XCTAssertTrue(source.contains("throw ApplicationTrafficAdmissionError.pairingMaterialNotAdmitted"))
+
+        let sendStart = try XCTUnwrap(
+            source.range(of: "private func sendPairingIdentityExchangeOverWebRTC(")
+        )
+        let sendEnd = try XCTUnwrap(
+            source.range(
+                of: "private func validatedWebRTCPairingIdentityAuthority(",
+                range: sendStart.lowerBound..<source.endIndex
+            )
+        )
+        let sendBody = String(source[sendStart.lowerBound..<sendEnd.lowerBound])
+        assertOrderedMarkers(
+            [
+                "let padded = try TrafficPadding.wrapIfEnabled(",
+                "try await beforeNetworkSubmit()",
+                "try await sendPairingIdentityFramedBounded(padded, over: session)"
+            ],
+            in: sendBody
+        )
+
+        let handlerStart = try XCTUnwrap(
+            source.range(of: "func handleInboundAppMessageOverWebRTC(")
+        )
+        let handlerEnd = try XCTUnwrap(
+            source.range(
+                of: "func maybeStartPQCRekeyOverWebRTC(",
+                range: handlerStart.lowerBound..<source.endIndex
+            )
+        )
+        let handler = String(source[handlerStart.lowerBound..<handlerEnd.lowerBound])
+        assertOrderedMarkers(
+            [
+                ".markReplyMayBeVisible(acceptanceHandle)",
+                ".completeAfterReplyMayBeVisible(",
+                "guard sendOutcome == .contentProcessedCurrent",
+                "installPairingMaterialAdmissionIfCurrent("
+            ],
+            in: handler
+        )
+    }
+
+    func testPreAdmissionLivenessWatchdogDoesNotRequireConnectedState() throws {
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private func startRemotePeerLivenessWatchdog(")
+        )
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func markStrictPQCClassicBootstrapOnly(",
+                range: start.lowerBound..<source.endIndex
+            )
+        )
+        let watchdog = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(watchdog.contains("self.currentSessionId == sessionId"))
+        XCTAssertTrue(watchdog.contains("self.session === session"))
+        XCTAssertTrue(watchdog.contains("self.sessionKeys?.sessionId == sessionId"))
+        XCTAssertTrue(watchdog.contains("isAdmissionDeadlineExpired("))
+        XCTAssertTrue(watchdog.contains("reason: \"pairing_material_admission_timeout\""))
+        XCTAssertTrue(watchdog.contains("Date().timeIntervalSince(lastActivityAt) > timeoutSeconds"))
+        XCTAssertFalse(watchdog.contains("case .connected"))
+        let admissionDeadline = try XCTUnwrap(
+            watchdog.range(of: "isAdmissionDeadlineExpired(")
+        )
+        let strictBootstrapDeferral = try XCTUnwrap(
+            watchdog.range(of: "strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)")
+        )
+        XCTAssertLessThan(
+            admissionDeadline.lowerBound,
+            strictBootstrapDeferral.lowerBound,
+            "Strict bootstrap may defer normal app liveness only after pairing-material admission remains deadline-bound."
+        )
     }
 
     func testWebRTCAuthorityCommitFailureTerminatesInsteadOfRetainingPostRekeySession() throws {
@@ -1187,34 +1698,395 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         let body = String(source[start.lowerBound..<end.lowerBound])
 
         XCTAssertTrue(body.contains("await terminateRemoteDesktopSession("))
-        XCTAssertTrue(body.contains("state = .failed(message)"))
-        XCTAssertTrue(body.contains("readiness = .idle"))
+        XCTAssertTrue(body.contains("terminalFailureMessage: message"))
+        XCTAssertFalse(body.contains("state = .failed(message)"))
     }
 
-    private func assertAuthorityCommitPrecedesPublishedSession(
+    @MainActor
+    func testLifecycleGateHasOneTeardownOwnerAndReleasesEveryWaiter() async throws {
+        let gate = CrossNetworkWebRTCLifecycleGate()
+
+        let teardownLease = try XCTUnwrap(gate.beginTeardown())
+        XCTAssertTrue(gate.isTeardownInProgress)
+        XCTAssertNil(gate.beginTeardown())
+
+        var completedWaiters: Set<Int> = []
+        let waiters = (0..<3).map { index in
+            Task { @MainActor in
+                try await gate.waitForTeardownCompletion()
+                completedWaiters.insert(index)
+            }
+        }
+        let registeredEveryWaiter = await waitForLifecycleGateWaiters(3, in: gate)
+        XCTAssertTrue(registeredEveryWaiter)
+        XCTAssertTrue(completedWaiters.isEmpty)
+
+        gate.finishTeardown(teardownLease)
+        for waiter in waiters {
+            try await waiter.value
+        }
+
+        XCTAssertEqual(completedWaiters, Set(0..<3))
+        XCTAssertFalse(gate.isTeardownInProgress)
+    }
+
+    @MainActor
+    func testLifecycleGateWaitReturnsImmediatelyWithoutAnActiveTeardown() async throws {
+        let gate = CrossNetworkWebRTCLifecycleGate()
+
+        try await gate.waitForTeardownCompletion()
+
+        XCTAssertFalse(gate.isTeardownInProgress)
+        let teardownLease = try XCTUnwrap(gate.beginTeardown())
+        gate.finishTeardown(teardownLease)
+    }
+
+    @MainActor
+    func testLifecycleGateWaiterDoesNotCrossASecondTeardownGeneration() async throws {
+        let gate = CrossNetworkWebRTCLifecycleGate()
+        let firstLease = try XCTUnwrap(gate.beginTeardown())
+        var completed = false
+        let waiter = Task { @MainActor in
+            try await gate.waitForTeardownCompletion()
+            completed = true
+        }
+
+        let registeredFirstGeneration = await waitForLifecycleGateWaiters(1, in: gate)
+        XCTAssertTrue(registeredFirstGeneration)
+        gate.finishTeardown(firstLease)
+        let secondLease = try XCTUnwrap(gate.beginTeardown())
+        let registeredSecondGeneration = await waitForLifecycleGateWaiters(1, in: gate)
+        XCTAssertTrue(registeredSecondGeneration)
+        XCTAssertFalse(completed)
+
+        gate.finishTeardown(secondLease)
+        try await waiter.value
+        XCTAssertTrue(completed)
+    }
+
+    @MainActor
+    func testLifecycleGateCancellationRemovesRegisteredWaiter() async throws {
+        let gate = CrossNetworkWebRTCLifecycleGate()
+        let teardownLease = try XCTUnwrap(gate.beginTeardown())
+        let cancellationFinished = expectation(description: "cancelled lifecycle waiter finished")
+        let waiter = Task { @MainActor in
+            defer { cancellationFinished.fulfill() }
+            try await gate.waitForTeardownCompletion()
+        }
+
+        let registeredCancelledWaiter = await waitForLifecycleGateWaiters(1, in: gate)
+        XCTAssertTrue(registeredCancelledWaiter)
+        waiter.cancel()
+        await fulfillment(of: [cancellationFinished], timeout: 1.0)
+        XCTAssertEqual(gate.registeredWaiterCount, 0)
+        gate.finishTeardown(teardownLease)
+        do {
+            try await waiter.value
+            XCTFail("Cancelled lifecycle waiter unexpectedly completed")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Cancelled lifecycle waiter returned unexpected error: \(error)")
+        }
+    }
+
+    @MainActor
+    func testLifecycleGateCancellationBeforeRegistrationDoesNotConsumeCapacity() async throws {
+        let gate = CrossNetworkWebRTCLifecycleGate(maxWaiters: 1)
+        let teardownLease = try XCTUnwrap(gate.beginTeardown())
+        let cancelledWaiter = Task { @MainActor in
+            try await gate.waitForTeardownCompletion()
+        }
+        cancelledWaiter.cancel()
+
+        do {
+            try await cancelledWaiter.value
+            XCTFail("Pre-cancelled lifecycle waiter unexpectedly completed")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Pre-cancelled lifecycle waiter returned unexpected error: \(error)")
+        }
+        XCTAssertEqual(gate.registeredWaiterCount, 0)
+
+        let replacementWaiter = Task { @MainActor in
+            try await gate.waitForTeardownCompletion()
+        }
+        let replacementRegistered = await waitForLifecycleGateWaiters(1, in: gate)
+        XCTAssertTrue(replacementRegistered)
+        gate.finishTeardown(teardownLease)
+        try await replacementWaiter.value
+    }
+
+    @MainActor
+    func testLifecycleGateRejectsWaitersBeyondItsCapacity() async throws {
+        let gate = CrossNetworkWebRTCLifecycleGate(maxWaiters: 1)
+        let teardownLease = try XCTUnwrap(gate.beginTeardown())
+        let firstWaiter = Task { @MainActor in
+            try await gate.waitForTeardownCompletion()
+        }
+        let registeredCapacityWaiter = await waitForLifecycleGateWaiters(1, in: gate)
+        XCTAssertTrue(registeredCapacityWaiter)
+
+        do {
+            try await gate.waitForTeardownCompletion()
+            XCTFail("Lifecycle gate unexpectedly admitted a waiter beyond capacity")
+        } catch let error as CrossNetworkWebRTCLifecycleGate.WaitError {
+            XCTAssertEqual(error, .waiterCapacityExceeded(limit: 1))
+        } catch {
+            XCTFail("Lifecycle gate returned unexpected capacity error: \(error)")
+        }
+
+        gate.finishTeardown(teardownLease)
+        try await firstWaiter.value
+    }
+
+    func testReceiveLoopTeardownJoinCompletesForACancelledCooperativeTask() async {
+        let receiveTask = Task<Void, Never> {}
+        receiveTask.cancel()
+
+        let outcome = await CrossNetworkCancelledTaskTeardownJoiner.joinCancelledTask(
+            receiveTask,
+            timeoutSeconds: 1
+        )
+
+        XCTAssertEqual(outcome, .completed)
+    }
+
+    func testReceiveLoopTeardownJoinQuarantinesAnUncooperativeTaskAtDeadline() async {
+        let gate = CrossNetworkTeardownTestGate()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let receiveTask = Task<Void, Never> {
+            await gate.wait(entered: enteredContinuation)
+        }
+        for await _ in entered {
+            break
+        }
+        receiveTask.cancel()
+
+        let outcome = await CrossNetworkCancelledTaskTeardownJoiner.joinCancelledTask(
+            receiveTask,
+            timeoutSeconds: 0
+        )
+
+        XCTAssertEqual(outcome, .quarantined(.deadlineExceeded))
+        await gate.release()
+        await receiveTask.value
+    }
+
+    @MainActor
+    func testTerminalNotificationDeliveryDoesNotRetainLifecycleAuthority() async throws {
+        let deliveryGate = CrossNetworkTeardownTestGate()
+        let deliveryFinished = CrossNetworkMainActorTestFlag()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let lifecycleGate = CrossNetworkWebRTCLifecycleGate()
+        let teardownLease = try XCTUnwrap(lifecycleGate.beginTeardown())
+
+        let deliveryTask = CrossNetworkTerminalNotificationDispatcher.enqueue {
+            await deliveryGate.wait(entered: enteredContinuation)
+        } didFinish: {
+            deliveryFinished.value = true
+        }
+        for await _ in entered {
+            break
+        }
+        XCTAssertFalse(deliveryFinished.value)
+
+        lifecycleGate.finishTeardown(teardownLease)
+        try await lifecycleGate.waitForTeardownCompletion()
+        XCTAssertFalse(deliveryFinished.value)
+
+        await deliveryGate.release()
+        await deliveryTask.value
+        XCTAssertTrue(deliveryFinished.value)
+    }
+
+    func testTemporaryRegistrationRollbackRemovesOnlyTheExactOwnedValue() {
+        let sessionId = "session-a"
+        var ownedState = [sessionId: "token-a"]
+        CrossNetworkTemporaryRegistrationRollback.removeOwnedValue(
+            from: &ownedState,
+            key: sessionId,
+            ownedValue: "token-a"
+        )
+        XCTAssertNil(ownedState[sessionId])
+
+        var replacementState = [sessionId: "token-b"]
+        CrossNetworkTemporaryRegistrationRollback.removeOwnedValue(
+            from: &replacementState,
+            key: sessionId,
+            ownedValue: "token-a"
+        )
+        XCTAssertEqual(replacementState[sessionId], "token-b")
+    }
+
+    func testExactOwnerRemovalCannotDeleteAReplacementWorker() {
+        let transferID = "transfer-a"
+        var workers = [
+            transferID: CrossNetworkOwnedValue(owner: "worker-b", value: 2)
+        ]
+
+        let staleRemoval = CrossNetworkExactOwnerDictionary.removeValue(
+            from: &workers,
+            key: transferID,
+            expectedOwner: "worker-a",
+            owner: \.owner
+        )
+        XCTAssertNil(staleRemoval)
+        XCTAssertEqual(workers[transferID]?.value, 2)
+
+        let exactRemoval = CrossNetworkExactOwnerDictionary.removeValue(
+            from: &workers,
+            key: transferID,
+            expectedOwner: "worker-b",
+            owner: \.owner
+        )
+        XCTAssertEqual(exactRemoval?.value, 2)
+        XCTAssertNil(workers[transferID])
+    }
+
+    @MainActor
+    func testStaleInboundProgressResumeCannotOverwriteReplacementTransfer() async {
+        let sessionA = "session-a"
+        let lifecycleA = UUID()
+        let ownerA = CrossNetworkWebRTCManager.InboundFileTransferProgressOwner(
+            stateToken: UUID(),
+            lifecycleToken: lifecycleA,
+            sessionID: sessionA,
+            revision: 1
+        )
+        let advancedOwnerA = CrossNetworkWebRTCManager.InboundFileTransferProgressOwner(
+            stateToken: ownerA.stateToken,
+            lifecycleToken: lifecycleA,
+            sessionID: sessionA,
+            revision: 2
+        )
+        let sessionB = "session-b"
+        let lifecycleB = UUID()
+        let ownerB = CrossNetworkWebRTCManager.InboundFileTransferProgressOwner(
+            stateToken: UUID(),
+            lifecycleToken: lifecycleB,
+            sessionID: sessionB,
+            revision: 1
+        )
+        let harness = CrossNetworkProgressResumeHarness(
+            currentOwner: ownerA,
+            activeLifecycleToken: lifecycleA,
+            activeSessionID: sessionA
+        )
+        let suspensionGate = CrossNetworkTeardownTestGate()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let staleResume = Task {
+            await suspensionGate.wait(entered: enteredContinuation)
+            return await harness.resume(
+                expectedOwner: ownerA,
+                replacementOwner: advancedOwnerA
+            )
+        }
+        for await _ in entered {
+            break
+        }
+
+        await harness.replaceSession(
+            currentOwner: ownerB,
+            activeLifecycleToken: lifecycleB,
+            activeSessionID: sessionB
+        )
+        await suspensionGate.release()
+
+        let staleDecision = await staleResume.value
+        let currentOwner = await harness.currentOwner
+        XCTAssertEqual(staleDecision, .discardStaleIO)
+        XCTAssertEqual(currentOwner, ownerB)
+    }
+
+    @MainActor
+    func testSignalingDrainStopsWhenSameSessionIDGetsAReplacementOwner() async {
+        let sessionID = "same-session"
+        let state = CrossNetworkSignalingDrainTestState(currentOwner: "owner-a")
+        let suspensionGate = CrossNetworkTeardownTestGate()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let envelopes = [
+            CrossNetworkSignalingDrainTestEnvelope(sessionID: sessionID, sequence: 1),
+            CrossNetworkSignalingDrainTestEnvelope(sessionID: sessionID, sequence: 2)
+        ]
+
+        let drainTask = Task { @MainActor in
+            await CrossNetworkSignalingEnvelopeDrain.run(
+                envelopes,
+                expectedOwner: "owner-a",
+                expectedSessionID: sessionID,
+                envelopeSessionID: \.sessionID,
+                currentOwner: { state.currentOwner },
+                handle: { envelope, _ in
+                    state.handledSequences.append(envelope.sequence)
+                    if envelope.sequence == 1 {
+                        await suspensionGate.wait(entered: enteredContinuation)
+                    }
+                }
+            )
+        }
+        for await _ in entered {
+            break
+        }
+
+        state.currentOwner = "owner-b"
+        await suspensionGate.release()
+
+        let handledCount = await drainTask.value
+        XCTAssertEqual(handledCount, 1)
+        XCTAssertEqual(state.handledSequences, [1])
+        XCTAssertEqual(state.currentOwner, "owner-b")
+    }
+
+    func testDisconnectCommitsMergedFailureBeforeReleasingLifecycleWaiters() throws {
+        let source = try readRepositorySource(
+            "SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+        )
+        let start = try XCTUnwrap(source.range(of: "private func disconnectInternal("))
+        let end = try XCTUnwrap(
+            source.range(of: "private func rollbackFailedSessionSetup(", range: start.lowerBound..<source.endIndex)
+        )
+        let body = String(source[start.lowerBound..<end.lowerBound])
+
+        XCTAssertTrue(body.contains("pendingDisconnectFailure == nil"))
+        XCTAssertTrue(body.contains("guard let teardownLease = lifecycleGate.beginTeardown() else"))
+        XCTAssertTrue(body.contains("enqueueTerminalNotification(deferredTerminalNotification)"))
+        XCTAssertTrue(body.contains("lifecycleGate.finishTeardown(teardownLease)"))
+        XCTAssertTrue(body.contains("state = .failed(terminalFailure.stateMessage)"))
+        XCTAssertTrue(body.contains("pendingDisconnectFailure = nil"))
+    }
+
+    private func assertOrderedMarkers(
+        _ markers: [String],
         in source: String,
-        sessionKeyNeedle: String,
-        connectedNeedle: String,
-        routeNeedle: String,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        guard let commit = source.range(of: "persistCurrentPathTrust("),
-              let sessionKeys = source.range(of: sessionKeyNeedle),
-              let connected = source.range(of: connectedNeedle),
-              let route = source.range(of: routeNeedle) else {
-            XCTFail("Expected authority commit and publication markers", file: file, line: line)
-            return
+        var searchStart = source.startIndex
+        for marker in markers {
+            guard let range = source.range(
+                of: marker,
+                range: searchStart..<source.endIndex
+            ) else {
+                XCTFail("Missing ordered marker: \(marker)", file: file, line: line)
+                return
+            }
+            searchStart = range.upperBound
         }
-        XCTAssertLessThan(commit.lowerBound, sessionKeys.lowerBound, file: file, line: line)
-        XCTAssertLessThan(commit.lowerBound, connected.lowerBound, file: file, line: line)
-        XCTAssertLessThan(commit.lowerBound, route.lowerBound, file: file, line: line)
-        if let heartbeat = source.range(of: "startRemotePeer") {
-            XCTAssertLessThan(commit.lowerBound, heartbeat.lowerBound, file: file, line: line)
+    }
+
+    @MainActor
+    private func waitForLifecycleGateWaiters(
+        _ expectedCount: Int,
+        in gate: CrossNetworkWebRTCLifecycleGate,
+        timeout: Duration = .seconds(1)
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while gate.registeredWaiterCount != expectedCount {
+            guard clock.now < deadline else { return false }
+            await Task.yield()
         }
-        if let desktopHeartbeat = source.range(of: "startRemoteDesktopHeartbeat()") {
-            XCTAssertLessThan(commit.lowerBound, desktopHeartbeat.lowerBound, file: file, line: line)
-        }
+        return true
     }
 
     private func makeScreenFrameWirePlaintext() -> Data {
@@ -1267,5 +2139,92 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         #else
         return try String(contentsOf: sourceURL, encoding: .utf8)
         #endif
+    }
+}
+
+private actor CrossNetworkTeardownTestGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait(entered: AsyncStream<Void>.Continuation) async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            entered.yield(())
+            entered.finish()
+        }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+@MainActor
+private final class CrossNetworkMainActorTestFlag {
+    var value = false
+}
+
+private struct CrossNetworkOwnedValue {
+    let owner: String
+    let value: Int
+}
+
+private actor CrossNetworkProgressResumeHarness {
+    typealias Owner = CrossNetworkWebRTCManager.InboundFileTransferProgressOwner
+    typealias Decision = CrossNetworkWebRTCManager.InboundFileTransferProgressResumeDecision
+
+    private(set) var currentOwner: Owner
+    private var activeLifecycleToken: UUID
+    private var activeSessionID: String
+
+    init(
+        currentOwner: Owner,
+        activeLifecycleToken: UUID,
+        activeSessionID: String
+    ) {
+        self.currentOwner = currentOwner
+        self.activeLifecycleToken = activeLifecycleToken
+        self.activeSessionID = activeSessionID
+    }
+
+    func replaceSession(
+        currentOwner: Owner,
+        activeLifecycleToken: UUID,
+        activeSessionID: String
+    ) {
+        self.currentOwner = currentOwner
+        self.activeLifecycleToken = activeLifecycleToken
+        self.activeSessionID = activeSessionID
+    }
+
+    func resume(
+        expectedOwner: Owner,
+        replacementOwner: Owner
+    ) -> Decision {
+        let decision = CrossNetworkWebRTCManager.InboundFileTransferProgressResumePolicy.decision(
+            expectedOwner: expectedOwner,
+            currentOwner: currentOwner,
+            activeLifecycleToken: activeLifecycleToken,
+            activeSessionID: activeSessionID
+        )
+        if decision == .resume {
+            currentOwner = replacementOwner
+        }
+        return decision
+    }
+}
+
+private struct CrossNetworkSignalingDrainTestEnvelope {
+    let sessionID: String
+    let sequence: Int
+}
+
+@MainActor
+private final class CrossNetworkSignalingDrainTestState {
+    var currentOwner: String?
+    var handledSequences: [Int] = []
+
+    init(currentOwner: String?) {
+        self.currentOwner = currentOwner
     }
 }

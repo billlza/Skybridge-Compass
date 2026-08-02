@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
-use crate::handshake_wire::{append_u16_le, read_exact, read_u16_le};
+use crate::handshake_wire::{
+    append_u16_le, encode_hpke_sealed_box as encode_shared_hpke_sealed_box, read_exact, read_u16_le,
+};
 use crate::{
     CryptoSuite, ProtocolIdentityBinding, ProtocolSigningAlgorithm, mldsa_verify_detached,
 };
@@ -47,6 +49,8 @@ pub(super) struct DecodedMessageA {
     pub(super) key_shares: BTreeMap<CryptoSuite, Vec<u8>>,
     pub(super) client_nonce: [u8; 32],
     pub(super) transcript_hash_a: [u8; 32],
+    pub(super) initiator_identity_algorithm: ProtocolSigningAlgorithm,
+    pub(super) initiator_identity_public_key: Vec<u8>,
     /// The initiator's advertised `requirePQC` flag, decoded from the MessageA
     /// policy block (previously discarded). `true` => the initiator claims a
     /// PQC-mandatory posture on the wire.
@@ -125,6 +129,8 @@ pub(super) fn decode_message_a(frame: &[u8]) -> Result<DecodedMessageA> {
         key_shares,
         client_nonce,
         transcript_hash_a: transcript_hash_a_bytes,
+        initiator_identity_algorithm: initiator_identity.algorithm,
+        initiator_identity_public_key: initiator_identity.public_key,
         initiator_requires_pqc,
     })
 }
@@ -286,25 +292,5 @@ pub(super) fn encode_hpke_sealed_box(
     ciphertext: &[u8],
     tag: &[u8],
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"HPKE");
-    let version = if nonce.is_empty() && tag.is_empty() {
-        2
-    } else {
-        1
-    };
-    out.push(version);
-    out.push((suite.wire_id & 0xFF) as u8);
-    out.push((suite.wire_id >> 8) as u8);
-    out.extend_from_slice(&[0, 0]);
-    out.push((encapsulated_key.len() & 0xFF) as u8);
-    out.push((encapsulated_key.len() >> 8) as u8);
-    out.push((nonce.len() & 0xFF) as u8);
-    out.push((tag.len() & 0xFF) as u8);
-    out.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    out.extend_from_slice(encapsulated_key);
-    out.extend_from_slice(nonce);
-    out.extend_from_slice(ciphertext);
-    out.extend_from_slice(tag);
-    out
+    encode_shared_hpke_sealed_box(suite.wire_id, encapsulated_key, nonce, ciphertext, tag)
 }

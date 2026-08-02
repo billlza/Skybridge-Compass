@@ -150,8 +150,13 @@ public struct QPeriaptRuntimeSession: Sendable, Equatable {
         decision: QPeriaptPolicyDecision,
         trustRootIdentifier: String,
         trustRootFingerprint: Data
-    ) {
-        precondition(trustRootFingerprint.count == SHA256.byteCount)
+    ) throws {
+        guard trustRootFingerprint.count == SHA256.byteCount else {
+            throw QPeriaptPolicyRuntimeError.invalidVerificationKeyPinLength(
+                actual: trustRootFingerprint.count,
+                expected: SHA256.byteCount
+            )
+        }
         policyVersion = decision.policyVersion
         policyDigest = decision.policyDigest
         self.trustRootIdentifier = trustRootIdentifier
@@ -234,7 +239,7 @@ public actor QPeriaptPolicyRuntime {
         guard committed else {
             throw QPeriaptPolicyRuntimeError.trustedStateChangedConcurrently
         }
-        return QPeriaptRuntimeSession(
+        return try QPeriaptRuntimeSession(
             decision: decision,
             trustRootIdentifier: material.trustRootIdentifier,
             trustRootFingerprint: material.verificationKeySHA256Pin

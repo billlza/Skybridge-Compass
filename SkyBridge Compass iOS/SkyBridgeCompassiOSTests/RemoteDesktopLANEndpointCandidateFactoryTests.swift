@@ -11,14 +11,14 @@ final class RemoteDesktopLANEndpointCandidateFactoryTests: XCTestCase {
             resolvedIP: "169.254.10.20",
             bonjourService: .init(name: "MacBook", domain: "local."),
             activePeerAddress: "10.0.0.42",
-            remoteServiceType: "_skybridge-remote._tcp"
+            remoteServiceType: DiscoveredDevice.remoteControlServiceType
         )
 
         XCTAssertEqual(
             plan.endpoints.map(endpointIdentity),
             [
                 "192.168.1.10:5901",
-                "service:MacBook:_skybridge-remote._tcp:local.",
+                "service:MacBook:\(DiscoveredDevice.remoteControlServiceType):local.",
                 "169.254.10.20:5901",
                 "10.0.0.42:5901"
             ]
@@ -37,7 +37,7 @@ final class RemoteDesktopLANEndpointCandidateFactoryTests: XCTestCase {
             resolvedIP: "192.168.1.10",
             bonjourService: nil,
             activePeerAddress: "192.168.1.10",
-            remoteServiceType: "_skybridge-remote._tcp"
+            remoteServiceType: DiscoveredDevice.remoteControlServiceType
         )
 
         XCTAssertEqual(plan.endpoints.map(endpointIdentity), ["192.168.1.10:5901"])
@@ -51,7 +51,7 @@ final class RemoteDesktopLANEndpointCandidateFactoryTests: XCTestCase {
             resolvedIP: nil,
             bonjourService: nil,
             activePeerAddress: "10.0.0.42",
-            remoteServiceType: "_skybridge-remote._tcp"
+            remoteServiceType: DiscoveredDevice.remoteControlServiceType
         )
 
         XCTAssertTrue(plan.endpoints.isEmpty)
@@ -66,7 +66,7 @@ final class RemoteDesktopLANEndpointCandidateFactoryTests: XCTestCase {
             resolvedIP: nil,
             bonjourService: nil,
             activePeerAddress: nil,
-            remoteServiceType: "_skybridge-remote._tcp"
+            remoteServiceType: DiscoveredDevice.remoteControlServiceType
         )
 
         let endpoint = try! XCTUnwrap(plan.endpoints.first)

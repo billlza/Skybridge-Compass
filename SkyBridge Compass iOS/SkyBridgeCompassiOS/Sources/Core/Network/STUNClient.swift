@@ -9,6 +9,9 @@
 import Foundation
 import Network
 import os
+import enum SkyBridgeProtocolCore.STUNMessageCodec
+import enum SkyBridgeProtocolCore.STUNMessageCodecError
+import struct SkyBridgeProtocolCore.STUNMappedAddress
 
 // MARK: - STUN Result
 

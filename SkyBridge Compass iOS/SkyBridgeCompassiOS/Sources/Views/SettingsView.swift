@@ -670,8 +670,9 @@ struct PQCSecuritySettingsView: View {
                 activeProtocolSigningProtection = committed.protection
                 protocolIdentityRuntimeIsActive = true
                 do {
-                    try await P2PConnectionManager.instance
-                        .refreshAdvertisingAuthorityIfActive(committed.snapshot)
+                    try await refreshLocalProtocolIdentityAdvertisements(
+                        committed.snapshot
+                    )
                     protocolIdentityRequiresExplicitConfirmation = false
                 } catch {
                     protocolIdentityRequiresExplicitConfirmation = true
@@ -686,8 +687,9 @@ struct PQCSecuritySettingsView: View {
                     activeProtocolSigningProtection = committed.protection
                     protocolIdentityRuntimeIsActive = true
                     do {
-                        try await P2PConnectionManager.instance
-                            .refreshAdvertisingAuthorityIfActive(committed.snapshot)
+                        try await refreshLocalProtocolIdentityAdvertisements(
+                            committed.snapshot
+                        )
                     } catch {
                         publicationFailure = error.localizedDescription
                     }
@@ -704,6 +706,35 @@ struct PQCSecuritySettingsView: View {
                     "Protocol signing identity configuration failed: \(error.localizedDescription)"
                 )
             }
+        }
+    }
+
+    @MainActor
+    private func refreshLocalProtocolIdentityAdvertisements(
+        _ authority: ProtocolIdentitySnapshot
+    ) async throws {
+        var failures: [String] = []
+        do {
+            try await P2PConnectionManager.instance
+                .refreshAdvertisingAuthorityIfActive(authority)
+        } catch {
+            failures.append("P2P: \(error.localizedDescription)")
+        }
+        do {
+            try await FileTransferRuntime.shared
+                .refreshAdvertisingAuthorityIfActive(authority)
+        } catch {
+            failures.append("FileTransfer: \(error.localizedDescription)")
+        }
+        guard failures.isEmpty else {
+            throw NSError(
+                domain: "SettingsView.ProtocolIdentityAdvertisement",
+                code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "部分本地身份广播未完成并已撤销对应能力：\(failures.joined(separator: "; "))"
+                ]
+            )
         }
     }
 
@@ -950,7 +981,7 @@ struct TrustedDevicesView: View {
             }
 
             Section("从已发现设备添加") {
-                let candidates = discoveryManager.discoveredDevices.filter { !store.isTrusted(deviceId: $0.id) }
+                let candidates = discoveryManager.discoveredDevices.filter { !$0.isTrusted }
                 if candidates.isEmpty {
                     Text("当前没有可添加的设备")
                         .foregroundColor(.secondary)
@@ -1157,9 +1188,8 @@ struct PerformanceSettingsView: View {
 
                 Picker("剪贴板最大内容大小", selection: $settings.clipboardMaxContentSize) {
                     Text("256 KB").tag(256 * 1024)
-                    Text("1 MB").tag(1 * 1024 * 1024)
-                    Text("5 MB").tag(5 * 1024 * 1024)
-                    Text("10 MB").tag(10 * 1024 * 1024)
+                    Text("512 KB").tag(512 * 1024)
+                    Text("750 KiB").tag(750 * 1024)
                 }
                 .onChange(of: settings.clipboardMaxContentSize) { _, v in
                     clipboard.maxContentSizeBytes = v
@@ -1177,7 +1207,7 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("并发数 / 限速")
             } footer: {
-                Text("限速优先体现在剪贴板：最大大小 + 最小发送间隔。文件传输的带宽限速可以在下一步接入传输层。")
+                Text("内联剪贴板受 P2P 控制帧限制，最大 750 KiB；更大内容请使用文件传输。")
             }
 
             Section {
@@ -1266,11 +1296,16 @@ struct ClipboardSettingsView: View {
                     }
                 )) {
                     Text("256 KB").tag(256 * 1024)
-                    Text("1 MB").tag(1 * 1024 * 1024)
-                    Text("5 MB").tag(5 * 1024 * 1024)
-                    Text("10 MB").tag(10 * 1024 * 1024)
+                    Text("512 KB").tag(512 * 1024)
+                    Text("750 KiB").tag(750 * 1024)
                 }
                 .disabled(!settings.clipboardSyncEnabled)
+
+                if settings.clipboardContentSizeWasMigrated {
+                    Text("旧版的大剪贴板设置已迁移到 750 KiB 安全上限；更大内容请使用文件传输。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
 
                 HStack {
                     Text("状态")

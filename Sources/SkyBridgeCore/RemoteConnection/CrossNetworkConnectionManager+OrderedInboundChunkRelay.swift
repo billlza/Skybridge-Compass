@@ -7,10 +7,16 @@ extension CrossNetworkConnectionManager {
         private let maxPendingOperations: Int
         private let maxPendingBytes: Int
         private var tailTask: Task<Void, Never>?
+        private var tailTaskIdentifier: UUID?
+        private var ownedTasksByIdentifier: [UUID: Task<Void, Never>] = [:]
         private var pendingOperationCount = 0
         private var pendingBytes = 0
-        private var generation: UInt64 = 0
+        private var generation = UUID()
         private var acceptingSubmissions = true
+
+        deinit {
+            cancel()
+        }
 
         init(
             maxPendingOperations: Int = 128,
@@ -30,25 +36,29 @@ extension CrossNetworkConnectionManager {
             byteCount: Int,
             _ operation: @escaping @Sendable () async -> Void
         ) -> Bool {
-            precondition(byteCount >= 0)
             lock.lock()
             guard acceptingSubmissions,
                   byteCount > 0,
                   pendingOperationCount < maxPendingOperations,
                   byteCount <= maxPendingBytes - pendingBytes else {
-                acceptingSubmissions = false
+                let tasksToCancel = transitionToTerminalStateLocked()
                 lock.unlock()
+                for task in tasksToCancel {
+                    task.cancel()
+                }
                 return false
             }
 
             let previous = tailTask
             let submissionGeneration = generation
+            let submissionIdentifier = UUID()
             pendingOperationCount += 1
             pendingBytes += byteCount
             let next = Task { [weak self] in
                 _ = await previous?.result
                 defer {
                     self?.completeSubmission(
+                        identifier: submissionIdentifier,
                         byteCount: byteCount,
                         generation: submissionGeneration
                     )
@@ -57,13 +67,26 @@ extension CrossNetworkConnectionManager {
                 await operation()
             }
             tailTask = next
+            tailTaskIdentifier = submissionIdentifier
+            ownedTasksByIdentifier[submissionIdentifier] = next
             lock.unlock()
             return true
         }
 
-        private func completeSubmission(byteCount: Int, generation completedGeneration: UInt64) {
+        private func completeSubmission(
+            identifier: UUID,
+            byteCount: Int,
+            generation completedGeneration: UUID
+        ) {
             lock.lock()
             defer { lock.unlock() }
+            guard ownedTasksByIdentifier.removeValue(forKey: identifier) != nil else {
+                return
+            }
+            if tailTaskIdentifier == identifier {
+                tailTask = nil
+                tailTaskIdentifier = nil
+            }
             guard generation == completedGeneration else { return }
             pendingOperationCount -= 1
             pendingBytes -= byteCount
@@ -71,14 +94,30 @@ extension CrossNetworkConnectionManager {
 
         func cancel() {
             lock.lock()
-            let task = tailTask
+            let tasksToCancel = transitionToTerminalStateLocked()
+            lock.unlock()
+            for task in tasksToCancel {
+                task.cancel()
+            }
+        }
+
+        var ownedTaskCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return ownedTasksByIdentifier.count
+        }
+
+        /// Caller must hold `lock`. The task registry remains populated until
+        /// each cancelled task actually exits, making uncooperative operations
+        /// observable without allowing them to retain submission authority.
+        private func transitionToTerminalStateLocked() -> [Task<Void, Never>] {
+            acceptingSubmissions = false
             tailTask = nil
-            generation &+= 1
+            tailTaskIdentifier = nil
+            generation = UUID()
             pendingOperationCount = 0
             pendingBytes = 0
-            acceptingSubmissions = false
-            lock.unlock()
-            task?.cancel()
+            return Array(ownedTasksByIdentifier.values)
         }
     }
 }

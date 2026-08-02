@@ -26,12 +26,15 @@ public final class FileTransferListenerService: ObservableObject {
     private let preferredPort: UInt16
     
     private var listener: NWListener?
+    private var pendingListener: NWListener?
+    private var startTask: Task<Void, Error>?
+    private var startTaskToken: UUID?
+    private var listenerGeneration: UInt64 = 0
     private let queue = DispatchQueue(label: "com.skybridge.transfer.listener", qos: .userInitiated)
     
     // Bonjour（用于同网段发现/权限触发；并不强依赖）
-    private let serviceType = "_skybridge-transfer._tcp"
+    private let serviceType = BonjourInteropContract.fileTransferServiceType
     private let serviceDomain = "local."
-    private var netService: NetService?
     public private(set) var activePort: UInt16?
     private var listenerHealthState: ListenerHealthState = .stopped
     private var bonjourPublished = false
@@ -49,34 +52,114 @@ public final class FileTransferListenerService: ObservableObject {
     }
     
     public func start() async throws {
-        guard listener == nil else { return }
+        if listener != nil, listenerHealthState == .ready, bonjourPublished {
+            return
+        }
+        if let startTask {
+            try await startTask.value
+            return
+        }
+        if listener != nil || pendingListener != nil {
+            stopListenerPreservingAcceptedConnections()
+        }
+
+        listenerGeneration &+= 1
+        let generation = listenerGeneration
+        let token = UUID()
         listenerHealthState = .starting
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw POSIXError(.ECANCELED) }
+            try await self.performStart(generation: generation, token: token)
+        }
+        startTask = task
+        startTaskToken = token
+
+        do {
+            try await task.value
+            finishStartTask(token: token)
+        } catch {
+            finishStartTask(token: token)
+            throw error
+        }
+    }
+
+    private func performStart(generation: UInt64, token: UUID) async throws {
+        guard listenerGeneration == generation,
+              startTaskToken == token else {
+            throw POSIXError(.ECANCELED)
+        }
 
         // Resolve the canonical authority before opening or advertising a listener.
         // Publishing a host-name placeholder first lets peers cache a weak identity
         // in the active Bonjour namespace and cannot be repaired reliably in place.
-        let identity: SelfIdentitySnapshot
+        let identity: CanonicalBonjourAdvertisementIdentity
         do {
-            identity = try await SelfIdentityProvider.shared
-                .snapshotEnsuringProtocolDeviceId(allowCreate: true)
-        } catch {
-            listenerHealthState = .failed
-            bonjourPublished = false
-            log.error(
-                "File-transfer listener startup blocked because identity authority is unavailable: \(error.localizedDescription, privacy: .public)"
+            identity = try await CanonicalBonjourAdvertisementIdentityProvider.current(
+                allowCreateDeviceId: true
             )
+        } catch {
+            if listenerGeneration == generation, startTaskToken == token {
+                listenerHealthState = .failed
+                bonjourPublished = false
+                log.error(
+                    "File-transfer listener startup blocked because identity authority is unavailable: \(error.localizedDescription, privacy: .public)"
+                )
+            }
             throw error
+        }
+        try Task.checkCancellation()
+        guard listenerGeneration == generation,
+              startTaskToken == token else {
+            throw POSIXError(.ECANCELED)
         }
 
         let parameters = makeListenerParameters()
-        let (boundListener, boundPort) = try await makeStartedListener(parameters: parameters, preferredPort: preferredPort)
-        listener = boundListener
-        activePort = boundPort
-        ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
-        configureBonjour(on: boundListener, port: boundPort, identity: identity)
+        let boundListener: NWListener
+        let boundPort: UInt16
+        do {
+            (boundListener, boundPort) = try await makeStartedListener(
+                parameters: parameters,
+                preferredPort: preferredPort,
+                identity: identity,
+                generation: generation
+            )
+        } catch {
+            if listenerGeneration == generation, startTaskToken == token {
+                if let pendingListener {
+                    Self.cancelListener(pendingListener)
+                }
+                pendingListener = nil
+                listenerHealthState = .failed
+                bonjourPublished = false
+                ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+            }
+            throw error
+        }
+        try Task.checkCancellation()
+        guard listenerGeneration == generation,
+              startTaskToken == token,
+              listener === boundListener,
+              activePort == boundPort,
+              listenerHealthState == .ready,
+              bonjourPublished else {
+            Self.cancelListener(boundListener)
+            if listener === boundListener {
+                listener = nil
+                activePort = nil
+                listenerHealthState = .failed
+                bonjourPublished = false
+                ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+            }
+            throw POSIXError(.ECANCELED)
+        }
+        log.info("✅ FileTransfer listener and Bonjour registration ready on \(boundPort)")
     }
 
     public func ensureHealthy() async throws {
+        if let startTask {
+            try await startTask.value
+            return
+        }
         let registryPort = ServiceEndpointRegistry.shared.snapshot().fileTransferPort
         let needsRestart = listener == nil
             || activePort == nil
@@ -90,7 +173,7 @@ public final class FileTransferListenerService: ObservableObject {
             log.warning(
                 "⚠️ FileTransfer listener unhealthy, restarting: state=\(String(describing: self.listenerHealthState), privacy: .public) activePort=\(self.activePort.map(String.init) ?? "-", privacy: .private) registryPort=\(registryPort.map(String.init) ?? "-", privacy: .private) bonjour=\(self.bonjourPublished, privacy: .public)"
             )
-            stop()
+            stopListenerPreservingAcceptedConnections()
             try await start()
             return
         }
@@ -106,7 +189,7 @@ public final class FileTransferListenerService: ObservableObject {
     private func makeListenerParameters() -> NWParameters {
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        parameters.includePeerToPeer = false
+        parameters.includePeerToPeer = true
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.enableKeepalive = true
             tcp.keepaliveIdle = 30
@@ -132,7 +215,7 @@ public final class FileTransferListenerService: ObservableObject {
         log.warning(
             "♻️ FileTransfer 首选端口恢复可用，正在从回退监听器迁回: preferred=\(self.preferredPort, privacy: .private) current=\(currentPort, privacy: .private)"
         )
-        stop()
+        stopListenerPreservingAcceptedConnections()
         do {
             try await start()
         } catch {
@@ -186,16 +269,7 @@ public final class FileTransferListenerService: ObservableObject {
     }
     
     public func stop() {
-        if let listener {
-            Self.cancelListener(listener)
-        }
-        listener = nil
-        activePort = nil
-        listenerHealthState = .stopped
-        bonjourPublished = false
-        ServiceEndpointRegistry.shared.setFileTransferPort(nil)
-        netService?.stop()
-        netService = nil
+        stopListenerPreservingAcceptedConnections()
         for task in inboundTasks.values {
             task.cancel()
         }
@@ -207,124 +281,123 @@ public final class FileTransferListenerService: ObservableObject {
         inboundConnections.removeAll()
         inboundAdmission.removeAll()
     }
+
+    private func stopListenerPreservingAcceptedConnections() {
+        listenerGeneration &+= 1
+        startTask?.cancel()
+        startTask = nil
+        startTaskToken = nil
+        if let pendingListener {
+            pendingListener.newConnectionHandler = nil
+            pendingListener.serviceRegistrationUpdateHandler = nil
+            pendingListener.cancel()
+        }
+        pendingListener = nil
+        if let listener {
+            Self.cancelListener(listener)
+        }
+        listener = nil
+        activePort = nil
+        listenerHealthState = .stopped
+        bonjourPublished = false
+        ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+    }
     
-    /// Prefer advertising via `NWListener.service` (Network.framework) so iOS `NWBrowser` sees it reliably.
-    /// We still keep a NetService fallback for older stacks / debugging.
     private func configureBonjour(
         on listener: NWListener,
-        port: UInt16,
-        identity: SelfIdentitySnapshot
-    ) {
-        let serviceName = Host.current().localizedName ?? "Mac"
-        var txt = NWTXTRecord()
-        txt["platform"] = "macos"
-        txt["osVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
-        txt["name"] = serviceName
-        txt["model"] = "Mac"
-        txt["deviceId"] = identity.deviceId
-        txt["uniqueId"] = identity.deviceId
-        txt["pubKeyFP"] = identity.pubKeyFP
-        BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &txt, port: port)
-        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &txt)
-        // Mirror the exact same authority tuple for the NetService compatibility publisher.
-        let txtData = makeNetServiceTXTData(
-            serviceName: serviceName,
+        identity: CanonicalBonjourAdvertisementIdentity
+    ) throws {
+        let serviceName = LocalHostName.localizedName ?? "Mac"
+        let txt = try BonjourInteropContract.makeCanonicalAdvertisementTXT(
             deviceId: identity.deviceId,
-            pubKeyFP: identity.pubKeyFP,
-            port: port
+            pubKeyFingerprint: identity.protocolPublicKeyFingerprint,
+            platform: .macOS,
+            role: .dedicatedService
         )
-        
         listener.service = NWListener.Service(name: serviceName, type: serviceType, domain: serviceDomain, txtRecord: txt)
-        bonjourPublished = true
-        log.info("📡 NWListener.service advertised \(self.serviceType) port=\(port)")
-        
-        // Fallback NetService (optional)
-        publishBonjourFallback(serviceName: serviceName, txtData: txtData, port: port)
     }
     
-    private func publishBonjourFallback(serviceName: String, txtData: [String: Data], port: UInt16) {
-        netService?.stop()
-        netService = NetService(domain: serviceDomain, type: serviceType, name: serviceName, port: Int32(port))
-
-        netService?.setTXTRecord(NetService.data(fromTXTRecord: txtData))
-        netService?.publish()
-        bonjourPublished = true
-        log.info("📡 NetService fallback published \(self.serviceType) port=\(port)")
-    }
-    
-    private func makeNetServiceTXTData(
-        serviceName: String,
-        deviceId: String,
-        pubKeyFP: String,
-        port: UInt16
-    ) -> [String: Data] {
-        var d: [String: Data] = [
-            "platform": Data("macos".utf8),
-            "osVersion": Data(ProcessInfo.processInfo.operatingSystemVersionString.utf8),
-            "name": Data(serviceName.utf8),
-            "model": Data("Mac".utf8)
-        ]
-        BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &d, port: port)
-        d["deviceId"] = Data(deviceId.utf8)
-        d["uniqueId"] = Data(deviceId.utf8)
-        d["pubKeyFP"] = Data(pubKeyFP.utf8)
-        LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &d)
-        return d
-    }
-
     private func makeStartedListener(
         parameters: NWParameters,
-        preferredPort: UInt16
+        preferredPort: UInt16,
+        identity: CanonicalBonjourAdvertisementIdentity,
+        generation: UInt64
     ) async throws -> (NWListener, UInt16) {
         do {
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port.validated(preferredPort))
-            let port = try await start(listener: listener)
+            pendingListener = listener
+            try configureBonjour(on: listener, identity: identity)
+            let port = try await start(listener: listener, generation: generation)
             return (listener, port)
         } catch {
             guard isAddressInUse(error) else { throw error }
+            guard listenerGeneration == generation, !Task.isCancelled else {
+                throw POSIXError(.ECANCELED)
+            }
             log.warning("⚠️ FileTransfer preferred port \(preferredPort) busy, falling back to dynamic port")
             let listener = try NWListener(using: parameters)
-            let port = try await start(listener: listener)
+            pendingListener = listener
+            try configureBonjour(on: listener, identity: identity)
+            let port = try await start(listener: listener, generation: generation)
             return (listener, port)
         }
     }
 
-    private func start(listener: NWListener) async throws -> UInt16 {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
-            let startupGate = NetworkListenerStartupGate()
+    private func start(listener: NWListener, generation: UInt64) async throws -> UInt16 {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UInt16, Error>) in
+                let startupGate = BonjourRegistrationReadinessGate()
 
-            listener.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
-                Task { @MainActor in
+                listener.stateUpdateHandler = { [weak self] state in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation,
+                              self.pendingListener === listener || self.listener === listener else {
+                            if startupGate.observeTerminal() == .completesStartup {
+                                Self.cancelListener(listener)
+                                continuation.resume(throwing: POSIXError(.ECANCELED))
+                            }
+                            return
+                        }
                     switch state {
                     case .ready:
                         let boundPort = listener.port?.rawValue ?? 0
                         guard boundPort > 0 else {
-                            guard startupGate.observe(.failed) == .completesStartup else { return }
+                            guard startupGate.observeTerminal() == .completesStartup else { return }
                             Self.cancelListener(listener)
                             self.listenerHealthState = .failed
-                            self.activePort = nil
                             self.bonjourPublished = false
                             ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                             self.log.error("FileTransfer listener became ready without a bound port")
                             continuation.resume(throwing: POSIXError(.EADDRNOTAVAIL))
                             return
                         }
-                        let observation = startupGate.observe(.ready)
-                        guard observation != .ignored else { return }
-                        self.listenerHealthState = .ready
-                        self.activePort = boundPort
-                        ServiceEndpointRegistry.shared.setFileTransferPort(boundPort)
-                        self.log.info("✅ FileTransfer listener ready on \(boundPort)")
+                        let observation = startupGate.observeSocketReady()
                         if observation == .completesStartup {
+                            guard self.commitListenerStartup(
+                                listener,
+                                generation: generation,
+                                port: boundPort
+                            ) else {
+                                Self.cancelListener(listener)
+                                continuation.resume(throwing: POSIXError(.ECANCELED))
+                                return
+                            }
                             continuation.resume(returning: boundPort)
+                        } else if observation == .runtimeReady {
+                            self.listenerHealthState = .ready
+                            self.bonjourPublished = true
+                            ServiceEndpointRegistry.shared.setFileTransferPort(self.activePort)
                         }
                     case .failed(let error):
-                        let observation = startupGate.observe(.failed)
-                        guard observation != .ignored else { return }
+                        let observation = startupGate.observeTerminal()
                         Self.cancelListener(listener)
+                        if self.pendingListener === listener { self.pendingListener = nil }
+                        if self.listener === listener {
+                            self.listener = nil
+                            self.activePort = nil
+                        }
                         self.listenerHealthState = .failed
-                        self.activePort = nil
                         self.bonjourPublished = false
                         ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         self.log.error("❌ FileTransfer listener failed: \(String(describing: error))")
@@ -332,16 +405,26 @@ public final class FileTransferListenerService: ObservableObject {
                             continuation.resume(throwing: error)
                         }
                     case .cancelled:
-                        let observation = startupGate.observe(.cancelled)
-                        guard observation != .ignored else { return }
+                        let observation = startupGate.observeTerminal()
                         Self.clearListenerHandlers(listener)
+                        if self.pendingListener === listener { self.pendingListener = nil }
+                        if self.listener === listener {
+                            self.listener = nil
+                            self.activePort = nil
+                        }
                         self.listenerHealthState = .cancelled
-                        self.activePort = nil
                         self.bonjourPublished = false
                         ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         self.log.info("⏹️ FileTransfer listener cancelled")
                         if observation == .completesStartup {
                             continuation.resume(throwing: POSIXError(.ECANCELED))
+                        }
+                    case .waiting:
+                        _ = startupGate.observeSocketUnavailable()
+                        if self.listener === listener {
+                            self.listenerHealthState = .starting
+                            self.bonjourPublished = false
+                            ServiceEndpointRegistry.shared.setFileTransferPort(nil)
                         }
                     default:
                         break
@@ -349,39 +432,128 @@ public final class FileTransferListenerService: ObservableObject {
                 }
             }
 
-            listener.newConnectionHandler = { [weak self] connection in
-                Task { @MainActor in
-                    self?.handleIncoming(connection)
-                }
-            }
+                listener.serviceRegistrationUpdateHandler = { [weak self] change in
+                    guard let self else { return }
+                    Task { @MainActor in
+                        guard self.listenerGeneration == generation,
+                              self.pendingListener === listener || self.listener === listener else {
+                            if startupGate.observeTerminal() == .completesStartup {
+                                Self.cancelListener(listener)
+                                continuation.resume(throwing: POSIXError(.ECANCELED))
+                            }
+                            return
+                        }
+                        let observation: BonjourRegistrationReadinessGate.Observation
+                        switch change {
+                        case .add(let endpoint):
+                            observation = startupGate.observeRegistrationAdded(
+                                endpoint.debugDescription
+                            )
+                        case .remove(let endpoint):
+                            observation = startupGate.observeRegistrationRemoved(
+                                endpoint.debugDescription
+                            )
+                        @unknown default:
+                            Self.cancelListener(listener)
+                            if startupGate.observeTerminal() == .completesStartup {
+                                continuation.resume(throwing: POSIXError(.EPROTO))
+                            }
+                            return
+                        }
 
-            listener.start(queue: queue)
-            Task { @MainActor [weak self] in
-                do {
-                    try await Task.sleep(for: Self.listenerStartTimeout)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard startupGate.observe(.failed) == .completesStartup else { return }
+                    switch observation {
+                    case .completesStartup:
+                        guard let port = listener.port?.rawValue, port > 0 else {
+                                Self.cancelListener(listener)
+                                continuation.resume(throwing: POSIXError(.EADDRNOTAVAIL))
+                            return
+                        }
+                        guard self.commitListenerStartup(
+                            listener,
+                            generation: generation,
+                            port: port
+                        ) else {
+                            Self.cancelListener(listener)
+                            continuation.resume(throwing: POSIXError(.ECANCELED))
+                            return
+                        }
+                        continuation.resume(returning: port)
+                        case .runtimeReady:
+                            self.listenerHealthState = .ready
+                            self.bonjourPublished = true
+                            ServiceEndpointRegistry.shared.setFileTransferPort(self.activePort)
+                        case .runtimeDegraded:
+                            self.listenerHealthState = .starting
+                            self.bonjourPublished = false
+                            ServiceEndpointRegistry.shared.setFileTransferPort(nil)
+                            self.log.warning("⚠️ FileTransfer Bonjour registration removed")
+                        case .pending, .runtimeTerminal, .ignored:
+                            break
+                        }
+                    }
+                }
+
+                listener.newConnectionHandler = { [weak self] connection in
+                    Task { @MainActor in
+                        guard let self,
+                              self.listenerGeneration == generation,
+                              self.listener === listener,
+                              self.bonjourPublished else {
+                            Self.clearConnectionHandlers(connection)
+                            connection.cancel()
+                            return
+                        }
+                        self.handleIncoming(connection)
+                    }
+                }
+
+                listener.start(queue: queue)
+                Task { @MainActor [weak self] in
+                    do {
+                        try await Task.sleep(for: Self.listenerStartTimeout)
+                    } catch {
+                        return
+                    }
+                    guard startupGate.claimTimeout() else { return }
                     Self.cancelListener(listener)
+                    if self?.pendingListener === listener {
+                        self?.pendingListener = nil
+                    }
                     self?.listenerHealthState = .failed
-                    self?.activePort = nil
                     self?.bonjourPublished = false
                     ServiceEndpointRegistry.shared.setFileTransferPort(nil)
-                    self?.log.error("FileTransfer listener timeout task failed: \(String(describing: error))")
-                    continuation.resume(throwing: error)
-                    return
+                    self?.log.error("FileTransfer listener or Bonjour registration timed out")
+                    continuation.resume(throwing: POSIXError(.ETIMEDOUT))
                 }
-                guard startupGate.claimTimeout() else { return }
-                Self.cancelListener(listener)
-                self?.listenerHealthState = .failed
-                self?.activePort = nil
-                self?.bonjourPublished = false
-                ServiceEndpointRegistry.shared.setFileTransferPort(nil)
-                self?.log.error("FileTransfer listener start timed out")
-                continuation.resume(throwing: POSIXError(.ETIMEDOUT))
             }
+        } onCancel: {
+            listener.cancel()
         }
+    }
+
+    private func commitListenerStartup(
+        _ candidate: NWListener,
+        generation: UInt64,
+        port: UInt16
+    ) -> Bool {
+        guard listenerGeneration == generation,
+              pendingListener === candidate,
+              port > 0 else {
+            return false
+        }
+        pendingListener = nil
+        listener = candidate
+        activePort = port
+        listenerHealthState = .ready
+        bonjourPublished = true
+        ServiceEndpointRegistry.shared.setFileTransferPort(port)
+        return true
+    }
+
+    private func finishStartTask(token: UUID) {
+        guard startTaskToken == token else { return }
+        startTask = nil
+        startTaskToken = nil
     }
 
     private func isAddressInUse(_ error: Error) -> Bool {
@@ -536,6 +708,7 @@ public final class FileTransferListenerService: ObservableObject {
 
     private nonisolated static func clearListenerHandlers(_ listener: NWListener) {
         listener.stateUpdateHandler = nil
+        listener.serviceRegistrationUpdateHandler = nil
         listener.newConnectionHandler = nil
     }
 
@@ -586,6 +759,10 @@ public final class FileTransferListenerService: ObservableObject {
             return "mac_receive_file_secure_session_required"
         case .securityThreatDetected:
             return "mac_receive_file_security_threat_detected"
+        case .securityScanReviewRequired:
+            return "mac_receive_file_security_scan_review_required"
+        case .securityScanIncomplete:
+            return "mac_receive_file_security_scan_incomplete"
         case .partialFileCleanupFailed:
             return "mac_receive_file_partial_cleanup_failed"
         case .sourceFileCloseFailed:

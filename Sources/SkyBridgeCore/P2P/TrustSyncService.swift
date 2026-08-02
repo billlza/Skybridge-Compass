@@ -2360,7 +2360,7 @@ public final class TrustSyncService: ObservableObject {
         usesInMemoryPersistenceForTesting = enabled
     }
 
-    func removeRecordsForTesting(deviceIds: [String]) async {
+    func removeRecordsForTesting(deviceIds: [String]) async throws {
         let normalizedDeviceIds = Set(
             deviceIds
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -2370,11 +2370,7 @@ public final class TrustSyncService: ObservableObject {
         guard !normalizedDeviceIds.isEmpty else { return }
 
         for deviceId in normalizedDeviceIds {
-            do {
-                try deleteFromKeychain(deviceId: deviceId)
-            } catch {
-                preconditionFailure("failed to remove trust record for testing: \(error)")
-            }
+            try deleteFromKeychain(deviceId: deviceId)
             localCache.removeValue(forKey: deviceId)
         }
 

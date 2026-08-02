@@ -509,7 +509,21 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("session.connection.cancel()"))
         XCTAssertTrue(source.contains("await session.task?.value"))
         XCTAssertTrue(source.contains("await runSession()"))
-        XCTAssertTrue(source.contains("await ClassicTransferSessionRegistry.shared.remove(sessionId: classicTransferSessionId)"))
+        let sessionReturn = try XCTUnwrap(source.range(of: "await runSession()"))
+        let terminalCancel = try XCTUnwrap(
+            source.range(
+                of: "connection.cancel()",
+                range: sessionReturn.upperBound..<source.endIndex
+            )
+        )
+        let registryRemoval = try XCTUnwrap(
+            source.range(
+                of: "self.removeInboundControlSession(id: inboundControlSessionId)",
+                range: terminalCancel.upperBound..<source.endIndex
+            )
+        )
+        XCTAssertLessThan(terminalCancel.lowerBound, registryRemoval.lowerBound)
+        XCTAssertTrue(source.contains("ClassicTransferSessionRegistry.shared.remove(\n                ifOwned: classicTransferSessionLease"))
         XCTAssertTrue(source.contains("self.removeInboundControlSession(id: inboundControlSessionId)"))
     }
 
@@ -532,8 +546,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             name: "Lza iPhone",
             ipv4: "10.0.0.42",
             ipv6: nil,
-            services: ["_skybridge-transfer._tcp"],
-            portMap: ["_skybridge-transfer._tcp": 8080],
+            services: [BonjourInteropContract.fileTransferServiceType],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 8080],
             connectionTypes: [.wifi],
             uniqueIdentifier: "bonjour:Lza iPhone@local.",
             source: .skybridgeBonjour
@@ -569,8 +583,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             name: "Other iPad",
             ipv4: "10.0.0.77",
             ipv6: nil,
-            services: ["_skybridge-transfer._tcp"],
-            portMap: ["_skybridge-transfer._tcp": 8080],
+            services: [BonjourInteropContract.fileTransferServiceType],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 8080],
             connectionTypes: [.wifi],
             uniqueIdentifier: "bonjour:Other iPad@local.",
             source: .skybridgeBonjour
@@ -605,8 +619,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             name: "Other iPad",
             ipv4: "10.0.0.77",
             ipv6: nil,
-            services: ["_skybridge-transfer._tcp"],
-            portMap: ["_skybridge-transfer._tcp": 8080],
+            services: [BonjourInteropContract.fileTransferServiceType],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 8080],
             connectionTypes: [.wifi],
             uniqueIdentifier: "bonjour:Other iPad@local.",
             source: .skybridgeBonjour
@@ -628,8 +642,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             name: "iPad",
             ipv4: "10.0.0.77",
             ipv6: nil,
-            services: ["_skybridge-transfer._tcp"],
-            portMap: ["_skybridge-transfer._tcp": 8080],
+            services: [BonjourInteropContract.fileTransferServiceType],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 8080],
             connectionTypes: [.wifi],
             uniqueIdentifier: "bonjour:iPad@local.",
             source: .skybridgeBonjour
@@ -720,11 +734,15 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(p2pSource.contains("NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)"))
-        XCTAssertTrue(discoverySource.contains("NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)"))
-        XCTAssertTrue(optimizedDiscoverySource.contains("NWBrowser.Descriptor.bonjourWithTXTRecord(type: serviceType, domain: serviceDomain)"))
-        XCTAssertFalse(
-            p2pSource.contains("NWBrowser.Descriptor.bonjour(type: serviceType, domain: serviceDomain)"),
+        let p2pTXTDescriptor = #"NWBrowser\.Descriptor\.bonjourWithTXTRecord\(\s*type:\s*lease\.serviceType,\s*domain:\s*serviceDomain\s*\)"#
+        let managerTXTDescriptor = #"NWBrowser\.Descriptor\.bonjourWithTXTRecord\(\s*type:\s*serviceType,\s*domain:\s*serviceDomain\s*\)"#
+        let p2pMetadataDroppingDescriptor = #"NWBrowser\.Descriptor\.bonjour\(\s*type:\s*(?:lease\.)?serviceType,\s*domain:\s*serviceDomain\s*\)"#
+
+        XCTAssertNotNil(p2pSource.range(of: p2pTXTDescriptor, options: .regularExpression))
+        XCTAssertNotNil(discoverySource.range(of: managerTXTDescriptor, options: .regularExpression))
+        XCTAssertNotNil(optimizedDiscoverySource.range(of: managerTXTDescriptor, options: .regularExpression))
+        XCTAssertNil(
+            p2pSource.range(of: p2pMetadataDroppingDescriptor, options: .regularExpression),
             "P2P discovery parses TXT deviceId/transferPort, so the browser must request TXT metadata."
         )
     }
@@ -741,10 +759,13 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let authenticateStart = try XCTUnwrap(source.range(of: "public func authenticate() async throws"))
         let startMetrics = try XCTUnwrap(source.range(of: "startMetricsIfNeeded()", range: authenticateStart.lowerBound..<source.endIndex))
         let authenticateBody = String(source[authenticateStart.lowerBound..<startMetrics.upperBound])
-        let publishRange = try XCTUnwrap(authenticateBody.range(of: "await publishAuthenticatedPresence(keys: keys)"))
+        let publishRange = try XCTUnwrap(
+            authenticateBody.range(of: "try await publishAuthenticatedPresence(")
+        )
         let pairingRange = try XCTUnwrap(authenticateBody.range(of: "schedulePostAuthPairingIdentityExchange()"))
 
         XCTAssertLessThan(publishRange.lowerBound, pairingRange.lowerBound)
+        XCTAssertTrue(authenticateBody.contains("operationOwner: receipt.owner"))
         XCTAssertFalse(authenticateBody.contains("await publishClassicTransferSessionSnapshot(keys: keys)"))
 
         let scheduleStart = try XCTUnwrap(source.range(of: "private func schedulePostAuthPairingIdentityExchange()"))
@@ -837,16 +858,26 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("stage: \"connect_no_endpoint_candidates\""))
         XCTAssertTrue(source.contains("stage: \"\\(stage)_connection_closed\""))
 
-        let invalidPayloadStart = try XCTUnwrap(
-            p2pSource.range(of: "guard let payload = payload.normalizedBootstrapPayload else {")
+        let handlerStart = try XCTUnwrap(
+            p2pSource.range(of: "private func handlePairingIdentityExchangeRequest(")
         )
-        let invalidPayloadEnd = try XCTUnwrap(
-            p2pSource.range(of: "let declaredDeviceId = payload.deviceId", range: invalidPayloadStart.lowerBound..<p2pSource.endIndex)
+        let handlerEnd = try XCTUnwrap(
+            p2pSource.range(
+                of: "private func scheduleBootstrapRekeyIfNeeded(",
+                range: handlerStart.upperBound..<p2pSource.endIndex
+            )
         )
-        let invalidPayloadBlock = String(p2pSource[invalidPayloadStart.lowerBound..<invalidPayloadEnd.lowerBound])
+        let handler = String(p2pSource[handlerStart.lowerBound..<handlerEnd.lowerBound])
+        let authorityAdmission = try XCTUnwrap(
+            handler.range(of: "AuthenticatedPairingIdentityAuthorityValidator.issue(")
+        )
+        let pendingPromptPublication = try XCTUnwrap(
+            handler.range(of: "pendingPairingContextByRequestId[requestId] =")
+        )
+        XCTAssertLessThan(authorityAdmission.lowerBound, pendingPromptPublication.lowerBound)
         XCTAssertFalse(
-            invalidPayloadBlock.contains("lastPairingIdentityExchangeReceivedAt"),
-            "Malformed pairingIdentityExchange frames must not confirm the classic file-transfer identity bridge."
+            handler.contains("lastPairingIdentityExchangeReceivedAt"),
+            "Only the durable exact-session acceptance path may confirm the classic file-transfer identity bridge."
         )
     }
 
@@ -961,7 +992,11 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(macSource.contains("let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock"))
         XCTAssertTrue(macSource.contains("sendPairingIdentityExchange(force: shouldForceIdentityReply)"))
         XCTAssertTrue(iOSSource.contains("lastAcceptedPairingIdentityDeviceIdByPeerId"))
-        XCTAssertTrue(iOSSource.contains("if !shouldForceIdentityReply,"))
+        XCTAssertTrue(iOSSource.contains("let hasRecentReplyForCurrentSession = !shouldForceIdentityReply"))
+        XCTAssertTrue(iOSSource.contains("$0.connectionGeneration == expectedConnectionGeneration"))
+        XCTAssertTrue(iOSSource.contains("$0.sessionId == expectedSessionId"))
+        XCTAssertTrue(iOSSource.contains("$0.acceptedMaterialDigest == acceptedMaterialDigest"))
+        XCTAssertTrue(iOSSource.contains("if !hasRecentReplyForCurrentSession {"))
     }
 
     func testMacInboundPairingIdentityReplyPrecedesTrustPersistence() throws {
@@ -980,7 +1015,9 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         let persistRange = try XCTUnwrap(handler.range(of: "await persistAuthenticatedRemoteAuthority"))
 
         XCTAssertLessThan(replyRange.lowerBound, persistRange.lowerBound)
-        XCTAssertTrue(handler.contains("isPairingIdentityBoundToAuthenticatedAuthority(payload)"))
+        XCTAssertTrue(
+            handler.contains("guard let validatedAuthority = await validatedPairingIdentityAuthority(payload)")
+        )
         XCTAssertTrue(handler.contains("persistedPolicyDecision(for: request)"))
         XCTAssertTrue(handler.contains("pairingIdentityExchange accepted on authenticated protocol-identity channel"))
         XCTAssertTrue(source.contains("protocolIdentityPublicKeys = try await Self.localProtocolIdentityPublicKeysForPairing()"))
@@ -1191,8 +1228,12 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
         for file in files {
             let source = try String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)
+            let usesBytewiseNetworkOrderDecode =
+                file == "Sources/SkyBridgeCore/P2P/P2PModels.swift"
+                && source.contains("for b in data[tsStart..<tsEnd]")
+                && source.contains("timestampNs = (timestampNs << 8) | UInt64(b)")
             XCTAssertTrue(
-                source.contains("loadUnaligned"),
+                source.contains("loadUnaligned") || usesBytewiseNetworkOrderDecode,
                 "\(file) must parse network byte headers without alignment traps."
             )
         }
@@ -1229,11 +1270,28 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(source.contains("P2P receive loop ended; tearing down authenticated session"))
+        XCTAssertTrue(source.contains("P2P receive loop ended; tearing down exact connection owner"))
         XCTAssertTrue(
-            source.contains("self.disconnect()"),
-            "Receive-loop EOF/errors must run the same cleanup as explicit disconnect so presence, unified status, and transfer session registry cannot retain stale routes."
+            source.contains("disconnectIfOwnedReceiveLease("),
+            "Receive-loop EOF/errors must close only their exact receive lease."
         )
+        let closeStart = try XCTUnwrap(
+            source.range(of: "private func disconnectIfOwnedReceiveLease(")
+        )
+        let closeEnd = try XCTUnwrap(
+            source.range(
+                of: "private func handleInboundFrame(",
+                range: closeStart.upperBound..<source.endIndex
+            )
+        )
+        let closeBody = String(source[closeStart.lowerBound..<closeEnd.lowerBound])
+        let leaseCheck = try XCTUnwrap(closeBody.range(of: "state?.id == id"))
+        let generationCheck = try XCTUnwrap(
+            closeBody.range(of: "$0.ownsConnectionGeneration(connectionGeneration)")
+        )
+        let disconnect = try XCTUnwrap(closeBody.range(of: "disconnect()"))
+        XCTAssertLessThan(leaseCheck.lowerBound, disconnect.lowerBound)
+        XCTAssertLessThan(generationCheck.lowerBound, disconnect.lowerBound)
     }
 
     func testIOSStrictInboundReconnectUsesAuthenticatedEstablishedReplacement() throws {
@@ -1252,7 +1310,8 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
         XCTAssertTrue(manager.contains("authenticatedIncomingEstablishedPolicy: strictTrustContext == nil"))
         XCTAssertTrue(manager.contains(": .replaceAuthenticated"))
-        XCTAssertTrue(manager.contains("strictInboundStablePeerIdByRuntimePeerId[peerId] = context.stablePeerId"))
+        XCTAssertTrue(manager.contains("if let stablePeerId = strictTrustContext?.stablePeerId {"))
+        XCTAssertTrue(manager.contains("strictInboundStablePeerIdByRuntimePeerId[peerId] = stablePeerId"))
         XCTAssertTrue(manager.contains("replaceStrictInboundStableSession("))
         XCTAssertTrue(driver.contains("case acceptAndReplaceEstablished"))
         XCTAssertTrue(driver.contains("establishedPolicy: authenticatedIncomingEstablishedPolicy"))
@@ -1268,11 +1327,13 @@ final class FileTransferRouteResolutionTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(source.contains("connection: NWConnection? = nil"))
-        XCTAssertTrue(source.contains("if let connection, !isTrackedConnection(connection)"))
+        XCTAssertTrue(source.contains("lease: P2PConnectionLease<NWConnection>"))
+        XCTAssertTrue(source.contains("guard connections.isCurrent(lease, for: runtimePeerId) else"))
         XCTAssertTrue(source.contains("stale-state-ignored"))
-        XCTAssertTrue(source.contains("handleConnectionStateChange(state, for: device, connection: connection)"))
-        XCTAssertTrue(source.contains("connections.values.contains { $0 === connection }"))
+        XCTAssertTrue(source.contains("handleConnectionStateChange(state, for: device, lease: lease)"))
+        XCTAssertTrue(source.contains("current.generation == lease.generation"))
+        XCTAssertTrue(source.contains("&& current.connection === lease.connection"))
+        XCTAssertTrue(source.contains("guard connections.removeIfOwned(lease, for: runtimePeerId) != nil else"))
     }
 
     func testIOSFileTransferInboundMetadataFailuresFailClosed() throws {

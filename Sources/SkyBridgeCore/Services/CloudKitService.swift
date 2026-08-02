@@ -1,3 +1,13 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// This type is cross-platform in nature, but the iOS app currently ships its own
+// parallel implementation (CloudKitSyncManager). Phase 0 of the iOS/SkyBridgeCore unification only
+// makes the core *compile* for iOS; adopting it on iOS is a later, deliberate migration
+// per type. Excluding it here avoids standing up a second implementation inside one
+// binary. The remaining macOS-only pieces are AppKit-based and must be replaced with
+// platform-neutral equivalents as part of that migration.
+// Tracked in Docs/background-wake-capability-ledger.md.
+#if os(macOS)
 import Foundation
 import CloudKit
 import Combine
@@ -33,7 +43,15 @@ public final class CloudKitService: CloudDeviceService {
  // 常量
     private let zoneName = "SkyBridgeDeviceZone"
     private let recordType = "SBDevice"
-    private let subscriptionID = "skybridge-device-changes"
+
+    /// Subscription id this service owns.
+    ///
+    /// Exposed so `RemoteNotificationRouter` can recognize silent pushes for it. It is the only
+    /// identifier that authorizes a background refresh, so it must stay in sync with the
+    /// `CKRecordZoneSubscription` created in `subscribeToZoneChanges()`.
+    public nonisolated static let deviceChangesSubscriptionID = "skybridge-device-changes"
+
+    private var subscriptionID: String { Self.deviceChangesSubscriptionID }
 
  // CloudKit 可用性（仅用于快速判断容器是否存在）
     public var isAvailable: Bool { container != nil }
@@ -68,6 +86,53 @@ public final class CloudKitService: CloudDeviceService {
 
     private var heartbeatTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
+
+    private struct ZoneRefreshSummary: Sendable {
+        let changedRecordCount: Int
+        let deletedRecordCount: Int
+        let producedNewData: Bool
+    }
+
+    private struct ZoneRefreshOperation {
+        let id: UUID
+        let task: Task<ZoneRefreshSummary, Error>
+    }
+
+    private enum ZoneRefreshError: LocalizedError, Sendable {
+        case serviceUnavailable
+        case recordModificationFailed(reason: String)
+        case changeTokenExpiredAfterFullRetry
+
+        var errorDescription: String? {
+            switch self {
+            case .serviceUnavailable:
+                return "CloudKit private database is unavailable"
+            case .recordModificationFailed(let reason):
+                return "CloudKit zone contained a record modification failure: \(reason)"
+            case .changeTokenExpiredAfterFullRetry:
+                return "CloudKit change token expired again after one full retry"
+            }
+        }
+    }
+
+    private enum SubscriptionValidationError: LocalizedError, Sendable {
+        case wrongType
+        case wrongZone
+        case silentPushDisabled
+
+        var errorDescription: String? {
+            switch self {
+            case .wrongType:
+                return "Existing CloudKit subscription has the wrong type"
+            case .wrongZone:
+                return "Existing CloudKit subscription targets the wrong record zone"
+            case .silentPushDisabled:
+                return "Existing CloudKit subscription does not request content-available pushes"
+            }
+        }
+    }
+
+    private var inFlightZoneRefresh: ZoneRefreshOperation?
 
     /// CloudKit 容器 schema 尚未部署到 Production 时，写入/查询会持续返回
     /// `CKError.serverRejectedRequest` (15 / 内部 2000)。这是部署配置问题而非瞬时错误，
@@ -143,7 +208,7 @@ public final class CloudKitService: CloudDeviceService {
             if ckStatus == .available {
                 await setupCloudKitEnvironment()
             } else {
-                stopService()
+                await stopService()
             }
         } catch {
             logger.error("CloudKit 账号状态检查失败: \(error.localizedDescription)")
@@ -154,7 +219,37 @@ public final class CloudKitService: CloudDeviceService {
  /// 手动刷新设备列表
     public func refreshDevices() async {
         guard isAvailable, accountStatus == .available else { return }
-        await fetchZoneChanges()
+        do {
+            _ = try await fetchZoneChanges()
+        } catch {
+            if Self.isPersistentServerRejection(error) {
+                handlePersistentServerRejection(context: "手动刷新", error: error)
+            } else {
+                logger.error("CloudKit 手动刷新失败: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Claims ownership of `deviceChangesSubscriptionID` with the remote-notification router.
+    ///
+    /// Registered alongside the subscription itself so a silent push can never authorize a refresh
+    /// for a subscription this process does not actually maintain.
+    private func registerRemoteNotificationHandler() async {
+        await RemoteNotificationRouter.shared.registerHandler(
+            forSubscriptionID: Self.deviceChangesSubscriptionID
+        ) { [weak self] in
+            guard let self else { return false }
+            return try await self.refreshDevicesReportingChange()
+        }
+    }
+
+    /// Refresh variant that reports whether the fetch actually changed the published device set.
+    ///
+    /// The remote-notification outcome must reflect reality: reporting `newData` unconditionally
+    /// gets the app's background wakeups throttled by the system.
+    private func refreshDevicesReportingChange() async throws -> Bool {
+        guard isAvailable, accountStatus == .available else { return false }
+        return try await fetchZoneChanges().producedNewData
     }
 
  // MARK: - 环境设置
@@ -193,7 +288,16 @@ public final class CloudKitService: CloudDeviceService {
         }
 
  // 4. 初次同步
-        await fetchZoneChanges()
+        do {
+            _ = try await fetchZoneChanges()
+        } catch {
+            if Self.isPersistentServerRejection(error) {
+                handlePersistentServerRejection(context: "初次同步", error: error)
+            } else {
+                logger.error("CloudKit 初次同步失败: \(error.localizedDescription)")
+            }
+            return
+        }
 
  // 5. 启动心跳
         startHeartbeat()
@@ -201,18 +305,48 @@ public final class CloudKitService: CloudDeviceService {
 
     private func subscribeToZoneChanges() async {
         guard isAvailable, let privateDB = privateDB else { return }
-        let subscription = CKRecordZoneSubscription(zoneID: CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName), subscriptionID: subscriptionID)
+        let zoneID = CKRecordZone.ID(
+            zoneName: zoneName,
+            ownerName: CKCurrentUserDefaultName
+        )
+        let subscription = CKRecordZoneSubscription(
+            zoneID: zoneID,
+            subscriptionID: subscriptionID
+        )
 
         let notificationInfo = CKSubscription.NotificationInfo()
         notificationInfo.shouldSendContentAvailable = true // 静默推送
         subscription.notificationInfo = notificationInfo
 
         do {
-            _ = try await privateDB.save(subscription)
-            logger.info("变更订阅成功")
-        } catch {
- // 忽略重复订阅错误
-            logger.debug("订阅结果: \(error.localizedDescription)")
+            do {
+                let existing = try await privateDB.subscription(for: subscriptionID)
+                guard let existingZoneSubscription = existing as? CKRecordZoneSubscription else {
+                    throw SubscriptionValidationError.wrongType
+                }
+                guard existingZoneSubscription.zoneID == zoneID else {
+                    throw SubscriptionValidationError.wrongZone
+                }
+                guard existingZoneSubscription.notificationInfo?.shouldSendContentAvailable == true else {
+                    throw SubscriptionValidationError.silentPushDisabled
+                }
+                logger.debug("已验证并复用既有 CloudKit 变更订阅")
+            } catch let ckError as CKError where ckError.code == .unknownItem {
+                _ = try await privateDB.save(subscription)
+                logger.info("CloudKit 变更订阅创建成功")
+            }
+
+            await registerRemoteNotificationHandler()
+        } catch let error {
+            await RemoteNotificationRouter.shared.unregisterHandler(
+                forSubscriptionID: Self.deviceChangesSubscriptionID
+            )
+            if Self.isPersistentServerRejection(error) {
+                handlePersistentServerRejection(context: "变更订阅", error: error)
+            }
+            logger.error(
+                "❌ CloudKit 变更订阅失败，静默推送唤醒不可用: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
@@ -289,72 +423,100 @@ public final class CloudKitService: CloudDeviceService {
 
  // MARK: - 核心逻辑：增量同步
 
- /// 拉取 Zone 变更（增量同步）
-    private func fetchZoneChanges() async {
-        guard isAvailable, !isSyncing, let privateDB = privateDB else { return }
+    /// 拉取 Zone 变更（增量同步）。并发调用共享同一个真实 fetch，所有等待者都拿到同一结果。
+    private func fetchZoneChanges() async throws -> ZoneRefreshSummary {
+        if let inFlightZoneRefresh {
+            return try await inFlightZoneRefresh.task.value
+        }
+        guard isAvailable, privateDB != nil else {
+            throw ZoneRefreshError.serviceUnavailable
+        }
+
+        let operationID = UUID()
         isSyncing = true
-
-        let zoneID = CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName)
-        var configurations = [CKRecordZone.ID: CKFetchRecordZoneChangesOperation.ZoneConfiguration]()
-        let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration()
-        config.previousServerChangeToken = serverChangeToken
-        configurations[zoneID] = config
-
- // 使用 Operation 进行更细粒度的控制
-        let operation = CKFetchRecordZoneChangesOperation(recordZoneIDs: [zoneID], configurationsByRecordZoneID: configurations)
-
-        var changedRecords = [CKRecord]()
-        var deletedRecordIDs = [CKRecord.ID]()
-
-        operation.recordWasChangedBlock = { recordID, result in
-            if let record = try? result.get() {
-                changedRecords.append(record)
+        let task = Task { @MainActor [weak self] () throws -> ZoneRefreshSummary in
+            guard let self else { throw CancellationError() }
+            return try await self.performZoneRefreshWithSingleTokenReset()
+        }
+        inFlightZoneRefresh = ZoneRefreshOperation(id: operationID, task: task)
+        defer {
+            if inFlightZoneRefresh?.id == operationID {
+                inFlightZoneRefresh = nil
+                isSyncing = false
             }
         }
+        return try await task.value
+    }
 
-        operation.recordWithIDWasDeletedBlock = { recordID, _ in
-            deletedRecordIDs.append(recordID)
-        }
-
-        operation.recordZoneChangeTokensUpdatedBlock = { zoneID, token, _ in
-            self.serverChangeToken = token
-        }
-
-        operation.recordZoneFetchResultBlock = { zoneID, result in
-            if let (token, _, _) = try? result.get() {
-                self.serverChangeToken = token
+    private func performZoneRefreshWithSingleTokenReset() async throws -> ZoneRefreshSummary {
+        do {
+            return try await performZoneRefresh(since: serverChangeToken)
+        } catch let ckError as CKError where ckError.code == .changeTokenExpired {
+            logger.info("CloudKit change token 已过期，执行一次完整 Zone 重拉")
+            do {
+                return try await performZoneRefresh(since: nil)
+            } catch let retryError as CKError where retryError.code == .changeTokenExpired {
+                throw ZoneRefreshError.changeTokenExpiredAfterFullRetry
             }
         }
+    }
 
-        operation.fetchRecordZoneChangesResultBlock = { result in
-            Task { @MainActor in
-                self.isSyncing = false
+    private func performZoneRefresh(
+        since initialToken: CKServerChangeToken?
+    ) async throws -> ZoneRefreshSummary {
+        guard let privateDB else { throw ZoneRefreshError.serviceUnavailable }
+        let zoneID = CKRecordZone.ID(
+            zoneName: zoneName,
+            ownerName: CKCurrentUserDefaultName
+        )
+        var nextToken = initialToken
+        var changedRecordsByID: [CKRecord.ID: CKRecord] = [:]
+        var deletedRecordIDsByID: [CKRecord.ID: CKRecord.ID] = [:]
+        var moreComing = true
 
+        while moreComing {
+            try Task.checkCancellation()
+            let page = try await privateDB.recordZoneChanges(
+                inZoneWith: zoneID,
+                since: nextToken
+            )
+
+            for (recordID, result) in page.modificationResultsByID {
                 switch result {
-                case .success:
-                    self.applyChanges(changed: changedRecords, deleted: deletedRecordIDs)
-                    self.lastSyncTime = Date()
-                    self.logger.info("同步完成: 更新 \(changedRecords.count), 删除 \(deletedRecordIDs.count)")
+                case .success(let modification):
+                    changedRecordsByID[recordID] = modification.record
+                    deletedRecordIDsByID.removeValue(forKey: recordID)
                 case .failure(let error):
-                    if Self.isPersistentServerRejection(error) {
-                        self.handlePersistentServerRejection(context: "增量同步", error: error)
-                    } else {
-                        self.logger.error("同步失败: \(error.localizedDescription)")
-                    }
- // 处理 ChangeToken 过期的情况
-                    if let ckError = error as? CKError, ckError.code == .changeTokenExpired {
-                        self.serverChangeToken = nil
-                        await self.fetchZoneChanges() // 重试全量
-                    }
+                    throw ZoneRefreshError.recordModificationFailed(
+                        reason: error.localizedDescription
+                    )
                 }
             }
+            for deletion in page.deletions {
+                changedRecordsByID.removeValue(forKey: deletion.recordID)
+                deletedRecordIDsByID[deletion.recordID] = deletion.recordID
+            }
+
+            nextToken = page.changeToken
+            moreComing = page.moreComing
         }
 
- // 必须在非 MainActor 上运行 Operation
-        let db = privateDB
-        Task.detached {
-            db.add(operation)
-        }
+        let before = devices
+        let changedRecords = Array(changedRecordsByID.values)
+        let deletedRecordIDs = Array(deletedRecordIDsByID.values)
+        applyChanges(changed: changedRecords, deleted: deletedRecordIDs)
+        serverChangeToken = nextToken
+        lastSyncTime = Date()
+
+        let producedNewData = devices != before
+        logger.info(
+            "同步完成: 更新 \(changedRecords.count), 删除 \(deletedRecordIDs.count), changed=\(producedNewData ? 1 : 0)"
+        )
+        return ZoneRefreshSummary(
+            changedRecordCount: changedRecords.count,
+            deletedRecordCount: deletedRecordIDs.count,
+            producedNewData: producedNewData
+        )
     }
 
     private func applyChanges(changed: [CKRecord], deleted: [CKRecord.ID]) {
@@ -411,8 +573,14 @@ public final class CloudKitService: CloudDeviceService {
         heartbeatTask = nil
     }
 
-    private func stopService() {
+    private func stopService() async {
         stopHeartbeat()
+        inFlightZoneRefresh?.task.cancel()
+        inFlightZoneRefresh = nil
+        isSyncing = false
+        await RemoteNotificationRouter.shared.unregisterHandler(
+            forSubscriptionID: Self.deviceChangesSubscriptionID
+        )
         devices = []
     }
 
@@ -449,68 +617,5 @@ public final class CloudKitService: CloudDeviceService {
 
 // MARK: - 数据模型
 
-public struct CloudDevice: Identifiable, Equatable, Codable {
-    public let id: String
-    public let deviceName: String
-    public let deviceModel: String
-    public let publicKey: String
-    public let lastSeenAt: Date
-    public let lastKnownEndpoint: String?
-    public let capabilities: [String]
-
-    public var isOnline: Bool {
- // 假设 5 分钟内有心跳视为在线
-        return Date().timeIntervalSince(lastSeenAt) < 5 * 60
-    }
-
- // 兼容 UI 的辅助属性
-    public var name: String { deviceName }
-    public var lastSeen: Date { lastSeenAt }
-    public var type: DeviceType {
-        if deviceModel.contains("Mac") { return .mac }
-        if deviceModel.contains("iPhone") { return .iPhone }
-        if deviceModel.contains("iPad") { return .iPad }
-        return .mac // Default
-    }
-
-    public enum DeviceType: String, Codable {
-        case mac, iPhone, iPad
-    }
-
-    public enum DeviceCapability: String, Codable {
-        case remoteDesktop, fileTransfer, screenMirroring
-    }
-
-    public var deviceCapabilities: [DeviceCapability] {
-        return capabilities.compactMap { DeviceCapability(rawValue: $0) }
-    }
-
-    init?(record: CKRecord) {
-        guard let deviceId = record["deviceId"] as? String,
-              let deviceName = record["deviceName"] as? String,
-              let lastSeenAt = record["lastSeenAt"] as? Date else {
-            return nil
-        }
-        let publicKey = (record["publicKeyFingerprint"] as? String) ?? (record["publicKey"] as? String) ?? ""
-
-        self.id = deviceId
-        self.deviceName = deviceName
-        self.deviceModel = record["deviceModel"] as? String ?? "Unknown"
-        self.publicKey = publicKey
-        self.lastSeenAt = lastSeenAt
-        self.lastKnownEndpoint = record["lastKnownEndpoint"] as? String
-        self.capabilities = record["capabilities"] as? [String] ?? []
-    }
-
- // 为了兼容 CrossNetworkConnectionManager 的初始化
-    public init(id: String, name: String, type: DeviceType, lastSeen: Date, capabilities: [DeviceCapability]) {
-        self.id = id
-        self.deviceName = name
-        self.deviceModel = type == .mac ? "Mac" : (type == .iPhone ? "iPhone" : "iPad")
-        self.publicKey = ""
-        self.lastSeenAt = lastSeen
-        self.lastKnownEndpoint = nil
-        self.capabilities = capabilities.map { $0.rawValue }
-    }
-}
  // CloudKit 可用性（仅用于快速判断容器是否存在）
+#endif

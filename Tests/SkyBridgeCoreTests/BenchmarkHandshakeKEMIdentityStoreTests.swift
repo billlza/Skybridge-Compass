@@ -12,7 +12,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair(),
+            generatedKeyPair: try Self.mlkemKeyPair(),
             generationCounter: creationCounter
         )
         let store = try await BenchmarkHandshakeKEMIdentityStore.make(
@@ -25,7 +25,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair()
+            generatedKeyPair: try Self.mlkemKeyPair()
         )
         await assertUnsupportedAlgorithm {
             _ = try await store.getOrCreateKEMIdentityKey(
@@ -39,7 +39,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .liboqsPQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair(privateKeyLength: 2_400)
+            generatedKeyPair: try Self.mlkemKeyPair(privateKeyLength: 2_400)
         )
         await assertUnsupportedAlgorithm {
             _ = try await store.getOrCreateKEMIdentityKey(
@@ -53,7 +53,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: creationProvider.tier,
             activeSuite: .xwingMLDSA,
             supportedSuites: [.mlkem768MLDSA65, .xwingMLDSA],
-            generatedKeyPair: Self.xwingKeyPair()
+            generatedKeyPair: try Self.xwingKeyPair()
         )
         await assertUnsupportedAlgorithm {
             _ = try await store.getOrCreateKEMIdentityKey(
@@ -68,7 +68,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
                 tier: creationProvider.tier,
                 activeSuite: creationProvider.activeSuite,
                 supportedSuites: creationProvider.supportedSuites,
-                generatedKeyPair: Self.mlkemKeyPair()
+                generatedKeyPair: try Self.mlkemKeyPair()
             )
         )
         await assertUnsupportedAlgorithm {
@@ -89,7 +89,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair(),
+            generatedKeyPair: try Self.mlkemKeyPair(),
             generationCounter: unsupportedCounter
         )
 
@@ -107,7 +107,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65, .xwingMLDSA],
-            generatedKeyPair: Self.mlkemKeyPair()
+            generatedKeyPair: try Self.mlkemKeyPair()
         )
         let mlkemStore = try await BenchmarkHandshakeKEMIdentityStore.make(
             offeredSuites: [.mlkem768MLDSA65],
@@ -125,13 +125,13 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
         }
     }
 
-    func testGeneratedKeyUsageAndSuiteMismatchesFailClosed() async {
+    func testGeneratedKeyUsageAndSuiteMismatchesFailClosed() async throws {
         let wrongUsageProvider = TestCryptoProvider(
             providerName: "wrong-usage",
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.keyPair(
+            generatedKeyPair: try Self.keyPair(
                 suite: .mlkem768MLDSA65,
                 usage: .signing,
                 publicKeyLength: 1_952,
@@ -160,7 +160,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.xwingKeyPair()
+            generatedKeyPair: try Self.xwingKeyPair()
         )
         await assertUnsupportedAlgorithm {
             _ = try await BenchmarkHandshakeKEMIdentityStore.make(
@@ -170,13 +170,13 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
         }
     }
 
-    func testGeneratedPublicAndPrivateKeyLengthMismatchesFailClosed() async {
+    func testGeneratedPublicAndPrivateKeyLengthMismatchesFailClosed() async throws {
         let shortPublicKeyProvider = TestCryptoProvider(
             providerName: "short-public-key",
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair(publicKeyLength: 1_183)
+            generatedKeyPair: try Self.mlkemKeyPair(publicKeyLength: 1_183)
         )
         await assertInvalidKeyLength(expected: 1_184, actual: 1_183) {
             _ = try await BenchmarkHandshakeKEMIdentityStore.make(
@@ -190,7 +190,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair(privateKeyLength: 95)
+            generatedKeyPair: try Self.mlkemKeyPair(privateKeyLength: 95)
         )
         await assertInvalidKeyLength(expected: 96, actual: 95) {
             _ = try await BenchmarkHandshakeKEMIdentityStore.make(
@@ -207,7 +207,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .classic,
             activeSuite: .x25519Ed25519,
             supportedSuites: [.x25519Ed25519],
-            generatedKeyPair: Self.keyPair(
+            generatedKeyPair: try Self.keyPair(
                 suite: .x25519Ed25519,
                 usage: .keyExchange,
                 publicKeyLength: 32,
@@ -239,7 +239,7 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
             tier: .nativePQC,
             activeSuite: .mlkem768MLDSA65,
             supportedSuites: [.mlkem768MLDSA65FS, .mlkem768MLDSA65],
-            generatedKeyPair: Self.mlkemKeyPair(),
+            generatedKeyPair: try Self.mlkemKeyPair(),
             generationCounter: counter
         )
         let offeredSuites: [CryptoSuite] = [.mlkem768MLDSA65FS, .mlkem768MLDSA65]
@@ -327,8 +327,8 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
     private static func mlkemKeyPair(
         publicKeyLength: Int = 1_184,
         privateKeyLength: Int = 96
-    ) -> KeyPair {
-        keyPair(
+    ) throws -> KeyPair {
+        try keyPair(
             suite: .mlkem768MLDSA65,
             usage: .keyExchange,
             publicKeyLength: publicKeyLength,
@@ -336,8 +336,8 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
         )
     }
 
-    private static func xwingKeyPair() -> KeyPair {
-        keyPair(
+    private static func xwingKeyPair() throws -> KeyPair {
+        try keyPair(
             suite: .xwingMLDSA,
             usage: .keyExchange,
             publicKeyLength: 1_216,
@@ -350,8 +350,8 @@ final class BenchmarkHandshakeKEMIdentityStoreTests: XCTestCase {
         usage: KeyUsage,
         publicKeyLength: Int,
         privateKeyLength: Int
-    ) -> KeyPair {
-        KeyPair(
+    ) throws -> KeyPair {
+        try KeyPair(
             publicKey: KeyMaterial(
                 suite: suite,
                 usage: usage,

@@ -28,9 +28,12 @@ public final class ArchitectureRefactor {
  /// 获取RemoteDesktopManager实例（从单例迁移到工厂模式）
  /// - Returns: RemoteDesktopManager实例
  /// - Note: 当前返回单例，后续可通过 ManagerFactory 提供依赖注入版本
+#if os(macOS)
+    /// macOS-only: `RemoteDesktopManager` 依赖 macOS 专属框架。
     public func getRemoteDesktopManager() -> RemoteDesktopManager {
         return RemoteDesktopManager.shared
     }
+#endif
     
  /// 获取P2PNetworkManager实例（从单例迁移到工厂模式）
  /// - Returns: P2PNetworkManager实例
@@ -46,9 +49,12 @@ public final class ArchitectureRefactor {
     
  /// 获取PerformanceModeManager实例（从单例迁移到工厂模式）
  /// - Returns: PerformanceModeManager实例
+#if os(macOS)
+    /// macOS-only: `PerformanceModeManager` 依赖 macOS 专属框架。
     public func getPerformanceModeManager() -> PerformanceModeManager {
         return PerformanceModeManager.shared
     }
+#endif
     
  /// 获取SettingsManager实例（从单例迁移到工厂模式）
  /// - Returns: SettingsManager实例

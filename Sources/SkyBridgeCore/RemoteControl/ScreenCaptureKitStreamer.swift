@@ -1,3 +1,6 @@
+// macOS-exclusive: ScreenCaptureKit is macOS-only. Excluded from other platforms so
+// SkyBridgeCore can be the single shared core for iOS as well. No macOS behaviour change.
+#if os(macOS)
 import Foundation
 @preconcurrency import AVFoundation
 @preconcurrency import ScreenCaptureKit
@@ -2650,3 +2653,4 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         }
     }
 }
+#endif

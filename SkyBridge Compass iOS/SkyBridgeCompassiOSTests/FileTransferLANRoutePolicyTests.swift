@@ -1,6 +1,16 @@
 import Foundation
 import CryptoKit
 import Network
+import class SkyBridgeProtocolCore.ClassicTransferOutboundFileReadSession
+import class SkyBridgeProtocolCore.ClassicTransferZlibCompressionWorker
+import class SkyBridgeProtocolCore.ClassicTransferZlibDecompressionWorker
+import enum SkyBridgeProtocolCore.ClassicTransferCanonicalTranscript
+import enum SkyBridgeProtocolCore.ClassicTransferChunkContract
+import enum SkyBridgeProtocolCore.ClassicTransferChunkContractError
+import enum SkyBridgeProtocolCore.ClassicTransferInboundPolicy
+import enum SkyBridgeProtocolCore.ClassicTransferMetadataContract
+import enum SkyBridgeProtocolCore.ClassicTransferZlibDecompressionError
+import struct SkyBridgeProtocolCore.ClassicTransferInboundAdmission
 import XCTest
 @testable import SkyBridgeCompass_iOS
 
@@ -177,7 +187,7 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         let linkLocalHost = NWEndpoint.hostPort(host: "fe80::1%en0", port: 8080)
         let bonjour = NWEndpoint.service(
             name: "Mac",
-            type: "_skybridge-transfer._tcp",
+            type: DiscoveredDevice.fileTransferServiceType,
             domain: "local",
             interface: nil
         )
@@ -197,7 +207,7 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
     func testRejectsUnverifiedBonjourAndPeerToPeerRoutes() {
         let bonjour = NWEndpoint.service(
             name: "Mac",
-            type: "_skybridge-transfer._tcp",
+            type: DiscoveredDevice.fileTransferServiceType,
             domain: "local",
             interface: nil
         )
@@ -408,27 +418,83 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         )
     }
 
-    func testIOSDoesNotAdvertiseUnsupportedClassicResumeAndXcodeGenKeepsInboundActor() throws {
+    func testIOSDoesNotAdvertiseUnsupportedClassicResumeAndUsesCanonicalProtocolModule() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let networkSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let networkSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
-            ),
-            encoding: .utf8
+            )
         )
-        let projectYAML = try String(
-            contentsOf: root.appendingPathComponent("SkyBridge Compass iOS/project.yml"),
-            encoding: .utf8
+        let projectYAML = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent("SkyBridge Compass iOS/project.yml")
+        )
+        let rootPackageManifest = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent("Package.swift")
+        )
+        let iosPackageManifest = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent("SkyBridge Compass iOS/Package.swift")
         )
 
-        XCTAssertTrue(networkSource.contains("\"capabilities\": Data(\"file,file_transfer\".utf8)"))
+        XCTAssertTrue(
+            networkSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields(")
+        )
+        XCTAssertTrue(networkSource.contains("role: .dedicatedService"))
+        XCTAssertFalse(networkSource.contains("\"capabilities\": Data("))
+        XCTAssertFalse(networkSource.contains("\"transferPort\": Data("))
         XCTAssertFalse(networkSource.contains("ClassicTransferCapability.classicResume)\".utf8"))
         XCTAssertTrue(networkSource.contains("case .resumeRequest:"))
         XCTAssertTrue(networkSource.contains("return .failure(.unsupportedResumeRequest)"))
-        XCTAssertTrue(projectYAML.contains("InboundFileTransferIOActor.swift"))
+        let appTargetStart = try XCTUnwrap(projectYAML.range(of: "  SkyBridgeCompass-iOS:\n"))
+        let appTargetEnd = try XCTUnwrap(
+            projectYAML.range(
+                of: "  SkyBridgeCompass-Widgets:\n",
+                range: appTargetStart.upperBound..<projectYAML.endIndex
+            )
+        )
+        let appTarget = String(projectYAML[appTargetStart.lowerBound..<appTargetEnd.lowerBound])
+        XCTAssertFalse(appTarget.contains("product: SkyBridgeProtocolCore"))
+        XCTAssertTrue(appTarget.contains("product: SkyBridgeWebRTCRuntime"))
+
+        let testTargetStart = try XCTUnwrap(projectYAML.range(of: "  SkyBridgeCompassiOSTests:\n"))
+        let testTargetEnd = try XCTUnwrap(
+            projectYAML.range(
+                of: "\nschemes:\n",
+                range: testTargetStart.upperBound..<projectYAML.endIndex
+            )
+        )
+        let testTarget = String(projectYAML[testTargetStart.lowerBound..<testTargetEnd.lowerBound])
+        XCTAssertTrue(testTarget.contains("product: SkyBridgeWebRTCRuntime"))
+        XCTAssertFalse(testTarget.contains("product: SkyBridgeProtocolCore"))
+        XCTAssertTrue(iosPackageManifest.contains("product(name: \"SkyBridgeWebRTCRuntime\""))
+        XCTAssertFalse(iosPackageManifest.contains("product(name: \"SkyBridgeProtocolCore\""))
+        XCTAssertTrue(
+            rootPackageManifest.contains(
+                "targets: [\"SkyBridgeProtocolCore\", \"SkyBridgeWebRTCRuntime\"]"
+            )
+        )
+        let runtimeTargetStart = try XCTUnwrap(
+            rootPackageManifest.range(
+                of: ".target(\n            name: \"SkyBridgeWebRTCRuntime\""
+            )
+        )
+        let runtimeTargetEnd = try XCTUnwrap(
+            rootPackageManifest.range(
+                of: "name: \"CSkyBridgeOpusShim\"",
+                range: runtimeTargetStart.upperBound..<rootPackageManifest.endIndex
+            )
+        )
+        let runtimeTarget = String(
+            rootPackageManifest[runtimeTargetStart.lowerBound..<runtimeTargetEnd.lowerBound]
+        )
+        XCTAssertTrue(runtimeTarget.contains("\"SkyBridgeProtocolCore\""))
+        XCTAssertFalse(
+            projectYAML.contains(
+                "../Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/InboundFileTransferIOActor.swift"
+            )
+        )
     }
 
     func testClassicInboundSourceKeepsAuthenticationCleanupAndResourceBoundaries() throws {
@@ -436,23 +502,20 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let managerSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let managerSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/FileTransferManager.swift"
-            ),
-            encoding: .utf8
+            )
         )
-        let networkSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let networkSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
-            ),
-            encoding: .utf8
+            )
         )
-        let ioActorSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let ioActorSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/InboundFileTransferIOActor.swift"
-            ),
-            encoding: .utf8
+            )
         )
 
         let receiveStart = try XCTUnwrap(managerSource.range(of: "    func receiveFile(\n"))
@@ -578,28 +641,94 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         )
     }
 
+    func testIOSWebRTCHeartbeatCarriesOnlyAuthenticatedFileTransferCapability() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let managerSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+            )
+        )
+
+        let heartbeatStart = try XCTUnwrap(
+            managerSource.range(of: "    public func startRemoteDesktopHeartbeat()")
+        )
+        let heartbeatEnd = try XCTUnwrap(
+            managerSource.range(
+                of: "    private func shouldAutoStartRemoteDesktopHeartbeat()",
+                range: heartbeatStart.upperBound..<managerSource.endIndex
+            )
+        )
+        let heartbeatBody = String(
+            managerSource[heartbeatStart.lowerBound..<heartbeatEnd.lowerBound]
+        )
+        XCTAssertTrue(
+            heartbeatBody.contains("let fileTransferReady = FileTransferRuntime.shared.isReady")
+        )
+        XCTAssertTrue(
+            heartbeatBody.contains(
+                "capabilities: fileTransferReady ? [\"file_transfer\"] : []"
+            )
+        )
+        XCTAssertTrue(
+            heartbeatBody.contains(
+                "fileTransferPort: fileTransferReady ? FileTransferConstants.defaultPort : nil"
+            )
+        )
+        XCTAssertTrue(heartbeatBody.contains("remoteControlPort: nil"))
+        XCTAssertFalse(heartbeatBody.contains("classic_resume"))
+        XCTAssertFalse(heartbeatBody.contains("capabilities: [\"remote"))
+        XCTAssertFalse(heartbeatBody.contains("capabilities: [\"clipboard"))
+        XCTAssertTrue(heartbeatBody.contains("self.sendAppMessageOverWebRTC("))
+        XCTAssertTrue(managerSource.contains("return currentRole != nil"))
+        XCTAssertFalse(managerSource.contains("return currentRole == .answerer"))
+
+        let secureSendStart = try XCTUnwrap(
+            managerSource.range(of: "    func sendAppMessageOverWebRTC(")
+        )
+        let secureSendEnd = try XCTUnwrap(
+            managerSource.range(
+                of: "func sendPairingIdentityExchangeOverWebRTC(",
+                range: secureSendStart.upperBound..<managerSource.endIndex
+            )
+        )
+        let secureSendBody = String(
+            managerSource[secureSendStart.lowerBound..<secureSendEnd.lowerBound]
+        )
+        XCTAssertTrue(secureSendBody.contains("let payload = try JSONEncoder().encode(message)"))
+        XCTAssertTrue(
+            secureSendBody.contains(
+                "encrypt(plaintext: payload, with: keys, packetType: .appControl)"
+            )
+        )
+        XCTAssertTrue(secureSendBody.contains("try await sendFramed(padded, over: session)"))
+    }
+
+    func testClassicFileTransferDefaultPortRemains8080() {
+        XCTAssertEqual(FileTransferConstants.defaultPort, 8080)
+    }
+
     func testIOSWebRTCProductionPathTracksCompletionHashAndDispatchesThroughTransferLanes() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let fileTransferManagerSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let fileTransferManagerSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/FileTransferManager.swift"
-            ),
-            encoding: .utf8
+            )
         )
-        let webRTCManagerSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let webRTCManagerSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
-            ),
-            encoding: .utf8
+            )
         )
-        let fileTransferExtensionSource = try String(
-            contentsOf: root.appendingPathComponent(
+        let fileTransferExtensionSource = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
                 "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager+FileTransfer.swift"
-            ),
-            encoding: .utf8
+            )
         )
 
         let sendStart = try XCTUnwrap(
@@ -638,9 +767,15 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         )
         XCTAssertTrue(
             fileTransferExtensionSource.contains(
-                "for operationWorker in operationWorkers {\n            await operationWorker.value\n        }"
+                "CrossNetworkCancelledTaskTeardownJoiner.joinCancelledTask("
             )
         )
+        XCTAssertTrue(
+            fileTransferExtensionSource.contains(
+                "CrossNetworkExactOwnerDictionary.removeValue("
+            )
+        )
+        XCTAssertFalse(fileTransferExtensionSource.contains("await operationWorker.value"))
     }
 }
 

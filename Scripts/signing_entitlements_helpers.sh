@@ -301,6 +301,7 @@ array_entitlements = [
 string_entitlements = [
     "com.apple.application-identifier",
     "aps-environment",
+    "com.apple.developer.aps-environment",
     "com.apple.developer.ubiquity-kvstore-identifier",
     "com.apple.developer.icloud-container-environment",
 ]

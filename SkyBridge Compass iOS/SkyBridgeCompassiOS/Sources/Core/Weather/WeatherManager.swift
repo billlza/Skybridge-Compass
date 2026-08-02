@@ -213,7 +213,7 @@ extension WeatherManager: CLLocationManagerDelegate {
                     city: cityName
                 )
                 
-                SkyBridgeLogger.shared.info("📍 位置更新: \(cityName ?? "未知")")
+                SkyBridgeLogger.shared.info("📍 位置状态已更新")
                 
                 // 如果天气数据为空，立即获取
                 if self.currentWeather == nil, let loc = self.currentLocation {

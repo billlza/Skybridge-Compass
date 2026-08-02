@@ -18,6 +18,18 @@ public struct HPKESealedBox: Sendable {
     private static let maxCtLenHandshake = 64 * 1024
     private static let maxCtLenPostAuth = 256 * 1024
 
+    private static func maximumCombinedByteCount(isHandshake: Bool) -> Int {
+        let maximumCiphertextByteCount = isHandshake ? maxCtLenHandshake : maxCtLenPostAuth
+        // Version 1 carries both the nonce and tag outside the ciphertext and
+        // is therefore the largest valid representation. Version 2 uses zero
+        // bytes for both fields and is bounded by the same ceiling.
+        return headerSize
+            + maxEncLen
+            + expectedNonceLen
+            + maximumCiphertextByteCount
+            + expectedTagLen
+    }
+
     public init(encapsulatedKey: Data, nonce: Data, ciphertext: Data, tag: Data) {
         self.encapsulatedKey = encapsulatedKey
         self.nonce = nonce
@@ -25,28 +37,53 @@ public struct HPKESealedBox: Sendable {
         self.tag = tag
     }
 
-    public init(combined: Data, isHandshake: Bool = true) throws {
-        // The sealed box is bounded (64 KiB during handshake, 256 KiB after
-        // authentication). Normalize a possible Data slice once so the wire
-        // offsets below are valid collection indices.
-        let combined = Data(combined)
-        guard combined.count >= Self.headerSize else {
+    public init(combined input: Data, isHandshake: Bool = true) throws {
+        guard input.count >= Self.headerSize else {
             throw CryptoProviderError.invalidSealedBox("Data too short for header")
         }
-        guard combined.prefix(4).elementsEqual(Self.magic) else {
+
+        // UnsafeRawBufferPointer offsets are relative to the beginning of this
+        // Data value even when it is a non-zero-startIndex slice. Read only the
+        // fixed-size header before deciding whether rebasing the full value is
+        // safe.
+        let header = input.withUnsafeBytes { raw -> (
+            magicMatches: Bool,
+            version: UInt8,
+            encLen: Int,
+            nonceLen: Int,
+            tagLen: Int,
+            ctLen: Int
+        ) in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            return (
+                magicMatches: bytes[0] == Self.magic[0]
+                    && bytes[1] == Self.magic[1]
+                    && bytes[2] == Self.magic[2]
+                    && bytes[3] == Self.magic[3],
+                version: bytes[4],
+                encLen: Int(bytes[9]) | (Int(bytes[10]) << 8),
+                nonceLen: Int(bytes[11]),
+                tagLen: Int(bytes[12]),
+                ctLen: Int(bytes[13])
+                    | (Int(bytes[14]) << 8)
+                    | (Int(bytes[15]) << 16)
+                    | (Int(bytes[16]) << 24)
+            )
+        }
+
+        guard header.magicMatches else {
             throw CryptoProviderError.invalidMagic
         }
 
-        let version = combined[4]
+        let version = header.version
         guard version == 1 || version == 2 else {
             throw CryptoProviderError.unsupportedVersion(version)
         }
 
-        let encLen = Int(combined[9]) | (Int(combined[10]) << 8)
-        let nonceLen = Int(combined[11])
-        let tagLen = Int(combined[12])
-        let ctLen = Int(combined[13]) | (Int(combined[14]) << 8)
-            | (Int(combined[15]) << 16) | (Int(combined[16]) << 24)
+        let encLen = header.encLen
+        let nonceLen = header.nonceLen
+        let tagLen = header.tagLen
+        let ctLen = header.ctLen
 
         guard encLen <= Self.maxEncLen else {
             throw CryptoProviderError.lengthExceeded("encLen", encLen, Self.maxEncLen)
@@ -76,6 +113,15 @@ public struct HPKESealedBox: Sendable {
             throw CryptoProviderError.lengthExceeded("ctLen", ctLen, maxCtLen)
         }
 
+        let maximumCombinedByteCount = Self.maximumCombinedByteCount(isHandshake: isHandshake)
+        guard input.count <= maximumCombinedByteCount else {
+            throw CryptoProviderError.lengthExceeded(
+                "combined",
+                input.count,
+                maximumCombinedByteCount
+            )
+        }
+
         var expectedTotal = Self.headerSize
         let (sum1, overflow1) = expectedTotal.addingReportingOverflow(encLen)
         let (sum2, overflow2) = sum1.addingReportingOverflow(nonceLen)
@@ -87,9 +133,14 @@ public struct HPKESealedBox: Sendable {
         }
         expectedTotal = sum4
 
-        guard combined.count == expectedTotal else {
-            throw CryptoProviderError.lengthMismatch(expected: expectedTotal, actual: combined.count)
+        guard input.count == expectedTotal else {
+            throw CryptoProviderError.lengthMismatch(expected: expectedTotal, actual: input.count)
         }
+
+        // The declared fields and the actual input now agree under the mode's
+        // hard ceiling. Normalize once so the extraction offsets below are
+        // valid Collection indices and returned fields have startIndex zero.
+        let combined = Data(input)
 
         var offset = Self.headerSize
         self.encapsulatedKey = Data(combined[offset..<(offset + encLen)])

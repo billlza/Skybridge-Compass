@@ -404,7 +404,13 @@ final class AppUpdateManifestTests: XCTestCase {
             "Apple-platform release builds must use the Xcode 26.6 Apple toolchain, not a separate Swift.org toolchain."
         )
         XCTAssertTrue(workflow.contains("contents: write"))
-        XCTAssertTrue(workflow.contains("actions/download-artifact@v4"))
+        XCTAssertTrue(
+            workflow.contains("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0")
+        )
+        XCTAssertFalse(
+            workflow.contains("actions/download-artifact@v4"),
+            "Release workflows must pin the reviewed download-artifact commit instead of a mutable major tag."
+        )
         XCTAssertTrue(workflow.contains("cancel-in-progress: false"))
         XCTAssertTrue(workflow.contains("release_artifact_run_attempt:"))
         XCTAssertFalse(workflow.contains("release_artifact_workflow_path:"))

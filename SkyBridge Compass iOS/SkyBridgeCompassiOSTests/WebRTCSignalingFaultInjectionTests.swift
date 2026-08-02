@@ -1,4 +1,5 @@
 import CFNetwork
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import XCTest
 @testable import SkyBridgeCompass_iOS
 
@@ -1008,16 +1009,19 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertTrue(parser.canProbeDirectCompatibility)
     }
 
-    func testInboundFrameParserClearsBufferAfterInvalidLengthPrefix() {
+    func testInboundFrameParserTerminatesAfterInvalidLengthPrefix() {
         var parser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 1024)
         parser.append(Data([0xFF, 0xFF, 0xFF, 0xFF]))
 
         XCTAssertNil(parser.nextPayload(sessionId: "S2", logLabel: "test"))
-        XCTAssertTrue(parser.canProbeDirectCompatibility)
+        XCTAssertEqual(
+            parser.terminalFailure,
+            .invalidLength(length: Int(UInt32.max), maximum: 1024)
+        )
+        XCTAssertFalse(parser.canProbeDirectCompatibility)
 
-        let payload = Data("recovered".utf8)
-        parser.append(framedPayload(payload))
-        XCTAssertEqual(parser.nextPayload(sessionId: "S2", logLabel: "test"), payload)
+        parser.append(framedPayload(Data("must-not-recover".utf8)))
+        XCTAssertNil(parser.nextPayload(sessionId: "S2", logLabel: "test"))
     }
 
     func testInboundFrameParserAcceptsExactMaxFrameAndStickyNextFrame() {
@@ -1037,7 +1041,11 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         var oversizedParser = CrossNetworkWebRTCManager.InboundFrameParser(maxInboundFrameBytes: 8192)
         oversizedParser.append(framedPayload(Data(repeating: 0xA5, count: 8193)))
         XCTAssertNil(oversizedParser.nextPayload(sessionId: "S2-oversized", logLabel: "test"))
-        XCTAssertTrue(oversizedParser.canProbeDirectCompatibility)
+        XCTAssertEqual(
+            oversizedParser.terminalFailure,
+            .invalidLength(length: 8193, maximum: 8192)
+        )
+        XCTAssertFalse(oversizedParser.canProbeDirectCompatibility)
     }
 
     func testInboundFrameParserOnlyAllowsDirectProbeWhenNoPartialFrameIsBuffered() {
@@ -1796,7 +1804,7 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             sectionStart: "public func generateConnectLink",
             sectionEnd: "public func disconnect",
             endpointVariable: "let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(\n                origin: lease.signalingServerOrigin,\n                wsPath: lease.wsPath\n            )",
-            tokenWrite: "webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken"
+            tokenWrite: "let ownedRegistrationReceipt = try installTemporaryConnectLinkRegistration("
         )
         assertEndpointValidationPrecedesTokenCaching(
             in: source,
@@ -1804,6 +1812,20 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
             sectionEnd: "nonisolated private static func normalizedNonEmptyToken",
             endpointVariable: "let signalingEndpoint = try validatedCurrentPathSignalingEndpoint(\n            origin: redeemed.signalingServerOrigin,\n            wsPath: redeemed.wsPath\n        )",
             tokenWrite: "webrtcSignalingAuthTokenBySessionId[qr.sessionID] = redeemed.sessionToken"
+        )
+        XCTAssertTrue(
+            source.contains(
+                "temporaryConnectLinkRegistrationOwnerBySessionId[sessionId] == nil"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "webrtcSignalingAuthTokenBySessionId[sessionId] = lease.sessionToken"
+            )
+        )
+        XCTAssertTrue(source.contains("try commitTemporaryConnectLinkRegistration("))
+        XCTAssertTrue(
+            source.contains("CrossNetworkTemporaryRegistrationRollback.removeOwnedValue(")
         )
         XCTAssertFalse(source.contains("cacheCurrentPathSignalingEndpoint("))
     }

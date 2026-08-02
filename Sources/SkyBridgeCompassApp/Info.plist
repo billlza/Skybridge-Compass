@@ -85,8 +85,8 @@
         <string>_skybridge._tcp</string>
         <string>_skybridge._udp</string>
         <!-- SkyBridge feature services -->
-        <string>_skybridge-transfer._tcp</string>
-        <string>_skybridge-remote._tcp</string>
+        <string>_skybridge-xfer._tcp</string>
+        <string>_skybridge-rd._tcp</string>
 
         <!-- Discovery toggles (Settings.EnableCompanionLink / EnableCompatibilityMode) -->
         <string>_companion-link._tcp</string>

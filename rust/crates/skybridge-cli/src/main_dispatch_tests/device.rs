@@ -69,86 +69,34 @@ async fn device_discover_dispatch_fails_closed_without_snapshot() -> Result<()> 
     Ok(())
 }
 
-#[tokio::test]
-async fn device_discover_dispatch_active_scan_fails_closed_without_active_snapshot() -> Result<()> {
-    let state_dir = make_test_dir("device-discover-dispatch-active-scan")?;
-    let state = state_dir.display().to_string();
-    let paths = resolve_paths(Some(state_dir.clone()))?;
-    // A passive nearby snapshot must not satisfy --scan: active scan only
-    // accepts snapshots produced by the agent-owned active mDNS scanner.
-    upsert_nearby_discovery_snapshot(
-        &paths,
-        NearbyDiscoverySnapshot::new(
-            "scan-1",
-            "agent_owned_nearby_discovery_snapshot",
-            vec![NearbyDiscoveredDevice::new(
-                "nearby-device-1",
-                "Studio Mac",
-                NearbyDiscoveryEndpointClass::LocalNetwork,
-                NearbyDiscoveryTrustStatus::ProtocolIdentityVerified,
-                vec!["remote_desktop".to_owned()],
-                true,
-            )],
-            300,
-        ),
-    )
-    .await?;
-
+#[test]
+fn device_discover_active_scan_dispatch_shape_is_bounded_before_network_io() {
     assert!(
-        dispatch_args([
+        Cli::try_parse_from([
             "skybridge",
-            "--state-dir",
-            &state,
             "device",
             "discover",
             "--nearby",
             "--scan",
+            "--scan-seconds",
+            "0",
             "--json",
         ])
-        .await
         .is_err(),
-        "active scan must fail closed when no agent-owned active scan snapshot exists"
+        "out-of-range scan duration must fail before mDNS network I/O"
     );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn device_discover_dispatch_active_scan_reads_agent_owned_active_snapshot() -> Result<()> {
-    let state_dir = make_test_dir("device-discover-dispatch-active-scan-ok")?;
-    let state = state_dir.display().to_string();
-    let paths = resolve_paths(Some(state_dir.clone()))?;
-    upsert_nearby_discovery_snapshot(
-        &paths,
-        NearbyDiscoverySnapshot::new(
-            "active-mdns-scan",
-            "agent_owned_active_mdns_scan",
-            vec![NearbyDiscoveredDevice::new(
-                "id-active1",
-                "Scanned Mac",
-                NearbyDiscoveryEndpointClass::LocalNetwork,
-                NearbyDiscoveryTrustStatus::Candidate,
-                vec!["remote_desktop".to_owned()],
-                false,
-            )],
-            120,
-        ),
-    )
-    .await?;
-
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "device",
-        "discover",
-        "--nearby",
-        "--scan",
-        "--json",
-    ])
-    .await?;
-
-    Ok(())
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "device",
+            "discover",
+            "--nearby",
+            "--show-addresses",
+            "--json",
+        ])
+        .is_err(),
+        "address disclosure must require an explicit active scan"
+    );
 }
 
 async fn dispatch_args<const N: usize>(args: [&str; N]) -> Result<()> {

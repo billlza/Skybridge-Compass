@@ -78,7 +78,10 @@ struct rdp_settings
 	SETTINGS_DEPRECATED(ALIGN64 char* AadServerHostname);       /** 30
 		                                                         * @since version 3.1.0
 		                                                         */
-	UINT64 padding0064[64 - 31];                                /* 31 */
+	SETTINGS_DEPRECATED(ALIGN64 char* CorrelationId);           /** 31
+		                                                         * @since version 3.27.0
+		                                                         */
+	UINT64 padding0064[64 - 32];                                /* 32 */
 	/* resource management related options */
 	SETTINGS_DEPRECATED(ALIGN64 UINT32 ThreadingFlags); /* 64 */
 
@@ -118,7 +121,12 @@ struct rdp_settings
 	SETTINGS_DEPRECATED(ALIGN64 UINT64 MonitorOverrideFlags);  /** 154
 		                                                        * @since version 3.15.0
 		                                                        */
-	UINT64 padding0192[192 - 155];                             /* 155 */
+	SETTINGS_DEPRECATED(ALIGN64 char* SspiClientHostname);     /** 155
+		                                                        * @brief The client name sent during
+		                                                        * SSPI authentication if available
+		                                                        * @since version 3.27.0
+		                                                        */
+	UINT64 padding0192[192 - 156];                             /* 156 */
 
 	/* Client/Server Security Data */
 	SETTINGS_DEPRECATED(ALIGN64 BOOL UseRdpSecurityLayer);                /* 192 */
@@ -207,7 +215,8 @@ struct rdp_settings
 	SETTINGS_DEPRECATED(ALIGN64 BOOL ForceEncryptedCsPdu);    /* 719 */
 	SETTINGS_DEPRECATED(ALIGN64 BOOL HiDefRemoteApp);         /* 720 */
 	SETTINGS_DEPRECATED(ALIGN64 UINT32 CompressionLevel);     /* 721 */
-	UINT64 padding0768[768 - 722];                            /* 722 */
+	SETTINGS_DEPRECATED(ALIGN64 UINT32 RemoteAppFeatureFlags); /* 722 */
+	UINT64 padding0768[768 - 723];                             /* 723 */
 
 	/* Client Info (Extra) */
 	SETTINGS_DEPRECATED(ALIGN64 BOOL IPv6Enabled);       /* 768 */
@@ -302,7 +311,10 @@ struct rdp_settings
 	SETTINGS_DEPRECATED(ALIGN64 UINT32 PreconnectionId);    /* 1154 */
 	SETTINGS_DEPRECATED(ALIGN64 char* PreconnectionBlob);   /* 1155 */
 	SETTINGS_DEPRECATED(ALIGN64 BOOL SendPreconnectionPdu); /* 1156 */
-	UINT64 padding1216[1216 - 1157];                        /* 1157 */
+	SETTINGS_DEPRECATED(ALIGN64 char* EndpointFedAuthToken); /** 1157
+		                                                      * @since version 3.28.0
+		                                                      */
+	UINT64 padding1216[1216 - 1158];                         /* 1158 */
 
 	/* Server Redirection */
 	SETTINGS_DEPRECATED(ALIGN64 UINT32 RedirectionFlags);                      /* 1216 */

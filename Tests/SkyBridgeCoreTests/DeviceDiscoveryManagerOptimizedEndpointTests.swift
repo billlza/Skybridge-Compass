@@ -114,8 +114,8 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
             name: "iPad Pro 11-inch (M4)",
             ipv4: nil,
             ipv6: nil,
-            services: ["_skybridge-transfer._tcp", "_skybridge._tcp"],
-            portMap: ["_skybridge-transfer._tcp": 8080, "_skybridge._tcp": 9527],
+            services: [BonjourInteropContract.fileTransferServiceType, "_skybridge._tcp"],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 8080, "_skybridge._tcp": 9527],
             connectionTypes: [.wifi],
             uniqueIdentifier: route,
             routeIdentifiers: [route],
@@ -142,18 +142,18 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
         let merged = DeviceDiscoveryManagerOptimized.mergedPortMapPreservingResolvedPorts(
             incoming: [
                 "_skybridge._tcp": 0,
-                "_skybridge-transfer._tcp": 8080,
-                "_skybridge-remote._tcp": 0
+                BonjourInteropContract.fileTransferServiceType: 8080,
+                BonjourInteropContract.remoteControlServiceType: 0
             ],
             existing: [
                 "_skybridge._tcp": 9527,
-                "_skybridge-remote._tcp": 5901
+                BonjourInteropContract.remoteControlServiceType: 5901
             ]
         )
 
         XCTAssertEqual(merged["_skybridge._tcp"], 9527)
-        XCTAssertEqual(merged["_skybridge-transfer._tcp"], 8080)
-        XCTAssertEqual(merged["_skybridge-remote._tcp"], 5901)
+        XCTAssertEqual(merged[BonjourInteropContract.fileTransferServiceType], 8080)
+        XCTAssertEqual(merged[BonjourInteropContract.remoteControlServiceType], 5901)
     }
 
     func testPortMapMergeAllowsFreshResolvedPortToReplaceStalePort() {

@@ -8,6 +8,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
     case android = "Android"
     case windows = "Windows"
     case linux = "Linux"
+    case unknown = "Unknown"
 
  /// 设备类型显示名称
     public var displayName: String {
@@ -18,6 +19,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
         case .android: return "Android"
         case .windows: return "Windows"
         case .linux: return "Linux"
+        case .unknown: return "Unknown"
         }
     }
 
@@ -30,7 +32,33 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
         case .android: return "smartphone"
         case .windows: return "pc"
         case .linux: return "server.rack"
+        case .unknown: return "questionmark.circle"
         }
+    }
+
+    static func remoteType(platformName: String?, modelName: String?) -> P2PDeviceType {
+        func token(_ value: String?) -> String {
+            (value ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .filter { $0.isLetter || $0.isNumber }
+        }
+
+        switch token(platformName) {
+        case "mac", "macos", "osx": return .macOS
+        case "ipad", "ipados": return .iPadOS
+        case "ios", "iphone": return .iOS
+        case "android": return .android
+        case "windows", "win32", "win64": return .windows
+        case "linux": return .linux
+        default: break
+        }
+
+        let model = token(modelName)
+        if model.hasPrefix("ipad") { return .iPadOS }
+        if model.hasPrefix("iphone") || model.hasPrefix("ipod") { return .iOS }
+        if model.hasPrefix("mac") || model.hasPrefix("imac") { return .macOS }
+        return .unknown
     }
 }
 

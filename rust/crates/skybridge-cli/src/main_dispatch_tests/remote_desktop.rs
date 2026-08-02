@@ -1,21 +1,20 @@
 use anyhow::Result;
 use clap::Parser;
 use skybridge_agent::{
-    load_remote_desktop_request_registry, observe_remote_desktop_requests_for_established_session,
-    resolve_paths, upsert_remote_desktop_capability_snapshot, upsert_session_runtime,
+    load_remote_desktop_request_registry, resolve_paths, upsert_remote_desktop_capability_snapshot,
+    upsert_session_runtime,
 };
 use skybridge_core::{
-    RemoteDesktopCapabilitySnapshot, RemoteDesktopControlAction,
-    RemoteDesktopControlRequestPayload, RemoteDesktopObservedMode, RemoteDesktopResolutionRequest,
-    RuntimeSessionRecord, RuntimeSessionRole, RuntimeSessionSource, RuntimeSessionState,
-    SessionReadiness,
+    RemoteDesktopCapabilitySnapshot, RemoteDesktopObservedMode,
+    RuntimeAuthenticatedPeerObservation, RuntimeSessionRecord, RuntimeSessionRole,
+    RuntimeSessionSource, RuntimeSessionState, SessionReadiness,
 };
 
 use crate::Cli;
 use crate::cli_test_support::make_test_dir;
 
 #[tokio::test]
-async fn remote_desktop_dispatch_registers_pending_request_without_live_success() -> Result<()> {
+async fn remote_desktop_dispatch_rejects_unverified_peer_without_registry_write() -> Result<()> {
     let state_dir = make_test_dir("remote-desktop-dispatch")?;
     let state = state_dir.display().to_string();
     let paths = resolve_paths(Some(state_dir.clone()))?;
@@ -47,35 +46,28 @@ async fn remote_desktop_dispatch_registers_pending_request_without_live_success(
         .await
         .is_err()
     );
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "remote-desktop",
-        "start",
-        "--session-id",
-        "session-1",
-        "--resolution",
-        "1920x1080",
-        "--fps",
-        "60",
-        "--json",
-    ])
-    .await?;
-    let request_registry = load_remote_desktop_request_registry(&paths).await?;
-    let pending = request_registry.pending_for_session("session-1");
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].target_runtime_id, "runtime-session-1");
-
-    let observed =
-        observe_remote_desktop_requests_for_established_session(&paths, "session-1").await?;
-    assert_eq!(observed.len(), 1);
-    assert!(observed[0].is_agent_observed());
-    assert!(!observed[0].is_pending_agent_observation());
+    assert!(
+        dispatch_args([
+            "skybridge",
+            "--state-dir",
+            &state,
+            "remote-desktop",
+            "start",
+            "--session-id",
+            "session-1",
+            "--resolution",
+            "1920x1080",
+            "--fps",
+            "60",
+            "--json",
+        ])
+        .await
+        .is_err()
+    );
     let request_registry = load_remote_desktop_request_registry(&paths).await?;
     assert!(
         request_registry.pending_for_session("session-1").is_empty(),
-        "observed remote desktop requests must leave the pending queue"
+        "unverified peer capability must fail before registry mutation"
     );
 
     dispatch_args([
@@ -146,113 +138,98 @@ async fn remote_desktop_dispatch_registers_pending_request_without_live_success(
 }
 
 #[tokio::test]
-async fn remote_desktop_dispatch_persists_distinct_request_payloads() -> Result<()> {
+async fn remote_desktop_dispatch_rejects_all_mutations_without_registry_writes() -> Result<()> {
     let state_dir = make_test_dir("remote-desktop-dispatch-payloads")?;
     let state = state_dir.display().to_string();
     let paths = resolve_paths(Some(state_dir.clone()))?;
-    seed_established_session(&paths, "session-stop").await?;
-    seed_established_session(&paths, "session-resolution").await?;
-    seed_established_session(&paths, "session-fps").await?;
-    seed_established_session(&paths, "session-default-start").await?;
-
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "remote-desktop",
-        "start",
-        "--session-id",
-        "session-default-start",
-        "--json",
-    ])
-    .await?;
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "remote-desktop",
-        "stop",
-        "--session-id",
+    seed_established_session_with_capabilities(
+        &paths,
         "session-stop",
-        "--json",
-    ])
+        Some(vec!["remote_desktop".to_owned()]),
+    )
     .await?;
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "remote-desktop",
-        "set-resolution",
-        "--session-id",
+    seed_established_session_with_capabilities(
+        &paths,
         "session-resolution",
-        "--resolution",
-        "2056x1329",
-        "--json",
-    ])
+        Some(vec!["remote_desktop".to_owned()]),
+    )
     .await?;
-    dispatch_args([
-        "skybridge",
-        "--state-dir",
-        &state,
-        "remote-desktop",
-        "set-fps",
-        "--session-id",
+    seed_established_session_with_capabilities(
+        &paths,
         "session-fps",
-        "--fps",
-        "120",
-        "--json",
-    ])
+        Some(vec!["remote_desktop".to_owned()]),
+    )
     .await?;
+    seed_established_session_with_capabilities(
+        &paths,
+        "session-default-start",
+        Some(vec!["remote_desktop".to_owned()]),
+    )
+    .await?;
+
+    assert!(
+        dispatch_args([
+            "skybridge",
+            "--state-dir",
+            &state,
+            "remote-desktop",
+            "start",
+            "--session-id",
+            "session-default-start",
+            "--json",
+        ])
+        .await
+        .is_err()
+    );
+    assert!(
+        dispatch_args([
+            "skybridge",
+            "--state-dir",
+            &state,
+            "remote-desktop",
+            "stop",
+            "--session-id",
+            "session-stop",
+            "--json",
+        ])
+        .await
+        .is_err()
+    );
+    assert!(
+        dispatch_args([
+            "skybridge",
+            "--state-dir",
+            &state,
+            "remote-desktop",
+            "set-resolution",
+            "--session-id",
+            "session-resolution",
+            "--resolution",
+            "2056x1329",
+            "--json",
+        ])
+        .await
+        .is_err()
+    );
+    assert!(
+        dispatch_args([
+            "skybridge",
+            "--state-dir",
+            &state,
+            "remote-desktop",
+            "set-fps",
+            "--session-id",
+            "session-fps",
+            "--fps",
+            "120",
+            "--json",
+        ])
+        .await
+        .is_err()
+    );
 
     let request_registry = load_remote_desktop_request_registry(&paths).await?;
-    let default_start = request_registry.pending_for_session("session-default-start");
-    assert_eq!(default_start.len(), 1);
-    assert_eq!(default_start[0].action, RemoteDesktopControlAction::Start);
-    assert_eq!(
-        default_start[0].payload.resolution,
-        Some(RemoteDesktopResolutionRequest::Auto)
-    );
-    assert_eq!(default_start[0].payload.fps, Some(60));
-    assert_eq!(
-        default_start[0].target_runtime_id,
-        "runtime-session-default-start"
-    );
-
-    let stop = request_registry.pending_for_session("session-stop");
-    assert_eq!(stop.len(), 1);
-    assert_eq!(stop[0].action, RemoteDesktopControlAction::Stop);
-    assert_eq!(
-        stop[0].payload,
-        RemoteDesktopControlRequestPayload::default()
-    );
-    assert_eq!(stop[0].target_runtime_id, "runtime-session-stop");
-
-    let set_resolution = request_registry.pending_for_session("session-resolution");
-    assert_eq!(set_resolution.len(), 1);
-    assert_eq!(
-        set_resolution[0].action,
-        RemoteDesktopControlAction::SetResolution
-    );
-    assert_eq!(set_resolution[0].payload.fps, None);
-    assert_eq!(
-        set_resolution[0].payload.resolution,
-        Some(RemoteDesktopResolutionRequest::Preset {
-            id: "2056x1329".to_owned(),
-            width: 2056,
-            height: 1329,
-        })
-    );
-    assert_eq!(
-        set_resolution[0].target_runtime_id,
-        "runtime-session-resolution"
-    );
-
-    let set_fps = request_registry.pending_for_session("session-fps");
-    assert_eq!(set_fps.len(), 1);
-    assert_eq!(set_fps[0].action, RemoteDesktopControlAction::SetFps);
-    assert_eq!(set_fps[0].payload.resolution, None);
-    assert_eq!(set_fps[0].payload.fps, Some(120));
-    assert_eq!(set_fps[0].target_runtime_id, "runtime-session-fps");
+    assert!(request_registry.requests.is_empty());
 
     Ok(())
 }
@@ -435,6 +412,45 @@ async fn seed_established_session(
     };
     record.readiness = readiness.clone();
     record.last_established_readiness = Some(readiness);
+    upsert_session_runtime(paths, record).await?;
+    Ok(())
+}
+
+async fn seed_established_session_with_capabilities(
+    paths: &skybridge_agent::AgentPaths,
+    session_id: &str,
+    capabilities: Option<Vec<String>>,
+) -> Result<()> {
+    let mut record = RuntimeSessionRecord::new(
+        format!("runtime-{session_id}"),
+        session_id.to_owned(),
+        RuntimeSessionRole::Initiator,
+        RuntimeSessionSource::Code,
+        "https://signal.example.com",
+        "local-device",
+        Some("remote-device".to_owned()),
+        Some("Remote Device".to_owned()),
+        Some("fingerprint".to_owned()),
+        RuntimeSessionState::Bound,
+    );
+    let readiness = SessionReadiness::HandshakeComplete {
+        session_id: session_id.to_owned(),
+        negotiated_suite: "X-Wing".to_owned(),
+    };
+    let observed_at = time::OffsetDateTime::now_utc();
+    record.readiness = readiness.clone();
+    record.last_established_readiness = Some(readiness);
+    record.handshake_completed_at = Some(observed_at);
+    record.authenticated_peer = Some(RuntimeAuthenticatedPeerObservation {
+        device_id: "remote-device".to_owned(),
+        device_name: "Remote Device".to_owned(),
+        platform: Some("linux".to_owned()),
+        capabilities,
+        file_transfer_port: None,
+        remote_control_port: None,
+        sbwc_counter: 1,
+        observed_at,
+    });
     upsert_session_runtime(paths, record).await?;
     Ok(())
 }

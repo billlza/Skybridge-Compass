@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 
+_skybridge_framework_helpers_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_skybridge_native_dependency_lock="${_skybridge_framework_helpers_dir}/../Config/native-dependencies.lock.json"
+if ! SKYBRIDGE_WEBRTC_M150_MACOS_BINARY_SHA256="$(
+  python3 - "${_skybridge_native_dependency_lock}" <<'PY'
+import json
+import pathlib
+import sys
+
+record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+value = record["families"]["webrtc"]["binaries"]["macos-arm64-x86_64"]
+if not isinstance(value, str) or len(value) != 64:
+    raise SystemExit("invalid WebRTC macOS SHA-256 in native dependency lock")
+print(value)
+PY
+)"; then
+  echo "failed to load the approved WebRTC hash from ${_skybridge_native_dependency_lock}" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 skybridge_framework_binary_path() {
   local framework_dir="${1:-}"
   local framework_name="${2:-}"
@@ -24,6 +43,41 @@ skybridge_framework_binary_path() {
 
 skybridge_framework_binary_exists() {
   skybridge_framework_binary_path "$@" >/dev/null
+}
+
+skybridge_assert_webrtc_m150_framework() {
+  local framework_dir="${1:-}"
+  local binary_path=""
+  local canonical_binary=""
+  local actual_sha256=""
+
+  binary_path="$(skybridge_framework_binary_path "${framework_dir}" "WebRTC")" || {
+    echo "WebRTC M150 gate: framework binary is missing: ${framework_dir}" >&2
+    return 1
+  }
+  canonical_binary="$(python3 - "${framework_dir}" "${binary_path}" <<'PY'
+import pathlib
+import sys
+
+framework = pathlib.Path(sys.argv[1]).resolve(strict=True)
+binary = pathlib.Path(sys.argv[2]).resolve(strict=True)
+try:
+    binary.relative_to(framework)
+except ValueError:
+    raise SystemExit(1)
+if not binary.is_file():
+    raise SystemExit(1)
+print(binary)
+PY
+)" || {
+    echo "WebRTC M150 gate: framework binary escapes its bundle or is not regular" >&2
+    return 1
+  }
+  actual_sha256="$(shasum -a 256 "${canonical_binary}" | awk '{print $1}')" || return 1
+  if [[ "${actual_sha256}" != "${SKYBRIDGE_WEBRTC_M150_MACOS_BINARY_SHA256}" ]]; then
+    echo "WebRTC M150 gate: unapproved macOS binary SHA-256: ${actual_sha256}" >&2
+    return 1
+  fi
 }
 
 skybridge_normalize_versioned_framework_layout() {

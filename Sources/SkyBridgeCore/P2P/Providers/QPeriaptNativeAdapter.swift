@@ -5,8 +5,6 @@ import SkyBridgeQPeriaptRuntime
 public typealias QPeriaptCryptoAdmissionError =
     SkyBridgeQPeriaptRuntime.QPeriaptCryptoAdmissionError
 
-extension SecureBytes: QPeriaptSecretBuffer {}
-
 /// SkyBridgeCore compatibility facade. Native execution operates directly on
 /// `SecureBytes` through the shared secret-buffer protocol; this layer only
 /// translates the target-owned typed errors into the established Core errors.

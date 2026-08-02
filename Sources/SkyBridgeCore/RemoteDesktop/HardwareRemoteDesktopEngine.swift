@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Metal
 import MetalKit
@@ -655,3 +660,4 @@ public struct EncodingConfiguration: Sendable {
 }
 
 // 注意：VideoCodec 和 RemoteDesktopError 已在其他文件中定义，此处不再重复定义
+#endif

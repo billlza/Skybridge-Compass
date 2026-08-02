@@ -74,8 +74,8 @@
     <array>
         <string>_skybridge._tcp</string>
         <string>_skybridge._udp</string>
-        <string>_skybridge-transfer._tcp</string>
-        <string>_skybridge-remote._tcp</string>
+        <string>_skybridge-xfer._tcp</string>
+        <string>_skybridge-rd._tcp</string>
         <string>_companion-link._tcp</string>
         <string>_services._dns-sd._udp</string>
         <string>_airplay._tcp</string>

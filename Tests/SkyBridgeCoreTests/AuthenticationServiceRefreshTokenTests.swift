@@ -369,6 +369,34 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
         assertRefreshIdentityContinuityRejected(refreshed, replacing: source)
     }
 
+    func testRefreshIdentityContinuityUsesSubjectWhenBusinessNebulaIdIsPresent() throws {
+        let baseURL = URL(string: "https://auth.example.test")!
+        let source = makeRefreshContinuitySession(
+            accessToken: Self.makeSupabaseAccessToken(
+                baseURL: baseURL,
+                expirationOffset: -3_600,
+                tenantID: nil
+            ),
+            nebulaID: "NEBULA-business-a"
+        )
+        let refreshed = makeRefreshContinuitySession(
+            accessToken: Self.makeSupabaseAccessToken(
+                baseURL: baseURL,
+                expirationOffset: 3_600,
+                tenantID: nil
+            ),
+            nebulaID: "NEBULA-business-b"
+        )
+
+        XCTAssertNoThrow(
+            try AuthenticationService.validateRefreshedIdentity(
+                refreshed,
+                sourceSession: source,
+                requiresProviderJWTContinuity: true
+            )
+        )
+    }
+
     private func makeRefreshContinuitySession(
         accessToken: String,
         nebulaID: String? = "NEBULA-1"

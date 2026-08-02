@@ -250,6 +250,13 @@ public actor RegexMatchingExecutor {
 
  /// Get or create XPC connection to helper.
     private func getOrCreateXPCConnection() throws -> NSXPCConnection {
+#if !os(macOS)
+        // `NSXPCConnection(serviceName:)` 是 macOS 专属，其它平台没有等价的进程外正则 helper。
+        // 报告 helper 不可用会走进 `match(...)` 中**既有**的进程内路径，而不是在这里新造降级。
+        throw RegexMatchingError.connectionFailed(
+            "XPC regex isolation helper is macOS-only"
+        )
+#else
         if xpcAvailable == false || Date() < nextXPCRetryAt {
             throw RegexMatchingError.connectionFailed("XPC helper unavailable")
         }
@@ -291,6 +298,7 @@ public actor RegexMatchingExecutor {
         xpcAvailable = true
 
         return connection
+#endif
     }
 
  /// Handle XPC connection invalidation.

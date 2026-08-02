@@ -1,0 +1,154 @@
+{
+  "schema_version": 2,
+  "families": {
+    "freerdp-runtime": {
+      "sources": [
+        {
+          "name": "freerdp",
+          "version": "3.30.0",
+          "ref": "3.30.0",
+          "commit": "6b107f0aadbabc47941c5a5b893b88c01792af6d",
+          "repository": "https://github.com/FreeRDP/FreeRDP.git",
+          "git_tree": "fd0ebd1311aad2111b96f49945af81d26fda8cb0",
+          "source_archive_sha256": "6bb30fd22f359124d60b839cba6b7b7aa4f5f56b00d6703a439332cc4d484354"
+        },
+        {
+          "name": "openssl",
+          "version": "4.0.1",
+          "ref": "openssl-4.0.1",
+          "commit": "1e963a8680ec78ad2072792c7a1a71f3c530bd2e",
+          "repository": "https://github.com/openssl/openssl.git",
+          "git_tree": "6b7ac39dd2fb86943398c625a90dd13662f46196",
+          "source_archive_sha256": "f682b3dbe3410a67c1f742c3088e549ec99066cb526cf77dba3c7921a1578a6d"
+        },
+        {
+          "name": "jansson",
+          "version": "2.15.1",
+          "ref": "v2.15.1",
+          "commit": "dbb5fb3636e155fccfce4cd215de752779bd6971",
+          "repository": "https://github.com/akheron/jansson.git",
+          "git_tree": "42a393f9dd6520fb191d3e301630cdf245d3e504",
+          "source_archive_sha256": "e806924b678e60eb370fe6edb86e52409ad891ab5f4edda10047303934f24e10"
+        },
+        {
+          "name": "uriparser",
+          "version": "1.0.2",
+          "ref": "uriparser-1.0.2",
+          "commit": "9b2bed92f5deecf740819f9bf27724bee2fe9c12",
+          "repository": "https://github.com/uriparser/uriparser.git",
+          "git_tree": "c1743fa4db3b5531fbff7df0d2c8e5357c458b83",
+          "source_archive_sha256": "53ac88ba224509bee94a937d1fe001c6374ef11fb3ba4571e9fd7b0b009cbbd9"
+        },
+        {
+          "name": "googletest",
+          "version": "1.17.0",
+          "ref": "v1.17.0",
+          "commit": "52eb8108c5bdec04579160ae17225d66034bd723",
+          "repository": "https://github.com/google/googletest.git",
+          "git_tree": "ad23b2ceac4a6eef2278c48545b62ffc1f0c134a",
+          "source_archive_sha256": "3a8fea2f310f73e090dbf10dc16260ab959cccf77bc5482f453d1f4bc3af4bcb"
+        }
+      ],
+      "build_inputs": {
+        "architecture": "arm64",
+        "audio": "disabled",
+        "audio_redirection": "disabled",
+        "build_jobs": "8",
+        "build_type": "Release",
+        "cairo": "disabled",
+        "channel_plugins": "not-built",
+        "channel_registration": "none",
+        "clang_format": "disabled",
+        "client_common": "disabled",
+        "dependency_resolution": "private-only",
+        "deployment_target": "14.0",
+        "device_redirection": "disabled",
+        "dsp_ffmpeg": "disabled",
+        "fdk_aac": "disabled",
+        "feature_scope": "freerdp-core-winpr-software-gdi-bgra-classic-bitmap-nscodec-basic-input-no-client-common-no-channel-plugins",
+        "freerdp_local_patch_sha256": "48f7bf519a230a01ab25f178ff00968e78066511b76fb9db6f1a35a8691262f3",
+        "freerdp_3x_deprecated": "disabled",
+        "freerdp_test_scope": "winpr-synch-all",
+        "jansson_local_patch_sha256": "eb7c26d605d020c60c9f25b62b43b0e229e12f0953b0fd0ba9b995026415b2a8",
+        "linkage": "dynamic",
+        "openssl_abi": "4",
+        "openssl_local_patch_sha256": "4e3c460e9b7f0619c80ae02bba2800ef172e4fdba07bf0b97144311774b7fb7b",
+        "openssl_sonames": "libssl.4.dylib;libcrypto.4.dylib",
+        "openssl_test_harness_jobs": "1",
+        "pcsc": "disabled",
+        "pkcs11": "disabled",
+        "private_dependency_closure": "true",
+        "runtime_gfx_h264": "disabled",
+        "runtime_graphics_pipeline": "disabled",
+        "runtime_remotefx": "disabled",
+        "smartcard": "disabled",
+        "source_revision": "embedded-and-verified",
+        "uriparser_local_patch_sha256": "65f13fb1c134ae4b06f1022d080f04124f592bf47317c389b345d948b612dca9",
+        "warning_suppressions": "forbidden",
+        "winpr_3x_deprecated": "disabled"
+      },
+      "toolchain": {
+        "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+        "cmake": "cmake version 4.3.3",
+        "macos_sdk": "26.5",
+        "ninja": "1.13.2",
+        "xcode": "Xcode 26.6; Build version 17F113"
+      }
+    },
+    "liboqs": {
+      "sources": [
+        {
+          "name": "liboqs",
+          "version": "0.16.0",
+          "ref": "0.16.0",
+          "commit": "5a1a854b0dc9f2141bdc771c555ee60c37950183",
+          "repository": "https://github.com/open-quantum-safe/liboqs.git",
+          "git_tree": "8e0a3a68b247f821ed535a141aa896a7fda59d2d",
+          "source_archive_sha256": "2a469ff48e73c9cd78c2f7752465ca7a066582fbaa9185f52b4725783218d39d"
+        }
+      ],
+      "build_inputs": {
+        "architectures": "macos-arm64;ios-arm64;ios-simulator-arm64;ios-simulator-x86_64",
+        "build_type": "Release",
+        "distribution_build": "true",
+        "downstream_patch": "Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch@6de373115afcf5cb01a2075ec49cb5609db2970cb582fbfb17e2b4c8653cf177",
+        "enabled_algorithms": "KEM_ml_kem_768;KEM_ml_kem_1024;SIG_ml_dsa_65;SIG_ml_dsa_87",
+        "ios_deployment_target": "17.0",
+        "linkage": "static",
+        "macos_deployment_target": "14.0",
+        "openssl": "false"
+      },
+      "toolchain": {
+        "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+        "cmake": "cmake version 4.3.3",
+        "macos_sdk": "26.5",
+        "ninja": "1.13.2",
+        "xcode": "Xcode 26.6; Build version 17F113"
+      }
+    },
+    "webrtc": {
+      "sources": [
+        {
+          "name": "webrtc",
+          "version": "150.0.0",
+          "ref": "150.0.0",
+          "commit": "6ed87f05368632f71dc95c89c14c051561710925",
+          "repository": "https://github.com/stasel/WebRTC.git"
+        }
+      ],
+      "release_asset": {
+        "name": "WebRTC-M150.xcframework.zip",
+        "sha256": "f9890492b0016e4c88ab20f07867b8b420054caedc8a692b2ec6ac041f3cf6b2",
+        "license_sha256": "ab00a482b6a3902e40211b43c5d0441962ea99b6cc7c25c0f243fa270b78d482"
+      },
+      "binaries": {
+        "ios-arm64": "2884d8adb224656b2570794aae4c429ef5064c2e3e2ab9a30eafd41daee2f7d3",
+        "ios-simulator-arm64-x86_64": "af97ac874a22271c0fe751c9c98f62d6171155263f2773ac084c3c3587ac113f",
+        "macos-arm64-x86_64": "8a6936a1beceab72283c54a0396c905313084ed1f9094781c02e3a9f39d55fe3"
+      },
+      "header_overlays": {
+        "Sources/Vendor/WebRTCM150AudioDeviceHeader/WebRTC/RTCAudioDevice.h": "8b4bdd60ab38c0a092da4b1ad6064946a77b0ffe95c2e116a1643c8d8ca3d83d"
+      }
+    }
+  }
+}

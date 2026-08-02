@@ -75,7 +75,7 @@ func installAuthenticatedMLDSATrustRecordForTesting(
     )
     let trust = TrustSyncService.shared
     trust.setInMemoryPersistenceForTesting(true)
-    await trust.removeRecordsForTesting(deviceIds: [peerId])
+    try await trust.removeRecordsForTesting(deviceIds: [peerId])
     _ = try await trust.addTrustRecord(
         TrustRecord(
             deviceId: peerId,

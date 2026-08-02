@@ -27,7 +27,7 @@ async fn command_wrappers_cover_auth_and_media_entrypoints() -> Result<()> {
             Some(state_dir.clone()),
             ConnectCommand {
                 code: "ABCDEF".to_owned(),
-                hold_seconds: 0,
+                timeout_seconds: 1,
                 json: true,
             },
         )
@@ -74,6 +74,8 @@ async fn command_wrappers_cover_auth_and_media_entrypoints() -> Result<()> {
             path: "/tmp/payload.txt".into(),
             to: "peer".to_owned(),
             session_id: None,
+            detach: false,
+            timeout_seconds: 1,
             output: OutputOptions { json: true },
         }),
     };

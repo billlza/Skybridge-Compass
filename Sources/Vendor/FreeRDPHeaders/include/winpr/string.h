@@ -37,8 +37,49 @@ extern "C"
 {
 #endif
 
+	/** @brief implementation of strnstr for all platforms
+	 *
+	 * @param haystack the string to search in
+	 * @param needle the string to search for, must not be \b nullptr
+	 * @param hlen the string length of haystack
+	 *
+	 * @return A pointer into \ref haystack if found, nullptr otherwise
+	 *
+	 * @since version 3.28.0
+	 */
+	WINPR_ATTR_NODISCARD
+	WINPR_API char* winpr_strnstr(char* haystack, const char* needle, size_t hlen);
+
 	WINPR_API WINPR_ATTR_MALLOC(free, 1) char* winpr_str_url_encode(const char* str, size_t len);
 	WINPR_API WINPR_ATTR_MALLOC(free, 1) char* winpr_str_url_decode(const char* str, size_t len);
+
+	/** @brief checks if a string is a valid URL
+	 *
+	 *  @param str The string to check
+	 *  @return \b TRUE if valid, \b FALSE otherwise
+	 *  @since version 3.29.0
+	 */
+	WINPR_ATTR_NODISCARD
+	WINPR_API BOOL winpr_str_is_valid_url(const char* str);
+
+	/** @brief checks if a string is a valid URL
+	 *
+	 *  @param str The string to check
+	 *  @param len The length of the string in bytes
+	 *  @return \b TRUE if valid, \b FALSE otherwise
+	 *  @since version 3.29.0
+	 */
+	WINPR_ATTR_NODISCARD
+	WINPR_API BOOL winpr_str_is_valid_urlN(const char* str, size_t len);
+
+	/** @brief checks if a string contains newlines
+	 *
+	 *  @param str The string to check
+	 *  @return \b TRUE if it has newlines, \b FALSE otherwise
+	 *  @since version 3.29.0
+	 */
+	WINPR_ATTR_NODISCARD
+	WINPR_API BOOL winpr_str_has_newlines(const char* str);
 
 	WINPR_API BOOL winpr_str_append(const char* what, char* buffer, size_t size,
 	                                const char* separator);

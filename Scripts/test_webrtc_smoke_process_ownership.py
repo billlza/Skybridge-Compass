@@ -22,6 +22,8 @@ import webrtc_smoke_process_ownership as ownership
 
 
 SMOKE_SCRIPT = SCRIPT_DIR / "run_real_device_webrtc_smoke.sh"
+FILE_TRANSFER_SMOKE_SCRIPT = SCRIPT_DIR / "run_real_device_file_transfer_smoke.sh"
+P2P_REMOTE_SMOKE_SCRIPT = SCRIPT_DIR / "run_real_device_p2p_remote_smoke.sh"
 
 
 class PrivateWorkspaceTestCase(unittest.TestCase):
@@ -148,6 +150,13 @@ class IOSProcessOwnershipTests(PrivateWorkspaceTestCase):
         processes = self.write_json("processes.json", {"result": {"runningProcesses": entries}})
         return ownership.ios_status(processes, self.identity)
 
+    def presence_for(self, entries: list[object]) -> int:
+        processes = self.write_json(
+            "presence-processes.json",
+            {"result": {"runningProcesses": entries}},
+        )
+        return ownership.ios_presence(processes, self.app_path)
+
     def exact_entry(self) -> dict[str, object]:
         return {
             "auditToken": self.audit_token,
@@ -169,6 +178,22 @@ class IOSProcessOwnershipTests(PrivateWorkspaceTestCase):
         del entry["auditToken"]
 
         self.assertEqual(self.status_for([entry]), ownership.UNVERIFIABLE)
+
+    def test_current_process_schema_can_prove_app_presence_without_signal_authority(self) -> None:
+        entry = self.exact_entry()
+        del entry["auditToken"]
+
+        self.assertEqual(self.presence_for([entry]), ownership.MATCH)
+
+    def test_current_process_schema_can_prove_app_absence(self) -> None:
+        self.assertEqual(self.presence_for([]), ownership.ABSENT)
+
+    def test_presence_check_rejects_malformed_process_entries(self) -> None:
+        entry = self.exact_entry()
+        del entry["auditToken"]
+        entry["processIdentifier"] = True
+
+        self.assertEqual(self.presence_for([entry]), ownership.UNVERIFIABLE)
 
     def test_same_pid_with_different_bundle_executable_fails_closed(self) -> None:
         entry = self.exact_entry()
@@ -253,35 +278,200 @@ class SmokeSourceContractTests(unittest.TestCase):
         self.assertNotIn('kill -KILL "$target_pid"', body)
         self.assertNotIn('kill -0 "$target_pid"', body)
 
-    def test_ios_launch_identity_is_captured_before_pid_is_consumed(self) -> None:
-        launch = self.source.index("device process launch \\")
-        capture = self.source.index('"$PROCESS_OWNERSHIP_HELPER" ios-capture', launch)
-        identity_pid = self.source.index('"$PROCESS_OWNERSHIP_HELPER" identity-pid', capture)
+    def test_ios_console_handle_is_captured_before_launch_returns_success(self) -> None:
+        body = self.function_body("launch_ios_app_with_console_handle")
+        launch = body.index("skybridge_ios_start_console_launch")
+        started = body.index("IOS_CONSOLE_HANDLE_STARTED=1", launch)
+        capture = body.index("skybridge_ios_capture_console_handle", started)
+        captured = body.index("IOS_CONSOLE_HANDLE_CAPTURED=1", capture)
+        running_check = body.index("ios_console_handle_is_exact_and_running", captured)
 
-        self.assertLess(launch, capture)
-        self.assertLess(capture, identity_pid)
+        self.assertLess(launch, started)
+        self.assertLess(started, capture)
+        self.assertLess(capture, captured)
+        self.assertLess(captured, running_check)
 
-    def test_ios_terminate_is_guarded_by_pid_executable_and_token_status(self) -> None:
+    def test_ios_cleanup_signals_only_the_exact_local_console_handle(self) -> None:
         body = self.function_body("terminate_ios_app")
-        ownership_check = body.index("ios_process_ownership_status")
-        terminate = body.index("device process terminate")
+        status = body.index("skybridge_ios_console_handle_status")
+        signal_handle = body.index("skybridge_ios_signal_console_handle", status)
+        wait_for_exit = body.index("skybridge_ios_wait_console_handle_exit", signal_handle)
+        capture_result = body.index("skybridge_ios_capture_exited_console_identity", wait_for_exit)
+        prove_absence = body.index("skybridge_ios_require_app_absent_after_handle_exit", capture_result)
 
-        self.assertLess(ownership_check, terminate)
-        self.assertIn("PID, bundle executable, and audit token", body)
-        self.assertNotIn("ios_process_is_running", self.source)
+        self.assertLess(status, signal_handle)
+        self.assertLess(signal_handle, wait_for_exit)
+        self.assertLess(wait_for_exit, capture_result)
+        self.assertLess(capture_result, prove_absence)
+        self.assertNotIn("device process terminate", body)
+        self.assertNotIn("--pid", body)
 
     def test_process_ownership_has_an_independent_private_lifecycle(self) -> None:
         self.assertIn('mktemp -d "${TMPDIR:-/tmp}/skybridge-webrtc-process-ownership.', self.source)
         self.assertIn('MAC_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/', self.source)
         self.assertIn('IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/', self.source)
+        self.assertIn('IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/', self.source)
+        self.assertIn(
+            'IOS_LAUNCH_JSON="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-launch.raw.json"',
+            self.source,
+        )
         self.assertNotIn('MAC_PROCESS_IDENTITY="$AUTH_PRIVATE_DIR/', self.source)
         self.assertNotIn('IOS_PROCESS_IDENTITY="$AUTH_PRIVATE_DIR/', self.source)
+        self.assertNotIn('IOS_LAUNCH_JSON="$AUTH_PRIVATE_DIR/', self.source)
+
+        cleanup = self.function_body("destroy_process_ownership_session")
+        self.assertIn('"$IOS_LAUNCH_JSON"', cleanup)
+        self.assertIn('"$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-launch.raw.json"', cleanup)
+
+        helper_source = (SCRIPT_DIR / "real_device_ios_process_ownership.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('chmod 0600 "$result_json"', helper_source)
 
     def test_mac_signals_use_audit_token_api_instead_of_pid_only_kill(self) -> None:
         helper_source = (SCRIPT_DIR / "webrtc_smoke_process_ownership.py").read_text(encoding="utf-8")
 
         self.assertIn("proc_signal_with_audittoken", helper_source)
         self.assertNotIn("os.kill(pid, signal_number)", helper_source)
+
+
+class FileTransferSmokeSourceContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = FILE_TRANSFER_SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+    @classmethod
+    def function_body(cls, name: str) -> str:
+        match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n(.*?)^\}}\n", cls.source)
+        if match is None:
+            raise AssertionError(f"missing shell function: {name}")
+        return match.group(1)
+
+    def test_ios_launch_captures_exact_console_handle_before_returning_success(self) -> None:
+        body = self.function_body("launch_ios_smoke_app")
+        launch = body.index("skybridge_ios_start_console_launch")
+        started = body.index("IOS_CONSOLE_HANDLE_STARTED=1", launch)
+        capture = body.index("skybridge_ios_capture_console_handle", started)
+        captured = body.index("IOS_CONSOLE_HANDLE_CAPTURED=1", capture)
+        status = body.index("skybridge_ios_console_handle_status", captured)
+        success = body.index("return 0", status)
+
+        self.assertLess(launch, started)
+        self.assertLess(started, capture)
+        self.assertLess(capture, captured)
+        self.assertLess(captured, status)
+        self.assertLess(status, success)
+
+    def test_cleanup_terminates_only_the_exact_launched_ios_process(self) -> None:
+        cleanup = self.function_body("cleanup")
+        terminate = self.function_body("terminate_ios_smoke_app")
+        ownership_status = terminate.index("skybridge_ios_console_handle_status")
+        signal_handle = terminate.index("skybridge_ios_signal_console_handle", ownership_status)
+        wait_for_exit = terminate.index("skybridge_ios_wait_console_handle_exit", signal_handle)
+        capture_result = terminate.index("skybridge_ios_capture_exited_console_identity", wait_for_exit)
+        prove_absence = terminate.index("skybridge_ios_require_app_absent_after_handle_exit", capture_result)
+
+        self.assertIn('[[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] && ! terminate_ios_smoke_app', cleanup)
+        self.assertIn("exact-process-exit-unverified", cleanup)
+        self.assertLess(ownership_status, signal_handle)
+        self.assertLess(signal_handle, wait_for_exit)
+        self.assertLess(wait_for_exit, capture_result)
+        self.assertLess(capture_result, prove_absence)
+        self.assertNotIn("device process terminate", terminate)
+        self.assertNotIn("--pid", terminate)
+
+    def test_ios_identity_has_an_independent_private_lifecycle(self) -> None:
+        self.assertIn(
+            'mktemp -d "${TMPDIR:-/tmp}/skybridge-file-transfer-process-ownership.',
+            self.source,
+        )
+        self.assertIn(
+            'IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"',
+            self.source,
+        )
+        self.assertIn(
+            'IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"',
+            self.source,
+        )
+        self.assertIn("destroy_process_ownership_session", self.function_body("cleanup"))
+        self.assertNotIn('IOS_PROCESS_IDENTITY="$ARTIFACT_DIR/', self.source)
+
+
+class P2PRemoteSmokeSourceContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = P2P_REMOTE_SMOKE_SCRIPT.read_text(encoding="utf-8")
+
+    @classmethod
+    def function_body(cls, name: str) -> str:
+        match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n(.*?)^\}}\n", cls.source)
+        if match is None:
+            raise AssertionError(f"missing shell function: {name}")
+        return match.group(1)
+
+    def test_launch_requires_absence_and_captures_exact_console_handle(self) -> None:
+        body = self.function_body("launch_ios_remote_smoke_app")
+        absence = body.index("skybridge_ios_require_fresh_app_launch")
+        launch = body.index("skybridge_ios_start_console_launch", absence)
+        capture = body.index("skybridge_ios_capture_console_handle", launch)
+        captured = body.index("IOS_CONSOLE_HANDLE_CAPTURED=1", capture)
+
+        self.assertLess(absence, launch)
+        self.assertLess(launch, capture)
+        self.assertLess(capture, captured)
+        self.assertIn("else\n      handle_status=$?", body)
+        self.assertNotIn("--terminate-existing", body)
+
+    def test_disconnect_cleanup_proves_exact_exit_before_receipt(self) -> None:
+        body = self.function_body("terminate_ios_remote_smoke_app_exact")
+        status = body.index("skybridge_ios_console_handle_status")
+        signal_handle = body.index("skybridge_ios_signal_console_handle", status)
+        wait_for_exit = body.index("skybridge_ios_wait_console_handle_exit", signal_handle)
+        capture_result = body.index("skybridge_ios_capture_exited_console_identity", wait_for_exit)
+        prove_absence = body.index("skybridge_ios_require_app_absent_after_handle_exit", capture_result)
+        receipt = body.index("write_ios_process_cleanup_receipt", prove_absence)
+
+        self.assertLess(status, signal_handle)
+        self.assertLess(signal_handle, wait_for_exit)
+        self.assertLess(wait_for_exit, capture_result)
+        self.assertLess(capture_result, prove_absence)
+        self.assertLess(prove_absence, receipt)
+
+    def test_rejected_launch_can_retry_only_after_handle_and_remote_absence_proof(self) -> None:
+        launch = self.function_body("launch_ios_remote_smoke_app")
+        finish = self.function_body("finish_failed_ios_console_launch_without_process")
+
+        explicit_failure = launch.index("launch_result_indicates_explicit_failure")
+        no_process_cleanup = launch.index(
+            "finish_failed_ios_console_launch_without_process",
+            explicit_failure,
+        )
+        exact_cleanup = launch.index(
+            'terminate_ios_remote_smoke_app_exact "startup-exit"',
+            no_process_cleanup,
+        )
+        self.assertLess(explicit_failure, no_process_cleanup)
+        self.assertLess(no_process_cleanup, exact_cleanup)
+        self.assertIn("handle_status != 1", finish)
+        self.assertIn("skybridge_ios_wait_console_handle_exit", finish)
+        self.assertIn("skybridge_ios_require_app_absent_after_handle_exit", finish)
+        self.assertNotIn("write_ios_process_cleanup_receipt", finish)
+
+    def test_no_remote_pid_or_unowned_console_signal_can_terminate_ios(self) -> None:
+        self.assertNotIn("--terminate-existing", self.source)
+        self.assertNotIn("device process terminate", self.source)
+        self.assertNotIn('kill "$IOS_CONSOLE_PID"', self.source)
+        self.assertNotIn("IOS_APP_PID", self.source)
+
+    def test_notice_disconnect_is_bound_to_the_strict_approved_session(self) -> None:
+        wait = self.function_body("wait_for_same_session_notice_disconnected")
+        disconnect = self.function_body("wait_for_remote_control_notice_disconnected")
+
+        self.assertIn('P2P_NOTICE_SESSION="$approved_session"', self.source)
+        self.assertIn("check_p2p_notice_disconnect.py", wait)
+        self.assertIn('"$P2P_NOTICE_SESSION"', wait)
+        self.assertIn("wait_for_same_session_notice_disconnected", disconnect)
+        self.assertNotIn("wait_for_file_pattern", disconnect)
 
 
 class CLIFailClosedTests(unittest.TestCase):

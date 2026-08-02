@@ -11,7 +11,9 @@ pub struct AgentPaths {
     pub logs_dir: PathBuf,
     pub received_dir: PathBuf,
     pub identity_file: PathBuf,
+    pub agent_runtime_lock_file: PathBuf,
     pub session_controls_file: PathBuf,
+    pub session_controls_lock_file: PathBuf,
     pub nearby_discovery_snapshots_file: PathBuf,
     pub file_transfer_requests_file: PathBuf,
     pub remote_desktop_requests_file: PathBuf,
@@ -39,7 +41,9 @@ pub fn resolve_paths(state_dir_override: Option<PathBuf>) -> Result<AgentPaths> 
         logs_dir: root.join("logs"),
         received_dir: root.join("received"),
         identity_file: root.join("identity").join("device.json"),
+        agent_runtime_lock_file: root.join("runtime").join("agent.lock"),
         session_controls_file: root.join("runtime").join("session-controls.json"),
+        session_controls_lock_file: root.join("runtime").join("session-controls.json.lock"),
         nearby_discovery_snapshots_file: root
             .join("runtime")
             .join("nearby-discovery-snapshots.json"),

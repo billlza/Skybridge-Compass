@@ -42,14 +42,15 @@ final class StrictIdentityFailClosedSourceContractTests: XCTestCase {
             "Sources/SkyBridgeCore/FileTransfer/FileTransferListenerService.swift"
         )
         let authority = try XCTUnwrap(
-            source.range(of: "snapshotEnsuringProtocolDeviceId(allowCreate: true)")
+            source.range(of: "CanonicalBonjourAdvertisementIdentityProvider.current(")
         )
-        let listenerStart = try XCTUnwrap(source.range(of: "makeStartedListener(parameters:"))
+        let listenerStart = try XCTUnwrap(source.range(of: "let parameters = makeListenerParameters()"))
 
         XCTAssertLessThan(authority.lowerBound, listenerStart.lowerBound)
-        XCTAssertTrue(source.contains("configureBonjour(on: boundListener, port: boundPort, identity: identity)"))
-        XCTAssertTrue(source.contains("txt[\"deviceId\"] = identity.deviceId"))
-        XCTAssertTrue(source.contains("txt[\"pubKeyFP\"] = identity.pubKeyFP"))
+        XCTAssertTrue(source.contains("configureBonjour(on: listener, identity: identity)"))
+        XCTAssertTrue(source.contains("BonjourInteropContract.makeCanonicalAdvertisementTXT("))
+        XCTAssertTrue(source.contains("deviceId: identity.deviceId"))
+        XCTAssertTrue(source.contains("pubKeyFingerprint: identity.protocolPublicKeyFingerprint"))
         XCTAssertFalse(source.contains("deviceId: nil"))
         XCTAssertFalse(source.contains("snap.deviceId.isEmpty ? serviceName"))
     }
@@ -92,16 +93,11 @@ final class StrictIdentityFailClosedSourceContractTests: XCTestCase {
         XCTAssertTrue(unified.contains("stableDeviceId: device.stableIdentityDeviceId"))
     }
 
-    func testPAKEAndSelfIdentityAPIsCannotSynthesizeOrExposeEmptySecurityIdentity() throws {
+    func testDisabledPAKEAndSelfIdentityAPIsCannotSynthesizeSecurityIdentity() throws {
         let pake = try repositorySource("Sources/SkyBridgeCore/P2P/PAKEService.swift")
-        XCTAssertTrue(
-            pake.contains(
-                "public init(localDeviceId: String, limits: SecurityLimits = .default) throws"
-            )
-        )
-        XCTAssertTrue(pake.contains("throw PAKEError.invalidLocalDeviceId"))
-        XCTAssertFalse(pake.contains("localDeviceId: String? = nil"))
-        XCTAssertFalse(pake.contains("localDeviceId ?? UUID().uuidString"))
+        XCTAssertTrue(pake.contains("unavailable,"))
+        XCTAssertTrue(pake.contains("public actor PAKEService {}"))
+        XCTAssertFalse(pake.contains("public init("))
 
         let identity = try repositorySource(
             "Sources/SkyBridgeCore/Utilities/SelfIdentityProvider.swift"
@@ -166,6 +162,123 @@ final class StrictIdentityFailClosedSourceContractTests: XCTestCase {
         XCTAssertTrue(probe.contains("verifyAbsent: verifyGenericPasswordArtifactsAbsent"))
         XCTAssertTrue(probe.contains("try verifyPrivateKeyArtifactsAbsent(accessGroup: accessGroup)"))
         XCTAssertFalse(probe.contains("try? removeUniqueProbe"))
+    }
+
+    func testSignedIdentityAuditIsReadOnlyStableAndRedacted() throws {
+        let manager = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift"
+        )
+        let auditStart = try XCTUnwrap(
+            manager.range(of: "public func legacyIdentityAuditReport() throws")
+        )
+        let auditEnd = try XCTUnwrap(
+            manager.range(
+                of: "/// Loads the device ID from an existing identity authority",
+                range: auditStart.lowerBound..<manager.endIndex
+            )
+        )
+        let auditBody = manager[auditStart.lowerBound..<auditEnd.lowerBound]
+        XCTAssertEqual(
+            auditBody.components(
+                separatedBy: "discoverStableLegacyIdentity(using: store)"
+            ).count - 1,
+            1
+        )
+        XCTAssertEqual(
+            auditBody.components(
+                separatedBy: "DeviceIdentityAuthorityTransaction.resolve"
+            ).count - 1,
+            3,
+            "The incomplete path must revalidate the authority before emitting structured degraded evidence"
+        )
+        XCTAssertTrue(manager.contains("guard initial == verified"))
+        XCTAssertTrue(auditBody.contains("legacyIdentityChangedDuringAudit"))
+        XCTAssertTrue(auditBody.contains("state: .inspectionUnavailable"))
+        XCTAssertTrue(auditBody.contains("inspectionStatus: .unavailable"))
+        for mutation in [
+            "cleanupLegacyIdentity",
+            "migrateLegacyIdentity",
+            "claimCandidate",
+            "insertAuthorityIfAbsent",
+            "deleteLegacyPrivateKey",
+            "deleteLegacyGenericPasswordCandidate",
+            "createNewIdentityKey"
+        ] {
+            XCTAssertFalse(auditBody.contains(mutation))
+        }
+
+        let host = try repositorySource("Sources/LocalLanInteropHost/main.swift")
+        XCTAssertTrue(
+            host.contains("@_spi(SkyBridgeSmokeDiagnostics) import SkyBridgeCore")
+        )
+        XCTAssertTrue(host.contains("SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY"))
+        XCTAssertTrue(host.contains("encoder.outputFormatting = [.sortedKeys]"))
+        XCTAssertTrue(host.contains("read-only-audit-error"))
+        XCTAssertFalse(
+            host.contains(#"identity audit failed: \(error.localizedDescription)"#)
+        )
+        XCTAssertTrue(host.contains(#"failed stage=identity code=\(code)"#))
+        XCTAssertFalse(
+            host.contains(
+                #"failed stage=identity error=\(sanitize(error.localizedDescription))"#
+            )
+        )
+    }
+
+    func testLegacyMigrationPromotesOnlyTheCommittedTupleAndRetainsResidue() throws {
+        let manager = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift"
+        )
+        XCTAssertFalse(manager.contains("cleanupLegacyIdentity"))
+        XCTAssertFalse(manager.contains("deleteLegacyPrivateKey"))
+        XCTAssertTrue(manager.contains("committedMigrationKeyInfo(from: legacy.state)"))
+        XCTAssertTrue(manager.contains("uniqueCommittedMigrationPrivateKey("))
+        XCTAssertTrue(manager.contains("resolveValidatedAuthority("))
+        XCTAssertTrue(
+            manager.contains(
+                "Legacy identity residue retained beside the validated shared authority"
+            )
+        )
+
+        let authority = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/DeviceIdentityAuthority.swift"
+        )
+        XCTAssertFalse(authority.contains("func deleteLegacyPrivateKey("))
+        XCTAssertTrue(authority.contains("keyInfo last"))
+        XCTAssertTrue(authority.contains("standalone deviceId"))
+        XCTAssertTrue(authority.contains("matches.count == 1"))
+    }
+
+    func testValidatedAuthoritySeparatesTypedResidueHealthFromAuthorityUse() throws {
+        let manager = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift"
+        )
+        XCTAssertTrue(manager.contains("private struct LegacyResidueInspectionError"))
+        XCTAssertTrue(manager.contains("discoverStableLegacyIdentity(using: store)"))
+        XCTAssertTrue(
+            manager.contains(
+                "catch let inspectionError as LegacyResidueInspectionError"
+            )
+        )
+        XCTAssertTrue(manager.contains("return .unavailable(inspectionError.reason)"))
+        XCTAssertTrue(
+            manager.contains(
+                "legacyMigrationPolicy: .rejectMutation"
+            ),
+            "The read-only existing-authority API must not migrate legacy data"
+        )
+        XCTAssertTrue(
+            manager.contains("legacyIdentityRequiresExplicitMigration")
+        )
+        XCTAssertFalse(
+            manager.contains("localizedDescription, privacy: .public"),
+            "Identity storage metadata must not cross a public log boundary"
+        )
+
+        let host = try repositorySource("Sources/LocalLanInteropHost/main.swift")
+        XCTAssertTrue(host.contains("lastLegacyResidueInspectionStatus()"))
+        XCTAssertTrue(host.contains("guard residueStatus.inspectionComplete"))
+        XCTAssertTrue(host.contains("legacyResidueInspectionComplete="))
     }
 
     private func repositorySource(_ relativePath: String) throws -> String {

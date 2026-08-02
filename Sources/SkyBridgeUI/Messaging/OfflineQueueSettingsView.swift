@@ -14,6 +14,7 @@ public struct OfflineQueueSettingsView: View {
 
     @ObservedObject private var queue: OfflineMessageQueue
     @State private var showClearConfirmation = false
+    @State private var operationError: String?
 
     public init(queue: OfflineMessageQueue = .shared) {
         self.queue = queue
@@ -23,6 +24,7 @@ public struct OfflineQueueSettingsView: View {
         Form {
             // 状态概览
             Section {
+                persistenceStatusRows
                 statisticsOverview
             } header: {
                 Label("队列状态", systemImage: "tray.full")
@@ -48,8 +50,11 @@ public struct OfflineQueueSettingsView: View {
 
             // 高级选项
             Section {
-                Toggle("启用持久化", isOn: $queue.configuration.enablePersistence)
-                Toggle("按优先级排序", isOn: $queue.configuration.priorityOrdering)
+                Label("持久化始终启用", systemImage: "lock.shield")
+                Toggle(
+                    "按优先级排序",
+                    isOn: configurationBinding(\.priorityOrdering)
+                )
             } header: {
                 Label("高级选项", systemImage: "gearshape.2")
             }
@@ -74,8 +79,12 @@ public struct OfflineQueueSettingsView: View {
             // 操作
             Section {
                 Button {
-                    Task {
-                        await queue.retryFailed()
+                    Task { @MainActor in
+                        do {
+                            try await queue.retryFailed()
+                        } catch {
+                            operationError = error.localizedDescription
+                        }
                     }
                 } label: {
                     Label("重试失败消息", systemImage: "arrow.clockwise")
@@ -87,7 +96,21 @@ public struct OfflineQueueSettingsView: View {
                 } label: {
                     Label("清空队列", systemImage: "trash")
                 }
-                .disabled(queue.statistics.totalMessages == 0)
+                .disabled(queue.statistics.totalMessages == 0 || queuePersistenceIsBlocked)
+
+                if configurationPersistenceIsBlocked {
+                    Button {
+                        Task { @MainActor in
+                            do {
+                                try await queue.resetConfigurationForRecovery()
+                            } catch {
+                                operationError = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        Label("隔离并重置损坏配置", systemImage: "wrench.and.screwdriver")
+                    }
+                }
             } header: {
                 Label("操作", systemImage: "hand.tap")
             }
@@ -96,16 +119,62 @@ public struct OfflineQueueSettingsView: View {
         .alert("确认清空队列", isPresented: $showClearConfirmation) {
             Button("取消", role: .cancel) {}
             Button("清空", role: .destructive) {
-                Task {
-                    await queue.clearAll()
+                Task { @MainActor in
+                    do {
+                        try await queue.clearAll()
+                    } catch {
+                        operationError = error.localizedDescription
+                    }
                 }
             }
         } message: {
             Text("确定要清空所有待发消息吗？此操作无法撤销。")
         }
+        .alert(
+            "离线队列操作失败",
+            isPresented: Binding(
+                get: { operationError != nil },
+                set: { if !$0 { operationError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { operationError = nil }
+        } message: {
+            Text(operationError ?? "离线队列操作失败")
+        }
     }
 
     // MARK: - Subviews
+
+    @ViewBuilder
+    private var persistenceStatusRows: some View {
+        switch queue.configurationPersistenceState {
+        case .loading:
+            Label("正在恢复队列配置…", systemImage: "hourglass")
+                .foregroundStyle(.secondary)
+        case .ready:
+            EmptyView()
+        case .blocked:
+            Label(
+                "队列配置已损坏并被阻止覆盖；需要显式隔离并重置。",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.red)
+        }
+
+        switch queue.persistenceState {
+        case .loading:
+            Label("正在载入离线消息…", systemImage: "hourglass")
+                .foregroundStyle(.secondary)
+        case .ready:
+            EmptyView()
+        case .blocked:
+            Label(
+                "离线消息存储不可用；普通清空不会绕过阻断或覆盖原始数据。",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.red)
+        }
+    }
 
     private var statisticsOverview: some View {
         VStack(spacing: 12) {
@@ -187,7 +256,7 @@ public struct OfflineQueueSettingsView: View {
         HStack {
             Text("最大队列大小")
             Spacer()
-            Picker("", selection: $queue.configuration.maxQueueSize) {
+            Picker("", selection: configurationBinding(\.maxQueueSize)) {
                 Text("100").tag(100)
                 Text("500").tag(500)
                 Text("1000").tag(1000)
@@ -202,7 +271,7 @@ public struct OfflineQueueSettingsView: View {
         HStack {
             Text("每设备最大消息数")
             Spacer()
-            Picker("", selection: $queue.configuration.maxMessagesPerDevice) {
+            Picker("", selection: configurationBinding(\.maxMessagesPerDevice)) {
                 Text("50").tag(50)
                 Text("100").tag(100)
                 Text("200").tag(200)
@@ -217,7 +286,7 @@ public struct OfflineQueueSettingsView: View {
         HStack {
             Text("最大重试次数")
             Spacer()
-            Picker("", selection: $queue.configuration.maxRetryCount) {
+            Picker("", selection: configurationBinding(\.maxRetryCount)) {
                 Text("3 次").tag(3)
                 Text("5 次").tag(5)
                 Text("10 次").tag(10)
@@ -232,7 +301,7 @@ public struct OfflineQueueSettingsView: View {
         HStack {
             Text("重试间隔")
             Spacer()
-            Picker("", selection: $queue.configuration.retryInterval) {
+            Picker("", selection: configurationBinding(\.retryInterval)) {
                 Text("10 秒").tag(TimeInterval(10))
                 Text("30 秒").tag(TimeInterval(30))
                 Text("60 秒").tag(TimeInterval(60))
@@ -247,7 +316,7 @@ public struct OfflineQueueSettingsView: View {
         HStack {
             Text("普通消息有效期")
             Spacer()
-            Picker("", selection: $queue.configuration.defaultTTL) {
+            Picker("", selection: configurationBinding(\.defaultTTL)) {
                 Text("1 小时").tag(TimeInterval(3600))
                 Text("6 小时").tag(TimeInterval(21600))
                 Text("24 小时").tag(TimeInterval(86400))
@@ -262,7 +331,7 @@ public struct OfflineQueueSettingsView: View {
         HStack {
             Text("紧急消息有效期")
             Spacer()
-            Picker("", selection: $queue.configuration.urgentTTL) {
+            Picker("", selection: configurationBinding(\.urgentTTL)) {
                 Text("24 小时").tag(TimeInterval(86400))
                 Text("7 天").tag(TimeInterval(604800))
                 Text("30 天").tag(TimeInterval(2592000))
@@ -274,6 +343,34 @@ public struct OfflineQueueSettingsView: View {
     }
 
     // MARK: - Helpers
+
+    private var configurationPersistenceIsBlocked: Bool {
+        if case .blocked = queue.configurationPersistenceState { return true }
+        return false
+    }
+
+    private var queuePersistenceIsBlocked: Bool {
+        if case .blocked = queue.persistenceState { return true }
+        return false
+    }
+
+    private func configurationBinding<Value>(
+        _ keyPath: WritableKeyPath<OfflineQueueConfiguration, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { queue.configuration[keyPath: keyPath] },
+            set: { newValue in
+                var updated = queue.configuration
+                updated[keyPath: keyPath] = newValue
+                do {
+                    try queue.updateConfiguration(updated)
+                    operationError = nil
+                } catch {
+                    operationError = error.localizedDescription
+                }
+            }
+        )
+    }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {
         let formatter = DateComponentsFormatter()
@@ -292,6 +389,7 @@ public struct PendingMessagesListView: View {
     @ObservedObject private var queue: OfflineMessageQueue
     @State private var messages: [QueuedMessage] = []
     @State private var selectedDeviceID: String?
+    @State private var operationError: String?
 
     public init(queue: OfflineMessageQueue = .shared) {
         self.queue = queue
@@ -345,9 +443,13 @@ public struct PendingMessagesListView: View {
                 List {
                     ForEach(messages) { message in
                         MessageRow(message: message) {
-                            Task {
-                                try? await queue.cancel(messageID: message.id)
-                                await refreshMessages()
+                            Task { @MainActor in
+                                do {
+                                    try await queue.cancel(messageID: message.id)
+                                    await refreshMessages()
+                                } catch {
+                                    operationError = error.localizedDescription
+                                }
                             }
                         }
                     }
@@ -357,15 +459,31 @@ public struct PendingMessagesListView: View {
         .task {
             await refreshMessages()
         }
+        .alert(
+            "离线消息操作失败",
+            isPresented: Binding(
+                get: { operationError != nil },
+                set: { if !$0 { operationError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { operationError = nil }
+        } message: {
+            Text(operationError ?? "离线消息操作失败")
+        }
     }
 
     private func refreshMessages() async {
-        if let deviceID = selectedDeviceID {
-            messages = await queue.getPendingMessages(for: deviceID)
-        } else {
-            messages = await queue.getAllPendingMessages()
-                .filter { !$0.status.isTerminal }
-                .sorted { $0.priority > $1.priority }
+        do {
+            if let deviceID = selectedDeviceID {
+                messages = try await queue.getPendingMessages(for: deviceID)
+            } else {
+                messages = try await queue.getAllPendingMessages()
+                    .filter { !$0.status.isTerminal }
+                    .sorted { $0.priority > $1.priority }
+            }
+            operationError = nil
+        } catch {
+            operationError = error.localizedDescription
         }
     }
 }

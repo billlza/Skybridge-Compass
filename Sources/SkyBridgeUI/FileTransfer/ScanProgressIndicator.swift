@@ -873,7 +873,7 @@ public struct ScanDetailSheet: View {
         }
     }
     
-    private func scanLevelText(_ level: FileScanService.ScanLevel) -> String {
+    private func scanLevelText(_ level: FileScanLevel) -> String {
         switch level {
         case .quick: return LocalizationManager.shared.localizedString("scan.level.quick")
         case .standard: return LocalizationManager.shared.localizedString("scan.level.standard")

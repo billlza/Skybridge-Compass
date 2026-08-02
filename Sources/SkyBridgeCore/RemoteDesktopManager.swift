@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 import Combine
 import AppKit
@@ -340,7 +343,7 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
  // 连接前把用户持久化的远程桌面设置（分辨率/色深/编码器/帧率/网络等）下发给会话，
  // 否则设置 UI 只写入 UserDefaults 而从不生效（此前 applySettings 没有任何调用方 = 假阳性）。
  // FreeRDP 类参数需在 connect 之前设置，故放在 start() 之前。
-            session.applySettings(RemoteDesktopSettingsManager.shared.settings)
+            try session.applySettings(RemoteDesktopSettingsManager.shared.settings)
             try await session.start()
             refreshMetrics()
         } catch {
@@ -352,13 +355,13 @@ public final class RemoteDesktopManager: ObservableObject, Sendable {
         }
     }
 
-    /// 把当前持久化的远程桌面设置重新下发给所有活跃会话。
-    /// 用于设置/质量变更后的即时生效尝试——设置至此真正接入会话（而非只写 UserDefaults）；
-    /// FreeRDP 是否支持会话中改参由客户端决定，但链路已接通。
-    public func reapplyCurrentSettingsToActiveSessions() {
+    /// 把当前持久化的远程桌面设置重新下发给所有活跃 RDP 会话。
+    /// FreeRDP 连接期参数不支持活跃会话中改写；拒绝时向调用方抛出 reconnect-required 错误，
+    /// 由 UI 明确告知用户，不把仅写入 UserDefaults 伪装成运行时已生效。
+    public func reapplyCurrentSettingsToActiveSessions() throws {
         let settings = RemoteDesktopSettingsManager.shared.settings
         for session in activeSessions.values {
-            session.applySettings(settings)
+            try session.applySettings(settings)
         }
     }
 
@@ -993,7 +996,7 @@ final class RemoteDesktopSession {
  // MARK: - 回调配置
 
     private func configureCallbacks() {
- // 帧回调：FreeRDPBridge 把解码后的 BGRA/H.264 帧交给我们
+ // 帧回调：FreeRDPBridge 的发布路径仅上拋软件 GDI 产生的 BGRA 帧。
         let deliveryGate = textureFeedDeliveryGate
         let publicationToken = framePublicationToken
         frameProcessor.installFrameHandler { texture, backing in
@@ -1153,18 +1156,13 @@ final class RemoteDesktopSession {
 
  // MARK: - 应用设置（映射到 FreeRDP）
 
-    func applySettings(_ settings: RemoteDesktopSettings) {
+    func applySettings(_ settings: RemoteDesktopSettings) throws {
         var dict: [String: Any] = [:]
 
- // 显示相关：分辨率/色深/编码器等，交给 FreeRDPBridge 映射到 /gfx-h264, /bpp 等
+ // 只下发 FreeRDPBridge 已接线、可验证且必须在 connect 前写入的字段。
+ // 其余 UI 设置由各自已接线的 runtime consumer 处理，不得在 RDP 桥中假装生效。
         var display: [String: Any] = [
-            "colorDepth": settings.displaySettings.colorDepth.rawValue,
-            "fullScreen": settings.displaySettings.fullScreenMode,
-            "multiMonitor": settings.displaySettings.multiMonitorSupport,
-            "preferredCodec": settings.displaySettings.preferredCodec.rawValue,
-            "targetFrameRate": settings.displaySettings.targetFrameRate,
-            "keyFrameInterval": settings.displaySettings.keyFrameInterval,
-            "compressionLevel": settings.displaySettings.boundedCompressionLevelPercent
+            "colorDepth": settings.displaySettings.colorDepth.rawValue
         ]
         if let dim = settings.displaySettings.resolution.dimensions {
             display["width"] = dim.width
@@ -1172,23 +1170,13 @@ final class RemoteDesktopSession {
         }
         dict["displaySettings"] = display
 
- // 网络相关：LAN/WAN、自适应质量等
+ // FreeRDP client 库只负责协议连接类型。超时、重连和自适应策略在 Swift 会话层执行。
         let network: [String: Any] = [
-            "connectionType": settings.networkSettings.connectionType.rawValue,
-            "enableEncryption": settings.networkSettings.enableEncryption,
-            "enableUDPTransport": settings.networkSettings.enableUDPTransport,
-            "enableAdaptiveQuality": settings.networkSettings.enableAdaptiveQuality,
-            "connectionTimeout": settings.networkSettings.boundedConnectionTimeoutSeconds * 1_000,
-            "compressionLevel": settings.networkSettings.boundedCompressionLevel,
-            "enableNetworkStats": settings.networkSettings.enableNetworkStats,
-            "maxReconnectAttempts": settings.networkSettings.boundedMaxReconnectAttempts,
-            "reconnectBackoffInitialMs": settings.networkSettings.boundedReconnectBackoffInitialMilliseconds,
-            "reconnectBackoffMaxMs": settings.networkSettings.boundedReconnectBackoffMaxMilliseconds,
-            "reconnectBackoffMultiplier": settings.networkSettings.boundedReconnectBackoffMultiplier
+            "connectionType": settings.networkSettings.connectionType.rawValue
         ]
         dict["networkSettings"] = network
 
-        client.applyAllSettings(dict)
+        try client.applyAllSettings(dict)
     }
 }
 
@@ -1248,8 +1236,10 @@ final class CBFreeRDPClient {
         _ = down
     }
 
-    func applyAllSettings(_ dict: [String: Any]) {
+    func applyAllSettings(_ dict: [String: Any]) throws {
         _ = dict
+        throw RemoteDesktopError.freeRDPUnavailable(installGuide: RemoteDesktopError.freeRDPInstallGuide)
     }
 }
+#endif
 #endif

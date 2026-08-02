@@ -17,8 +17,15 @@ public actor NetworkActivityLogStore {
         iso8601Formatter = ISO8601DateFormatter()
         iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
+#if os(macOS)
         let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
+#else
+        // `homeDirectoryForCurrentUser` 在 iOS 不可用；容器内 documents 目录必然存在，
+        // 临时目录只是防御性兜底，不改变 macOS 行为。
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+#endif
         logsDirectory = documentsDirectory
             .appendingPathComponent("Logs", isDirectory: true)
             .appendingPathComponent("SkyBridge", isDirectory: true)

@@ -54,6 +54,9 @@ pub struct LocalIdentityState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentHealthSnapshot {
     pub schema_version: u32,
+    /// Random identifier for the process instance that owns the runtime lease.
+    #[serde(default)]
+    pub instance_id: String,
     pub status: AgentRuntimeStatus,
     pub pid: u32,
     pub state_dir: String,
@@ -62,8 +65,24 @@ pub struct AgentHealthSnapshot {
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
     pub active_sessions: usize,
-    pub active_transfers: usize,
-    pub fallback_invocation_count: u32,
+    /// Current transfer count, or `None` until the runtime wires an authoritative
+    /// cross-session counter. Never use zero as a stand-in for unknown.
+    #[serde(default)]
+    pub active_transfers: Option<usize>,
+    /// Observed fallback invocations, or `None` until the policy driver exposes
+    /// an authoritative process-wide counter.
+    #[serde(default)]
+    pub fallback_invocation_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRuntimeLease {
+    pub schema_version: u32,
+    pub instance_id: String,
+    pub pid: u32,
+    pub state_dir: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub started_at: OffsetDateTime,
 }
 
 impl LocalIdentityState {
@@ -126,25 +145,66 @@ mod base64_standard {
 }
 
 impl AgentHealthSnapshot {
-    pub const SCHEMA_VERSION: u32 = 1;
+    pub const SCHEMA_VERSION: u32 = 3;
 
     pub fn new(status: AgentRuntimeStatus, pid: u32, state_dir: impl Into<String>) -> Self {
+        Self::new_for_instance(status, pid, state_dir, uuid::Uuid::now_v7().to_string())
+    }
+
+    pub fn new_for_instance(
+        status: AgentRuntimeStatus,
+        pid: u32,
+        state_dir: impl Into<String>,
+        instance_id: impl Into<String>,
+    ) -> Self {
         let now = OffsetDateTime::now_utc();
         Self {
             schema_version: Self::SCHEMA_VERSION,
+            instance_id: instance_id.into(),
             status,
             pid,
             state_dir: state_dir.into(),
             started_at: now,
             updated_at: now,
             active_sessions: 0,
-            active_transfers: 0,
-            fallback_invocation_count: 0,
+            active_transfers: None,
+            fallback_invocation_count: None,
         }
     }
 
     pub fn touch(&mut self, status: AgentRuntimeStatus) {
         self.status = status;
         self.updated_at = OffsetDateTime::now_utc();
+    }
+}
+
+impl AgentRuntimeLease {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    pub fn new(instance_id: impl Into<String>, pid: u32, state_dir: impl Into<String>) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            instance_id: instance_id.into(),
+            pid,
+            state_dir: state_dir.into(),
+            started_at: OffsetDateTime::now_utc(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_snapshot_never_encodes_unobserved_counters_as_zero() {
+        let health = AgentHealthSnapshot::new(AgentRuntimeStatus::Healthy, 42, "/state");
+        let encoded = serde_json::to_value(&health).expect("health should serialize");
+        assert_eq!(
+            encoded["schema_version"],
+            serde_json::json!(AgentHealthSnapshot::SCHEMA_VERSION)
+        );
+        assert!(encoded["active_transfers"].is_null());
+        assert!(encoded["fallback_invocation_count"].is_null());
     }
 }

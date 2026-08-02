@@ -2,7 +2,9 @@ import Foundation
 
 enum P2PDiscoveryBonjourPolicy {
     nonisolated static func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
-        let allowedTypes: Set<String> = ["_skybridge._tcp", "_skybridge._udp"]
+        // This list feeds a connector built with `NWParameters.tcp`. A UDP/QUIC advertisement
+        // remains discovery evidence, but it is never a TCP dial route.
+        let allowedTypes: Set<String> = [BonjourInteropContract.controlServiceType]
         var seen = Set<String>()
         var ordered: [String] = []
 
@@ -18,17 +20,18 @@ enum P2PDiscoveryBonjourPolicy {
         return ordered
     }
 
-    nonisolated static func isValidBonjourServiceType(_ raw: String) -> Bool {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard value.hasPrefix("_") else { return false }
-        guard value.hasSuffix("._tcp") || value.hasSuffix("._udp") else { return false }
+    nonisolated static func tcpControlPort(from portMap: [String: Int]) -> Int? {
+        guard let port = portMap[BonjourInteropContract.controlServiceType],
+              (1...65_535).contains(port) else {
+            return nil
+        }
+        return port
+    }
 
-        let serviceLabel = value
-            .replacingOccurrences(of: "._tcp", with: "")
-            .replacingOccurrences(of: "._udp", with: "")
-            .dropFirst()
-        guard !serviceLabel.isEmpty, serviceLabel.count <= 15 else { return false }
-        return serviceLabel.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+    nonisolated static func isValidBonjourServiceType(_ raw: String) -> Bool {
+        BonjourInteropContract.isValidDNSServiceType(
+            raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        )
     }
 
     nonisolated static func isBonjourIdentifier(_ identifier: String?) -> Bool {
@@ -320,9 +323,11 @@ enum P2PDiscoveryBonjourPolicy {
         switch serviceType {
         case "_skybridge._tcp", "_skybridge._udp":
             keys = ["port", "skybridgePort", "p2pPort", "controlPort"]
-        case "_skybridge-transfer._tcp":
+        case BonjourInteropContract.fileTransferServiceType,
+             BonjourInteropContract.legacyFileTransferServiceType:
             keys = ["transferPort", "fileTransferPort", "file_transfer_port", "port"]
-        case "_skybridge-remote._tcp":
+        case BonjourInteropContract.remoteControlServiceType,
+             BonjourInteropContract.legacyRemoteControlServiceType:
             keys = ["remotePort", "remoteControlPort", "remote_port", "port"]
         default:
             keys = ["port"]

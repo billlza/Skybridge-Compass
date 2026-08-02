@@ -18,7 +18,9 @@ usage() {
 7. iOS/macOS 最低部署目标不得因 OS 27 适配被抬高（含根 macOS XcodeGen 与已提交 Xcode 工程）
 8. iOS 模拟器/真机 XCTest lane 的每个构建与执行阶段都必须将 Swift/Clang warning 视为 error
 9. 模拟器 lane 必须先通过 Apple PQC symbol probe，并在两个阶段显式启用编译条件
-10. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
+10. 模拟器/真机 lane 必须严格使用 Package.resolved，禁止自动更新依赖
+11. iOS WebRTC runtime 必须显式静态聚合 ProtocolCore；hosted tests 只获取模块依赖，不得二次链接
+12. 默认模式下额外用 xcodebuild -showdestinations 做一次轻量动态探测
 EOF
 }
 
@@ -114,6 +116,11 @@ PQC_SDK_SELECTOR_PATTERN = re.compile(
 )
 PQC_XCODEBUILD_SETTING = "SKYBRIDGE_APPLE_PQC_SDK_CONDITION"
 PQC_CONDITION_REFERENCE = "$(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
+WEBRTC_RUNTIME_PRODUCT = "SkyBridgeWebRTCRuntime"
+WEBRTC_RUNTIME_TARGETS = (
+    "SkyBridgeProtocolCore",
+    "SkyBridgeWebRTCRuntime",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -208,6 +215,10 @@ def nested_key_present(payload: object, key: str) -> bool:
 WARNING_AS_ERROR_SETTINGS = (
     "SWIFT_TREAT_WARNINGS_AS_ERRORS=YES",
     "GCC_TREAT_WARNINGS_AS_ERRORS=YES",
+)
+LOCKED_PACKAGE_SETTINGS = (
+    "-skipPackageUpdates",
+    "-disableAutomaticPackageResolution",
 )
 XCTEST_STAGES = ("build-for-testing", "test-without-building")
 
@@ -305,6 +316,23 @@ def require_warning_gates_by_stage(
 
         normalized_lines = normalized_shell_lines(stage_blocks[0])
         for setting in WARNING_AS_ERROR_SETTINGS:
+            require(
+                setting in normalized_lines,
+                f"{lane_name} 的 {stage} 阶段必须设置 {setting}",
+            )
+
+
+def require_locked_packages_by_stage(
+    blocks: dict[str, list[str]],
+    lane_name: str,
+) -> None:
+    for stage in XCTEST_STAGES:
+        stage_blocks = blocks.get(stage, [])
+        if len(stage_blocks) != 1:
+            continue
+
+        normalized_lines = normalized_shell_lines(stage_blocks[0])
+        for setting in LOCKED_PACKAGE_SETTINGS:
             require(
                 setting in normalized_lines,
                 f"{lane_name} 的 {stage} 阶段必须设置 {setting}",
@@ -434,11 +462,48 @@ require(
     ".iOS(.v17)" in ios_package_text,
     "iOS Package.swift 必须保持 .iOS(.v17)，OS 27 适配不得抬高最低 iOS 版本",
 )
+
+# The multi-target WebRTC product must be explicitly static. If left automatic, Xcode can
+# produce a PackageProduct framework while Q-Periapt links its ProtocolCore dependency into
+# the app executable, producing duplicate runtime classes and split state.
+webrtc_runtime_product_match = re.search(
+    rf'\.library\(\s*name:\s*"{WEBRTC_RUNTIME_PRODUCT}",\s*type:\s*\.static,\s*targets:\s*\[(.*?)\]\s*\)',
+    root_package_text,
+    re.DOTALL,
+)
+require(
+    webrtc_runtime_product_match is not None,
+    f"根 Package.swift 必须声明显式 static {WEBRTC_RUNTIME_PRODUCT} 聚合产品",
+)
+if webrtc_runtime_product_match is not None:
+    aggregate_targets = webrtc_runtime_product_match.group(1)
+    for target_name in WEBRTC_RUNTIME_TARGETS:
+        require(
+            f'"{target_name}"' in aggregate_targets,
+            f"{WEBRTC_RUNTIME_PRODUCT} 缺少必需 target: {target_name}",
+        )
+
+require(
+    f'.product(name: "{WEBRTC_RUNTIME_PRODUCT}", package: "SkyBridgeRoot")'
+    in ios_package_text,
+    f"iOS Package.swift 必须通过 {WEBRTC_RUNTIME_PRODUCT} 消费共享 WebRTC runtime",
+)
+
+require(
+    pbxproj_text.count(f"productName = {WEBRTC_RUNTIME_PRODUCT};") == 2,
+    f"project.pbxproj 必须为 app/test 各保留一个 {WEBRTC_RUNTIME_PRODUCT} package dependency",
+)
+require(
+    pbxproj_text.count(f"/* {WEBRTC_RUNTIME_PRODUCT} in Frameworks */") == 2,
+    f"project.pbxproj 只能由宿主 app 链接一次 {WEBRTC_RUNTIME_PRODUCT}；hosted tests 不得二次链接",
+)
+
 simulator_stage_blocks = continued_command_stage_blocks(
     ios_test_lane_text,
     "run_xcodebuild_with_retry",
 )
 require_warning_gates_by_stage(simulator_stage_blocks, "iOS 模拟器 XCTest lane")
+require_locked_packages_by_stage(simulator_stage_blocks, "iOS 模拟器 XCTest lane")
 for stage in XCTEST_STAGES:
     stage_blocks = simulator_stage_blocks.get(stage, [])
     if len(stage_blocks) == 1:
@@ -470,16 +535,15 @@ for reset_command in (
         reset_command in ios_test_lane_text,
         f"iOS 模拟器 XCTest lane 缺少确定性 simulator reset 步骤: {reset_command}",
     )
-require_warning_gates_by_stage(
-    array_backed_stage_blocks(
-        ios_device_test_lane_text,
-        {
-            "build-for-testing": "build_args",
-            "test-without-building": "test_args",
-        },
-    ),
-    "iOS 真机 XCTest lane",
+device_stage_blocks = array_backed_stage_blocks(
+    ios_device_test_lane_text,
+    {
+        "build-for-testing": "build_args",
+        "test-without-building": "test_args",
+    },
 )
+require_warning_gates_by_stage(device_stage_blocks, "iOS 真机 XCTest lane")
+require_locked_packages_by_stage(device_stage_blocks, "iOS 真机 XCTest lane")
 
 # 3. App scheme 必须引用共享 test plan，且能构建测试 target
 app_scheme_test_plan = app_scheme.find("./TestAction/TestPlans/TestPlanReference")
@@ -601,6 +665,18 @@ if project_yaml_text is not None:
         f"project.yml 的 deploymentTarget.iOS 必须保持 {IOS_DEPLOYMENT_TARGET}",
     )
 
+    app_target_block = extract_yaml_child_block(project_yaml_text, "targets", APP_TARGET_NAME)
+    require(app_target_block is not None, "project.yml 缺少 SkyBridgeCompass-iOS target 定义")
+    if app_target_block is not None:
+        require(
+            re.search(
+                rf"(?m)^\s+- package: SkyBridgeRoot\s*\n\s+product: {WEBRTC_RUNTIME_PRODUCT}\s*$",
+                app_target_block,
+            )
+            is not None,
+            f"project.yml 的宿主 app 必须链接 {WEBRTC_RUNTIME_PRODUCT}",
+        )
+
     target_block = extract_yaml_child_block(project_yaml_text, "targets", TEST_TARGET_NAME)
     require(target_block is not None, "project.yml 缺少 SkyBridgeCompassiOSTests target 定义")
     if target_block is not None:
@@ -612,6 +688,22 @@ if project_yaml_text is not None:
             "- path: SkyBridgeCompassiOSTests" in target_block,
             "project.yml 的 SkyBridgeCompassiOSTests target 未覆盖测试源码目录",
         )
+        require(
+            re.search(
+                rf"(?m)^\s+- package: SkyBridgeRoot\s*\n"
+                rf"\s+product: {WEBRTC_RUNTIME_PRODUCT}\s*\n"
+                r"\s+link: false\s*\n"
+                r"\s+embed: false\s*$",
+                target_block,
+            )
+            is not None,
+            f"project.yml 的 hosted tests 必须以 link:false/embed:false 依赖 {WEBRTC_RUNTIME_PRODUCT}",
+        )
+
+    require(
+        project_yaml_text.count(f"product: {WEBRTC_RUNTIME_PRODUCT}") == 2,
+        f"project.yml 必须由 app/test 各声明一次 {WEBRTC_RUNTIME_PRODUCT}",
+    )
 
     app_scheme_block = extract_yaml_child_block(project_yaml_text, "schemes", APP_TARGET_NAME)
     require(app_scheme_block is not None, "project.yml 缺少 SkyBridgeCompass-iOS scheme 定义")

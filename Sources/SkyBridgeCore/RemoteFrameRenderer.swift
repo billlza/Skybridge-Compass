@@ -79,6 +79,19 @@ private final class RemoteFrameBacking: @unchecked Sendable {
     }
 }
 
+/// Transfers ownership of one immutable VideoToolbox callback image to `renderQueue`.
+///
+/// The retained Core Video reference keeps its IOSurface alive until texture conversion has
+/// completed. Only the serial render queue reads the buffer and this type exposes no mutation,
+/// so the unchecked conformance is confined to this explicit one-way delivery boundary.
+private final class RemoteDecodedFrameDelivery: @unchecked Sendable {
+    let imageBuffer: CVImageBuffer
+
+    init(imageBuffer: CVImageBuffer) {
+        self.imageBuffer = imageBuffer
+    }
+}
+
 private final class RemoteFrameDecompressionCallbackContext {
     private let lock = NSLock()
     weak var renderer: RemoteFrameRenderer?
@@ -740,8 +753,10 @@ public final class RemoteFrameRenderer: @unchecked Sendable {
     }
 
     private func handleDecompressedFrame(imageBuffer: CVImageBuffer, presentationTimeStamp: CMTime) {
+        let delivery = RemoteDecodedFrameDelivery(imageBuffer: imageBuffer)
         renderQueue.async { [weak self] in
             guard let self else { return }
+            let imageBuffer = delivery.imageBuffer
             guard let textureCache else {
                 self.log.error("Missing texture cache; cannot convert decoded frame to Metal texture")
                 self.reportFailure(.metalTextureConversionFailed(kCVReturnInvalidArgument))

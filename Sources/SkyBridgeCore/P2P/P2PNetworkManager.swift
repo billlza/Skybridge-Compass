@@ -101,7 +101,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     )
  /// 已发布“可连接设备”提醒的时间戳（用于限频与去重）
     private var connectableNotifyTimestamps: [String: Date] = [:]
-    @Published public var isStarted: Bool = false
+    @Published public private(set) var isStarted: Bool = false
     
  // MARK: - 私有属性
     
@@ -110,8 +110,11 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     private var connectionStatusSubscriptions: [ObjectIdentifier: AnyCancellable] = [:]
     private var connectionAttempts: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var wifiAwareStartTask: Task<Void, Never>?
+    private let startupLifecycle = P2PStartupLifecycle()
     private var discoveryTimer: Timer?
     private var qualityMonitorTimer: Timer?
+    private var localProtocolDeviceId: String?
+    private var pendingLocalProtocolDeviceId: String?
     
  // MARK: - 初始化
     
@@ -124,25 +127,66 @@ public class P2PNetworkManager: ObservableObject, Sendable {
     
  /// 启动P2P网络管理器
     public func start() async throws {
-        guard !isStarted else { return }
-        
-        isStarted = true
-        
- // 开始设备发现
-        await startDiscovery()
+        try await startupLifecycle.ensureStarted(
+            operation: { [weak self] in
+                guard let self else { throw CancellationError() }
+
+                let rawLocalDeviceId = try await SelfIdentityProvider.shared
+                    .protocolIdentityDeviceId(allowCreate: true)
+                let normalizedLocalDeviceId = rawLocalDeviceId
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                guard !normalizedLocalDeviceId.isEmpty else {
+                    throw P2PConnectionError.disconnected
+                }
+                self.pendingLocalProtocolDeviceId = normalizedLocalDeviceId
+
+                // This is the sole managed discovery startup path. It returns
+                // only after browsing and the connectable control advertisement
+                // are both ready, and propagates every startup failure.
+                try await self.discoveryService.ensureStartedAndScanning()
+                try Task.checkCancellation()
+            },
+            commit: { [self] in
+                self.localProtocolDeviceId = self.pendingLocalProtocolDeviceId
+                self.pendingLocalProtocolDeviceId = nil
+                self.isStarted = true
+                self.activateDiscoveryObservation()
+            },
+            rollback: { [weak self] in
+                await self?.rollbackFailedStartup()
+            }
+        )
     }
     
  /// 停止P2P网络管理器
     public func stop() async {
-        guard isStarted else { return }
-        
-        isStarted = false
-        
- // 停止设备发现
+        let startupError = await startupLifecycle.stop(
+            willStop: { [weak self] in
+                self?.isStarted = false
+                self?.pendingLocalProtocolDeviceId = nil
+            },
+            operation: { [weak self] in
+                await self?.performStop()
+            }
+        )
+        if let startupError {
+            SkyBridgeLogger.p2p.error(
+                "P2P manager startup failed while stop completed cleanup: \(startupError.localizedDescription, privacy: .private)"
+            )
+        }
+    }
+
+    private func performStop() async {
         stopDiscovery()
 
-        wifiAwareStartTask?.cancel()
+        let wifiAwareTask = wifiAwareStartTask
         wifiAwareStartTask = nil
+        wifiAwareTask?.cancel()
+        if let wifiAwareTask {
+            await wifiAwareTask.value
+        }
+
         let attempts = Array(connectionAttempts.values)
         connectionAttempts.removeAll()
         attempts.forEach { $0.task.cancel() }
@@ -153,6 +197,19 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  // 断开所有连接
         for deviceId in Array(activeConnections.keys) {
             disconnectFromDevice(deviceId)
+        }
+    }
+
+    private func rollbackFailedStartup() async {
+        pendingLocalProtocolDeviceId = nil
+        isStarted = false
+        stopDiscovery()
+
+        let wifiAwareTask = wifiAwareStartTask
+        wifiAwareStartTask = nil
+        wifiAwareTask?.cancel()
+        if let wifiAwareTask {
+            await wifiAwareTask.value
         }
     }
     
@@ -175,6 +232,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         discoveredDevices.removeAll()
         activeConnections.removeAll()
         connectionHistory.removeAll()
+        localProtocolDeviceId = nil
     }
     
  // MARK: - 设备发现
@@ -182,7 +240,14 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  /// 开始设备发现
     public func startDiscovery() async {
         guard isStarted else { return }
-        
+
+        discoveryService.startBrowsing()
+        activateDiscoveryObservation()
+    }
+
+    private func activateDiscoveryObservation() {
+        guard isStarted else { return }
+
         networkState = .discovering
         #if canImport(WiFiAware)
         wifiAwareStartTask?.cancel()
@@ -196,9 +261,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
             }
         }
         #endif
-        
-        discoveryService.startScanning()
-        
+
  // 监听发现的设备
         p2pNetworkCancellables.removeAll()
         discoveryService.$p2pDevices
@@ -216,27 +279,23 @@ public class P2PNetworkManager: ObservableObject, Sendable {
  /// 发布“可连接设备”通知事件（通过NotificationCenter），供UI层监听
     private func publishConnectableDeviceEvents(_ devices: [P2PDevice]) {
         let now = Date()
- // 本机信息：名称与IPv4地址，用于在发布通知前做二次自过滤
-        let localName = Host.current().localizedName ?? Host.current().name ?? ""
-        let localIP = getLocalIPv4Address()
+ // 本机协议身份用于发布通知前做二次自过滤。名称和 IP 都不是身份；
+ // 同名设备及共享/碰撞地址必须保留。
  // 清理超过1小时的记录
         connectableNotifyTimestamps = connectableNotifyTimestamps.filter { now.timeIntervalSince($0.value) < 3600 }
         for d in devices {
- // 自过滤：名称或IP命中本机则跳过
-            let isSelfByName: Bool = {
-                guard !localName.isEmpty else { return false }
-                let lhs = d.name.lowercased()
-                let rhs = localName.lowercased()
-                return lhs == rhs || lhs.contains(rhs)
-            }()
-            let isSelfByIP = (localIP != nil && d.address == localIP)
-            if isSelfByName || isSelfByIP {
+            if Self.shouldSuppressConnectableNotification(
+                for: d,
+                localProtocolDeviceId: localProtocolDeviceId
+            ) {
                 SkyBridgeLogger.p2p.debugOnly("🛑 跳过发布‘可连接设备’通知（本机过滤）: \(d.name) @ \(d.address)")
                 continue
             }
             let isOnline = d.isOnline
             let isConnected = activeConnections[d.deviceId] != nil
-            if isOnline && !isConnected && connectableNotifyTimestamps[d.deviceId] == nil {
+            let hasTCPDialRoute = !d.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && d.port > 0
+            if isOnline && hasTCPDialRoute && !isConnected && connectableNotifyTimestamps[d.deviceId] == nil {
                 connectableNotifyTimestamps[d.deviceId] = now
                 NotificationCenter.default.post(name: Notification.Name("ConnectableDeviceDiscovered"), object: nil, userInfo: [
                     "deviceId": d.deviceId,
@@ -248,6 +307,21 @@ public class P2PNetworkManager: ObservableObject, Sendable {
                 ])
             }
         }
+    }
+
+    nonisolated static func shouldSuppressConnectableNotification(
+        for device: P2PDevice,
+        localProtocolDeviceId: String?
+    ) -> Bool {
+        let localId = localProtocolDeviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let remoteIds = ([device.deviceId] + [device.persistentDeviceId].compactMap { $0 })
+            .compactMap { value -> String? in
+                let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                return normalized.isEmpty ? nil : normalized
+            }
+        return localId.map { !($0.isEmpty) && remoteIds.contains($0) } ?? false
     }
     
  /// 停止设备发现
@@ -424,7 +498,7 @@ public class P2PNetworkManager: ObservableObject, Sendable {
                         case .ready:
                             connection.stateUpdateHandler = nil
                             context.complete(.success(())) {
-                                p2p?.markConnectedAndStartReceiving()
+                                p2p?.markTransportReady()
                             }
 
                         case .failed(let error):
@@ -495,47 +569,6 @@ public class P2PNetworkManager: ObservableObject, Sendable {
         discoveryTimer = nil
     }
 
- /// 获取本机有效IPv4地址（优先Wi-Fi），用于在通知层进行自过滤
- /// 注意：此处实现为轻量版本，不依赖 pathMonitor，避免引入额外状态
-    private func getLocalIPv4Address() -> String? {
-        var ifaddrPtr: UnsafeMutablePointer<ifaddrs>? = nil
-        guard getifaddrs(&ifaddrPtr) == 0, let firstAddr = ifaddrPtr else { return nil }
-        defer { freeifaddrs(ifaddrPtr) }
-        var cursor: UnsafeMutablePointer<ifaddrs>? = firstAddr
-        var preferredIP: String?
-        var fallbackIP: String?
-        while let addr = cursor?.pointee {
-            guard let addressPtr = addr.ifa_addr else {
-                cursor = addr.ifa_next
-                continue
-            }
-            if addressPtr.pointee.sa_family == sa_family_t(AF_INET) {
-                let flags = Int32(addr.ifa_flags)
-                let isLoopback = (flags & IFF_LOOPBACK) != 0
-                if !isLoopback {
-                    var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                    let result = getnameinfo(addressPtr, socklen_t(addressPtr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
-                    if result == 0 {
- // 使用现代UTF8解码，先截断到首个空字符
-                        let truncated = hostname.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
-                        let ip = String(decoding: truncated, as: UTF8.self)
-                        if !ip.isEmpty {
- // 替换已弃用的 String(cString:)，使用统一的UTF8解码
-                            let name = decodeOptionalCString(addr.ifa_name) ?? ""
-                            if name == "en0", preferredIP == nil {
-                                preferredIP = ip
-                            } else if fallbackIP == nil {
-                                fallbackIP = ip
-                            }
-                        }
-                    }
-                }
-            }
-            cursor = addr.ifa_next
-        }
-        return preferredIP ?? fallbackIP
-    }
-    
     private func startQualityMonitoring() {
         qualityMonitorTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task {

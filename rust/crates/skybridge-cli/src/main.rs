@@ -1,5 +1,6 @@
-use anyhow::Result;
 use clap::Parser;
+use std::process::ExitCode;
+mod agent_runtime_guard;
 mod auth_commands;
 mod auth_support;
 mod check_coverage;
@@ -7,6 +8,7 @@ mod check_source_catalog;
 mod cli_args;
 mod cli_dispatch;
 mod cli_metadata;
+mod cli_output;
 #[cfg(test)]
 mod cli_test_support;
 mod cli_text;
@@ -67,7 +69,53 @@ pub(crate) use performance_evidence::{
 };
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    dispatch(cli).await
+async fn main() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return render_parse_failure(error),
+    };
+    let json_output = cli.json_output_requested();
+
+    match dispatch(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if json_output {
+                if !cli_output::json_failure_was_written()
+                    && let Err(render_error) = cli_output::write_unhandled_json_failure(
+                        "command_failed",
+                        "SkyBridge command failed",
+                    )
+                {
+                    eprintln!("Error: {render_error:#}");
+                }
+            } else {
+                eprintln!("Error: {error:#}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn render_parse_failure(error: clap::Error) -> ExitCode {
+    let exit_code = error.exit_code();
+    if exit_code == 0 {
+        if let Err(render_error) = error.print() {
+            eprintln!("Error: failed to render command-line help: {render_error}");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let json_requested = std::env::args_os().any(|argument| argument == "--json");
+    if json_requested {
+        if let Err(render_error) = cli_output::write_unhandled_json_failure(
+            "invalid_arguments",
+            "SkyBridge command arguments are invalid; check option prerequisites with --help",
+        ) {
+            eprintln!("Error: {render_error:#}");
+        }
+    } else if let Err(render_error) = error.print() {
+        eprintln!("Error: failed to render command-line help: {render_error}");
+    }
+    ExitCode::FAILURE
 }

@@ -171,6 +171,12 @@ public enum CryptoProviderError: Error, LocalizedError, Sendable {
     case keyGenerationFailed(String)
     case pqcNotAvailable
     case invalidCiphertext(String)
+    case providerContractViolation(
+        provider: String,
+        field: String,
+        expected: Int,
+        actual: Int
+    )
     
     public var errorDescription: String? {
         switch self {
@@ -187,6 +193,8 @@ public enum CryptoProviderError: Error, LocalizedError, Sendable {
         case .keyGenerationFailed(let reason): return "Key generation failed: \(reason)"
         case .pqcNotAvailable: return "PQC not available on this platform"
         case .invalidCiphertext(let reason): return "Invalid ciphertext: \(reason)"
+        case .providerContractViolation(let provider, let field, let expected, let actual):
+            return "Crypto provider contract violation for \(provider) \(field): expected \(expected), got \(actual)"
         }
     }
 }

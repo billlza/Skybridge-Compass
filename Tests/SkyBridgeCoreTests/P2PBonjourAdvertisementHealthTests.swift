@@ -63,19 +63,164 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
     func testP2PAdvertisingUsesCentralHealthSnapshot() throws {
         let p2p = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
         let localServices = try readSource("Sources/SkyBridgeCompassApp/LocalPeerServiceCoordinator.swift")
+        let managerStart = try sourceSlice(
+            from: "public override func performStart() async throws",
+            to: "public override func performStop() async",
+            in: p2p
+        )
+        let managerStop = try sourceSlice(
+            from: "public override func performStop() async",
+            to: "public override func cleanup()",
+            in: p2p
+        )
+        let stopScanning = try sourceSlice(
+            from: "public func stopScanning()",
+            to: "public func connectToDevice(_ device: DiscoveredDevice)",
+            in: p2p
+        )
 
         XCTAssertTrue(p2p.contains("private static let controlAdvertisementOwner = \"P2PDiscoveryService\""))
         XCTAssertTrue(p2p.contains("advertisementSnapshot(for: Self.controlServiceType)"))
         XCTAssertTrue(p2p.contains("ensureAdvertisingHealthy()"))
         XCTAssertTrue(p2p.contains("owner: Self.controlAdvertisementOwner"))
         XCTAssertTrue(localServices.contains("try await p2pDiscoveryService.ensureAdvertisingHealthy()"))
-        XCTAssertTrue(p2p.contains("public func startAdvertising(forceRebind: Bool = false) async throws"))
+        XCTAssertTrue(p2p.contains("private func startAdvertising(forceRebind: Bool = false) async throws"))
+        XCTAssertTrue(p2p.contains("public func ensureStartedAndScanning() async throws"))
+        XCTAssertTrue(p2p.contains("try await startupLifecycle.ensureStarted("))
+        XCTAssertTrue(p2p.contains("try await ensureStartedAndScanning()"))
+        XCTAssertTrue(p2p.contains("try await reconcileAdvertisingHealth()"))
+        XCTAssertTrue(p2p.contains("_ = beginScanningIfNeeded()"))
+        XCTAssertTrue(p2p.contains("advertisingLifecycleOperation == .starting"))
+        XCTAssertTrue(p2p.contains("try await existingTask.value"))
+        XCTAssertTrue(p2p.contains("try Task.checkCancellation()"))
+        XCTAssertTrue(p2p.contains("readySnapshot.isOwned(by: Self.controlAdvertisementOwner)"))
+        XCTAssertTrue(p2p.contains("readySnapshot.isConnectable"))
         XCTAssertTrue(p2p.contains("centerSnapshot.isConnectable"))
         XCTAssertTrue(p2p.contains("waitUntilReady(Self.controlServiceType)"))
+        XCTAssertTrue(
+            managerStart.contains("await performStop()"),
+            "A failed manager start must tear down browsing and advertising before propagating the error."
+        )
+        XCTAssertFalse(
+            managerStart.contains("if startedScanning"),
+            "Conditionally rolling back only newly-created browsers leaves an inactive manager half-started."
+        )
+        XCTAssertFalse(
+            stopScanning.contains("stopAdvertising()")
+                || stopScanning.contains("acceptingInboundControlConnections = false"),
+            "Stopping an outbound browser lease must not withdraw or reject the app-wide inbound service."
+        )
+        let stopBrowserOffset = try XCTUnwrap(managerStop.range(of: "stopScanning()")?.lowerBound)
+        let stopAdvertisementOffset = try XCTUnwrap(
+            managerStop.range(of: "stopAdvertising()")?.lowerBound
+        )
+        XCTAssertLessThan(
+            stopBrowserOffset,
+            stopAdvertisementOffset,
+            "Only the full manager stop may release both browser and advertisement lifecycles."
+        )
         XCTAssertFalse(
             p2p.contains("centerSnapshot.isConnectable || centerSnapshot.isStarting"),
             "A listener that is merely starting must not be reported as an active advertisement."
         )
+    }
+
+    func testP2PDiscoveryReadinessPolicyStartsInactiveManagerAndWaitsForInFlightStart() {
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: true,
+                status: .inactive,
+                isScanning: false
+            ),
+            .startManager
+        )
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: true,
+                status: .starting,
+                isScanning: true
+            ),
+            .waitForManagerStart
+        )
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: true,
+                status: .active,
+                isScanning: true
+            ),
+            .ready
+        )
+    }
+
+    func testP2PDiscoveryReadinessPolicyRepairsStoppedScanningAndAllowsFreshStartAfterFailure() {
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: true,
+                status: .active,
+                isScanning: false
+            ),
+            .resumeScanning
+        )
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: false,
+                status: .inactive,
+                isScanning: false
+            ),
+            .waitForInitialization
+        )
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: true,
+                status: .stopping,
+                isScanning: false
+            ),
+            .rejectStopping
+        )
+        XCTAssertEqual(
+            P2PDiscoveryReadinessPolicy.action(
+                isInitialized: true,
+                status: .error("listener failed"),
+                isScanning: false
+            ),
+            .startManager,
+            "A completed failed attempt must leave the singular lifecycle able to start a fresh generation."
+        )
+    }
+
+    func testManagedP2PStartupCommitsNetworkManagerOnlyAfterDiscoveryReadiness() throws {
+        let discovery = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let networkManager = try readSource("Sources/SkyBridgeCore/P2P/P2PNetworkManager.swift")
+        let networkStart = try sourceSlice(
+            from: "public func start() async throws",
+            to: "public func stop() async",
+            in: networkManager
+        )
+        let browserOnlyStart = try sourceSlice(
+            from: "public func startBrowsing()",
+            to: "@discardableResult\n    private func beginScanningIfNeeded()",
+            in: discovery
+        )
+
+        let readinessCall = try XCTUnwrap(
+            networkStart.range(of: "try await self.discoveryService.ensureStartedAndScanning()")
+        )
+        let startedCommit = try XCTUnwrap(networkStart.range(of: "self.isStarted = true"))
+        XCTAssertLessThan(
+            readinessCall.lowerBound,
+            startedCommit.lowerBound,
+            "P2PNetworkManager must not publish started before discovery and advertising are connectable."
+        )
+        XCTAssertTrue(networkStart.contains("startupLifecycle.ensureStarted("))
+        XCTAssertTrue(networkStart.contains("try Task.checkCancellation()"))
+        XCTAssertTrue(
+            networkManager.contains("@Published public private(set) var isStarted: Bool = false"),
+            "Only the managed lifecycle may publish P2P startup readiness."
+        )
+        XCTAssertTrue(browserOnlyStart.contains("_ = beginScanningIfNeeded()"))
+        XCTAssertFalse(browserOnlyStart.contains("Task {"))
+        XCTAssertFalse(browserOnlyStart.contains("startAdvertising("))
+        XCTAssertFalse(networkManager.contains("discoveryService.startScanning()"))
     }
 
     func testIOSInboundBonjourConnectionBreaksStateHandlerCycleAndTimesOut() throws {
@@ -91,11 +236,30 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(source.contains("maximumPreReadyInboundConnectionsPerEndpoint = 4"))
     }
 
+    func testIOSLiveBonjourRoutesPreserveBrowserReportedInterfaceOwnership() throws {
+        let discovery = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+        )
+        let connectionManager = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let harness = try readSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift"
+        )
+
+        XCTAssertTrue(discovery.contains("let interfaces: [NWInterface]"))
+        XCTAssertTrue(discovery.contains("interfaces: result.interfaces"))
+        XCTAssertTrue(discovery.contains("let observedInterfaces = Array(Set(snapshot.interfaces))"))
+        XCTAssertTrue(discovery.contains("interface: interface"))
+        XCTAssertTrue(connectionManager.contains("parameters.requiredInterface = observedInterface"))
+        XCTAssertTrue(harness.contains("observedInterfaces="))
+    }
+
     func testP2PAuthenticationDoesNotBlockOnOptionalPostAuthPairingExchange() throws {
         let source = try readSource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
         let authenticateBody = try sourceSlice(
             from: "public func authenticate() async throws",
-            to: "private func performHandshake() async throws",
+            to: "private func performHandshake(",
             in: source
         )
         let postAuthHelperBody = try sourceSlice(
@@ -115,20 +279,22 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(postAuthHelperBody.contains("SkyBridgeLogger.p2p.info("))
     }
 
-    func testP2PControlAdvertiserUsesLANDirectListenerParameters() throws {
+    func testP2PControlAdvertiserPreservesBonjourPeerToPeerRoutes() throws {
         let center = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
         let p2p = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
 
         XCTAssertTrue(center.contains("includePeerToPeer: Bool = true"))
         XCTAssertTrue(center.contains("parameters.includePeerToPeer = includePeerToPeer"))
         XCTAssertTrue(center.contains("peerToPeer=\\(includePeerToPeer"))
-        XCTAssertTrue(center.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT(to: &record)"))
-        XCTAssertTrue(center.contains("record[\"skybridgePort\"] = portValue"))
-        XCTAssertTrue(center.contains("record[\"controlPort\"] = portValue"))
-        XCTAssertTrue(center.contains("record[\"controlPortSource\"] = \"listener\""))
+        XCTAssertTrue(center.contains("BonjourInteropContract.makeCanonicalAdvertisementTXT("))
+        XCTAssertTrue(center.contains("platform: .macOS"))
+        XCTAssertTrue(center.contains("role: .control"))
+        XCTAssertFalse(center.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT"))
+        XCTAssertFalse(center.contains("record[\"skybridgePort\"]"))
+        XCTAssertFalse(center.contains("record[\"controlPort\"]"))
         XCTAssertTrue(
-            p2p.contains("includePeerToPeer: false"),
-            "P2P control advertising must use LAN-routable listener parameters so direct host:port control probes do not silently fall back to Bonjour/AWDL."
+            p2p.contains("includePeerToPeer: true"),
+            "The shipping P2P listener must remain reachable through resolved Bonjour/AWDL routes when peers do not share an infrastructure-LAN address."
         )
     }
 
@@ -186,7 +352,7 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
     }
 
     @available(macOS 14.0, iOS 17.0, *)
-    func testP2PControlPortParsingIsServiceTypeAware() {
+    func testLegacyTXTPortAliasesRemainServiceTypeAwareInputOnly() {
         let txt = [
             "port": "51241",
             "skybridgePort": "51242",
@@ -201,12 +367,130 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             51241
         )
         XCTAssertEqual(
-            P2PDiscoveryBonjourPolicy.advertisedServicePort(from: txt, serviceType: "_skybridge-transfer._tcp"),
+            P2PDiscoveryBonjourPolicy.advertisedServicePort(
+                from: txt,
+                serviceType: BonjourInteropContract.legacyFileTransferServiceType
+            ),
             8080
         )
         XCTAssertEqual(
-            P2PDiscoveryBonjourPolicy.advertisedServicePort(from: txt, serviceType: "_skybridge-remote._tcp"),
+            P2PDiscoveryBonjourPolicy.advertisedServicePort(
+                from: txt,
+                serviceType: BonjourInteropContract.legacyRemoteControlServiceType
+            ),
             5901
+        )
+    }
+
+    func testTCPConnectorNeverTreatsUDPAdvertisementAsDialRoute() {
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.normalizedConnectableServiceTypes(
+                from: ["_skybridge._udp", "_skybridge._tcp"]
+            ),
+            ["_skybridge._tcp"]
+        )
+        XCTAssertNil(
+            P2PDiscoveryBonjourPolicy.tcpControlPort(
+                from: ["_skybridge._udp": 60_001]
+            )
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.tcpControlPort(
+                from: ["_skybridge._udp": 60_001, "_skybridge._tcp": 9_527]
+            ),
+            9_527
+        )
+        XCTAssertNil(
+            P2PDiscoveryBonjourPolicy.tcpControlPort(
+                from: ["_skybridge._tcp": 0]
+            )
+        )
+        XCTAssertNil(
+            P2PDiscoveryBonjourPolicy.tcpControlPort(
+                from: ["_skybridge._tcp": 65_536]
+            )
+        )
+    }
+
+    func testRemotePresentationPreservesIPadAndUnknownPlatformTruth() {
+        XCTAssertEqual(
+            P2PDeviceType.remoteType(
+                platformName: "iPadOS",
+                modelName: "iPad Pro 11-inch (M4)"
+            ),
+            .iPadOS
+        )
+        XCTAssertEqual(
+            P2PDeviceType.remoteType(platformName: nil, modelName: "iPhone17,1"),
+            .iOS
+        )
+        XCTAssertEqual(
+            P2PDeviceType.remoteType(platformName: "futureOS", modelName: "Device99,1"),
+            .unknown
+        )
+    }
+
+    func testDiscoveryPreservesRemotePresentationThroughMergeAndHydration() throws {
+        let discovery = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let advertiser = try readSource(
+            "Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift"
+        )
+
+        XCTAssertTrue(discovery.contains("platformName: deviceInfo.platform"))
+        XCTAssertTrue(discovery.contains("osVersion: deviceInfo.osVersion"))
+        XCTAssertTrue(discovery.contains("modelName: deviceInfo.model"))
+        XCTAssertTrue(discovery.contains("chip: deviceInfo.chip"))
+        XCTAssertTrue(discovery.contains("existing.platformName = deviceInfo.platform ?? existing.platformName"))
+        XCTAssertTrue(discovery.contains("existing.remoteVideoFormats.formUnion"))
+        XCTAssertTrue(discovery.contains("platformName: dd.platformName"))
+        XCTAssertTrue(discovery.contains("remoteVideoFormats: dd.remoteVideoFormats"))
+        XCTAssertTrue(advertiser.contains("platform: .macOS"))
+        XCTAssertTrue(advertiser.contains("role: .control"))
+        XCTAssertFalse(advertiser.contains("localPresentation"))
+    }
+
+    func testConnectableNotificationSelfFilterNeverUsesDisplayNameAsIdentity() {
+        let remote = P2PDevice(
+            id: "remote-device-id",
+            name: "Shared Device Name",
+            type: .iPadOS,
+            address: "192.0.2.20",
+            port: 9_527,
+            osVersion: "27.0",
+            capabilities: [],
+            publicKey: Data(),
+            lastSeen: Date()
+        )
+
+        let aliasedRemote = P2PDevice(
+            id: remote.deviceId,
+            name: remote.name,
+            type: remote.type,
+            address: remote.address,
+            port: remote.port,
+            osVersion: remote.osVersion,
+            capabilities: remote.capabilities,
+            publicKey: remote.publicKey,
+            lastSeen: remote.lastSeen,
+            persistentDeviceId: "persistent-remote-id"
+        )
+        XCTAssertTrue(
+            P2PNetworkManager.shouldSuppressConnectableNotification(
+                for: aliasedRemote,
+                localProtocolDeviceId: "PERSISTENT-REMOTE-ID"
+            )
+        )
+        XCTAssertTrue(
+            P2PNetworkManager.shouldSuppressConnectableNotification(
+                for: remote,
+                localProtocolDeviceId: "REMOTE-DEVICE-ID"
+            )
+        )
+        XCTAssertFalse(
+            P2PNetworkManager.shouldSuppressConnectableNotification(
+                for: remote,
+                localProtocolDeviceId: "different-local-id"
+            )
         )
     }
 
@@ -581,19 +865,21 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         )
     }
 
-    func testLegacyDiscoveryManagersCannotStopP2POwnedSkybridgeAdvertiser() throws {
+    func testP2PDiscoveryServiceIsTheOnlyControlAdvertisementOwner() throws {
         let manager = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift")
         let optimized = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift")
         let p2p = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let center = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
 
-        XCTAssertFalse(manager.contains("ServiceAdvertiserCenter.shared.stopAdvertising(\"_skybridge._tcp\")"))
-        XCTAssertFalse(optimized.contains("ServiceAdvertiserCenter.shared.stopAdvertising(\"_skybridge._tcp\")"))
-        XCTAssertFalse(p2p.contains("ServiceAdvertiserCenter.shared.stopAdvertising(\"_skybridge._tcp\")"))
-
-        XCTAssertTrue(manager.contains("owner: advertisementOwner"))
-        XCTAssertTrue(optimized.contains("owner: Self.advertisementOwner"))
-        XCTAssertTrue(manager.contains("owner: advertisementOwner\n            )"))
-        XCTAssertTrue(optimized.contains("owner: Self.advertisementOwner\n            )"))
+        XCTAssertFalse(manager.contains("ServiceAdvertiserCenter.shared.startAdvertising("))
+        XCTAssertFalse(manager.contains("ServiceAdvertiserCenter.shared.stopAdvertising("))
+        XCTAssertFalse(optimized.contains("ServiceAdvertiserCenter.shared.startAdvertising("))
+        XCTAssertFalse(optimized.contains("ServiceAdvertiserCenter.shared.stopAdvertising("))
+        XCTAssertTrue(p2p.contains("owner: Self.controlAdvertisementOwner"))
+        XCTAssertTrue(center.contains("case ownerConflict(serviceType: String"))
+        XCTAssertTrue(center.contains("try validateOwner("))
+        XCTAssertTrue(center.contains("startOperations[serviceType]"))
+        XCTAssertTrue(center.contains("current == requested"))
     }
 
     func testInboundDiscoveryConnectionsDetachStateHandlers() throws {
@@ -792,7 +1078,7 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         )
     }
 
-    func testRemoteControlRoutePreflightDoesNotEnterSessionLifecycle() throws {
+    func testRemoteControlServerBoundsPreHandshakeInspectionAndPreservesHandoffBytes() throws {
         let server = try readSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift")
         let manager = try readSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
         let harness = try readSource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/Smoke/LocalP2PSmokeHarness.swift")
@@ -800,6 +1086,10 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(server.contains("SKYBRIDGE_REMOTE_ROUTE_PROBE_V1"))
         XCTAssertTrue(server.contains("probe=remote-route-preflight"))
         XCTAssertTrue(server.contains("receiveInitialConnectionBytes("))
+        XCTAssertTrue(server.contains("RemoteControlInboundAdmission"))
+        XCTAssertTrue(server.contains("maximumConnections: Int = 32"))
+        XCTAssertTrue(server.contains("maximumConnectionsPerEndpoint: Int = 4"))
+        XCTAssertTrue(server.contains("inboundAdmission.release(admissionLease)"))
         XCTAssertTrue(
             server.contains("let handoffConnection = connection")
                 && server.contains("let handoffData = initialData")
@@ -811,9 +1101,11 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(manager.contains("var pendingInitialData = initialData"))
         XCTAssertTrue(manager.contains("processInboundRemoteEventChunk("))
 
-        XCTAssertTrue(harness.contains("remoteControlRoutePreflightProbePayload"))
-        XCTAssertTrue(harness.contains("probePayload: Self.remoteControlRoutePreflightProbePayload"))
-        XCTAssertTrue(harness.contains("probe-send=ok"))
+        XCTAssertFalse(harness.contains("remoteControlRoutePreflightProbePayload"))
+        XCTAssertFalse(harness.contains("control-route-preflight"))
+        XCTAssertTrue(harness.contains("liveBonjourServiceEndpoints("))
+        XCTAssertTrue(harness.contains("liveBonjourControlEndpoints: liveEndpoints"))
+        XCTAssertTrue(harness.contains("preferredInterface="))
     }
 
     func testP2PConnectCancellationAndReadinessHandlersAreLifecycleBound() throws {
@@ -888,7 +1180,8 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             in: source
         )
         XCTAssertTrue(activeWait.contains("Self.appendSmokeConnectionPathEvidence("))
-        XCTAssertTrue(source.contains("p2p-connection-ready-path deviceId="))
+        XCTAssertTrue(source.contains("p2p-connect-plan dialRef="))
+        XCTAssertTrue(source.contains("p2p-connection-ready-path dialRef="))
         XCTAssertTrue(source.contains("usedInterfaceTypes="))
         XCTAssertTrue(source.contains("usedInterfaceNames="))
         XCTAssertTrue(source.contains("routeClass=\\(classification.routeClass)"))
@@ -966,6 +1259,91 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             p2p.contains("try? await Task.sleep(for: .seconds(delay))"),
             "A cancelled reconnect timer must return instead of initiating a ghost connection."
         )
+        XCTAssertTrue(p2p.contains("p2p-connect-attempt dialRef="))
+    }
+
+    func testCentralAdvertiserBindsHealthAndInboundConnectionsToExactRegistrationLease() throws {
+        let source = try readSource("Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryOrchestrator.swift")
+        let inbound = try sourceSlice(
+            from: "private func handleNewConnection(",
+            to: "private func waitForAdvertisingReady(",
+            in: source
+        )
+        XCTAssertTrue(inbound.contains("record.token == token"))
+        XCTAssertTrue(inbound.contains("record.listener === listener"))
+        XCTAssertTrue(inbound.contains("record.state == .ready"))
+        XCTAssertTrue(inbound.contains("connection.cancel()"))
+
+        let listenerState = try sourceSlice(
+            from: "private func handleListenerStateUpdate(",
+            to: "private func handleServiceRegistrationUpdate(",
+            in: source
+        )
+        XCTAssertTrue(listenerState.contains("record.readinessGate.observeSocketUnavailable()"))
+        XCTAssertTrue(listenerState.contains("record.readinessHandler?(false)"))
+
+        let registration = try sourceSlice(
+            from: "private func handleServiceRegistrationUpdate(",
+            to: "private func handleNewConnection(",
+            in: source
+        )
+        XCTAssertTrue(registration.contains("record.readinessGate.observeRegistrationRemoved("))
+        XCTAssertTrue(registration.contains("record.registrationEndpoints.isEmpty"))
+        XCTAssertTrue(registration.contains("record.readinessHandler?(false)"))
+    }
+
+    func testDedicatedMacListenersCommitExactPublicationBeforeStartupReturns() throws {
+        for relativePath in [
+            "Sources/SkyBridgeCore/FileTransfer/FileTransferListenerService.swift",
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift"
+        ] {
+            let source = try readSource(relativePath)
+            let commitCall = try XCTUnwrap(source.range(of: "guard self.commitListenerStartup("))
+            let continuation = try XCTUnwrap(
+                source.range(
+                    of: "continuation.resume(returning: port)",
+                    range: commitCall.upperBound..<source.endIndex
+                )
+            )
+            XCTAssertLessThan(
+                commitCall.lowerBound,
+                continuation.lowerBound,
+                "\(relativePath) must atomically publish the exact listener before waking start()"
+            )
+
+            let commit = try sourceSlice(
+                from: "private func commitListenerStartup(",
+                to: "private func finishStartTask(",
+                in: source
+            )
+            XCTAssertTrue(commit.contains("listenerGeneration == generation"))
+            XCTAssertTrue(commit.contains("pendingListener === candidate"))
+            XCTAssertTrue(commit.contains("listener = candidate"))
+            XCTAssertTrue(
+                commit.contains("isBonjourPublished = true")
+                    || commit.contains("bonjourPublished = true")
+            )
+            XCTAssertTrue(commit.contains("ServiceEndpointRegistry.shared.set"))
+        }
+    }
+
+    func testOptimizedDiscoveryUsesResolvedSRVEndpointInsteadOfTXTOrDomainAsPort() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift"
+        )
+        let resolver = try sourceSlice(
+            from: "private func extractNetworkInfoAsync(",
+            to: "private func publishHydratedPrimaryControlService(",
+            in: source
+        )
+        XCTAssertTrue(resolver.contains("NetService("))
+        XCTAssertTrue(resolver.contains("resolveBonjourServiceOnMain("))
+        XCTAssertTrue(resolver.contains("return (resolved.ipv4, resolved.ipv6, resolved.port)"))
+        XCTAssertTrue(resolver.contains("endpointType.caseInsensitiveCompare(serviceType)"))
+        XCTAssertFalse(resolver.contains("Int(domain)"))
+        XCTAssertFalse(resolver.contains("parsePort("))
+        XCTAssertFalse(resolver.contains("transferPort"))
+        XCTAssertFalse(resolver.contains("remoteControlPort"))
     }
 
     private func readSource(_ relativePath: String) throws -> String {

@@ -1,5 +1,5 @@
 {
-  "originHash" : "0114d749591eb14d1769ca77246a08c95f355c9b06a397ccc8b58d4ecf371855",
+  "originHash" : "ef26f2704ff12a83c484745c479407541b6c2038aa55513ac1a47a2d0f21d925",
   "pins" : [
     {
       "identity" : "swift-asn1",
@@ -51,8 +51,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio-ssh",
       "state" : {
-        "revision" : "31cdc3c3391a10460dedf1170530cf651d2ca496",
-        "version" : "0.14.1"
+        "revision" : "3ec281496f28a3b6581afd946b759e2642f5cd8d",
+        "version" : "0.15.0"
       }
     },
     {
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/stasel/WebRTC",
       "state" : {
-        "revision" : "7b7272aa4c2ebb597eaf0bf4f81ec19b6a0a44a3",
-        "version" : "148.0.0"
+        "revision" : "6ed87f05368632f71dc95c89c14c051561710925",
+        "version" : "150.0.0"
       }
     }
   ],

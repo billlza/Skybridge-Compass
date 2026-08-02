@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 //
 // RemoteControlManager.swift
 // SkyBridgeCore
@@ -46,6 +49,8 @@ private final class PeerConnection {
     var sessionKeys: SessionKeys?
     @available(macOS 14.0, *)
     var soaPairKey: Data?
+    @available(macOS 14.0, *)
+    var soaEstablishedLease: PeerSessionArbiter.EstablishedLease?
     @available(macOS 14.0, *)
     let secureEnvelopeSendSequencer = RemoteControlSecureEnvelopeSendSequencer()
     @available(macOS 14.0, *)
@@ -613,7 +618,7 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         _ = removePeer(deviceId: deviceId, role: .controlling)
         if #available(macOS 14.0, *) {
-            releaseSOAStateIfUnretained(for: peer)
+            releaseSOAState(for: peer)
         }
         lastSentViewerStreamConfiguration = nil
         stopP2PRealtimeAudioReceiverIfNeeded(peerId: deviceId)
@@ -731,7 +736,7 @@ public final class RemoteControlManager: BaseManager {
         peer.connection.cancel()
         _ = removePeer(deviceId: deviceId, role: .beingControlled)
         if #available(macOS 14.0, *) {
-            releaseSOAStateIfUnretained(for: peer)
+            releaseSOAState(for: peer)
         }
         Task {
             await peer.outboundFramePump.close()
@@ -793,7 +798,7 @@ public final class RemoteControlManager: BaseManager {
             Task { await sender.close(reason: "session-superseded") }
         }
         if #available(macOS 14.0, *) {
-            releaseSOAStateIfUnretained(for: previousPeer)
+            releaseSOAState(for: previousPeer)
         }
 
         if resetCapturePipeline {
@@ -821,32 +826,51 @@ public final class RemoteControlManager: BaseManager {
     }
 
     @available(macOS 14.0, *)
-    private func releaseStaleSOAStateBeforeHandshake(pairKey: Data, for peer: PeerConnection) async {
-        guard !isSOAPairKeyRetainedByCurrentPeer(pairKey, excluding: peer) else {
-            return
+    private func releaseStaleSOAStateBeforeHandshake(for peer: PeerConnection) async throws {
+        if let staleDriver = peer.handshakeDriver {
+            peer.handshakeDriver = nil
+            switch await staleDriver.getCurrentState() {
+            case .idle, .established, .failed:
+                break
+            default:
+                await staleDriver.cancel()
+            }
         }
-        await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
-        await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
+        if let staleLease = peer.soaEstablishedLease {
+            guard await PeerSessionArbiter.shared.clearEstablished(staleLease) else {
+                logger.error(
+                    "⛔️ RemoteControl could not release its exact stale SOA lease for \(peer.id, privacy: .public)"
+                )
+                throw RemoteControlError.handshakeInitializationFailed(
+                    "could not release exact stale remote-control SOA lease"
+                )
+            }
+            peer.soaEstablishedLease = nil
+        }
     }
 
     @available(macOS 14.0, *)
-    private func releaseSOAStateIfUnretained(for peer: PeerConnection) {
-        guard let pairKey = peer.soaPairKey else { return }
+    private func releaseSOAState(for peer: PeerConnection) {
+        let driverToCancel = peer.handshakeDriver
+        let establishedLease = peer.soaEstablishedLease
+        guard peer.soaPairKey != nil || driverToCancel != nil || establishedLease != nil else {
+            return
+        }
         peer.soaPairKey = nil
-        guard !isSOAPairKeyRetainedByCurrentPeer(pairKey, excluding: peer) else {
-            return
-        }
+        peer.handshakeDriver = nil
+        peer.soaEstablishedLease = nil
         Task {
-            await PeerSessionArbiter.shared.clearEstablished(pairKey: pairKey)
-            await PeerSessionArbiter.shared.clearOutgoing(pairKey: pairKey, attemptId: nil)
-        }
-    }
-
-    @available(macOS 14.0, *)
-    private func isSOAPairKeyRetainedByCurrentPeer(_ pairKey: Data, excluding peer: PeerConnection) -> Bool {
-        let peers = Array(controllingPeers.values) + Array(beingControlledPeers.values)
-        return peers.contains { candidate in
-            candidate !== peer && candidate.soaPairKey == pairKey
+            if let driverToCancel {
+                switch await driverToCancel.getCurrentState() {
+                case .idle, .established, .failed:
+                    break
+                default:
+                    await driverToCancel.cancel()
+                }
+            }
+            if let establishedLease {
+                _ = await PeerSessionArbiter.shared.clearEstablished(establishedLease)
+            }
         }
     }
 
@@ -2061,6 +2085,11 @@ public final class RemoteControlManager: BaseManager {
     ) async throws -> HandshakeSyncResult {
         switch await driver.getCurrentState() {
         case .established(let keys):
+            try await bindEstablishedSOALease(
+                from: driver,
+                sessionKeys: keys,
+                for: peer
+            )
             let installed = try await installSecureSessionKeys(
                 keys,
                 for: peer,
@@ -2090,6 +2119,33 @@ public final class RemoteControlManager: BaseManager {
         default:
             return .pending
         }
+    }
+
+    @available(macOS 14.0, *)
+    private func bindEstablishedSOALease(
+        from driver: HandshakeDriver?,
+        sessionKeys: SessionKeys,
+        for peer: PeerConnection
+    ) async throws {
+        let lease = if let driver {
+            await driver.getEstablishedArbiterLease()
+        } else {
+            peer.soaEstablishedLease
+        }
+        guard let pairKey = peer.soaPairKey,
+              let lease,
+              lease.pairKey == pairKey,
+              lease.sessionId == sessionKeys.sessionId else {
+            throw RemoteControlError.handshakeInitializationFailed(
+                "established remote-control session missing exact SOA lease"
+            )
+        }
+
+        if let previousLease = peer.soaEstablishedLease,
+           previousLease != lease {
+            _ = await PeerSessionArbiter.shared.clearEstablished(previousLease)
+        }
+        peer.soaEstablishedLease = lease
     }
 
     @available(macOS 14.0, *)
@@ -2170,7 +2226,6 @@ public final class RemoteControlManager: BaseManager {
             scope: .remoteControl
         )
         recordSOAState(soaPairKey, for: peer)
-        await releaseStaleSOAStateBeforeHandshake(pairKey: soaPairKey, for: peer)
 
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
@@ -2178,6 +2233,7 @@ public final class RemoteControlManager: BaseManager {
         let baseProvider = CryptoProviderFactory.make(policy: selection)
 
         do {
+            try await releaseStaleSOAStateBeforeHandshake(for: peer)
             let trustProvider = try await makeRemoteControlTrustProvider(for: handshakePeer.deviceId)
             let transport = RemoteControlHandshakeTransport(connection: peer.connection)
             let configuration = try await SettingsManager.shared
@@ -2255,6 +2311,11 @@ public final class RemoteControlManager: BaseManager {
                 pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm
             )
 
+            try await bindEstablishedSOALease(
+                from: peer.handshakeDriver,
+                sessionKeys: keys,
+                for: peer
+            )
             let installed = try await installSecureSessionKeys(
                 keys,
                 for: peer,
@@ -3067,7 +3128,7 @@ public final class RemoteControlManager: BaseManager {
             scope: .remoteControl
         )
         recordSOAState(soaPairKey, for: peer)
-        await releaseStaleSOAStateBeforeHandshake(pairKey: soaPairKey, for: peer)
+        try await releaseStaleSOAStateBeforeHandshake(for: peer)
         peer.handshakePeer = PeerIdentifier(deviceId: trustedPeerId, displayName: nil, address: nil)
         let trustProvider = try await makeRemoteControlTrustProvider(for: trustedPeerId)
         #if !os(macOS)
@@ -3610,7 +3671,7 @@ public final class RemoteControlManager: BaseManager {
         }
         _ = removePeer(deviceId: peer.id, role: peer.role)
         if #available(macOS 14.0, *) {
-            releaseSOAStateIfUnretained(for: peer)
+            releaseSOAState(for: peer)
         }
         await peer.outboundFramePump.close()
         if #available(macOS 14.0, *), let realtimeAudioSender = peer.realtimeAudioSender {
@@ -3779,4 +3840,5 @@ extension RemoteControlManager {
         )
     }
 }
+#endif
 #endif

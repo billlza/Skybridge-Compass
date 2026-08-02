@@ -37,13 +37,13 @@ fn p2p_remote_lan_route_rejects_link_local_peer_to_peer_video_path() {
     let mut bonjour_infra_evidence = P2pRemotePerformanceEvidence::default();
     update_p2p_remote_evidence(
         &mut bonjour_infra_evidence,
-        "ios-lan-remote-route candidate=1/1 addressClass=bonjour-service peerToPeer=false endpoint=Mac._skybridge-remote._tcp.local.",
+        "ios-lan-remote-route candidate=1/1 addressClass=bonjour-service peerToPeer=false endpoint=Mac._skybridge-rd._tcp.local.",
         false,
         true,
     );
     update_p2p_remote_evidence(
         &mut bonjour_infra_evidence,
-        "ios-lan-remote-route-ready requestedAddressClass=bonjour-service resolvedAddressClass=lan-direct resolvedPeerToPeer=false requested=Mac._skybridge-remote._tcp.local. resolved=192.168.1.20:5901",
+        "ios-lan-remote-route-ready requestedAddressClass=bonjour-service resolvedAddressClass=lan-direct resolvedPeerToPeer=false requested=Mac._skybridge-rd._tcp.local. resolved=192.168.1.20:5901",
         false,
         true,
     );
@@ -59,13 +59,13 @@ fn p2p_remote_lan_route_rejects_link_local_peer_to_peer_video_path() {
     let mut bonjour_peer_to_peer_evidence = P2pRemotePerformanceEvidence::default();
     update_p2p_remote_evidence(
         &mut bonjour_peer_to_peer_evidence,
-        "ios-lan-remote-route candidate=1/1 addressClass=bonjour-service peerToPeer=false endpoint=Mac._skybridge-remote._tcp.local.",
+        "ios-lan-remote-route candidate=1/1 addressClass=bonjour-service peerToPeer=false endpoint=Mac._skybridge-rd._tcp.local.",
         false,
         true,
     );
     update_p2p_remote_evidence(
         &mut bonjour_peer_to_peer_evidence,
-        "ios-lan-remote-route-ready requestedAddressClass=bonjour-service resolvedAddressClass=link-local resolvedPeerToPeer=true requested=Mac._skybridge-remote._tcp.local. resolved=fe80::1%en0:5901",
+        "ios-lan-remote-route-ready requestedAddressClass=bonjour-service resolvedAddressClass=link-local resolvedPeerToPeer=true requested=Mac._skybridge-rd._tcp.local. resolved=fe80::1%en0:5901",
         false,
         true,
     );

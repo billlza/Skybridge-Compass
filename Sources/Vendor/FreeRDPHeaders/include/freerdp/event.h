@@ -85,6 +85,16 @@ extern "C"
 	int result;
 	DEFINE_EVENT_END(ConnectionResult)
 
+	DEFINE_EVENT_BEGIN(ChannelInitialized)
+	const char* name;
+	void* pInterface;
+	DEFINE_EVENT_END(ChannelInitialized)
+
+	DEFINE_EVENT_BEGIN(ChannelTerminated)
+	const char* name;
+	void* pInterface;
+	DEFINE_EVENT_END(ChannelTerminated)
+
 	DEFINE_EVENT_BEGIN(ChannelConnected)
 	const char* name;
 	void* pInterface;
@@ -134,6 +144,15 @@ extern "C"
 	BOOL cancelPreviousNotification; /**< This notification is meant to cancel a previous one with
 	                                    \ref messageID */
 	DEFINE_EVENT_END(UserNotification)
+
+	DEFINE_EVENT_BEGIN(StateChanged)
+	CONNECTION_STATE oldState; /** @brief Old CONNECTION_STATE value
+	                            * @since version 3.27.0
+	                            */
+	CONNECTION_STATE newState; /** @brief Current CONNECTION_STATE value
+	                            * @since version 3.27.0
+	                            */
+	DEFINE_EVENT_END(StateChanged)
 
 #ifdef __cplusplus
 }

@@ -105,13 +105,13 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
         )
         XCTAssertEqual(routes.count, 2)
         XCTAssertEqual(routes[0].kind, "fileTransfer")
-        XCTAssertEqual(routes[0].serviceType, "_skybridge-transfer._tcp")
-        XCTAssertEqual(routes[0].instanceName, "Desk Mac._skybridge-transfer._tcp.local")
+        XCTAssertEqual(routes[0].serviceType, BonjourInteropContract.fileTransferServiceType)
+        XCTAssertEqual(routes[0].instanceName, "Desk Mac._skybridge-xfer._tcp.local")
         XCTAssertEqual(routes[0].hostName, "desk-mac.local")
         XCTAssertEqual(routes[0].port, 9443)
         XCTAssertEqual(routes[1].kind, "remoteDesktop")
-        XCTAssertEqual(routes[1].serviceType, "_skybridge-remote._tcp")
-        XCTAssertEqual(routes[1].instanceName, "Desk Mac._skybridge-remote._tcp.local")
+        XCTAssertEqual(routes[1].serviceType, BonjourInteropContract.remoteControlServiceType)
+        XCTAssertEqual(routes[1].instanceName, "Desk Mac._skybridge-rd._tcp.local")
         XCTAssertEqual(routes[1].hostName, "desk-mac.local")
         XCTAssertEqual(routes[1].port, 5901)
 
@@ -149,7 +149,11 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
     }
 
     func testAuthenticatedRouteBindingPolicyPublishesOnlyVerifiedFileTransferRoutes() throws {
-        let payload = authenticatedRouteBindingPayload(kind: "fileTransfer", serviceType: "_skybridge-transfer._tcp", port: 9443)
+        let payload = authenticatedRouteBindingPayload(
+            kind: "fileTransfer",
+            serviceType: BonjourInteropContract.fileTransferServiceType,
+            port: 9443
+        )
 
         let decision = WebRTCAuthenticatedRouteBindingPolicy.evaluate(
             payload,
@@ -168,10 +172,26 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
         )
     }
 
+    func testAuthenticatedRouteBindingPolicyAcceptsLegacyFileServiceAsInputOnly() throws {
+        let payload = authenticatedRouteBindingPayload(
+            kind: "fileTransfer",
+            serviceType: BonjourInteropContract.legacyFileTransferServiceType,
+            port: 9443
+        )
+
+        guard case .fileTransfer(let route) = WebRTCAuthenticatedRouteBindingPolicy.evaluate(
+            payload,
+            context: routeBindingContext(now: Date(timeIntervalSinceReferenceDate: 60))
+        ) else {
+            return XCTFail("authenticated version-1 service input should remain readable")
+        }
+        XCTAssertEqual(route.transferPort, 9443)
+    }
+
     func testAuthenticatedRouteBindingPolicyRejectsSessionBindingMismatch() throws {
         let payload = authenticatedRouteBindingPayload(
             kind: "fileTransfer",
-            serviceType: "_skybridge-transfer._tcp",
+            serviceType: BonjourInteropContract.fileTransferServiceType,
             port: 9443,
             sessionHashHex: "badbadbadbadbadb"
         )
@@ -186,7 +206,11 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
     }
 
     func testAuthenticatedRouteBindingPolicyDoesNotPublishRemoteDesktopAsFileRoute() throws {
-        let payload = authenticatedRouteBindingPayload(kind: "remoteDesktop", serviceType: "_skybridge-remote._tcp", port: 5901)
+        let payload = authenticatedRouteBindingPayload(
+            kind: "remoteDesktop",
+            serviceType: BonjourInteropContract.remoteControlServiceType,
+            port: 5901
+        )
 
         XCTAssertEqual(
             WebRTCAuthenticatedRouteBindingPolicy.evaluate(
@@ -202,8 +226,8 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
             try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedRouteBindingMessages(
                 routes: [.init(
                     kind: "fileTransfer",
-                    serviceType: "_skybridge-transfer._tcp",
-                    instanceName: "Desk Mac._skybridge-transfer._tcp.local",
+                    serviceType: BonjourInteropContract.fileTransferServiceType,
+                    instanceName: "Desk Mac._skybridge-xfer._tcp.local",
                     hostName: "desk-mac.local",
                     port: 9443
                 )],
@@ -227,8 +251,8 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
             try CrossNetworkWebRTCLocalAppMessageFactory.authenticatedRouteBindingMessages(
                 routes: [.init(
                     kind: "fileTransfer",
-                    serviceType: "_skybridge-transfer._tcp",
-                    instanceName: "Desk Mac._skybridge-transfer._tcp.local",
+                    serviceType: BonjourInteropContract.fileTransferServiceType,
+                    instanceName: "Desk Mac._skybridge-xfer._tcp.local",
                     hostName: "desk-mac.local",
                     port: 9443
                 )],
@@ -258,9 +282,7 @@ final class WebRTCControlChannelSecureEnvelopeTests: XCTestCase {
         AppMessage.AuthenticatedRouteBindingPayload(
             kind: kind,
             serviceType: serviceType,
-            instanceName: serviceType == "_skybridge-transfer._tcp"
-                ? "Windows PC._skybridge-transfer._tcp.local"
-                : "Windows PC._skybridge-remote._tcp.local",
+            instanceName: "Windows PC.\(serviceType).local",
             hostName: "windows-pc.local.",
             port: port,
             endpointProvenance: CrossNetworkWebRTCLocalAppMessageFactory.routeBindingEndpointProvenance,

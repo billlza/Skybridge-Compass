@@ -344,6 +344,14 @@ enum SkyBridgeDiagnosticTrace {
         enqueueLine(SkyBridgeTraceRedaction.redactKnownAssignments(in: line()), suffix: ".trace.log")
     }
 
+    /// Waits until every diagnostic write submitted before this call is durable.
+    /// Smoke completion uses this barrier before the runner copies the app cache,
+    /// preventing a successful tail event from remaining only in the queue.
+    static func flush() {
+        guard DispatchQueue.getSpecific(key: writerQueueKey) == nil else { return }
+        writerQueue.sync {}
+    }
+
     static func resetStatusArtifacts(primaryStatusURL: URL) throws {
         if DispatchQueue.getSpecific(key: writerQueueKey) != nil {
             try resetConfiguredStatusArtifacts(primaryStatusURL: primaryStatusURL)
@@ -547,5 +555,8 @@ enum SkyBridgeDiagnosticTrace {
 
     @inline(__always)
     static func appendMediaDiagnostic(_ fields: @autoclosure () -> [String: Any]) {}
+
+    @inline(__always)
+    static func flush() {}
 }
 #endif

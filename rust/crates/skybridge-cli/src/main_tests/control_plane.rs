@@ -61,9 +61,12 @@ async fn signaling_doctor_mock_server_reports_media_surface() -> Result<()> {
         ),
     ])?;
 
-    let report =
-        crate::control_plane_doctor::build_signaling_doctor_report(Some(base_url), Some("redis"))
-            .await?;
+    let report = crate::control_plane_doctor::build_signaling_doctor_report(
+        Some(base_url),
+        true,
+        Some("redis"),
+    )
+    .await?;
 
     assert!(report.checks.iter().all(|check| check.ok));
     assert!(
@@ -107,6 +110,7 @@ async fn media_lease_doctor_reports_reject_reason_fields() -> Result<()> {
 
     let report = crate::control_plane_doctor::build_media_lease_doctor_report(
         Some(base_url),
+        true,
         Some("SESSION1".to_owned()),
         Some("token".to_owned()),
     )

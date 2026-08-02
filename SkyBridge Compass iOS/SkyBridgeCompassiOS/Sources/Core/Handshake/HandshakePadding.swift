@@ -9,6 +9,7 @@
 
 import Foundation
 import Security
+import SkyBridgeProtocolCore
 import os
 
 @available(iOS 17.0, *)
@@ -24,6 +25,20 @@ public struct HandshakePaddingConfig: Sendable {
     public var mode: HandshakePaddingMode
     public var fixedSizeBytes: Int
     public var bucketSizesBytes: [Int]
+
+    public init(
+        enabled: Bool,
+        debugLog: Bool,
+        mode: HandshakePaddingMode,
+        fixedSizeBytes: Int,
+        bucketSizesBytes: [Int]
+    ) {
+        self.enabled = enabled
+        self.debugLog = debugLog
+        self.mode = mode
+        self.fixedSizeBytes = fixedSizeBytes
+        self.bucketSizesBytes = bucketSizesBytes
+    }
 
     public static func fromUserDefaults() -> HandshakePaddingConfig {
         let enabledKey = "sb_handshake_padding_enabled"
@@ -64,6 +79,10 @@ public enum HandshakePadding {
     // "SBP1"
     private static let magic: [UInt8] = [0x53, 0x42, 0x50, 0x31]
     private static let headerLen = 4 + 4 // magic + u32 actualLen
+    public static let maximumOutputByteCount = max(
+        HandshakeConstants.maxMessageALength,
+        HandshakeConstants.maxMessageBLength
+    ) + headerLen
     private static let didLogConfigHint = OSAllocatedUnfairLock(initialState: false)
 
     private static func logConfigHintOnceIfNeeded(cfg: HandshakePaddingConfig) {
@@ -82,27 +101,48 @@ public enum HandshakePadding {
         print(msg)
     }
 
-    public static func wrapIfEnabled(_ payload: Data, label: String? = nil, maxTotalBytes: Int? = nil) -> Data {
+    public static func wrapIfEnabled(
+        _ payload: Data,
+        label: String? = nil,
+        maximumPaddingTargetByteCount: Int? = nil
+    ) throws -> Data {
         let cfg = HandshakePaddingConfig.fromUserDefaults()
-        guard cfg.enabled else { return payload }
         logConfigHintOnceIfNeeded(cfg: cfg)
+        return try wrapIfEnabled(
+            payload,
+            configuration: cfg,
+            label: label,
+            maximumPaddingTargetByteCount: maximumPaddingTargetByteCount
+        )
+    }
 
-        let minLen = headerLen + payload.count
-        let effectiveCap = maxTotalBytes.map { max($0, minLen) }
-        let targetLen: Int
-        switch cfg.mode {
+    public static func wrapIfEnabled(
+        _ payload: Data,
+        configuration cfg: HandshakePaddingConfig,
+        label: String? = nil,
+        maximumPaddingTargetByteCount: Int? = nil
+    ) throws -> Data {
+        let target: BoundedPaddingEnvelopePolicy.Target = switch cfg.mode {
         case .fixed:
-            let requested = max(minLen, cfg.fixedSizeBytes > 0 ? cfg.fixedSizeBytes : minLen)
-            targetLen = if let effectiveCap, requested > effectiveCap { minLen } else { requested }
+            .fixed(cfg.fixedSizeBytes)
         case .bucketed:
-            let requested = cfg.bucketSizesBytes.first(where: { $0 >= minLen }) ?? minLen
-            targetLen = if let effectiveCap, requested > effectiveCap { minLen } else { requested }
+            .bucketed(cfg.bucketSizesBytes)
         }
-        let out = wrap(payload: payload, totalLen: max(minLen, targetLen))
+        let plan = try BoundedPaddingEnvelopePolicy.plan(
+            payloadByteCount: payload.count,
+            headerByteCount: headerLen,
+            enabled: cfg.enabled,
+            target: target,
+            maximumOutputByteCount: maximumOutputByteCount,
+            maximumPaddingTargetByteCount: maximumPaddingTargetByteCount
+        )
+        guard plan.shouldWrap else { return payload }
+
+        let out = wrap(payload: payload, totalLen: plan.totalByteCount)
 
         if cfg.debugLog {
             let name = label ?? "handshake"
-            let capDescription = effectiveCap.map { ", cap=\($0)B" } ?? ""
+            let capDescription = maximumPaddingTargetByteCount.map { ", paddingTargetCap=\($0)B" } ?? ""
             let msg = "🧪 Padding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue)\(capDescription))"
             // 在某些控制台过滤下 debug 可能不可见，这里用 info 确保可见（仅在开关打开时）
             SkyBridgeLogger.shared.debug(msg)
@@ -114,9 +154,15 @@ public enum HandshakePadding {
     }
 
     public static func unwrapIfNeeded(_ input: Data, label: String? = nil) -> Data {
-        // Handshake frames are size-bounded. Rebasing once makes every
-        // downstream wire-relative decoder safe for Data slices.
-        let data = Data(input)
+        // Inspect the original COW value before creating a body copy. A hostile
+        // SBP1 marker inside a larger WebRTC frame must not turn the 16 KiB
+        // handshake decoder into an additional multi-megabyte allocation.
+        let candidate = input
+        guard candidate.count <= maximumOutputByteCount else { return candidate }
+        // Rebase every bounded result, including unpadded frames. Downstream
+        // wire decoders intentionally use integer offsets from zero, while a
+        // Data.SubSequence can retain its parent's non-zero startIndex.
+        let data = Data(candidate)
         guard data.count >= headerLen else { return data }
         guard data.prefix(4).elementsEqual(magic) else { return data }
 

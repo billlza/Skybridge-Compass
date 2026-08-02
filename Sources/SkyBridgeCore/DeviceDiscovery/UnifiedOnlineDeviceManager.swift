@@ -1,3 +1,8 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// macOS 侧发现编排（依赖 USB/IOKit 与 DeviceDiscoveryManagerOptimized）。iOS 有自己的一份
+// （iOS 侧在线设备管理）。采用/合并是阶段 3 的迁移工作，见 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 import Foundation
 import Combine
 import OSLog
@@ -4179,7 +4184,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
 
  // E. 次级证据：名称与本机 hostname 精确归一化后相等（仅在通过 B+C 后允许）
-        let hostname = Host.current().localizedName ?? ""
+        let hostname = LocalHostName.localizedName ?? ""
         func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: " ", with: "") }
         if !hostname.isEmpty, norm(name) == norm(hostname) {
             return true
@@ -4336,70 +4341,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
 // MARK: - 数据模型
 
-/// 在线设备
-public struct OnlineDevice: Identifiable, Hashable, Sendable {
-    public let id: UUID
-    public var name: String
-    public var deviceType: DeviceClassifier.DeviceType
-    public var ipv4: String?
-    public var ipv6: String?
-    public var platformName: String? = nil
-    public var osVersion: String? = nil
-    public var modelName: String? = nil
-    public var chip: String? = nil
-    public var macAddress: String?
-    public var serialNumber: String?
-    public var connectionTypes: Set<DeviceConnectionType>
-    public var services: [String]
-    public var portMap: [String: Int]
-    /// Dialable route aliases such as `bonjour:<instance>@local.` that must survive
-    /// stable identity promotion.
-    public var routeIdentifiers: [String] = []
-    /// Runtime-only protocol fingerprint observed from live discovery TXT. This is
-    /// intentionally not encoded so persisted recent/cloud rows cannot outrank
-    /// current live protocol identity.
-    public var protocolFingerprint: String? = nil
-    public let uniqueIdentifier: String
-    public var sources: [DeviceSource]
-    public let discoveredAt: Date
-    public var lastSeen: Date
-    public var connectionStatus: OnlineDeviceStatus
-    public var lastConnectedAt: Date?
-    /// Best-effort crypto info for last successful handshake (UI-only).
-    public var lastCryptoKind: String?
-    public var lastCryptoSuite: String?
-    /// UI hint: whether we are actively guarding this connection (keepalive enabled).
-    public var guardStatus: String?
-    public var isLocalDevice: Bool
-    public var isAuthorized: Bool
-    public var signalStrength: Double? = nil
-    public var isConnectable: Bool = true
-
-    public static func == (lhs: OnlineDevice, rhs: OnlineDevice) -> Bool {
-        lhs.id == rhs.id
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-    }
-}
 
 // DeviceSource 定义已移至 Models.swift，此处不再重复定义
 
-/// 在线设备状态（用于UnifiedOnlineDeviceManager）
-public enum OnlineDeviceStatus: String, Sendable, Codable {
-    case connected = "已连接"
-    case online = "在线"
-    case offline = "离线"
-
-    var priority: Int {
-        switch self {
-        case .connected: return 3
-        case .online: return 2
-        case .offline: return 1
-        }
-    }
-}
 
 /// 设备统计
 public struct DeviceStats: Sendable {
@@ -4662,3 +4606,4 @@ extension OnlineDevice: Codable {
         try container.encode(isConnectable, forKey: .isConnectable)
     }
 }
+#endif

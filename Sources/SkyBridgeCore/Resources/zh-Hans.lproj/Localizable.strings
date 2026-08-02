@@ -732,7 +732,7 @@
 "remote.connectionMode.far" = "远距";
 "remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
 "remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
-"remote.connectionMode.far.description" = "远距 RDP - 跨网稳定（FreeRDP 3.x + GFX-AVC444）";
+"remote.connectionMode.far.description" = "手动 RDP（受限预览）- FreeRDP 3.30 软件 GDI、严格证书校验、无通道重定向";
 "common.unknown" = "未知";
 "profile.title" = "用户资料";
 "action.close" = "关闭";
@@ -934,6 +934,7 @@
 "remote.form.recommended.body" = "大多数情况下无需手动填写 IP/端口。建议先到「设备发现」选择设备进行连接。";
 "remote.form.openDeviceDiscovery" = "打开设备发现";
 "remote.form.advanced.section" = "高级：手动配置（RDP/VNC/SSH）";
+"remote.form.rdp.certificateNotice" = "RDP 仅接受证书链受 macOS 系统信任且主机名匹配的端点。需要手动信任的未知、自签名或已变更证书会被拒绝；本版本没有证书登记或 TOFU 流程。";
 "monitor.title" = "系统监控";
 "monitor.status.monitoring" = "监控中";
 "monitor.status.initializing" = "初始化中...";

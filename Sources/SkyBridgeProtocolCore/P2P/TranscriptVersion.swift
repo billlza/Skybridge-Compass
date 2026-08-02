@@ -193,6 +193,10 @@ public struct TLVDecoder {
     private var offset: Int
     
     public init(data: Data) {
+        // Keep the original storage. Transcript inputs can be larger than a
+        // single handshake message, so decoding must use indices relative to
+        // the collection's actual startIndex instead of rebasing the whole
+        // value merely to make integer offsets work.
         self.data = data
         self.offset = 0
     }
@@ -210,24 +214,31 @@ public struct TLVDecoder {
         guard offset < data.count else {
             throw TranscriptError.decodingError("Unexpected end of TLV data")
         }
-        let tag = data[offset]
+        let tagIndex = data.index(data.startIndex, offsetBy: offset)
+        let tag = data[tagIndex]
         offset += 1
         
  // Length: 4 bytes, big-endian
-        guard offset + 4 <= data.count else {
+        let lengthWidth = MemoryLayout<UInt32>.size
+        guard offset <= data.count, lengthWidth <= data.count - offset else {
             throw TranscriptError.decodingError("Unexpected end of TLV length")
         }
-        let length = data.subdata(in: offset..<offset+4).withUnsafeBytes {
-            $0.load(as: UInt32.self).bigEndian
+        let lengthStartIndex = data.index(data.startIndex, offsetBy: offset)
+        let lengthEndIndex = data.index(lengthStartIndex, offsetBy: lengthWidth)
+        let length = data[lengthStartIndex..<lengthEndIndex].withUnsafeBytes {
+            $0.loadUnaligned(as: UInt32.self).bigEndian
         }
-        offset += 4
+        offset += lengthWidth
         
  // Value
-        guard offset + Int(length) <= data.count else {
+        let valueLength = Int(length)
+        guard offset <= data.count, valueLength <= data.count - offset else {
             throw TranscriptError.decodingError("TLV value exceeds data bounds")
         }
-        let value = data.subdata(in: offset..<offset+Int(length))
-        offset += Int(length)
+        let valueStartIndex = data.index(data.startIndex, offsetBy: offset)
+        let valueEndIndex = data.index(valueStartIndex, offsetBy: valueLength)
+        let value = Data(data[valueStartIndex..<valueEndIndex])
+        offset += valueLength
         
         return (tag, value)
     }

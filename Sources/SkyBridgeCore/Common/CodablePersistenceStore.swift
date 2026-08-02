@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -134,8 +139,7 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
         case let .protectedApplicationSupport(path, legacyUserDefaultsKey):
             let url = try resolvedURL(for: path)
             try ensureParentDirectory(for: url)
-            try data.write(to: url, options: .atomic)
-            try applyFileProtection(to: url)
+            try replaceWithProtectedData(data, at: url)
             if let legacyUserDefaultsKey {
                 defaults.removeObject(forKey: legacyUserDefaultsKey)
             }
@@ -155,6 +159,50 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
             if let legacyUserDefaultsKey {
                 defaults.removeObject(forKey: legacyUserDefaultsKey)
             }
+        }
+    }
+
+    /// Moves unreadable canonical bytes out of the active location without
+    /// decoding or rewriting them. Callers must persist a new canonical value
+    /// after this succeeds; a failed replacement write remains a blocked state.
+    @discardableResult
+    func quarantineExistingPayload() throws -> Bool {
+        let quarantineID = UUID().uuidString.lowercased()
+        switch location {
+        case let .userDefaults(key):
+            guard let data = defaults.data(forKey: key) else { return false }
+            let quarantineKey = "\(key).quarantine.\(quarantineID)"
+            defaults.set(data, forKey: quarantineKey)
+            guard defaults.data(forKey: quarantineKey) == data else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            defaults.removeObject(forKey: key)
+            return true
+
+        case let .protectedApplicationSupport(path, legacyUserDefaultsKey):
+            let url = try resolvedURL(for: path)
+            if fileManager.fileExists(atPath: url.path) {
+                let quarantineURL = url
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(
+                        "\(url.lastPathComponent).quarantine.\(quarantineID)",
+                        isDirectory: false
+                    )
+                try applyFileProtection(to: url)
+                try atomicallyReplace(quarantineURL, withPreparedFileAt: url)
+                return true
+            }
+            guard let legacyUserDefaultsKey,
+                  let data = defaults.data(forKey: legacyUserDefaultsKey) else {
+                return false
+            }
+            let quarantineKey = "\(legacyUserDefaultsKey).quarantine.\(quarantineID)"
+            defaults.set(data, forKey: quarantineKey)
+            guard defaults.data(forKey: quarantineKey) == data else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            defaults.removeObject(forKey: legacyUserDefaultsKey)
+            return true
         }
     }
 
@@ -224,6 +272,73 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
 #endif
     }
 
+    /// Prepares a fully protected sibling file before a single atomic rename.
+    /// No throwing operation is performed against the committed file after the
+    /// rename, so a reported save failure cannot conceal a changed primary.
+    private func replaceWithProtectedData(_ data: Data, at destinationURL: URL) throws {
+        let temporaryURL = destinationURL.deletingLastPathComponent()
+            .appendingPathComponent(
+                ".\(destinationURL.lastPathComponent).prepared-\(UUID().uuidString)",
+                isDirectory: false
+            )
+        var preparedFileExists = false
+
+        do {
+            guard !fileManager.fileExists(atPath: temporaryURL.path) else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+            // From this point the UUID-scoped path belongs to this transaction.
+            // Mark ownership before writing so a partial write is also cleaned.
+            preparedFileExists = true
+#if canImport(UIKit) && !os(macOS)
+            try data.write(
+                to: temporaryURL,
+                options: [
+                    .withoutOverwriting,
+                    .completeFileProtectionUntilFirstUserAuthentication
+                ]
+            )
+#else
+            try data.write(to: temporaryURL, options: .withoutOverwriting)
+#endif
+            try applyFileProtection(to: temporaryURL)
+            try atomicallyReplace(destinationURL, withPreparedFileAt: temporaryURL)
+            preparedFileExists = false
+        } catch {
+            guard preparedFileExists,
+                  fileManager.fileExists(atPath: temporaryURL.path) else {
+                throw error
+            }
+            do {
+                try fileManager.removeItem(at: temporaryURL)
+            } catch let cleanupError {
+                throw PreparedPersistenceFileCleanupError(
+                    operationError: error,
+                    cleanupError: cleanupError
+                )
+            }
+            throw error
+        }
+    }
+
+    private func atomicallyReplace(
+        _ destinationURL: URL,
+        withPreparedFileAt temporaryURL: URL
+    ) throws {
+        let result: Int32 = temporaryURL.withUnsafeFileSystemRepresentation { temporaryPath in
+            destinationURL.withUnsafeFileSystemRepresentation { destinationPath in
+                guard let temporaryPath, let destinationPath else {
+                    errno = EINVAL
+                    return Int32(-1)
+                }
+                return rename(temporaryPath, destinationPath)
+            }
+        }
+        guard result == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
     private func validatePayloadSize(_ actualBytes: Int) throws {
         guard actualBytes <= maximumPayloadBytes else {
             throw CodablePersistenceStoreError.payloadTooLarge(
@@ -232,4 +347,9 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
             )
         }
     }
+}
+
+private struct PreparedPersistenceFileCleanupError: Error {
+    let operationError: Error
+    let cleanupError: Error
 }

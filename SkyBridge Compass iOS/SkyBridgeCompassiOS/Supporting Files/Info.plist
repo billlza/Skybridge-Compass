@@ -46,8 +46,8 @@
 	<array>
 		<string>_skybridge._tcp</string>
 		<string>_skybridge._udp</string>
-		<string>_skybridge-transfer._tcp</string>
-		<string>_skybridge-remote._tcp</string>
+		<string>_skybridge-xfer._tcp</string>
+		<string>_skybridge-rd._tcp</string>
 		<string>_companion-link._tcp</string>
 		<string>_airdrop._tcp</string>
 		<string>_sftp-ssh._tcp</string>
@@ -69,6 +69,20 @@
 	<true/>
 	<key>SKYBRIDGE_ENABLE_APPLE_SIGN_IN</key>
 	<true/>
+	<key>SkyBridgePackagingBuildConfiguration</key>
+	<string>$(SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION)</string>
+	<key>SkyBridgePackagingGitCommit</key>
+	<string>$(SKYBRIDGE_PACKAGING_GIT_COMMIT)</string>
+	<key>SkyBridgePackagingGitDirtyState</key>
+	<string>$(SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE)</string>
+	<key>SkyBridgePackagingSourceInputDigest</key>
+	<string>$(SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST)</string>
+	<key>SkyBridgePackagingProductSurface</key>
+	<string>$(SKYBRIDGE_PACKAGING_PRODUCT_SURFACE)</string>
+	<key>SkyBridgePackagingSourceRepository</key>
+	<string>$(SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY)</string>
+	<key>SkyBridgePackagingSwiftActiveCompilationConditions</key>
+	<string>$(SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS)</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

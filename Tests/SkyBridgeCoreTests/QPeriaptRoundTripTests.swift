@@ -460,7 +460,7 @@ final class QPeriaptRoundTripTests: XCTestCase {
             QPeriaptNativeAdapter.privateKeyLength - 1,
             QPeriaptNativeAdapter.privateKeyLength + 1
         ] {
-            let privateKey = SecureBytes(count: invalidPrivateKeyLength)
+            let privateKey = try SecureBytes(count: invalidPrivateKeyLength)
             defer { privateKey.zeroize() }
             do {
                 _ = try await requirePromptCompletion {
@@ -491,7 +491,9 @@ final class QPeriaptRoundTripTests: XCTestCase {
             QPeriaptNativeAdapter.encapsulatedKeyLength - 1,
             QPeriaptNativeAdapter.encapsulatedKeyLength + 1
         ] {
-            let privateKey = SecureBytes(count: QPeriaptNativeAdapter.privateKeyLength)
+            let privateKey = try SecureBytes(
+                count: QPeriaptNativeAdapter.privateKeyLength
+            )
             defer { privateKey.zeroize() }
             do {
                 _ = try await requirePromptCompletion {

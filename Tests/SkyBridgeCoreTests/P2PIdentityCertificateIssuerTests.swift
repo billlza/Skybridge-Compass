@@ -41,9 +41,9 @@ final class P2PIdentityCertificateIssuerTests: XCTestCase {
 
         let trust = TrustSyncService.shared
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [signerId])
+        try await trust.removeRecordsForTesting(deviceIds: [signerId])
         addTeardownBlock { @MainActor [trust] in
-            await trust.removeRecordsForTesting(deviceIds: [signerId])
+            try await trust.removeRecordsForTesting(deviceIds: [signerId])
             trust.setInMemoryPersistenceForTesting(false)
         }
 
@@ -52,7 +52,7 @@ final class P2PIdentityCertificateIssuerTests: XCTestCase {
             .reverificationRequired,
             .revoked
         ] {
-            await trust.removeRecordsForTesting(deviceIds: [signerId])
+            try await trust.removeRecordsForTesting(deviceIds: [signerId])
             _ = try await trust.addTrustRecord(
                 makeSignerRecord(
                     signerId: signerId,
@@ -71,7 +71,7 @@ final class P2PIdentityCertificateIssuerTests: XCTestCase {
             }
         }
 
-        await trust.removeRecordsForTesting(deviceIds: [signerId])
+        try await trust.removeRecordsForTesting(deviceIds: [signerId])
         _ = try await trust.addTrustRecord(
             makeSignerRecord(
                 signerId: signerId,

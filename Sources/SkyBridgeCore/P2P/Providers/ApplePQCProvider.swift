@@ -481,7 +481,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         }
         let publicKey = privateKey.publicKey
         
-        return KeyPair(
+        return try KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
                 usage: .keyExchange,
@@ -508,7 +508,7 @@ public struct ApplePQCCryptoProvider: CryptoProvider, Sendable {
         }
         let publicKey = privateKey.publicKey
         
-        return KeyPair(
+        return try KeyPair(
             publicKey: KeyMaterial(
                 suite: activeSuite,
                 usage: .signing,
@@ -668,14 +668,14 @@ public struct AppleXWingCryptoProvider: CryptoProvider, Sendable {
         case .keyExchange:
             let privateKey = try XWingMLKEM768X25519.PrivateKey.generate()
             let publicKey = privateKey.publicKey
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(suite: activeSuite, usage: .keyExchange, bytes: publicKey.rawRepresentation),
                 privateKey: KeyMaterial(suite: activeSuite, usage: .keyExchange, bytes: privateKey.integrityCheckedRepresentation)
             )
         case .signing:
             let privateKey = try MLDSA65.PrivateKey()
             let publicKey = privateKey.publicKey
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(suite: activeSuite, usage: .signing, bytes: publicKey.rawRepresentation),
                 privateKey: KeyMaterial(suite: activeSuite, usage: .signing, bytes: privateKey.integrityCheckedRepresentation)
             )

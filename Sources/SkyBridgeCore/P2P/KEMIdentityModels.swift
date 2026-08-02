@@ -16,9 +16,10 @@ public struct KEMIdentityKeyLengthContract: Sendable, Equatable {
     public let publicKeyLength: Int
     public let privateKeyLength: Int
 
-    init(publicKeyLength: Int, privateKeyLength: Int) {
-        precondition(publicKeyLength > 0, "KEM public-key length must be positive")
-        precondition(privateKeyLength > 0, "KEM private-key length must be positive")
+    private init?(publicKeyLength: Int, privateKeyLength: Int) {
+        guard publicKeyLength > 0, privateKeyLength > 0 else {
+            return nil
+        }
         self.publicKeyLength = publicKeyLength
         self.privateKeyLength = privateKeyLength
     }
@@ -48,7 +49,9 @@ public struct KEMIdentityKeyLengthContract: Sendable, Equatable {
     public static func publicKeyLength(suite: CryptoSuite) -> Int? {
         let canonicalSuite = suite.canonicalKEMSuite
         switch canonicalSuite.wireId {
-        case 0x0012: return QPeriaptPlatformPolicy.publicKeyLength
+        case 0x0012:
+            let length = QPeriaptPlatformPolicy.publicKeyLength
+            return length > 0 ? length : nil
         case 0x0101: return 1_184
         case 0x0001: return 1_216
         default: return nil

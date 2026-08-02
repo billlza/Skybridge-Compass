@@ -9,12 +9,14 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/skybridge-cli-release.yml"
+PACKAGING_WORKFLOW = ROOT / ".github/workflows/skybridge-cli-packaging.yml"
 GITHUB_PUBLISHER = ROOT / "rust/scripts/publish_cli_github_release.sh"
 NPM_PUBLISHER = ROOT / "rust/scripts/publish_cli_npm.py"
 HOMEBREW_PUBLISHER = ROOT / "rust/scripts/publish_homebrew_formula.sh"
 FINALIZER = ROOT / "rust/scripts/finalize_cli_release_assets.py"
 HANDOFF = ROOT / "rust/scripts/cli_release_handoff.py"
 CODEOWNERS = ROOT / ".github/CODEOWNERS"
+FFI_BUILD_SCRIPT = ROOT / "rust/crates/skybridge-ffi/build.rs"
 
 
 def job_block(workflow: str, name: str) -> str:
@@ -142,6 +144,18 @@ class SkyBridgeCLIReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("refusing to downgrade", self.homebrew_publisher)
         self.assertIn("same-version Homebrew formula bytes differ", self.homebrew_publisher)
 
+    def test_publication_is_blocked_until_platform_signatures_are_verified(self) -> None:
+        metadata = job_block(self.workflow, "metadata")
+        signing_gate = job_block(self.workflow, "public-release-signing-gate")
+
+        self.assertIn("publication_blocked:", metadata)
+        self.assertIn("PUBLICATION_BLOCKED=true", metadata)
+        self.assertNotIn("PUBLISH_REQUESTED=true", metadata)
+        self.assertIn("- assemble", signing_gate)
+        self.assertIn("macOS signing/notarization", signing_gate)
+        self.assertIn("Windows publisher-signature proofs", signing_gate)
+        self.assertIn("exit 1", signing_gate)
+
     def test_exact_assets_and_lifecycle_boundaries_are_enforced(self) -> None:
         exact_assets = (
             "skybridge-aarch64-apple-darwin.tar.gz",
@@ -177,6 +191,74 @@ class SkyBridgeCLIReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn('components = ["clippy", "llvm-tools-preview", "rustfmt"]', toolchain)
         self.assertIn("--component llvm-tools-preview", packaging_workflow)
+
+    def test_release_and_packaging_verify_the_complete_rust_workspace(self) -> None:
+        packaging_workflow = PACKAGING_WORKFLOW.read_text(encoding="utf-8")
+        release_verify = job_block(self.workflow, "verify")
+        for workflow in (release_verify, packaging_workflow):
+            self.assertIn("cargo install cargo-audit --locked --version 0.22.2", workflow)
+            self.assertIn("cargo audit --deny warnings --file rust/Cargo.lock", workflow)
+            self.assertIn("cargo fmt --manifest-path rust/Cargo.toml --all --check", workflow)
+            self.assertIn(
+                "cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets",
+                workflow,
+            )
+            self.assertIn(
+                "cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings",
+                workflow,
+            )
+            self.assertIn("--component clippy", workflow)
+            self.assertIn(
+                "node --test rust/packaging/npm/skybridge-cli/test/install.test.js", workflow
+            )
+            self.assertIn("rust/scripts/test_verify_cli_release_proof.py", workflow)
+            self.assertIn("shellcheck", workflow)
+        self.assertIn("workflow_dispatch:", packaging_workflow)
+        pull_request_block = packaging_workflow.split("  pull_request:\n", 1)[1].split(
+            "  push:\n", 1
+        )[0]
+        self.assertNotIn("paths:", pull_request_block)
+        build = job_block(self.workflow, "build")
+        self.assertIn("- verify", build)
+
+    def test_external_cargo_path_dependency_is_pinned_and_prepared_on_every_rust_job(self) -> None:
+        packaging_workflow = PACKAGING_WORKFLOW.read_text(encoding="utf-8")
+        release_verify = job_block(self.workflow, "verify")
+        release_build = job_block(self.workflow, "build")
+        required_checkout = (
+            "repository: billlza/q-periapt",
+            "ref: 5664fd86a617f92b620ea37e7692d3417d0e307d",
+            "path: External/pqt_hybrid_suite",
+            "crates/q-periapt-backends/Cargo.toml",
+        )
+        for workflow in (packaging_workflow, release_verify, release_build):
+            for value in required_checkout:
+                self.assertIn(value, workflow)
+
+        core_manifest = (ROOT / "rust/crates/skybridge-core/Cargo.toml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(core_manifest.count('path = "../../../External/pqt_hybrid_suite/'), 3)
+        self.assertNotIn("../../../../pqt_hybrid_suite", core_manifest)
+        self.assertIn("name: Test the platform runtime", release_build)
+        for package in (
+            "-p skybridge-core",
+            "-p skybridge-agent",
+            "-p skybridge-crossnet-client",
+            "-p skybridge-ffi",
+            "-p skybridge",
+        ):
+            self.assertIn(package, release_build)
+        self.assertIn('--target "${TARGET}"', release_build)
+
+    def test_ffi_header_generation_is_cross_target_and_fail_closed(self) -> None:
+        build_script = FFI_BUILD_SCRIPT.read_text(encoding="utf-8")
+        release_build = job_block(self.workflow, "build")
+
+        self.assertIn(".with_src(&c_abi_source)", build_script)
+        self.assertNotIn(".with_crate(&crate_dir)", build_script)
+        self.assertNotIn("ParseSyntaxError", build_script)
+        self.assertIn("-p skybridge-ffi", release_build)
 
     def test_release_control_surfaces_have_explicit_owners(self) -> None:
         codeowners = CODEOWNERS.read_text(encoding="utf-8")

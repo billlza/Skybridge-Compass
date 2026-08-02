@@ -135,6 +135,64 @@ final class PresenceRouteContractTests: XCTestCase {
         XCTAssertTrue(ConnectionPresenceService.shared.routeDescriptorsByPeerId.isEmpty)
     }
 
+    func testDelayedOldOwnerAndLegacyDisconnectCannotRemoveReplacementPresence() {
+        let stablePeerId = "id:\(UUID().uuidString.lowercased())"
+        let rawPeerId = String(stablePeerId.dropFirst(3))
+        let oldRoute = ConnectionPresenceService.PresenceRouteDescriptor(
+            peerId: stablePeerId,
+            deviceName: "Old iPad",
+            displayAddress: "10.0.0.8",
+            transferAddress: "10.0.0.8",
+            transferPort: 9528,
+            routeSource: .inbound
+        )
+        let replacementRoute = ConnectionPresenceService.PresenceRouteDescriptor(
+            peerId: rawPeerId,
+            deviceName: "Replacement iPad",
+            displayAddress: "10.0.0.9",
+            transferAddress: "10.0.0.9",
+            transferPort: 9529,
+            routeSource: .inbound
+        )
+
+        guard let oldLease = ConnectionPresenceService.shared.publishConnectedOwnedAtomically(
+            peerId: stablePeerId,
+            displayName: "Old iPad",
+            address: "10.0.0.8",
+            cryptoKind: "Classic",
+            suite: "X25519",
+            routeDescriptor: oldRoute
+        ), let replacementLease = ConnectionPresenceService.shared.publishConnectedOwnedAtomically(
+            peerId: rawPeerId,
+            displayName: "Replacement iPad",
+            address: "10.0.0.9",
+            cryptoKind: "Apple PQC",
+            suite: "ML-KEM-768",
+            routeDescriptor: replacementRoute
+        ) else {
+            XCTFail("Complete routes must publish owner leases")
+            return
+        }
+        defer {
+            _ = ConnectionPresenceService.shared.disconnectIfOwned(oldLease)
+            _ = ConnectionPresenceService.shared.disconnectIfOwned(replacementLease)
+        }
+
+        XCTAssertFalse(ConnectionPresenceService.shared.disconnectIfOwned(oldLease))
+        ConnectionPresenceService.shared.markDisconnected(peerId: rawPeerId)
+
+        XCTAssertEqual(
+            ConnectionPresenceService.shared.routeDescriptorsByPeerId[stablePeerId]?.transferAddress,
+            "10.0.0.9"
+        )
+        XCTAssertEqual(
+            ConnectionPresenceService.shared.activeConnections.first(where: { $0.id == stablePeerId })?.displayName,
+            "Replacement iPad"
+        )
+        XCTAssertTrue(ConnectionPresenceService.shared.disconnectIfOwned(replacementLease))
+        XCTAssertNil(ConnectionPresenceService.shared.routeDescriptorsByPeerId[stablePeerId])
+    }
+
     func testResolveInboundPresenceRouteUsesStableDeviceIdPlusEndpointAddress() {
         let deviceId = UUID().uuidString.lowercased()
         let discovered = DiscoveredDevice(
@@ -142,8 +200,8 @@ final class PresenceRouteContractTests: XCTestCase {
             name: "MacBook Pro",
             ipv4: "192.168.31.20",
             ipv6: nil,
-            services: ["_skybridge._tcp", "_skybridge-transfer._tcp"],
-            portMap: ["_skybridge-transfer._tcp": 9528],
+            services: ["_skybridge._tcp", BonjourInteropContract.fileTransferServiceType],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 9528],
             connectionTypes: [.wifi],
             uniqueIdentifier: "id:\(deviceId)",
             deviceId: deviceId

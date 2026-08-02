@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 
 /// 磁盘使用卡片 - 显示磁盘空间使用情况
@@ -373,3 +378,4 @@ struct DiskUsageCard_Previews: PreviewProvider {
             .previewDisplayName("空状态")
     }
 }
+#endif

@@ -47,6 +47,43 @@ final class OrderedInboundChunkRelayTests: XCTestCase {
         await gate.release()
         relay.cancel()
     }
+
+    func testCancelRequestsCancellationForRunningAndEveryQueuedTask() async throws {
+        let relay = CrossNetworkConnectionManager.OrderedInboundChunkRelay(
+            maxPendingOperations: 3,
+            maxPendingBytes: 3
+        )
+        let recorder = RelayEventRecorder()
+        defer { relay.cancel() }
+
+        XCTAssertTrue(relay.submit(byteCount: 1) {
+            await recorder.record("first-start")
+            do {
+                try await Task.sleep(for: .seconds(5))
+                await recorder.record("first-finished")
+            } catch is CancellationError {
+                await recorder.record("first-cancelled")
+            } catch {
+                await recorder.record("first-unexpected-error")
+            }
+        })
+        XCTAssertTrue(relay.submit(byteCount: 1) {
+            await recorder.record("second-started")
+        })
+        XCTAssertTrue(relay.submit(byteCount: 1) {
+            await recorder.record("third-started")
+        })
+
+        try await waitForRelayEvent("first-start", recorder: recorder)
+        XCTAssertEqual(relay.ownedTaskCount, 3)
+
+        relay.cancel()
+        try await waitForRelayOwnedTaskCount(0, relay: relay)
+
+        let events = await recorder.snapshot()
+        XCTAssertEqual(events, ["first-start", "first-cancelled"])
+        XCTAssertFalse(relay.submit(byteCount: 1) {})
+    }
 }
 
 private actor RelayEventRecorder {
@@ -74,5 +111,39 @@ private actor RelaySuspensionGate {
         released = true
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private enum RelayTestError: Error {
+    case timedOut
+}
+
+private func waitForRelayEvent(
+    _ expected: String,
+    recorder: RelayEventRecorder
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while !(await recorder.snapshot().contains(expected)) {
+        guard clock.now < deadline else {
+            XCTFail("Timed out waiting for relay event \(expected)")
+            throw RelayTestError.timedOut
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
+private func waitForRelayOwnedTaskCount(
+    _ expected: Int,
+    relay: CrossNetworkConnectionManager.OrderedInboundChunkRelay
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while relay.ownedTaskCount != expected {
+        guard clock.now < deadline else {
+            XCTFail("Timed out waiting for relay owned-task count \(expected)")
+            throw RelayTestError.timedOut
+        }
+        try await Task.sleep(for: .milliseconds(5))
     }
 }

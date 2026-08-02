@@ -27,6 +27,12 @@ public enum CryptoProviderError: Error, LocalizedError, Sendable {
 
     case invalidKeyLength(expected: Int, actual: Int, suite: String, usage: KeyUsage)
     case keyUsageMismatch(expected: KeyUsage, actual: KeyUsage)
+    case providerContractViolation(
+        provider: String,
+        field: String,
+        expected: Int,
+        actual: Int
+    )
 
     case operationFailed(String)
 
@@ -70,6 +76,8 @@ public enum CryptoProviderError: Error, LocalizedError, Sendable {
             return "Invalid key length for \(suite)/\(usage.rawValue): expected \(expected), got \(actual)"
         case .keyUsageMismatch(let expected, let actual):
             return "Key usage mismatch: expected \(expected.rawValue), got \(actual.rawValue)"
+        case .providerContractViolation(let provider, let field, let expected, let actual):
+            return "Crypto provider contract violation for \(provider) \(field): expected \(expected), got \(actual)"
         case .operationFailed(let reason):
             return "Crypto operation failed: \(reason)"
         }

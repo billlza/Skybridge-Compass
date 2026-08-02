@@ -2,7 +2,10 @@ import Foundation
 import SwiftUI
 import Combine
 import UserNotifications
+#if os(macOS)
+// Theme/appearance persistence still uses NSColor + NSAppearance on macOS.
 import AppKit
+#endif
 import os.log
 import SkyBridgeProtocolCore
 
@@ -101,6 +104,23 @@ public struct ProtocolIdentityConfigurationRecord: Codable, Sendable, Equatable 
 
     public var isValidAuthoritySelection: Bool {
         version == Self.currentVersion && algorithm != .ed25519
+    }
+}
+
+enum ProtocolIdentityAuthorityRestorationAction: Equatable, Sendable {
+    case provision
+    case requireExisting
+}
+
+enum ProtocolIdentityAuthorityRestorationPolicy {
+    nonisolated static func action(
+        shouldProvisionDefault: Bool,
+        usesEphemeralIdentityStore: Bool
+    ) -> ProtocolIdentityAuthorityRestorationAction {
+        if shouldProvisionDefault || usesEphemeralIdentityStore {
+            return .provision
+        }
+        return .requireExisting
     }
 }
 
@@ -375,7 +395,7 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var transferSpeedLimitMBps: Double = 0
     @Published public var encryptionAlgorithm: FileTransferEncryptionAlgorithm = .aes256GCM
  /// 文件扫描级别：Quick/Standard/Deep
-    @Published public var scanLevel: FileScanService.ScanLevel = .standard
+    @Published public var scanLevel: FileScanLevel = .standard
  /// MetalFX 降级缩放：是否优先选择最近邻（更快但质量低），默认关闭（使用双线性）
     @Published public var preferNearestNeighborScaling: Bool = false
     @Published public var enableZeroCopyBGRA: Bool = false
@@ -581,12 +601,16 @@ public class SettingsManager: ObservableObject, Sendable {
 
         Task { @MainActor in
             FileTransferSettingsBridge.shared.apply()
+#if os(macOS)
+            // 发现服务与网络偏好目前仍是 macOS 侧实现（各平台一套编排，属于
+            // 「协议共享 / 编排分平台」切分线的编排侧）。
             NetworkPreferenceService.shared.applyRuntimeSettings(
                 prefer5GHz: self.prefer5GHz,
                 autoConnectKnownNetworks: self.autoConnectKnownNetworks,
                 scanIntervalSeconds: self.wifiScanTimeout,
                 startMonitoringIfNeeded: false
             )
+#endif
             let sharedScanInterval = Double(self.scanInterval)
             // 仅首启从「通用扫描间隔」播种各协议间隔；此后保留用户在「设备管理」里的逐协议自定义值。
             // 此前每次启动都无条件覆盖，导致用户的逐协议设置被静默丢失。
@@ -604,10 +628,14 @@ public class SettingsManager: ObservableObject, Sendable {
                 "showHomePodDevices": self.showHomePodDevices,
                 "showThirdPartyAirPlayDevices": self.showThirdPartyAirPlayDevices
             ])
+#if os(macOS)
+            // 发现服务与网络偏好目前仍是 macOS 侧实现（各平台一套编排，属于
+            // 「协议共享 / 编排分平台」切分线的编排侧）。
             DeviceDiscoveryService.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
             if #available(macOS 14.0, *) {
                 UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: false)
             }
+#endif
             self.applyRemotePerformanceSettings(self.enableHardwareAcceleration)
         }
     }
@@ -624,18 +652,24 @@ public class SettingsManager: ObservableObject, Sendable {
 
     private func scheduleDiscoveryRuntimeApply(restartIfNeeded: Bool) {
         Task { @MainActor in
+#if os(macOS)
+            // 发现服务与网络偏好目前仍是 macOS 侧实现（各平台一套编排，属于
+            // 「协议共享 / 编排分平台」切分线的编排侧）。
             DeviceDiscoveryService.shared.applyRuntimeDiscoverySettings(restartIfNeeded: restartIfNeeded)
             if #available(macOS 14.0, *) {
                 UnifiedOnlineDeviceManager.shared.applyRuntimeDiscoverySettings(restartIfNeeded: restartIfNeeded)
             }
+#endif
         }
     }
 
     private func scheduleOnlineDevicePresentationRefresh() {
         Task { @MainActor in
+#if os(macOS)
             if #available(macOS 14.0, *) {
                 UnifiedOnlineDeviceManager.shared.refreshDevices()
             }
+#endif
         }
     }
 
@@ -875,7 +909,12 @@ public class SettingsManager: ObservableObject, Sendable {
 
         do {
             let restoredIdentity: (publicKey: Data, keyHandle: SigningKeyHandle)
-            if shouldProvisionDefault {
+            let restorationAction = ProtocolIdentityAuthorityRestorationPolicy.action(
+                shouldProvisionDefault: shouldProvisionDefault,
+                usesEphemeralIdentityStore: DeviceIdentityKeyManager
+                    .usesEphemeralIdentityStoreForCurrentProcess
+            )
+            if restorationAction == .provision {
                 restoredIdentity = try await DeviceIdentityKeyManager.shared.getProtocolSigningIdentity(
                     for: storedRecord.algorithm,
                     protection: storedRecord.protection
@@ -1424,7 +1463,7 @@ public class SettingsManager: ObservableObject, Sendable {
         if let value = settings["encryptionAlgorithm"] as? String {
             encryptionAlgorithm = try FileTransferEncryptionAlgorithm(persistedValue: value)
         }
-        if let value = settings["scanLevel"] as? String, let level = FileScanService.ScanLevel(rawValue: value) { scanLevel = level }
+        if let value = settings["scanLevel"] as? String, let level = FileScanLevel(rawValue: value) { scanLevel = level }
 
         enforceStrictCertificateValidationIfNeeded(context: "legacy import payload")
         applyRuntimeSettingsSnapshot()
@@ -1581,9 +1620,11 @@ public class SettingsManager: ObservableObject, Sendable {
  /// 应用主题模式
     public func applyThemeMode() {
         Task { @MainActor in
+#if os(macOS)
             if let window = NSApplication.shared.windows.first {
                 window.appearance = self.useDarkMode ? NSAppearance(named: .darkAqua) : NSAppearance(named: .aqua)
             }
+#endif
 
  // 发送主题变更通知
             NotificationCenter.default.post(
@@ -1861,12 +1902,20 @@ public class SettingsManager: ObservableObject, Sendable {
         showConnectionStats = userDefaults.bool(forKey: "Settings.ShowConnectionStats", defaultValue: true)
         compactMode = userDefaults.bool(forKey: "Settings.CompactMode", defaultValue: false)
         // themeColor: support both new namespaced key and legacy key ("ThemeColor") used by older UI code.
+#if os(macOS)
         if let data = userDefaults.data(forKey: "Settings.ThemeColor") ?? userDefaults.data(forKey: "ThemeColor"),
            let nsColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
             themeColor = Color(nsColor)
         } else if let hex = userDefaults.string(forKey: "Settings.ThemeColorHex") {
             themeColor = Self.color(fromHexRGBA: hex) ?? .blue
         }
+#else
+        // Non-macOS reads only the portable hex representation. The NSColor archive is a macOS
+        // legacy format and is never written on other platforms.
+        if let hex = userDefaults.string(forKey: "Settings.ThemeColorHex") {
+            themeColor = Self.color(fromHexRGBA: hex) ?? .blue
+        }
+#endif
 
  // 网络设置
         autoConnectKnownNetworks = userDefaults.bool(forKey: "Settings.AutoConnectKnownNetworks", defaultValue: true)
@@ -2027,7 +2076,7 @@ public class SettingsManager: ObservableObject, Sendable {
         let persistedFileTransferAlgorithm = userDefaults.string(forKey: "Settings.EncryptionAlgorithm") ?? FileTransferEncryptionAlgorithm.aes256GCM.rawValue
         encryptionAlgorithm = (try? FileTransferEncryptionAlgorithm(persistedValue: persistedFileTransferAlgorithm)) ?? .aes256GCM
         userDefaults.set(encryptionAlgorithm.rawValue, forKey: "Settings.EncryptionAlgorithm")
-        scanLevel = FileScanService.ScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
+        scanLevel = FileScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
         enableZeroCopyBGRA = userDefaults.bool(forKey: "Settings.EnableZeroCopyBGRA", defaultValue: false)
         preferNearestNeighborScaling = userDefaults.bool(forKey: "Settings.PreferNearestNeighborScaling", defaultValue: false)
     }
@@ -2087,14 +2136,18 @@ public class SettingsManager: ObservableObject, Sendable {
         // Theme color persistence (namespaced + legacy compatibility)
         $themeColor.sink { [weak self] value in
             guard let self else { return }
+#if os(macOS)
             if let data = Self.archive(color: value) {
                 self.userDefaults.set(data, forKey: "Settings.ThemeColor")
                 // legacy key used by older UI code
                 self.userDefaults.set(data, forKey: "ThemeColor")
             }
+#endif
+#if os(macOS)
             if let hex = Self.hexRGBA(from: value) {
                 self.userDefaults.set(hex, forKey: "Settings.ThemeColorHex")
             }
+#endif
             NotificationCenter.default.post(
                 name: NSNotification.Name("ThemeColorChanged"),
                 object: nil,
@@ -2612,8 +2665,12 @@ extension UserDefaults {
 }
 
 // MARK: - Theme color helpers (UserDefaults)
+//
+// The NSColor-based archive is the historical macOS storage format. Other platforms persist the
+// portable `Settings.ThemeColorHex` representation only, so these helpers stay macOS-scoped.
 @available(macOS 14.0, *)
 private extension SettingsManager {
+#if os(macOS)
     static func archive(color: Color) -> Data? {
         let ns = NSColor(color)
         return try? NSKeyedArchiver.archivedData(withRootObject: ns, requiringSecureCoding: false)
@@ -2628,7 +2685,9 @@ private extension SettingsManager {
         let a = Int(round(rgb.alphaComponent * 255))
         return String(format: "#%02X%02X%02X%02X", r, g, b, a)
     }
+#endif
 
+    /// Portable representation, used by every platform.
     static func color(fromHexRGBA s: String) -> Color? {
         var str = s.trimmingCharacters(in: .whitespacesAndNewlines)
         if str.hasPrefix("#") { str.removeFirst() }

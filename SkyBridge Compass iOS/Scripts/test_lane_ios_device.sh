@@ -25,12 +25,16 @@ IOS_PROJECT="${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompassiOSTests"
 DEVICE_REDACTION_TOKENS_FILE="$(mktemp "${TMPDIR:-/tmp}/skybridge-ios-device-redaction.XXXXXX")"
 DEVICE_METADATA_FILE="$(mktemp "${TMPDIR:-/tmp}/skybridge-ios-device-metadata.XXXXXX")"
+DEVICE_REACHABILITY_FILE="$(mktemp "${TMPDIR:-/tmp}/skybridge-ios-device-reachability.XXXXXX")"
+DEVICE_REACHABILITY_STDERR_FILE="$(mktemp "${TMPDIR:-/tmp}/skybridge-ios-device-reachability-stderr.XXXXXX")"
 IOS_DEVICE_DESTINATION_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_DEVICE_DESTINATION_TIMEOUT_SECONDS:-90}"
 DERIVED_DATA_PATH=""
 
 cleanup_ios_device_lane() {
   rm -f "${DEVICE_REDACTION_TOKENS_FILE}"
   rm -f "${DEVICE_METADATA_FILE}"
+  rm -f "${DEVICE_REACHABILITY_FILE}"
+  rm -f "${DEVICE_REACHABILITY_STDERR_FILE}"
   if [[ -n "${DERIVED_DATA_PATH}" ]]; then
     rm -rf "${DERIVED_DATA_PATH}"
   fi
@@ -310,8 +314,6 @@ def matches_constraints(device):
     hw = device.get("hardwareProperties", {})
     if conn.get("pairingState") != "paired":
         return False
-    if conn.get("tunnelState") != "connected":
-        return False
     if props.get("bootState") != "booted":
         return False
     if props.get("developerModeStatus") != "enabled":
@@ -339,7 +341,11 @@ def constraint_description():
         details.append(f"releaseType == {required_release_type}")
     if require_ipad:
         details.append("deviceType == iPad")
-    details.append("tunnelState == connected")
+    details.extend([
+        "pairingState == paired",
+        "bootState == booted",
+        "developerModeStatus == enabled",
+    ])
     return "; ".join(details)
 
 devices = payload.get("result", {}).get("devices", [])
@@ -375,6 +381,101 @@ else:
     details = constraint_description()
     suffix = f" matching {details}" if details else ""
     raise SystemExit(f"No available paired booted iOS physical device found{suffix}.")
+PY
+}
+
+require_device_reachability() {
+  local status=0
+
+  : >"${DEVICE_REACHABILITY_FILE}"
+  : >"${DEVICE_REACHABILITY_STDERR_FILE}"
+  if xcrun devicectl device info details \
+    --device "${DEVICE_ID}" \
+    --timeout "${IOS_DEVICE_DESTINATION_TIMEOUT_SECONDS}" \
+    --json-output "${DEVICE_REACHABILITY_FILE}" \
+    >/dev/null 2>"${DEVICE_REACHABILITY_STDERR_FILE}"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  if [[ "${status}" -ne 0 ]]; then
+    echo "[iOS device lane] ERROR: active device reachability probe failed exit=${status}" >&2
+    return "${status}"
+  fi
+
+  python3 - "${DEVICE_REACHABILITY_FILE}" "${DEVICE_ID}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit("[iOS device lane] ERROR: active device reachability probe returned invalid JSON")
+
+result = payload.get("result")
+if not isinstance(result, dict) or result.get("identifier") != sys.argv[2]:
+    raise SystemExit("[iOS device lane] ERROR: active device reachability probe returned the wrong device")
+
+legacy_connection = result.get("connectionProperties")
+if not isinstance(legacy_connection, dict):
+    legacy_connection = {}
+
+properties = result.get("properties")
+if not isinstance(properties, dict):
+    properties = {}
+connection = properties.get("connection")
+if not isinstance(connection, dict):
+    connection = {}
+
+pairing_state = connection.get("pairingState") or legacy_connection.get("pairingState")
+connection_state = connection.get("state") or legacy_connection.get("tunnelState")
+if pairing_state != "paired" or connection_state != "connected":
+    raise SystemExit("[iOS device lane] ERROR: selected device is paired but not actively reachable")
+PY
+}
+
+require_device_unlocked() {
+  local status=0
+
+  : >"${DEVICE_REACHABILITY_FILE}"
+  : >"${DEVICE_REACHABILITY_STDERR_FILE}"
+  if xcrun devicectl device info lockState \
+    --device "${DEVICE_ID}" \
+    --timeout "${IOS_DEVICE_DESTINATION_TIMEOUT_SECONDS}" \
+    --json-output "${DEVICE_REACHABILITY_FILE}" \
+    >/dev/null 2>"${DEVICE_REACHABILITY_STDERR_FILE}"; then
+    status=0
+  else
+    status=$?
+  fi
+
+  if [[ "${status}" -ne 0 ]]; then
+    echo "[iOS device lane] ERROR: active device lock-state probe failed exit=${status}" >&2
+    return "${status}"
+  fi
+
+  python3 - "${DEVICE_REACHABILITY_FILE}" "${DEVICE_ID}" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit("[iOS device lane] ERROR: active device lock-state probe returned invalid JSON")
+
+result = payload.get("result")
+if not isinstance(result, dict) or result.get("deviceIdentifier") != sys.argv[2]:
+    raise SystemExit("[iOS device lane] ERROR: active device lock-state probe returned the wrong device")
+
+passcode_required = result.get("passcodeRequired")
+unlocked_since_boot = result.get("unlockedSinceBoot")
+if not isinstance(passcode_required, bool) or not isinstance(unlocked_since_boot, bool):
+    raise SystemExit("[iOS device lane] ERROR: active device lock-state probe omitted required state")
+if passcode_required or not unlocked_since_boot:
+    raise SystemExit("[iOS device lane] ERROR: selected device is locked; unlock it before starting the test lane")
 PY
 }
 
@@ -506,13 +607,17 @@ run_xcodebuild_step() {
     # arch-fallback diagnostic ("DVTDevice: Error locating DeviceSupport directory
     # using Optional(\"arm64\")/Optional(\"arm64e\"): nilError") even when those
     # symbols are present, so that specific line is filtered out here. Any other
-    # DeviceSupport error, or any real warning:/error:, still fails the gate.
+    # DeviceSupport error, any real warning:/error:, Objective-C duplicate-class
+    # diagnostic, or explicit XPC runtime error still fails the gate. The latter
+    # diagnostics do not include the compiler-style warning:/error: tokens, so
+    # they must be matched explicitly rather than inferred from xcodebuild's exit
+    # status.
     #
     # Uses POSIX grep, not ripgrep: `rg` is absent on the GitHub macOS runners, and
     # swallowing that absence would make this gate fail open and silently accept a
     # log full of warnings.
     raw_matches="$(
-      LC_ALL=C grep -nE '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory' "${log_path}"
+      LC_ALL=C grep -nE '(^|[^A-Za-z])warning:|(^|[^A-Za-z])error:|\bWARNING:\b|\bERROR:\b|Error locating DeviceSupport directory|Class .* is implemented in both|This may cause spurious casting failures and mysterious crashes\.|One of the duplicates must be removed or renamed\.|\[XPCErrors\]' "${log_path}"
     )" || scan_status=$?
     # grep exits 1 for "no match", which is the clean case. Anything higher is a
     # real tool or I/O failure and must never be read as a clean log.
@@ -591,6 +696,8 @@ PY
 }
 
 echo "[iOS device lane] device=${DEVICE_LOG_LABEL}"
+require_device_reachability
+require_device_unlocked
 require_device_support_symbols_for_clean_log
 echo "[iOS device lane] building for testing"
 
@@ -612,6 +719,8 @@ if [[ -n "${SKYBRIDGE_APPLE_PQC_SDK_CONDITION:-}" ]]; then
 fi
 
 build_args+=(
+  -skipPackageUpdates
+  -disableAutomaticPackageResolution
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
   GCC_TREAT_WARNINGS_AS_ERRORS=YES
   build-for-testing
@@ -635,6 +744,8 @@ if [[ -n "${SKYBRIDGE_IOS_DEVICE_ONLY_TESTING:-}" ]]; then
 fi
 
 test_args+=(
+  -skipPackageUpdates
+  -disableAutomaticPackageResolution
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
   GCC_TREAT_WARNINGS_AS_ERRORS=YES
   test-without-building

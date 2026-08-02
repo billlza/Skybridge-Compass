@@ -1,3 +1,4 @@
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,16 +15,120 @@ use std::thread;
 use serde_json::Value;
 use skybridge_agent::{
     load_file_transfer_request_registry, observe_file_transfer_requests_for_established_session,
-    observe_remote_desktop_requests_for_established_session, resolve_paths,
-    upsert_nearby_discovery_snapshot, upsert_remote_desktop_capability_snapshot,
+    resolve_paths, upsert_nearby_discovery_snapshot, upsert_remote_desktop_capability_snapshot,
     upsert_session_runtime,
 };
 use skybridge_core::{
     NearbyDiscoveredDevice, NearbyDiscoveryEndpointClass, NearbyDiscoverySnapshot,
     NearbyDiscoveryTrustStatus, RemoteDesktopCapabilitySnapshot, RemoteDesktopObservedMode,
-    RuntimeSessionRecord, RuntimeSessionRole, RuntimeSessionSource, RuntimeSessionState,
-    SessionReadiness,
+    RuntimeAuthenticatedPeerObservation, RuntimeSessionRecord, RuntimeSessionRole,
+    RuntimeSessionSource, RuntimeSessionState, SessionReadiness,
 };
+
+#[test]
+fn failing_json_commands_emit_one_parseable_document_and_nonzero_exit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        (
+            "connect",
+            vec!["connect", "ABCDEFGH", "--timeout-seconds", "1", "--json"],
+        ),
+        (
+            "file-send",
+            vec![
+                "file",
+                "send",
+                "/tmp/skybridge-json-contract-missing-source",
+                "--to",
+                "peer",
+                "--json",
+            ],
+        ),
+        (
+            "remote-desktop",
+            vec![
+                "remote-desktop",
+                "start",
+                "--session-id",
+                "missing-session",
+                "--json",
+            ],
+        ),
+        (
+            "device-discovery",
+            vec!["device", "discover", "--nearby", "--json"],
+        ),
+        ("doctor", vec!["doctor", "--json"]),
+    ];
+
+    for (label, args) in cases {
+        let state_dir = make_state_dir(&format!("failure-json-{label}"))?;
+        let output = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .args(args)
+            .output()?;
+        assert_single_json_failure(&output, label)?;
+    }
+
+    let nested_doctor_state = make_state_dir("failure-json-doctor-nested")?;
+    let nested_doctor = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+        .arg("--state-dir")
+        .arg(&nested_doctor_state)
+        .args([
+            "doctor",
+            "--json",
+            "signaling",
+            "--base-url",
+            "http://127.0.0.1:9",
+            "--allow-insecure-loopback",
+        ])
+        .output()?;
+    assert_success_with_clean_stderr(&nested_doctor, "doctor --json signaling");
+    let nested_doctor_report: Value = serde_json::from_slice(&nested_doctor.stdout)?;
+    assert_eq!(
+        nested_doctor_report["target"].as_str(),
+        Some("http://127.0.0.1:9")
+    );
+
+    let parse_failure = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+        .args([
+            "file",
+            "send",
+            "/tmp/skybridge-json-contract-missing-source",
+            "--to",
+            "peer",
+            "--timeout-seconds",
+            "0",
+            "--json",
+        ])
+        .output()?;
+    let parse_payload = assert_single_json_failure(&parse_failure, "invalid-arguments")?;
+    assert_eq!(parse_payload["error"]["code"], "invalid_arguments");
+
+    Ok(())
+}
+
+fn assert_single_json_failure(
+    output: &std::process::Output,
+    label: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    assert!(
+        !output.status.success(),
+        "{label} --json must return a nonzero status on failure"
+    );
+    let payload: Value = serde_json::from_slice(&output.stderr).map_err(|error| {
+        format!(
+            "{label} --json stderr must be exactly one JSON document: {error}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })?;
+    assert_ne!(
+        payload["success"], true,
+        "{label} failure payload must never claim success"
+    );
+    Ok(payload)
+}
 
 #[test]
 fn cli_identity_contract_uses_skybridge_cli_display_name_and_stable_binary()
@@ -323,7 +428,7 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
 
     assert_eq!(
         capability_status(capabilities, "file.transfer.send")?,
-        "request_only"
+        "pending_live_proof"
     );
     assert_eq!(
         capability_runtime_target(capabilities, "file.transfer.send")?,
@@ -331,16 +436,42 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     );
     assert_eq!(
         capability_control_effect(capabilities, "file.transfer.send")?,
-        "request_only"
+        "native_mutation"
+    );
+    let file_send_gate = capability_verification_gate(capabilities, "file.transfer.send")?;
+    assert!(
+        file_send_gate.contains("real_device_file_transfer_gate"),
+        "file send must remain pending until the real-device transfer gate is captured"
     );
     assert_eq!(
         capability_status(capabilities, "file.transfer.receive")?,
-        "planned"
+        "pending_live_proof"
+    );
+    assert_eq!(
+        capability_runtime_target(capabilities, "file.transfer.receive")?,
+        "agent_owned_registry"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "file.transfer.receive")?,
+        "native_mutation"
+    );
+    let file_receive_command = capability_command(capabilities, "file.transfer.receive")?;
+    assert!(
+        file_receive_command.contains("--list")
+            && file_receive_command.contains("--accept")
+            && file_receive_command.contains("--reject"),
+        "file receive capability must expose explicit approval operations"
+    );
+    let file_receive_gate = capability_verification_gate(capabilities, "file.transfer.receive")?;
+    assert!(
+        file_receive_gate.contains("inbound_approval_registry_and_receiver_tests")
+            && file_receive_gate.contains("real_device_file_transfer_gate"),
+        "file receive must retain approval-registry and real-device evidence gates"
     );
     let file_send_command = capability_command(capabilities, "file.transfer.send")?;
     assert!(
         file_send_command.contains("file send") && file_send_command.contains("--session-id"),
-        "file send capability must expose the explicit request-only session binding"
+        "file send capability must expose the explicit session binding"
     );
     let remote_resolutions_command =
         capability_command(capabilities, "remote_desktop.resolutions.list")?;
@@ -349,23 +480,24 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
             && remote_resolutions_command.contains("--session-id"),
         "observed resolution listing must require an explicit session filter"
     );
-    for request_only in [
+    for unavailable in [
         "remote_desktop.start",
         "remote_desktop.stop",
         "remote_desktop.resolution.set",
         "remote_desktop.fps.set",
     ] {
+        assert_eq!(capability_status(capabilities, unavailable)?, "unavailable");
         assert_eq!(
-            capability_status(capabilities, request_only)?,
-            "request_only"
+            capability_runtime_target(capabilities, unavailable)?,
+            "native_headless_state_dir"
         );
         assert_eq!(
-            capability_runtime_target(capabilities, request_only)?,
-            "agent_owned_registry"
+            capability_control_effect(capabilities, unavailable)?,
+            "unavailable_fail_closed"
         );
-        assert_eq!(
-            capability_control_effect(capabilities, request_only)?,
-            "request_only"
+        assert!(
+            capability_command(capabilities, unavailable)?.contains("unavailable/fail-closed"),
+            "{unavailable} must not imply request acceptance without a standalone backend"
         );
     }
 
@@ -489,6 +621,60 @@ fn crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json
         Some("ABCDEFGH")
     );
     let _ = std::fs::remove_dir_all(&connect_home);
+
+    let settings_home = make_crossnet_fake_home("settings-outer-json")?;
+    let settings_server = spawn_crossnet_fake_server(
+        &settings_home,
+        vec![
+            FakeCrossnetResponse {
+                method: "crossnet.hello",
+                result: serde_json::json!({
+                    "engine_version": "test-app",
+                    "proto": 1,
+                    "auth_loaded": true,
+                    "tenant_bound": true
+                }),
+            },
+            FakeCrossnetResponse {
+                method: "crossnet.settings.set",
+                result: serde_json::json!({
+                    "runtime_target": "mac_app_runtime",
+                    "control_effect": "mac_runtime_mutation",
+                    "id": "logging.verbose",
+                    "value_type": "bool",
+                    "requested_value": true,
+                    "observed_value": true,
+                    "runtime_applied": true,
+                    "note": null
+                }),
+            },
+        ],
+    )?;
+    let settings = run_skybridge_with_home(
+        &settings_home,
+        [
+            "crossnet",
+            "settings",
+            "--json",
+            "set",
+            "logging.verbose",
+            "true",
+        ],
+    )?;
+    assert_success_with_clean_stderr(&settings, "crossnet settings --json set");
+    let settings_payload: Value = serde_json::from_slice(&settings.stdout)?;
+    assert_eq!(settings_payload["id"], "logging.verbose");
+    assert_eq!(settings_payload["runtime_applied"], true);
+    let settings_requests = join_crossnet_fake_server(settings_server)?;
+    assert_eq!(
+        request_method(&settings_requests[0]),
+        Some("crossnet.hello")
+    );
+    assert_eq!(
+        request_method(&settings_requests[1]),
+        Some("crossnet.settings.set")
+    );
+    let _ = std::fs::remove_dir_all(&settings_home);
 
     Ok(())
 }
@@ -631,7 +817,6 @@ fn run_skybridge_with_home<const N: usize>(
         .output()?)
 }
 
-#[cfg(target_os = "macos")]
 fn assert_success_with_clean_stderr(output: &std::process::Output, command: &str) {
     assert!(
         output.status.success(),
@@ -828,6 +1013,7 @@ fn file_transfer_json_contract_fails_closed_without_path_or_peer_leakage()
 
     let state_dir = make_state_dir("file-transfer-json-contract")?;
     seed_established_session(&state_dir, "session-1")?;
+    let _active_agent = activate_test_agent(&state_dir)?;
     let source_path = state_dir.join("secret-payload-request.bin");
     std::fs::write(&source_path, b"hello")?;
     let state_arg = state_dir.display().to_string();
@@ -843,6 +1029,7 @@ fn file_transfer_json_contract_fails_closed_without_path_or_peer_leakage()
             "remote-device",
             "--session-id",
             "session-1",
+            "--detach",
             "--json",
         ])
         .output()?;
@@ -860,6 +1047,8 @@ fn file_transfer_json_contract_fails_closed_without_path_or_peer_leakage()
     assert_eq!(payload["capability_id"], "file.transfer.send");
     assert_eq!(payload["action"], "send");
     assert_eq!(payload["accepted"], true);
+    assert_eq!(payload["success"], false);
+    assert_eq!(payload["detached"], true);
     assert_eq!(payload["request_registered"], true);
     assert_eq!(payload["status"], "pending_agent_observation");
     assert_eq!(payload["pending_agent_observation"], true);
@@ -913,6 +1102,7 @@ fn file_transfer_json_contract_fails_closed_without_path_or_peer_leakage()
 
     let mismatch_state_dir = make_state_dir("file-transfer-mismatch-json-contract")?;
     seed_established_session(&mismatch_state_dir, "session-mismatch")?;
+    let _mismatch_active_agent = activate_test_agent(&mismatch_state_dir)?;
     let mismatch_source_path = mismatch_state_dir.join("secret-payload-mismatch.bin");
     std::fs::write(&mismatch_source_path, b"mismatch")?;
     let mismatch_state_arg = mismatch_state_dir.display().to_string();
@@ -976,6 +1166,7 @@ fn file_transfer_json_contract_fails_closed_without_path_or_peer_leakage()
 
     let invalid_source_state_dir = make_state_dir("file-transfer-invalid-source-json-contract")?;
     seed_established_session(&invalid_source_state_dir, "session-invalid-source")?;
+    let _invalid_source_active_agent = activate_test_agent(&invalid_source_state_dir)?;
     let invalid_state_arg = invalid_source_state_dir.display().to_string();
     let missing_source = invalid_source_state_dir.join("missing-secret-payload.bin");
     let missing_source_arg = missing_source.display().to_string();
@@ -1090,25 +1281,34 @@ fn file_transfer_json_contract_fails_closed_without_path_or_peer_leakage()
         "invalid file-transfer inputs must fail before writing pending requests"
     );
 
+    let receive_state_dir = make_state_dir("file-transfer-empty-inbound-approvals-json-contract")?;
+    let receive_state_arg = receive_state_dir.display().to_string();
     let receive = Command::new(env!("CARGO_BIN_EXE_skybridge"))
-        .args(["file", "receive", "--json"])
+        .args([
+            "--state-dir",
+            &receive_state_arg,
+            "file",
+            "receive",
+            "--list",
+            "--json",
+        ])
         .output()?;
     assert!(
-        !receive.status.success(),
-        "file receive --json must remain fail-closed until receive policy and sender identity proof exist"
+        receive.status.success(),
+        "file receive --list --json must expose the persisted approval queue"
     );
     assert!(
-        receive.stdout.is_empty(),
-        "failed JSON file receive must not emit fake success to stdout"
+        receive.stderr.is_empty(),
+        "successful approval listing must not emit a failure document"
     );
-    let stderr = String::from_utf8_lossy(&receive.stderr);
-    assert!(
-        stderr.contains("\"capability_id\": \"file.transfer.receive\"")
-            && stderr.contains("\"accepted\": false")
-            && stderr.contains("\"status\": \"planned\"")
-            && stderr.contains("receiver_write_policy"),
-        "file receive failure should expose the planned contract and required gates; stderr={stderr}"
+    let receive_payload: Value = serde_json::from_slice(&receive.stdout)?;
+    assert_eq!(
+        receive_payload["capability_id"],
+        "file.transfer.receive.approvals"
     );
+    assert_eq!(receive_payload["status"], "empty");
+    assert_eq!(receive_payload["pending_count"], 0);
+    assert_eq!(receive_payload["requests"], serde_json::json!([]));
 
     let empty_history_state_dir = make_state_dir("file-transfer-empty-history-json-contract")?;
     let empty_history_state_arg = empty_history_state_dir.display().to_string();
@@ -1267,9 +1467,9 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
 
     let payload: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(payload["schema_version"], 1);
-    assert_eq!(payload["live_control_status"], "planned");
+    assert_eq!(payload["live_control_status"], "unavailable");
     assert_eq!(payload["mutation_supported"], false);
-    assert_eq!(payload["agent_observation_supported"], true);
+    assert_eq!(payload["agent_observation_supported"], false);
     assert!(
         payload["required_gates"]
             .as_array()
@@ -1285,7 +1485,7 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
             .any(|command| command["command"]
                 .as_str()
                 .is_some_and(|value| value.contains("set-fps"))
-                && command["status"] == "request_only")
+                && command["status"] == "unavailable")
     );
 
     let resolutions = Command::new(env!("CARGO_BIN_EXE_skybridge"))
@@ -1303,7 +1503,7 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
         String::from_utf8_lossy(&resolutions.stderr)
     );
     let payload: Value = serde_json::from_slice(&resolutions.stdout)?;
-    assert_eq!(payload["live_control_status"], "planned");
+    assert_eq!(payload["live_control_status"], "unavailable");
     assert_eq!(payload["mutation_supported"], false);
     assert!(payload["session_filter"].is_null());
     assert_eq!(payload["observed_modes_status"], "planned");
@@ -1375,7 +1575,7 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
     let payload: Value = serde_json::from_slice(&observed_resolutions.stdout)?;
     assert_eq!(payload["session_filter"], "session-modes");
     assert_eq!(payload["observed_modes_status"], "available");
-    assert_eq!(payload["live_control_status"], "planned");
+    assert_eq!(payload["live_control_status"], "unavailable");
     assert_eq!(payload["mutation_supported"], false);
     assert_eq!(
         payload["observed_sessions"][0]["session_id"],
@@ -1439,7 +1639,7 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
     let payload: Value = serde_json::from_slice(&stale_resolutions.stdout)?;
     assert_eq!(payload["session_filter"], "session-stale-modes");
     assert_eq!(payload["observed_modes_status"], "stale");
-    assert_eq!(payload["live_control_status"], "planned");
+    assert_eq!(payload["live_control_status"], "unavailable");
     assert!(
         payload["observed_sessions"]
             .as_array()
@@ -1454,10 +1654,9 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
         "stale resolution report must not leak stale runtime ids or mode names; stdout={stale_stdout}"
     );
 
-    let live_start = Command::new(env!("CARGO_BIN_EXE_skybridge"))
-        .args([
-            "--state-dir",
-            &state_arg,
+    let unverified_start = run_remote_desktop_unavailable_mutation(
+        &state_dir,
+        &[
             "remote-desktop",
             "start",
             "--session-id",
@@ -1467,117 +1666,101 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
             "--fps",
             "60",
             "--json",
-        ])
-        .output()?;
-    assert!(
-        live_start.status.success(),
-        "remote-desktop start should register a pending agent-owned request for an established session; stderr={}",
-        String::from_utf8_lossy(&live_start.stderr)
+        ],
+    )?;
+    assert_eq!(
+        unverified_start["error"]["code"],
+        "peer_capability_unverified"
     );
-    assert!(
-        live_start.stderr.is_empty(),
-        "successful request registration must keep stderr clean: {}",
-        String::from_utf8_lossy(&live_start.stderr)
-    );
-    let payload: Value = serde_json::from_slice(&live_start.stdout)?;
-    assert_eq!(payload["accepted"], true);
-    assert_eq!(payload["request_registered"], true);
-    assert_eq!(payload["pending_agent_observation"], true);
-    assert_eq!(payload["agent_observed"], false);
-    assert_eq!(payload["applied"], false);
-    assert_eq!(payload["live_control_status"], "pending_agent_observation");
-    assert!(
-        payload["request_id"]
-            .as_str()
-            .is_some_and(|value| !value.trim().is_empty())
-    );
-    assert_eq!(payload["request"]["action"], "start");
-    assert_eq!(payload["request"]["fps"], 60);
-    assert_eq!(payload["request"]["resolution"]["kind"], "preset");
-    assert_eq!(payload["request"]["resolution"]["id"], "1920x1080");
-    assert_no_unevidenced_success_or_legacy_ack_terms(&live_start.stdout);
+    assert_eq!(unverified_start["peer_capability_status"], "unverified");
+    assert_eq!(unverified_start["session_binding_verified"], false);
+    assert_eq!(unverified_start["authenticated_peer_bound"], false);
 
-    let set_resolution_payload = run_remote_desktop_mutation(
-        "remote-desktop-set-resolution-json-contract",
-        "session-resolution",
-        [
+    seed_established_session_with_capabilities(
+        &state_dir,
+        "session-no-remote-desktop",
+        Some(vec!["file_transfer".to_owned()]),
+    )?;
+    let not_advertised = run_remote_desktop_unavailable_mutation(
+        &state_dir,
+        &[
+            "remote-desktop",
+            "start",
+            "--session-id",
+            "session-no-remote-desktop",
+            "--resolution",
+            "1920x1080",
+            "--fps",
+            "60",
+            "--json",
+        ],
+    )?;
+    assert_eq!(
+        not_advertised["error"]["code"],
+        "peer_capability_not_advertised"
+    );
+    assert_eq!(not_advertised["peer_capability_status"], "not_advertised");
+    assert_eq!(not_advertised["session_binding_verified"], true);
+    assert_eq!(not_advertised["authenticated_peer_bound"], true);
+
+    seed_established_session_with_capabilities(
+        &state_dir,
+        "session-backend-unavailable",
+        Some(vec!["remote_desktop".to_owned()]),
+    )?;
+    for args in [
+        vec![
+            "remote-desktop",
+            "start",
+            "--session-id",
+            "session-backend-unavailable",
+            "--resolution",
+            "1920x1080",
+            "--fps",
+            "60",
+            "--json",
+        ],
+        vec![
             "remote-desktop",
             "set-resolution",
             "--session-id",
-            "session-resolution",
+            "session-backend-unavailable",
             "--resolution",
             "2056x1329",
             "--json",
         ],
-    )?;
-    assert_eq!(set_resolution_payload["accepted"], true);
-    assert_eq!(set_resolution_payload["request_registered"], true);
-    assert_eq!(set_resolution_payload["pending_agent_observation"], true);
-    assert_eq!(set_resolution_payload["agent_observed"], false);
-    assert_eq!(set_resolution_payload["applied"], false);
-    assert_eq!(
-        set_resolution_payload["request"]["action"],
-        "set_resolution"
-    );
-    assert_eq!(
-        set_resolution_payload["request"]["resolution"]["kind"],
-        "preset"
-    );
-    assert_eq!(
-        set_resolution_payload["request"]["resolution"]["id"],
-        "2056x1329"
-    );
-    assert!(
-        set_resolution_payload["request"]["fps"].is_null(),
-        "set-resolution must not smuggle FPS into the request payload"
-    );
-
-    let set_fps_payload = run_remote_desktop_mutation(
-        "remote-desktop-set-fps-json-contract",
-        "session-fps",
-        [
+        vec![
             "remote-desktop",
             "set-fps",
             "--session-id",
-            "session-fps",
+            "session-backend-unavailable",
             "--fps",
             "120",
             "--json",
         ],
-    )?;
-    assert_eq!(set_fps_payload["accepted"], true);
-    assert_eq!(set_fps_payload["request_registered"], true);
-    assert_eq!(set_fps_payload["pending_agent_observation"], true);
-    assert_eq!(set_fps_payload["agent_observed"], false);
-    assert_eq!(set_fps_payload["applied"], false);
-    assert_eq!(set_fps_payload["request"]["action"], "set_fps");
-    assert_eq!(set_fps_payload["request"]["fps"], 120);
-    assert!(
-        set_fps_payload["request"]["resolution"].is_null(),
-        "set-fps must not smuggle a resolution into the request payload"
-    );
-
-    let stop_payload = run_remote_desktop_mutation(
-        "remote-desktop-stop-json-contract",
-        "session-stop",
-        [
+        vec![
             "remote-desktop",
             "stop",
             "--session-id",
-            "session-stop",
+            "session-backend-unavailable",
             "--json",
         ],
-    )?;
-    assert_eq!(stop_payload["accepted"], true);
-    assert_eq!(stop_payload["request_registered"], true);
-    assert_eq!(stop_payload["pending_agent_observation"], true);
-    assert_eq!(stop_payload["agent_observed"], false);
-    assert_eq!(stop_payload["applied"], false);
-    assert_eq!(stop_payload["request"]["action"], "stop");
-    assert!(
-        stop_payload["request"]["resolution"].is_null() && stop_payload["request"]["fps"].is_null(),
-        "stop must not smuggle resolution or fps into the request payload"
-    );
+    ] {
+        let unavailable = run_remote_desktop_unavailable_mutation(&state_dir, &args)?;
+        assert_eq!(
+            unavailable["error"]["code"],
+            "standalone_remote_desktop_backend_unavailable"
+        );
+        assert_eq!(unavailable["success"], false);
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(unavailable["peer_capability_status"], "advertised");
+        assert_eq!(unavailable["standalone_backend_status"], "unavailable");
+        assert_eq!(unavailable["request_registered"], false);
+        assert_eq!(unavailable["accepted"], false);
+        assert_eq!(unavailable["pending_agent_observation"], false);
+        assert_eq!(unavailable["agent_observed"], false);
+        assert_eq!(unavailable["applied"], false);
+    }
 
     let status = Command::new(env!("CARGO_BIN_EXE_skybridge"))
         .args([
@@ -1586,129 +1769,20 @@ fn remote_desktop_json_contract_is_machine_readable_without_live_success_claims(
             "remote-desktop",
             "status",
             "--session-id",
-            "session-1",
+            "session-backend-unavailable",
             "--json",
         ])
         .output()?;
-    assert!(
-        status.status.success(),
-        "remote-desktop status should show pending request; stderr={}",
-        String::from_utf8_lossy(&status.stderr)
-    );
+    assert!(status.status.success());
+    assert!(status.stderr.is_empty());
     let payload: Value = serde_json::from_slice(&status.stdout)?;
-    assert_eq!(payload["live_control_status"], "pending_agent_observation");
-    assert_eq!(payload["sessions"][0]["pending_agent_observation"], true);
-    assert_eq!(payload["sessions"][0]["remote_identity_bound"], true);
-    assert_eq!(
-        payload["sessions"][0]["remote_display_name_available"],
-        true
-    );
-    assert!(
-        payload["sessions"][0]["remote_device_id"].is_null()
-            && payload["sessions"][0]["remote_device_name"].is_null()
-            && payload["sessions"][0]["remote_protocol_public_key_fingerprint"].is_null(),
-        "remote desktop status public JSON must not expose peer identifiers"
-    );
-    assert_eq!(
-        payload["sessions"][0]["pending_request"]["request_id"],
-        live_start_request_id(&live_start.stdout)?
-    );
-
-    let duplicate_start = Command::new(env!("CARGO_BIN_EXE_skybridge"))
-        .args([
-            "--state-dir",
-            &state_arg,
-            "remote-desktop",
-            "start",
-            "--session-id",
-            "session-1",
-            "--resolution",
-            "1920x1080",
-            "--fps",
-            "60",
-            "--json",
-        ])
-        .output()?;
-    assert!(
-        !duplicate_start.status.success(),
-        "duplicate pending request must fail closed"
-    );
-    assert!(
-        duplicate_start.stdout.is_empty(),
-        "duplicate pending request must not emit fake success to stdout"
-    );
-    let duplicate_stderr = String::from_utf8_lossy(&duplicate_start.stderr);
-    assert!(
-        duplicate_stderr.contains("\"code\": \"remote_desktop_request_rejected\"")
-            && duplicate_stderr
-                .contains("remote desktop request rejected before agent observation"),
-        "duplicate failure should use stable redacted JSON and terminal error; stderr={duplicate_stderr}"
-    );
-    assert!(
-        !duplicate_stderr.contains("fingerprint")
-            && !duplicate_stderr.contains("remote-device")
-            && !duplicate_stderr.contains("/"),
-        "remote desktop request rejection must not leak peer identity or local paths; stderr={duplicate_stderr}"
-    );
-
-    let runtime = tokio::runtime::Runtime::new()?;
-    let observed = runtime.block_on(async {
-        let paths = resolve_paths(Some(state_dir.clone()))?;
-        observe_remote_desktop_requests_for_established_session(&paths, "session-1").await
-    })?;
-    assert_eq!(observed.len(), 1);
-    assert!(observed[0].is_agent_observed());
-    assert!(!observed[0].is_pending_agent_observation());
-
-    let observed_status = Command::new(env!("CARGO_BIN_EXE_skybridge"))
-        .args([
-            "--state-dir",
-            &state_arg,
-            "remote-desktop",
-            "status",
-            "--session-id",
-            "session-1",
-            "--json",
-        ])
-        .output()?;
-    assert!(
-        observed_status.status.success(),
-        "remote-desktop status should show agent observe without live apply; stderr={}",
-        String::from_utf8_lossy(&observed_status.stderr)
-    );
-    assert!(
-        observed_status.stderr.is_empty(),
-        "observed remote-desktop status must keep stderr clean: {}",
-        String::from_utf8_lossy(&observed_status.stderr)
-    );
-    let payload: Value = serde_json::from_slice(&observed_status.stdout)?;
-    assert_eq!(payload["live_control_status"], "agent_observed_not_applied");
-    assert_eq!(payload["agent_observation_supported"], true);
+    assert_eq!(payload["live_control_status"], "unavailable");
+    assert_eq!(payload["agent_observation_supported"], false);
     assert_eq!(payload["mutation_supported"], false);
-    assert_eq!(
-        payload["sessions"][0]["live_control_status"],
-        "agent_observed_not_applied"
-    );
+    assert_eq!(payload["sessions"][0]["live_control_status"], "unavailable");
     assert_eq!(payload["sessions"][0]["pending_agent_observation"], false);
     assert!(payload["sessions"][0]["pending_request"].is_null());
-    assert_eq!(
-        payload["sessions"][0]["latest_request"]["request_id"],
-        live_start_request_id(&live_start.stdout)?
-    );
-    assert_eq!(
-        payload["sessions"][0]["latest_request"]["status"],
-        "agent_observed_not_applied"
-    );
-    assert_eq!(
-        payload["sessions"][0]["latest_request"]["pending_agent_observation"],
-        false
-    );
-    assert_eq!(
-        payload["sessions"][0]["latest_request"]["agent_observed"],
-        true
-    );
-    assert_eq!(payload["sessions"][0]["latest_request"]["applied"], false);
-    assert_no_unevidenced_success_or_legacy_ack_terms(&observed_status.stdout);
+    assert!(payload["sessions"][0]["latest_request"].is_null());
 
     let invalid_state_dir = make_state_dir("remote-desktop-invalid-json-contract")?;
     let invalid_session_id = "/tmp/session-token-secret";
@@ -1837,38 +1911,36 @@ fn nearby_discovery_json_contract_fails_closed_without_fake_empty_results()
         "missing snapshot report must not leak fabricated nearby device details; stderr={stderr}"
     );
 
-    let active_scan_output = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+    let invalid_address_disclosure = Command::new(env!("CARGO_BIN_EXE_skybridge"))
         .args([
             "--state-dir",
             &state_arg,
             "device",
             "discover",
             "--nearby",
-            "--scan",
+            "--show-addresses",
             "--json",
         ])
         .output()?;
     assert!(
-        !active_scan_output.status.success(),
-        "active nearby scan must remain fail-closed until an agent-owned scanner exists"
+        !invalid_address_disclosure.status.success(),
+        "address disclosure must require an explicit active scan"
     );
     assert!(
-        active_scan_output.stdout.is_empty(),
-        "failed active scan must not emit fake discovery results to stdout"
+        invalid_address_disclosure.stdout.is_empty(),
+        "invalid address disclosure must not emit discovery results to stdout"
     );
-    let active_scan_stderr = String::from_utf8_lossy(&active_scan_output.stderr);
-    assert!(
-        active_scan_stderr.contains("\"capability_id\": \"device.discovery.nearby\"")
-            && active_scan_stderr.contains("\"accepted\": false")
-            && active_scan_stderr.contains("\"status\": \"planned\"")
-            && active_scan_stderr.contains("device_discovery_active_scan_snapshot_missing")
-            && active_scan_stderr.contains("agent_owned_discovery_scanner"),
-        "active scan failure should fail closed when no agent-owned scan snapshot exists; stderr={active_scan_stderr}"
+    let invalid_address_payload: Value =
+        serde_json::from_slice(&invalid_address_disclosure.stderr)?;
+    assert_eq!(
+        invalid_address_payload["error"]["code"],
+        "invalid_arguments"
     );
     assert!(
-        !active_scan_stderr.contains("nearby-device-1")
-            && !active_scan_stderr.contains("MacBook.local"),
-        "active scan failure must not leak fabricated nearby device details; stderr={active_scan_stderr}"
+        invalid_address_payload["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("--help")),
+        "invalid JSON arguments must provide a safe next action: {invalid_address_payload}"
     );
 
     let stale_state_dir = make_state_dir("nearby-discovery-stale-json-contract")?;
@@ -1948,39 +2020,65 @@ fn nearby_discovery_json_contract_fails_closed_without_fake_empty_results()
             .any(|gate| gate == "session_handshake_gate")
     );
 
-    let active_scan_state_dir = make_state_dir("nearby-discovery-active-scan-json-contract")?;
-    seed_active_scan_snapshot(&active_scan_state_dir)?;
-    let active_scan_state_arg = active_scan_state_dir.display().to_string();
-    let active_scan_success = Command::new(env!("CARGO_BIN_EXE_skybridge"))
+    Ok(())
+}
+
+#[test]
+fn active_nearby_discovery_dispatch_never_falls_back_to_generic_json_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let state_dir = make_state_dir("active-nearby-discovery-json-contract")?;
+    let state_arg = state_dir.display().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_skybridge"))
         .args([
             "--state-dir",
-            &active_scan_state_arg,
+            &state_arg,
             "device",
             "discover",
             "--nearby",
             "--scan",
+            "--scan-seconds",
+            "1",
             "--json",
         ])
         .output()?;
-    assert!(
-        active_scan_success.status.success(),
-        "device discover --nearby --scan should read a fresh agent-owned active scan snapshot; stderr={}",
-        String::from_utf8_lossy(&active_scan_success.stderr)
-    );
-    assert!(
-        active_scan_success.stderr.is_empty(),
-        "successful active scan report must keep stderr clean: {}",
-        String::from_utf8_lossy(&active_scan_success.stderr)
-    );
-    let active_payload: Value = serde_json::from_slice(&active_scan_success.stdout)?;
-    assert_eq!(active_payload["capability_id"], "device.discovery.nearby");
-    assert_eq!(active_payload["accepted"], true);
-    assert_eq!(active_payload["status"], "read_only");
-    assert_eq!(active_payload["source"], "agent_owned_active_mdns_scan");
-    assert_eq!(active_payload["devices_returned"], 1);
-    assert_eq!(active_payload["snapshot_authorizes_connection"], false);
-    assert_eq!(active_payload["devices"][0]["device_ref"], "id-active1");
-    assert_eq!(active_payload["devices"][0]["connection_authorized"], false);
+
+    if output.status.success() {
+        assert!(
+            output.stderr.is_empty(),
+            "successful active scan must keep stderr clean: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(payload["accepted"], true);
+        assert_eq!(payload["status"], "read_only");
+        assert_eq!(payload["active_scan_duration_seconds"], 1);
+        assert!(payload["error"].is_null());
+    } else {
+        assert!(
+            output.stdout.is_empty(),
+            "failed active scan must not emit a fake empty success to stdout"
+        );
+        let payload: Value = serde_json::from_slice(&output.stderr)?;
+        let code = payload["error"]["code"]
+            .as_str()
+            .ok_or("active scan failure code must be a string")?;
+        assert!(
+            matches!(
+                code,
+                "device_discovery_permission_denied"
+                    | "device_discovery_transport_unavailable"
+                    | "device_discovery_scan_runtime_failed"
+            ),
+            "active scan must emit a classified discovery failure, not a generic command failure: {payload}"
+        );
+        assert_eq!(payload["accepted"], false);
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["active_scan_duration_seconds"], 1);
+        assert_ne!(code, "command_failed");
+        let encoded = payload.to_string();
+        assert!(!encoded.contains(&state_arg));
+        assert!(!encoded.contains("os error"));
+    }
 
     Ok(())
 }
@@ -2061,6 +2159,40 @@ fn make_state_dir(name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(path)
 }
 
+struct ActiveAgentFixture {
+    _lock_file: File,
+}
+
+fn activate_test_agent(state_dir: &Path) -> Result<ActiveAgentFixture, Box<dyn std::error::Error>> {
+    let paths = resolve_paths(Some(state_dir.to_path_buf()))?;
+    std::fs::create_dir_all(&paths.runtime_dir)?;
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&paths.agent_runtime_lock_file)?;
+    lock_file.lock()?;
+    let health = skybridge_core::AgentHealthSnapshot::new(
+        skybridge_core::AgentRuntimeStatus::Healthy,
+        std::process::id(),
+        paths.root.display().to_string(),
+    );
+    let lease = skybridge_core::AgentRuntimeLease::new(
+        health.instance_id.clone(),
+        health.pid,
+        paths.root.display().to_string(),
+    );
+    std::fs::write(
+        &paths.agent_runtime_lock_file,
+        serde_json::to_vec_pretty(&lease)?,
+    )?;
+    std::fs::write(&paths.health_file, serde_json::to_vec_pretty(&health)?)?;
+    Ok(ActiveAgentFixture {
+        _lock_file: lock_file,
+    })
+}
+
 fn fixture_dir(parts: &[&str]) -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests");
@@ -2113,6 +2245,50 @@ fn seed_established_session(
         };
         record.readiness = readiness.clone();
         record.last_established_readiness = Some(readiness);
+        upsert_session_runtime(&paths, record).await?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+    Ok(())
+}
+
+fn seed_established_session_with_capabilities(
+    state_dir: &Path,
+    session_id: &str,
+    capabilities: Option<Vec<String>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let paths = resolve_paths(Some(state_dir.to_path_buf()))?;
+        let mut record = RuntimeSessionRecord::new(
+            format!("runtime-{session_id}"),
+            session_id.to_owned(),
+            RuntimeSessionRole::Initiator,
+            RuntimeSessionSource::Code,
+            "https://signal.example.com",
+            "local-device",
+            Some("remote-device".to_owned()),
+            Some("Remote Device".to_owned()),
+            Some("fingerprint".to_owned()),
+            RuntimeSessionState::Bound,
+        );
+        let readiness = SessionReadiness::HandshakeComplete {
+            session_id: session_id.to_owned(),
+            negotiated_suite: "X-Wing".to_owned(),
+        };
+        let observed_at = time::OffsetDateTime::now_utc();
+        record.readiness = readiness.clone();
+        record.last_established_readiness = Some(readiness);
+        record.handshake_completed_at = Some(observed_at);
+        record.authenticated_peer = Some(RuntimeAuthenticatedPeerObservation {
+            device_id: "remote-device".to_owned(),
+            device_name: "Remote Device".to_owned(),
+            platform: Some("linux".to_owned()),
+            capabilities,
+            file_transfer_port: None,
+            remote_control_port: None,
+            sbwc_counter: 1,
+            observed_at,
+        });
         upsert_session_runtime(&paths, record).await?;
         Ok::<(), anyhow::Error>(())
     })?;
@@ -2200,29 +2376,6 @@ fn seed_nearby_discovery_snapshot(state_dir: &Path) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-fn seed_active_scan_snapshot(state_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        let paths = resolve_paths(Some(state_dir.to_path_buf()))?;
-        let snapshot = NearbyDiscoverySnapshot::new(
-            "active-mdns-scan",
-            "agent_owned_active_mdns_scan",
-            vec![NearbyDiscoveredDevice::new(
-                "id-active1",
-                "Scanned Mac",
-                NearbyDiscoveryEndpointClass::LocalNetwork,
-                NearbyDiscoveryTrustStatus::Candidate,
-                vec!["remote_desktop".to_owned()],
-                false,
-            )],
-            120,
-        );
-        upsert_nearby_discovery_snapshot(&paths, snapshot).await?;
-        Ok::<(), anyhow::Error>(())
-    })?;
-    Ok(())
-}
-
 fn seed_stale_nearby_discovery_snapshot(
     state_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2250,11 +2403,6 @@ fn seed_stale_nearby_discovery_snapshot(
         Ok::<(), anyhow::Error>(())
     })?;
     Ok(())
-}
-
-fn live_start_request_id(stdout: &[u8]) -> Result<Value, Box<dyn std::error::Error>> {
-    let payload: Value = serde_json::from_slice(stdout)?;
-    Ok(payload["request_id"].clone())
 }
 
 /// Honesty guardrail for *evidence-free* command outputs (request registration,
@@ -2288,13 +2436,10 @@ fn assert_no_unevidenced_success_or_legacy_ack_terms(output: &[u8]) {
     }
 }
 
-fn run_remote_desktop_mutation<const N: usize>(
-    state_name: &str,
-    session_id: &str,
-    args: [&str; N],
+fn run_remote_desktop_unavailable_mutation(
+    state_dir: &Path,
+    args: &[&str],
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    let state_dir = make_state_dir(state_name)?;
-    seed_established_session(&state_dir, session_id)?;
     let state_arg = state_dir.display().to_string();
     let output = Command::new(env!("CARGO_BIN_EXE_skybridge"))
         .arg("--state-dir")
@@ -2302,15 +2447,23 @@ fn run_remote_desktop_mutation<const N: usize>(
         .args(args)
         .output()?;
     assert!(
-        output.status.success(),
-        "remote desktop mutation should register a pending request; status={:?}; stderr={}",
+        !output.status.success(),
+        "remote desktop mutation must fail closed without a standalone backend; status={:?}; stdout={}",
         output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stdout)
     );
     assert!(
-        output.stderr.is_empty(),
-        "successful request registration must keep stderr clean: {}",
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.is_empty(),
+        "unavailable remote desktop mutation must not emit success JSON to stdout"
     );
-    Ok(serde_json::from_slice(&output.stdout)?)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("fingerprint")
+            && !stderr.contains("remote-device")
+            && !stderr.contains(&state_arg),
+        "remote desktop unavailability JSON must not leak peer identity or state paths: {stderr}"
+    );
+    let payload = serde_json::from_slice(&output.stderr)?;
+    assert_no_unevidenced_success_or_legacy_ack_terms(&output.stderr);
+    Ok(payload)
 }

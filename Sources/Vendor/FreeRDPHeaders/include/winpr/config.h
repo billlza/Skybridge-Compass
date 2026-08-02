@@ -22,6 +22,7 @@
 #define WINPR_HAVE_GETLOGIN_R
 #define WINPR_HAVE_GETPWUID_R
 #define WINPR_HAVE_STRNDUP
+#define WINPR_HAVE_STRNSTR
 #define WINPR_HAVE_UNWIND_H
 #define WINPR_HAVE_SSIZE_T
 /* #undef WINPR_HAVE_WIN_SSIZE_T */
@@ -47,5 +48,12 @@
 /* #undef WINPR_UTILS_IMAGE_WEBP */
 /* #undef WINPR_UTILS_IMAGE_PNG */
 /* #undef WINPR_UTILS_IMAGE_JPEG */
+
+#if !defined(WITHOUT_WINPR_3x_DEPRECATED)
+#define WITHOUT_WINPR_3x_DEPRECATED /** @since version 3.27.0 */
+#endif
+#if !defined(WITH_WINPR_DEPRECATED)
+/* #undef WITH_WINPR_DEPRECATED */
+#endif
 
 #endif /* WINPR_CONFIG_H */

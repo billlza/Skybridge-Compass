@@ -11,10 +11,11 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 
 | 组件 | 平台 | 入口/目录 | 说明 |
 |---|---|---|---|
-| Protocol + Crypto + Bench core | macOS / iOS（代码路径） | `Sources/SkyBridgeCore/` | 协议实现（握手/会话/策略）、PQC/降级可审计、SBP1/SBP2 padding、统计与 CSV artifacts |
+| Protocol contracts / wire core | macOS / iOS | `Sources/SkyBridgeProtocolCore/` | 两端通过同一 Swift product 消费已迁移的协议契约与共享安全实现；仍含待拆出的 Apple 文件 I/O 接缝，不能据此宣称 Android/Linux 可直接构建 |
+| Runtime + Crypto + Bench core | macOS（主入口）/ iOS（部分共享路径） | `Sources/SkyBridgeCore/` | 握手/会话运行时、PQC provider、远控、统计与 CSV artifacts；Apple 平台集成仍留在此层 |
 | Shared SwiftUI views | macOS（构建）/ iOS（可移植代码） | `Sources/SkyBridgeUI/` | 共享 UI 组件；平台差异用 `#if os(...)` 保护 |
 | macOS app | macOS | `Sources/SkyBridgeCompassApp/` | macOS App 入口（SwiftUI + 菜单/窗口等） |
-| iOS app | iOS | `SkyBridge Compass iOS/` | iOS 客户端 Xcode 工程（`SkyBridgeCompass-iOS.xcodeproj`，iOS 17+）；协议面与 macOS 端按文件对齐（见 `Docs/CoreLayering.md` 的防漂移说明） |
+| iOS app | iOS | `SkyBridge Compass iOS/` | iOS 客户端 Xcode 工程（`SkyBridgeCompass-iOS.xcodeproj`，iOS 17+）；已迁移切片直接依赖 `SkyBridgeProtocolCore`，未迁移的平行协议文件仍受 parity 闸门约束 |
 | Tests / Paper benches | macOS（host） | `Tests/` | 论文评测、SBP2 sensitivity、fault-injection 等，输出 `Artifacts/*.csv` |
 | Paper sources + PDFs | n/a | `Docs/` | 主论文与 Supplementary 源码、生成表格与最终 PDF/DOCX |
 
@@ -28,6 +29,12 @@ SkyBridge Compass Pro 是一个以 **跨平台协议内核（SkyBridgeCore）** 
 - Apple Silicon（arm64）Mac（当前 vendored XCFramework 仅提供 arm64 slice，Intel x86_64 暂不支持）
 - Xcode 26.5+（正式发布/CI 基线）；Xcode 27 beta 仅用于手动 OS 27 兼容验证
 - Swift 6.3+（由 Xcode 版本提供）
+
+## macOS 手动 RDP 当前边界
+
+macOS 手动 RDP 入口使用内置 FreeRDP 3.30 core-only 运行时和软件 GDI 渲染。当前只允许证书链受 macOS 系统信任且与输入主机名匹配的端点；需要手动信任的未知、自签名或已变更证书会失败。本版本没有 TOFU、指纹登记或连接时忽略证书的通道。FreeRDP/OpenSSL 的构建期信任目录和用户 `known_hosts` 不参与该决策。
+
+这是受限实现边界，不是“任意 Windows RDP 已发布可用”的验收证明。发布前还必须使用真实 Windows 端点验证生产证书链与主机名、NLA/凭据失败、首帧、鼠标/键盘输入、正常断开与重连。剪贴板、驱动器、音频、RemoteApp 和显示控制通道在当前 core-only 运行时中均未开放。
 
 ## Apple PQC（iOS 26+/macOS 26+）在分发包中自动启用
 
@@ -199,7 +206,7 @@ swift test
 
 ## SkyBridge CLI / Agent Workspace
 
-SkyBridge CLI/agent 的 headless Rust 工作区位于 `rust/`，用于承载正式的 operator surface，不再依赖 GUI 侧状态。用户可见产品名是 SkyBridge CLI；稳定命令名仍是 `skybridge`。
+SkyBridge CLI/agent 的 headless Rust 工作区位于 `rust/`，用于承载正式的 operator surface。原生/headless 命令不依赖 GUI 侧状态；`skybridge crossnet ...` 则是明确依赖运行中 Mac App 的独立控制面。用户可见产品名是 SkyBridge CLI；稳定命令名仍是 `skybridge`。
 
 常用命令：
 
@@ -216,11 +223,18 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `skybridge device status`
 - `skybridge device enroll --invite-token <token>`
 - `skybridge device approve <pending-device-id> --pending-fingerprint <fp>`
+- `skybridge device discover --nearby --scan [--show-addresses]`
 - `skybridge code create`
-- `skybridge connect <code>`
+- `skybridge connect <code> [--timeout-seconds <seconds>]`
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
+- `skybridge file send <path> --to <peer> --session-id <id> [--detach]`
+- `skybridge file history`
+- `skybridge crossnet preflight`
+- `skybridge crossnet status`
+- `skybridge crossnet settings`
+- `skybridge crossnet settings set <id> <value>`
 - `skybridge doctor`
 - `skybridge doctor webrtc-media --artifact-dir <dir> --latest`
 - `skybridge smoke local-p2p`
@@ -231,6 +245,27 @@ cargo run --manifest-path rust/Cargo.toml -p skybridge -- version
 - `skybridge logs tail`
 - `skybridge metrics`
 - `skybridge version`
+
+原生连接与文件传输不依赖 Desktop App，但要求同一 `--state-dir` 下有一个
+健康、持锁的 `skybridge agent run`。`connect` 只在身份绑定的协议握手完成后
+返回成功，并报告实际协商套件；文件发送默认等待接收端 SHA-256 receipt。
+原生连接与文件发送在取得跨平台真机 artifact 前均标记为
+`pending_live_proof`。PQC 路径还要求主协议身份与握手身份一致并具备明确的对端
+KEM 公钥；没有 control-plane→bridge 签名绑定的独立 bridge 身份不能作为发布
+路径。主动扫描默认不输出 IP，只有显式 `--show-addresses` 才显示短期、未认证的
+mDNS 地址。
+
+Rust CLI 的 control-plane / signaling origin 默认只接受 `https://` / `wss://`。
+本机明文开发必须显式设置
+`SKYBRIDGE_ALLOW_INSECURE_LOOPBACK_TRANSPORT=true`，或在 doctor 的显式
+`--base-url` 上同时传入 `--allow-insecure-loopback`；该例外仍只接受严格 loopback，
+不会放宽到局域网地址。原生 WebSocket 使用
+`X-SkyBridge-Session-Id` / `X-SkyBridge-Session` 握手 header，session token
+不会进入 `?st=`，也没有 query-token fallback。
+
+CLI 的公开 tag 发布目前也保持 fail-closed：四平台 bundle 可以构建和校验，但在
+macOS 签名/公证与 Windows publisher signature 证明进入工作流并被验证之前，
+GitHub、npm 与 Homebrew 发布任务不会执行。
 
 首发边界与 contract 文档：
 

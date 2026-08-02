@@ -79,7 +79,7 @@ actor WebRTCAudioFallbackSender {
             let plaintext = pendingPayloads.removeFirst()
             do {
                 let ciphertext = try await securePayloadSealer(plaintext)
-                let padded = TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-audio")
+                let padded = try TrafficPadding.wrapIfEnabled(ciphertext, label: "tx/webrtc-audio")
                 guard self.generation == generation else { break }
                 try await session.sendFramedPayloadAsync(
                     padded,

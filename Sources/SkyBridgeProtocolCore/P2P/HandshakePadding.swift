@@ -90,6 +90,10 @@ public enum HandshakePadding {
     // "SBP1"
     private static let magic: [UInt8] = [0x53, 0x42, 0x50, 0x31]
     private static let headerLen = 4 + 4 // magic + u32 actualLen
+    public static let maximumOutputByteCount = max(
+        HandshakeConstants.maxMessageALength,
+        HandshakeConstants.maxMessageBLength
+    ) + headerLen
     private static let configLogLock = NSLock()
     // Protected by configLogLock; marked unsafe to satisfy Swift 6 concurrency checks.
     private nonisolated(unsafe) static var didLogConfigHint = false
@@ -117,34 +121,48 @@ public enum HandshakePadding {
         }
     }
 
-    public static func wrapIfEnabled(_ payload: Data, label: String? = nil, maxTotalBytes: Int? = nil) -> Data {
+    public static func wrapIfEnabled(
+        _ payload: Data,
+        label: String? = nil,
+        maximumPaddingTargetByteCount: Int? = nil
+    ) throws -> Data {
         let cfg = HandshakePaddingConfig.fromUserDefaults()
-        guard cfg.enabled else { return payload }
         logConfigHintOnceIfNeeded(cfg: cfg)
+        return try wrapIfEnabled(
+            payload,
+            configuration: cfg,
+            label: label,
+            maximumPaddingTargetByteCount: maximumPaddingTargetByteCount
+        )
+    }
 
-        let minLen = headerLen + payload.count
-        let effectiveCap = maxTotalBytes.map { max($0, minLen) }
-        let targetLen: Int
-        switch cfg.mode {
+    public static func wrapIfEnabled(
+        _ payload: Data,
+        configuration cfg: HandshakePaddingConfig,
+        label: String? = nil,
+        maximumPaddingTargetByteCount: Int? = nil
+    ) throws -> Data {
+        let target: BoundedPaddingEnvelopePolicy.Target = switch cfg.mode {
         case .fixed:
-            let requested = max(minLen, cfg.fixedSizeBytes > 0 ? cfg.fixedSizeBytes : minLen)
-            targetLen = if let effectiveCap, requested > effectiveCap { minLen } else { requested }
+            .fixed(cfg.fixedSizeBytes)
         case .bucketed:
-            let requested = cfg.bucketSizesBytes.first(where: { $0 >= minLen }) ?? minLen
-            targetLen = if let effectiveCap, requested > effectiveCap { minLen } else { requested }
+            .bucketed(cfg.bucketSizesBytes)
         }
+        let plan = try BoundedPaddingEnvelopePolicy.plan(
+            payloadByteCount: payload.count,
+            headerByteCount: headerLen,
+            enabled: cfg.enabled,
+            target: target,
+            maximumOutputByteCount: maximumOutputByteCount,
+            maximumPaddingTargetByteCount: maximumPaddingTargetByteCount
+        )
+        guard plan.shouldWrap else { return payload }
 
-        let out: Data
-        if targetLen > minLen {
-            out = wrap(payload: payload, totalLen: targetLen)
-        } else {
-            // Still wrap (so receiver can unwrap), but with no padding.
-            out = wrap(payload: payload, totalLen: minLen)
-        }
+        let out = wrap(payload: payload, totalLen: plan.totalByteCount)
 
         if cfg.debugLog {
             let name = label ?? "handshake"
-            let capDescription = effectiveCap.map { ", cap=\($0)B" } ?? ""
+            let capDescription = maximumPaddingTargetByteCount.map { ", paddingTargetCap=\($0)B" } ?? ""
             let msg = "🧪 Padding[\(name)]: raw=\(payload.count)B -> padded=\(out.count)B (mode=\(cfg.mode.rawValue)\(capDescription))"
             handshakePaddingLogger.info("\(msg, privacy: .public)")
         }
@@ -153,9 +171,15 @@ public enum HandshakePadding {
     }
 
     public static func unwrapIfNeeded(_ input: Data, label: String? = nil) -> Data {
-        // Handshake frames are size-bounded. Rebasing once makes every
-        // downstream wire-relative decoder safe for Data slices.
-        let data = Data(input)
+        // Inspect the original COW value before creating a body copy. A hostile
+        // SBP1 marker inside a larger WebRTC frame must not turn the 16 KiB
+        // handshake decoder into an additional multi-megabyte allocation.
+        let candidate = input
+        guard candidate.count <= maximumOutputByteCount else { return candidate }
+        // Rebase every bounded result, including unpadded frames. Downstream
+        // wire decoders intentionally use integer offsets from zero, while a
+        // Data.SubSequence can retain its parent's non-zero startIndex.
+        let data = Data(candidate)
         guard data.count >= headerLen else { return data }
         guard data.prefix(4).elementsEqual(magic) else { return data }
 

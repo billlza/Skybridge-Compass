@@ -5,5 +5,6 @@ import Foundation
 final class WebRTCHandshakeLoopState {
     var driver: HandshakeDriver?
     var sessionKeys: SessionKeys?
+    var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
     var previousSessionKeysBeforeRekey: SessionKeys?
 }

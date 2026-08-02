@@ -209,7 +209,14 @@ public final class FileTransferSettingsBridge: ObservableObject {
             }
         }
 
-        let fallback = fallbackURL ?? fallbackReceiveDirectory()
+        guard let fallback = fallbackURL ?? fallbackReceiveDirectory() else {
+            return .failure(
+                preferredFailure: preferredFailure,
+                terminalFailure: FileTransferReceiveDirectoryFailure(
+                    InboundFileTransferIOError.destinationUnavailable
+                )
+            )
+        }
         do {
             let resolved = try await InboundFileTransferIOActor.shared
                 .prepareFirstWritableDirectory(from: [fallback])
@@ -302,13 +309,20 @@ public final class FileTransferSettingsBridge: ObservableObject {
     private nonisolated static func normalizedDirectoryURL(from rawPath: String) -> URL? {
         let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        #if os(iOS)
+        // `~/Downloads` is the persisted macOS default. On iOS it would expand to a different
+        // container-root directory and silently bypass the established Documents/Downloads
+        // layout. Treat that one legacy default as the canonical iOS receive directory; explicit
+        // user-selected absolute paths remain untouched.
+        if trimmed == "~/Downloads" {
+            return FileTransferDirectoryLayout.defaultReceiveDirectory()
+        }
+        #endif
         let expandedPath = (trimmed as NSString).expandingTildeInPath
         return URL(fileURLWithPath: expandedPath, isDirectory: true).standardizedFileURL
     }
 
-    private nonisolated static func fallbackReceiveDirectory() -> URL {
-        let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
-        return base.appendingPathComponent("SkyBridge", isDirectory: true)
+    private nonisolated static func fallbackReceiveDirectory() -> URL? {
+        FileTransferDirectoryLayout.defaultReceiveDirectory()
     }
 }

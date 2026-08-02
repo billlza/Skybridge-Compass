@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -73,6 +74,56 @@ pub(crate) fn make_test_dir(name: &str) -> Result<PathBuf> {
     ));
     std::fs::create_dir_all(&path)?;
     Ok(path)
+}
+
+pub(crate) struct ActiveAgentTestGuard {
+    lock_file: File,
+    instance_id: String,
+}
+
+impl ActiveAgentTestGuard {
+    pub(crate) fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+}
+
+impl Drop for ActiveAgentTestGuard {
+    fn drop(&mut self) {
+        let _ = self.lock_file.unlock();
+    }
+}
+
+pub(crate) fn activate_test_agent(
+    paths: &skybridge_agent::AgentPaths,
+) -> Result<ActiveAgentTestGuard> {
+    std::fs::create_dir_all(&paths.runtime_dir)?;
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&paths.agent_runtime_lock_file)?;
+    lock_file.lock()?;
+    let health = skybridge_core::AgentHealthSnapshot::new(
+        skybridge_core::AgentRuntimeStatus::Healthy,
+        std::process::id(),
+        paths.root.display().to_string(),
+    );
+    let instance_id = health.instance_id.clone();
+    let lease = skybridge_core::AgentRuntimeLease::new(
+        instance_id.clone(),
+        std::process::id(),
+        paths.root.display().to_string(),
+    );
+    std::fs::write(
+        &paths.agent_runtime_lock_file,
+        serde_json::to_vec_pretty(&lease)?,
+    )?;
+    std::fs::write(&paths.health_file, serde_json::to_vec_pretty(&health)?)?;
+    Ok(ActiveAgentTestGuard {
+        lock_file,
+        instance_id,
+    })
 }
 
 pub(crate) struct EnvVarGuard {

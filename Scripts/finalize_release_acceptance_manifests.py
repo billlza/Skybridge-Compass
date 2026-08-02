@@ -241,6 +241,15 @@ def _validate_pre_cleanup_payload(payload: dict[str, Any]) -> bool:
     if "finalizationOrder" in payload:
         _fail("pre-cleanup manifest must not claim a finalization order")
     if candidate:
+        if payload.get("transport") == "p2p":
+            if payload.get("macHostLaunchMode") != "packaged":
+                _fail("P2P acceptance candidate macHostLaunchMode must be packaged")
+            if payload.get("macHostDiagnosticOnly") is not False:
+                _fail("P2P acceptance candidate mac host must not be diagnostic-only")
+            if payload.get("identitySourceStaplerValid") is not True:
+                _fail("P2P acceptance candidate must prove a stapled macOS host identity source")
+            if payload.get("identitySourceGatekeeperAccepted") is not True:
+                _fail("P2P acceptance candidate must prove Gatekeeper acceptance for the macOS host identity source")
         if payload.get("iosProductSurface") != "production":
             _fail("acceptance candidate iosProductSurface must be production")
         if payload.get("iosTestingCompilationCondition") is not False:

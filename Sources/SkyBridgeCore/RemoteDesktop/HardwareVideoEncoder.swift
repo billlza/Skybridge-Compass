@@ -337,6 +337,30 @@ public class HardwareVideoEncoder: ObservableObject {
  // MARK: - 私有方法
     
  /// 设置压缩会话
+
+    /// 编码器规格字典。
+    ///
+    /// `kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder` 在 iOS 需要 17.4+，
+    /// 而本包最低支持 iOS 17.0。低于该版本时返回 nil，即不显式禁用硬件编码器 —— 这只影响
+    /// `enableHardwareAcceleration == false` 这一分支的强制力，不会额外开启任何能力。
+    private static func encoderSpecification(
+        enableHardwareAcceleration: Bool
+    ) -> CFDictionary? {
+        guard !enableHardwareAcceleration else { return nil }
+#if os(macOS)
+        return [
+            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: kCFBooleanFalse
+        ] as CFDictionary
+#else
+        if #available(iOS 17.4, *) {
+            return [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: kCFBooleanFalse
+            ] as CFDictionary
+        }
+        return nil
+#endif
+    }
+
     private func setupCompressionSession() throws {
  // 清理现有会话
         invalidateCompressionSession()
@@ -349,9 +373,9 @@ public class HardwareVideoEncoder: ObservableObject {
             width: Int32(currentConfiguration.resolution.width),
             height: Int32(currentConfiguration.resolution.height),
             codecType: currentConfiguration.codec.vtCodecType,
-            encoderSpecification: currentConfiguration.enableHardwareAcceleration ? nil : [
-                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: kCFBooleanFalse
-            ] as CFDictionary,
+            encoderSpecification: Self.encoderSpecification(
+                enableHardwareAcceleration: currentConfiguration.enableHardwareAcceleration
+            ),
             imageBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
                 kCVPixelBufferMetalCompatibilityKey: kCFBooleanTrue!

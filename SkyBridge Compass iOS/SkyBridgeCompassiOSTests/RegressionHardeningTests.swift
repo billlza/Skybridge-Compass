@@ -1,6 +1,8 @@
 import CryptoKit
 import Dispatch
 import Network
+import class SkyBridgeProtocolCore.InboundFileTransferIOActor
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import SkyBridgeRealtimeMedia
 import UIKit
 import XCTest
@@ -77,8 +79,8 @@ final class SecureBytesHardeningTests: XCTestCase {
     XCTAssertEqual(copy, expected)
   }
 
-  func testConcurrentReadsAndWritesReturnCoherentCopies() {
-    let secureBytes = SecureBytes(count: 64)
+  func testConcurrentReadsAndWritesReturnCoherentCopies() throws {
+    let secureBytes = try SecureBytes(count: 64)
     let probe = CoherenceProbe()
 
     DispatchQueue.concurrentPerform(iterations: 1_000) { iteration in
@@ -107,6 +109,27 @@ final class SecureBytesHardeningTests: XCTestCase {
 @MainActor
 private final class PairingPromptActivationGate {
   var allowsPresentation = false
+}
+
+private enum PreparedFileProtectionTestError: Error {
+  case rejected
+}
+
+private final class PreparedFileProtectionFailingFileManager: FileManager, @unchecked Sendable {
+  var rejectsPreparedFileProtection = false
+  var rejectedProtectionLastPathComponent: String?
+
+  override func setAttributes(
+    _ attributes: [FileAttributeKey: Any],
+    ofItemAtPath path: String
+  ) throws {
+    let lastPathComponent = URL(fileURLWithPath: path).lastPathComponent
+    if (rejectsPreparedFileProtection && lastPathComponent.contains(".prepared-"))
+        || lastPathComponent == rejectedProtectionLastPathComponent {
+      throw PreparedFileProtectionTestError.rejected
+    }
+    try super.setAttributes(attributes, ofItemAtPath: path)
+  }
 }
 
 @available(iOS 17.0, *)
@@ -149,6 +172,10 @@ private final class PairingPromptSceneHost {
 
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
+  private enum PairingTimerTestError: Error, Sendable {
+    case injectedFailure
+  }
+
   func testMediaRelayLeaseDecoderUsesLocalRoleEndpoint() throws {
     let body = """
       {
@@ -205,27 +232,70 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(manager.contains("CrossNetworkWebRTCLocalAppMessageFactory.authenticatedFileTransferRouteBindingMessages("))
     XCTAssertTrue(manager.contains("FileTransferRuntime.shared.ensureHealthy()"))
     XCTAssertTrue(manager.contains("strict_pqc_rekey_pending"))
-    XCTAssertTrue(manager.contains("stage: \"initial-handshake\""))
-    XCTAssertTrue(manager.contains("stage: \"inbound-initial-handshake\""))
+    XCTAssertTrue(manager.contains("stage: \"pairing-material-admission\""))
+    XCTAssertFalse(manager.contains("stage: \"initial-handshake\""))
+    XCTAssertFalse(manager.contains("stage: \"inbound-initial-handshake\""))
     XCTAssertTrue(manager.contains("stage: \"inbound-rekey\""))
     XCTAssertTrue(manager.contains("stage: \"outbound-rekey\""))
   }
 
-  func testFileTransferCapabilityTracksHealthyListenerAndStartupFailureIsVisible() throws {
+    func testFileTransferCapabilityTracksHealthyListenerAndStartupFailureIsVisible() throws {
     let runtime = try iosFileTransferRuntimeSource()
     let manager = try p2pConnectionManagerSource()
     let app = try skyBridgeCompassAppSource()
 
-    XCTAssertTrue(runtime.contains("public func startIfNeeded() async throws"))
+        XCTAssertTrue(runtime.contains("public func startIfNeeded() async throws"))
+        XCTAssertTrue(runtime.contains("private var startAttempt: StartAttempt?"))
+        XCTAssertTrue(runtime.contains("refreshAdvertisingAuthorityIfActive"))
     XCTAssertTrue(runtime.contains("@Published public private(set) var isReady = false"))
     XCTAssertTrue(runtime.contains("isReady = false"))
     XCTAssertTrue(runtime.contains("throw error"))
     XCTAssertTrue(manager.contains("guard FileTransferRuntime.shared.isReady else"))
     XCTAssertTrue(manager.contains("return (capabilities, nil, nil)"))
-    XCTAssertTrue(app.contains("try await FileTransferRuntime.shared.startIfNeeded()"))
+        XCTAssertTrue(app.contains("try await FileTransferRuntime.shared.startIfNeeded()"))
+        XCTAssertTrue(app.contains("前台恢复文件传输监听器失败"))
     XCTAssertTrue(app.contains("已撤销本机文件传输能力广告"))
-    XCTAssertFalse(app.contains("\n        await FileTransferRuntime.shared.startIfNeeded()"))
-  }
+        XCTAssertFalse(app.contains("\n        await FileTransferRuntime.shared.startIfNeeded()"))
+    }
+
+    func testIOSFileTransferAuthorityUsesCommittedIdentityAndExactListenerRebind() throws {
+        let service = try iosFileTransferNetworkServiceSource()
+        let settings = try repositoryScriptSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift"
+        )
+
+        XCTAssertTrue(service.contains("IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()"))
+        XCTAssertTrue(service.contains("committedActiveProtocolIdentitySnapshot()"))
+        XCTAssertFalse(service.contains(".currentProtocolIdentitySnapshot()"))
+        XCTAssertTrue(service.contains("stopListenerPreservingAcceptedConnections()"))
+        XCTAssertTrue(service.contains("try await startListening(authorityOverride: authority)"))
+        XCTAssertTrue(service.contains("listenerGeneration &+= 1"))
+        XCTAssertTrue(service.contains("pendingListener === candidate"))
+        XCTAssertTrue(service.contains("listener === sourceListener"))
+        XCTAssertTrue(service.contains("isBonjourPublished"))
+        XCTAssertTrue(settings.contains("FileTransferRuntime.shared"))
+        XCTAssertTrue(settings.contains("refreshLocalProtocolIdentityAdvertisements("))
+        XCTAssertTrue(settings.contains("refreshAdvertisingAuthorityIfActive(authority)"))
+        XCTAssertTrue(settings.contains("var failures: [String] = []"))
+    }
+
+    func testCurrentPathPrincipalNeverUsesBusinessNebulaIdentifierAsTenant() throws {
+        let authentication = try repositoryScriptSource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/AuthenticationManager.swift"
+        )
+        let signaling = try crossNetworkSignalServerClientSource()
+
+        let principal = try sourceSlice(
+            from: "var currentPathAuthenticationPrincipal:",
+            to: "public var remoteControlSecurityIdentityMetadata:",
+            in: authentication
+        )
+        XCTAssertTrue(principal.contains("resolveAuthenticatedJWTIdentity("))
+        XCTAssertTrue(principal.contains("tenantID: identity.effectiveTenantID"))
+        XCTAssertFalse(principal.contains("nebulaId"))
+        XCTAssertFalse(signaling.contains("sessionTenantID: identitySession?.nebulaId"))
+        XCTAssertFalse(signaling.contains("sessionTenantID: original.nebulaId"))
+    }
 
   func testInboundFileTransferSupportStaysOutsideManager() throws {
     let manager = try crossNetworkWebRTCManagerSource()
@@ -549,12 +619,46 @@ final class RegressionHardeningTests: XCTestCase {
     do {
       try await gate.waitReady(timeoutSeconds: 0.05)
       XCTFail("Connection ready wait should fail when no ready or failed state arrives.")
-    } catch {
+    } catch let error as P2PConnectionManager.ConnectionReadyTimeoutError {
+      XCTAssertEqual(error.lastState, .setup)
+      XCTAssertNil(error.lastWaitingError)
       XCTAssertLessThan(
         Date().timeIntervalSince(startedAt),
         1.0,
         "Connection candidate timeout must not hang behind an uncancellable continuation."
       )
+    } catch {
+      XCTFail("Connection timeout must preserve typed state, got: \(error)")
+    }
+  }
+
+  func testP2PConnectionReadyGatePreservesLastWaitingNetworkErrorAtTimeout() async {
+    let gate = P2PConnectionManager.ConnectionReadyGate()
+    gate.onState(.preparing)
+    gate.onState(.waiting(.posix(.ENETDOWN)))
+
+    do {
+      try await gate.waitReady(timeoutSeconds: 0.01)
+      XCTFail("A waiting connection must still respect the bounded deadline.")
+    } catch let error as P2PConnectionManager.ConnectionReadyTimeoutError {
+      XCTAssertEqual(error.lastState, .waiting)
+      XCTAssertEqual(error.lastWaitingError, .posix(.ENETDOWN))
+    } catch {
+      XCTFail("Connection timeout must preserve the last NWError, got: \(error)")
+    }
+  }
+
+  func testP2PConnectionReadyGateNetworkCancellationResumesImmediately() async {
+    let gate = P2PConnectionManager.ConnectionReadyGate()
+    gate.onState(.cancelled)
+
+    do {
+      try await gate.waitReady(timeoutSeconds: 30)
+      XCTFail("A network-cancelled connection must not wait for the timeout.")
+    } catch is P2PConnectionManager.ConnectionReadyCancelledError {
+      // Expected typed transport cancellation.
+    } catch {
+      XCTFail("Network cancellation must preserve its typed error, got: \(error)")
     }
   }
 
@@ -699,7 +803,9 @@ final class RegressionHardeningTests: XCTestCase {
     manager.testOnlyResetPendingPairingDecisionState()
     defer { manager.testOnlyResetPendingPairingDecisionState() }
 
-    manager.testOnlyInstallStandalonePairingApproval(timeout: .milliseconds(20))
+    _ = try manager.testOnlyInstallStandalonePairingApproval(
+      timeout: .milliseconds(20)
+    )
     XCTAssertTrue(manager.testOnlyHasPendingPairingApproval)
     XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 1)
     let expiredRequest = try XCTUnwrap(manager.pendingPairingTrustRequest)
@@ -711,7 +817,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
     XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 0)
 
-    let replacementRequestID = manager.testOnlyInstallStandalonePairingApproval(
+    let replacementRequestID = try manager.testOnlyInstallStandalonePairingApproval(
       timeout: .seconds(30)
     )
     do {
@@ -722,6 +828,28 @@ final class RegressionHardeningTests: XCTestCase {
     }
     XCTAssertEqual(manager.pendingPairingTrustRequest?.id, replacementRequestID)
     XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 1)
+  }
+
+  @MainActor
+  func testStandalonePairingApprovalTimerFailureRejectsWithoutCrashing() async throws {
+    let manager = P2PConnectionManager.instance
+    manager.testOnlyResetPendingPairingDecisionState()
+    defer { manager.testOnlyResetPendingPairingDecisionState() }
+
+    _ = try manager.testOnlyInstallStandalonePairingApproval(
+      timeout: .seconds(30),
+      sleep: { _ in throw PairingTimerTestError.injectedFailure }
+    )
+    for _ in 0..<100 where manager.testOnlyHasPendingPairingApproval {
+      await Task.yield()
+    }
+
+    XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
+    XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 0)
+    XCTAssertEqual(
+      manager.lastError,
+      "Pairing approval timer failed; request rejected fail closed"
+    )
   }
 
   @MainActor
@@ -742,7 +870,7 @@ final class RegressionHardeningTests: XCTestCase {
     let firstDecision = await approvalTask.value
     XCTAssertEqual(firstDecision, .timedOut)
 
-    let replacementRequestID = manager.testOnlyInstallStandalonePairingApproval(
+    let replacementRequestID = try manager.testOnlyInstallStandalonePairingApproval(
       timeout: .seconds(30)
     )
 
@@ -1054,7 +1182,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(forwardedDecisions, [.reject])
   }
 
-  func testRealDeviceSmokeUsesDynamicMacControlPortForPIBRoute() throws {
+  func testRealDeviceSmokeKeepsDynamicPortsDiagnosticAndUsesProductBonjourRoute() throws {
     let hostSource = try repositoryScriptSource("Sources/LocalLanInteropHost/main.swift")
     let smokeScript = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
     let harnessSource = try repositoryScriptSource(
@@ -1063,6 +1191,9 @@ final class RegressionHardeningTests: XCTestCase {
     let p2pSource = try p2pConnectionManagerSource()
 
     XCTAssertTrue(hostSource.contains("waitForControlAdvertisementPort()"))
+    XCTAssertTrue(hostSource.contains("private let p2pDiscoveryService = P2PDiscoveryService.shared"))
+    XCTAssertTrue(hostSource.contains("try await p2pDiscoveryService.ensureStartedAndScanning()"))
+    XCTAssertFalse(hostSource.contains("private let discoveryManager = DeviceDiscoveryManager()"))
     XCTAssertTrue(hostSource.contains("ready discovery=_skybridge._tcp port=\\(controlPort)"))
     XCTAssertFalse(
       hostSource.contains("ready discovery=_skybridge._tcp port=9527"),
@@ -1075,25 +1206,35 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(smokeScript.contains("SMOKE_BUILD_DIR=\"${SKYBRIDGE_P2P_SMOKE_BUILD_DIR:-$ROOT_DIR/.build/real-device-p2p-smoke}\""))
     XCTAssertTrue(smokeScript.contains("MAC_DIRECT_BIN=\"$SMOKE_BUILD_DIR/debug/LocalLanInteropHost\""))
     XCTAssertTrue(smokeScript.contains("MAC_SOURCE_DIRECT_BIN=\"$SMOKE_BUILD_DIR/debug/LocalLanSmokeSourceHost\""))
-    XCTAssertTrue(smokeScript.contains("if [[ \"$MAC_HOST_LAUNCH_MODE\" == \"direct\" ]]"))
+    XCTAssertTrue(smokeScript.contains("case \"$MAC_HOST_LAUNCH_MODE\" in"))
+    XCTAssertTrue(
+      smokeScript.contains("direct)\n      start_macos_smoke_host_directly")
+    )
     XCTAssertTrue(smokeScript.contains("if [[ \"$LAB_RUN\" != \"1\" ]]"))
     XCTAssertTrue(smokeScript.contains("\"$MAC_DIRECT_BIN\" >\"$HOST_STDOUT\" 2>&1 &"))
     XCTAssertTrue(smokeScript.contains("launch method=direct-app-binary pid=$HOST_PID mode=direct binary=swiftpm-build-product"))
     XCTAssertFalse(smokeScript.contains("fallbackFrom=open-app-bundle"))
     XCTAssertTrue(smokeScript.contains("failed stage=mac-host"))
     XCTAssertTrue(smokeScript.contains("verify_mac_control_port_reachable \"$MAC_CONTROL_HOST\" \"$MAC_CONTROL_PORT\""))
-    XCTAssertTrue(smokeScript.contains("mac-control-port reachable=1 host=$host port=$port source=pre-ios-probe"))
+    XCTAssertTrue(smokeScript.contains("mac-control-port reachable=1 host=$host port=$port source=local-self-probe"))
     XCTAssertTrue(smokeScript.contains("failed stage=mac-host phase=control-port-probe reason=tcp-unreachable"))
-    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT=\"$MAC_CONTROL_PORT\""))
-    XCTAssertTrue(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_HOST=\"$MAC_CONTROL_HOST\""))
+    XCTAssertTrue(smokeScript.contains("verify_host_pid_owns_listener_port \"$MAC_CONTROL_PORT\" \"control\""))
+    XCTAssertTrue(smokeScript.contains("record_macos_smoke_host_launch_evidence"))
+    XCTAssertFalse(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT"))
+    XCTAssertFalse(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_HOST"))
+    XCTAssertFalse(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT"))
 
-    XCTAssertTrue(harnessSource.contains("applySmokePinnedControlRoute"))
-    XCTAssertTrue(harnessSource.contains("SKYBRIDGE_SMOKE_TARGET_CONTROL_PORT"))
-    XCTAssertTrue(harnessSource.contains("updated.portMap[controlService] = port"))
+    XCTAssertTrue(harnessSource.contains("verifyDiscoveredControlRoute"))
+    XCTAssertTrue(harnessSource.contains("liveBonjourServiceEndpoints("))
+    XCTAssertTrue(harnessSource.contains("liveBonjourControlEndpoints: liveEndpoints"))
+    XCTAssertTrue(harnessSource.contains("preferredInterface="))
+    XCTAssertTrue(harnessSource.contains("source=bonjour-service"))
+    XCTAssertFalse(harnessSource.contains("applySmokePinnedControlRoute"))
+    XCTAssertFalse(harnessSource.contains("control-route-preflight"))
 
     XCTAssertTrue(
-      p2pSource.contains("connectionEndpointCandidates(for: device, preferDirectHostPort: true)"),
-      "PIB-1 OOB binding should try the pinned direct LAN route before Bonjour service fallback."
+      p2pSource.contains("let endpoints = connectionEndpointCandidates(for: device)"),
+      "PIB-1 OOB binding must use the provenance-bound DNS-SD control route."
     )
   }
 
@@ -2937,7 +3078,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(messageASOACandidateBody.contains("soa.initiatorPeerId"))
     XCTAssertTrue(messageASOACandidateBody.contains("TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint)"))
     XCTAssertTrue(messageASOACandidateBody.contains("ProtocolIdentityTrustStore.shared.deviceIds(containingFingerprint: fingerprint)"))
-    XCTAssertTrue(messageASOACandidateBody.contains("TrustedDeviceStore.shared.trustedDevices"))
+    XCTAssertTrue(messageASOACandidateBody.contains("activeAuthoritySnapshot()"))
+    XCTAssertTrue(messageASOACandidateBody.contains("return []"))
+    XCTAssertFalse(messageASOACandidateBody.contains("TrustedDeviceStore.shared.trustedDevices"))
     XCTAssertTrue(messageASOACandidateBody.contains("lastAcceptedPairingIdentityDeviceIdByPeerId"))
     XCTAssertTrue(messageASOACandidateBody.contains("soaPeerIdBytes(for: normalizedStablePeerId)"))
     XCTAssertTrue(trustContextBody.contains("messageAStableCandidates + [peerId"))
@@ -3780,6 +3923,7 @@ final class RegressionHardeningTests: XCTestCase {
 
   func testSmokeTraceWriterKeepsStatusFileIOOffMediaHotPaths() throws {
     let writerBody = try diagnosticTraceSource()
+    let smokeHarness = try skyBridgeCompassAppSource()
     let appendStatusBody = try sourceSlice(
       from: "static func appendStatus(_ line: @autoclosure () -> String)",
       to: "static func append(_ line: @autoclosure () -> String)",
@@ -3794,6 +3938,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(writerBody.contains("private static let writerQueue"))
     XCTAssertTrue(writerBody.contains("private final class WriterState: @unchecked Sendable"))
     XCTAssertTrue(writerBody.contains("writerQueue.async"))
+    XCTAssertTrue(writerBody.contains("static func flush()"))
+    XCTAssertTrue(writerBody.contains("writerQueue.sync {}"))
+    XCTAssertTrue(smokeHarness.contains("defer { SkyBridgeDiagnosticTrace.flush() }"))
     XCTAssertTrue(writerBody.contains("try SmokeArtifactFileIO.appendProtectedData(data, to: url)"))
     XCTAssertFalse(appendStatusBody.contains("FileHandle"))
     XCTAssertFalse(appendStatusBody.contains("ISO8601DateFormatter().string"))
@@ -4479,10 +4626,29 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   func testNoAuthBrowseFailureDoesNotAutoRecover() {
-    let error = NWError.dns(DeviceDiscoveryManager.bonjourAuthorizationDNSCode)
+    let error = NWError.dns(DeviceDiscoveryManager.bonjourNoAuthDNSCode)
 
     XCTAssertTrue(DeviceDiscoveryManager.isBonjourAuthorizationError(error))
+    XCTAssertEqual(DeviceDiscoveryManager.bonjourAuthorizationFailure(error), .noAuth)
     XCTAssertFalse(DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: error))
+  }
+
+  func testPolicyDeniedBrowseFailureIsAnAuthorizationBlocker() {
+    let error = NWError.dns(DeviceDiscoveryManager.bonjourPolicyDeniedDNSCode)
+
+    XCTAssertTrue(DeviceDiscoveryManager.isBonjourAuthorizationError(error))
+    XCTAssertEqual(DeviceDiscoveryManager.bonjourAuthorizationFailure(error), .policyDenied)
+    XCTAssertFalse(DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: error))
+  }
+
+  func testBonjourTimeoutIsRetryableButUnknownDNSErrorsAreNot() {
+    XCTAssertTrue(
+      DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: NWError.dns(-65568))
+    )
+    XCTAssertFalse(
+      DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: NWError.dns(-65790)),
+      "未知 DNS 错误不得被无限重建掩盖"
+    )
   }
 
   func testTransientBrowserFailuresStillAutoRecover() {
@@ -4492,11 +4658,410 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(DeviceDiscoveryManager.shouldAutoRecoverBrowser(after: error))
   }
 
-  func testAuthorizationRecoveryDelayUsesBoundedBackoff() {
+  func testLateLocalNetworkAuthorizationRemainsRecoverableAtBoundedCadence() {
     XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 1), 2)
     XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 2), 5)
     XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 3), 10)
-    XCTAssertNil(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 4))
+    XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 4), 30)
+    XCTAssertEqual(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 40), 30)
+    XCTAssertNil(DeviceDiscoveryManager.authorizationRecoveryDelay(forAttempt: 0))
+
+    XCTAssertEqual(DeviceDiscoveryManager.nextAuthorizationRecoveryAttempt(after: 0), 1)
+    XCTAssertEqual(DeviceDiscoveryManager.nextAuthorizationRecoveryAttempt(after: 3), 4)
+    XCTAssertEqual(
+      DeviceDiscoveryManager.nextAuthorizationRecoveryAttempt(after: 4),
+      4,
+      "权限弹窗在应用保持前台时晚于 17 秒处理，恢复监督仍必须存活，且重试状态不得无界增长"
+    )
+    XCTAssertEqual(DeviceDiscoveryManager.nextAuthorizationRecoveryAttempt(after: .max), 4)
+  }
+
+  // MARK: - Advertising startup recovery
+  //
+  // 回归背景：广播启动是一次性 fail-closed 事务，浏览器侧有完整的授权识别 + 指数
+  // 重试，广播侧一个都没有。首次启动时 NWListener 发布 Bonjour 服务会触发本地网络
+  // 权限弹窗，用户点“允许”之前 listener 停在 `.waiting`（此前落到 `default: break`
+  // 完全不可见），8 秒硬超时后广播被取消且永不重试 —— 表现就是“启动后没有进入广播”。
+
+  func testPendingLocalNetworkAuthorizationIsRetryable() {
+    XCTAssertTrue(
+      DeviceDiscoveryManager.shouldRetryAdvertising(
+        after: DeviceDiscoveryManager.AdvertisingStartupError
+          .localNetworkAuthorizationPending(seconds: 45)
+      ),
+      "等待本地网络授权是用户可解除的阻塞，必须保留自动恢复路径"
+    )
+  }
+
+  func testAdvertisingStartupTimeoutIsRetryable() {
+    XCTAssertTrue(
+      DeviceDiscoveryManager.shouldRetryAdvertising(
+        after: DeviceDiscoveryManager.AdvertisingStartupError.timedOut(seconds: 8)
+      )
+    )
+  }
+
+  func testTransientListenerFailuresAreRetryable() {
+    XCTAssertTrue(
+      DeviceDiscoveryManager.shouldRetryAdvertising(after: NWError.posix(.EADDRINUSE)),
+      "端口尚未释放等瞬态失败必须重试，否则本机永久不可被发现"
+    )
+  }
+
+  func testSupersededAndCancelledAdvertisingStartupsAreNotRetried() {
+    XCTAssertFalse(
+      DeviceDiscoveryManager.shouldRetryAdvertising(
+        after: DeviceDiscoveryManager.AdvertisingStartupError.superseded
+      ),
+      "被新启动请求替换时重试会与当前所有者互相拆台"
+    )
+    XCTAssertFalse(
+      DeviceDiscoveryManager.shouldRetryAdvertising(
+        after: DeviceDiscoveryManager.AdvertisingStartupError.cancelledBeforeReady
+      )
+    )
+    XCTAssertFalse(
+      DeviceDiscoveryManager.shouldRetryAdvertising(after: CancellationError()),
+      "显式停止监听不得被自动恢复重新拉起"
+    )
+  }
+
+  func testListeningRecoveryDelayEscalatesThenHoldsAtCeiling() throws {
+    XCTAssertEqual(try P2PConnectionManager.listeningRecoveryDelay(forAttempt: 1).get(), 3)
+    XCTAssertEqual(try P2PConnectionManager.listeningRecoveryDelay(forAttempt: 2).get(), 8)
+    XCTAssertEqual(try P2PConnectionManager.listeningRecoveryDelay(forAttempt: 3).get(), 20)
+    XCTAssertEqual(try P2PConnectionManager.listeningRecoveryDelay(forAttempt: 4).get(), 45)
+
+    let delays = try (1...40).map {
+      try P2PConnectionManager.listeningRecoveryDelay(forAttempt: $0).get()
+    }
+    for index in delays.indices.dropFirst() {
+      XCTAssertGreaterThanOrEqual(
+        delays[index],
+        delays[index - 1],
+        "退避不得随重试次数变小"
+      )
+    }
+    for delay in delays.dropFirst(4) {
+      XCTAssertEqual(
+        delay,
+        60,
+        "可发现性是期望状态：退避收敛到上限后必须继续重试，而不是放弃"
+      )
+      XCTAssertGreaterThan(delay, 0, "间隔为 0 会退化成忙等")
+    }
+  }
+
+  func testListeningRecoveryDelayRejectsInvalidAttempt() {
+    XCTAssertEqual(
+      P2PConnectionManager.listeningRecoveryDelay(forAttempt: 0),
+      .failure(.invalidAttempt(0))
+    )
+  }
+
+  func testPendingLocalNetworkAuthorizationIsSurfacedAsUserActionable() {
+    XCTAssertTrue(
+      DeviceDiscoveryManager.isPendingLocalNetworkAuthorization(
+        DeviceDiscoveryManager.AdvertisingStartupError
+          .localNetworkAuthorizationPending(seconds: 45)
+      )
+    )
+    XCTAssertTrue(
+      DeviceDiscoveryManager.isPendingLocalNetworkAuthorization(
+        NWError.dns(DeviceDiscoveryManager.bonjourNoAuthDNSCode)
+      )
+    )
+    XCTAssertTrue(
+      DeviceDiscoveryManager.isPendingLocalNetworkAuthorization(
+        NWError.dns(DeviceDiscoveryManager.bonjourPolicyDeniedDNSCode)
+      )
+    )
+    XCTAssertFalse(
+      DeviceDiscoveryManager.isPendingLocalNetworkAuthorization(
+        DeviceDiscoveryManager.AdvertisingStartupError.timedOut(seconds: 8)
+      ),
+      "普通挂死不得被误报成权限问题，否则会把用户引向错误的系统设置页"
+    )
+    XCTAssertFalse(
+      DeviceDiscoveryManager.isPendingLocalNetworkAuthorization(NWError.posix(.EADDRINUSE))
+    )
+  }
+
+  func testAdvertisingLifecycleOnlyFlagsAuthorizationAsUserAction() {
+    typealias State = P2PConnectionManager.AdvertisingLifecycleState
+
+    XCTAssertTrue(
+      State.awaitingLocalNetworkAuthorization(nextRetryInSeconds: 45).requiresUserAction
+    )
+    XCTAssertFalse(State.idle.requiresUserAction)
+    XCTAssertFalse(State.starting.requiresUserAction)
+    XCTAssertFalse(State.advertising(port: 9527).requiresUserAction)
+    XCTAssertFalse(State.retrying(attempt: 2, nextRetryInSeconds: 8).requiresUserAction)
+    XCTAssertFalse(State.blockedByStartupFailure(reason: "no authority").requiresUserAction)
+  }
+
+  func testOnlyAdvertisingStateCountsAsNotSilent() {
+    typealias State = P2PConnectionManager.AdvertisingLifecycleState
+
+    XCTAssertFalse(State.advertising(port: 9527).isSilent)
+    for state: State in [
+      .idle,
+      .starting,
+      .awaitingLocalNetworkAuthorization(nextRetryInSeconds: 45),
+      .retrying(attempt: 1, nextRetryInSeconds: 3),
+      .blockedByStartupFailure(reason: "no authority")
+    ] {
+      XCTAssertTrue(
+        state.isSilent,
+        "只有真正处于 advertising 才算「对端可见」，其余状态都必须算静默"
+      )
+    }
+  }
+
+  func testStartupBlockedStateIsDistinctFromIdle() {
+    typealias State = P2PConnectionManager.AdvertisingLifecycleState
+
+    XCTAssertNotEqual(
+      State.blockedByStartupFailure(reason: "no authority"),
+      State.idle,
+      """
+      「未启用」与「已启用但被拒绝」必须可区分：两者合并成 idle 正是身份恢复失败后\
+      界面完全静默、只有一行日志的成因
+      """
+    )
+  }
+
+  /// 身份 authority 恢复失败时，广播必须停用（TXT 里的身份会被对端 pin），
+  /// 但浏览不需要任何本机身份，不应被一并关掉。
+  func testAuthorityRecoveryFailureStopsAdvertisingButNotBrowsing() throws {
+    let appSource = try readRepositorySource(
+      at: iOSSourceURL("Sources/App/SkyBridgeCompassApp.swift")
+    )
+    let managerSource = try readRepositorySource(
+      at: iOSSourceURL("Sources/Managers/P2PConnectionManager.swift")
+    )
+
+    let initializeServices = try XCTUnwrap(
+      appSource.range(of: "private func initializeServices() async")
+    )
+    let discovery = try XCTUnwrap(
+      appSource.range(
+        of: "applyDiscoverySettings()",
+        range: initializeServices.upperBound..<appSource.endIndex
+      )
+    )
+    let requestListening = try XCTUnwrap(
+      appSource.range(
+        of: "try await connectionManager.startListening()",
+        range: discovery.upperBound..<appSource.endIndex
+      )
+    )
+
+    XCTAssertLessThan(
+      discovery.lowerBound,
+      requestListening.lowerBound,
+      "浏览必须先独立启动，随后才请求受 authority 门控的广播监听"
+    )
+    let appStartupPrefix = String(
+      appSource[initializeServices.lowerBound..<requestListening.lowerBound]
+    )
+    XCTAssertFalse(
+      appStartupPrefix.contains("IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()"),
+      "App 层不得在浏览启动前执行 authority 门控，否则恢复失败会同时关闭发现与广播"
+    )
+
+    let startListening = try XCTUnwrap(
+      managerSource.range(of: "public func startListening() async throws")
+    )
+    let transactionDeclaration = try XCTUnwrap(
+      managerSource.range(
+        of: "private func performStartListeningTransaction() async throws",
+        range: startListening.upperBound..<managerSource.endIndex
+      )
+    )
+    let startListeningBody = String(
+      managerSource[startListening.lowerBound..<transactionDeclaration.lowerBound]
+    )
+    let beginSupervision = try XCTUnwrap(
+      startListeningBody.range(of: "beginListeningSupervision()")
+    )
+    let performTransaction = try XCTUnwrap(
+      startListeningBody.range(of: "try await self.performStartListeningTransaction()")
+    )
+    XCTAssertLessThan(
+      beginSupervision.lowerBound,
+      performTransaction.lowerBound,
+      "必须先登记 desired state/监督器，再执行可能失败的 authority 事务"
+    )
+    XCTAssertTrue(startListeningBody.contains("self.discoveryManager.stopAdvertising()"))
+    XCTAssertTrue(startListeningBody.contains("self.isListening = false"))
+    XCTAssertTrue(
+      startListeningBody.contains("self.scheduleListeningRecovery(after: error)"),
+      "authority 失败必须保持可观测且由 desired-state supervisor 分类恢复"
+    )
+
+    let transactionEnd = try XCTUnwrap(
+      managerSource.range(
+        of: "func refreshAdvertisingAuthorityIfActive",
+        range: transactionDeclaration.upperBound..<managerSource.endIndex
+      )
+    )
+    let transactionBody = String(
+      managerSource[transactionDeclaration.lowerBound..<transactionEnd.lowerBound]
+    )
+    let authorityGate = try XCTUnwrap(
+      transactionBody.range(
+        of: "IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()"
+      )
+    )
+    let advertise = try XCTUnwrap(
+      transactionBody.range(of: "self.discoveryManager.startAdvertising(")
+    )
+    XCTAssertLessThan(
+      authorityGate.lowerBound,
+      advertise.lowerBound,
+      "广播必须在读取并稳定 authority 之后才能发布可被对端 pin 的 TXT 身份"
+    )
+  }
+
+  func testDeniedLocalNetworkAccessIsPublishedForTheBrowseSideToo() throws {
+    let source = try readRepositorySource(
+      at: iOSSourceURL("Sources/Managers/DeviceDiscoveryManager.swift")
+    )
+
+    XCTAssertTrue(
+      source.contains("@Published public private(set) var isBrowseAuthorizationBlocked"),
+      "权限被拒会同时打断两个方向，浏览侧的阻塞必须可被 UI 观测"
+    )
+    XCTAssertTrue(
+      source.contains("isBrowseAuthorizationBlocked = true"),
+      "命中 -65555 授权错误时必须置位"
+    )
+    XCTAssertTrue(
+      source.contains("isBrowseAuthorizationBlocked = !authorizationBlockedServiceTypes.isEmpty"),
+      "浏览器就绪后必须按剩余阻塞集合复位，避免告警粘住"
+    )
+  }
+
+  func testAdvertisingIsSupervisedByDesiredStateNotASingleStartup() throws {
+    let source = try readRepositorySource(
+      at: iOSSourceURL("Sources/Managers/P2PConnectionManager.swift")
+    )
+
+    XCTAssertTrue(
+      source.contains("private var desiredListening: Bool = false"),
+      "广播必须建模为期望状态，而不是一次性事务"
+    )
+    XCTAssertTrue(
+      source.contains("beginListeningSupervision()"),
+      "启动必须登记期望状态并安装监督触发源"
+    )
+    XCTAssertTrue(
+      source.contains("discoveryManager.$isAdvertising"),
+      "监督器必须能感知已就绪的监听器意外消失"
+    )
+    XCTAssertTrue(
+      source.contains("NWPathMonitor()") && source.contains("handleListeningPathUpdate"),
+      "网络路径恢复必须能立即触发重建，而不是等下一次退避"
+    )
+    XCTAssertTrue(
+      source.contains("supervisorNudgeMinimumInterval"),
+      "立即重试触发源必须有抖动抑制，否则网络抖动会不断重置退避"
+    )
+    let healthStart = try XCTUnwrap(
+      source.range(of: "private func handleAdvertisingHealthChange(")
+    )
+    let pathStart = try XCTUnwrap(
+      source.range(
+        of: "private func handleListeningPathUpdate(",
+        range: healthStart.upperBound..<source.endIndex
+      )
+    )
+    let healthBody = String(source[healthStart.lowerBound..<pathStart.lowerBound])
+    XCTAssertTrue(healthBody.contains("guard isListening,"))
+    XCTAssertTrue(healthBody.contains("listeningStartupOperation == nil,"))
+    XCTAssertTrue(healthBody.contains("!advertisingAuthorityRefreshInProgress"))
+    XCTAssertTrue(healthBody.contains("nudgeListeningSupervisor("))
+    XCTAssertFalse(
+      healthBody.contains("scheduleListeningRecovery("),
+      "健康度观察不得与启动失败恢复双重驱动退避"
+    )
+
+    let stopListening = try XCTUnwrap(source.range(of: "public func stopListening() {"))
+    let stopBody = String(source[stopListening.lowerBound...].prefix(320))
+    XCTAssertTrue(
+      stopBody.contains("endListeningSupervision()"),
+      "只有显式停止监听才允许清除期望状态并拆除监督"
+    )
+  }
+
+  func testAdvertisingStartupHandlesWaitingStateAndExtendsAuthorizationDeadline() throws {
+    let source = try readRepositorySource(
+      at: iOSSourceURL("Sources/Managers/DeviceDiscoveryManager.swift")
+    )
+
+    XCTAssertTrue(
+      source.contains("case .waiting(let waitError):"),
+      "`.waiting` 不得再落入 `default: break`，否则首次启动的授权等待完全不可观测"
+    )
+    XCTAssertTrue(
+      source.contains("advertisingAuthorizationDeadlineExtended"),
+      "授权等待必须只延长一次启动窗口，避免反复 `.waiting` 无限推迟失败"
+    )
+    XCTAssertTrue(
+      source.contains("advertisingAuthorizationWaitTimeoutSeconds: TimeInterval = 45"),
+      "授权等待必须有一个明确的、用户可响应的窗口常量"
+    )
+    let waitingCase = try XCTUnwrap(source.range(of: "case .waiting(let waitError):"))
+    let waitingEnd = try XCTUnwrap(
+      source.range(of: "\n        default:", range: waitingCase.upperBound..<source.endIndex)
+    )
+    let waitingBody = String(source[waitingCase.upperBound..<waitingEnd.lowerBound])
+    XCTAssertTrue(
+      waitingBody.contains("scheduleAdvertisingStartupTimeout(")
+        && waitingBody.contains("Self.advertisingAuthorizationWaitTimeoutSeconds"),
+      "授权等待期间必须改用更长窗口重排超时，而不是沿用 8 秒挂死判定"
+    )
+    XCTAssertTrue(
+      waitingBody.contains("advertisingStartupContinuation != nil"),
+      "只有仍在启动窗口内才允许延长；已就绪的监听器不得被超时逻辑影响"
+    )
+    XCTAssertTrue(
+      source.contains(".localNetworkAuthorizationPending(seconds: seconds)"),
+      "超时错误必须区分“未获授权”与“真正挂死”"
+    )
+  }
+
+  func testFailedListeningStartupSchedulesBoundedRecovery() throws {
+    let source = try readRepositorySource(
+      at: iOSSourceURL("Sources/Managers/P2PConnectionManager.swift")
+    )
+
+    XCTAssertTrue(source.contains("self.scheduleListeningRecovery(after: error)"))
+    XCTAssertTrue(source.contains("self.cancelListeningRecovery()"))
+    XCTAssertTrue(
+      source.contains("DeviceDiscoveryManager.shouldRetryAdvertising(after: error)"),
+      "恢复调度必须复用广播失败分类，不得自行重新判定"
+    )
+    XCTAssertTrue(
+      source.contains("self.desiredListening,\n                  !self.isListening else {"),
+      "恢复重试必须在期望状态已撤销或已就绪时自行退出"
+    )
+
+    let stopListening = try XCTUnwrap(source.range(of: "public func stopListening() {"))
+    let stopBody = String(source[stopListening.lowerBound...].prefix(320))
+    XCTAssertTrue(
+      stopBody.contains("cancelListeningRecovery()"),
+      "显式停止监听必须同时取消恢复调度"
+    )
+  }
+
+  private func iOSSourceURL(_ relativePath: String) -> URL {
+    URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("SkyBridgeCompassiOS")
+      .appendingPathComponent(relativePath)
   }
 
   @MainActor
@@ -4516,6 +5081,7 @@ final class RegressionHardeningTests: XCTestCase {
       targetDeviceId: "peer-a",
       messageType: .text,
       payload: Data("p".utf8),
+      createdAt: Date().addingTimeInterval(-120),
       expiresAt: Date().addingTimeInterval(-60)
     )
 
@@ -4524,6 +5090,7 @@ final class RegressionHardeningTests: XCTestCase {
       targetDeviceId: "peer-b",
       messageType: .text,
       payload: Data("f".utf8),
+      createdAt: Date().addingTimeInterval(-120),
       expiresAt: Date().addingTimeInterval(-60)
     )
 
@@ -4653,7 +5220,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
     let bonjour = NWEndpoint.service(
       name: "Lza's MacBook Pro",
-      type: "_skybridge-remote._tcp",
+      type: DiscoveredDevice.remoteControlServiceType,
       domain: "local.",
       interface: nil
     )
@@ -4816,15 +5383,17 @@ final class RegressionHardeningTests: XCTestCase {
       discoverySource.contains(
         "txtValue(txtRecord, \"lanHost\", \"host\", \"ip\", \"ipv4\", \"address\", \"hostAddress\")"
       ))
+    XCTAssertTrue(discoverySource.contains("txtValue(txtRecord, \"lanIPv4\")"))
+    XCTAssertTrue(discoverySource.contains("txtValue(txtRecord, \"lanIPv6\", \"ipv6\")"))
     XCTAssertTrue(
       discoverySource.contains(
-        "\"lanHost\", \"lanIPv4\", \"lanIPv6\", \"host\", \"ip\", \"ipv4\", \"ipv6\", \"address\", \"hostAddress\""
+        "ConnectableAddressCanonicalizer.isRoutableLANAddress($0) ? $0 : nil"
       ))
     XCTAssertTrue(discoverySource.contains("ConnectableAddressCanonicalizer.bestLANAddress(["))
     XCTAssertTrue(discoverySource.contains("避免 Bonjour service 解析退回 link-local"))
   }
 
-  func testIOSP2PAdvertisingOnlyBecomesVisibleAfterListenerReady() throws {
+  func testIOSP2PAdvertisingOnlyBecomesVisibleAfterExactSocketAndRegistrationReady() throws {
     let discoverySource = try repositoryScriptSource(
       "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
     )
@@ -4837,11 +5406,59 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(discoverySource.contains("withTaskCancellationHandler"))
     XCTAssertTrue(discoverySource.contains("finishAdvertisingStartup(.failure(CancellationError()))"))
     XCTAssertTrue(discoverySource.contains("activeListener.start(queue: queue)"))
-    XCTAssertTrue(discoverySource.contains("case .ready:"))
-    XCTAssertTrue(discoverySource.contains("advertisingActualPort = activeListener.port?.rawValue"))
-    XCTAssertTrue(discoverySource.contains("appendListenerStatus(\n                \"ready service="))
-    XCTAssertTrue(discoverySource.contains("isAdvertising = true"))
-    XCTAssertTrue(discoverySource.contains("finishAdvertisingStartup(.success(()))"))
+    XCTAssertTrue(
+      discoverySource.contains(
+        "advertisingReadinessGate = BonjourRegistrationReadinessGate()"
+      )
+    )
+    XCTAssertTrue(discoverySource.contains("activeListener.serviceRegistrationUpdateHandler ="))
+
+    let listenerStateStart = try XCTUnwrap(
+      discoverySource.range(of: "private func handleListenerStateChange(")
+    )
+    let registrationStart = try XCTUnwrap(
+      discoverySource.range(
+        of: "private func handleServiceRegistrationChange(",
+        range: listenerStateStart.upperBound..<discoverySource.endIndex
+      )
+    )
+    let completionStart = try XCTUnwrap(
+      discoverySource.range(
+        of: "private func completeAdvertisingReadiness(",
+        range: registrationStart.upperBound..<discoverySource.endIndex
+      )
+    )
+    let incomingStart = try XCTUnwrap(
+      discoverySource.range(
+        of: "private func handleNewIncomingConnection(",
+        range: completionStart.upperBound..<discoverySource.endIndex
+      )
+    )
+    let listenerStateBody = String(
+      discoverySource[listenerStateStart.lowerBound..<registrationStart.lowerBound]
+    )
+    let registrationBody = String(
+      discoverySource[registrationStart.lowerBound..<completionStart.lowerBound]
+    )
+    let completionBody = String(
+      discoverySource[completionStart.lowerBound..<incomingStart.lowerBound]
+    )
+
+    XCTAssertTrue(listenerStateBody.contains("let observation = gate.observeSocketReady()"))
+    XCTAssertTrue(listenerStateBody.contains("completeAdvertisingReadiness("))
+    XCTAssertFalse(listenerStateBody.contains("isAdvertising = true"))
+    XCTAssertTrue(registrationBody.contains("gate.observeRegistrationAdded("))
+    XCTAssertTrue(registrationBody.contains("gate.observeRegistrationRemoved("))
+    XCTAssertTrue(registrationBody.contains("completeAdvertisingReadiness("))
+    XCTAssertFalse(registrationBody.contains("isAdvertising = true"))
+    XCTAssertTrue(completionBody.contains("listener === activeListener"))
+    XCTAssertTrue(completionBody.contains("listenerGeneration == generation"))
+    XCTAssertTrue(completionBody.contains("let port = activeListener.port?.rawValue"))
+    XCTAssertTrue(completionBody.contains("port > 0"))
+    XCTAssertTrue(completionBody.contains("advertisingActualPort = port"))
+    XCTAssertTrue(completionBody.contains("isAdvertising = true"))
+    XCTAssertTrue(completionBody.contains("finishAdvertisingStartup(.success(()))"))
+    XCTAssertTrue(completionBody.contains("registration=confirmed"))
     XCTAssertTrue(discoverySource.contains("AdvertisingStartupError.timedOut"))
     XCTAssertFalse(
       discoverySource.contains("listener?.start(queue: queue)\n        isAdvertising = true"),
@@ -4898,25 +5515,15 @@ final class RegressionHardeningTests: XCTestCase {
       )
     )
 
-    let record = try await manager.debugCreateAdvertisingTXTRecord(
-      port: 9_527,
-      authority: authority
-    )
+    let record = try manager.debugCreateAdvertisingTXTRecord(authority: authority)
     let dictionary = try XCTUnwrap(record.dictionary)
     XCTAssertEqual(dictionary["deviceId"], authority.deviceId)
-    XCTAssertEqual(
-      dictionary["protocolSigningAlgorithm"],
-      ProtocolSigningAlgorithm.mlDSA87.rawValue
-    )
-    XCTAssertEqual(
-      dictionary["identityFingerprint"],
-      authority.signingPublicKeyFingerprint
-    )
-    XCTAssertEqual(
-      dictionary["protocolIdentityFingerprint"],
-      authority.signingPublicKeyFingerprint
-    )
-    XCTAssertEqual(dictionary["controlPort"], "9527")
+    XCTAssertEqual(dictionary["version"], "2")
+    XCTAssertEqual(dictionary["pubKeyFP"], authority.signingPublicKeyFingerprint)
+    XCTAssertEqual(dictionary["hs_soa"], "1")
+    XCTAssertNil(dictionary["protocolSigningAlgorithm"])
+    XCTAssertNil(dictionary["identityFingerprint"])
+    XCTAssertNil(dictionary["controlPort"])
   }
 
   @MainActor
@@ -4930,10 +5537,7 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     do {
-      _ = try await manager.debugCreateAdvertisingTXTRecord(
-        port: 9_527,
-        authority: authority
-      )
+      _ = try manager.debugCreateAdvertisingTXTRecord(authority: authority)
       XCTFail("A mismatched authority fingerprint must fail before Bonjour publication")
     } catch {
       XCTAssertTrue(
@@ -4955,18 +5559,26 @@ final class RegressionHardeningTests: XCTestCase {
         publicKeyBytes: publicKey
       )
     )
-    let readiness = DeviceDiscoveryManager.AdvertisingReadinessSnapshot(
-      isAdvertising: true,
-      listenerPresent: true,
-      handlerInstalled: true,
-      requestedPort: 9_527,
-      actualPort: 9_527,
-      serviceType: DiscoveryServiceType.skybridge.rawValue,
-      readyGeneration: 1,
-      authorityDeviceID: authority.deviceId,
-      authorityAlgorithm: authority.signingAlgorithm,
-      authorityFingerprint: authority.signingPublicKeyFingerprint
-    )
+    func makeReadiness(
+      requestedPort: UInt16 = 9_527,
+      actualPort: UInt16 = 9_527,
+      serviceType: String = DiscoveryServiceType.skybridge.rawValue,
+      readyGeneration: UInt64 = 1
+    ) -> DeviceDiscoveryManager.AdvertisingReadinessSnapshot {
+      DeviceDiscoveryManager.AdvertisingReadinessSnapshot(
+        isAdvertising: true,
+        listenerPresent: true,
+        handlerInstalled: true,
+        requestedPort: requestedPort,
+        actualPort: actualPort,
+        serviceType: serviceType,
+        readyGeneration: readyGeneration,
+        authorityDeviceID: authority.deviceId,
+        authorityAlgorithm: authority.signingAlgorithm,
+        authorityFingerprint: authority.signingPublicKeyFingerprint
+      )
+    }
+    let readiness = makeReadiness()
     let replacement = ProtocolIdentitySnapshot(
       deviceId: authority.deviceId,
       signingAlgorithm: .mlDSA65,
@@ -4976,6 +5588,22 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(readiness.isReady(for: 9_527, authority: authority))
     XCTAssertFalse(readiness.isReady(for: 9_527, authority: replacement))
+    XCTAssertFalse(
+      makeReadiness(serviceType: DiscoveryServiceType.skybridgeRemote.rawValue)
+        .isReady(for: 9_527, authority: authority)
+    )
+    XCTAssertFalse(
+      makeReadiness(readyGeneration: 0)
+        .isReady(for: 9_527, authority: authority)
+    )
+    XCTAssertFalse(
+      makeReadiness(requestedPort: 0)
+        .isReady(for: 9_527, authority: authority)
+    )
+    XCTAssertTrue(
+      makeReadiness(requestedPort: 0, actualPort: 49_152)
+        .isReady(for: 0, authority: authority)
+    )
   }
 
   @MainActor
@@ -5014,6 +5642,27 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(committedLoads.isEmpty)
   }
 
+  @MainActor
+  func testP2PAdvertisingStartupRejectsInvalidAttemptBudget() async {
+    do {
+      _ = try await P2PAdvertisingAuthorityStabilizer.applyLatest(
+        maximumAttempts: 0,
+        loadCommittedAuthority: {
+          XCTFail("Invalid attempt budget must fail before loading identity")
+          throw CancellationError()
+        },
+        applyAuthority: { _ in
+          XCTFail("Invalid attempt budget must fail before applying identity")
+        }
+      )
+      XCTFail("Expected invalid maximum-attempt error")
+    } catch let error as P2PAdvertisingAuthorityStabilizationError {
+      XCTAssertEqual(error, .invalidMaximumAttempts(0))
+    } catch {
+      XCTFail("Unexpected attempt-budget error: \(error)")
+    }
+  }
+
   func testSupersededBonjourAuthorityUpdateCannotStopTheNewListener() {
     XCTAssertFalse(
       DeviceDiscoveryManager.shouldFailClosedAfterAuthorityUpdateFailure(
@@ -5036,6 +5685,55 @@ final class RegressionHardeningTests: XCTestCase {
         listenerStillMatches: false
       )
     )
+  }
+
+  func testIOSBonjourAuthorityRotationOwnsAnExactListenerGeneration() throws {
+    let discovery = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+    )
+    let manager = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+    )
+    let app = try repositoryScriptSource(
+      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/App/SkyBridgeCompassApp.swift"
+    )
+    let runtime = try iosFileTransferRuntimeSource()
+
+    XCTAssertFalse(app.contains("refreshAdvertisingCapabilities"))
+
+    let startup = try sourceSlice(
+      from: "func startAdvertising(\n",
+      to: "private func performStartAdvertising(",
+      in: discovery
+    )
+    XCTAssertTrue(startup.contains("existingTask.cancel()"))
+    XCTAssertTrue(startup.contains("stopAdvertising()"))
+    XCTAssertTrue(startup.contains("try Task.checkCancellation()"))
+    XCTAssertFalse(startup.contains("try await existingTask.value\n            stopAdvertising()"))
+
+    let rotation = try sourceSlice(
+      from: "func updateAdvertisingAuthority(",
+      to: "public func stopAdvertising()",
+      in: discovery
+    )
+    XCTAssertTrue(rotation.contains("let replacedListenerGeneration = listenerGeneration"))
+    XCTAssertTrue(rotation.contains("listenerGeneration &+= 1"))
+    XCTAssertTrue(rotation.contains("Self.cancelListener(activeListener)"))
+    XCTAssertTrue(rotation.contains("try await performStartAdvertising("))
+    XCTAssertTrue(rotation.contains("advertisingReadinessSnapshot.isReady("))
+
+    XCTAssertTrue(manager.contains("private var advertisingAuthorityRefreshInProgress = false"))
+    XCTAssertTrue(manager.contains("advertisingAuthorityRefreshInProgress = true"))
+    XCTAssertTrue(manager.contains("!advertisingAuthorityRefreshInProgress else { return }"))
+
+    let stop = try sourceSlice(
+      from: "public func stop() async",
+      to: "\n}",
+      in: runtime
+    )
+    let listenerStop = try XCTUnwrap(stop.range(of: "await networkService.stopListening()"))
+    let wrapperAwait = try XCTUnwrap(stop.range(of: "_ = try? await inFlightStart.value"))
+    XCTAssertLessThan(listenerStop.lowerBound, wrapperAwait.lowerBound)
   }
 
   @MainActor
@@ -5086,45 +5784,53 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(presenceSource.contains("controlPort: readiness.controlPort"))
   }
 
-  func testIOSPrimaryBonjourTXTAdvertisesAllControlPortAliases() throws {
-    let discoverySource = try repositoryScriptSource(
-      "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+  func testIOSPrimaryBonjourTXTContainsOnlyCanonicalVersion2IdentityFields() throws {
+    let fields = try DeviceDiscoveryManager.primaryBonjourInteropAdvertisementFields(
+      validatedDeviceId: "id:canonical-ios-device",
+      protocolIdentityFingerprint: String(repeating: "a", count: 64),
+      platform: .iOS
     )
 
-    XCTAssertTrue(discoverySource.contains("let portValue = String(port)"))
-    XCTAssertTrue(discoverySource.contains("record[\"port\"] = portValue"))
-    XCTAssertTrue(discoverySource.contains("record[\"skybridgePort\"] = portValue"))
-    XCTAssertTrue(discoverySource.contains("record[\"p2pPort\"] = portValue"))
-    XCTAssertTrue(discoverySource.contains("record[\"controlPort\"] = portValue"))
-    XCTAssertTrue(discoverySource.contains("record[\"controlPortSource\"] = \"listener\""))
+    XCTAssertEqual(
+      Set(fields.keys),
+      Set(["version", "deviceId", "pubKeyFP", "platform", "hs_soa"])
+    )
+    XCTAssertEqual(fields["version"], "2")
+    XCTAssertEqual(fields["hs_soa"], "1")
+    XCTAssertNil(fields["port"])
+    XCTAssertNil(fields["controlPort"])
+    XCTAssertNil(fields["capabilities"])
   }
 
-  func testIOSBonjourInteropCapabilitiesStayAlignedWithAndroidAliases() throws {
+  func testIOSBonjourServiceTypesCarryCapabilitiesWithoutMutableTXTClaims() throws {
     let fileTransferSource = try repositoryScriptSource(
       "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
     )
     let discoverySource = try repositoryScriptSource(
       "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
     )
+    let compactDiscoverySource = discoverySource.filter { !$0.isWhitespace }
 
     XCTAssertTrue(
-      fileTransferSource.contains("\"capabilities\": Data(\"file,file_transfer\".utf8)"),
-      "iOS file-transfer Bonjour TXT must advertise both interoperable file aliases."
+      fileTransferSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields(")
     )
+    XCTAssertTrue(fileTransferSource.contains("role: .dedicatedService"))
+    XCTAssertFalse(fileTransferSource.contains("\"capabilities\": Data("))
+    XCTAssertFalse(fileTransferSource.contains("\"transferPort\": Data("))
     XCTAssertFalse(
       fileTransferSource.contains("ClassicTransferCapability.classicResume"),
       "iOS must not advertise classic resume until its inbound protocol implements resume semantics."
     )
-    XCTAssertTrue(discoverySource.contains("return [\"file\", \"file_transfer\"]"))
+    XCTAssertTrue(compactDiscoverySource.contains("return[\"file\",\"file_transfer\"]"))
     XCTAssertTrue(
-      discoverySource.contains("return [\"screen_sharing\", \"remote_desktop\", \"rdview\", \"remote_control\", \"rdcontrol\"]"),
+      compactDiscoverySource.contains("return[\"screen_sharing\",\"remote_desktop\",\"rdview\",\"remote_control\",\"rdcontrol\"]"),
       "Remote Bonjour service inference must keep Android-compatible screen/control aliases."
     )
     XCTAssertTrue(
-      discoverySource.contains("caps.formUnion([\"file\", \"file_transfer\"])")
+      compactDiscoverySource.contains("caps.formUnion([\"file\",\"file_transfer\"])")
     )
     XCTAssertTrue(
-      discoverySource.contains("caps.formUnion([\"screen_sharing\", \"remote_desktop\", \"rdview\", \"remote_control\", \"rdcontrol\"])")
+      compactDiscoverySource.contains("caps.formUnion([\"screen_sharing\",\"remote_desktop\",\"rdview\",\"remote_control\",\"rdcontrol\"])")
     )
   }
 
@@ -6884,6 +7590,162 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
+  func testCodablePersistenceStoreProtectionFailureCannotReplaceCommittedPrimary() throws {
+    let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
+    let rootDirectoryName = "SkyBridgeStateTests-\(UUID().uuidString)"
+    let relativePath = "Tests/atomic-protection.json"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+      XCTFail("Expected isolated UserDefaults suite")
+      return
+    }
+
+    let fileManager = PreparedFileProtectionFailingFileManager()
+    let applicationSupport = try fileManager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )
+    let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+    let rootURL = applicationSupport
+      .appendingPathComponent(bundleIdentifier, isDirectory: true)
+      .appendingPathComponent(rootDirectoryName, isDirectory: true)
+    let primaryURL = rootURL.appendingPathComponent(relativePath, isDirectory: false)
+    defer {
+      if fileManager.fileExists(atPath: rootURL.path) {
+        XCTAssertNoThrow(try fileManager.removeItem(at: rootURL))
+      }
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    let store = CodablePersistenceStore<[String]>(
+      location: .protectedApplicationSupport(path: relativePath),
+      rootDirectoryName: rootDirectoryName,
+      defaults: defaults,
+      fileManager: fileManager
+    )
+    let committed = ["committed"]
+    try store.save(committed)
+    let committedBytes = try Data(contentsOf: primaryURL)
+
+    fileManager.rejectsPreparedFileProtection = true
+    XCTAssertThrowsError(try store.save(["must-not-commit"])) { error in
+      XCTAssertTrue(error is PreparedFileProtectionTestError)
+    }
+    fileManager.rejectsPreparedFileProtection = false
+
+    XCTAssertEqual(try Data(contentsOf: primaryURL), committedBytes)
+    XCTAssertEqual(try store.loadOrThrow(), committed)
+    let siblingNames = try fileManager.contentsOfDirectory(
+      atPath: primaryURL.deletingLastPathComponent().path
+    )
+    XCTAssertFalse(siblingNames.contains(where: { $0.contains(".prepared-") }))
+  }
+
+  @MainActor
+  func testCodablePersistenceStoreReplacesExistingPrimaryWithProtectedFile() throws {
+    let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
+    let rootDirectoryName = "SkyBridgeStateTests-\(UUID().uuidString)"
+    let relativePath = "Tests/atomic-replacement.json"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+      XCTFail("Expected isolated UserDefaults suite")
+      return
+    }
+
+    let fileManager = FileManager.default
+    let applicationSupport = try fileManager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )
+    let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+    let rootURL = applicationSupport
+      .appendingPathComponent(bundleIdentifier, isDirectory: true)
+      .appendingPathComponent(rootDirectoryName, isDirectory: true)
+    let primaryURL = rootURL.appendingPathComponent(relativePath, isDirectory: false)
+    defer {
+      if fileManager.fileExists(atPath: rootURL.path) {
+        XCTAssertNoThrow(try fileManager.removeItem(at: rootURL))
+      }
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    let store = CodablePersistenceStore<[String]>(
+      location: .protectedApplicationSupport(path: relativePath),
+      rootDirectoryName: rootDirectoryName,
+      defaults: defaults,
+      fileManager: fileManager
+    )
+    try store.save(["first"])
+    try store.save(["second"])
+
+    XCTAssertEqual(try store.loadOrThrow(), ["second"])
+#if targetEnvironment(simulator)
+    // Simulator host filesystems do not consistently surface NSFileProtectionKey.
+#else
+    let attributes = try fileManager.attributesOfItem(atPath: primaryURL.path)
+    XCTAssertEqual(
+      attributes[.protectionKey] as? FileProtectionType,
+      .completeUntilFirstUserAuthentication
+    )
+#endif
+  }
+
+  @MainActor
+  func testCodablePersistenceStoreQuarantineProtectionFailureKeepsPrimaryInPlace() throws {
+    let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
+    let rootDirectoryName = "SkyBridgeStateTests-\(UUID().uuidString)"
+    let relativePath = "Tests/quarantine-protection.json"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+      XCTFail("Expected isolated UserDefaults suite")
+      return
+    }
+
+    let fileManager = PreparedFileProtectionFailingFileManager()
+    let applicationSupport = try fileManager.url(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask,
+      appropriateFor: nil,
+      create: true
+    )
+    let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+    let rootURL = applicationSupport
+      .appendingPathComponent(bundleIdentifier, isDirectory: true)
+      .appendingPathComponent(rootDirectoryName, isDirectory: true)
+    let primaryURL = rootURL.appendingPathComponent(relativePath, isDirectory: false)
+    defer {
+      if fileManager.fileExists(atPath: rootURL.path) {
+        XCTAssertNoThrow(try fileManager.removeItem(at: rootURL))
+      }
+      defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    let store = CodablePersistenceStore<[String]>(
+      location: .protectedApplicationSupport(path: relativePath),
+      rootDirectoryName: rootDirectoryName,
+      defaults: defaults,
+      fileManager: fileManager
+    )
+    let committed = ["corrupt-but-preserved"]
+    try store.save(committed)
+    let committedBytes = try Data(contentsOf: primaryURL)
+
+    fileManager.rejectedProtectionLastPathComponent = primaryURL.lastPathComponent
+    XCTAssertThrowsError(try store.quarantine()) { error in
+      XCTAssertTrue(error is PreparedFileProtectionTestError)
+    }
+    fileManager.rejectedProtectionLastPathComponent = nil
+
+    XCTAssertEqual(try Data(contentsOf: primaryURL), committedBytes)
+    XCTAssertEqual(try store.loadOrThrow(), committed)
+    let siblingNames = try fileManager.contentsOfDirectory(
+      atPath: primaryURL.deletingLastPathComponent().path
+    )
+    XCTAssertFalse(siblingNames.contains(where: { $0.contains(".quarantine-") }))
+  }
+
+  @MainActor
   func testCodablePersistenceStoreDoesNotFallBackToLegacyWhenPrimaryIsCorrupt() throws {
     let suiteName = "RegressionHardeningTests.\(UUID().uuidString)"
     let legacyKey = "legacy.persistence.payload"
@@ -7040,7 +7902,7 @@ final class RegressionHardeningTests: XCTestCase {
       platform: "macOS",
       osVersion: "15.0"
     )
-    manager.testInstallNegotiatedSuite(.mlkem768, for: runtimePeerId)
+    manager.testInstallNegotiatedSuitePresentationCache(.mlkem768, for: runtimePeerId)
 
     XCTAssertTrue(manager.activeConnections.contains(where: { $0.device.id == stablePeerId }))
     XCTAssertEqual(manager.negotiatedSuiteByDeviceId[stablePeerId], .mlkem768)
@@ -7058,13 +7920,14 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testDashboardViewModelRefreshesStatusWhenNegotiatedSuitePublishes() async {
+  func testDashboardViewModelRefreshesStatusWhenNegotiatedSuitePublishes() async throws {
     let manager = P2PConnectionManager.instance
     let viewModel = DashboardViewModel.shared
     let runtimePeerId = "host:192.168.1.57"
     let declaredDeviceId = UUID().uuidString.lowercased()
     let stablePeerId = "id:\(declaredDeviceId)"
     let connectedText = RuntimeLocalization.string("已连接")
+    defer { manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId) }
 
     manager.installTestPeerRuntimeState(
       runtimePeerId: runtimePeerId,
@@ -7084,13 +7947,49 @@ final class RegressionHardeningTests: XCTestCase {
     await Task.yield()
     XCTAssertEqual(viewModel.topConnectionPresentation.statusText, connectedText)
 
-    manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
+    try manager.testInstallAuthenticatedSession(.x25519Ed25519, for: runtimePeerId)
 
     await Task.yield()
+    XCTAssertEqual(manager.getNegotiatedSuite(for: stablePeerId), .x25519Ed25519)
     XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
 
     manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
     XCTAssertNil(manager.negotiatedSuiteByDeviceId[stablePeerId])
+  }
+
+  @MainActor
+  func testDashboardViewModelDoesNotClaimSuiteFromPresentationOnlyCache() async {
+    let manager = P2PConnectionManager.instance
+    let viewModel = DashboardViewModel.shared
+    let runtimePeerId = "host:192.168.1.59"
+    let declaredDeviceId = UUID().uuidString.lowercased()
+    let stablePeerId = "id:\(declaredDeviceId)"
+    let connectedText = RuntimeLocalization.string("已连接")
+    defer { manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId) }
+
+    manager.installTestPeerRuntimeState(
+      runtimePeerId: runtimePeerId,
+      status: .connected,
+      name: "Presentation Cache Peer",
+      ipAddress: "192.168.1.59"
+    )
+    _ = manager.testPromotePeerPresentationIdentity(
+      runtimePeerId: runtimePeerId,
+      declaredDeviceId: declaredDeviceId,
+      deviceName: "Presentation Cache Mac",
+      modelName: "MacBook Pro",
+      platform: "macOS",
+      osVersion: "15.0"
+    )
+    manager.testInstallNegotiatedSuitePresentationCache(
+      .x25519Ed25519,
+      for: runtimePeerId
+    )
+
+    await Task.yield()
+    XCTAssertNil(manager.getNegotiatedSuite(for: stablePeerId))
+    XCTAssertEqual(viewModel.topConnectionPresentation.statusText, connectedText)
+    XCTAssertFalse(viewModel.topConnectionPresentation.statusText.contains("Classic"))
   }
 
   @MainActor
@@ -7250,13 +8149,14 @@ final class RegressionHardeningTests: XCTestCase {
 
   @MainActor
   func testDashboardViewModelPreservesClassicPresentationWhenActiveConnectionsTemporarilyClear()
-    async
+    async throws
   {
     let manager = P2PConnectionManager.instance
     let viewModel = DashboardViewModel.shared
     let runtimePeerId = "host:192.168.1.58"
     let declaredDeviceId = UUID().uuidString.lowercased()
     let connectedText = RuntimeLocalization.string("已连接")
+    defer { manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId) }
 
     manager.installTestPeerRuntimeState(
       runtimePeerId: runtimePeerId,
@@ -7272,9 +8172,10 @@ final class RegressionHardeningTests: XCTestCase {
       platform: "macOS",
       osVersion: "15.0"
     )
-    manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
+    try manager.testInstallAuthenticatedSession(.x25519Ed25519, for: runtimePeerId)
 
     await Task.yield()
+    XCTAssertEqual(manager.getNegotiatedSuite(for: runtimePeerId), .x25519Ed25519)
     XCTAssertEqual(viewModel.topConnectionPresentation.statusText, "Classic \(connectedText)")
 
     manager.testClearActiveConnectionsPreservingState()
@@ -7285,17 +8186,17 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertNotEqual(
       viewModel.topConnectionPresentation.statusText, RuntimeLocalization.string("在线"))
 
-    manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
   }
 
   @MainActor
-  func testDashboardViewModelDoesNotPretendTargetSuiteIsConnectedDuringRekey() async {
+  func testDashboardViewModelDoesNotPretendTargetSuiteIsConnectedDuringRekey() async throws {
     let manager = P2PConnectionManager.instance
     let viewModel = DashboardViewModel.shared
     let runtimePeerId = "host:192.168.1.63"
     let declaredDeviceId = UUID().uuidString.lowercased()
     let connectedText = RuntimeLocalization.string("已连接")
     let rekeyingText = RuntimeLocalization.string("Rekey 中")
+    defer { manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId) }
 
     manager.installTestPeerRuntimeState(
       runtimePeerId: runtimePeerId,
@@ -7311,7 +8212,7 @@ final class RegressionHardeningTests: XCTestCase {
       platform: "macOS",
       osVersion: "15.0"
     )
-    manager.testInstallNegotiatedSuite(.x25519Ed25519, for: runtimePeerId)
+    try manager.testInstallAuthenticatedSession(.x25519Ed25519, for: runtimePeerId)
     manager.testInstallRekeyStatus(
       fromSuite: "Classic",
       toSuite: "X-Wing",
@@ -7324,7 +8225,6 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(viewModel.topConnectionPresentation.detailText, "Classic → X-Wing · \(rekeyingText)")
     XCTAssertFalse(viewModel.topConnectionPresentation.statusText.contains("X-Wing"))
 
-    manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
   }
 
   @MainActor
@@ -7353,7 +8253,7 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
-  func testResolvedConnectionStatusPrefersLiveConnectionOverStaleAliasFailure() {
+  func testResolvedConnectionStatusPrefersLiveConnectionOverStaleAliasFailure() throws {
     let manager = P2PConnectionManager.instance
     let runtimePeerId = "host:192.168.1.72"
     let declaredDeviceId = UUID().uuidString.lowercased()
@@ -7393,6 +8293,14 @@ final class RegressionHardeningTests: XCTestCase {
       osVersion: "15.0",
       ipAddress: "192.168.1.72"
     )
+
+    XCTAssertEqual(manager.resolvedConnectionStatus(for: device), .failed)
+    XCTAssertEqual(manager.resolvedConnectionError(for: device), "stale failure")
+
+    try manager.testInstallAuthenticatedSession(.x25519Ed25519, for: runtimePeerId)
+    defer {
+      manager.testSimulateTerminalCleanup(runtimePeerId: runtimePeerId)
+    }
 
     XCTAssertEqual(manager.resolvedConnectionStatus(for: device), .connected)
     XCTAssertNil(manager.resolvedConnectionError(for: device))
@@ -7538,7 +8446,7 @@ final class RegressionHardeningTests: XCTestCase {
     }
   }
 
-  func testTrafficPaddingRoundTripAndMalformedFrameBehavior() {
+  func testTrafficPaddingRoundTripAndMalformedFrameBehavior() throws {
     let defaults = UserDefaults.standard
     let enabledKey = "sb_traffic_padding_enabled"
     let modeKey = "sb_traffic_padding_mode"
@@ -7559,7 +8467,7 @@ final class RegressionHardeningTests: XCTestCase {
     defaults.set(128, forKey: fixedKey)
 
     let payload = Data("traffic-padding-regression".utf8)
-    let wrapped = TrafficPadding.wrapIfEnabled(payload, label: "unit")
+    let wrapped = try TrafficPadding.wrapIfEnabled(payload, label: "unit")
 
     XCTAssertEqual(wrapped.count, 128)
     XCTAssertEqual(TrafficPadding.unwrapIfNeeded(wrapped, label: "unit"), payload)
@@ -7608,8 +8516,8 @@ final class RegressionHardeningTests: XCTestCase {
     let macP2P = try repositoryScriptSource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
 
     XCTAssertTrue(
-      iosP2P.contains(
-        "protocolIdentityPublicKeys: try await localProtocolIdentityPublicKeysForPairing()"))
+      iosP2P.contains("let protocolIdentityPublicKeys = try await localProtocolIdentityPublicKeysForPairing()"))
+    XCTAssertTrue(iosP2P.contains("protocolIdentityPublicKeys: protocolIdentityPublicKeys"))
     XCTAssertTrue(
       iosP2P.contains("let configuration = try ProtocolSigningIdentityPolicy.requiredConfiguration()"),
       "iOS pairing advertisements must resolve the committed protocol-identity algorithm, not an implicit default.")
@@ -8218,24 +9126,136 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(disconnectBody.contains("originatingReceiveLoop: ReceiveLoopTaskKind? = nil"))
     XCTAssertTrue(disconnectBody.contains("controlReceiveTask?.cancel()"))
-    XCTAssertTrue(disconnectBody.contains("videoReceiveTask?.cancel()"))
+    XCTAssertTrue(disconnectBody.contains("detachedScreenReceiveTask?.cancel()"))
+    XCTAssertTrue(disconnectBody.contains("let closingHandshakeDriver = handshakeDriver"))
+    XCTAssertTrue(disconnectBody.contains("handshakeDriver = nil"))
+    XCTAssertTrue(disconnectBody.contains("handshakeDriverCancellationTask = Task {"))
+    XCTAssertTrue(disconnectBody.contains("await closingHandshakeDriver.cancel()"))
+    XCTAssertTrue(disconnectBody.contains("await joinDetachedHandshakeDriverCancellationTask("))
+    XCTAssertTrue(disconnectBody.contains("let closingSignaling = signaling"))
+    XCTAssertTrue(disconnectBody.contains("signaling = nil"))
+    XCTAssertTrue(disconnectBody.contains("signalingCloseTask = Task {"))
+    XCTAssertTrue(disconnectBody.contains("await closingSignaling.close()"))
+    XCTAssertTrue(disconnectBody.contains("await joinDetachedSignalingCloseTask("))
     XCTAssertTrue(disconnectBody.contains("await controlInboundQueue.finish()"))
-    XCTAssertTrue(disconnectBody.contains("await videoInboundQueue.finish()"))
-    XCTAssertTrue(disconnectBody.contains("if originatingReceiveLoop != .control"))
-    XCTAssertTrue(disconnectBody.contains("await controlReceiveTask?.value"))
-    XCTAssertTrue(disconnectBody.contains("if originatingReceiveLoop != .screen"))
-    XCTAssertTrue(disconnectBody.contains("await videoReceiveTask?.value"))
+    XCTAssertTrue(disconnectBody.contains("await detachedScreenInboundQueue.finish()"))
+    XCTAssertTrue(disconnectBody.contains("await joinDetachedReceiveLoopTasks("))
+    XCTAssertTrue(disconnectBody.contains("originatingReceiveLoop: originatingReceiveLoop"))
     XCTAssertTrue(failureBody.contains("originatingReceiveLoop: ReceiveLoopTaskKind"))
     XCTAssertTrue(failureBody.contains("sessionObjectIdentifier: ObjectIdentifier"))
-    XCTAssertTrue(failureBody.contains("ObjectIdentifier(currentSession) == sessionObjectIdentifier"))
+    XCTAssertTrue(failureBody.contains("guard isCurrentSession("))
+    XCTAssertTrue(failureBody.contains("sessionId: sessionId"))
+    XCTAssertTrue(failureBody.contains("sessionObjectIdentifier: sessionObjectIdentifier"))
     XCTAssertTrue(failureBody.contains("originatingReceiveLoop: originatingReceiveLoop"))
     XCTAssertFalse(failureBody.contains("await disconnect(clearSnapshot: true)"))
 
-    let controlJoin = try XCTUnwrap(disconnectBody.range(of: "await controlReceiveTask?.value"))
+    let screenCancel = try XCTUnwrap(disconnectBody.range(of: "detachedScreenReceiveTask?.cancel()"))
+    let sessionClose = try XCTUnwrap(disconnectBody.range(of: "closingSession?.close()"))
+    let fileTransferInvalidation = try XCTUnwrap(
+      disconnectBody.range(of: "invalidateInboundFileTransferOperationsForTeardown()")
+    )
+    let handshakeDriverCapture = try XCTUnwrap(
+      disconnectBody.range(of: "let closingHandshakeDriver = handshakeDriver")
+    )
+    let handshakeDriverDetach = try XCTUnwrap(
+      disconnectBody.range(of: "handshakeDriver = nil")
+    )
+    let handshakeDriverCancellationSchedule = try XCTUnwrap(
+      disconnectBody.range(of: "handshakeDriverCancellationTask = Task {")
+    )
+    let handshakeDriverCancellationJoin = try XCTUnwrap(
+      disconnectBody.range(of: "await joinDetachedHandshakeDriverCancellationTask(")
+    )
+    let signalingCapture = try XCTUnwrap(
+      disconnectBody.range(of: "let closingSignaling = signaling")
+    )
+    let signalingDetach = try XCTUnwrap(disconnectBody.range(of: "signaling = nil"))
+    let signalingCloseSchedule = try XCTUnwrap(
+      disconnectBody.range(of: "signalingCloseTask = Task {")
+    )
+    let signalingCloseJoin = try XCTUnwrap(
+      disconnectBody.range(of: "await joinDetachedSignalingCloseTask(")
+    )
+    XCTAssertLessThan(handshakeDriverCapture.lowerBound, handshakeDriverDetach.lowerBound)
+    XCTAssertLessThan(handshakeDriverDetach.lowerBound, handshakeDriverCancellationSchedule.lowerBound)
+    XCTAssertLessThan(handshakeDriverCancellationSchedule.lowerBound, handshakeDriverCancellationJoin.lowerBound)
+    XCTAssertLessThan(signalingCapture.lowerBound, signalingDetach.lowerBound)
+    XCTAssertLessThan(signalingDetach.lowerBound, signalingCloseSchedule.lowerBound)
+    XCTAssertLessThan(signalingCloseSchedule.lowerBound, signalingCloseJoin.lowerBound)
+    XCTAssertLessThan(handshakeDriverCancellationJoin.lowerBound, signalingCloseJoin.lowerBound)
+    XCTAssertLessThan(screenCancel.lowerBound, signalingCloseJoin.lowerBound)
+    XCTAssertLessThan(sessionClose.lowerBound, signalingCloseJoin.lowerBound)
+    XCTAssertLessThan(fileTransferInvalidation.lowerBound, signalingCloseJoin.lowerBound)
+    let controlJoin = try XCTUnwrap(disconnectBody.range(of: "await joinDetachedReceiveLoopTasks("))
     let transferCleanup = try XCTUnwrap(disconnectBody.range(of: "await cleanupInboundFileTransfers()"))
     let keyClear = try XCTUnwrap(disconnectBody.range(of: "sessionKeys = nil"))
     XCTAssertLessThan(controlJoin.lowerBound, transferCleanup.lowerBound)
     XCTAssertLessThan(transferCleanup.lowerBound, keyClear.lowerBound)
+
+    let handshakeCancellationJoinBody = try sourceSlice(
+      from: "private func joinDetachedHandshakeDriverCancellationTask(",
+      to: "public func disconnect(clearSnapshot:",
+      in: source
+    )
+    XCTAssertTrue(
+      handshakeCancellationJoinBody.contains(
+        "timeoutSeconds: Self.handshakeDriverTeardownJoinTimeoutSeconds"
+      )
+    )
+    XCTAssertTrue(handshakeCancellationJoinBody.contains("pendingDisconnectFailure == nil"))
+    XCTAssertTrue(handshakeCancellationJoinBody.contains("handshake-driver-quarantined"))
+
+    let signalingCloseJoinBody = try sourceSlice(
+      from: "private func joinDetachedSignalingCloseTask(",
+      to: "public func disconnect(clearSnapshot:",
+      in: source
+    )
+    XCTAssertTrue(
+      signalingCloseJoinBody.contains(
+        "timeoutSeconds: Self.signalingTeardownJoinTimeoutSeconds"
+      )
+    )
+    XCTAssertTrue(signalingCloseJoinBody.contains("pendingDisconnectFailure == nil"))
+    XCTAssertTrue(signalingCloseJoinBody.contains("signaling-close-quarantined"))
+  }
+
+  func testIOSCrossNetworkProductionDiagnosticsRedactIdentifiersAndRawErrors() throws {
+    let source = try crossNetworkWebRTCManagerSource()
+
+    XCTAssertTrue(source.contains("private static func diagnosticErrorSummary(_ error: Error)"))
+    XCTAssertTrue(
+      source.contains(
+        "join heartbeat start: session_ref=\\(SkyBridgeDiagnosticReference.stableReference(sessionId))"
+      )
+    )
+    XCTAssertTrue(
+      source.contains(
+        "QR parse phase=decoded session_ref=\\(SkyBridgeDiagnosticReference.stableReference(qr.sessionID)) device_ref=\\(SkyBridgeDiagnosticReference.stableReference(qr.deviceID))"
+      )
+    )
+    XCTAssertTrue(
+      source.contains(
+        "WebRTC rekey start: session_ref=\\(SkyBridgeDiagnosticReference.stableReference(sessionId))"
+      )
+    )
+    XCTAssertTrue(source.contains("Self.diagnosticErrorSummary(error)"))
+
+    let forbiddenProductionLogFragments = [
+      "join heartbeat start: session=\\(sessionId)",
+      "join heartbeat exhausted before transportReady: session=\\(sessionId)",
+      "QR parse phase=decoded session=\\(qr.sessionID) device=\\(qr.deviceID)",
+      "cross-network phase=signaling_bound session=\\(sessionId)",
+      "WebRTC transport ready: session=\\(sessionId)",
+      "cross-network phase=session_started session=\\(sessionId)",
+      "cross-network phase=join_sent session=\\(sessionId)",
+      "WebRTC rekey start: session=\\(sessionId)",
+      "WebRTC heartbeat send failed: \\(error.localizedDescription)",
+      "inbound WebRTC rekey driver 初始化失败: session=\\(sessionId), err=\\(error.localizedDescription)",
+      "screen-channel payload 解密/解析失败，已重置 length parser: wireMode=lengthFramed \\(error.localizedDescription)"
+    ]
+    for fragment in forbiddenProductionLogFragments {
+      XCTAssertFalse(source.contains(fragment), "Production diagnostic still contains raw data: \(fragment)")
+    }
   }
 
   func testIOSInboundFileTransferAckFailureClosesAuthenticatedControlChannel() throws {
@@ -8248,6 +9268,8 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(sendAckBody.contains("try await sendFileTransferMessage(ack)"))
     XCTAssertTrue(sendAckBody.contains("failInboundFileTransferControlChannel("))
+    XCTAssertTrue(sendAckBody.contains("inboundFileTransferLifecycleToken == expectedLifecycleToken"))
+    XCTAssertTrue(sendAckBody.contains("sessionKeys?.sessionId == sessionID"))
     XCTAssertTrue(
       sendAckBody.contains("WebRTC file-transfer acknowledgement delivery failed"),
       "A failed authenticated ACK must be surfaced as a session failure instead of being logged and ignored."
@@ -8776,6 +9798,91 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertEqual(resolved.id, richerTransferCandidate.id)
     XCTAssertEqual(resolved.fileTransferPort, 8080)
+  }
+
+  @MainActor
+  func testResolveBestTransferDeviceFailsClosedForAmbiguousOrIncompleteScopedHostCandidates() {
+    let target = DiscoveredDevice(
+      id: "host:fe80::468:f5a1:462b:29d3%bridge100",
+      name: "fe80::468:f5a1:462b:29d3%bridge100",
+      modelName: "Mac",
+      platform: .macOS,
+      osVersion: "26.3.1",
+      ipAddress: nil,
+      bonjourServiceType: nil,
+      bonjourServiceDomain: nil,
+      services: [],
+      portMap: [:],
+      signalStrength: -40,
+      lastSeen: Date(),
+      isConnected: true,
+      isTrusted: true,
+      publicKey: nil,
+      advertisedCapabilities: [],
+      capabilities: []
+    )
+
+    func candidate(
+      id: String,
+      name: String,
+      domain: String?,
+      port: UInt16?
+    ) -> DiscoveredDevice {
+      DiscoveredDevice(
+        id: id,
+        name: name,
+        bonjourServiceName: name,
+        modelName: "Mac",
+        platform: .macOS,
+        osVersion: "26.3.1",
+        ipAddress: "fe80::468:f5a1:462b:29d3",
+        bonjourServiceType: DiscoveredDevice.fileTransferServiceType,
+        bonjourServiceDomain: domain,
+        services: [DiscoveredDevice.fileTransferServiceType],
+        portMap: port.map { [DiscoveredDevice.fileTransferServiceType: $0] } ?? [:],
+        signalStrength: -38,
+        lastSeen: Date(),
+        isConnected: false,
+        isTrusted: true,
+        publicKey: nil,
+        advertisedCapabilities: ["file_transfer"],
+        capabilities: ["file_transfer"]
+      )
+    }
+
+    let first = candidate(
+      id: "id:peer-transfer-a",
+      name: "MacBook Pro A",
+      domain: "local.",
+      port: 8080
+    )
+    let second = candidate(
+      id: "id:peer-transfer-b",
+      name: "MacBook Pro B",
+      domain: "local.",
+      port: 8080
+    )
+    let incomplete = candidate(
+      id: "id:peer-transfer-incomplete",
+      name: "MacBook Pro Incomplete",
+      domain: nil,
+      port: nil
+    )
+
+    XCTAssertEqual(
+      FileTransferManager.resolveBestTransferDevice(
+        target: target,
+        discovered: [first, second]
+      ).id,
+      target.id
+    )
+    XCTAssertEqual(
+      FileTransferManager.resolveBestTransferDevice(
+        target: target,
+        discovered: [incomplete]
+      ).id,
+      target.id
+    )
   }
 
   @MainActor
@@ -10925,75 +12032,651 @@ final class RegressionHardeningTests: XCTestCase {
   func testHandshakeDriverRetainsAuthenticatedAuthorityAfterOutboundHandshakeEstablishes()
     async throws
   {
-    let signatureProvider = LocalHandshakeTestSignatureProvider()
-    let provider = LocalHandshakeTestCryptoProvider(
-      tier: .classic,
-      activeSuite: .x25519Ed25519,
-      supportedSuites: [.x25519Ed25519]
+    let fixture = try await makeWaitingFinishedSOAHandshake()
+    let authorityBeforeFinished = await fixture.initiator.getAuthenticatedRemoteAuthority()
+    let bindingBeforeFinished = await fixture.initiator.getAuthenticatedHandshakePeerBinding()
+    XCTAssertNil(
+      authorityBeforeFinished,
+      "Signature validation alone must not publish authority before Finished key confirmation"
     )
-    let initiatorIdentity = Data(repeating: 0x10, count: 1_952)
-    let responderIdentity = Data(repeating: 0x50, count: 1_952)
-    let transport = CaptureOnlyDiscoveryTransport()
-    let initiator = HandshakeDriver(
-      transport: transport,
-      cryptoProvider: provider,
-      protocolSignatureProvider: signatureProvider,
-      identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xAA]))),
-      sigAAlgorithm: .mlDSA65,
-      protocolSigningKeyProtection: .softwareKeychain,
-      identityPublicKey: initiatorIdentity
-    )
-    let handshakeTask = Task {
-      try await initiator.initiateHandshake(with: PeerIdentifier(deviceId: "mac-peer"))
-    }
-    let messageAFrame = try await waitForLatestFrame(from: transport)
-    let messageA = try HandshakeMessageA.decode(
-      from: HandshakePadding.unwrapIfNeeded(messageAFrame, label: "test/messageA")
-    )
+    XCTAssertNil(bindingBeforeFinished)
 
-    let responderContext = HandshakeContext(
-      role: .responder,
-      cryptoProvider: provider,
-      protocolSignatureProvider: signatureProvider,
-      identityKeyHandle: SigningKeyHandle.callback(FixedSignatureCallback(signature: Data([0xBB]))),
-      identityPublicKey: responderIdentity,
-      policy: .default,
-      cryptoPolicy: .default
-    )
-    try await responderContext.processMessageA(messageA)
-    let (messageB, _) = try await responderContext.buildMessageB()
-
-    await initiator.handleMessage(messageB.encoded, from: PeerIdentifier(deviceId: "mac-peer"))
-
-    guard
-      case .waitingFinished(_, let sessionKeys, let expectingFrom) =
-        await initiator.getCurrentState()
-    else {
-      XCTFail("Expected initiator handshake to be waiting for Finished after MessageB")
-      return
-    }
-    XCTAssertEqual(expectingFrom, .responder)
-
-    let responderFinished = LocalHandshakeFinishedHelper.responderFinished(for: sessionKeys)
-    await initiator.handleMessage(
+    let responderFinished = LocalHandshakeFinishedHelper.responderFinished(
+      for: fixture.sessionKeys)
+    await fixture.initiator.handleMessage(
       responderFinished.encoded, from: PeerIdentifier(deviceId: "mac-peer"))
 
-    let establishedKeys = try await handshakeTask.value
+    let establishedKeys = try await fixture.handshakeTask.value
     XCTAssertEqual(establishedKeys.negotiatedSuite, .x25519Ed25519)
 
-    guard case .established = await initiator.getCurrentState() else {
+    guard case .established = await fixture.initiator.getCurrentState() else {
       XCTFail("Expected initiator handshake to establish")
       return
     }
 
-    let initiatorAuthority = await initiator.getAuthenticatedRemoteAuthority()
+    let initiatorAuthority = await fixture.initiator.getAuthenticatedRemoteAuthority()
     XCTAssertEqual(
       initiatorAuthority,
       try LocalHandshakeAuthorityHelper.authority(
-        identityPublicKey: responderIdentity,
-        signatureAlgorithm: signatureProvider.signatureAlgorithm
+        identityPublicKey: fixture.responderIdentity,
+        signatureAlgorithm: fixture.signatureProvider.signatureAlgorithm
       )
     )
+    let establishedBinding = await fixture.initiator.getAuthenticatedHandshakePeerBinding()
+    let binding = try XCTUnwrap(establishedBinding)
+    XCTAssertEqual(binding.authority, initiatorAuthority)
+    XCTAssertEqual(binding.authenticatedRemoteSOAPeerId, fixture.remoteSOAPeerId)
+  }
+
+  func testHandshakeDriverCancellationDuringArbiterCommitDoesNotPublishOrLeakLease()
+    async throws
+  {
+    let fixture = try await makeWaitingFinishedSOAHandshake(
+      suspendEstablishmentCommit: true
+    )
+    let responderFinished = LocalHandshakeFinishedHelper.responderFinished(
+      for: fixture.sessionKeys)
+    let finishTask = Task {
+      await fixture.initiator.handleMessage(
+        responderFinished.encoded,
+        from: PeerIdentifier(deviceId: "mac-peer")
+      )
+    }
+
+    var enteredArbiterCommit = false
+    for _ in 0..<100 {
+      if await fixture.arbiter.testOnlyIsEstablishmentCommitSuspended() {
+        enteredArbiterCommit = true
+        break
+      }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    XCTAssertTrue(
+      enteredArbiterCommit,
+      "Finished handling never reached the suspended arbiter commit"
+    )
+
+    // Model the manager superseding A while its actor call is suspended. Driver
+    // cancellation owns the exact reservation capability; tests must not widen
+    // production teardown back to public pair/attempt deletion.
+    await fixture.initiator.cancel()
+    let replacementAttemptId = Data(
+      repeating: 0x77,
+      count: HandshakeSOAExtension.attemptIdLength
+    )
+    let replacementDecision = await fixture.arbiter.registerOutgoing(
+      .init(
+        pairKey: fixture.pairKey,
+        initiatorPeerId: fixture.localSOAPeerId,
+        attemptId: replacementAttemptId,
+        startedAt: Date(),
+        onSuperseded: { _, _ in }
+      )
+    )
+    guard case .accepted(let replacementReservation) = replacementDecision else {
+      XCTFail("Cancelled Finished commit retained its outgoing reservation")
+      return
+    }
+    let replacementLease = try await fixture.arbiter.commitEstablished(
+      replacementReservation,
+      sessionId: "replacement-session"
+    )
+
+    // B now owns the slot. Late resumption of A must be exact and therefore
+    // cannot clear, overwrite, or restore across B.
+    try await fixture.arbiter.testOnlyResumeEstablishmentCommit(
+      attemptId: fixture.attemptId
+    )
+    await finishTask.value
+    await XCTAssertThrowsErrorAsync(try await fixture.handshakeTask.value) { _ in }
+
+    guard case .failed(let reason) = await fixture.initiator.getCurrentState() else {
+      XCTFail("Cancellation during arbiter commit must leave the handshake failed")
+      return
+    }
+    XCTAssertEqual(reason, .cancelled)
+    let authority = await fixture.initiator.getAuthenticatedRemoteAuthority()
+    let binding = await fixture.initiator.getAuthenticatedHandshakePeerBinding()
+    let lease = await fixture.initiator.getEstablishedArbiterLease()
+    XCTAssertNil(authority)
+    XCTAssertNil(binding)
+    XCTAssertNil(lease)
+
+    let staleLease = PeerSessionArbiter.EstablishedLease(
+      pairKey: fixture.pairKey,
+      sessionId: fixture.sessionKeys.sessionId
+    )
+    let staleClearSucceeded = await fixture.arbiter.clearEstablished(staleLease)
+    let staleRestoreSucceeded = await fixture.arbiter.restoreEstablishedIfVacant(staleLease)
+    XCTAssertFalse(staleClearSucceeded)
+    XCTAssertFalse(staleRestoreSucceeded)
+
+    let blockedByReplacement = await fixture.arbiter.registerOutgoing(
+      .init(
+        pairKey: fixture.pairKey,
+        initiatorPeerId: fixture.localSOAPeerId,
+        attemptId: Data(repeating: 0x78, count: HandshakeSOAExtension.attemptIdLength),
+        startedAt: Date(),
+        onSuperseded: { _, _ in }
+      )
+    )
+    guard case .alreadyConnected = blockedByReplacement else {
+      XCTFail("Stale A completion removed replacement B")
+      return
+    }
+    let replacementClearSucceeded = await fixture.arbiter.clearEstablished(replacementLease)
+    XCTAssertTrue(replacementClearSucceeded)
+  }
+
+  func testPeerSessionArbiterReplacementUsesExpectedOwnerCAS() async throws {
+    let arbiter = PeerSessionArbiter()
+    let localPeerId = Data(repeating: 0x10, count: HandshakeSOAExtension.initiatorPeerIdLength)
+    let remotePeerId = Data(repeating: 0x20, count: HandshakeSOAExtension.initiatorPeerIdLength)
+    let pairKey = PeerSessionArbiter.pairKey(
+      localPeerId: localPeerId,
+      remotePeerId: remotePeerId
+    )
+    let firstAttemptId = Data(repeating: 0x31, count: HandshakeSOAExtension.attemptIdLength)
+    let firstDecision = await arbiter.registerOutgoing(
+      .init(
+        pairKey: pairKey,
+        initiatorPeerId: localPeerId,
+        attemptId: firstAttemptId,
+        startedAt: Date(),
+        onSuperseded: { _, _ in }
+      )
+    )
+    guard case .accepted(let firstReservation) = firstDecision else {
+      XCTFail("Initial establishment reservation was rejected")
+      return
+    }
+    let firstLease = try await arbiter.commitEstablished(
+      firstReservation,
+      sessionId: "first-session"
+    )
+
+    let replacementAttemptId = Data(
+      repeating: 0x32,
+      count: HandshakeSOAExtension.attemptIdLength
+    )
+    let incomingDecision = await arbiter.evaluateIncoming(
+      pairKey: pairKey,
+      remoteInitiatorPeerId: remotePeerId,
+      remoteAttemptId: replacementAttemptId,
+      targetPeerId: localPeerId,
+      expectedRemotePeerId: remotePeerId,
+      localPeerId: localPeerId,
+      establishedPolicy: .replaceAuthenticated
+    )
+    guard case .acceptAndReplaceEstablished(let replacementReservation) = incomingDecision else {
+      XCTFail("Authenticated replacement was not reserved")
+      return
+    }
+
+    let ownerStillBlocksOutgoing = await arbiter.registerOutgoing(
+      .init(
+        pairKey: pairKey,
+        initiatorPeerId: localPeerId,
+        attemptId: Data(repeating: 0x33, count: HandshakeSOAExtension.attemptIdLength),
+        startedAt: Date(),
+        onSuperseded: { _, _ in }
+      )
+    )
+    guard case .alreadyConnected = ownerStillBlocksOutgoing else {
+      XCTFail("Replacement evaluation removed the established owner before commit")
+      return
+    }
+
+    let firstClearSucceeded = await arbiter.clearEstablished(firstLease)
+    XCTAssertTrue(firstClearSucceeded)
+    do {
+      _ = try await arbiter.commitEstablished(
+        replacementReservation,
+        sessionId: "stale-replacement"
+      )
+      XCTFail("Replacement committed after its expected owner changed")
+    } catch let error as PeerSessionArbiter.EstablishmentCommitError {
+      XCTAssertEqual(error, .establishedOwnerChanged)
+    }
+
+    let finalAttemptId = Data(repeating: 0x34, count: HandshakeSOAExtension.attemptIdLength)
+    let finalDecision = await arbiter.registerOutgoing(
+      .init(
+        pairKey: pairKey,
+        initiatorPeerId: localPeerId,
+        attemptId: finalAttemptId,
+        startedAt: Date(),
+        onSuperseded: { _, _ in }
+      )
+    )
+    guard case .accepted(let finalReservation) = finalDecision else {
+      XCTFail("Final establishment reservation was rejected")
+      return
+    }
+    let finalLease = try await arbiter.commitEstablished(
+      finalReservation,
+      sessionId: "final-session"
+    )
+    let staleClearSucceeded = await arbiter.clearEstablished(firstLease)
+    let staleRestoreSucceeded = await arbiter.restoreEstablishedIfVacant(firstLease)
+    XCTAssertFalse(staleClearSucceeded)
+    XCTAssertFalse(staleRestoreSucceeded)
+    let finalClearSucceeded = await arbiter.clearEstablished(finalLease)
+    XCTAssertTrue(finalClearSucceeded)
+  }
+
+  func testPeerSessionArbiterEmbeddedUUIDCannotCollideWithExactStableIdentifier() {
+    let uuid = "55555555-5555-4555-8555-555555555555"
+    let canonicalUUID = PeerSessionArbiter.canonicalSOAIdentifier(uuid)
+    let exactPeerId = PeerSessionArbiter.soaPeerId(from: uuid)
+
+    for attackerControlledIdentifier in [
+      "attacker-\(uuid)-suffix",
+      "id:attacker-\(uuid)-suffix",
+      "recent:mac:id:attacker-\(uuid)-suffix",
+    ] {
+      XCTAssertNotEqual(
+        PeerSessionArbiter.canonicalSOAIdentifier(attackerControlledIdentifier),
+        canonicalUUID
+      )
+      XCTAssertNotEqual(
+        PeerSessionArbiter.soaPeerId(from: attackerControlledIdentifier),
+        exactPeerId
+      )
+    }
+  }
+
+  func testPeerSessionArbiterAllowlistedExactUUIDAliasesRemainCanonical() {
+    let uppercaseUUID = "BBBBBBBB-CCCC-4DDD-8EEE-FFFFFFFFFFFF"
+    let canonicalUUID = uppercaseUUID.lowercased()
+    let canonicalPeerId = PeerSessionArbiter.soaPeerId(from: canonicalUUID)
+
+    for alias in [
+      uppercaseUUID,
+      "id:\(uppercaseUUID)",
+      "recent:id:\(uppercaseUUID)",
+      "recent:mac:id:\(uppercaseUUID)",
+    ] {
+      XCTAssertEqual(PeerSessionArbiter.canonicalSOAIdentifier(alias), canonicalUUID)
+      XCTAssertEqual(PeerSessionArbiter.soaPeerId(from: alias), canonicalPeerId)
+    }
+  }
+
+  func testNWConnectionTransportRejectsStaleAndUnboundSequencedAccess() async throws {
+    let transport = NWConnectionTransport()
+    let firstConnection = makeUnstartedHandshakeTestConnection(port: 9)
+    let replacementConnection = makeUnstartedHandshakeTestConnection(port: 10)
+    let conflictingConnection = makeUnstartedHandshakeTestConnection(port: 11)
+
+    let installedFirst = await transport.setConnection(
+      firstConnection,
+      for: "peer",
+      leaseSequence: 1
+    )
+    XCTAssertTrue(installedFirst)
+    let firstCapability = try await transport.boundTransport(
+      for: "peer",
+      expectedConnection: firstConnection,
+      leaseSequence: 1
+    )
+
+    let installedReplacement = await transport.setConnection(
+      replacementConnection,
+      for: "peer",
+      leaseSequence: 2
+    )
+    let staleSequenceAccepted = await transport.setConnection(
+      firstConnection,
+      for: "peer",
+      leaseSequence: 1
+    )
+    let conflictingSocketAccepted = await transport.setConnection(
+      conflictingConnection,
+      for: "peer",
+      leaseSequence: 2
+    )
+    let legacyOverwriteAccepted = await transport.setConnection(firstConnection, for: "peer")
+    XCTAssertTrue(installedReplacement)
+    XCTAssertFalse(staleSequenceAccepted)
+    XCTAssertFalse(conflictingSocketAccepted)
+    XCTAssertFalse(legacyOverwriteAccepted)
+
+    do {
+      try await firstCapability.send(
+        to: PeerIdentifier(deviceId: "peer"),
+        data: Data([0x01])
+      )
+      XCTFail("Stale capability unexpectedly sent through replacement socket")
+    } catch let error as NWConnectionTransportBindingError {
+      XCTAssertEqual(error, .staleBinding)
+    }
+
+    do {
+      try await transport.send(
+        to: PeerIdentifier(deviceId: "peer"),
+        data: Data([0x02])
+      )
+      XCTFail("Shared transport unexpectedly accessed a sequenced binding")
+    } catch let error as NWConnectionTransportBindingError {
+      XCTAssertEqual(error, .boundCapabilityRequired)
+    }
+
+    _ = try await transport.boundTransport(
+      for: "peer",
+      expectedConnection: replacementConnection,
+      leaseSequence: 2
+    )
+    let socketOnlyRemovalSucceeded = await transport.removeConnection(
+      replacementConnection,
+      for: "peer"
+    )
+    let staleRemovalSucceeded = await transport.removeConnection(
+      firstConnection,
+      for: "peer",
+      leaseSequence: 1
+    )
+    let replacementRemovalSucceeded = await transport.removeConnection(
+      replacementConnection,
+      for: "peer",
+      leaseSequence: 2
+    )
+    XCTAssertFalse(socketOnlyRemovalSucceeded)
+    XCTAssertFalse(staleRemovalSucceeded)
+    XCTAssertTrue(replacementRemovalSucceeded)
+  }
+
+  func testHandshakeDriverWithExactTransportCannotBorrowReplacementSocket() async throws {
+    let transport = NWConnectionTransport()
+    let firstConnection = makeUnstartedHandshakeTestConnection(port: 12)
+    let replacementConnection = makeUnstartedHandshakeTestConnection(port: 13)
+    let installedFirst = await transport.setConnection(
+      firstConnection,
+      for: "mac-peer",
+      leaseSequence: 1
+    )
+    XCTAssertTrue(installedFirst)
+    let firstCapability = try await transport.boundTransport(
+      for: "mac-peer",
+      expectedConnection: firstConnection,
+      leaseSequence: 1
+    )
+    let installedReplacement = await transport.setConnection(
+      replacementConnection,
+      for: "mac-peer",
+      leaseSequence: 2
+    )
+    XCTAssertTrue(installedReplacement)
+
+    let signatureProvider = LocalHandshakeTestSignatureProvider()
+    let driver = HandshakeDriver(
+      transport: firstCapability,
+      cryptoProvider: LocalHandshakeTestCryptoProvider(
+        tier: .classic,
+        activeSuite: .x25519Ed25519,
+        supportedSuites: [.x25519Ed25519]
+      ),
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0xAA]))),
+      sigAAlgorithm: signatureProvider.signatureAlgorithm,
+      protocolSigningKeyProtection: .softwareKeychain,
+      identityPublicKey: Data(repeating: 0x10, count: 1_952)
+    )
+
+    await XCTAssertThrowsErrorAsync(
+      try await driver.initiateHandshake(with: PeerIdentifier(deviceId: "mac-peer"))
+    ) { error in
+      guard let handshakeError = error as? HandshakeError,
+        case .failed(.transportError(let reason)) = handshakeError
+      else {
+        XCTFail("Unexpected error: \(error)")
+        return
+      }
+      XCTAssertEqual(
+        reason,
+        NWConnectionTransportBindingError.staleBinding.localizedDescription
+      )
+    }
+
+    _ = try await transport.boundTransport(
+      for: "mac-peer",
+      expectedConnection: replacementConnection,
+      leaseSequence: 2
+    )
+  }
+
+  func testHandshakeCancellationDuringOutboundTrustPreflightReleasesExactArbiterAttempt()
+    async throws
+  {
+    let transport = CaptureOnlyDiscoveryTransport()
+    let trustProvider = SuspendedKEMLookupHandshakeTrustProvider()
+    let arbiter = PeerSessionArbiter()
+    let localSOAPeerId = Data(
+      repeating: 0x31,
+      count: HandshakeSOAExtension.initiatorPeerIdLength
+    )
+    let remoteSOAPeerId = Data(
+      repeating: 0x32,
+      count: HandshakeSOAExtension.targetPeerIdLength
+    )
+    let attemptId = Data(repeating: 0x33, count: HandshakeSOAExtension.attemptIdLength)
+    let pairKey = PeerSessionArbiter.pairKey(
+      localPeerId: localSOAPeerId,
+      remotePeerId: remoteSOAPeerId
+    )
+    let signatureProvider = LocalHandshakeTestSignatureProvider()
+    let driver = HandshakeDriver(
+      transport: transport,
+      cryptoProvider: LocalHandshakeTestCryptoProvider(
+        tier: .classic,
+        activeSuite: .x25519Ed25519,
+        supportedSuites: [.x25519Ed25519]
+      ),
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0x34]))),
+      sigAAlgorithm: signatureProvider.signatureAlgorithm,
+      protocolSigningKeyProtection: .softwareKeychain,
+      identityPublicKey: Data(repeating: 0x35, count: 1_952),
+      trustProvider: trustProvider,
+      soaMetadata: try HandshakeSOAMetadata(
+        initiatorPeerId: localSOAPeerId,
+        targetPeerId: remoteSOAPeerId,
+        attemptId: attemptId
+      ),
+      localSOAPeerId: localSOAPeerId,
+      expectedRemoteSOAPeerId: remoteSOAPeerId,
+      sessionArbiter: arbiter
+    )
+
+    let handshakeTask = Task {
+      try await driver.initiateHandshake(with: PeerIdentifier(deviceId: "remote-peer"))
+    }
+    await trustProvider.waitUntilKEMLookupStarts()
+    guard case .sendingMessageA = await driver.getCurrentState() else {
+      XCTFail("Outbound preflight must be observable as an in-flight handshake")
+      await trustProvider.resumeKEMLookup()
+      return
+    }
+
+    await driver.cancel()
+    await trustProvider.resumeKEMLookup()
+    await XCTAssertThrowsErrorAsync(try await handshakeTask.value) { error in
+      guard let handshakeError = error as? HandshakeError,
+        case .failed(.cancelled) = handshakeError
+      else {
+        XCTFail("Expected exact cancellation, got \(error)")
+        return
+      }
+    }
+    let capturedFrame = await transport.latestFrame()
+    XCTAssertNil(capturedFrame, "A cancelled preflight must never send MessageA")
+
+    let replacementAttemptId = Data(
+      repeating: 0x36,
+      count: HandshakeSOAExtension.attemptIdLength
+    )
+    let replacementDecision = await arbiter.registerOutgoing(.init(
+      pairKey: pairKey,
+      initiatorPeerId: localSOAPeerId,
+      attemptId: replacementAttemptId,
+      startedAt: Date(),
+      onSuperseded: { _, _ in }
+    ))
+    guard case .accepted(let replacementReservation) = replacementDecision else {
+      XCTFail("Cancelled preflight leaked its exact outgoing arbiter reservation")
+      return
+    }
+    let replacementCleanupSucceeded = await arbiter.clearOutgoing(replacementReservation)
+    XCTAssertTrue(replacementCleanupSucceeded)
+  }
+
+  func testHandshakeEarlyFinishedWhileMessageASendIsSuspendedReturnsAuthenticatedSuccess()
+    async throws
+  {
+    func verifyEarlyFinished(failFirstSendOnResume: Bool) async throws {
+    let transport = SuspendedFirstSendDiscoveryTransport(
+      failFirstSendOnResume: failFirstSendOnResume
+    )
+    let signatureProvider = LocalHandshakeTestSignatureProvider()
+    let cryptoProvider = LocalHandshakeTestCryptoProvider(
+      tier: .classic,
+      activeSuite: .x25519Ed25519,
+      supportedSuites: [.x25519Ed25519]
+    )
+    let driver = HandshakeDriver(
+      transport: transport,
+      cryptoProvider: cryptoProvider,
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0x41]))),
+      sigAAlgorithm: signatureProvider.signatureAlgorithm,
+      protocolSigningKeyProtection: .softwareKeychain,
+      identityPublicKey: Data(repeating: 0x42, count: 1_952)
+    )
+    let handshakeTask = Task {
+      try await driver.initiateHandshake(with: PeerIdentifier(deviceId: "remote-peer"))
+    }
+    let messageAFrame = await transport.waitForFirstFrame()
+    let messageA = try HandshakeMessageA.decode(
+      from: HandshakePadding.unwrapIfNeeded(messageAFrame, label: "test/early-finished")
+    )
+
+    let responder = HandshakeContext(
+      role: .responder,
+      cryptoProvider: cryptoProvider,
+      protocolSignatureProvider: signatureProvider,
+      identityKeyHandle: .callback(FixedSignatureCallback(signature: Data([0x43]))),
+      identityPublicKey: Data(repeating: 0x44, count: 1_952),
+      policy: .default
+    )
+    try await responder.processMessageA(messageA)
+    let response = try await responder.buildMessageB()
+    defer { response.sharedSecret.zeroize() }
+    await driver.handleMessage(
+      response.message.encoded,
+      from: PeerIdentifier(deviceId: "remote-peer")
+    )
+    guard case .waitingFinished(_, let sessionKeys, _) = await driver.getCurrentState() else {
+      XCTFail("MessageB did not advance the suspended outbound send to waitingFinished")
+      await transport.resumeFirstSend()
+      await responder.zeroize()
+      return
+    }
+
+    await driver.handleMessage(
+      LocalHandshakeFinishedHelper.responderFinished(for: sessionKeys).encoded,
+      from: PeerIdentifier(deviceId: "remote-peer")
+    )
+    guard case .established = await driver.getCurrentState() else {
+      XCTFail("Authenticated Finished did not establish before MessageA send returned")
+      await transport.resumeFirstSend()
+      await responder.zeroize()
+      return
+    }
+
+    await transport.resumeFirstSend()
+    let establishedKeys = try await handshakeTask.value
+    XCTAssertEqual(establishedKeys.sessionId, sessionKeys.sessionId)
+    XCTAssertEqual(establishedKeys.negotiatedSuite, .x25519Ed25519)
+    await responder.zeroize()
+    }
+
+    try await verifyEarlyFinished(failFirstSendOnResume: false)
+    try await verifyEarlyFinished(failFirstSendOnResume: true)
+  }
+
+  func testPeerSessionArbiterExactCleanupCannotDeleteSameAttemptReplacement() async {
+    let arbiter = PeerSessionArbiter()
+    let localPeerId = Data(
+      repeating: 0x51,
+      count: HandshakeSOAExtension.initiatorPeerIdLength
+    )
+    let remotePeerId = Data(
+      repeating: 0x52,
+      count: HandshakeSOAExtension.targetPeerIdLength
+    )
+    let pairKey = PeerSessionArbiter.pairKey(
+      localPeerId: localPeerId,
+      remotePeerId: remotePeerId
+    )
+    let reusedAttemptId = Data(
+      repeating: 0x53,
+      count: HandshakeSOAExtension.attemptIdLength
+    )
+    let staleDecision = await arbiter.registerOutgoing(.init(
+      pairKey: pairKey,
+      initiatorPeerId: localPeerId,
+      attemptId: reusedAttemptId,
+      startedAt: Date(timeIntervalSinceNow: -11),
+      onSuperseded: { _, _ in }
+    ))
+    guard case .accepted(let staleReservation) = staleDecision else {
+      XCTFail("Failed to create stale reservation fixture")
+      return
+    }
+    let replacementDecision = await arbiter.registerOutgoing(.init(
+      pairKey: pairKey,
+      initiatorPeerId: localPeerId,
+      attemptId: reusedAttemptId,
+      startedAt: Date(),
+      onSuperseded: { _, _ in }
+    ))
+    guard case .accepted(let replacementReservation) = replacementDecision else {
+      XCTFail("Expired registration did not admit an exact replacement")
+      return
+    }
+
+    let staleCleanupSucceeded = await arbiter.clearOutgoing(staleReservation)
+    XCTAssertFalse(staleCleanupSucceeded)
+    let blockedDecision = await arbiter.registerOutgoing(.init(
+      pairKey: pairKey,
+      initiatorPeerId: localPeerId,
+      attemptId: Data(repeating: 0x54, count: HandshakeSOAExtension.attemptIdLength),
+      startedAt: Date(),
+      onSuperseded: { _, _ in }
+    ))
+    guard case .alreadyInProgress = blockedDecision else {
+      XCTFail("Stale exact cleanup deleted the same-attempt replacement")
+      return
+    }
+    let replacementCleanupSucceeded = await arbiter.clearOutgoing(replacementReservation)
+    XCTAssertTrue(replacementCleanupSucceeded)
+  }
+
+  func testLANRemoteDesktopRetainsAndClearsExactArbiterLease() throws {
+    let source = try remoteDesktopManagerSource()
+
+    XCTAssertTrue(
+      source.contains(
+        "private var lanEstablishedArbiterLease: PeerSessionArbiter.EstablishedLease?"
+      )
+    )
+    XCTAssertTrue(source.contains("try await captureLANEstablishedArbiterLease("))
+    XCTAssertTrue(
+      source.contains(
+        "PeerSessionArbiter.shared.clearEstablished(closingArbiterLease)"
+      )
+    )
+    XCTAssertFalse(source.contains("clearEstablished(pairKey: lanSOAPairKey)"))
+    XCTAssertFalse(source.contains("clearOutgoing(pairKey: lanSOAPairKey, attemptId: nil)"))
   }
 
   func testLocalHandshakeContextRetainsValidatedResponderCapabilities() async throws {
@@ -11157,13 +12840,9 @@ final class RegressionHardeningTests: XCTestCase {
       return
     }
     let authorityBeforeCancel = await initiator.getAuthenticatedRemoteAuthority()
-    XCTAssertEqual(
-      authorityBeforeCancel,
-      try LocalHandshakeAuthorityHelper.authority(
-        identityPublicKey: responderIdentity,
-        signatureAlgorithm: signatureProvider.signatureAlgorithm
-      )
-    )
+    let bindingBeforeCancel = await initiator.getAuthenticatedHandshakePeerBinding()
+    XCTAssertNil(authorityBeforeCancel)
+    XCTAssertNil(bindingBeforeCancel)
 
     await initiator.cancel()
     await XCTAssertThrowsErrorAsync(try await handshakeTask.value) { _ in }
@@ -11188,7 +12867,10 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(bootstrapFilter.contains("case .heartbeat, .ping, .pong, .peerDisconnecting:"))
     XCTAssertTrue(bootstrapFilter.contains("accepted control app message before PQC rekey"))
     XCTAssertTrue(bootstrapFilter.contains("type=\\(messageKind)"))
-    XCTAssertTrue(bootstrapFilter.contains("lastRekey=\\(lastRekeyEvent ?? \"-\")"))
+    XCTAssertTrue(
+      bootstrapFilter.contains(
+        "lastRekey_ref=\\(SkyBridgeDiagnosticReference.stableReference(lastRekeyEvent))"))
+    XCTAssertFalse(bootstrapFilter.contains("lastRekey=\\(lastRekeyEvent ?? \"-\")"))
     XCTAssertTrue(bootstrapFilter.contains("ignored non-bootstrap app message"))
   }
 
@@ -11246,8 +12928,16 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertTrue(source.contains("strictPQCClassicBootstrapMaxGraceSeconds"))
-    XCTAssertTrue(
-      livenessWatchdog.contains("strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)"))
+    let admissionGate = try XCTUnwrap(
+      livenessWatchdog.range(of: "if !self.isPairingMaterialAdmitted("))
+    let strictBootstrapDefer = try XCTUnwrap(
+      livenessWatchdog.range(
+        of: "if self.strictPQCClassicBootstrapOnlySessionIds.contains(sessionId)"))
+    let normalActivityDeadline = try XCTUnwrap(
+      livenessWatchdog.range(of: "Date().timeIntervalSince(lastActivityAt) > timeoutSeconds"))
+    XCTAssertLessThan(admissionGate.lowerBound, strictBootstrapDefer.lowerBound)
+    XCTAssertLessThan(strictBootstrapDefer.lowerBound, normalActivityDeadline.lowerBound)
+    XCTAssertTrue(livenessWatchdog.contains("pairing_material_admission_timeout"))
     XCTAssertTrue(livenessWatchdog.contains("continue"))
     XCTAssertTrue(bootstrapTimeout.contains("hasFreshActivity || isRekeyActivelyProgressing"))
     XCTAssertTrue(bootstrapTimeout.contains("strictPQCClassicBootstrapMaxGraceSeconds"))
@@ -11274,12 +12964,15 @@ final class RegressionHardeningTests: XCTestCase {
     )
 
     XCTAssertTrue(source.contains("private var lanSOAPairKey: Data?"))
+    XCTAssertTrue(source.contains("private var lanEstablishedArbiterLease: PeerSessionArbiter.EstablishedLease?"))
     XCTAssertTrue(source.contains("private var pendingConnectionTarget: DiscoveredDevice?"))
-    XCTAssertTrue(clearBody.contains("PeerSessionArbiter.shared.clearEstablished"))
-    XCTAssertTrue(clearBody.contains("PeerSessionArbiter.shared.clearOutgoing"))
+    XCTAssertTrue(clearBody.contains("let closingArbiterLease = lanEstablishedArbiterLease"))
+    XCTAssertTrue(clearBody.contains("PeerSessionArbiter.shared.clearEstablished(closingArbiterLease)"))
+    XCTAssertFalse(clearBody.contains("PeerSessionArbiter.shared.clearOutgoing"))
     XCTAssertTrue(clearBody.contains("lanSOAPairKey = nil"))
     XCTAssertTrue(handshakeBody.contains("PeerSessionArbiter.pairKey"))
     XCTAssertTrue(handshakeBody.contains("lanSOAPairKey = pairKey"))
+    XCTAssertTrue(handshakeBody.contains("captureLANEstablishedArbiterLease("))
     XCTAssertTrue(connectBody.contains("pendingConnectionTarget"))
     XCTAssertTrue(connectBody.contains("areEquivalentRemoteDesktopDevices"))
     XCTAssertTrue(connectBody.contains("pushViewerStreamConfiguration(force: true)"))
@@ -11301,13 +12994,15 @@ final class RegressionHardeningTests: XCTestCase {
     let source = try repositoryScriptSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
 
     XCTAssertTrue(source.contains("var soaPairKey: Data?"))
+    XCTAssertTrue(source.contains("var soaEstablishedLease: PeerSessionArbiter.EstablishedLease?"))
     XCTAssertTrue(source.contains("recordSOAState(soaPairKey, for: peer)"))
-    XCTAssertTrue(source.contains("releaseStaleSOAStateBeforeHandshake(pairKey: soaPairKey, for: peer)"))
-    XCTAssertTrue(source.contains("releaseSOAStateIfUnretained(for: previousPeer)"))
-    XCTAssertTrue(source.contains("releaseSOAStateIfUnretained(for: peer)"))
+    XCTAssertTrue(source.contains("releaseStaleSOAStateBeforeHandshake(for: peer)"))
+    XCTAssertTrue(source.contains("releaseSOAState(for: previousPeer)"))
+    XCTAssertTrue(source.contains("releaseSOAState(for: peer)"))
     XCTAssertTrue(source.contains("PeerSessionArbiter.shared.clearEstablished"))
-    XCTAssertTrue(source.contains("PeerSessionArbiter.shared.clearOutgoing"))
-    XCTAssertTrue(source.contains("isSOAPairKeyRetainedByCurrentPeer"))
+    XCTAssertFalse(source.contains("PeerSessionArbiter.shared.clearOutgoing"))
+    XCTAssertTrue(source.contains("lease.pairKey == pairKey"))
+    XCTAssertTrue(source.contains("lease.sessionId == sessionKeys.sessionId"))
   }
 }
 
@@ -11430,6 +13125,106 @@ private struct LocalHandshakeTestCryptoProvider: CryptoProvider {
   }
 }
 
+private struct WaitingFinishedSOAHandshakeFixture {
+  let initiator: HandshakeDriver
+  let handshakeTask: Task<SessionKeys, Error>
+  let sessionKeys: SessionKeys
+  let signatureProvider: LocalHandshakeTestSignatureProvider
+  let responderIdentity: Data
+  let arbiter: PeerSessionArbiter
+  let localSOAPeerId: Data
+  let remoteSOAPeerId: Data
+  let pairKey: Data
+  let attemptId: Data
+}
+
+private func makeWaitingFinishedSOAHandshake(
+  suspendEstablishmentCommit: Bool = false
+) async throws -> WaitingFinishedSOAHandshakeFixture {
+  let signatureProvider = LocalHandshakeTestSignatureProvider()
+  let provider = LocalHandshakeTestCryptoProvider(
+    tier: .classic,
+    activeSuite: .x25519Ed25519,
+    supportedSuites: [.x25519Ed25519]
+  )
+  let initiatorIdentity = Data(repeating: 0x10, count: 1_952)
+  let responderIdentity = Data(repeating: 0x50, count: 1_952)
+  let transport = CaptureOnlyDiscoveryTransport()
+  let localSOAPeerId = PeerSessionArbiter.soaPeerId(
+    from: "id:11111111-2222-4333-8444-555555555555")
+  let remoteSOAPeerId = PeerSessionArbiter.soaPeerId(
+    from: "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+  let arbiter = PeerSessionArbiter()
+  let attemptId = Data(repeating: 0x42, count: HandshakeSOAExtension.attemptIdLength)
+  if suspendEstablishmentCommit {
+    try await arbiter.testOnlySuspendEstablishmentCommit(attemptId: attemptId)
+  }
+  let initiator = HandshakeDriver(
+    transport: transport,
+    cryptoProvider: provider,
+    protocolSignatureProvider: signatureProvider,
+    identityKeyHandle: SigningKeyHandle.callback(
+      FixedSignatureCallback(signature: Data([0xAA]))),
+    sigAAlgorithm: .mlDSA65,
+    protocolSigningKeyProtection: .softwareKeychain,
+    identityPublicKey: initiatorIdentity,
+    soaMetadata: try HandshakeSOAMetadata(
+      initiatorPeerId: localSOAPeerId,
+      targetPeerId: remoteSOAPeerId,
+      attemptId: attemptId
+    ),
+    localSOAPeerId: localSOAPeerId,
+    expectedRemoteSOAPeerId: remoteSOAPeerId,
+    sessionArbiter: arbiter
+  )
+  let handshakeTask = Task {
+    try await initiator.initiateHandshake(with: PeerIdentifier(deviceId: "mac-peer"))
+  }
+  let messageAFrame = try await waitForLatestFrame(from: transport)
+  let messageA = try HandshakeMessageA.decode(
+    from: HandshakePadding.unwrapIfNeeded(messageAFrame, label: "test/messageA")
+  )
+
+  let responderContext = HandshakeContext(
+    role: .responder,
+    cryptoProvider: provider,
+    protocolSignatureProvider: signatureProvider,
+    identityKeyHandle: SigningKeyHandle.callback(
+      FixedSignatureCallback(signature: Data([0xBB]))),
+    identityPublicKey: responderIdentity,
+    policy: .default,
+    cryptoPolicy: .default
+  )
+  try await responderContext.processMessageA(messageA)
+  let (messageB, _) = try await responderContext.buildMessageB()
+  await responderContext.zeroize()
+  await initiator.handleMessage(
+    messageB.encoded,
+    from: PeerIdentifier(deviceId: "mac-peer")
+  )
+
+  guard case .waitingFinished(_, let sessionKeys, let expectingFrom) =
+    await initiator.getCurrentState(),
+    expectingFrom == .responder else {
+    throw LocalHandshakeTestError.unexpectedState
+  }
+  return WaitingFinishedSOAHandshakeFixture(
+    initiator: initiator,
+    handshakeTask: handshakeTask,
+    sessionKeys: sessionKeys,
+    signatureProvider: signatureProvider,
+    responderIdentity: responderIdentity,
+    arbiter: arbiter,
+    localSOAPeerId: localSOAPeerId,
+    remoteSOAPeerId: remoteSOAPeerId,
+    pairKey: PeerSessionArbiter.pairKey(
+      localPeerId: localSOAPeerId,
+      remotePeerId: remoteSOAPeerId
+    ),
+    attemptId: attemptId
+  )
+}
+
 private enum LocalHandshakeAuthorityHelper {
   static func authority(
     identityPublicKey: Data,
@@ -11461,6 +13256,112 @@ private actor CaptureOnlyDiscoveryTransport: DiscoveryTransport {
   }
 }
 
+@available(iOS 17.0, *)
+private actor SuspendedFirstSendDiscoveryTransport: DiscoveryTransport {
+  private let failFirstSendOnResume: Bool
+  private var sendCount = 0
+  private var firstFrame: Data?
+  private var firstFrameWaiters: [CheckedContinuation<Data, Never>] = []
+  private var firstSendContinuation: CheckedContinuation<Void, Error>?
+
+  init(failFirstSendOnResume: Bool) {
+    self.failFirstSendOnResume = failFirstSendOnResume
+  }
+
+  func send(to peer: PeerIdentifier, data: Data) async throws {
+    _ = peer
+    sendCount += 1
+    guard sendCount == 1 else { return }
+
+    firstFrame = data
+    let waiters = firstFrameWaiters
+    firstFrameWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume(returning: data)
+    }
+    try await withCheckedThrowingContinuation { continuation in
+      precondition(firstSendContinuation == nil, "Only the first send may be suspended")
+      firstSendContinuation = continuation
+    }
+  }
+
+  func waitForFirstFrame() async -> Data {
+    if let firstFrame { return firstFrame }
+    return await withCheckedContinuation { continuation in
+      firstFrameWaiters.append(continuation)
+    }
+  }
+
+  func resumeFirstSend() {
+    let continuation = firstSendContinuation
+    firstSendContinuation = nil
+    if failFirstSendOnResume {
+      continuation?.resume(throwing: NSError(
+        domain: "SkyBridge.HandshakeEarlyFinishedTest",
+        code: 1
+      ))
+    } else {
+      continuation?.resume()
+    }
+  }
+}
+
+@available(iOS 17.0, *)
+private actor SuspendedKEMLookupHandshakeTrustProvider: HandshakeTrustProvider {
+  private var lookupStarted = false
+  private var lookupStartedWaiters: [CheckedContinuation<Void, Never>] = []
+  private var lookupContinuation: CheckedContinuation<Void, Never>?
+
+  func trustedFingerprint(for deviceId: String) async -> String? {
+    _ = deviceId
+    return nil
+  }
+
+  func trustedKEMPublicKeys(for deviceId: String) async -> [CryptoSuite: Data] {
+    _ = deviceId
+    lookupStarted = true
+    let waiters = lookupStartedWaiters
+    lookupStartedWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume()
+    }
+    await withCheckedContinuation { continuation in
+      precondition(lookupContinuation == nil, "Only one KEM lookup may be suspended")
+      lookupContinuation = continuation
+    }
+    return [:]
+  }
+
+  func trustedSecureEnclavePublicKey(for deviceId: String) async -> Data? {
+    _ = deviceId
+    return nil
+  }
+
+  func waitUntilKEMLookupStarts() async {
+    guard !lookupStarted else { return }
+    await withCheckedContinuation { continuation in
+      lookupStartedWaiters.append(continuation)
+    }
+  }
+
+  func resumeKEMLookup() {
+    let continuation = lookupContinuation
+    lookupContinuation = nil
+    continuation?.resume()
+  }
+}
+
+private func makeUnstartedHandshakeTestConnection(port: UInt16) -> NWConnection {
+  guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
+    preconditionFailure("Test port must be valid")
+  }
+  return NWConnection(
+    host: NWEndpoint.Host("127.0.0.1"),
+    port: endpointPort,
+    using: .tcp
+  )
+}
+
 private enum LocalHandshakeFinishedHelper {
   static func responderFinished(for sessionKeys: SessionKeys) -> HandshakeFinished {
     let macKey = HKDF<SHA256>.deriveKey(
@@ -11476,6 +13377,7 @@ private enum LocalHandshakeFinishedHelper {
 
 private enum LocalHandshakeTestError: Error {
   case timedOutWaitingForCapturedFrame
+  case unexpectedState
 }
 
 private func waitForLatestFrame(

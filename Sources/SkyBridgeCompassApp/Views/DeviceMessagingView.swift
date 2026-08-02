@@ -10,10 +10,38 @@ struct DeviceMessagingView: View {
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = DeviceMessageStore.shared
+    @ObservedObject private var queue = OfflineMessageQueue.shared
     @State private var draft = ""
+    @State private var isSending = false
+    @State private var operationError: String?
 
     private var messages: [DeviceMessageStore.Message] {
-        store.messages(fingerprint: fingerprint)
+        switch conversationProjection {
+        case .success(let messages):
+            return messages
+        case .failure:
+            return []
+        }
+    }
+
+    private var conversationProjection: Result<[DeviceMessageStore.Message], Error> {
+        Result { try store.messages(fingerprint: fingerprint) }
+    }
+
+    private var availabilityIssue: String? {
+        if case .failure = conversationProjection {
+            return "该会话的认证身份指纹无效，消息功能已停用。"
+        }
+        if case .blocked = store.persistenceState {
+            return "消息历史持久化不可用。数据会保持原样，需使用受控隔离恢复流程；本版本不会自动清空。"
+        }
+        if case .blocked = queue.configurationPersistenceState {
+            return "离线队列配置不可用，请先在离线队列设置中显式恢复。"
+        }
+        if case .blocked = queue.persistenceState {
+            return "离线队列持久化不可用，消息不会被假定为已排队。"
+        }
+        return nil
     }
 
     var body: some View {
@@ -29,6 +57,19 @@ struct DeviceMessagingView: View {
             .padding()
 
             Divider()
+
+            if let availabilityIssue {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                    Text(availabilityIssue)
+                        .font(.caption)
+                    Spacer()
+                }
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+                Divider()
+            }
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -68,20 +109,55 @@ struct DeviceMessagingView: View {
                 Button {
                     sendDraft()
                 } label: {
-                    Image(systemName: "paperplane.fill")
+                    if isSending {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                    }
                 }
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || isSending
+                        || availabilityIssue != nil
+                )
             }
             .padding()
         }
         .frame(minWidth: 460, minHeight: 520)
+        .alert(
+            "消息发送失败",
+            isPresented: Binding(
+                get: { operationError != nil },
+                set: { if !$0 { operationError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { operationError = nil }
+        } message: {
+            Text(operationError ?? "消息操作失败")
+        }
     }
 
     private func sendDraft() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        draft = ""
-        Task { await DeviceMessagingService.shared.send(text: text, toDeviceId: deviceId, fingerprint: fingerprint) }
+        guard !text.isEmpty, !isSending, availabilityIssue == nil else { return }
+        isSending = true
+        operationError = nil
+        Task { @MainActor in
+            defer { isSending = false }
+            do {
+                try await DeviceMessagingService.shared.send(
+                    text: text,
+                    toDeviceID: deviceId,
+                    fingerprint: fingerprint
+                )
+                if draft.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+                    draft = ""
+                }
+            } catch {
+                operationError = error.localizedDescription
+            }
+        }
     }
 
     @ViewBuilder
@@ -107,6 +183,7 @@ struct DeviceMessagingView: View {
         case .pending: return "等待对方上线…"
         case .sent: return "已发送 · \(time)"
         case .delivered: return "已送达 · \(time)"
+        case .failed: return "发送失败 · \(time)"
         }
     }
 }

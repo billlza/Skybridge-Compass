@@ -46,48 +46,6 @@ enum LocalNetworkAdvertisementAddressProvider {
             }
     }
 
-    static func attachAddressTXT(to record: inout NWTXTRecord) {
-        let addresses = routableLANAddresses()
-        guard !addresses.isEmpty else { return }
-
-        let primary = addresses[0]
-        record["lanHost"] = primary
-        record["host"] = primary
-        record["ip"] = primary
-
-        if let ipv4 = addresses.first(where: { IPv4Address($0) != nil }) {
-            record["ipv4"] = ipv4
-            record["lanIPv4"] = ipv4
-        }
-        if let ipv6 = addresses.first(where: { IPv6Address(stripInterfaceScope($0)) != nil }) {
-            record["ipv6"] = ipv6
-            record["lanIPv6"] = ipv6
-        }
-    }
-
-    static func attachAddressTXT(to record: inout [String: Data]) {
-        let addresses = routableLANAddresses()
-        guard !addresses.isEmpty else { return }
-
-        func set(_ key: String, _ value: String) {
-            record[key] = Data(value.utf8)
-        }
-
-        let primary = addresses[0]
-        set("lanHost", primary)
-        set("host", primary)
-        set("ip", primary)
-
-        if let ipv4 = addresses.first(where: { IPv4Address($0) != nil }) {
-            set("ipv4", ipv4)
-            set("lanIPv4", ipv4)
-        }
-        if let ipv6 = addresses.first(where: { IPv6Address(stripInterfaceScope($0)) != nil }) {
-            set("ipv6", ipv6)
-            set("lanIPv6", ipv6)
-        }
-    }
-
     static func isAdvertisableRoutableLANAddress(_ raw: String) -> Bool {
         let address = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !address.isEmpty else { return false }

@@ -1,17 +1,445 @@
-import Foundation
 import Combine
+import Foundation
+import SkyBridgeMessagePersistence
+import SkyBridgeProtocolCore
 
-/// 设备间文本消息的持久化会话存储。
-///
-/// 以稳定的公钥指纹（`TrustRecord.pubKeyFP`，与 F2 一致）为会话键，避免设备 id 轮换导致历史错位。
-/// 跨平台（不依赖 AppKit），UI 与传输层共用。
+enum UnifiedDeviceMessageStoreMutation: Sendable {
+    case clearConversation(String)
+}
+
+public enum DeviceMessageStoreError: Error, LocalizedError, Sendable, Equatable {
+    case invalidConversationFingerprint
+    case messageNotFound(UUID)
+    case persistenceBlocked(OfflineDeliveryFailureCode)
+    case invalidPersistedState
+    case conversationCapacityExceeded
+    case pendingOutgoingMessagesPreventClear(count: Int)
+    case storageCapacityExceeded(actualBytes: Int, maximumBytes: Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidConversationFingerprint:
+            return "Invalid device-message conversation fingerprint"
+        case .messageNotFound:
+            return "Device message was not found"
+        case .persistenceBlocked:
+            return "Device-message persistence is unavailable"
+        case .invalidPersistedState:
+            return "Device-message persistence contains invalid state"
+        case .conversationCapacityExceeded:
+            return "Device-message conversation capacity was exceeded"
+        case .pendingOutgoingMessagesPreventClear:
+            return "Pending outgoing messages must be resolved before clearing the conversation"
+        case .storageCapacityExceeded(let actualBytes, let maximumBytes):
+            return "Device-message storage capacity exceeded: \(actualBytes) bytes (maximum \(maximumBytes) bytes)"
+        }
+    }
+}
+
+public enum DeviceMessageStorePersistenceState: Sendable, Equatable {
+    case loading
+    case ready
+    case blocked(OfflineDeliveryFailureCode)
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+actor DeviceMessageConversationRepository {
+    typealias Conversations = [String: [DeviceMessageStore.Message]]
+
+    struct Snapshot: Sendable {
+        let conversations: Conversations
+        let persistenceState: DeviceMessageStorePersistenceState
+        let generation: UInt64
+    }
+
+    private let store: CodablePersistenceStore<Conversations>
+    private let maximumMessagesPerConversation: Int
+    private var conversations: Conversations = [:]
+    private var persistenceState: DeviceMessageStorePersistenceState = .loading
+    private var bootstrapTask: Task<Conversations, Error>?
+    private var nextTransactionSequence: UInt64 = 0
+    private var latestAppliedTransactionSequence: UInt64 = 0
+
+    init(
+        store: CodablePersistenceStore<Conversations>,
+        maximumMessagesPerConversation: Int
+    ) {
+        precondition(maximumMessagesPerConversation > 0)
+        self.store = store
+        self.maximumMessagesPerConversation = maximumMessagesPerConversation
+    }
+
+    func bootstrap() async throws -> Snapshot {
+        switch persistenceState {
+        case .ready:
+            return snapshot()
+        case .blocked(let code):
+            throw DeviceMessageStoreError.persistenceBlocked(code)
+        case .loading:
+            break
+        }
+
+        let task: Task<Conversations, Error>
+        if let bootstrapTask {
+            task = bootstrapTask
+        } else {
+            let store = self.store
+            let maximum = maximumMessagesPerConversation
+            task = Task {
+                try await CodablePersistenceStoreIOCoordinator.shared.perform(
+                    identity: store.persistenceIdentity
+                ) {
+                    let persisted = try store.loadOrThrow() ?? [:]
+                    let normalized = try Self.validated(
+                        persisted,
+                        maximumMessagesPerConversation: maximum
+                    )
+                    if normalized != persisted {
+                        try store.save(normalized)
+                    }
+                    return normalized
+                }
+            }
+            bootstrapTask = task
+        }
+
+        let sequence = try issueTransactionSequence()
+        do {
+            let loaded = try await task.value
+            bootstrapTask = nil
+            if apply(loaded, transactionSequence: sequence) {
+                persistenceState = .ready
+            }
+            return snapshot()
+        } catch {
+            bootstrapTask = nil
+            let code = Self.failureCode(for: error)
+            advanceGeneration(to: sequence)
+            persistenceState = .blocked(code)
+            throw DeviceMessageStoreError.persistenceBlocked(code)
+        }
+    }
+
+    func appendOutgoing(
+        text: String,
+        conversationFingerprint: String,
+        targetDeviceID: String,
+        messageID: UUID,
+        sentAt: Date
+    ) async throws -> Snapshot {
+        let maximum = maximumMessagesPerConversation
+        let message = DeviceMessageStore.Message(
+            id: messageID,
+            direction: .outgoing,
+            text: text,
+            timestamp: sentAt,
+            deliveryState: .pending,
+            targetDeviceID: targetDeviceID
+        )
+        return try await mutate { conversations in
+            var messages = conversations[conversationFingerprint] ?? []
+            guard !messages.contains(where: { $0.id == messageID }) else {
+                throw DeviceMessageStoreError.invalidPersistedState
+            }
+            messages.append(message)
+            conversations[conversationFingerprint] = try Self.bounded(
+                messages,
+                maximumMessagesPerConversation: maximum
+            )
+        }
+    }
+
+    func updateDeliveryState(
+        messageID: UUID,
+        conversationFingerprint: String,
+        deliveryState: DeviceMessageStore.DeliveryState
+    ) async throws -> Snapshot {
+        try await mutate { conversations in
+            guard var messages = conversations[conversationFingerprint],
+                  let index = messages.firstIndex(where: { $0.id == messageID }) else {
+                throw DeviceMessageStoreError.messageNotFound(messageID)
+            }
+            guard messages[index].deliveryState != deliveryState else { return }
+            messages[index].deliveryState = deliveryState
+            conversations[conversationFingerprint] = messages
+        }
+    }
+
+    func receiveIncoming(
+        text: String,
+        conversationFingerprint: String,
+        messageID: UUID,
+        sentAt: Date
+    ) async throws -> Snapshot {
+        let maximum = maximumMessagesPerConversation
+        return try await mutate { conversations in
+            var messages = conversations[conversationFingerprint] ?? []
+            guard !messages.contains(where: { $0.id == messageID }) else { return }
+            messages.append(
+                DeviceMessageStore.Message(
+                    id: messageID,
+                    direction: .incoming,
+                    text: text,
+                    timestamp: sentAt,
+                    deliveryState: .delivered
+                )
+            )
+            conversations[conversationFingerprint] = try Self.bounded(
+                messages,
+                maximumMessagesPerConversation: maximum
+            )
+        }
+    }
+
+    func clearConversation(_ conversationFingerprint: String) async throws -> Snapshot {
+        try await mutate { conversations in
+            let pendingOutgoingCount = conversations[conversationFingerprint, default: []]
+                .lazy
+                .filter { $0.direction == .outgoing && $0.deliveryState == .pending }
+                .count
+            guard pendingOutgoingCount == 0 else {
+                throw DeviceMessageStoreError.pendingOutgoingMessagesPreventClear(
+                    count: pendingOutgoingCount
+                )
+            }
+            conversations.removeValue(forKey: conversationFingerprint)
+        }
+    }
+
+    /// Explicit destructive recovery for an unreadable canonical file.
+    func clearAll() async throws -> Snapshot {
+        let sequence = try issueTransactionSequence()
+        let store = self.store
+        let requiresQuarantine: Bool
+        if case .blocked = persistenceState {
+            requiresQuarantine = true
+        } else {
+            requiresQuarantine = false
+        }
+        do {
+            try await CodablePersistenceStoreIOCoordinator.shared.perform(
+                identity: store.persistenceIdentity
+            ) {
+                if requiresQuarantine {
+                    _ = try store.quarantineExistingPayload()
+                }
+                try store.save([:])
+            }
+            if apply([:], transactionSequence: sequence) {
+                persistenceState = .ready
+                bootstrapTask = nil
+            }
+            return snapshot()
+        } catch {
+            let code = Self.failureCode(for: error)
+            advanceGeneration(to: sequence)
+            persistenceState = .blocked(code)
+            throw DeviceMessageStoreError.persistenceBlocked(code)
+        }
+    }
+
+    func currentSnapshot() -> Snapshot {
+        snapshot()
+    }
+
+    private func mutate(
+        _ mutation: @escaping @Sendable (inout Conversations) throws -> Void
+    ) async throws -> Snapshot {
+        _ = try await bootstrap()
+        let sequence = try issueTransactionSequence()
+        let store = self.store
+        let maximum = maximumMessagesPerConversation
+        do {
+            let result = try await CodablePersistenceStoreIOCoordinator.shared.perform(
+                identity: store.persistenceIdentity
+            ) {
+                let persisted = try store.loadOrThrow() ?? [:]
+                var canonical = try Self.validated(
+                    persisted,
+                    maximumMessagesPerConversation: maximum
+                )
+                try mutation(&canonical)
+                canonical = try Self.validated(
+                    canonical,
+                    maximumMessagesPerConversation: maximum
+                )
+                do {
+                    try store.save(canonical)
+                } catch let error as CodablePersistenceStoreError {
+                    switch error {
+                    case .payloadTooLarge(let actualBytes, let maximumBytes):
+                        throw DeviceMessageStoreError.storageCapacityExceeded(
+                            actualBytes: actualBytes,
+                            maximumBytes: maximumBytes
+                        )
+                    }
+                }
+                return canonical
+            }
+            apply(result, transactionSequence: sequence)
+            return snapshot()
+        } catch let error as DeviceMessageStoreError {
+            switch error {
+            case .invalidPersistedState:
+                advanceGeneration(to: sequence)
+                persistenceState = .blocked(.stateConflict)
+                throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+            case .invalidConversationFingerprint, .messageNotFound,
+                 .persistenceBlocked, .conversationCapacityExceeded,
+                 .pendingOutgoingMessagesPreventClear, .storageCapacityExceeded:
+                throw error
+            }
+        } catch let error as DeviceTextMessagePolicyError {
+            throw error
+        } catch {
+            let code = Self.failureCode(for: error)
+            advanceGeneration(to: sequence)
+            persistenceState = .blocked(code)
+            throw DeviceMessageStoreError.persistenceBlocked(code)
+        }
+    }
+
+    private func snapshot() -> Snapshot {
+        Snapshot(
+            conversations: conversations,
+            persistenceState: persistenceState,
+            generation: latestAppliedTransactionSequence
+        )
+    }
+
+    private func issueTransactionSequence() throws -> UInt64 {
+        let increment = nextTransactionSequence.addingReportingOverflow(1)
+        guard !increment.overflow else {
+            persistenceState = .blocked(.stateConflict)
+            throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+        }
+        nextTransactionSequence = increment.partialValue
+        return nextTransactionSequence
+    }
+
+    @discardableResult
+    private func apply(_ value: Conversations, transactionSequence: UInt64) -> Bool {
+        guard transactionSequence >= latestAppliedTransactionSequence else { return false }
+        latestAppliedTransactionSequence = transactionSequence
+        conversations = value
+        return true
+    }
+
+    private func advanceGeneration(to transactionSequence: UInt64) {
+        guard transactionSequence > latestAppliedTransactionSequence else { return }
+        latestAppliedTransactionSequence = transactionSequence
+    }
+
+    private nonisolated static func validated(
+        _ conversations: Conversations,
+        maximumMessagesPerConversation: Int
+    ) throws -> Conversations {
+        var normalized: Conversations = [:]
+        normalized.reserveCapacity(conversations.count)
+        for (rawFingerprint, rawMessages) in conversations {
+            let fingerprint: String
+            do {
+                fingerprint = try DeviceTextMessagePolicy
+                    .normalizedConversationFingerprint(rawFingerprint)
+            } catch {
+                throw DeviceMessageStoreError.invalidPersistedState
+            }
+            guard fingerprint == rawFingerprint else {
+                throw DeviceMessageStoreError.invalidPersistedState
+            }
+            var seen = Set<UUID>()
+            var messages: [DeviceMessageStore.Message] = []
+            messages.reserveCapacity(rawMessages.count)
+            for message in rawMessages {
+                guard seen.insert(message.id).inserted,
+                      message.timestamp.timeIntervalSinceReferenceDate.isFinite else {
+                    throw DeviceMessageStoreError.invalidPersistedState
+                }
+                do {
+                    _ = try DeviceTextMessagePolicy.validatedText(message.text)
+                    if let targetDeviceID = message.targetDeviceID {
+                        let normalizedTarget = try DeviceTextMessagePolicy
+                            .normalizedTargetDeviceIdentifier(targetDeviceID)
+                        guard normalizedTarget == targetDeviceID else {
+                            throw DeviceMessageStoreError.invalidPersistedState
+                        }
+                    }
+                } catch {
+                    throw DeviceMessageStoreError.invalidPersistedState
+                }
+                messages.append(message)
+            }
+            normalized[fingerprint] = try bounded(
+                messages,
+                maximumMessagesPerConversation: maximumMessagesPerConversation
+            )
+        }
+        return normalized
+    }
+
+    private nonisolated static func bounded(
+        _ messages: [DeviceMessageStore.Message],
+        maximumMessagesPerConversation: Int
+    ) throws -> [DeviceMessageStore.Message] {
+        guard messages.count > maximumMessagesPerConversation else { return messages }
+        let pendingIDs = Set(
+            messages.lazy
+                .filter { $0.direction == .outgoing && $0.deliveryState == .pending }
+                .map(\.id)
+        )
+        guard pendingIDs.count <= maximumMessagesPerConversation else {
+            throw DeviceMessageStoreError.conversationCapacityExceeded
+        }
+        var retained = Array(messages.suffix(maximumMessagesPerConversation))
+        let retainedIDs = Set(retained.map(\.id))
+        let missingPending = messages.filter {
+            pendingIDs.contains($0.id) && !retainedIDs.contains($0.id)
+        }
+        if !missingPending.isEmpty {
+            let removableIndexes = retained.indices.filter { index in
+                !pendingIDs.contains(retained[index].id)
+            }
+            guard removableIndexes.count >= missingPending.count else {
+                throw DeviceMessageStoreError.conversationCapacityExceeded
+            }
+            for (message, index) in zip(missingPending, removableIndexes) {
+                retained[index] = message
+            }
+            retained.sort {
+                if $0.timestamp != $1.timestamp { return $0.timestamp < $1.timestamp }
+                return $0.id.uuidString < $1.id.uuidString
+            }
+        }
+        return retained
+    }
+
+    private nonisolated static func failureCode(for error: Error) -> OfflineDeliveryFailureCode {
+        if let error = error as? DeviceMessageStoreError,
+           error == .invalidPersistedState {
+            return .stateConflict
+        }
+        return .persistenceFailure
+    }
+}
+
+/// Device-message conversation projection. The repository owns canonical I/O;
+/// this main-actor facade only publishes committed snapshots to SwiftUI.
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 public final class DeviceMessageStore: ObservableObject {
     public static let shared = DeviceMessageStore()
 
-    public enum Direction: String, Codable, Sendable { case incoming, outgoing }
-    public enum DeliveryState: String, Codable, Sendable { case pending, sent, delivered }
+    public enum Direction: String, Codable, Sendable {
+        case incoming
+        case outgoing
+    }
+
+    public enum DeliveryState: String, Codable, Sendable {
+        case pending
+        case sent
+        case delivered
+        case failed
+    }
 
     public struct Message: Identifiable, Codable, Sendable, Equatable {
         public let id: UUID
@@ -19,76 +447,261 @@ public final class DeviceMessageStore: ObservableObject {
         public let text: String
         public let timestamp: Date
         public var deliveryState: DeliveryState
+        public let targetDeviceID: String?
 
-        public init(id: UUID = UUID(), direction: Direction, text: String, timestamp: Date = Date(), deliveryState: DeliveryState) {
+        public init(
+            id: UUID = UUID(),
+            direction: Direction,
+            text: String,
+            timestamp: Date = Date(),
+            deliveryState: DeliveryState,
+            targetDeviceID: String? = nil
+        ) {
             self.id = id
             self.direction = direction
             self.text = text
             self.timestamp = timestamp
             self.deliveryState = deliveryState
+            self.targetDeviceID = targetDeviceID
         }
     }
 
-    /// 会话表：pubKeyFP -> 该设备的消息列表（按时间）。
     @Published public private(set) var conversations: [String: [Message]] = [:]
+    @Published public private(set) var persistenceState: DeviceMessageStorePersistenceState = .loading
+    @Published public private(set) var migrationIssues: [MessageRepositoryMigrationIssue] = []
 
-    private let store = CodablePersistenceStore<[String: [Message]]>(
+    private static let defaultStore = CodablePersistenceStore<[String: [Message]]>(
         location: .protectedApplicationSupport(path: "Messaging/conversations.json")
     )
-    private let maxPerConversation = 500
+    private let repository: DeviceMessageConversationRepository
+    private let usesUnifiedRepository: Bool
+    private var latestGeneration: UInt64 = 0
+    private var bootstrapTask: Task<Void, Never>?
+    private var unifiedMutationHandler: (@MainActor @Sendable (
+        UnifiedDeviceMessageStoreMutation
+    ) async throws -> Void)?
 
-    private init() {
-        conversations = store.load() ?? [:]
+    private convenience init() {
+        self.init(store: Self.defaultStore, usesUnifiedRepository: true)
     }
 
-    public func messages(fingerprint: String) -> [Message] {
-        conversations[fingerprint] ?? []
+    convenience init(store: CodablePersistenceStore<[String: [Message]]>) {
+        self.init(store: store, usesUnifiedRepository: false)
     }
 
-    /// 记录一条发出的消息（初始 pending）。
-    public func appendOutgoing(text: String, fingerprint: String, messageId: UUID) {
-        guard !fingerprint.isEmpty else { return }
-        append(Message(id: messageId, direction: .outgoing, text: text, deliveryState: .pending), fingerprint: fingerprint)
+    private init(
+        store: CodablePersistenceStore<[String: [Message]]>,
+        usesUnifiedRepository: Bool
+    ) {
+        repository = DeviceMessageConversationRepository(
+            store: store,
+            maximumMessagesPerConversation: 500
+        )
+        self.usesUnifiedRepository = usesUnifiedRepository
+        bootstrapTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.bootstrap()
+        }
     }
 
-    /// 标记某条发出的消息已成功投递（已通过 P2P 发出）。
-    public func markDelivered(messageId: UUID, fingerprint: String) {
-        guard var msgs = conversations[fingerprint],
-              let idx = msgs.firstIndex(where: { $0.id == messageId }) else { return }
-        guard msgs[idx].deliveryState != .sent else { return }
-        msgs[idx].deliveryState = .sent
-        conversations[fingerprint] = msgs
-        persist()
+    public func messages(fingerprint rawFingerprint: String) throws -> [Message] {
+        let fingerprint = try normalizedFingerprint(rawFingerprint)
+        return conversations[fingerprint] ?? []
     }
 
-    /// 收到一条远端消息（按 id 去重）。
-    public func receiveIncoming(text: String, fingerprint: String, messageId: UUID, sentAt: Date) {
-        guard !fingerprint.isEmpty else { return }
-        var msgs = conversations[fingerprint] ?? []
-        guard !msgs.contains(where: { $0.id == messageId }) else { return }
-        msgs.append(Message(id: messageId, direction: .incoming, text: text, timestamp: sentAt, deliveryState: .delivered))
-        conversations[fingerprint] = trimmed(msgs)
-        persist()
+    public func appendOutgoing(
+        text rawText: String,
+        fingerprint rawFingerprint: String,
+        targetDeviceID rawTargetDeviceID: String,
+        messageID: UUID,
+        sentAt: Date
+    ) async throws {
+        let text = try DeviceTextMessagePolicy.validatedText(rawText)
+        let fingerprint = try normalizedFingerprint(rawFingerprint)
+        let targetDeviceID = try DeviceTextMessagePolicy
+            .normalizedTargetDeviceIdentifier(rawTargetDeviceID)
+        guard !usesUnifiedRepository else {
+            throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+        }
+        try await applyRepositoryMutation {
+            try await repository.appendOutgoing(
+                text: text,
+                conversationFingerprint: fingerprint,
+                targetDeviceID: targetDeviceID,
+                messageID: messageID,
+                sentAt: sentAt
+            )
+        }
     }
 
-    public func clearConversation(fingerprint: String) {
-        guard conversations[fingerprint] != nil else { return }
-        conversations[fingerprint] = nil
-        persist()
+    public func markSent(messageID: UUID, fingerprint rawFingerprint: String) async throws {
+        let fingerprint = try normalizedFingerprint(rawFingerprint)
+        guard !usesUnifiedRepository else {
+            throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+        }
+        try await applyRepositoryMutation {
+            try await repository.updateDeliveryState(
+                messageID: messageID,
+                conversationFingerprint: fingerprint,
+                deliveryState: .sent
+            )
+        }
     }
 
-    private func append(_ msg: Message, fingerprint: String) {
-        var msgs = conversations[fingerprint] ?? []
-        msgs.append(msg)
-        conversations[fingerprint] = trimmed(msgs)
-        persist()
+    public func markFailed(messageID: UUID, fingerprint rawFingerprint: String) async throws {
+        let fingerprint = try normalizedFingerprint(rawFingerprint)
+        guard !usesUnifiedRepository else {
+            throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+        }
+        try await applyRepositoryMutation {
+            try await repository.updateDeliveryState(
+                messageID: messageID,
+                conversationFingerprint: fingerprint,
+                deliveryState: .failed
+            )
+        }
     }
 
-    private func trimmed(_ msgs: [Message]) -> [Message] {
-        msgs.count > maxPerConversation ? Array(msgs.suffix(maxPerConversation)) : msgs
+    public func receiveIncoming(
+        text rawText: String,
+        fingerprint rawFingerprint: String,
+        messageID: UUID,
+        sentAt: Date
+    ) async throws {
+        let text = try DeviceTextMessagePolicy.validatedText(rawText)
+        let fingerprint = try normalizedFingerprint(rawFingerprint)
+        if usesUnifiedRepository {
+            let snapshot = try await UnifiedDeviceMessagingRuntime.shared.recordIncoming(
+                PersistedMessageRecord(
+                    id: messageID,
+                    conversationFingerprint: fingerprint,
+                    targetDeviceID: nil,
+                    direction: .incoming,
+                    text: text,
+                    timestamp: sentAt,
+                    deliveryState: .delivered
+                )
+            )
+            try applyUnifiedSnapshot(snapshot)
+            return
+        }
+        try await applyRepositoryMutation {
+            try await repository.receiveIncoming(
+                text: text,
+                conversationFingerprint: fingerprint,
+                messageID: messageID,
+                sentAt: sentAt
+            )
+        }
     }
 
-    private func persist() {
-        try? store.save(conversations)
+    public func clearConversation(fingerprint rawFingerprint: String) async throws {
+        let fingerprint = try normalizedFingerprint(rawFingerprint)
+        if usesUnifiedRepository {
+            guard let unifiedMutationHandler else {
+                throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+            }
+            try await unifiedMutationHandler(.clearConversation(fingerprint))
+            return
+        }
+        try await applyRepositoryMutation {
+            try await repository.clearConversation(fingerprint)
+        }
+    }
+
+    public func clearAllForRecovery() async throws {
+        guard !usesUnifiedRepository else {
+            throw DeviceMessageStoreError.persistenceBlocked(.stateConflict)
+        }
+        try await applyRepositoryMutation {
+            try await repository.clearAll()
+        }
+    }
+
+    func installUnifiedMutationHandler(
+        _ handler: @escaping @MainActor @Sendable (
+            UnifiedDeviceMessageStoreMutation
+        ) async throws -> Void
+    ) {
+        guard usesUnifiedRepository else { return }
+        unifiedMutationHandler = handler
+    }
+
+    private func bootstrap() async {
+        if usesUnifiedRepository {
+            do {
+                try applyUnifiedSnapshot(
+                    try await UnifiedDeviceMessagingRuntime.shared.bootstrap()
+                )
+            } catch {
+                persistenceState = .blocked(.persistenceFailure)
+            }
+            return
+        }
+        do {
+            apply(try await repository.bootstrap())
+        } catch {
+            apply(await repository.currentSnapshot())
+        }
+    }
+
+    private func normalizedFingerprint(_ raw: String) throws -> String {
+        do {
+            return try DeviceTextMessagePolicy.normalizedConversationFingerprint(raw)
+        } catch {
+            throw DeviceMessageStoreError.invalidConversationFingerprint
+        }
+    }
+
+    private func applyRepositoryMutation(
+        _ operation: @MainActor () async throws -> DeviceMessageConversationRepository.Snapshot
+    ) async throws {
+        do {
+            apply(try await operation())
+        } catch {
+            apply(await repository.currentSnapshot())
+            throw error
+        }
+    }
+
+    private func apply(_ snapshot: DeviceMessageConversationRepository.Snapshot) {
+        guard snapshot.generation >= latestGeneration else { return }
+        latestGeneration = snapshot.generation
+        conversations = snapshot.conversations
+        persistenceState = snapshot.persistenceState
+    }
+
+    func applyUnifiedSnapshot(_ snapshot: MessageRepositorySnapshot) throws {
+        guard snapshot.generation >= latestGeneration else { return }
+        var next: [String: [Message]] = [:]
+        for record in snapshot.messages {
+            let direction: Direction
+            switch record.direction {
+            case .incoming: direction = .incoming
+            case .outgoing: direction = .outgoing
+            }
+            let deliveryState: DeliveryState
+            switch record.deliveryState {
+            case .pending: deliveryState = .pending
+            case .sent: deliveryState = .sent
+            case .delivered: deliveryState = .delivered
+            case .failed: deliveryState = .failed
+            }
+            next[record.conversationFingerprint, default: []].append(Message(
+                id: record.id,
+                direction: direction,
+                text: record.text,
+                timestamp: record.timestamp,
+                deliveryState: deliveryState,
+                targetDeviceID: record.targetDeviceID
+            ))
+        }
+        guard next.values.allSatisfy({ $0.count <= 500 }) else {
+            throw DeviceMessageStoreError.conversationCapacityExceeded
+        }
+        latestGeneration = snapshot.generation
+        conversations = next
+        migrationIssues = snapshot.migrationIssues
+        persistenceState = .ready
     }
 }

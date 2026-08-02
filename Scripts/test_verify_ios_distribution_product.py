@@ -199,6 +199,51 @@ class WidgetEntitlementConformanceTests(unittest.TestCase):
         self.assertTrue(verifier.entitlement_value_is_present(["CloudKit"]))
         self.assertTrue(verifier.entitlement_value_is_present("production"))
 
+    def test_debug_lab_widget_requires_no_keychain_group(self) -> None:
+        self.assertEqual(
+            verifier.required_keychain_groups(
+                bundle_identifier="com.skybridge.compass.ios.widgets",
+                expected_team="YKUPL7Z869",
+                is_app=False,
+                configuration="Debug",
+                lab_run=True,
+            ),
+            set(),
+        )
+
+    def test_release_widget_still_requires_its_own_keychain_group(self) -> None:
+        expected = {"YKUPL7Z869.com.skybridge.compass.ios.widgets"}
+        for lab_run in (False, True):
+            with self.subTest(lab_run=lab_run):
+                self.assertEqual(
+                    verifier.required_keychain_groups(
+                        bundle_identifier="com.skybridge.compass.ios.widgets",
+                        expected_team="YKUPL7Z869",
+                        is_app=False,
+                        configuration="Release",
+                        lab_run=lab_run,
+                    ),
+                    expected,
+                )
+
+    def test_app_always_requires_product_and_shared_keychain_groups(self) -> None:
+        expected = {
+            "YKUPL7Z869.com.skybridge.compass.ios",
+            "YKUPL7Z869.group.com.skybridge.compass",
+        }
+        for configuration, lab_run in (("Debug", True), ("Release", False)):
+            with self.subTest(configuration=configuration, lab_run=lab_run):
+                self.assertEqual(
+                    verifier.required_keychain_groups(
+                        bundle_identifier="com.skybridge.compass.ios",
+                        expected_team="YKUPL7Z869",
+                        is_app=True,
+                        configuration=configuration,
+                        lab_run=lab_run,
+                    ),
+                    expected,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

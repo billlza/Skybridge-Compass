@@ -15,6 +15,8 @@ public enum FileTransferError: Error, LocalizedError {
   case receiverRejected
   case secureSessionRequired
   case securityThreatDetected(threatName: String)
+  case securityScanReviewRequired(warningCodes: [String])
+  case securityScanIncomplete(verdict: ScanVerdict, warningCodes: [String])
   case partialFileCleanupFailed
   case sourceFileCloseFailed
   case committedFileReleaseFailed
@@ -56,6 +58,12 @@ public enum FileTransferError: Error, LocalizedError {
       return "经典文件传输需要已认证的安全会话"
     case .securityThreatDetected(let threatName):
       return "检测到安全威胁: \(threatName)"
+    case .securityScanReviewRequired(let warningCodes):
+      let codes = warningCodes.isEmpty ? "unspecified" : warningCodes.joined(separator: ",")
+      return "文件扫描需要人工复核，自动接收已阻止（\(codes)）"
+    case .securityScanIncomplete(let verdict, let warningCodes):
+      let codes = warningCodes.isEmpty ? "unspecified" : warningCodes.joined(separator: ",")
+      return "文件扫描未给出可自动放行的结论（verdict=\(verdict.rawValue), codes=\(codes)）"
     case .partialFileCleanupFailed:
       return "文件传输失败，且未完成文件清理失败"
     case .sourceFileCloseFailed:

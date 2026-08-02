@@ -77,8 +77,11 @@ enum WebRTCAuthenticatedRouteBindingPolicy {
             return .rejected(reason: "invalid_endpoint")
         }
 
-        switch (payload.kind, payload.serviceType) {
-        case ("fileTransfer", "_skybridge-transfer._tcp"):
+        if payload.kind == "fileTransfer",
+           [
+               BonjourInteropContract.fileTransferServiceType,
+               BonjourInteropContract.legacyFileTransferServiceType
+           ].contains(payload.serviceType) {
             let peerName = normalizedRequiredToken(expectedRemoteAuthority.deviceName)
                 ?? normalizedRequiredToken(payload.localDeviceId)
                 ?? "Remote Device"
@@ -89,11 +92,15 @@ enum WebRTCAuthenticatedRouteBindingPolicy {
                 transferAddress: hostName,
                 transferPort: Int(payload.port)
             ))
-        case ("remoteDesktop", "_skybridge-remote._tcp"):
-            return .verifiedButUnsupported(kind: "remoteDesktop")
-        default:
-            return .rejected(reason: "unsupported_route_kind_or_service")
         }
+        if payload.kind == "remoteDesktop",
+           [
+               BonjourInteropContract.remoteControlServiceType,
+               BonjourInteropContract.legacyRemoteControlServiceType
+           ].contains(payload.serviceType) {
+            return .verifiedButUnsupported(kind: "remoteDesktop")
+        }
+        return .rejected(reason: "unsupported_route_kind_or_service")
     }
 
     private static func normalizedRequiredToken(_ raw: String?) -> String? {

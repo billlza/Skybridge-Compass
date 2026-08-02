@@ -35,6 +35,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         let p2pDiscoverySource = try repositorySource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let remoteSmokeScript = try repositorySource("Scripts/run_real_device_p2p_remote_smoke.sh")
+        let noticeDisconnectVerifierSource = try repositorySource("Scripts/check_p2p_notice_disconnect.py")
         let packageScript = try repositorySource("Scripts/package_app.sh")
         let releaseReadinessScript = try repositorySource("Scripts/check_macos_release_readiness.sh")
         let frameworkHelpers = try repositorySource("Scripts/framework_artifact_helpers.sh")
@@ -336,10 +337,17 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("remoteControlNoticeApproved .*transport=p2p") &&
             remoteSmokeScript.contains("remoteControlNoticeActive .*transport=p2p") &&
             remoteSmokeScript.contains("terminate_ios_remote_smoke_app_for_notice_disconnect") &&
-            remoteSmokeScript.contains("remoteControlNoticeDisconnected .*transport=p2p") &&
+            remoteSmokeScript.contains("wait_for_same_session_notice_disconnected") &&
+            remoteSmokeScript.contains("python3 \"$ROOT_DIR/Scripts/check_p2p_notice_disconnect.py\"") &&
             remoteSmokeScript.contains("AXUIElementPerformAction") &&
             remoteSmokeScript.contains("source=OnlineDeviceCard"),
             "Real-device P2P remote smoke must launch the Mac UI client, press a real online-device Connect button, record click evidence from outside the app UI, and fail closed instead of silently choosing a non-iPad target."
+        )
+        XCTAssertTrue(
+            noticeDisconnectVerifierSource.contains("expected exactly one Active event for the approved session") &&
+            noticeDisconnectVerifierSource.contains("approved session contains duplicate Disconnected events") &&
+            noticeDisconnectVerifierSource.contains("match.group(\"session\") == session"),
+            "Notice disconnect proof must remain bound to exactly one approved session lifecycle."
         )
         XCTAssertFalse(remoteSmokeScript.contains("SKYBRIDGE_SMOKE_MAC_ONLINE_SIGN_IDENTITY"))
         XCTAssertFalse(remoteSmokeScript.contains("select_macos_online_ipad_debug_signing_identity"))

@@ -366,7 +366,6 @@ struct DeviceDetailSheet: View {
     
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var connectionManager: P2PConnectionManager
-    @ObservedObject private var trustedStore: TrustedDeviceStore = .shared
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
     @State private var isConnecting = false
@@ -407,7 +406,7 @@ struct DeviceDetailSheet: View {
                 
                 // 操作
                 Section {
-                    if trustedStore.isTrusted(deviceId: device.id) {
+                    if device.isTrusted {
                         HStack(spacing: 10) {
                             Image(systemName: trustSymbolName)
                                 .foregroundStyle(.green)

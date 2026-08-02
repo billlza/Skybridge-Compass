@@ -55,9 +55,6 @@ if [[ "$MAIN_BUILD_SYSTEM" == "swiftpm" && -z "${SKYBRIDGE_SWIFTPM_RELEASE_SCRAT
     export SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH="/tmp/skybridge-swiftpm-release-${BUILD_ARCH}"
 fi
 VENDOR_XCFRAMEWORKS=(
-    "$PROJECT_ROOT/Sources/Vendor/FreeRDP.xcframework"
-    "$PROJECT_ROOT/Sources/Vendor/FreeRDPClient.xcframework"
-    "$PROJECT_ROOT/Sources/Vendor/WinPR.xcframework"
     "$PROJECT_ROOT/Sources/Vendor/liboqs.xcframework"
     "$PROJECT_ROOT/Sources/Vendor/libopus.xcframework"
 )
@@ -288,16 +285,16 @@ verify_release_executable_runtime_inputs() {
     fi
 
     if otool -L "$executable_path" 2>/dev/null | grep -q "@rpath/WebRTC.framework/WebRTC"; then
-        if [[ ! -e "$build_dir/WebRTC.framework/WebRTC" && ! -e "$build_dir/PackageFrameworks/WebRTC.framework/WebRTC" ]]; then
-            local framework_source=""
-            if ! framework_source="$(skybridge_resolve_framework_source_dir "WebRTC" "$BUILD_ARCH" "$build_dir" "$XCODE_DERIVED_DATA_PATH" "$PROJECT_ROOT")"; then
-                log_error "主可执行文件依赖 WebRTC.framework，但 Release 构建目录和 SwiftPM artifacts 都缺少 macOS $BUILD_ARCH slice"
-                exit 1
-            fi
-            log_info "Release executable 校验通过: WebRTC.framework 将从 artifact 补齐: $framework_source"
-            return 0
+        local framework_source=""
+        if ! framework_source="$(skybridge_resolve_framework_source_dir "WebRTC" "$BUILD_ARCH" "$build_dir" "$XCODE_DERIVED_DATA_PATH" "$PROJECT_ROOT")"; then
+            log_error "主可执行文件依赖 WebRTC.framework，但 Release 构建目录和 SwiftPM artifacts 都缺少 macOS $BUILD_ARCH slice"
+            exit 1
         fi
-        log_info "Release executable 校验通过: 主二进制链接 WebRTC.framework，且构建目录包含 WebRTC"
+        if ! skybridge_assert_webrtc_m150_framework "$framework_source"; then
+            log_error "Release WebRTC.framework 不是审核通过的 exact M150 macOS 原始二进制"
+            exit 1
+        fi
+        log_info "Release executable 校验通过: WebRTC.framework exact M150 source=$framework_source"
     fi
 }
 

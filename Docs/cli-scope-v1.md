@@ -35,9 +35,11 @@ not a fallback for Mac app auth.
   read-only socket server source exist. `crossnet preflight` is the explicit
   macOS-only readiness check for protocol/auth/tenant state. `crossnet status`
   can read one redacted Mac app status snapshot. `crossnet settings` can read
-  one allowlisted, non-secret Mac app settings snapshot. Mutating commands,
-  settings writes, and status watch still require signed-app live socket smoke
-  before they are treated as end-to-end GUI control capabilities.
+  one allowlisted, non-secret Mac app settings snapshot, and
+  `crossnet settings set` can mutate the smaller typed allowlist with runtime
+  read-back. Session mutation, navigation, and status watch remain disabled;
+  settings mutation still requires signed-app live socket smoke before it is a
+  release-ready end-to-end GUI control claim.
 - reuse of the formal SkyBridge identity, signaling, current-path, session, and file-transfer contracts
 - stable structured logs and doctor output for automation and regression
 
@@ -74,7 +76,7 @@ The Rust workspace under `rust/` is the new headless surface:
 - `skybridge-agent`
   - state directory, health/runtime loop, structured logging, graceful shutdown
 - `skybridge`
-  - operator commands, doctor/logs/metrics, future login/connect/file commands
+  - operator commands, login/connect/file flows, doctor/logs/metrics
 
 The CLI must not read GUI view models or UI-only state.
 
@@ -92,6 +94,7 @@ GUI-affecting commands:
 - `skybridge crossnet disconnect`
 - `skybridge crossnet status`
 - `skybridge crossnet settings`
+- `skybridge crossnet settings set <id> <value>`
 
 These are app-bound and use the Mac app's `crossnet-control/1` Unix socket at
 `~/Library/Application Support/SkyBridge/crossnet-control.sock`. The Mac app
@@ -103,36 +106,50 @@ contract are present. The Mac app now has an initial `crossnet.hello` /
 `crossnet.status` socket server source path. `crossnet preflight` reads that
 Mac app hello state and reports whether protocol/auth/tenant preconditions are
 ready. It must keep mutation availability separate: `preconditions_ready=true`
-does not imply GUI mutation support, `mutation_methods_enabled=false` remains
-visible until signed Mac app socket smoke proves the runtime path, and
-`release_gate=signed_mac_app_socket_smoke_required` stays machine-readable.
+does not imply that every GUI mutation is available. `mutation_methods_enabled`
+reports whether at least one method is enabled, while
+`enabled_mutation_methods` / `disabled_mutation_methods` carry the per-method
+boundary. With auth and tenant ready, `crossnet.settings.set` may be enabled
+while host/connect/disconnect remain disabled; the independent
+`release_gate=signed_mac_app_socket_smoke_required` stays machine-readable until
+the packaged runtime path has live evidence.
 `crossnet status` reads one redacted Mac app status snapshot: auth/tenant flags,
 connection/readiness strings, signaling health, optional stable `failure_code` /
 `failure_class`, suite, and non-secret `session_ref`; it does not log in,
 generate codes, connect peers, change settings, watch streams, expose raw session
-ids, raw failure reasons, or control iOS. `crossnet settings` reads an allowlisted, non-secret settings snapshot from
-the running Mac app and reports every setting as read-only in this slice; it does
-not write `UserDefaults`, mutate runtime state, expose paths/tokens/raw session
-ids, or control iOS. `crossnet.host`, `crossnet.connect`, `crossnet.disconnect`,
-and `crossnet.settings.set` still return explicit `method_not_enabled` after
-their validation/auth gates where a method shape exists. Mutating commands and
-`crossnet status --watch` must remain planned/app-bound until the signed Mac app
-passes live socket smoke with explicit auth, tenant, status, local-binding,
-stream lifecycle, mutation, and runtime-observation gates.
+ids, raw failure reasons, or control iOS. `crossnet settings` reads an
+allowlisted, non-secret settings snapshot from the running Mac app. A strict
+subset is mutable through `crossnet settings set`; the app requires auth and
+tenant binding, applies the typed value, and re-reads runtime state before
+reporting success. PQC identity settings remain immutable on this surface.
+`crossnet.host`, `crossnet.connect`, and `crossnet.disconnect` still return
+explicit `method_not_enabled`. Sidebar navigation is not part of
+`crossnet-control/1`; adding it requires an app-owned injected navigation
+coordinator and must not be emulated with global notifications or direct view
+state writes. Status watch and all release claims for settings mutation remain
+gated on signed-app socket evidence.
 
 Native/headless commands:
 
 - `skybridge login`
 - `skybridge logout`
+- `skybridge agent run`
+- `skybridge device discover --nearby [--scan]`
 - `skybridge code create`
 - `skybridge connect <code>`
 - `skybridge session ls`
 - `skybridge session inspect <id>`
 - `skybridge disconnect <id>`
+- `skybridge file send <path> --to <peer> --session-id <id>`
 
 These use Rust `state_dir` and `skybridge-agent` runtime state. They are useful
 for standalone/headless operation and tests, but they do not mutate the Mac GUI
-runtime and must not be treated as a substitute GUI interop channel.
+runtime and must not be treated as a substitute GUI interop channel. Hosting,
+connecting, and transferring files require one healthy lock-owning
+`skybridge agent run` process for the same state directory; no Desktop app is
+required. `device discover --nearby --scan` is a bounded foreground mDNS scan
+and can run without the agent. Addresses are hidden by default and, when
+explicitly requested, are labelled short-lived and unauthenticated.
 
 `skybridge capabilities --json` exposes this boundary with `runtime_target` and
 `control_effect` for each capability. Top-level fields also keep
@@ -142,6 +159,31 @@ to automation.
 The v1 matrix has no `ios_app_runtime` target: iOS appears only as shared
 protocol compatibility and regression coverage, never as a Rust CLI runtime
 control plane.
+
+`skybridge metrics` accepts data only from the same lock-owning agent and the
+same schema/state-directory/freshness evaluator used by managed mutations; a
+stale `health.json` cannot report a current healthy runtime. Transfer and
+fallback counters remain `null` with an explicit `unobserved` marker until the
+agent owns authoritative process-wide counters—zero is never used as a stand-in
+for missing observation. Plain `skybridge doctor` includes `overall_ok` and
+returns a non-zero status whenever any required check fails.
+
+Native control-plane and signaling origins are TLS-only by default: control-plane
+requests require `https://` and the corresponding WebSocket request uses `wss://`.
+Plaintext is a local-development exception only. It requires either
+`SKYBRIDGE_ALLOW_INSECURE_LOOPBACK_TRANSPORT=true` for environment-configured
+clients or `--allow-insecure-loopback` together with an explicit doctor
+`--base-url`; even then, only strict `localhost`, IPv4 loopback, or IPv6 loopback
+origins are accepted. LAN and public plaintext origins always fail closed.
+
+The native WebSocket session token is never placed in `?st=`. The handshake uses
+the server contract's sensitive `X-SkyBridge-Session-Id` and
+`X-SkyBridge-Session` headers while `shard` remains a non-authorizing routing
+hint. Credential-bearing query parameters are rejected case-insensitively, and
+there is no query-token compatibility fallback. External HTTP response bodies
+are bounded; rejected-response diagnostics expose only status, an allowlisted
+error code, and truncation state. Debug output redacts OAuth, PKCE, session,
+TURN, and private-key material.
 
 ## Source of Truth
 
@@ -180,6 +222,7 @@ The parser is intentionally shaped around the release surface:
 - `skybridge file receive`
 - `skybridge file history`
 - `skybridge doctor`
+- `skybridge doctor signaling [--base-url <https-origin>] [--allow-insecure-loopback]`
 - `skybridge logs tail`
 - `skybridge metrics`
 - `skybridge version`
@@ -189,6 +232,7 @@ As of this commit, the runnable subset is:
 - `skybridge login`
 - `skybridge logout`
 - `skybridge agent run`
+- `skybridge device discover --nearby [--scan] [--show-addresses]`
 - `skybridge device status`
 - `skybridge device enroll --invite-token <token>`
 - `skybridge device approve <pending-device-id> --pending-fingerprint <fp>`
@@ -205,11 +249,15 @@ As of this commit, the runnable subset is:
 - `skybridge remote-desktop set-resolution`
 - `skybridge remote-desktop set-fps`
 - `skybridge file send <path> --to <peer> --session-id <id>`
+- `skybridge file receive --list`
+- `skybridge file receive --session-id <id> --accept <transfer-uuid>`
+- `skybridge file receive --session-id <id> --reject <transfer-uuid>`
 - `skybridge file history`
 - `skybridge capabilities`
 - `skybridge crossnet preflight`
 - `skybridge crossnet status`
 - `skybridge crossnet settings`
+- `skybridge crossnet settings set <id> <value>`
 - `skybridge doctor`
 - `skybridge logs tail`
 - `skybridge metrics`
@@ -217,23 +265,43 @@ As of this commit, the runnable subset is:
 
 Still intentionally gated:
 
-- `skybridge file receive`
 - `skybridge crossnet host`
 - `skybridge crossnet connect <code>`
 - `skybridge crossnet disconnect`
-- `skybridge crossnet settings set <id> <value>`
 - `skybridge crossnet status --watch`
 
 The gated `crossnet` host/connect/disconnect commands have a runnable CLI parser
 and Rust UDS client, and the Mac app source now exposes an initial read-only
 `crossnet-control/1` server. They remain release-gated until a signed Mac app
-live socket smoke proves the runtime path. `crossnet settings set` remains a
-planned capability without a runnable parser until a typed allowlist and runtime
-observation proof exist. The gated `file receive` command remains fail-closed
-because inbound transfers are handled by the managed agent runtime, not a
-synchronous operator command.
+live socket smoke proves the runtime path. `crossnet settings set` is implemented
+with a typed allowlist and runtime read-back but remains `pending_live_proof`
+until a signed-app socket smoke proves the packaged runtime path. The gated
+`file receive --list` reads the persistent inbound approval registry. Accept
+and reject require a health-fresh active agent and a current session/runtime,
+transfer UUID, authenticated peer device-id, and protocol-fingerprint binding.
+The CLI records a decision request with `applied=false`; only the managed agent
+owns the live native sender and can apply the decision. The receiver allocates
+no staging or storage before approval. This path remains
+`pending_live_proof` until a real-device cross-platform inbound transfer gate
+is captured.
 
-Current native `connect` establishes and validates the formal signaling/current-path control plane, then writes lifecycle state into the shared runtime session registry under `runtime/sessions.json`. `session ls` and `session inspect` read that native agent/runtime view instead of Mac GUI state. Use `skybridge crossnet preflight/status/settings` for read-only Mac GUI truth; use mutating `skybridge crossnet ...` commands for Mac GUI interop only after signed Mac app socket smoke exists. File transfer send/history are present as agent-owned request/evidence surfaces; release readiness still requires real-device transfer artifacts.
+Current native `connect` submits one managed responder session to the active
+agent and returns success only after the agent persists an identity-bound
+`HandshakeComplete` receipt with the negotiated suite. The CLI does not create
+a second short-lived WebRTC runtime. Peer name comes from the connection-code
+lookup; selected ICE IP and authenticated feature negotiation are reported as
+unobserved until those runtime receipts exist. `file send` waits by default for
+a matching SHA-256 receiver receipt; `--detach` means only that the request was
+registered for the active agent. `session ls` and `session inspect` read the
+native agent/runtime view instead of Mac GUI state. Release readiness still
+requires real-device connection and file-transfer artifacts.
+The default Ed25519 path requires a real classic initiator/responder handshake.
+PQC initiation additionally requires explicit peer KEM key material and a
+primary ML-DSA protocol identity whose fingerprint matches admission state.
+An independent PQC bridge identity is not a release path until a signed
+control-plane-to-handshake identity binding exists;
+`SKYBRIDGE_PQC_BRIDGE_IDENTITY=true` currently fails before handshake setup
+instead of generating or advertising an unbound identity.
 
 ## Iteration Template
 

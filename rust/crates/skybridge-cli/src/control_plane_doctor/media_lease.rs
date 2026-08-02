@@ -7,10 +7,11 @@ use super::{control_plane_report, signal_server_client};
 
 pub(crate) async fn build_media_lease_doctor_report(
     base_url: Option<String>,
+    allow_insecure_loopback: bool,
     expected_session_id: Option<String>,
     media_admission_token: Option<String>,
 ) -> Result<crate::DoctorProbeReport> {
-    let signal_server = signal_server_client(base_url)?;
+    let signal_server = signal_server_client(base_url, allow_insecure_loopback)?;
     let target = signal_server.base_url.clone();
     let health = signal_server.probe_json_endpoint("/health").await;
     let mut checks = vec![check_probe_reachable("health", &health, "/health")];

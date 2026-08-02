@@ -280,11 +280,10 @@ if derivation.get("retains_upstream_container_signature") is not False:
 PY
 
 for dylib in \
-  libcrypto.3.dylib \
-  libfreerdp-client3.dylib \
+  libcrypto.4.dylib \
   libfreerdp3.dylib \
   libjansson.4.dylib \
-  libssl.3.dylib \
+  libssl.4.dylib \
   liburiparser.1.dylib \
   libwinpr3.dylib
 do

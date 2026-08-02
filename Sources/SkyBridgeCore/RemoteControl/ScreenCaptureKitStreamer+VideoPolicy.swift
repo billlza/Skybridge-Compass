@@ -1,3 +1,8 @@
+// macOS-exclusive: this file is built on frameworks that exist only on macOS
+// (AppKit / IOKit / ScreenCaptureKit / CoreWLAN / MetalFX / ServiceManagement /
+// ApplicationServices). It is excluded from other platforms so SkyBridgeCore can be
+// the single shared core for iOS as well. No behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 @preconcurrency import AVFoundation
 import CoreMedia
@@ -298,3 +303,4 @@ extension ScreenCaptureKitStreamer {
         max(1, 1_000_000_000 / UInt64(max(1, fps)))
     }
 }
+#endif

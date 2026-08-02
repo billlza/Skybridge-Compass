@@ -1,3 +1,8 @@
+// macOS-exclusive: built on macOS-only APIs (AppKit / IOKit / ScreenCaptureKit / CoreWLAN /
+// MetalFX / ServiceManagement / ApplicationServices / CoreGraphics display services).
+// Excluded from other platforms so SkyBridgeCore can be the single shared core for iOS as
+// well. No behaviour changes on macOS.
+#if os(macOS)
 import SwiftUI
 import Combine
 import UserNotifications
@@ -1466,11 +1471,11 @@ public struct SettingsView: View {
                             Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel"))
                             Picker("", selection: $settingsManager.scanLevel) {
                                 Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel.quick"))
-                                    .tag(FileScanService.ScanLevel.quick)
+                                    .tag(FileScanLevel.quick)
                                 Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel.standard"))
-                                    .tag(FileScanService.ScanLevel.standard)
+                                    .tag(FileScanLevel.standard)
                                 Text(localizationManager.localizedString("settings.fileTransfer.security.scanLevel.deep"))
-                                    .tag(FileScanService.ScanLevel.deep)
+                                    .tag(FileScanLevel.deep)
                             }
                             .pickerStyle(MenuPickerStyle())
                             .frame(width: 120)
@@ -2409,3 +2414,4 @@ public struct SettingsView: View {
         newCustomServiceType = ""
     }
 }
+#endif

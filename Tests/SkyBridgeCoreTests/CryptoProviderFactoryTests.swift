@@ -307,6 +307,70 @@ final class HPKESealedBoxTests: XCTestCase {
         XCTAssertEqual(parsed.ciphertext, ciphertext)
         XCTAssertEqual(parsed.tag, tag)
     }
+
+    func testHPKESealedBoxAcceptsNonZeroStartIndexSlice() throws {
+        let box = HPKESealedBox(
+            encapsulatedKey: Data(repeating: 0x11, count: 32),
+            nonce: Data(repeating: 0x22, count: 12),
+            ciphertext: Data(repeating: 0x33, count: 128),
+            tag: Data(repeating: 0x44, count: 16)
+        )
+        let wire = box.combinedWithHeader(suite: .x25519Ed25519)
+        var storage = Data(repeating: 0xEE, count: 17)
+        storage.append(wire)
+        let slice = storage.dropFirst(17)
+        XCTAssertNotEqual(slice.startIndex, 0)
+
+        let parsed = try HPKESealedBox(combined: slice, isHandshake: true)
+        XCTAssertEqual(parsed.encapsulatedKey, box.encapsulatedKey)
+        XCTAssertEqual(parsed.nonce, box.nonce)
+        XCTAssertEqual(parsed.ciphertext, box.ciphertext)
+        XCTAssertEqual(parsed.tag, box.tag)
+        XCTAssertEqual(parsed.encapsulatedKey.startIndex, 0)
+        XCTAssertEqual(parsed.nonce.startIndex, 0)
+        XCTAssertEqual(parsed.ciphertext.startIndex, 0)
+        XCTAssertEqual(parsed.tag.startIndex, 0)
+    }
+
+    func testHPKESealedBoxRejectsOversizedNonZeroStartIndexSliceBeforeBodyParsing() {
+        let maximumHandshakeCombinedByteCount = 17 + 4_096 + 12 + (64 * 1_024) + 16
+        let maximumPostAuthCombinedByteCount = 17 + 4_096 + 12 + (256 * 1_024) + 16
+        let cases = [
+            (isHandshake: true, maximum: maximumHandshakeCombinedByteCount),
+            (isHandshake: false, maximum: maximumPostAuthCombinedByteCount),
+        ]
+
+        for testCase in cases {
+            var oversized = Data(repeating: 0xA5, count: testCase.maximum + 1)
+            oversized.replaceSubrange(0..<4, with: [0x48, 0x50, 0x4B, 0x45])
+            oversized[4] = 1
+            oversized[9] = 32
+            oversized[10] = 0
+            oversized[11] = 12
+            oversized[12] = 16
+            oversized[13] = 16
+            oversized[14] = 0
+            oversized[15] = 0
+            oversized[16] = 0
+
+            var storage = Data(repeating: 0xEE, count: 17)
+            storage.append(oversized)
+            let slice = storage.dropFirst(17)
+            XCTAssertNotEqual(slice.startIndex, 0)
+
+            XCTAssertThrowsError(
+                try HPKESealedBox(combined: slice, isHandshake: testCase.isHandshake)
+            ) { error in
+                guard case CryptoProviderError.lengthExceeded(let field, let actual, let maximum) = error else {
+                    XCTFail("Expected CryptoProviderError.lengthExceeded, got \(error)")
+                    return
+                }
+                XCTAssertEqual(field, "combined")
+                XCTAssertEqual(actual, testCase.maximum + 1)
+                XCTAssertEqual(maximum, testCase.maximum)
+            }
+        }
+    }
     
  /// Test HPKESealedBox rejects invalid magic
     func testHPKESealedBoxRejectsInvalidMagic() {
@@ -648,7 +712,7 @@ final class KeyMaterialTests: XCTestCase {
     }
     
  /// Test KeyPair requires matching suite and usage
-    func testKeyPairRequiresMatchingSuiteAndUsage() {
+    func testKeyPairRequiresMatchingSuiteAndUsage() throws {
         let pubKey = KeyMaterial(
             suite: .x25519Ed25519,
             usage: .keyExchange,
@@ -661,8 +725,58 @@ final class KeyMaterialTests: XCTestCase {
         )
         
  // Should not crash
-        let keyPair = KeyPair(publicKey: pubKey, privateKey: privKey)
+        let keyPair = try KeyPair(publicKey: pubKey, privateKey: privKey)
         XCTAssertEqual(keyPair.publicKey.suite, keyPair.privateKey.suite)
+    }
+
+    func testKeyPairRejectsSuiteMismatchWithTypedError() {
+        let publicKey = KeyMaterial(
+            suite: .x25519Ed25519,
+            usage: .keyExchange,
+            bytes: Data(repeating: 0x01, count: 32)
+        )
+        let privateKey = KeyMaterial(
+            suite: .p256ECDSA,
+            usage: .keyExchange,
+            bytes: Data(repeating: 0x02, count: 32)
+        )
+
+        XCTAssertThrowsError(
+            try KeyPair(publicKey: publicKey, privateKey: privateKey)
+        ) { error in
+            XCTAssertEqual(
+                error as? KeyPairError,
+                .suiteMismatch(
+                    publicSuite: .x25519Ed25519,
+                    privateSuite: .p256ECDSA
+                )
+            )
+        }
+    }
+
+    func testKeyPairRejectsUsageMismatchWithTypedError() {
+        let publicKey = KeyMaterial(
+            suite: .x25519Ed25519,
+            usage: .keyExchange,
+            bytes: Data(repeating: 0x01, count: 32)
+        )
+        let privateKey = KeyMaterial(
+            suite: .x25519Ed25519,
+            usage: .signing,
+            bytes: Data(repeating: 0x02, count: 64)
+        )
+
+        XCTAssertThrowsError(
+            try KeyPair(publicKey: publicKey, privateKey: privateKey)
+        ) { error in
+            XCTAssertEqual(
+                error as? KeyPairError,
+                .usageMismatch(
+                    publicUsage: .keyExchange,
+                    privateUsage: .signing
+                )
+            )
+        }
     }
     
  // MARK: - Property 12: Key Material Type Safety

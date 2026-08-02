@@ -64,6 +64,47 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         )
     }
 
+    func testEmbeddedUUIDCannotCollideWithExactStableIdentifier() {
+        let uuid = "44444444-4444-4444-8444-444444444444"
+        let canonicalUUID = PeerSessionArbiter.canonicalSOAIdentifier(uuid)
+
+        for attackerControlledIdentifier in [
+            "attacker-\(uuid)-suffix",
+            "id:attacker-\(uuid)-suffix",
+            "recent:mac:id:attacker-\(uuid)-suffix",
+        ] {
+            XCTAssertNotEqual(
+                PeerSessionArbiter.canonicalSOAIdentifier(attackerControlledIdentifier),
+                canonicalUUID
+            )
+            XCTAssertNotEqual(
+                PeerSessionArbiter.soaPeerId(from: attackerControlledIdentifier),
+                PeerSessionArbiter.soaPeerId(from: uuid)
+            )
+        }
+    }
+
+    func testAllowlistedExactUUIDAliasesRemainCanonical() {
+        let uppercaseUUID = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
+        let canonicalUUID = uppercaseUUID.lowercased()
+
+        for alias in [
+            uppercaseUUID,
+            "id:\(uppercaseUUID)",
+            "recent:id:\(uppercaseUUID)",
+            "recent:mac:id:\(uppercaseUUID)",
+        ] {
+            XCTAssertEqual(
+                PeerSessionArbiter.canonicalSOAIdentifier(alias),
+                canonicalUUID
+            )
+            XCTAssertEqual(
+                PeerSessionArbiter.soaPeerId(from: alias),
+                PeerSessionArbiter.soaPeerId(from: canonicalUUID)
+            )
+        }
+    }
+
     func testSupersedeRequiresAuthenticatedIncoming() async {
         let arbiter = PeerSessionArbiter()
         let localPeerId = Data(repeating: 0xF0, count: 32)
@@ -119,14 +160,30 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         }
     }
 
-    func testEstablishedReplacementRequiresAuthenticatedBoundIncoming() async {
+    func testEstablishedReplacementRequiresAuthenticatedBoundIncoming() async throws {
         let arbiter = PeerSessionArbiter()
         let localPeerId = Data(repeating: 0x10, count: 32)
         let remotePeerId = Data(repeating: 0x20, count: 32)
         let forgedTargetPeerId = Data(repeating: 0x30, count: 32)
         let pairKey = PeerSessionArbiter.pairKey(localPeerId: localPeerId, remotePeerId: remotePeerId)
 
-        await arbiter.markEstablished(pairKey: pairKey)
+        let initialRegistration = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x3F, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let initialReservation) = initialRegistration else {
+            XCTFail("Expected initial owner registration")
+            return
+        }
+        let initialLease = try await arbiter.commitEstablished(
+            initialReservation,
+            sessionId: "initial-session"
+        )
         let unauthenticatedDecision = await arbiter.evaluateIncoming(
             pairKey: pairKey,
             remoteInitiatorPeerId: remotePeerId,
@@ -151,7 +208,7 @@ final class SOABindingAliasRegressionTests: XCTestCase {
         )
         XCTAssertEqualDecision(forgedBindingDecision, .rejectBinding)
 
-        let authenticatedDecision = await arbiter.evaluateIncoming(
+        let authenticatedDecision = await arbiter.evaluateIncomingWithReservation(
             pairKey: pairKey,
             remoteInitiatorPeerId: remotePeerId,
             remoteAttemptId: Data(repeating: 0x42, count: 16),
@@ -161,9 +218,12 @@ final class SOABindingAliasRegressionTests: XCTestCase {
             authenticationState: .authenticated,
             establishedPolicy: .replaceAuthenticated
         )
-        XCTAssertEqualDecision(authenticatedDecision, .acceptAndReplaceEstablished)
+        guard case .acceptAndReplaceEstablished(let replacementReservation) = authenticatedDecision else {
+            XCTFail("Expected authenticated replacement reservation")
+            return
+        }
 
-        let reconnectAfterReplace = await arbiter.registerOutgoing(
+        let reconnectBeforeCommit = await arbiter.registerOutgoing(
             PeerSessionArbiter.OutgoingAttempt(
                 pairKey: pairKey,
                 initiatorPeerId: localPeerId,
@@ -172,11 +232,18 @@ final class SOABindingAliasRegressionTests: XCTestCase {
                 onSuperseded: { _, _ in }
             )
         )
-        if case .accepted = reconnectAfterReplace {
-            // expected
-        } else {
-            XCTFail("Replacing an authenticated established inbound attempt should release the old established guard")
+        guard case .alreadyConnected = reconnectBeforeCommit else {
+            XCTFail("Replacement admission must retain the old owner until CAS commit")
+            return
         }
+        let replacementLease = try await arbiter.commitEstablished(
+            replacementReservation,
+            sessionId: "replacement-session"
+        )
+        let initialLeaseCleared = await arbiter.clearEstablished(initialLease)
+        let replacementLeaseCleared = await arbiter.clearEstablished(replacementLease)
+        XCTAssertFalse(initialLeaseCleared)
+        XCTAssertTrue(replacementLeaseCleared)
     }
 
     func testSupersedeReasonIsFixedToConcurrentAttempt() {
@@ -251,6 +318,237 @@ final class SOABindingAliasRegressionTests: XCTestCase {
             XCTFail("Expected established guard to be restorable after failed rekey")
             return
         }
+    }
+
+    func testStaleEstablishedLeaseCannotClearReplacementSession() async throws {
+        let arbiter = PeerSessionArbiter()
+        let localPeerId = Data(repeating: 0x31, count: 32)
+        let remotePeerId = Data(repeating: 0x32, count: 32)
+        let pairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localPeerId,
+            remotePeerId: remotePeerId
+        )
+
+        let initialDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x30, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let initialReservation) = initialDecision else {
+            XCTFail("Expected initial reservation")
+            return
+        }
+        let staleLease = try await arbiter.commitEstablished(
+            initialReservation,
+            sessionId: "stale-session"
+        )
+        let replacementDecision = await arbiter.evaluateIncomingWithReservation(
+            pairKey: pairKey,
+            remoteInitiatorPeerId: remotePeerId,
+            remoteAttemptId: Data(repeating: 0x31, count: 16),
+            targetPeerId: localPeerId,
+            expectedRemotePeerId: remotePeerId,
+            localPeerId: localPeerId,
+            authenticationState: .authenticated,
+            establishedPolicy: .replaceAuthenticated
+        )
+        guard case .acceptAndReplaceEstablished(let replacementReservation) = replacementDecision else {
+            XCTFail("Expected replacement reservation")
+            return
+        }
+        let replacementLease = try await arbiter.commitEstablished(
+            replacementReservation,
+            sessionId: "replacement-session"
+        )
+
+        let staleLeaseCleared = await arbiter.clearEstablished(staleLease)
+        XCTAssertFalse(
+            staleLeaseCleared,
+            "A stale teardown must not clear the replacement session's established guard"
+        )
+
+        let blockedByReplacement = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x33, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .alreadyConnected = blockedByReplacement else {
+            XCTFail("Replacement lease must remain active after stale teardown")
+            return
+        }
+
+        let replacementLeaseCleared = await arbiter.clearEstablished(replacementLease)
+        XCTAssertTrue(replacementLeaseCleared)
+        let acceptedAfterExactClear = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x34, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted = acceptedAfterExactClear else {
+            XCTFail("Exact owner teardown must release the established guard")
+            return
+        }
+        await arbiter.clearOutgoing(pairKey: pairKey, attemptId: nil)
+    }
+
+    func testReplacementCommitFailsWhenExpectedOwnerChanges() async throws {
+        let arbiter = PeerSessionArbiter()
+        let localPeerId = Data(repeating: 0x41, count: 32)
+        let remotePeerId = Data(repeating: 0x42, count: 32)
+        let pairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localPeerId,
+            remotePeerId: remotePeerId
+        )
+
+        let initialDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x43, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let initialReservation) = initialDecision else {
+            XCTFail("Expected initial reservation")
+            return
+        }
+        let initialLease = try await arbiter.commitEstablished(
+            initialReservation,
+            sessionId: "initial-owner"
+        )
+
+        let replacementDecision = await arbiter.evaluateIncomingWithReservation(
+            pairKey: pairKey,
+            remoteInitiatorPeerId: remotePeerId,
+            remoteAttemptId: Data(repeating: 0x44, count: 16),
+            targetPeerId: localPeerId,
+            expectedRemotePeerId: remotePeerId,
+            localPeerId: localPeerId,
+            authenticationState: .authenticated,
+            establishedPolicy: .replaceAuthenticated
+        )
+        guard case .acceptAndReplaceEstablished(let replacementReservation) = replacementDecision else {
+            XCTFail("Expected replacement reservation")
+            return
+        }
+
+        let initialLeaseCleared = await arbiter.clearEstablished(initialLease)
+        XCTAssertTrue(initialLeaseCleared)
+        do {
+            _ = try await arbiter.commitEstablished(
+                replacementReservation,
+                sessionId: "stale-replacement"
+            )
+            XCTFail("CAS commit must fail after its expected owner disappears")
+        } catch let error as PeerSessionArbiter.EstablishmentCommitError {
+            XCTAssertEqual(error, .establishedOwnerChanged)
+        }
+
+        let finalDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x45, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let finalReservation) = finalDecision else {
+            XCTFail("Failed replacement commit must leave the vacant slot usable")
+            return
+        }
+        let finalLease = try await arbiter.commitEstablished(
+            finalReservation,
+            sessionId: "final-owner"
+        )
+        let forgedLease = PeerSessionArbiter.EstablishedLease(
+            pairKey: pairKey,
+            sessionId: finalLease.sessionId
+        )
+        let forgedLeaseCleared = await arbiter.clearEstablished(forgedLease)
+        let forgedLeaseRestored = await arbiter.restoreEstablishedIfVacant(forgedLease)
+        let finalLeaseCleared = await arbiter.clearEstablished(finalLease)
+        XCTAssertFalse(forgedLeaseCleared)
+        XCTAssertFalse(forgedLeaseRestored)
+        XCTAssertTrue(finalLeaseCleared)
+    }
+
+    func testLegacyPairKeyClearCannotDeleteModernSessionOwner() async throws {
+        let arbiter = PeerSessionArbiter()
+        let localPeerId = Data(repeating: 0x61, count: 32)
+        let remotePeerId = Data(repeating: 0x62, count: 32)
+        let pairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localPeerId,
+            remotePeerId: remotePeerId
+        )
+
+        let modernDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x63, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let modernReservation) = modernDecision else {
+            XCTFail("Expected modern reservation")
+            return
+        }
+        let modernLease = try await arbiter.commitEstablished(
+            modernReservation,
+            sessionId: "modern-owner"
+        )
+
+        await arbiter.clearEstablished(pairKey: pairKey)
+        await arbiter.markEstablished(pairKey: pairKey)
+        let duplicateDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x64, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .alreadyConnected = duplicateDecision else {
+            XCTFail("Legacy clear/mark must not replace a modern owner")
+            return
+        }
+        let modernLeaseCleared = await arbiter.clearEstablished(modernLease)
+        XCTAssertTrue(modernLeaseCleared)
+
+        // The compatibility API still owns and clears its own legacy slot.
+        await arbiter.markEstablished(pairKey: pairKey)
+        await arbiter.clearEstablished(pairKey: pairKey)
+        let acceptedAfterLegacyClear = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localPeerId,
+                attemptId: Data(repeating: 0x65, count: 16),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let cleanupReservation) = acceptedAfterLegacyClear else {
+            XCTFail("Legacy clear must release a legacy-owned slot")
+            return
+        }
+        let cleanupCleared = await arbiter.clearOutgoing(cleanupReservation)
+        XCTAssertTrue(cleanupCleared)
     }
 
     func testRemoteControlSOAScopeDoesNotCollideWithEstablishedP2PSession() async {

@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 import SkyBridgeProtocolCore
+import SkyBridgeWebRTCRuntime
 import CoreVideo
 
 #if canImport(WebRTC)
@@ -156,12 +157,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     public enum WebRTCError: Error, LocalizedError, Sendable {
         case webRTCNotAvailable
+        case sslInitializationFailed
         case peerConnectionCreationFailed
         case dataChannelNotReady
         case dataChannelNotOpen
         case dataChannelSendFailed
         case sdpFailed(String)
         case invalidChunkSize(Int)
+        case invalidFramedPayloadSize(Int)
         case framedPayloadTooLarge(Int)
         case screenFrameBudgetExceeded(framedBytes: Int, bufferedAmount: UInt64, maxBufferedAmountBytes: UInt64)
         case alreadyClosed
@@ -172,13 +175,17 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         public var errorDescription: String? {
             switch self {
             case .webRTCNotAvailable: return "WebRTC 模块不可用（请确认已添加 WebRTC 依赖）"
+            case .sslInitializationFailed: return "WebRTC 进程级 SSL 初始化失败"
             case .peerConnectionCreationFailed: return "创建 RTCPeerConnection 失败"
             case .dataChannelNotReady: return "DataChannel 未就绪"
             case .dataChannelNotOpen: return "DataChannel 未打开"
             case .dataChannelSendFailed: return "DataChannel 发送失败"
             case .sdpFailed(let msg): return "SDP 处理失败：\(msg)"
             case .invalidChunkSize(let value): return "分块大小无效：\(value)。必须大于 0"
-            case .framedPayloadTooLarge(let size): return "分帧负载过大：\(size) 字节，超过 4 GiB 上限"
+            case .invalidFramedPayloadSize(let size):
+                return "分帧负载大小无效：\(size) 字节。必须大于 0"
+            case .framedPayloadTooLarge(let size):
+                return "分帧负载过大：\(size) 字节，超过 \(WebRTCFramedPayloadPolicy.maximumPayloadByteCount) 字节上限"
             case .screenFrameBudgetExceeded(let framedBytes, let bufferedAmount, let maxBufferedAmountBytes):
                 return "SBC2 屏幕帧超过发送预算：framedBytes=\(framedBytes) buffered=\(bufferedAmount) budget=\(maxBufferedAmountBytes)"
             case .alreadyClosed: return "WebRTCSession 已关闭"
@@ -297,7 +304,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     
     private var isClosed = false
     private var hasStarted = false
-    private var sslHeld = false
     private var didNotifyDisconnected = false
     private var didNotifyReady = false
     private var hasRemoteDescription = false
@@ -446,13 +452,16 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         chunkOffset: Int,
         payload: Data
     ) throws -> Data {
+        let (chunkEnd, chunkEndOverflow) = chunkOffset.addingReportingOverflow(
+            payload.count
+        )
         guard chunkIndex >= 0,
               chunkCount > 0,
               chunkIndex < chunkCount,
               totalBytes >= 0,
               chunkOffset >= 0,
-              payload.count >= 0,
-              chunkOffset + payload.count <= totalBytes,
+              !chunkEndOverflow,
+              chunkEnd <= totalBytes,
               chunkCount <= Int(UInt32.max),
               chunkIndex <= Int(UInt32.max),
               totalBytes <= Int(UInt32.max),
@@ -484,12 +493,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
     }
 
-    /// 关闭 WebRTC 会话并释放所有资源（PeerConnection / DataChannel / SSL）。
+    /// 关闭 WebRTC 会话并释放会话级资源（PeerConnection / DataChannel）。
     ///
     /// 符合 IEEE TDSC 安全生命周期管理要求：
     /// - 主动关闭 DataChannel 防止数据残留
     /// - 关闭 PeerConnection 终止 ICE / DTLS-SRTP 会话
-    /// - 调用 RTCCleanupSSL() 释放 OpenSSL 上下文
+    /// - WebRTC SSL 由共享 factory provider 持有至进程退出，session close 不得清理
     public func close() {
         withState {
             guard !isClosed else { return }
@@ -546,10 +555,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             peerConnection?.delegate = nil
             peerConnection?.close()
             peerConnection = nil
-            if sslHeld {
-                sslHeld = false
-                WebRTCSSL.release()
-            }
 #endif
             onLocalOffer = nil
             onLocalAnswer = nil
@@ -662,7 +667,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard !isClosed else { throw WebRTCError.alreadyClosed }
         guard !hasStarted else { throw WebRTCError.alreadyStarted }
 #if canImport(WebRTC)
-        // Validate configuration before retaining process-wide SSL state.
+        // Validate configuration before initializing the process-wide WebRTC runtime.
         let iceServers = try buildIceServers()
 #endif
         didNotifyDisconnected = false
@@ -676,11 +681,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
         seenRemoteICECandidateKeys.removeAll(keepingCapacity: false)
         latestObservedRemoteICECandidateAddress = nil
-        WebRTCSSL.retain()
-        sslHeld = true
-        let factory = WebRTCPeerConnectionFactoryProvider.factory(
-            useCustomAudioDevice: prefersNativeOutgoingAudioTrack
-        )
+        let factory: RTCPeerConnectionFactory
+        do {
+            factory = try WebRTCPeerConnectionFactoryProvider.factory(
+                useCustomAudioDevice: prefersNativeOutgoingAudioTrack
+            )
+        } catch WebRTCRuntimeLifecycleError.sslInitializationFailed {
+            throw WebRTCError.sslInitializationFailed
+        }
 
         let config = RTCConfiguration()
         config.sdpSemantics = .unifiedPlan
@@ -697,8 +705,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
         guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
             logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
-            sslHeld = false
-            WebRTCSSL.release()
             throw WebRTCError.peerConnectionCreationFailed
         }
         self.peerConnection = pc
@@ -716,8 +722,6 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             guard let dc = pc.dataChannel(forLabel: Self.controlChannelLabel, configuration: dcConfig) else {
                 peerConnection?.close()
                 peerConnection = nil
-                sslHeld = false
-                WebRTCSSL.release()
                 throw WebRTCError.peerConnectionCreationFailed
             }
             dc.delegate = self
@@ -2076,10 +2080,14 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         payloadByteCount: Int,
         maxChunkBytes: Int
     ) throws -> UInt32 {
-        guard maxChunkBytes > 0 else {
+        guard maxChunkBytes > 0,
+              maxChunkBytes <= WebRTCFramedPayloadPolicy.maximumPayloadByteCount else {
             throw WebRTCError.invalidChunkSize(maxChunkBytes)
         }
-        guard payloadByteCount >= 0, payloadByteCount <= Int(UInt32.max) else {
+        guard payloadByteCount > 0 else {
+            throw WebRTCError.invalidFramedPayloadSize(payloadByteCount)
+        }
+        guard WebRTCFramedPayloadPolicy.isValidPayloadByteCount(payloadByteCount) else {
             throw WebRTCError.framedPayloadTooLarge(payloadByteCount)
         }
         return UInt32(payloadByteCount)

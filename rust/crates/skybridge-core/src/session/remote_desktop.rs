@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -260,6 +261,14 @@ impl RemoteDesktopControlRequest {
         self.status == RemoteDesktopControlRequestStatus::AgentObserved
     }
 
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            RemoteDesktopControlRequestStatus::AgentObserved
+                | RemoteDesktopControlRequestStatus::AgentRejected
+        )
+    }
+
     pub fn mark_agent_observed(&mut self, now: OffsetDateTime) {
         self.status = RemoteDesktopControlRequestStatus::AgentObserved;
         self.updated_at = now;
@@ -286,9 +295,28 @@ impl RemoteDesktopControlRequestRegistry {
     pub const SCHEMA_VERSION: u32 = 1;
     pub const MAX_REQUESTS: usize = 128;
 
-    pub fn insert(&mut self, request: RemoteDesktopControlRequest) {
-        self.requests.insert(request.request_id.clone(), request);
-        self.prune_to_limit();
+    pub fn insert(&mut self, request: RemoteDesktopControlRequest) -> Result<()> {
+        let request_id = request.request_id.clone();
+        if !self.requests.contains_key(&request_id) {
+            while self.requests.len() >= Self::MAX_REQUESTS {
+                let Some(oldest_terminal_id) = self
+                    .requests
+                    .values()
+                    .filter(|existing| existing.is_terminal())
+                    .min_by(|left, right| {
+                        left.updated_at
+                            .cmp(&right.updated_at)
+                            .then_with(|| left.request_id.cmp(&right.request_id))
+                    })
+                    .map(|existing| existing.request_id.clone())
+                else {
+                    bail!("remote desktop request registry is full with nonterminal requests");
+                };
+                self.requests.remove(&oldest_terminal_id);
+            }
+        }
+        self.requests.insert(request_id, request);
+        Ok(())
     }
 
     pub fn get(&self, request_id: &str) -> Option<&RemoteDesktopControlRequest> {
@@ -333,23 +361,6 @@ impl RemoteDesktopControlRequestRegistry {
         values.sort_by_key(|request| std::cmp::Reverse(request.updated_at));
         values
     }
-
-    fn prune_to_limit(&mut self) {
-        let overflow = self.requests.len().saturating_sub(Self::MAX_REQUESTS);
-        if overflow == 0 {
-            return;
-        }
-
-        let mut oldest_keys = self
-            .requests
-            .values()
-            .map(|request| (request.updated_at, request.request_id.clone()))
-            .collect::<Vec<_>>();
-        oldest_keys.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-        for (_, key) in oldest_keys.into_iter().take(overflow) {
-            self.requests.remove(&key);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -373,7 +384,7 @@ mod tests {
                 fps: Some(60),
             },
         );
-        registry.insert(request);
+        registry.insert(request).expect("insert pending request");
 
         let pending = registry.pending_for_session("session-1");
         assert_eq!(pending.len(), 1);
@@ -391,7 +402,7 @@ mod tests {
         observed.mark_agent_observed(OffsetDateTime::now_utc());
         assert!(observed.is_agent_observed());
         assert!(!observed.is_pending_agent_observation());
-        registry.insert(observed);
+        registry.insert(observed).expect("replace observed request");
         assert!(registry.pending_for_session("session-1").is_empty());
         assert!(
             registry
@@ -530,7 +541,10 @@ mod tests {
                 RemoteDesktopControlRequestPayload::default(),
             );
             request.updated_at = base + time::Duration::seconds(index as i64);
-            request_registry.insert(request);
+            request.mark_agent_observed(request.updated_at);
+            request_registry
+                .insert(request)
+                .expect("terminal history should remain bounded");
         }
         assert_eq!(
             request_registry.requests.len(),
@@ -539,5 +553,33 @@ mod tests {
         assert!(request_registry.get("request-000").is_none());
         assert!(request_registry.get("request-001").is_none());
         assert!(request_registry.get("request-002").is_some());
+    }
+
+    #[test]
+    fn remote_desktop_request_registry_rejects_insert_when_all_entries_are_pending() {
+        let mut registry = RemoteDesktopControlRequestRegistry::default();
+        for index in 0..RemoteDesktopControlRequestRegistry::MAX_REQUESTS {
+            registry
+                .insert(RemoteDesktopControlRequest::pending(
+                    format!("request-{index:03}"),
+                    "session-1",
+                    "runtime-1",
+                    RemoteDesktopControlAction::Start,
+                    RemoteDesktopControlRequestPayload::default(),
+                ))
+                .expect("fill pending registry");
+        }
+        let before = registry.clone();
+        let error = registry
+            .insert(RemoteDesktopControlRequest::pending(
+                "overflow",
+                "session-2",
+                "runtime-2",
+                RemoteDesktopControlAction::Start,
+                RemoteDesktopControlRequestPayload::default(),
+            ))
+            .expect_err("all-pending registry must reject without eviction");
+        assert!(error.to_string().contains("nonterminal"));
+        assert_eq!(registry, before);
     }
 }

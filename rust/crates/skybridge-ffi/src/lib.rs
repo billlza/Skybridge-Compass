@@ -45,7 +45,7 @@ pub mod uniffi_api;
 #[cfg(feature = "uniffi-scaffolding")]
 uniffi::setup_scaffolding!("skybridge_ffi");
 
-// Re-export the C-ABI symbols at the crate root so cbindgen (which parses the
-// crate root) sees them, and so the `extern "C"` functions are exported from the
-// cdylib/staticlib.
+// Re-export the C-ABI symbols at the crate root so Rust consumers see the same
+// surface that cbindgen reads directly from `c_abi.rs`, and so the `extern "C"`
+// functions are exported from the cdylib/staticlib.
 pub use c_abi::*;

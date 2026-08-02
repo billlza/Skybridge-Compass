@@ -9,6 +9,7 @@
 
 import Foundation
 import Security
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 public enum TrafficPaddingMode: String, Sendable {
@@ -23,6 +24,20 @@ public struct TrafficPaddingConfig: Sendable {
     public var mode: TrafficPaddingMode
     public var fixedSizeBytes: Int
     public var bucketSizesBytes: [Int]
+
+    public init(
+        enabled: Bool,
+        debugLog: Bool,
+        mode: TrafficPaddingMode,
+        fixedSizeBytes: Int,
+        bucketSizesBytes: [Int]
+    ) {
+        self.enabled = enabled
+        self.debugLog = debugLog
+        self.mode = mode
+        self.fixedSizeBytes = fixedSizeBytes
+        self.bucketSizesBytes = bucketSizesBytes
+    }
 
     public static func fromUserDefaults() -> TrafficPaddingConfig {
         let enabledKey = "sb_traffic_padding_enabled"
@@ -69,6 +84,10 @@ public enum TrafficPadding {
     // "SBP2"
     private static let magic: [UInt8] = [0x53, 0x42, 0x50, 0x32]
     private static let headerLen = 4 + 4 // magic + u32 actualLen
+    /// Matches the existing WebRTC receive-frame ceiling on both platforms.
+    /// Callers must never emit a padded payload that its peer will reject.
+    public static let maximumWebRTCOutputByteCount =
+        WebRTCFramedPayloadPolicy.maximumPayloadByteCount
 
     private static let configLogLock = NSLock()
     private nonisolated(unsafe) static var didLogConfigHint = false
@@ -117,7 +136,11 @@ public enum TrafficPadding {
         SkyBridgeLogger.shared.info(diag)
     }
 
-    public static func wrapIfEnabled(_ payload: Data, label: String? = nil) -> Data {
+    public static func wrapIfEnabled(
+        _ payload: Data,
+        label: String? = nil,
+        maximumOutputByteCount: Int = maximumWebRTCOutputByteCount
+    ) throws -> Data {
         let cfg = TrafficPaddingConfig.fromUserDefaults()
         if shouldEmitDiagnostics(cfg: cfg) {
             enterLogLock.lock()
@@ -128,18 +151,36 @@ public enum TrafficPadding {
             enterLogLock.unlock()
         }
         logConfigHintOnceIfNeeded(cfg: cfg)
-        guard cfg.enabled else { return payload }
+        return try wrapIfEnabled(
+            payload,
+            configuration: cfg,
+            label: label,
+            maximumOutputByteCount: maximumOutputByteCount
+        )
+    }
 
-        let minLen = headerLen + payload.count
-        let targetLen: Int
-        switch cfg.mode {
+    public static func wrapIfEnabled(
+        _ payload: Data,
+        configuration cfg: TrafficPaddingConfig,
+        label: String? = nil,
+        maximumOutputByteCount: Int = maximumWebRTCOutputByteCount
+    ) throws -> Data {
+        let target: BoundedPaddingEnvelopePolicy.Target = switch cfg.mode {
         case .fixed:
-            targetLen = max(minLen, cfg.fixedSizeBytes > 0 ? cfg.fixedSizeBytes : minLen)
+            .fixed(cfg.fixedSizeBytes)
         case .bucketed:
-            targetLen = cfg.bucketSizesBytes.first(where: { $0 >= minLen }) ?? minLen
+            .bucketed(cfg.bucketSizesBytes)
         }
+        let plan = try BoundedPaddingEnvelopePolicy.plan(
+            payloadByteCount: payload.count,
+            headerByteCount: headerLen,
+            enabled: cfg.enabled,
+            target: target,
+            maximumOutputByteCount: maximumOutputByteCount
+        )
+        guard plan.shouldWrap else { return payload }
 
-        let out = wrap(payload: payload, totalLen: max(minLen, targetLen))
+        let out = wrap(payload: payload, totalLen: plan.totalByteCount)
 
         if shouldEmitDiagnostics(cfg: cfg) {
             let name = label ?? "traffic"
@@ -148,10 +189,88 @@ public enum TrafficPadding {
             print(msg)
         }
 
-        // Phase C3: stats (best-effort, non-blocking)
-        Task { await TrafficPaddingStats.shared.recordWrap(label: label ?? "traffic", rawBytes: payload.count, paddedBytes: out.count) }
+        TrafficPaddingStats.submitWrap(
+            label: label ?? "traffic",
+            rawBytes: payload.count,
+            paddedBytes: out.count
+        )
 
         return out
+    }
+
+    /// Applies SBP2 while enforcing the compatibility control-frame ceiling
+    /// before any padding allocation occurs.
+    public static func wrapForP2PControlFrame(
+        _ payload: Data,
+        label: String? = nil
+    ) throws -> Data {
+        let cfg = TrafficPaddingConfig.fromUserDefaults()
+        logConfigHintOnceIfNeeded(cfg: cfg)
+        return try wrapForP2PControlFrame(
+            payload,
+            configuration: cfg,
+            label: label
+        )
+    }
+
+    public static func wrapForP2PControlFrame(
+        _ payload: Data,
+        configuration cfg: TrafficPaddingConfig,
+        label: String? = nil
+    ) throws -> Data {
+        guard cfg.enabled else {
+            try P2PControlFramePolicy.validateBodyByteCount(payload.count)
+            return payload
+        }
+
+        let minimumResult = payload.count.addingReportingOverflow(headerLen)
+        guard !minimumResult.overflow else {
+            throw P2PControlFramePolicyError.byteCountOverflow
+        }
+        let minimumLength = minimumResult.partialValue
+        try P2PControlFramePolicy.validateBodyByteCount(minimumLength)
+
+        let targetLength: Int
+        switch cfg.mode {
+        case .fixed:
+            if cfg.fixedSizeBytes > 0 {
+                guard cfg.fixedSizeBytes <= P2PControlFramePolicy.maximumBodyByteCount else {
+                    throw P2PControlFramePolicyError.invalidPaddingTarget(
+                        actual: cfg.fixedSizeBytes,
+                        maximum: P2PControlFramePolicy.maximumBodyByteCount
+                    )
+                }
+                guard minimumLength <= cfg.fixedSizeBytes else {
+                    throw P2PControlFramePolicyError.payloadExceedsFixedPaddingTarget(
+                        required: minimumLength,
+                        configured: cfg.fixedSizeBytes
+                    )
+                }
+                targetLength = cfg.fixedSizeBytes
+            } else {
+                targetLength = minimumLength
+            }
+        case .bucketed:
+            targetLength = cfg.bucketSizesBytes.first(where: { $0 >= minimumLength })
+                ?? minimumLength
+        }
+
+        try P2PControlFramePolicy.validateBodyByteCount(targetLength)
+        let output = wrap(payload: payload, totalLen: targetLength)
+        try P2PControlFramePolicy.validateBodyByteCount(output.count)
+
+        if shouldEmitDiagnostics(cfg: cfg) {
+            let name = label ?? "traffic"
+            let message = "🧪 TrafficPadding[\(name)]: raw=\(payload.count)B -> padded=\(output.count)B (mode=\(cfg.mode.rawValue))"
+            SkyBridgeLogger.shared.info(message)
+            print(message)
+        }
+        TrafficPaddingStats.submitWrap(
+            label: label ?? "traffic",
+            rawBytes: payload.count,
+            paddedBytes: output.count
+        )
+        return output
     }
 
     public static func unwrapIfNeeded(_ data: Data, label: String? = nil) -> Data {
@@ -192,10 +311,37 @@ public enum TrafficPadding {
             print(msg)
         }
 
-        // Phase C3: stats (best-effort, non-blocking)
-        Task { await TrafficPaddingStats.shared.recordUnwrap(label: label ?? "traffic", totalBytes: data.count, rawBytes: payload.count) }
+        TrafficPaddingStats.submitUnwrap(
+            label: label ?? "traffic",
+            totalBytes: data.count,
+            rawBytes: payload.count
+        )
 
         return payload
+    }
+
+    /// Unwraps an inbound SBP2 envelope only after enforcing the caller's
+    /// transport ceiling. The unwrapped body can never be larger than the
+    /// envelope, so validating the input before the shared implementation runs
+    /// also guarantees that its body copy stays within the same hard limit.
+    public static func unwrapIfNeeded(
+        _ data: Data,
+        label: String? = nil,
+        maximumOutputByteCount: Int
+    ) throws -> Data {
+        guard maximumOutputByteCount > 0,
+              maximumOutputByteCount <= Int(UInt32.max) else {
+            throw BoundedPaddingEnvelopePolicyError.invalidMaximumOutputByteCount(
+                maximumOutputByteCount
+            )
+        }
+        guard data.count <= maximumOutputByteCount else {
+            throw BoundedPaddingEnvelopePolicyError.payloadExceedsMaximum(
+                actual: data.count,
+                maximum: maximumOutputByteCount
+            )
+        }
+        return unwrapIfNeeded(data, label: label)
     }
 
     private static func wrap(payload: Data, totalLen: Int) -> Data {

@@ -1,3 +1,9 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// 属于 macOS 侧连接编排簇（其类型定义在 ConnectionManager.swift）。阶段 0 只让
+// SkyBridgeCore 能为 iOS 编译；采用/合并 iOS 版本是阶段 3 的迁移工作。
+// 记录在 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
@@ -233,3 +239,4 @@ public final class WiFiConnectionManager: @unchecked Sendable {
         stateLock.withLock { self.stats[connectionId] = stats }
     }
 }
+#endif

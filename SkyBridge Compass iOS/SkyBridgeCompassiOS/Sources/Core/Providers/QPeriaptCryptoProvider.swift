@@ -2,8 +2,6 @@ import CryptoKit
 import Foundation
 import SkyBridgeQPeriaptRuntime
 
-extension SecureBytes: QPeriaptSecretBuffer {}
-
 /// Thin iOS bridge over the shared Q-Periapt ABI2 runtime.
 ///
 /// Policy verification, native admission/cancellation, ABI validation, and KEM
@@ -25,10 +23,6 @@ public struct QPeriaptCryptoProvider: QPeriaptRuntimeBoundCryptoProvider, Sendab
     private let signatureProvider = OQSPQCCryptoProvider()
 
     public init(session: QPeriaptRuntimeSession) {
-        precondition(
-            session.trustRootFingerprint.count == SHA256.byteCount,
-            "An admitted Q-Periapt session must carry a SHA-256 root-key fingerprint"
-        )
         adapter = QPeriaptNativeAdapter(session: session)
         qPeriaptAuthProfile = session.authProfile
         qPeriaptTrustRootFingerprint = session.trustRootFingerprint

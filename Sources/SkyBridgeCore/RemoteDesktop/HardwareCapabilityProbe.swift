@@ -1,3 +1,6 @@
+// macOS-exclusive: built on macOS-only frameworks (see SkyBridgeCore iOS portability
+// notes). Excluded from other platforms; no behaviour changes on macOS.
+#if os(macOS)
 import Foundation
 @preconcurrency import Metal
 import VideoToolbox
@@ -273,4 +276,5 @@ public struct HardwareCapabilityProbe: Sendable {
 
 #if canImport(AppKit)
 import AppKit
+#endif
 #endif

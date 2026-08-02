@@ -158,19 +158,33 @@ function authContext(req) {
     .trim();
   const claims = parseJWTClaims(bearer);
   const appMetadata = claims.app_metadata && typeof claims.app_metadata === 'object' ? claims.app_metadata : {};
-  const userMetadata = claims.user_metadata && typeof claims.user_metadata === 'object' ? claims.user_metadata : {};
-  const tenantId = String(
-    req.get('X-SkyBridge-Tenant-Id')
-    || appMetadata.tenant_id
-    || appMetadata.tenantId
-    || userMetadata.tenant_id
-    || userMetadata.tenantId
-    || claims.tenant_id
-    || claims.tenantId
-    || claims.sub
-    || 'local-tenant'
+  const userId = String(
+    claims.sub || `user-${sha256Hex(bearer).slice(0, 16)}`
   ).trim();
-  const userId = String(claims.sub || claims.user_id || userMetadata.user_id || `user-${sha256Hex(bearer).slice(0, 16)}`).trim();
+  const protectedTenantIds = new Set([
+    appMetadata.tenant_id,
+    appMetadata.tenantId,
+    appMetadata.org_id,
+    appMetadata.workspace_id,
+    claims.tenant_id,
+    claims.tenantId,
+    claims.org_id,
+    claims.workspace_id
+  ].map((value) => String(value || '').trim()).filter(Boolean));
+  if (protectedTenantIds.size > 1) {
+    const error = new Error('conflicting_tenant_claims');
+    error.statusCode = 401;
+    throw error;
+  }
+  const tenantId = protectedTenantIds.size === 1
+    ? protectedTenantIds.values().next().value
+    : userId;
+  const requestedTenantId = String(req.get('X-SkyBridge-Tenant-Id') || '').trim();
+  if (requestedTenantId && requestedTenantId !== tenantId) {
+    const error = new Error('tenant_id_mismatch');
+    error.statusCode = 403;
+    throw error;
+  }
   return { tenantId, userId };
 }
 

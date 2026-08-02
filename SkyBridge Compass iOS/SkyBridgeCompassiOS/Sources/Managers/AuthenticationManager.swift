@@ -80,22 +80,33 @@ public class AuthenticationManager: ObservableObject {
 
     var currentPathAuthenticationPrincipal: CurrentPathAuthenticationPrincipal? {
         guard isAuthenticated, !isGuestMode, !isRestoringSession else { return nil }
-        let sessionUserID = Self.normalizedIdentityValue(session?.userIdentifier)
+        guard let session,
+              let accessToken = Self.normalizedIdentityValue(session.accessToken),
+              let sessionUserID = Self.normalizedIdentityValue(session.userIdentifier) else {
+            return nil
+        }
         let displayedUserID = Self.normalizedIdentityValue(currentUser?.id)
-        if let sessionUserID, let displayedUserID, sessionUserID != displayedUserID {
+        if let displayedUserID, sessionUserID != displayedUserID {
             return nil
         }
-        guard let userID = sessionUserID ?? displayedUserID else { return nil }
-
-        let sessionTenantID = Self.normalizedIdentityValue(session?.nebulaId)
-        let displayedTenantID = Self.normalizedIdentityValue(currentUser?.nebulaId)
-        if let sessionTenantID,
-           let displayedTenantID,
-           sessionTenantID != displayedTenantID {
+        do {
+            let identity = try SignalServerClientCompat.resolveAuthenticatedJWTIdentity(
+                accessToken: accessToken,
+                expectedUserIdentifier: sessionUserID
+            )
+            guard displayedUserID == nil || displayedUserID == identity.subject else {
+                return nil
+            }
+            return CurrentPathAuthenticationPrincipal(
+                userID: identity.subject,
+                tenantID: identity.effectiveTenantID
+            )
+        } catch {
+            SkyBridgeLogger.shared.error(
+                "Current-path authentication principal rejected: \(error.localizedDescription)"
+            )
             return nil
         }
-        guard let tenantID = sessionTenantID ?? displayedTenantID else { return nil }
-        return CurrentPathAuthenticationPrincipal(userID: userID, tenantID: tenantID)
     }
 
     public var remoteControlSecurityIdentityMetadata: RemoteControlSecurityIdentityMetadata {
@@ -1140,23 +1151,27 @@ public class AuthenticationManager: ObservableObject {
 
         do {
             let refreshed = try await SupabaseService.shared.refreshSession(refreshToken: refreshToken)
-            // 保留本地 session 中的 display/email/avatar/nebulaId（refresh 响应可能为空/不全）
-            let merged = AuthSession(
-                accessToken: refreshed.accessToken,
-                refreshToken: refreshed.refreshToken ?? session.refreshToken,
-                userIdentifier: session.userIdentifier,
-                displayName: session.displayName,
-                email: session.email,
-                avatarURL: session.avatarURL,
-                nebulaId: session.nebulaId,
-                issuedAt: Date()
+            let merged = try SignalServerClientCompat.validatedRefreshedAuthSession(
+                refreshed,
+                replacing: session,
+                explicitTenantID: nil,
+                now: Date()
             )
-            try await persistSession(merged)
+            guard self.session == session else {
+                throw SignalServerClientCompat.ClientError.authenticationSessionChanged
+            }
+            let replaced = try await KeychainManager.shared.replaceAuthSession(
+                expected: session,
+                with: merged
+            )
+            guard replaced, self.session == session else {
+                throw SignalServerClientCompat.ClientError.authenticationSessionChanged
+            }
             self.session = merged
             SkyBridgeLogger.shared.info("🔄 Supabase access token 已刷新")
             return true
         } catch {
-            SkyBridgeLogger.shared.warning("⚠️ Supabase token 刷新失败（忽略）：\(error.localizedDescription)")
+            SkyBridgeLogger.shared.error("❌ Supabase token 刷新失败：\(error.localizedDescription)")
             return false
         }
     }

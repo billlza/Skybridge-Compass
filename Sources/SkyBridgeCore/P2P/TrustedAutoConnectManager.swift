@@ -76,7 +76,15 @@ public final class TrustedAutoConnectManager: ObservableObject {
             if thermal == .serious || thermal == .critical {
                 base = 90
             } else {
+#if os(macOS)
                 base = HardwareCapabilityProbe.isOnExternalPower() ? 15 : 45
+#else
+                // `HardwareCapabilityProbe` is IOKit-based and macOS-only. Rather than inventing a
+                // new interval, pick the existing battery-powered branch, which is the conservative
+                // one. Migration decision point: use the platform's own power-source signal
+                // (`UIDevice.batteryState` on iOS) once iOS runs this path.
+                base = 45
+#endif
             }
         }
         // 0.8x–1.2x 抖动（用纳秒时钟低位作为无种子随机源，避免 Math.random / 不可复现的全局状态）

@@ -196,27 +196,23 @@ xcodebuild test \
 
 ## 🔐 PQC 加密配置
 
-### 使用 liboqs (可选)
+### 使用 liboqs
 
-如果要替换当前仓库中的 `Vendor/liboqs.xcframework`，可以自行重新编译并覆盖 vendored 产物：
+iOS 与 macOS 共用根包中唯一的、带版本锁与 provenance 的 liboqs XCFramework。重新生成时必须使用仓库配方：
 
 ```bash
-# 下载 liboqs
-git clone https://github.com/open-quantum-safe/liboqs.git
-cd liboqs
-
-# 构建 iOS 版本
-mkdir build-ios && cd build-ios
-cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/ios.toolchain.cmake
-make
-
-# 将编译产物整理成 xcframework 后替换当前 vendored 版本
-# 目标位置示例：
-#   SkyBridge Compass iOS/Vendor/liboqs.xcframework
+cd ..
+bash Scripts/build_liboqs_xcframework.sh
+python3 Scripts/native_vendor_provenance.py verify \
+  --repository-root "$PWD" \
+  --lock Config/native-dependencies.lock.json \
+  --provenance Sources/Vendor/liboqs.provenance.json
 ```
 
 说明：
-- 当前工程已经通过本地 vendor / local package 路径接入 liboqs 相关依赖
+- 唯一产物位置是 `Sources/Vendor/liboqs.xcframework`
+- iOS 通过根包 `SkyBridgeRoot` 的 `OQSRAII` product 消费该产物
+- 不允许手工覆盖二进制或在 iOS 子目录恢复平行 vendor / local package
 - 不再使用旧文档里 `Shared/Libraries/` 这类目录布局
 
 ## 📚 更多资源

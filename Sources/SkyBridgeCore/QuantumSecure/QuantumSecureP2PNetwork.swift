@@ -663,7 +663,7 @@ public class QuantumSecureP2PNetwork: BaseManager {
     }
 
     private func hostNameOrEmpty() -> String {
-        Host.current().localizedName ?? ""
+        LocalHostName.localizedName ?? ""
     }
 
     private func shouldRekey(peerId: String) -> Bool {

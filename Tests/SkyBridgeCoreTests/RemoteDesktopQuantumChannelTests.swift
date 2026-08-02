@@ -43,7 +43,9 @@ final class RemoteDesktopQuantumCryptoAdapterTests: XCTestCase {
     
     override func tearDown() async throws {
         crypto = nil
-        await trustService?.removeRecordsForTesting(deviceIds: authenticatedPeerIds)
+        if let trustService {
+            try await trustService.removeRecordsForTesting(deviceIds: authenticatedPeerIds)
+        }
         trustService?.setInMemoryPersistenceForTesting(false)
         trustService = nil
         committedProtocolPublicKey.removeAll(keepingCapacity: false)

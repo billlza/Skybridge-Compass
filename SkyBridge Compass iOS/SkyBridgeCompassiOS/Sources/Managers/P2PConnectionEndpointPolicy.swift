@@ -1,6 +1,80 @@
 import Foundation
 import Network
 
+/// The persistable identity portion of one DNS-SD route. A service endpoint is actionable
+/// only when this tuple and the Network.framework interface came from the same live result.
+///
+/// Keeping this as a value prevents the discovery cache, active-connection enrichment, and
+/// trusted-device persistence from independently filling fields and manufacturing an endpoint
+/// that no peer actually published. The interface itself remains in the process-local discovery
+/// snapshot because `NWInterface` has no supported persistence/reconstruction contract.
+struct BonjourRouteTuple: Equatable, Sendable {
+    let name: String
+    let type: String
+    let domain: String
+
+    init?(name: String?, type: String?, domain: String?) {
+        guard let name = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(name),
+              let type = type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !type.isEmpty,
+              let domain = Self.normalizedDomain(domain) else {
+            return nil
+        }
+        self.name = name
+        self.type = type
+        self.domain = domain
+    }
+
+    init?(_ device: DiscoveredDevice) {
+        self.init(
+            name: device.bonjourServiceName,
+            type: device.bonjourServiceType,
+            domain: device.bonjourServiceDomain
+        )
+    }
+
+    var isPrimaryControlRoute: Bool {
+        type == DiscoveryServiceType.skybridge.rawValue
+    }
+
+    /// Selects one complete route without combining fields.
+    ///
+    /// A newly observed primary control advertisement is authoritative, including when it
+    /// replaces an older primary route after a rename. Auxiliary advertisements may seed an
+    /// empty route but never displace a selected primary route.
+    static func preferred(
+        existing: BonjourRouteTuple?,
+        update: BonjourRouteTuple?
+    ) -> BonjourRouteTuple? {
+        guard let update else { return existing }
+        guard let existing else { return update }
+        if update.isPrimaryControlRoute {
+            return update
+        }
+        return existing
+    }
+
+    func apply(to device: inout DiscoveredDevice) {
+        device.bonjourServiceName = name
+        device.bonjourServiceType = type
+        device.bonjourServiceDomain = domain
+    }
+
+    static func clear(from device: inout DiscoveredDevice) {
+        device.bonjourServiceName = nil
+        device.bonjourServiceType = nil
+        device.bonjourServiceDomain = nil
+    }
+
+    private static func normalizedDomain(_ rawDomain: String?) -> String? {
+        guard let trimmed = rawDomain?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed.hasSuffix(".") ? trimmed : "\(trimmed)."
+    }
+}
+
 enum P2PConnectionEndpointPolicy {
     static func parseBonjourPeerIdentifier(_ peerId: String) -> (name: String, domain: String)? {
         guard peerId.hasPrefix("bonjour:") else { return nil }
@@ -17,25 +91,13 @@ enum P2PConnectionEndpointPolicy {
     ) -> Bool {
         let normalizedBonjourName = bonjourName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedBonjourName.isEmpty,
-              isPlausibleSkyBridgeServiceInstanceName(normalizedBonjourName) else {
+              isPlausibleSkyBridgeServiceInstanceName(normalizedBonjourName),
+              let route = BonjourRouteTuple(device),
+              route.isPrimaryControlRoute,
+              route.name == normalizedBonjourName else {
             return false
         }
-
-        if device.services.contains(DiscoveryServiceType.skybridge.rawValue)
-            || device.services.contains(DiscoveryServiceType.skybridgeQUIC.rawValue) {
-            return true
-        }
-
-        if let bonjourServiceType = device.bonjourServiceType?.trimmingCharacters(in: .whitespacesAndNewlines),
-           bonjourServiceType.hasPrefix("_skybridge") {
-            return true
-        }
-
-        if device.id.hasPrefix("bonjour:") {
-            return true
-        }
-
-        return false
+        return true
     }
 
     static func isPlausibleSkyBridgeServiceInstanceName(_ raw: String?) -> Bool {
@@ -93,7 +155,7 @@ enum P2PConnectionEndpointPolicy {
         if device.bonjourServiceType == skybridgeTCP {
             score += 140
         }
-        if resolvedSkyBridgeControlPort(for: device) != nil {
+        if BonjourRouteTuple(device)?.isPrimaryControlRoute == true {
             score += 100
         }
         if device.services.contains(skybridgeUDP) || device.portMap[skybridgeUDP] != nil {
@@ -119,9 +181,6 @@ enum P2PConnectionEndpointPolicy {
         }
         if device.bonjourServiceName?.isEmpty == false {
             score += 60
-        }
-        if sanitizedConnectableAddress(for: device) != nil {
-            score += 50
         }
         return score
     }
@@ -154,7 +213,7 @@ enum P2PConnectionEndpointPolicy {
 
     static func connectionEndpointCandidates(
         for device: DiscoveredDevice,
-        preferDirectHostPort: Bool = false
+        liveBonjourControlEndpoints: [NWEndpoint]
     ) -> [NWEndpoint] {
         let parsedBonjourIdentity = parseBonjourPeerIdentifier(device.id)
         let bonjourName = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(device.bonjourServiceName)
@@ -163,64 +222,98 @@ enum P2PConnectionEndpointPolicy {
             ?? parsedBonjourIdentity?.domain
             ?? "local."
         let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
-        let portValue = resolvedSkyBridgeControlPort(for: device)
-
-        var candidates: [NWEndpoint] = []
-        let scopedConnectableAddress = connectableAddress(for: device)
         let usableBonjourName =
             isPlausibleSkyBridgeServiceInstanceName(bonjourName)
             ? bonjourName?.trimmingCharacters(in: .whitespacesAndNewlines)
             : nil
-        let prefersBonjour = !preferDirectHostPort && shouldPreferBonjourSkyBridgeEndpoint(
+        let hasTCPBonjourEvidence = shouldPreferBonjourSkyBridgeEndpoint(
             for: device,
             bonjourName: usableBonjourName ?? ""
         )
-
-        if prefersBonjour, let usableBonjourName {
-            candidates.append(
-                .service(
-                    name: usableBonjourName,
-                    type: skybridgeTCP,
-                    domain: bonjourDomain,
-                    interface: nil
-                )
-            )
+        // `ipAddress` and `portMap` may originate from independent TXT fields. Reconstructing a
+        // `.service` value from persisted name/type/domain is also insufficient: it discards the
+        // live result's interface, which is the route ownership needed for AWDL. Accept only the
+        // exact live endpoint after proving it matches this device's primary advertisement.
+        guard hasTCPBonjourEvidence,
+              let usableBonjourName,
+              let advertisedRoute = BonjourRouteTuple(
+                name: usableBonjourName,
+                type: skybridgeTCP,
+                domain: bonjourDomain
+              ) else {
+            return []
         }
 
-        if let ipAddress = scopedConnectableAddress,
-           let portValue {
-            candidates.append(
-                .hostPort(
-                    host: NWEndpoint.Host(ipAddress),
-                    port: NWEndpoint.Port(integerLiteral: portValue)
-                )
-            )
+        var seenEndpointKeys = Set<String>()
+        return liveBonjourControlEndpoints.filter { endpoint in
+            guard case .service(let liveName, let liveType, let liveDomain, _) = endpoint,
+                  let liveRoute = BonjourRouteTuple(
+                    name: liveName,
+                    type: liveType,
+                    domain: liveDomain
+                  ),
+                  liveRoute == advertisedRoute else {
+                return false
+            }
+            return seenEndpointKeys.insert(BonjourBrowseEndpointIdentity.key(for: endpoint)).inserted
+        }
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    /// Pure policy convenience for unit tests. Runtime code must supply the exact live browser
+    /// endpoint so an AWDL interface is never reconstructed as `nil`.
+    static func connectionEndpointCandidates(for device: DiscoveredDevice) -> [NWEndpoint] {
+        guard let route = BonjourRouteTuple(device) else { return [] }
+        return connectionEndpointCandidates(
+            for: device,
+            liveBonjourControlEndpoints: [.service(
+                name: route.name,
+                type: route.type,
+                domain: route.domain,
+                interface: nil
+            )]
+        )
+    }
+    #endif
+
+    static func shouldAwaitSkyBridgeControlRoute(
+        for device: DiscoveredDevice,
+        liveBonjourControlEndpoints: [NWEndpoint] = []
+    ) -> Bool {
+        guard connectionEndpointCandidates(
+                for: device,
+                liveBonjourControlEndpoints: liveBonjourControlEndpoints
+              ).isEmpty,
+              normalizedStrongDeviceId(for: device) != nil,
+              isPlausibleSkyBridgeServiceInstanceName(device.bonjourServiceName) else {
+            return false
         }
 
-        if (preferDirectHostPort || !prefersBonjour),
-           let usableBonjourName {
-            candidates.append(
-                .service(
-                    name: usableBonjourName,
-                    type: skybridgeTCP,
-                    domain: bonjourDomain,
-                    interface: nil
-                )
-            )
+        // A persisted primary route is identity/context evidence, not an actionable
+        // endpoint because it no longer carries the exact live NWInterface. Give the
+        // browser a bounded opportunity to republish that exact route before failing.
+        if BonjourRouteTuple(device)?.isPrimaryControlRoute == true {
+            return true
         }
 
-        var seen = Set<String>()
-        return candidates.filter { seen.insert(String(describing: $0)).inserted }
+        let partialRouteServices: Set<String> = [
+            DiscoveryServiceType.skybridgeQUIC.rawValue,
+            DiscoveredDevice.fileTransferServiceType,
+            DiscoveredDevice.remoteControlServiceType
+        ]
+        if let serviceType = device.bonjourServiceType,
+           partialRouteServices.contains(serviceType) {
+            return true
+        }
+        return !partialRouteServices.isDisjoint(with: device.services)
     }
 
     static func resolvedSkyBridgeControlPort(for device: DiscoveredDevice) -> UInt16? {
+        // Diagnostic only. This TXT-derived value must never be combined with `ipAddress` to
+        // construct an actionable endpoint; use `connectionEndpointCandidates(for:)` instead.
         let skybridgeTCP = DiscoveryServiceType.skybridge.rawValue
-        let skybridgeUDP = DiscoveryServiceType.skybridgeQUIC.rawValue
-        for value in [device.portMap[skybridgeTCP], device.portMap[skybridgeUDP]] {
-            guard let value, value > 0 else { continue }
-            return value
-        }
-        return nil
+        guard let value = device.portMap[skybridgeTCP], value > 0 else { return nil }
+        return value
     }
 
     static func signedLANRefreshEndpointClass(_ endpoint: NWEndpoint) -> String {

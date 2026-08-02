@@ -218,6 +218,20 @@ public extension CryptoProvider {
 
 // MARK: - KeyPair
 
+public enum KeyPairError: Error, LocalizedError, Sendable, Equatable {
+    case suiteMismatch(publicSuite: CryptoSuite, privateSuite: CryptoSuite)
+    case usageMismatch(publicUsage: KeyUsage, privateUsage: KeyUsage)
+
+    public var errorDescription: String? {
+        switch self {
+        case .suiteMismatch(let publicSuite, let privateSuite):
+            return "Key-pair suite mismatch: \(publicSuite.rawValue) != \(privateSuite.rawValue)"
+        case .usageMismatch(let publicUsage, let privateUsage):
+            return "Key-pair usage mismatch: \(publicUsage.rawValue) != \(privateUsage.rawValue)"
+        }
+    }
+}
+
 /// 密钥对（类型化，防止喂错）
 ///
 /// **设计决策**：
@@ -227,9 +241,19 @@ public struct KeyPair: Sendable {
     public let publicKey: KeyMaterial
     public let privateKey: KeyMaterial
     
-    public init(publicKey: KeyMaterial, privateKey: KeyMaterial) {
-        precondition(publicKey.suite == privateKey.suite, "Suite mismatch")
-        precondition(publicKey.usage == privateKey.usage, "Usage mismatch")
+    public init(publicKey: KeyMaterial, privateKey: KeyMaterial) throws {
+        guard publicKey.suite == privateKey.suite else {
+            throw KeyPairError.suiteMismatch(
+                publicSuite: publicKey.suite,
+                privateSuite: privateKey.suite
+            )
+        }
+        guard publicKey.usage == privateKey.usage else {
+            throw KeyPairError.usageMismatch(
+                publicUsage: publicKey.usage,
+                privateUsage: privateKey.usage
+            )
+        }
         self.publicKey = publicKey
         self.privateKey = privateKey
     }

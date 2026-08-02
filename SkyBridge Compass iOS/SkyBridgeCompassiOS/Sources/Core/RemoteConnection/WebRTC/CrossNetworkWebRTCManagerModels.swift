@@ -3,6 +3,81 @@ import SkyBridgeRealtimeMedia
 
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
+    struct PairingMaterialAdmissionOwner: Equatable {
+        let sessionId: String
+        let sessionObjectIdentifier: ObjectIdentifier
+        let acceptedMaterialDigest: Data
+    }
+
+    struct PairingIdentityReplyObservation: Equatable {
+        let sessionId: String
+        let sessionObjectIdentifier: ObjectIdentifier
+        let acceptedMaterialDigest: Data?
+        let sentAt: Date
+    }
+
+    struct PairingMaterialAdmissionDeadline: Equatable {
+        let sessionId: String
+        let sessionObjectIdentifier: ObjectIdentifier
+        let expiresAt: Date
+    }
+
+    enum PairingMaterialAdmissionPolicy {
+        static func isCurrentAdmission(
+            _ admission: PairingMaterialAdmissionOwner?,
+            sessionId: String,
+            sessionObjectIdentifier: ObjectIdentifier
+        ) -> Bool {
+            admission?.sessionId == sessionId
+                && admission?.sessionObjectIdentifier == sessionObjectIdentifier
+                && admission?.acceptedMaterialDigest.isEmpty == false
+        }
+
+        static func canReusePairingIdentityReply(
+            _ observation: PairingIdentityReplyObservation?,
+            sessionId: String,
+            sessionObjectIdentifier: ObjectIdentifier,
+            acceptedMaterialDigest: Data?,
+            now: Date,
+            reuseInterval: TimeInterval
+        ) -> Bool {
+            guard reuseInterval >= 0,
+                  let observation,
+                  observation.sessionId == sessionId,
+                  observation.sessionObjectIdentifier == sessionObjectIdentifier,
+                  observation.acceptedMaterialDigest == acceptedMaterialDigest else {
+                return false
+            }
+            let age = now.timeIntervalSince(observation.sentAt)
+            return age >= 0 && age < reuseInterval
+        }
+
+        static func isAdmissionDeadlineExpired(
+            _ deadline: PairingMaterialAdmissionDeadline?,
+            sessionId: String,
+            sessionObjectIdentifier: ObjectIdentifier,
+            now: Date
+        ) -> Bool {
+            guard let deadline,
+                  deadline.sessionId == sessionId,
+                  deadline.sessionObjectIdentifier == sessionObjectIdentifier else {
+                return false
+            }
+            return now >= deadline.expiresAt
+        }
+    }
+
+    enum ApplicationTrafficAdmissionError: LocalizedError, Equatable {
+        case pairingMaterialNotAdmitted
+
+        var errorDescription: String? {
+            switch self {
+            case .pairingMaterialNotAdmitted:
+                return "WebRTC pairing material is not admitted for this session"
+            }
+        }
+    }
+
     public struct VerifiedConnectLinkTrustImport: Sendable, Equatable {
         public let deviceID: String
         public let deviceName: String

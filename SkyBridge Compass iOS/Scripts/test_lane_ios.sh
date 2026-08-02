@@ -89,6 +89,8 @@ run_xcodebuild_with_retry \
   -destination "platform=iOS Simulator,id=${SIM_ID},arch=${SIM_ARCH}" \
   -destination-timeout 120 \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
+  -skipPackageUpdates \
+  -disableAutomaticPackageResolution \
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
   GCC_TREAT_WARNINGS_AS_ERRORS=YES \
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
@@ -101,6 +103,8 @@ run_xcodebuild_with_retry \
   -destination "platform=iOS Simulator,id=${SIM_ID},arch=${SIM_ARCH}" \
   -destination-timeout 120 \
   -derivedDataPath "${DERIVED_DATA_PATH}" \
+  -skipPackageUpdates \
+  -disableAutomaticPackageResolution \
   SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
   GCC_TREAT_WARNINGS_AS_ERRORS=YES \
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \

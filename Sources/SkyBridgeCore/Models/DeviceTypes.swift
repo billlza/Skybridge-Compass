@@ -41,11 +41,14 @@ public class EnhancedDeviceDiscovery: ObservableObject {
             )
         }
  // 委托给真实的设备发现服务 (Requirement 10.1)
+#if os(macOS)
+        // `DeviceDiscoveryService` 目前仍是 macOS 侧实现（iOS 有自己的一份，属于去重目标）。
         if #available(macOS 14.0, *) {
             Task {
                 await DeviceDiscoveryService.shared.startDiscovery()
             }
         }
+#endif
     }
     
     public func stopScanning() {
@@ -59,9 +62,11 @@ public class EnhancedDeviceDiscovery: ObservableObject {
             )
         }
  // 委托给真实的设备发现服务 (Requirement 10.1)
+#if os(macOS)
         if #available(macOS 14.0, *) {
             DeviceDiscoveryService.shared.stopDiscovery()
         }
+#endif
     }
 }
 

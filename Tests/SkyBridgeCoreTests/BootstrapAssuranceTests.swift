@@ -157,7 +157,6 @@ final class BootstrapAssuranceTests: XCTestCase {
         let now = Date()
         let lastReply = PairingIdentityExchangeReplyThrottleState(
             requestKey: "old-request",
-            requestSentAt: now.addingTimeInterval(-2),
             repliedAt: now.addingTimeInterval(-2)
         )
 
@@ -165,7 +164,6 @@ final class BootstrapAssuranceTests: XCTestCase {
             P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
                 lastReply: lastReply,
                 requestKey: "old-request",
-                requestSentAt: now.addingTimeInterval(-2),
                 now: now
             )
         )
@@ -173,13 +171,12 @@ final class BootstrapAssuranceTests: XCTestCase {
             P2PDiscoveryService.shouldSendPairingIdentityExchangeReply(
                 lastReply: lastReply,
                 requestKey: "fresh-request",
-                requestSentAt: now,
                 now: now
             )
         )
     }
 
-    func testPairingIdentityExchangeRequestKeyChangesWithSentAt() {
+    func testPairingIdentityExchangeRequestKeyIgnoresUntrustedSentAt() {
         let kemKey = KEMPublicKeyInfo(suiteWireId: 1, publicKey: Data(repeating: 0xA5, count: 32))
         let first = AppMessage.PairingIdentityExchangePayload(
             deviceId: "peer-device",
@@ -193,8 +190,22 @@ final class BootstrapAssuranceTests: XCTestCase {
         )
 
         XCTAssertNotEqual(
+            first.sentAt,
+            second.sentAt
+        )
+        XCTAssertEqual(
             P2PDiscoveryService.pairingIdentityExchangeRequestKey(first),
             P2PDiscoveryService.pairingIdentityExchangeRequestKey(second)
+        )
+
+        let extreme = AppMessage.PairingIdentityExchangePayload(
+            deviceId: "peer-device",
+            kemPublicKeys: [kemKey],
+            sentAt: Date(timeIntervalSince1970: 1e300)
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.pairingIdentityExchangeRequestKey(first),
+            P2PDiscoveryService.pairingIdentityExchangeRequestKey(extreme)
         )
     }
 }

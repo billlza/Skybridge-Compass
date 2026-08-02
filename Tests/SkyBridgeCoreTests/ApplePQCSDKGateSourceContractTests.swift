@@ -285,7 +285,12 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         let coreBridge = try readSource(
             "Sources/SkyBridgeCore/P2P/Providers/QPeriaptNativeAdapter.swift"
         )
-        XCTAssertTrue(coreBridge.contains("extension SecureBytes: QPeriaptSecretBuffer"))
+        let secretBuffer = try readSource(
+            "Sources/SkyBridgeQPeriaptRuntime/QPeriaptSecretBuffer.swift"
+        )
+        XCTAssertTrue(secretBuffer.contains("extension SecureBytes: QPeriaptSecretBuffer"))
+        XCTAssertTrue(secretBuffer.contains("typealias QPeriaptSecretBytes = SecureBytes"))
+        XCTAssertFalse(coreBridge.contains("extension SecureBytes: QPeriaptSecretBuffer"))
         XCTAssertTrue(coreBridge.contains("translateNativeErrors"))
         XCTAssertFalse(coreBridge.contains("q_periapt_"))
     }
@@ -325,7 +330,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(adapter.contains("session.decision.encoded.withUnsafeBytes"))
         XCTAssertTrue(adapter.contains("privateKey.withUnsafeBytes"))
         XCTAssertTrue(adapter.contains("privateKey: Secret"))
-        XCTAssertTrue(adapter.contains("let privateKey = Secret(count: Self.privateKeyLength)"))
+        XCTAssertTrue(adapter.contains("let privateKey = try Secret(count: Self.privateKeyLength)"))
         XCTAssertTrue(adapter.contains("Secret: QPeriaptSecretBuffer"))
         XCTAssertFalse(adapter.contains("var privateKey = Data(capacity: Self.privateKeyLength)"))
         XCTAssertFalse(adapter.contains("privateKey.copyData()"))
@@ -823,9 +828,9 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(deviceLane.contains(#"build_args+=("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=${SKYBRIDGE_APPLE_PQC_SDK_CONDITION}")"#))
     }
 
-    func testMacOSSwiftPMTargetsPropagateWebRTCHeaderOverlayAndTestRPath() throws {
+    func testMacOSSwiftPMScopesWebRTCAudioHeaderOverlayAndTestRPath() throws {
         let manifest = try readSource("Package.swift")
-        let targetsRequiringWebRTCOverlay = [
+        let targetsUsingFrameworkHeadersDirectly = [
             "SkyBridgeCore",
             "SkyBridgeUI",
             "SkyBridgeCoreTests",
@@ -839,11 +844,25 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
             "MessageSizeBenchRunner"
         ]
 
-        for targetName in targetsRequiringWebRTCOverlay {
+        let audioBridgeBody = try packageManifestTargetBody("WebRTCAudioDeviceBridge", in: manifest)
+        XCTAssertTrue(
+            audioBridgeBody.contains(#"["-I", webRTCAudioDeviceHeaderOverlayPath]"#)
+                && audioBridgeBody.contains(#".when(platforms: [.macOS])"#),
+            "Only the Objective-C audio-device bridge should receive the reviewed M150 RTCAudioDevice header overlay."
+        )
+        XCTAssertTrue(
+            manifest.contains(#"let webRTCAudioDeviceHeaderOverlayPath = "\(packageRootPath)/Sources/Vendor/WebRTCM150AudioDeviceHeader""#)
+        )
+        XCTAssertFalse(
+            manifest.contains("webRTCHeadersIncludePath"),
+            "The removed general WebRTC header mirror must not remain as a second framework-header authority."
+        )
+
+        for targetName in targetsUsingFrameworkHeadersDirectly {
             let body = try packageManifestTargetBody(targetName, in: manifest)
-            XCTAssertTrue(
-                body.contains(#".unsafeFlags(["-Xcc", "-I", "-Xcc", webRTCHeadersIncludePath], .when(platforms: [.macOS]))"#),
-                "\(targetName) must pass the WebRTC header overlay to Clang. Xcode 27 SwiftBuild performs explicit module scanning per target and does not inherit transitive include paths."
+            XCTAssertFalse(
+                body.contains("webRTCAudioDeviceHeaderOverlayPath"),
+                "\(targetName) must consume the M150 framework headers directly instead of inheriting the audio-device-only overlay."
             )
         }
 

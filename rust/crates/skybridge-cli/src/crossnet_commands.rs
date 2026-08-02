@@ -175,7 +175,7 @@ fn preflight_state(result: &HelloResult) -> PreflightState {
         ready_for_mutation: !ENABLED_MUTATION_METHODS.is_empty(),
         failure_code: None,
         failure_class: None,
-        next_required_action: "settings mutation is live; session mutation still needs signed Mac app socket smoke before it is enabled",
+        next_required_action: "settings mutation method is enabled; signed Mac app socket smoke is still required for release readiness, and session mutation remains disabled",
     }
 }
 
@@ -466,7 +466,9 @@ mod tests {
             );
         }
         assert!(
-            !disabled.iter().any(|entry| entry == "crossnet.settings.set"),
+            !disabled
+                .iter()
+                .any(|entry| entry == "crossnet.settings.set"),
             "settings.set must not be reported both enabled and disabled: {payload}"
         );
         assert_eq!(

@@ -38,7 +38,7 @@ final class SecureBytesTests: XCTestCase {
  ///
  /// **注意**：不直接验证内存内容（不可靠），而是通过注入 wipingFunction 验证擦除路径被调用
     #if DEBUG || SKYBRIDGE_TESTING
-    func testProperty3_WipingFunctionCalledOnDeinit() {
+    func testProperty3_WipingFunctionCalledOnDeinit() throws {
         let tracker = SecureBytesWipeTracker()
         let originalWipingFunction = SecureBytes.wipingFunction
         SecureBytes.wipingFunction = tracker.makeWipingFunction()
@@ -50,8 +50,8 @@ final class SecureBytesTests: XCTestCase {
         
  // 创建并立即释放 SecureBytes
         let testSize = 32
-        autoreleasepool {
-            let _ = SecureBytes(count: testSize)
+        try autoreleasepool {
+            let _ = try SecureBytes(count: testSize)
         }
         
  // 验证擦除函数被调用
@@ -59,7 +59,7 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertEqual(tracker.lastWipedSize, testSize, "Wiped size should match allocated size")
     }
     
-    func testProperty3_WipingFunctionCalledWithCorrectSize() {
+    func testProperty3_WipingFunctionCalledWithCorrectSize() throws {
         let tracker = SecureBytesWipeTracker()
         let originalWipingFunction = SecureBytes.wipingFunction
         SecureBytes.wipingFunction = tracker.makeWipingFunction()
@@ -73,8 +73,8 @@ final class SecureBytesTests: XCTestCase {
         
         for size in sizes {
             tracker.reset()
-            autoreleasepool {
-                let _ = SecureBytes(count: size)
+            try autoreleasepool {
+                let _ = try SecureBytes(count: size)
             }
             XCTAssertEqual(tracker.wipeCount, 1, "Wiping function should be called for size \(size)")
             XCTAssertEqual(tracker.lastWipedSize, size, "Wiped size should be \(size)")
@@ -99,7 +99,7 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertEqual(tracker.lastWipedSize, testData.count, "Wiped size should match data size")
     }
     
-    func testProperty3_ManualZeroizeCalled() {
+    func testProperty3_ManualZeroizeCalled() throws {
         let tracker = SecureBytesWipeTracker()
         let originalWipingFunction = SecureBytes.wipingFunction
         SecureBytes.wipingFunction = tracker.makeWipingFunction()
@@ -108,7 +108,7 @@ final class SecureBytesTests: XCTestCase {
             SecureBytes.wipingFunction = originalWipingFunction
         }
         
-        let secureBytes = SecureBytes(count: 32)
+        let secureBytes = try SecureBytes(count: 32)
         
  // 手动擦除
         secureBytes.zeroize()
@@ -123,8 +123,8 @@ final class SecureBytesTests: XCTestCase {
     
  // MARK: - Basic Functionality Tests
     
-    func testSecureBytesInitWithCount() {
-        let secureBytes = SecureBytes(count: 32)
+    func testSecureBytesInitWithCount() throws {
+        let secureBytes = try SecureBytes(count: 32)
         
         XCTAssertEqual(secureBytes.byteCount, 32)
         XCTAssertFalse(secureBytes.isEmpty)
@@ -151,8 +151,8 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertEqual(secureBytes.data, Data(testBytes))
     }
     
-    func testSecureBytesEmptyInit() {
-        let secureBytes = SecureBytes(count: 0)
+    func testSecureBytesEmptyInit() throws {
+        let secureBytes = try SecureBytes(count: 0)
         
         XCTAssertEqual(secureBytes.byteCount, 0)
         XCTAssertTrue(secureBytes.isEmpty)
@@ -180,8 +180,8 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertEqual(sum, 0x01 + 0x02 + 0x03 + 0x04)
     }
     
-    func testSecureBytesWithUnsafeMutableBytes() {
-        let secureBytes = SecureBytes(count: 4)
+    func testSecureBytesWithUnsafeMutableBytes() throws {
+        let secureBytes = try SecureBytes(count: 4)
         
         secureBytes.withUnsafeMutableBytes { buffer in
             buffer[0] = 0xAA
@@ -193,8 +193,8 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertEqual(secureBytes.data, Data([0xAA, 0xBB, 0xCC, 0xDD]))
     }
     
-    func testSecureBytesDataCopyIndependence() {
-        let secureBytes = SecureBytes(count: 4)
+    func testSecureBytesDataCopyIndependence() throws {
+        let secureBytes = try SecureBytes(count: 4)
         
  // 修改 SecureBytes 内容
         secureBytes.withUnsafeMutableBytes { buffer in
@@ -226,8 +226,8 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertEqual(copy, expected)
     }
 
-    func testConcurrentReadsAndWritesReturnCoherentCopies() {
-        let secureBytes = SecureBytes(count: 64)
+    func testConcurrentReadsAndWritesReturnCoherentCopies() throws {
+        let secureBytes = try SecureBytes(count: 64)
         let probe = CoherenceProbe()
 
         DispatchQueue.concurrentPerform(iterations: 1_000) { iteration in
@@ -251,10 +251,10 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertFalse(probe.observedTornCopy)
     }
     
-    func testSecureBytesLargeAllocation() {
+    func testSecureBytesLargeAllocation() throws {
  // 测试较大的分配
         let largeSize = 1024 * 1024  // 1MB
-        let secureBytes = SecureBytes(count: largeSize)
+        let secureBytes = try SecureBytes(count: largeSize)
         
         XCTAssertEqual(secureBytes.byteCount, largeSize)
         
@@ -274,5 +274,24 @@ final class SecureBytesTests: XCTestCase {
  // 验证内容被擦除
         let data = secureBytes.data
         XCTAssertTrue(data.allSatisfy { $0 == 0 }, "Should be zeroed after zeroize()")
+    }
+
+    func testNegativeAllocationFailsWithTypedError() {
+        XCTAssertThrowsError(try SecureBytes(count: -1)) { error in
+            XCTAssertEqual(error as? SecureBytesError, .invalidCount(-1))
+        }
+    }
+
+    func testOversizedAllocationFailsBeforeAllocating() {
+        let oversized = SecureBytes.maximumAllocationSize + 1
+        XCTAssertThrowsError(try SecureBytes(count: oversized)) { error in
+            XCTAssertEqual(
+                error as? SecureBytesError,
+                .countExceedsLimit(
+                    actual: oversized,
+                    maximum: SecureBytes.maximumAllocationSize
+                )
+            )
+        }
     }
 }

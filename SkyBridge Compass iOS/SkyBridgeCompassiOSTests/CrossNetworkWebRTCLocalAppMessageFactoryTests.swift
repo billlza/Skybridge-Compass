@@ -21,8 +21,10 @@ final class CrossNetworkWebRTCLocalAppMessageFactoryTests: XCTestCase {
 
         let descriptor = CrossNetworkWebRTCControlChannelCodec.sessionBindingDescriptor(for: keys)
         XCTAssertEqual(payload.kind, "fileTransfer")
-        XCTAssertEqual(payload.serviceType, "_skybridge-transfer._tcp")
-        XCTAssertTrue(payload.instanceName.hasSuffix("._skybridge-transfer._tcp.local"))
+        XCTAssertEqual(payload.serviceType, DiscoveredDevice.fileTransferServiceType)
+        XCTAssertTrue(
+            payload.instanceName.hasSuffix(".\(DiscoveredDevice.fileTransferServiceType).local")
+        )
         XCTAssertEqual(payload.port, FileTransferConstants.defaultPort)
         XCTAssertEqual(payload.endpointProvenance, "resolved-dns-sd-endpoint")
         XCTAssertEqual(payload.localDeviceId, "ios-device")

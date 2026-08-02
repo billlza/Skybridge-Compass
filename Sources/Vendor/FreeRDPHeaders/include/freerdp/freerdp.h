@@ -516,10 +516,10 @@ owned by rdpRdp */
 
 		WINPR_DEPRECATED_VAR("Use VerifyCertificateEx or VerifyX509Certificate  instead",
 		                     WINPR_ATTR_NODISCARD ALIGN64 pVerifyCertificate
-		                         VerifyCertificate;) /**< (offset 51) */
+		                         VerifyCertificate); /**< (offset 51) */
 		WINPR_DEPRECATED_VAR("Use VerifyChangedCertificateEx or VerifyX509Certificate  instead",
 		                     WINPR_ATTR_NODISCARD ALIGN64 pVerifyChangedCertificate
-		                         VerifyChangedCertificate;) /**< (offset 52) */
+		                         VerifyChangedCertificate); /**< (offset 52) */
 #else
 	    ALIGN64 UINT64 reserved50[3];
 #endif

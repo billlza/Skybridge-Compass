@@ -1,3 +1,8 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// macOS 侧发现编排（依赖 USB/IOKit 与 DeviceDiscoveryManagerOptimized）。iOS 有自己的一份
+// （iOS 侧统一发现）。采用/合并是阶段 3 的迁移工作，见 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 import Foundation
 import OSLog
 import Combine
@@ -16,29 +21,6 @@ import CoreBluetooth
 
 // MARK: - 扫描范围模式
 
-/// 设备发现范围模式
-///
-/// 控制设备扫描和过滤的行为：
-/// - skyBridgeOnly: 只关注 SkyBridge 对端设备（优化性能，减少网络负载）
-/// - generalDevices: 扫描局域网设备，但 UI 默认隐藏打印机/摄像头等外设
-/// - fullCompatible: 完全兼容模式，显示所有设备类型
-public enum DiscoveryScopeMode: String, Codable, Sendable {
-    case skyBridgeOnly = "仅 SkyBridge"
-    case generalDevices = "常规设备"
-    case fullCompatible = "完全兼容"
-    
- /// 用户友好的描述
-    public var description: String {
-        switch self {
-        case .skyBridgeOnly:
-            return "只显示 SkyBridge 对端设备，性能最优"
-        case .generalDevices:
-            return "显示电脑、手机等常规设备，隐藏打印机和摄像头"
-        case .fullCompatible:
-            return "显示所有设备类型，包括打印机、摄像头和 IoT 设备"
-        }
-    }
-}
 
 @MainActor
 public final class UnifiedDeviceDiscoveryManager: ObservableObject {
@@ -554,3 +536,4 @@ public enum PermissionState: String, Sendable {
     case partiallyGranted
     case denied
 }
+#endif

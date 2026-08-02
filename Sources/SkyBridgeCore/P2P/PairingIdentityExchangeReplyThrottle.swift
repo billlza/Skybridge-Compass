@@ -11,7 +11,6 @@ import Foundation
 @available(macOS 14.0, iOS 17.0, *)
 struct PairingIdentityExchangeReplyThrottleState: Equatable, Sendable {
     let requestKey: String
-    let requestSentAt: Date
     let repliedAt: Date
 }
 
@@ -29,13 +28,11 @@ extension P2PDiscoveryService {
     nonisolated static func shouldSendPairingIdentityExchangeReply(
         lastReply: PairingIdentityExchangeReplyThrottleState?,
         requestKey: String,
-        requestSentAt: Date,
         now: Date = Date(),
         minimumInterval: TimeInterval = 10
     ) -> Bool {
         guard let lastReply else { return true }
         if lastReply.requestKey != requestKey { return true }
-        if requestSentAt > lastReply.requestSentAt { return true }
         return now.timeIntervalSince(lastReply.repliedAt) >= minimumInterval
     }
 
@@ -58,8 +55,6 @@ extension P2PDiscoveryService {
         }
 
         append(payload.deviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
-        var sentAtMilliseconds = Int64((payload.sentAt.timeIntervalSince1970 * 1000).rounded()).littleEndian
-        material.append(Data(bytes: &sentAtMilliseconds, count: MemoryLayout<Int64>.size))
 
         for key in payload.kemPublicKeys.sorted(by: { $0.suiteWireId < $1.suiteWireId }) {
             var wireId = key.suiteWireId.littleEndian

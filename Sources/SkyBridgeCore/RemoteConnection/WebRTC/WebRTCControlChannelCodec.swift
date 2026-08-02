@@ -434,32 +434,49 @@ enum WebRTCControlChannelCodec {
 
     static func decodeCompatibilityAppMessage(_ plaintext: Data) -> AppMessage? {
         let decoder = JSONDecoder()
-        if let direct = try? decoder.decode(AppMessage.self, from: plaintext) {
+        if let direct = try? AppMessage.decodeWireMessage(
+            from: plaintext,
+            using: decoder
+        ) {
             return direct
         }
 
-        guard let fallback = try? decoder.decode(PlainEnvelope.self, from: plaintext) else {
+        let legacyFields: Set<String> = [
+            "clipboard",
+            "pairingIdentityExchange",
+            "heartbeat",
+            "authenticatedRouteBinding",
+            "ping",
+            "pong",
+        ]
+        guard (try? StrictJSONSingleDiscriminatorWireValidator.validatedRootFields(
+            in: plaintext,
+            allowedFields: legacyFields
+        )) != nil,
+              let fallback = try? decoder.decode(PlainEnvelope.self, from: plaintext) else {
             return nil
         }
+        var decodedMessages: [AppMessage] = []
         if let payload = fallback.clipboard {
-            return .clipboard(payload)
+            decodedMessages.append(.clipboard(payload))
         }
         if let payload = fallback.pairingIdentityExchange {
-            return .pairingIdentityExchange(payload)
+            decodedMessages.append(.pairingIdentityExchange(payload))
         }
         if let payload = fallback.heartbeat {
-            return .heartbeat(payload)
+            decodedMessages.append(.heartbeat(payload))
         }
         if let payload = fallback.authenticatedRouteBinding {
-            return .authenticatedRouteBinding(payload)
+            decodedMessages.append(.authenticatedRouteBinding(payload))
         }
         if let payload = fallback.ping {
-            return .ping(payload)
+            decodedMessages.append(.ping(payload))
         }
         if let payload = fallback.pong {
-            return .pong(payload)
+            decodedMessages.append(.pong(payload))
         }
-        return nil
+        guard decodedMessages.count == 1 else { return nil }
+        return decodedMessages.first
     }
 
     static func bootstrapAppMessageKind(_ message: AppMessage) -> String {
@@ -468,6 +485,8 @@ enum WebRTCControlChannelCodec {
             return "clipboard"
         case .textMessage:
             return "textMessage"
+        case .textMessageReceipt:
+            return "textMessageReceipt"
         case .pairingIdentityExchange:
             return "pairingIdentityExchange"
         case .kemRefreshRequest:

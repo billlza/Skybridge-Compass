@@ -24,6 +24,7 @@ jobs:
       source_date_epoch: ${{ steps.meta.outputs.source_date_epoch }}
       rust_toolchain: ${{ steps.meta.outputs.rust_toolchain }}
       publish_requested: ${{ steps.meta.outputs.publish_requested }}
+      publication_blocked: ${{ steps.meta.outputs.publication_blocked }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,6 +55,7 @@ jobs:
           )"
           RELEASE_TAG="skybridge-cli-v${VERSION}"
           PUBLISH_REQUESTED=false
+          PUBLICATION_BLOCKED=false
 
           [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
           python rust/scripts/finalize_cli_release_assets.py validate-metadata \
@@ -76,7 +78,10 @@ jobs:
               "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
             git merge-base --is-ancestor \
               "${SOURCE_SHA}" "refs/remotes/origin/${RELEASE_BRANCH}"
-            PUBLISH_REQUESTED=true
+            # Public archives are intentionally blocked until the workflow
+            # produces and verifies platform publisher signatures/notarization.
+            # The tag lane still builds and validates the exact release bundle.
+            PUBLICATION_BLOCKED=true
           fi
 
           {
@@ -86,10 +91,105 @@ jobs:
             echo "source_date_epoch=${SOURCE_DATE_EPOCH}"
             echo "rust_toolchain=${RUST_TOOLCHAIN}"
             echo "publish_requested=${PUBLISH_REQUESTED}"
+            echo "publication_blocked=${PUBLICATION_BLOCKED}"
           } >>"${GITHUB_OUTPUT}"
 
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Q-Periapt source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: billlza/q-periapt
+          ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Verify the pinned Cargo path dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependency_path="$PWD/External/pqt_hybrid_suite"
+          [[ -f "$dependency_path/Cargo.toml" ]]
+          [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "5664fd86a617f92b620ea37e7692d3417d0e307d" ]]
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13.5"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.18.0"
+          package-manager-cache: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.94.0 --profile minimal --component clippy --component rustfmt
+          rustup override set 1.94.0
+          [[ "$(rustc --version)" == "rustc 1.94.0 "* ]]
+
+      - name: Install the pinned dependency auditor
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Audit locked dependencies
+        run: cargo audit --deny warnings --file rust/Cargo.lock
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+
+      - name: Check workspace tests
+        run: CARGO_TARGET_DIR=/tmp/skybridge-release-tests cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets
+
+      - name: Check workspace lint
+        run: CARGO_TARGET_DIR=/tmp/skybridge-release-clippy cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
+
+      - name: Validate npm wrapper scripts
+        run: |
+          node --check rust/packaging/npm/skybridge-cli/bin/skybridge.js
+          node --check rust/packaging/npm/skybridge-cli/lib/platform.js
+          node --check rust/packaging/npm/skybridge-cli/lib/install.js
+          node --test rust/packaging/npm/skybridge-cli/test/install.test.js
+
+      - name: Check release shell scripts
+        run: |
+          bash -n rust/scripts/build_release_artifact.sh
+          bash -n rust/scripts/assemble_release_assets.sh
+          bash -n rust/scripts/render_homebrew_formula.sh
+          bash -n rust/scripts/publish_cli_github_release.sh
+          bash -n rust/scripts/publish_homebrew_formula.sh
+          shellcheck \
+            rust/scripts/build_release_artifact.sh \
+            rust/scripts/assemble_release_assets.sh \
+            rust/scripts/render_homebrew_formula.sh \
+            rust/scripts/publish_cli_github_release.sh \
+            rust/scripts/publish_homebrew_formula.sh
+
+      - name: Run release contract and fault-injection tests
+        run: |
+          python -m unittest \
+            Scripts/test_skybridge_cli_release_workflow_contract.py \
+            rust/scripts/test_finalize_cli_release_assets.py \
+            rust/scripts/test_cli_release_handoff.py \
+            rust/scripts/test_publish_cli_github_release.py \
+            rust/scripts/test_publish_cli_npm.py \
+            rust/scripts/test_publish_homebrew_formula.py \
+            rust/scripts/test_validate_cli_native_archive.py \
+            rust/scripts/test_verify_cli_release_proof.py
+
   build:
-    needs: metadata
+    needs:
+      - metadata
+      - verify
     permissions:
       contents: read
     strategy:
@@ -109,13 +209,30 @@ jobs:
             target: x86_64-pc-windows-msvc
             asset: skybridge-x86_64-pc-windows-msvc.zip
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.metadata.outputs.source_sha }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Checkout pinned Q-Periapt source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: billlza/q-periapt
+          ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
+          path: External/pqt_hybrid_suite
+          persist-credentials: false
+
+      - name: Verify the pinned Cargo path dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          dependency_path="$PWD/External/pqt_hybrid_suite"
+          [[ -f "$dependency_path/Cargo.toml" ]]
+          [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "5664fd86a617f92b620ea37e7692d3417d0e307d" ]]
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -131,6 +248,23 @@ jobs:
           rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --target "${TARGET}"
           rustup override set "${RUST_TOOLCHAIN}"
           [[ "$(rustc --version)" == "rustc ${RUST_TOOLCHAIN} "* ]]
+
+      - name: Test the platform runtime
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/platform-tests
+          RUSTFLAGS: -Dwarnings
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path rust/Cargo.toml \
+            -p skybridge-core \
+            -p skybridge-agent \
+            -p skybridge-crossnet-client \
+            -p skybridge-ffi \
+            -p skybridge \
+            --all-targets \
+            --target "${TARGET}"
 
       - name: Build the exact release asset
         shell: bash
@@ -324,6 +458,29 @@ jobs:
         run: |
           [[ "${ARTIFACT_ID}" =~ ^[1-9][0-9]*$ ]]
           [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+
+  public-release-signing-gate:
+    if: always() && needs.metadata.outputs.publication_blocked == 'true'
+    needs:
+      - metadata
+      - assemble
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Reject publication without platform publisher proof
+        shell: bash
+        env:
+          ASSEMBLE_RESULT: ${{ needs.assemble.result }}
+        run: |
+          set -euo pipefail
+          [[ "${ASSEMBLE_RESULT}" == "success" ]] || {
+            echo "release bundle validation did not complete successfully" >&2
+            exit 1
+          }
+          echo "public CLI publication is blocked until macOS signing/notarization and Windows publisher-signature proofs are produced and verified" >&2
+          exit 1
 
   publish-github:
     if: needs.metadata.outputs.publish_requested == 'true'

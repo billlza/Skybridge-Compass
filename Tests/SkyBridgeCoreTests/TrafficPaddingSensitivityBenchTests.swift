@@ -47,6 +47,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         group?.set(true, forKey: "sb_traffic_padding_enabled")
         group?.set(true, forKey: "sb_traffic_padding_stats_enabled")
         group?.set(false, forKey: "sb_traffic_padding_stats_autoflush")
+        TrafficPaddingStats.refreshSubmissionAdmission()
 
         let caps: [Int] = [65536, 131072, 262144]
 
@@ -127,8 +128,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
                 )
             }
 
-            // Give async stats tasks a chance to complete before snapshotting.
-            try await Task.sleep(for: .milliseconds(200))
+            await TrafficPaddingStats.waitForPendingSubmissions()
 
             let snapshot = await TrafficPaddingStats.shared.snapshot()
             for key in wantedLabels() {
@@ -405,7 +405,7 @@ final class TrafficPaddingSensitivityBenchTests: XCTestCase {
         }
         entry.rawBytes += payload.count
 
-        let wrapped = TrafficPadding.wrapIfEnabled(payload, label: label)
+        let wrapped = try TrafficPadding.wrapIfEnabled(payload, label: label)
         entry.paddedBytes += wrapped.count
         if !isOverCap {
             entry.paddedOnlyRawBytes += payload.count

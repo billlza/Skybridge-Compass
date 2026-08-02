@@ -105,7 +105,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     }
 
     func testQPeriaptCryptoAdmissionRejectsWhenQueueIsDisabled() async throws {
-        let boundedGate = QPeriaptCryptoAdmissionGate(maximumWaiters: 0)
+        let boundedGate = try QPeriaptCryptoAdmissionGate(maximumWaiters: 0)
         let boundedBarrier = AdmissionOperationBarrier()
         let owner = Task {
             try await boundedGate.run {
@@ -129,7 +129,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     }
 
     func testQPeriaptCryptoAdmissionRemovesCancelledQueuedWorkBeforeOwnerRelease() async throws {
-        let cancellationGate = QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
+        let cancellationGate = try QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
         let cancellationBarrier = AdmissionOperationBarrier()
         let executionProbe = AdmissionExecutionProbe()
         let cancellationOwner = Task {
@@ -181,7 +181,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     func testQPeriaptCryptoAdmissionClosesCancellationRaceBeforeWaiterAppend() async throws {
         let ownerBarrier = AdmissionOperationBarrier()
         let executionProbe = AdmissionExecutionProbe()
-        let gate = QPeriaptCryptoAdmissionGate(
+        let gate = try QPeriaptCryptoAdmissionGate(
             maximumWaiters: 1,
             beforeWaiterAppendForTesting: {
                 withUnsafeCurrentTask { task in
@@ -224,7 +224,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     }
 
     func testQPeriaptCryptoAdmissionDefaultQueueRejectsNinthWaiter() async throws {
-        let gate = QPeriaptCryptoAdmissionGate()
+        let gate = try QPeriaptCryptoAdmissionGate()
         let ownerBarrier = AdmissionOperationBarrier()
         let owner = Task {
             try await gate.run {
@@ -266,8 +266,8 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
         XCTAssertEqual(Set(completedValues), Set(0..<8))
     }
 
-    func testQPeriaptCryptoAdmissionRejectsResultCancelledAfterOperation() async {
-        let gate = QPeriaptCryptoAdmissionGate(maximumWaiters: 0)
+    func testQPeriaptCryptoAdmissionRejectsResultCancelledAfterOperation() async throws {
+        let gate = try QPeriaptCryptoAdmissionGate(maximumWaiters: 0)
         let executionProbe = AdmissionExecutionProbe()
         let operation = Task {
             try await gate.run {
@@ -293,7 +293,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
         let deadlineBarrier = AdmissionOperationBarrier()
         let ownerBarrier = AdmissionOperationBarrier()
         let clock = AdmissionManualClock()
-        let gate = QPeriaptCryptoAdmissionGate(
+        let gate = try QPeriaptCryptoAdmissionGate(
             maximumWaiters: 1,
             maximumWaitDuration: .seconds(1),
             sleepUntilDeadline: { _ in
@@ -344,7 +344,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
         let ownerBarrier = AdmissionOperationBarrier()
         let executionProbe = AdmissionExecutionProbe()
         let clock = AdmissionManualClock()
-        let gate = QPeriaptCryptoAdmissionGate(
+        let gate = try QPeriaptCryptoAdmissionGate(
             maximumWaiters: 1,
             maximumWaitDuration: .seconds(1),
             sleepUntilDeadline: { _ in
@@ -398,7 +398,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     func testQPeriaptCryptoAdmissionPrunesExpiredWaiterBeforeCapacityCheck() async throws {
         let ownerBarrier = AdmissionOperationBarrier()
         let clock = AdmissionManualClock()
-        let gate = QPeriaptCryptoAdmissionGate(
+        let gate = try QPeriaptCryptoAdmissionGate(
             maximumWaiters: 1,
             maximumWaitDuration: .seconds(1),
             sleepUntilDeadline: { _ in
@@ -452,7 +452,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     }
 
     func testQPeriaptCryptoAdmissionKeepsCancelledOwnerPermitUntilOperationReturns() async throws {
-        let gate = QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
+        let gate = try QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
         let ownerBarrier = AdmissionOperationBarrier()
         let secondExecution = AdmissionExecutionProbe()
         let owner = Task {
@@ -501,7 +501,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
     }
 
     func testQPeriaptCryptoAdmissionReleasesPermitAfterOperationFailure() async throws {
-        let gate = QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
+        let gate = try QPeriaptCryptoAdmissionGate(maximumWaiters: 1)
         do {
             _ = try await gate.run { () -> Int in
                 throw AdmissionTestError.expectedFailure
@@ -682,7 +682,7 @@ final class QPeriaptAdmissionRuntimeTests: XCTestCase {
         var version = UInt32(1).bigEndian
         withUnsafeBytes(of: &version) { encoded.append(contentsOf: $0) }
         encoded.append(Data(repeating: 0x5A, count: 32))
-        return QPeriaptRuntimeSession(
+        return try QPeriaptRuntimeSession(
             decision: try QPeriaptPolicyDecision(validating: encoded),
             trustRootIdentifier: "test/q-periapt/admission",
             trustRootFingerprint: Data(repeating: 0xA5, count: 32)

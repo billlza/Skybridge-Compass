@@ -1,5 +1,6 @@
 import XCTest
 @testable import SkyBridgeCore
+import SkyBridgeProtocolCore
 
 final class FramedReaderTests: XCTestCase {
     private final class CancellationProbe: @unchecked Sendable {
@@ -22,6 +23,7 @@ final class FramedReaderTests: XCTestCase {
     actor ChunkSource {
         private var chunks: [Data]
         private let closesWhenEmpty: Bool
+        private var requestCount = 0
 
         init(chunks: [Data], closesWhenEmpty: Bool = true) {
             self.chunks = chunks
@@ -29,6 +31,7 @@ final class FramedReaderTests: XCTestCase {
         }
 
         func next(maximumLength: Int) -> (data: Data, isComplete: Bool) {
+            requestCount += 1
             guard !chunks.isEmpty else {
                 return (Data(), closesWhenEmpty)
             }
@@ -40,6 +43,10 @@ final class FramedReaderTests: XCTestCase {
                 return (Data(prefix), false)
             }
             return (head, false)
+        }
+
+        func requestsMade() -> Int {
+            requestCount
         }
     }
 
@@ -134,6 +141,32 @@ final class FramedReaderTests: XCTestCase {
 
         let decoded = try await reader.receiveFrame(maxFrameLength: 8192)
         XCTAssertEqual(decoded, payload)
+    }
+
+    func testReceiveFrameRejectsSharedMaximumPlusOneBeforeReadingBody() async {
+        var encodedLength = UInt32(
+            P2PControlFramePolicy.maximumBodyByteCount + 1
+        ).bigEndian
+        let header = Data(bytes: &encodedLength, count: 4)
+        let source = ChunkSource(chunks: [header])
+        let reader = FramedReader { maximumLength in
+            await source.next(maximumLength: maximumLength)
+        }
+
+        do {
+            _ = try await reader.receiveFrame()
+            XCTFail("expected invalidLength")
+        } catch let error as FramedReaderError {
+            XCTAssertEqual(
+                error,
+                .invalidLength(UInt32(P2PControlFramePolicy.maximumBodyByteCount + 1))
+            )
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        let requestCount = await source.requestsMade()
+        XCTAssertEqual(requestCount, 1)
     }
 
     func testReceiveFrameHandlesSplitLengthPrefixes() async throws {

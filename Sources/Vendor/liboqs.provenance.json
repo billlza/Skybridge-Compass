@@ -1,0 +1,95 @@
+{
+  "artifact_roots": {
+    "xcframework": {
+      "file_count": 47,
+      "path": "Sources/Vendor/liboqs.xcframework",
+      "tree_sha256": "169b9d3a8f6ce23dc752a662ceec134923074fa9f1a12279910df3eb0a9f2be3"
+    }
+  },
+  "binaries": [
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "deployment_targets": [
+        "17.0"
+      ],
+      "path": "Sources/Vendor/liboqs.xcframework/ios-arm64/liboqs.a",
+      "platforms": [
+        "ios"
+      ],
+      "sha256": "cd6ef4a9bb3f8651a215bf24c38f62340978b7f0f708227a3673151524dd50ac",
+      "size": 482232
+    },
+    {
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "deployment_targets": [
+        "17.0"
+      ],
+      "path": "Sources/Vendor/liboqs.xcframework/ios-arm64_x86_64-simulator/liboqs.a",
+      "platforms": [
+        "ios-simulator"
+      ],
+      "sha256": "4ae8995e976bcedede849037207d2e13a0360b5eff6100a0500a9e23c59daa3c",
+      "size": 943376
+    },
+    {
+      "architectures": [
+        "arm64"
+      ],
+      "deployment_targets": [
+        "14.0"
+      ],
+      "path": "Sources/Vendor/liboqs.xcframework/macos-arm64/liboqs.a",
+      "platforms": [
+        "macos"
+      ],
+      "sha256": "e3a0f47e4df9d7ef04f7266f880a2827a23cd8cf0e871d8ed63fa2cce0905a2c",
+      "size": 800232
+    }
+  ],
+  "build": {
+    "inputs": {
+      "architectures": "macos-arm64;ios-arm64;ios-simulator-arm64;ios-simulator-x86_64",
+      "build_type": "Release",
+      "distribution_build": "true",
+      "downstream_patch": "Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch@6de373115afcf5cb01a2075ec49cb5609db2970cb582fbfb17e2b4c8653cf177",
+      "enabled_algorithms": "KEM_ml_kem_768;KEM_ml_kem_1024;SIG_ml_dsa_65;SIG_ml_dsa_87",
+      "ios_deployment_target": "17.0",
+      "linkage": "static",
+      "macos_deployment_target": "14.0",
+      "openssl": "false"
+    },
+    "recipe": "Scripts/build_liboqs_xcframework.sh",
+    "recipe_sha256": "e963c065199a348847d98f71c671d4a76eca43428cbc8689f9942b42ff30b047",
+    "toolchain": {
+      "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+      "cmake": "cmake version 4.3.3",
+      "macos_sdk": "26.5",
+      "ninja": "1.13.2",
+      "xcode": "Xcode 26.6; Build version 17F113"
+    }
+  },
+  "family": "liboqs",
+  "native_dependency_lock": {
+    "family": "liboqs",
+    "family_sha256": "df158b24344f928fea6cd77c3a68ee07c20a8f54523f450121b656400e371482",
+    "path": "Config/native-dependencies.lock.json",
+    "schema_version": 2
+  },
+  "schema_version": 2,
+  "sources": [
+    {
+      "commit": "5a1a854b0dc9f2141bdc771c555ee60c37950183",
+      "git_tree": "8e0a3a68b247f821ed535a141aa896a7fda59d2d",
+      "name": "liboqs",
+      "ref": "0.16.0",
+      "repository": "https://github.com/open-quantum-safe/liboqs.git",
+      "source_archive_sha256": "2a469ff48e73c9cd78c2f7752465ca7a066582fbaa9185f52b4725783218d39d",
+      "version": "0.16.0"
+    }
+  ]
+}

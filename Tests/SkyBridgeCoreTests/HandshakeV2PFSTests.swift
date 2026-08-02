@@ -319,7 +319,7 @@ private struct MockPQCProvider: CryptoProvider, Sendable {
             let publicKey = signingKey.publicKey.rawRepresentation
             var privateBytes = Data(signingKey.rawRepresentation)
             privateBytes.append(publicKey)
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(suite: .x25519Ed25519, usage: .signing, bytes: publicKey),
                 privateKey: KeyMaterial(suite: .x25519Ed25519, usage: .signing, bytes: privateBytes)
             )
@@ -328,7 +328,7 @@ private struct MockPQCProvider: CryptoProvider, Sendable {
             let publicKey = deriveKEMPublicKey(fromSeed: seed)
             var privateKey = Data(seed)
             privateKey.append(Data(repeating: 0, count: 96 - privateKey.count))
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(suite: .mlkem768MLDSA65, usage: .keyExchange, bytes: publicKey),
                 privateKey: KeyMaterial(suite: .mlkem768MLDSA65, usage: .keyExchange, bytes: privateKey)
             )

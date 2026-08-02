@@ -13,7 +13,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use url::Url;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+use crate::external_http::{decode_json_response, transport_error};
+use crate::{CurrentPathOriginPolicy, OriginTransportPolicy};
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthSession {
     pub access_token: String,
     pub refresh_token: Option<String>,
@@ -24,7 +27,21 @@ pub struct AuthSession {
     pub issued_at: OffsetDateTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for AuthSession {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthSession")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token_present", &self.refresh_token.is_some())
+            .field("user_identifier", &"<redacted>")
+            .field("nebula_id_present", &self.nebula_id.is_some())
+            .field("display_name", &"<redacted>")
+            .field("issued_at", &self.issued_at)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorizationRequest {
     pub authorization_url: String,
     pub state: String,
@@ -32,6 +49,20 @@ pub struct AuthorizationRequest {
     pub code_challenge: String,
     pub redirect_uri: String,
     pub scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for AuthorizationRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizationRequest")
+            .field("authorization_url", &"<redacted>")
+            .field("state", &"<redacted>")
+            .field("code_verifier", &"<redacted>")
+            .field("code_challenge", &"<redacted>")
+            .field("redirect_uri", &"<redacted>")
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +78,7 @@ pub struct DiscoveryDocument {
     pub revocation_endpoint: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenResponse {
     #[serde(rename = "access_token")]
     pub access_token: String,
@@ -62,7 +93,24 @@ pub struct TokenResponse {
     pub id_token: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenResponse")
+            .field("access_token", &"<redacted>")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("scope", &self.scope)
+            .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserInfo {
     #[serde(rename = "sub")]
     pub subject: String,
@@ -71,6 +119,22 @@ pub struct UserInfo {
     pub name: Option<String>,
     pub email: Option<String>,
     pub picture: Option<String>,
+}
+
+impl std::fmt::Debug for UserInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UserInfo")
+            .field("subject", &"<redacted>")
+            .field(
+                "preferred_username_present",
+                &self.preferred_username.is_some(),
+            )
+            .field("name_present", &self.name.is_some())
+            .field("email_present", &self.email.is_some())
+            .field("picture_present", &self.picture.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -88,15 +152,28 @@ impl NebulaOAuthClient {
         let client_id = std::env::var("NEBULA_CLIENT_ID")
             .or_else(|_| std::env::var("SKYBRIDGE_NEBULA_CLIENT_ID"))
             .context("missing NEBULA_CLIENT_ID")?;
-        Self::new(base_url, client_id)
+        Self::new_with_transport_policy(
+            base_url,
+            client_id,
+            OriginTransportPolicy::from_environment()?,
+        )
     }
 
     pub fn new(base_url: impl Into<String>, client_id: impl Into<String>) -> Result<Self> {
-        let base_url = base_url.into().trim().trim_end_matches('/').to_owned();
+        Self::new_with_transport_policy(base_url, client_id, OriginTransportPolicy::SecureOnly)
+    }
+
+    pub fn new_with_transport_policy(
+        base_url: impl Into<String>,
+        client_id: impl Into<String>,
+        transport_policy: OriginTransportPolicy,
+    ) -> Result<Self> {
+        let base_url = CurrentPathOriginPolicy::canonical_origin_with_policy(
+            base_url.into().trim(),
+            transport_policy,
+        )
+        .context("invalid NEBULA_BASE_URL")?;
         let client_id = client_id.into().trim().to_owned();
-        if Url::parse(&base_url).is_err() {
-            bail!("invalid NEBULA_BASE_URL");
-        }
         if client_id.is_empty() {
             bail!("missing NEBULA_CLIENT_ID");
         }
@@ -113,13 +190,13 @@ impl NebulaOAuthClient {
 
     pub async fn fetch_discovery_document(&self) -> Result<DiscoveryDocument> {
         let url = format!("{}/.well-known/openid-configuration", self.base_url);
-        let response = self.client.get(url).send().await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!("discovery failed ({}): {}", status, body);
-        }
-        Ok(response.json::<DiscoveryDocument>().await?)
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| transport_error("nebula oauth", "discovery", &error))?;
+        decode_json_response(response, "nebula oauth", "discovery").await
     }
 
     pub fn make_authorization_request(
@@ -176,8 +253,9 @@ impl NebulaOAuthClient {
                 ),
             ])
             .send()
-            .await?;
-        decode_token_response(response).await
+            .await
+            .map_err(|error| transport_error("nebula oauth", "token exchange", &error))?;
+        decode_token_response(response, "token exchange").await
     }
 
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<TokenResponse> {
@@ -191,8 +269,9 @@ impl NebulaOAuthClient {
                 ("refresh_token", refresh_token),
             ])
             .send()
-            .await?;
-        decode_token_response(response).await
+            .await
+            .map_err(|error| transport_error("nebula oauth", "token refresh", &error))?;
+        decode_token_response(response, "token refresh").await
     }
 
     pub async fn fetch_user_info(&self, access_token: &str) -> Result<UserInfo> {
@@ -202,13 +281,9 @@ impl NebulaOAuthClient {
             .header("Authorization", format!("Bearer {access_token}"))
             .header("Accept", "application/json")
             .send()
-            .await?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!("userinfo failed ({}): {}", status, body);
-        }
-        Ok(response.json::<UserInfo>().await?)
+            .await
+            .map_err(|error| transport_error("nebula oauth", "userinfo", &error))?;
+        decode_json_response(response, "nebula oauth", "userinfo").await
     }
 
     pub async fn complete_authorization_interactively(
@@ -337,13 +412,11 @@ fn random_bytes(length: usize) -> Vec<u8> {
     bytes
 }
 
-async fn decode_token_response(response: reqwest::Response) -> Result<TokenResponse> {
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        bail!("token exchange failed ({}): {}", status, body);
-    }
-    Ok(response.json::<TokenResponse>().await?)
+async fn decode_token_response(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<TokenResponse> {
+    decode_json_response(response, "nebula oauth", operation).await
 }
 
 async fn capture_authorization_code_via_loopback(
@@ -408,11 +481,8 @@ fn parse_authorization_callback(value: &str, expected_state: &str) -> Result<Str
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect::<HashMap<String, String>>();
     if let Some(error) = pairs.get("error") {
-        let description = pairs
-            .get("error_description")
-            .cloned()
-            .unwrap_or_else(|| error.to_string());
-        bail!(description);
+        let error_code = allowlisted_oauth_error_code(error).unwrap_or("unclassified");
+        bail!("oauth authorization failed ({error_code})");
     }
     let returned_state = pairs.get("state").map(String::as_str).unwrap_or("");
     if returned_state != expected_state {
@@ -428,6 +498,27 @@ fn parse_authorization_callback(value: &str, expected_state: &str) -> Result<Str
     Ok(code)
 }
 
+fn allowlisted_oauth_error_code(value: &str) -> Option<&'static str> {
+    Some(match value {
+        "access_denied" => "access_denied",
+        "account_selection_required" => "account_selection_required",
+        "consent_required" => "consent_required",
+        "interaction_required" => "interaction_required",
+        "invalid_request" => "invalid_request",
+        "invalid_request_object" => "invalid_request_object",
+        "invalid_request_uri" => "invalid_request_uri",
+        "invalid_scope" => "invalid_scope",
+        "login_required" => "login_required",
+        "request_not_supported" => "request_not_supported",
+        "request_uri_not_supported" => "request_uri_not_supported",
+        "server_error" => "server_error",
+        "temporarily_unavailable" => "temporarily_unavailable",
+        "unauthorized_client" => "unauthorized_client",
+        "unsupported_response_type" => "unsupported_response_type",
+        _ => return None,
+    })
+}
+
 fn is_loopback_redirect(redirect_uri: &str) -> bool {
     Url::parse(redirect_uri).ok().is_some_and(|url| {
         matches!(url.scheme(), "http" | "https")
@@ -436,4 +527,116 @@ fn is_loopback_redirect(redirect_uri: &str) -> bool {
                 .is_some_and(|host| host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost"))
             && url.port().is_some()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_debug_output_redacts_tokens_and_pkce_material() {
+        let session = AuthSession {
+            access_token: "access-secret".to_owned(),
+            refresh_token: Some("refresh-secret".to_owned()),
+            user_identifier: "user-1".to_owned(),
+            nebula_id: None,
+            display_name: "User".to_owned(),
+            issued_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let request = AuthorizationRequest {
+            authorization_url:
+                "https://id.example/oauth/authorize?state=state-secret&code_challenge=challenge-secret"
+                    .to_owned(),
+            state: "state-secret".to_owned(),
+            code_verifier: "verifier-secret".to_owned(),
+            code_challenge: "challenge-secret".to_owned(),
+            redirect_uri: "http://127.0.0.1:49152/callback-secret".to_owned(),
+            scopes: vec!["openid".to_owned()],
+        };
+        let token = TokenResponse {
+            access_token: "access-secret".to_owned(),
+            token_type: "Bearer".to_owned(),
+            expires_in: Some(60),
+            refresh_token: Some("refresh-secret".to_owned()),
+            scope: Some("openid".to_owned()),
+            id_token: Some("id-secret".to_owned()),
+        };
+
+        let debug = format!("{session:?}\n{request:?}\n{token:?}");
+        for secret in [
+            "access-secret",
+            "refresh-secret",
+            "user-1",
+            "User",
+            "state-secret",
+            "verifier-secret",
+            "challenge-secret",
+            "callback-secret",
+            "id-secret",
+        ] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
+
+        let user_info = UserInfo {
+            subject: "subject-secret".to_owned(),
+            preferred_username: Some("username-secret".to_owned()),
+            name: Some("name-secret".to_owned()),
+            email: Some("email-secret@example.com".to_owned()),
+            picture: Some("https://example.com/private-picture".to_owned()),
+        };
+        let debug = format!("{user_info:?}");
+        for pii in [
+            "subject-secret",
+            "username-secret",
+            "name-secret",
+            "email-secret@example.com",
+            "private-picture",
+        ] {
+            assert!(!debug.contains(pii), "debug output leaked {pii}");
+        }
+    }
+
+    #[test]
+    fn oauth_client_origin_is_secure_by_default_and_loopback_opt_in_is_explicit() {
+        assert!(NebulaOAuthClient::new("http://127.0.0.1:8080", "client").is_err());
+        assert!(
+            NebulaOAuthClient::new_with_transport_policy(
+                "http://127.0.0.1:8080",
+                "client",
+                OriginTransportPolicy::AllowPlaintextLoopback,
+            )
+            .is_ok()
+        );
+        assert!(
+            NebulaOAuthClient::new_with_transport_policy(
+                "http://192.168.1.2:8080",
+                "client",
+                OriginTransportPolicy::AllowPlaintextLoopback,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn oauth_callback_errors_do_not_echo_external_descriptions() {
+        let error = parse_authorization_callback(
+            "http://127.0.0.1:49152/callback?error=access_denied&error_description=Bearer%20access-secret",
+            "expected-state",
+        )
+        .expect_err("oauth error callback must fail");
+        let message = error.to_string();
+        assert!(message.contains("access_denied"));
+        assert!(!message.contains("access-secret"));
+        assert!(!message.contains("Bearer"));
+
+        let reflected_secret = "sk_live_Q7wE9rT2uI4oP6aS8dF0gH1jK3lZ5xC7";
+        let error = parse_authorization_callback(
+            &format!("http://127.0.0.1:49152/callback?error={reflected_secret}"),
+            "expected-state",
+        )
+        .expect_err("unknown OAuth error must fail");
+        let message = error.to_string();
+        assert!(message.contains("unclassified"));
+        assert!(!message.contains(reflected_secret));
+    }
 }

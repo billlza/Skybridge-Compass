@@ -1024,6 +1024,8 @@ final class HandshakeDriverTests: XCTestCase {
 
         let initiatorAuthority = await initiator.getAuthenticatedRemoteAuthority()
         let responderAuthority = await responder.getAuthenticatedRemoteAuthority()
+        let initiatorBinding = await initiator.getAuthenticatedHandshakePeerBinding()
+        let responderBinding = await responder.getAuthenticatedHandshakePeerBinding()
 
         XCTAssertEqual(
             initiatorAuthority,
@@ -1041,6 +1043,10 @@ final class HandshakeDriverTests: XCTestCase {
                 protocolPublicKey: initiatorIdentity.publicKey.bytes
             )
         )
+        XCTAssertEqual(initiatorBinding?.authority, initiatorAuthority)
+        XCTAssertEqual(responderBinding?.authority, responderAuthority)
+        XCTAssertNil(initiatorBinding?.authenticatedRemoteSOAPeerId)
+        XCTAssertNil(responderBinding?.authenticatedRemoteSOAPeerId)
     }
 
     func testAuthenticatedRemoteAuthorityClearedAfterKeyConfirmationFailure() async throws {
@@ -1061,14 +1067,12 @@ final class HandshakeDriverTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
 
         let authorityBeforeFailure = await driver.getAuthenticatedRemoteAuthority()
-        XCTAssertEqual(
+        let bindingBeforeFailure = await driver.getAuthenticatedHandshakePeerBinding()
+        XCTAssertNil(
             authorityBeforeFailure,
-            AuthenticatedRemoteAuthority(
-                protocolSigningAlgorithm: .ed25519,
-                protocolPublicKeyFingerprint: authoritativeFingerprint(initiatorKeyPair.publicKey.bytes),
-                protocolPublicKey: initiatorKeyPair.publicKey.bytes
-            )
+            "Signature-authenticated authority must remain a private candidate until Finished succeeds."
         )
+        XCTAssertNil(bindingBeforeFailure)
 
         let stateBeforeFinished = await driver.getCurrentState()
         guard case .waitingFinished(_, let sessionKeys, _) = stateBeforeFinished else {
@@ -1095,6 +1099,202 @@ final class HandshakeDriverTests: XCTestCase {
         XCTAssertEqual(reason, .keyConfirmationFailed)
         let authorityAfterFailure = await driver.getAuthenticatedRemoteAuthority()
         XCTAssertNil(authorityAfterFailure)
+    }
+
+    func testCancellationDuringFinishedArbiterCommitDoesNotLeakEstablishedLease() async throws {
+#if DEBUG || SKYBRIDGE_TESTING
+        let initiatorTransport = MockDiscoveryTransport()
+        let responderTransport = MockDiscoveryTransport()
+        let initiatorIdentity = try await provider.generateKeyPair(for: .signing)
+        let responderIdentity = try await provider.generateKeyPair(for: .signing)
+        let localSOAPeerId = PeerSessionArbiter.soaPeerId(
+            from: "id:11111111-2222-4333-8444-555555555555"
+        )
+        let remoteSOAPeerId = PeerSessionArbiter.soaPeerId(
+            from: "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        )
+        let pairKey = PeerSessionArbiter.pairKey(
+            localPeerId: localSOAPeerId,
+            remotePeerId: remoteSOAPeerId
+        )
+        let originalAttemptId = Data(
+            repeating: 0x42,
+            count: HandshakeSOAExtension.attemptIdLength
+        )
+        let arbiter = PeerSessionArbiter()
+        try await arbiter.testOnlySuspendEstablishmentCommit(
+            attemptId: originalAttemptId
+        )
+        do {
+            try await arbiter.testOnlySuspendEstablishmentCommit(
+                attemptId: Data("duplicate-barrier".utf8)
+            )
+            XCTFail("A duplicate deterministic barrier must be rejected")
+        } catch {
+            XCTAssertEqual(
+                error as? PeerSessionArbiter.TestEstablishmentBarrierError,
+                .barrierAlreadyConfigured
+            )
+        }
+
+        let initiator = try HandshakeDriver(
+            transport: initiatorTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(initiatorIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(initiatorIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(5),
+            soaMetadata: try HandshakeSOAMetadata(
+                initiatorPeerId: localSOAPeerId,
+                targetPeerId: remoteSOAPeerId,
+                attemptId: originalAttemptId
+            ),
+            localSOAPeerId: localSOAPeerId,
+            expectedRemoteSOAPeerId: remoteSOAPeerId,
+            sessionArbiter: arbiter
+        )
+        let responder = try HandshakeDriver(
+            transport: responderTransport,
+            cryptoProvider: ClassicCryptoProvider(),
+            protocolSignatureProvider: ClassicSignatureProvider(),
+            protocolSigningKeyHandle: .softwareKey(responderIdentity.privateKey.bytes),
+            sigAAlgorithm: .ed25519,
+            identityPublicKey: encodeIdentityPublicKey(responderIdentity.publicKey.bytes),
+            offeredSuites: [.x25519Ed25519],
+            timeout: .seconds(5)
+        )
+        let peer = PeerIdentifier(deviceId: "finished-commit-peer")
+        let handshakeTask = Task {
+            try await initiator.initiateHandshake(with: peer)
+        }
+
+        try await waitForSentMessageCount(1, on: initiatorTransport)
+        let messageA = await initiatorTransport.getSentMessages()[0].1
+        await responder.handleMessage(messageA, from: peer)
+
+        try await waitForSentMessageCount(2, on: responderTransport)
+        let responderMessages = await responderTransport.getSentMessages()
+        await initiator.handleMessage(responderMessages[0].1, from: peer)
+        guard case .waitingFinished = await initiator.getCurrentState() else {
+            await initiator.cancel()
+            await responder.cancel()
+            _ = try? await handshakeTask.value
+            XCTFail("Initiator did not reach waitingFinished")
+            return
+        }
+
+        let finishedTask = Task {
+            await initiator.handleMessage(responderMessages[1].1, from: peer)
+        }
+        var enteredArbiterCommit = false
+        for _ in 0..<200 {
+            if await arbiter.testOnlyIsEstablishmentCommitSuspended() {
+                enteredArbiterCommit = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        guard enteredArbiterCommit else {
+            try await arbiter.testOnlyResumeEstablishmentCommit(
+                attemptId: originalAttemptId
+            )
+            await initiator.cancel()
+            await responder.cancel()
+            await finishedTask.value
+            _ = try? await handshakeTask.value
+            XCTFail("Finished handling never reached the deterministic establishment barrier")
+            return
+        }
+
+        // Invalidate A while its Finished is suspended, then let B become the
+        // exact owner before A is cancelled and resumes.
+        await arbiter.clearOutgoing(pairKey: pairKey, attemptId: originalAttemptId)
+        let replacementAttemptId = Data(
+            repeating: 0x77,
+            count: HandshakeSOAExtension.attemptIdLength
+        )
+        let replacementDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localSOAPeerId,
+                attemptId: replacementAttemptId,
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .accepted(let replacementReservation) = replacementDecision else {
+            try await arbiter.testOnlyResumeEstablishmentCommit(
+                attemptId: originalAttemptId
+            )
+            await initiator.cancel()
+            await responder.cancel()
+            await finishedTask.value
+            _ = try? await handshakeTask.value
+            XCTFail("Replacement attempt was not admitted after invalidating A")
+            return
+        }
+        let replacementLease = try await arbiter.commitEstablished(
+            replacementReservation,
+            sessionId: "replacement-session"
+        )
+
+        await initiator.cancel()
+        try await arbiter.testOnlyResumeEstablishmentCommit(
+            attemptId: originalAttemptId
+        )
+        await finishedTask.value
+
+        do {
+            _ = try await handshakeTask.value
+            XCTFail("Cancellation during Finished commit must fail the handshake")
+        } catch let error as HandshakeError {
+            guard case .failed(.cancelled) = error else {
+                XCTFail("Expected cancelled handshake error, got \(error)")
+                return
+            }
+        } catch {
+            XCTFail("Expected HandshakeError.failed(.cancelled), got \(error)")
+            return
+        }
+
+        guard case .failed(let reason) = await initiator.getCurrentState() else {
+            XCTFail("Cancellation during Finished commit must leave the driver failed")
+            return
+        }
+        XCTAssertEqual(reason, .cancelled)
+        let leakedLease = await initiator.getEstablishedArbiterLease()
+        XCTAssertNil(leakedLease)
+
+        let forgedReplacementLease = PeerSessionArbiter.EstablishedLease(
+            pairKey: pairKey,
+            sessionId: replacementLease.sessionId
+        )
+        let forgedLeaseCleared = await arbiter.clearEstablished(forgedReplacementLease)
+        let forgedLeaseRestored = await arbiter.restoreEstablishedIfVacant(forgedReplacementLease)
+        XCTAssertFalse(forgedLeaseCleared)
+        XCTAssertFalse(forgedLeaseRestored)
+
+        let duplicateDecision = await arbiter.registerOutgoing(
+            PeerSessionArbiter.OutgoingAttempt(
+                pairKey: pairKey,
+                initiatorPeerId: localSOAPeerId,
+                attemptId: Data(repeating: 0x78, count: HandshakeSOAExtension.attemptIdLength),
+                startedAt: Date(),
+                onSuperseded: { _, _ in }
+            )
+        )
+        guard case .alreadyConnected = duplicateDecision else {
+            XCTFail("Stale Finished/cancellation displaced the replacement owner")
+            return
+        }
+        let replacementLeaseCleared = await arbiter.clearEstablished(replacementLease)
+        XCTAssertTrue(replacementLeaseCleared)
+        await responder.cancel()
+#else
+        throw XCTSkip("Requires DEBUG or SKYBRIDGE_TESTING arbiter suspension hook")
+#endif
     }
 
     private func makePeerFinishedFromInitiator(sessionKeys: SessionKeys) -> HandshakeFinished {

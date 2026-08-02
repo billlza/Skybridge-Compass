@@ -3,15 +3,22 @@ import Foundation
 @available(iOS 17.0, *)
 extension CrossNetworkWebRTCManager {
     struct InboundFrameParser {
+        enum TerminalFailure: Error, Sendable, Equatable {
+            case invalidLength(length: Int, maximum: Int)
+            case bufferedBytesExceeded(maximum: Int)
+        }
+
         private(set) var buffer = Data()
         private(set) var readOffset = 0
+        private(set) var terminalFailure: TerminalFailure?
         let maxInboundFrameBytes: Int
 
         var canProbeDirectCompatibility: Bool {
-            readOffset >= buffer.count
+            terminalFailure == nil && readOffset >= buffer.count
         }
 
         mutating func append(_ chunk: Data) {
+            guard terminalFailure == nil else { return }
             compact()
             buffer.append(chunk)
         }
@@ -20,6 +27,7 @@ extension CrossNetworkWebRTCManager {
             sessionId: String,
             logLabel: String
         ) -> Data? {
+            guard terminalFailure == nil else { return nil }
             while buffer.count - readOffset >= 4 {
                 if Self.startsWithKnownDirectEnvelope(buffer, at: readOffset) {
                     let bufferedBytes = buffer.count - readOffset
@@ -58,7 +66,11 @@ extension CrossNetworkWebRTCManager {
                     )
                     // WebRTC DataChannel is reliable and ordered. If framing is poisoned, byte-by-byte
                     // resync can turn arbitrary ciphertext into a fake handshake packet. Drop the whole
-                    // buffered frame state and wait for the next clean prefix instead.
+                    // buffered frame state and terminate this reliable ordered channel.
+                    terminalFailure = .invalidLength(
+                        length: length,
+                        maximum: maxInboundFrameBytes
+                    )
                     reset()
                     return nil
                 }
@@ -95,6 +107,9 @@ extension CrossNetworkWebRTCManager {
             }
 
             if buffer.count > maxInboundFrameBytes * 2 {
+                terminalFailure = .bufferedBytesExceeded(
+                    maximum: maxInboundFrameBytes * 2
+                )
                 reset()
             }
         }
@@ -158,6 +173,10 @@ extension CrossNetworkWebRTCManager {
             mode != .lengthFramed && parser.canProbeDirectCompatibility
         }
 
+        var lengthParserTerminalFailure: InboundFrameParser.TerminalFailure? {
+            parser.terminalFailure
+        }
+
         var hasPendingDirectCandidate: Bool {
             pendingDirectCandidate != nil
         }
@@ -210,7 +229,7 @@ extension CrossNetworkWebRTCManager {
             guard let length = InboundFrameParser.lengthPrefix(from: chunk) else {
                 return false
             }
-            return length <= 0 || length >= maxInboundFrameBytes
+            return length <= 0 || length > maxInboundFrameBytes
         }
 
         mutating func cacheDirectCandidateIfPossible(_ chunk: Data, now: Date) -> Bool {

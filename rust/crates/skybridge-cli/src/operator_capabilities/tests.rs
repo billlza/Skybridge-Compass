@@ -181,65 +181,157 @@ fn operator_capability_contract_covers_requested_surface_without_fake_success() 
         );
     }
 
-    for required in ["native.code.create", "native.connect"] {
-        let capability = capabilities
-            .iter()
-            .find(|capability| capability.id == required)
-            .expect("native/headless capability must be declared");
-        assert_eq!(capability.status, OperatorCapabilityStatus::Available);
-        assert_eq!(
-            capability.runtime_target,
-            OperatorRuntimeTarget::NativeHeadlessStateDir
-        );
-        assert_eq!(
-            capability.control_effect,
-            OperatorControlEffect::NativeMutation
-        );
-        assert!(
-            capability.authority_boundary.contains("does not"),
-            "{required} must not imply GUI mutation"
-        );
-    }
+    let navigation = capabilities
+        .iter()
+        .find(|capability| capability.id == "crossnet.navigation")
+        .expect("Mac navigation boundary must be declared");
+    assert_eq!(navigation.status, OperatorCapabilityStatus::Planned);
+    assert_eq!(
+        navigation.control_effect,
+        OperatorControlEffect::MacMutationNotEnabled
+    );
+    assert!(navigation.command.contains("<dashboard|settings>"));
+    assert!(
+        navigation
+            .authority_boundary
+            .contains("injected navigation coordinator")
+            && navigation
+                .authority_boundary
+                .contains("global notifications")
+            && navigation
+                .authority_boundary
+                .contains("direct view-state writes")
+    );
+
+    let code_create = capabilities
+        .iter()
+        .find(|capability| capability.id == "native.code.create")
+        .expect("native code creation capability must be declared");
+    assert_eq!(code_create.status, OperatorCapabilityStatus::Available);
+    assert_eq!(
+        code_create.runtime_target,
+        OperatorRuntimeTarget::NativeHeadlessStateDir
+    );
+    assert_eq!(
+        code_create.control_effect,
+        OperatorControlEffect::NativeMutation
+    );
+    assert!(code_create.authority_boundary.contains("does not"));
+
+    let native_connect = capabilities
+        .iter()
+        .find(|capability| capability.id == "native.connect")
+        .expect("native connect capability must be declared");
+    assert_eq!(
+        native_connect.status,
+        OperatorCapabilityStatus::PendingLiveProof
+    );
+    assert_eq!(
+        native_connect.runtime_target,
+        OperatorRuntimeTarget::AgentOwnedRegistry
+    );
+    assert_eq!(
+        native_connect.control_effect,
+        OperatorControlEffect::NativeMutation
+    );
+    assert!(
+        native_connect
+            .authority_boundary
+            .contains("active runtime lock")
+            && native_connect
+                .authority_boundary
+                .contains("identity-bound HandshakeComplete")
+            && native_connect.authority_boundary.contains("IP")
+            && native_connect.authority_boundary.contains("features")
+            && native_connect
+                .authority_boundary
+                .contains("authenticated SBWC")
+            && native_connect.authority_boundary.contains("selected ICE")
+            && native_connect
+                .authority_boundary
+                .contains("fresh authenticated SBWC")
+            && native_connect
+                .authority_boundary
+                .contains("direct-or-relay IP semantics")
+            && native_connect.authority_boundary.contains("does not")
+            && native_connect
+                .authority_boundary
+                .contains("real-device cross-platform handshake")
+    );
 
     let active_scan = capabilities
         .iter()
         .find(|capability| capability.id == "device.discovery.active_scan")
         .expect("active nearby scan capability must be declared");
     assert_eq!(active_scan.status, OperatorCapabilityStatus::ReadOnly);
+    assert_eq!(
+        active_scan.runtime_target,
+        OperatorRuntimeTarget::NativeHeadlessStateDir
+    );
     assert!(
         active_scan
             .command
             .contains("device discover --nearby --scan")
+            && active_scan.command.contains("--show-addresses")
             && active_scan
                 .authority_boundary
-                .contains("agent-owned active mDNS scanner")
-            && active_scan.authority_boundary.contains("fail closed")
+                .contains("bounded foreground mDNS scan")
+            && active_scan
+                .authority_boundary
+                .contains("advertised_unverified")
+            && active_scan.authority_boundary.contains("persisted=false")
     );
 
     let send = capabilities
         .iter()
         .find(|capability| capability.id == "file.transfer.send")
         .expect("file send capability must be declared");
-    assert_eq!(send.status, OperatorCapabilityStatus::RequestOnly);
+    assert_eq!(send.status, OperatorCapabilityStatus::PendingLiveProof);
+    assert_eq!(send.control_effect, OperatorControlEffect::NativeMutation);
     assert!(send.command.contains("--session-id"));
+    assert!(send.command.contains("--detach"));
     assert!(
         send.owner_module
             .contains("FileTransferControlRequestRegistry")
     );
-    assert!(send.authority_boundary.contains("pending request"));
+    assert!(
+        send.authority_boundary.contains("TransferCompleted")
+            && send
+                .authority_boundary
+                .contains("verified matching SHA-256 receipt")
+            && send.authority_boundary.contains("request registration")
+            && send.authority_boundary.contains("never agent observation")
+            && send.authority_boundary.contains("never transfer success")
+            && send
+                .authority_boundary
+                .contains("real-device cross-platform file-transfer")
+    );
 
     let receive = capabilities
         .iter()
         .find(|capability| capability.id == "file.transfer.receive")
         .expect("file receive capability must be declared");
-    assert_eq!(receive.status, OperatorCapabilityStatus::Planned);
-    assert!(
-        !receive.authority_boundary.trim().is_empty(),
-        "file.transfer.receive must declare its authority boundary"
+    assert_eq!(receive.status, OperatorCapabilityStatus::PendingLiveProof);
+    assert_eq!(
+        receive.control_effect,
+        OperatorControlEffect::NativeMutation
     );
     assert!(
-        !receive.verification_gate.trim().is_empty(),
-        "file.transfer.receive must declare its verification gate"
+        receive.command.contains("--list")
+            && receive.command.contains("--accept")
+            && receive.command.contains("--reject")
+    );
+    assert!(
+        receive.authority_boundary.contains("applied=false")
+            && receive
+                .authority_boundary
+                .contains("stable authenticated peer device id")
+            && receive
+                .authority_boundary
+                .contains("allocates staging/storage only after approval")
+            && receive
+                .authority_boundary
+                .contains("real-device cross-platform inbound transfer")
     );
 
     for required in [
@@ -251,10 +343,14 @@ fn operator_capability_contract_covers_requested_surface_without_fake_success() 
         let capability = capabilities
             .iter()
             .find(|capability| capability.id == required)
-            .expect("request-only capability must be declared");
-        assert_eq!(capability.status, OperatorCapabilityStatus::RequestOnly);
+            .expect("unavailable capability must be declared");
+        assert_eq!(capability.status, OperatorCapabilityStatus::Unavailable);
+        assert_eq!(
+            capability.control_effect,
+            OperatorControlEffect::UnavailableFailClosed
+        );
         assert!(
-            capability.command.contains("request-only"),
+            capability.command.contains("unavailable/fail-closed"),
             "{required} must not imply live application"
         );
         assert!(
@@ -326,12 +422,15 @@ fn operator_capability_matrix_keeps_ios_out_of_rust_runtime_control() {
         }
 
         // `pending_live_proof` is only honest while the proof is genuinely
-        // outstanding, so it must name the evidence it still needs.
+        // outstanding, so it must name the live evidence it still needs.
         if capability.status == OperatorCapabilityStatus::PendingLiveProof {
             assert!(
                 capability
                     .authority_boundary
-                    .contains("live signed-app socket smoke"),
+                    .contains("live signed-app socket smoke")
+                    || capability
+                        .authority_boundary
+                        .contains("real-device cross-platform"),
                 "{} must state which live evidence is still missing",
                 capability.id
             );

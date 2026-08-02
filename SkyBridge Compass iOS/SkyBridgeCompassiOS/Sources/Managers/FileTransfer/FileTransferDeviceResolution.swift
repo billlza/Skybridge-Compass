@@ -24,6 +24,18 @@ extension FileTransferManager {
         target: DiscoveredDevice,
         discovered: [DiscoveredDevice]
     ) -> DiscoveredDevice {
+        let scopedTargetAddresses = scopedLinkLocalTransferAddresses(for: target)
+        if !scopedTargetAddresses.isEmpty {
+            guard scopedTargetAddresses.count == 1,
+                  let scopedTargetAddress = scopedTargetAddresses.first else {
+                return target
+            }
+            return uniquelyResolvedScopedLinkLocalTransferCandidate(
+                targetAddress: scopedTargetAddress,
+                discovered: discovered
+            ) ?? target
+        }
+
         let targetScore = transferResolutionScore(candidate: target, target: target)
         let bestCandidate = discovered.max { lhs, rhs in
             let left = transferResolutionScore(candidate: lhs, target: target)
@@ -35,6 +47,66 @@ extension FileTransferManager {
         guard let bestCandidate else { return target }
         let bestScore = transferResolutionScore(candidate: bestCandidate, target: target)
         return bestScore > targetScore ? bestCandidate : target
+    }
+
+    private static func uniquelyResolvedScopedLinkLocalTransferCandidate(
+        targetAddress: String,
+        discovered: [DiscoveredDevice]
+    ) -> DiscoveredDevice? {
+        guard let targetLookupKey = ConnectableAddressCanonicalizer.lookupKey(targetAddress) else {
+            return nil
+        }
+
+        let matches = discovered.filter { candidate in
+            guard hasCompleteFileTransferRoute(candidate) else { return false }
+
+            let candidateAddresses = transferConnectionAddresses(for: candidate)
+            let candidateScopedAddresses = Set(candidateAddresses.filter { $0.contains("%") })
+            guard candidateScopedAddresses.isEmpty
+                    || candidateScopedAddresses == [targetAddress] else {
+                return false
+            }
+
+            return candidateAddresses.contains { address in
+                ConnectableAddressCanonicalizer.lookupKey(address) == targetLookupKey
+            }
+        }
+
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    private static func scopedLinkLocalTransferAddresses(
+        for device: DiscoveredDevice
+    ) -> Set<String> {
+        Set(
+            transferConnectionAddresses(for: device).filter { address in
+                address.contains("%")
+                    && ConnectableAddressCanonicalizer.isLinkLocal(address)
+            }
+        )
+    }
+
+    private static func transferConnectionAddresses(for device: DiscoveredDevice) -> [String] {
+        [device.ipAddress, addressFromTransferIdentifier(device.id)]
+            .compactMap(ConnectableAddressCanonicalizer.connectionTarget)
+    }
+
+    private static func hasCompleteFileTransferRoute(_ device: DiscoveredDevice) -> Bool {
+        guard BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(
+            device.bonjourServiceName
+        ) != nil,
+        device.bonjourServiceType?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == DiscoveredDevice.fileTransferServiceType,
+        let domain = device.bonjourServiceDomain?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+        !domain.isEmpty,
+        let port = device.fileTransferPort,
+        port > 0 else {
+            return false
+        }
+        return true
     }
 
     static func areEquivalentTransferDevices(

@@ -187,6 +187,70 @@ private func loadUniqueProbeValues(
     }
 }
 
+/// Mirrors the production legacy-identity two-phase discovery shape. The broad
+/// read returns only attributes and exact persistent references; secret data is
+/// then loaded through the selected reference because the legacy file Keychain
+/// rejects the combined broad query with `errSecParam`.
+private func loadLegacyDiscoveryRows(
+    in domain: KeychainDomain
+) throws -> Int {
+    var query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: account,
+        kSecAttrSynchronizable as String: false,
+        kSecReturnAttributes as String: true,
+        kSecReturnPersistentRef as String: true,
+        kSecMatchLimit as String: kSecMatchLimitAll,
+    ]
+    domain.apply(to: &query)
+    forbidAuthenticationUI(&query)
+
+    var result: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    guard status == errSecSuccess else {
+        throw ProbeFailure.security(
+            operation: "load production-shaped \(domain.name) discovery rows",
+            status: status
+        )
+    }
+    let rows: [[String: Any]]
+    if let values = result as? [[String: Any]] {
+        rows = values
+    } else if let value = result as? [String: Any] {
+        rows = [value]
+    } else {
+        throw ProbeFailure.malformedResult(
+            operation: "load production-shaped \(domain.name) discovery rows"
+        )
+    }
+    for row in rows {
+        guard let persistentReference = row[kSecValuePersistentRef as String] as? Data,
+              !persistentReference.isEmpty else {
+            throw ProbeFailure.malformedResult(
+                operation: "load production-shaped \(domain.name) discovery rows"
+            )
+        }
+        if domain.usesDataProtectionKeychain {
+            guard let accessGroup = row[kSecAttrAccessGroup as String] as? String,
+                  !accessGroup.isEmpty else {
+                throw ProbeFailure.malformedResult(
+                    operation: "load production-shaped \(domain.name) discovery rows"
+                )
+            }
+        }
+        guard try loadGenericPassword(
+            persistentReference: persistentReference,
+            in: domain
+        ) != nil else {
+            throw ProbeFailure.invariant(
+                "production-shaped \(domain.name) discovery row disappeared"
+            )
+        }
+    }
+    return rows.count
+}
+
 private func delete(
     persistentReference: Data,
     in domain: KeychainDomain
@@ -813,6 +877,14 @@ private func runGenericPasswordProbeBody() throws {
         initialDataProtectionValues == [dataProtectionValue],
         "Data Protection domain returned unexpected values: "
             + describe(initialDataProtectionValues)
+    )
+    try require(
+        try loadLegacyDiscoveryRows(in: legacyDomain) == 1,
+        "legacy production-shaped discovery did not return exactly one row"
+    )
+    try require(
+        try loadLegacyDiscoveryRows(in: dataProtectionDomain) == 1,
+        "Data Protection production-shaped discovery did not return exactly one row"
     )
 
     try delete(persistentReference: legacyReference, in: legacyDomain)

@@ -73,8 +73,8 @@ text = re.sub(
     text,
 )
 text = re.sub(r"/Applications/([^/\s]+\.app)", r"<applications>/\1", text)
-text = re.sub(r"/var/folders/[^ \n\r\t]+", "<tmp>", text)
-text = re.sub(r"/tmp/[^ \n\r\t]+", "<tmp>", text)
+text = re.sub(r"/var/folders/[^ \n\r\t\"']+", "<tmp>", text)
+text = re.sub(r"/tmp/[^ \n\r\t\"']+", "<tmp>", text)
 text = re.sub(
     r'("?(?:identifier|udid|serialNumber|deviceIdentifier|ecid)"?\s*:\s*)"[^"]+"',
     r'\1"<redacted-ios-device>"',
@@ -157,7 +157,8 @@ skybridge_smoke_tail_redacted() {
 skybridge_smoke_public_redact_stream() {
   local device_label="${1:?missing device label}"
   shift
-  skybridge_smoke_redact_stream "${device_label}" "$@" | python3 -c '
+  skybridge_smoke_redact_stream "${device_label}" "$@" | python3 /dev/fd/3 3<<'PY'
+import ipaddress
 import json
 import os
 import re
@@ -165,6 +166,42 @@ import sys
 
 text = sys.stdin.read()
 jsonl_mode = os.environ.get("SKYBRIDGE_SMOKE_REDACTION_FORMAT") == "jsonl"
+
+ipv4_octet = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+private_ipv4_endpoint_pattern = re.compile(
+    rf"(?<![0-9.])(?:"
+    rf"10\.{ipv4_octet}\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"127\.{ipv4_octet}\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"169\.254\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"172\.(?:1[6-9]|2[0-9]|3[01])\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"192\.168\.{ipv4_octet}\.{ipv4_octet}"
+    rf")(?::[0-9]{{1,5}})?(?![0-9.])"
+)
+ipv6_candidate_pattern = re.compile(
+    r"(?<![0-9A-Fa-f:.%])(?:"
+    r"\[(?P<bracketed>[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?)\](?::[0-9]{1,5})?"
+    r"|(?P<bare>[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[A-Za-z0-9_.-]+)?)"
+    r")(?![0-9A-Fa-f:.%])"
+)
+
+def parsed_ipv6_literal(match):
+    candidate = match.group("bracketed") or match.group("bare")
+    address_without_scope = candidate.split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(address_without_scope)
+    except ValueError:
+        return None
+    return address if address.version == 6 else None
+
+def redact_ipv6_literals(value: str) -> str:
+    return ipv6_candidate_pattern.sub(
+        lambda match: (
+            "<redacted-ipv6-endpoint>"
+            if parsed_ipv6_literal(match) is not None
+            else match.group(0)
+        ),
+        value,
+    )
 
 sensitive_key_values = {
     "accesstoken",
@@ -266,6 +303,8 @@ sensitive_key_values = {
     "tenantid",
     "token",
     "trackid",
+    "tunnelipaddress",
+    "tunnelipaddressstring",
     "udid",
     "uniqueidentifier",
     "url",
@@ -302,9 +341,36 @@ def redact_text(value: str) -> str:
         value,
         flags=re.IGNORECASE | re.MULTILINE,
     )
+    # Bare smoke-log labels are not schema keys, so handle only assignments that
+    # begin at a line boundary or after whitespace. This deliberately avoids
+    # compiler flags such as `-fmodule-name=CQPeriapt`.
+    value = re.sub(
+        r"(^|[ \t])(name|candidates|peers)=.*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
+        r"\1\2=<redacted-public-artifact-value>",
+        value,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
     value = re.sub(
         r"\b(identity[_-]?key|declared[_-]?device[_-]?id|target[_-]?device[_-]?id|local[_-]?device[_-]?id|peer(?:[_-]?id)?|remote[_-]?device[_-]?id|stable[_-]?peer(?:[_-]?id)?|device(?:[_-]?id)?|p2p[_-]?device[_-]?id|cloud[_-]?device[_-]?id|pub[_-]?key[_-]?fp|dedupe[_-]?key|key[_-]?id|requester[_-]?protocol[_-]?identity|pinned[_-]?protocol[_-]?identity|unique[_-]?identifier|session|session[_-]?id|track[_-]?id)=\S+",
         r"\1=<redacted-identity>",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(^|[ \t])(sender|target|transfer)=\S+",
+        r"\1\2=<redacted-identity>",
+        value,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    value = re.sub(
+        r"(^|[ \t])id=id:\S+",
+        r"\1id=<redacted-identity>",
+        value,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    value = re.sub(
+        r"\b(session|sessionId|trackId)\s*:\s*\"(?!<redacted\b)[^\"]+\"",
+        "\\1: \"<redacted-identity>\"",
         value,
         flags=re.IGNORECASE,
     )
@@ -313,6 +379,12 @@ def redact_text(value: str) -> str:
         r"\1=<redacted-public-artifact-value>",
         value,
         flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(^|[ \t])(requested|resolved)=\S+",
+        r"\1\2=<redacted-public-artifact-value>",
+        value,
+        flags=re.IGNORECASE | re.MULTILINE,
     )
     value = re.sub(
         r"\b(access[_-]?token|api[_-]?key|authorization|bearer[_-]?token|client[_-]?secret|private[_-]?key|(?:(?:peer|kem|pqc|xwing|mlkem|ed25519|x25519)[_-]?)?public[_-]?key(?:[_-]?base64)?|refresh[_-]?token|token)="
@@ -336,6 +408,13 @@ def redact_text(value: str) -> str:
     value = re.sub(r"/private/var/folders/[^ \n\r\t\"'\'']+", "<tmp>", value)
     value = re.sub(r"/var/folders/[^ \n\r\t\"'\'']+", "<tmp>", value)
     value = re.sub(r"/tmp/[^ \n\r\t\"'\'']+", "<tmp>", value)
+    value = re.sub(
+        r"(Provisioning(?:\\ | )Profiles/)[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\.mobileprovision",
+        r"\1<redacted-provisioning-profile>.mobileprovision",
+        value,
+    )
+    value = private_ipv4_endpoint_pattern.sub("<redacted-private-endpoint>", value)
+    value = redact_ipv6_literals(value)
     value = re.sub(r"\b[A-Za-z0-9+/_-]{80,}={0,2}\b", "<redacted-long-base64>", value)
     value = re.sub(
         r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b",
@@ -371,6 +450,8 @@ def redact_json(value, key: str = ""):
             "stablepeerid",
             "targetdeviceid",
             "trackid",
+            "tunnelipaddress",
+            "tunnelipaddressstring",
             "uniqueidentifier",
         }:
             return "<redacted-identity>"
@@ -488,7 +569,7 @@ else:
     else:
         sys.stdout.write(json.dumps(redact_json(payload), indent=2, sort_keys=True))
     sys.stdout.write("\n")
-'
+PY
 }
 
 skybridge_smoke_public_artifact_file_name() {
@@ -532,54 +613,104 @@ skybridge_smoke_materialize_public_artifacts() {
 
   local artifact_abs
   local public_parent
+  local public_parent_abs
+  local public_name
   local public_abs
   artifact_abs="$(cd "${artifact_dir}" && pwd -P)"
   public_parent="$(dirname "${public_dir}")"
   mkdir -p "${public_parent}"
-  public_abs="$(cd "${public_parent}" && pwd -P)/$(basename "${public_dir}")"
-
-  if [[ "${public_abs}" == "/" || "${public_abs}" == "${artifact_abs}" || "${public_abs}" == "${artifact_abs}/"* ]]; then
+  public_parent_abs="$(cd "${public_parent}" && pwd -P)"
+  public_name="$(basename "${public_dir}")"
+  if [[ -z "${public_name}" || "${public_name}" == "." || "${public_name}" == ".." ]]; then
     echo "refusing unsafe public artifact directory: ${public_dir}" >&2
     return 2
   fi
+  public_abs="${public_parent_abs}/${public_name}"
 
-  rm -rf "${public_abs}"
-  mkdir -p "${public_abs}"
+  if [[ "${public_abs}" == "/" ||
+        "${public_abs}" == "${artifact_abs}" ||
+        "${public_abs}" == "${artifact_abs}/"* ||
+        "${artifact_abs}" == "${public_abs}/"* ]]; then
+    echo "refusing unsafe public artifact directory: ${public_dir}" >&2
+    return 2
+  fi
+  if [[ -L "${public_abs}" || ( -e "${public_abs}" && ! -d "${public_abs}" ) ]]; then
+    echo "refusing unsafe public artifact directory: ${public_dir}" >&2
+    return 2
+  fi
+  if [[ -d "${public_abs}" && ! -f "${public_abs}/skybridge-public-artifacts.json" ]]; then
+    echo "refusing to replace unowned public artifact directory: ${public_dir}" >&2
+    return 2
+  fi
 
-  local source_path
-  local name
-  local rel_path
-  local dest_path
-  while IFS= read -r -d "" source_path; do
-    name="$(basename "${source_path}")"
-    rel_path="${source_path#"${artifact_abs}"/}"
-    if [[ "${rel_path}" == "${source_path}" || "${rel_path}" == .* || "${rel_path}" == */../* || "${rel_path}" == ../* ]]; then
-      echo "refusing unsafe smoke artifact path: ${source_path}" >&2
-      return 2
-    fi
-    if skybridge_smoke_private_secret_artifact_file_name "${name}"; then
-      continue
-    fi
-    if ! skybridge_smoke_public_artifact_file_name "${name}"; then
-      if skybridge_smoke_private_capture_artifact_file_name "${name}"; then
+  local staging_abs
+  staging_abs="$(mktemp -d "${public_parent_abs}/.${public_name}.tmp.XXXXXX")"
+  if (
+    set -euo pipefail
+    trap 'if [[ -n "${staging_abs:-}" && -d "${staging_abs}" ]]; then rm -rf -- "${staging_abs}"; fi' EXIT
+
+    local source_path
+    local name
+    local rel_path
+    local dest_path
+    while IFS= read -r -d "" source_path; do
+      name="$(basename "${source_path}")"
+      rel_path="${source_path#"${artifact_abs}"/}"
+      if [[ "${rel_path}" == "${source_path}" || "${rel_path}" == .* || "${rel_path}" == */../* || "${rel_path}" == ../* ]]; then
+        echo "refusing unsafe smoke artifact path: ${source_path}" >&2
+        exit 2
+      fi
+      if skybridge_smoke_private_secret_artifact_file_name "${name}"; then
         continue
       fi
-      echo "unsupported smoke artifact file extension in public materializer input: ${rel_path}" >&2
-      return 2
-    fi
-    dest_path="${public_abs}/${rel_path}"
-    mkdir -p "$(dirname "${dest_path}")"
-    if [[ "${name}" == *.jsonl ]]; then
-      SKYBRIDGE_SMOKE_REDACTION_FORMAT=jsonl \
+      if ! skybridge_smoke_public_artifact_file_name "${name}"; then
+        if skybridge_smoke_private_capture_artifact_file_name "${name}"; then
+          continue
+        fi
+        echo "unsupported smoke artifact file extension in public materializer input: ${rel_path}" >&2
+        exit 2
+      fi
+      dest_path="${staging_abs}/${rel_path}"
+      mkdir -p "$(dirname "${dest_path}")"
+      if [[ "${name}" == *.jsonl ]]; then
+        SKYBRIDGE_SMOKE_REDACTION_FORMAT=jsonl \
+          skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
+      else
         skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
-    else
-      skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
+      fi
+    done < <(
+      find "${artifact_abs}" \
+        \( -name .build -o -name .git -o -name DerivedData-ios -o -name DerivedData-mac-online \) -prune \
+        -o -type f -print0
+    )
+
+    printf '%s\n' '{"kind":"skybridge-public-smoke-artifacts","schemaVersion":1}' \
+      >"${staging_abs}/skybridge-public-artifacts.json"
+    skybridge_smoke_check_public_artifacts "${staging_abs}" "$@"
+
+    local backup_abs=""
+    if [[ -d "${public_abs}" ]]; then
+      backup_abs="$(mktemp -d "${public_parent_abs}/.${public_name}.backup.XXXXXX")"
+      rmdir "${backup_abs}"
+      mv "${public_abs}" "${backup_abs}"
     fi
-  done < <(
-    find "${artifact_abs}" \
-      \( -path "${public_abs}" -o -name .build -o -name .git -o -name DerivedData-ios -o -name DerivedData-mac-online \) -prune \
-      -o -type f -print0
-  )
+    if ! mv "${staging_abs}" "${public_abs}"; then
+      if [[ -n "${backup_abs}" && -d "${backup_abs}" ]]; then
+        mv "${backup_abs}" "${public_abs}" || true
+      fi
+      exit 1
+    fi
+    staging_abs=""
+    if [[ -n "${backup_abs}" && -d "${backup_abs}" ]]; then
+      rm -rf -- "${backup_abs}"
+    fi
+    trap - EXIT
+  ); then
+    return 0
+  else
+    local materialize_status=$?
+    return "${materialize_status}"
+  fi
 }
 
 skybridge_smoke_check_public_artifacts() {
@@ -592,6 +723,7 @@ skybridge_smoke_check_public_artifacts() {
   fi
 
   python3 - "${public_dir}" "${ROOT_DIR:-$(pwd)}" "$@" <<'PY'
+import ipaddress
 import json
 import os
 import re
@@ -717,6 +849,8 @@ sensitive_key_values = {
     "tenantid",
     "token",
     "trackid",
+    "tunnelipaddress",
+    "tunnelipaddressstring",
     "udid",
     "uniqueidentifier",
     "url",
@@ -735,6 +869,8 @@ prefixed_sensitive_key_suffixes = {
     "declareddeviceid",
     "deviceid",
     "identitykey",
+    "ipaddress",
+    "ipaddressstring",
     "localdeviceid",
     "nebulaid",
     "p2pdeviceid",
@@ -749,6 +885,34 @@ prefixed_sensitive_key_suffixes = {
     "userid",
     "useridentifier",
 }
+ipv4_octet = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+private_ipv4_endpoint_pattern = re.compile(
+    rf"(?<![0-9.])(?:"
+    rf"10\.{ipv4_octet}\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"127\.{ipv4_octet}\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"169\.254\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"172\.(?:1[6-9]|2[0-9]|3[01])\.{ipv4_octet}\.{ipv4_octet}|"
+    rf"192\.168\.{ipv4_octet}\.{ipv4_octet}"
+    rf")(?::[0-9]{{1,5}})?(?![0-9.])"
+)
+ipv6_candidate_pattern = re.compile(
+    r"(?<![0-9A-Fa-f:.%])(?:"
+    r"\[(?P<bracketed>[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?)\](?::[0-9]{1,5})?"
+    r"|(?P<bare>[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*(?:%[A-Za-z0-9_.-]+)?)"
+    r")(?![0-9A-Fa-f:.%])"
+)
+
+def contains_raw_ipv6_literal(value: str) -> bool:
+    for match in ipv6_candidate_pattern.finditer(value):
+        candidate = match.group("bracketed") or match.group("bare")
+        address_without_scope = candidate.split("%", 1)[0]
+        try:
+            address = ipaddress.ip_address(address_without_scope)
+        except ValueError:
+            continue
+        if address.version == 6:
+            return True
+    return False
 patterns = [
     ("raw connect link", re.compile(r"skybridge://")),
     (
@@ -803,6 +967,34 @@ patterns = [
         ),
     ),
     (
+        "raw bare device identity assignment",
+        re.compile(
+            r"(^|[ \t])(?:sender|target|transfer)=(?!<redacted\b|<redacted>)[^\s]+",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        "raw bare route endpoint assignment",
+        re.compile(
+            r"(^|[ \t])(?:requested|resolved)=(?!<redacted\b|<redacted>)[^\s]+",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        "raw human name or identity-list assignment",
+        re.compile(
+            r"(^|[ \t])(?:name|candidates|peers)=(?!<redacted\b|<redacted>).*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
+        "raw shorthand device identity assignment",
+        re.compile(
+            r"(^|[ \t])id=id:(?!<redacted\b|<redacted>)[^\s]+",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
         "raw public key assignment",
         re.compile(
             r"\b(?:(?:peer|kem|pqc|xwing|mlkem|ed25519|x25519)[_-]?)?public[_-]?key(?:[_-]?base64)?="
@@ -825,6 +1017,14 @@ patterns = [
     ("raw ICE candidate", re.compile(r"(^|\n)a=candidate:(?!<redacted\b|<redacted>)[^\r\n]+", re.IGNORECASE)),
     ("raw SDP assignment", re.compile(r"\b(?:iceCandidate|icePwd|iceUfrag|localDescription|remoteDescription|sdp)=(?!<redacted\b|<redacted>)[^\s&]+", re.IGNORECASE)),
     ("raw session or track assignment", re.compile(r"\b(?:session|sessionId|trackId)=(?!<redacted\b|<redacted>)[^\s]+", re.IGNORECASE)),
+    ("raw Swift debug session id", re.compile(r'\b(?:session|sessionId|trackId)\s*:\s*"(?!<redacted\b)[^"]+"', re.IGNORECASE)),
+    (
+        "raw provisioning profile UUID path",
+        re.compile(
+            r"Provisioning(?:\\ | )Profiles/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\.mobileprovision"
+        ),
+    ),
+    ("raw private IPv4 endpoint", private_ipv4_endpoint_pattern),
     ("raw connect code", re.compile(r"\bconnect\s+(?!<redacted\b|<redacted>)[A-Za-z0-9._:-]{4,}\b", re.IGNORECASE)),
     ("raw plain SAS code", re.compile(r"\bcode\s+(?!<redacted\b|<redacted>)[0-9]{6}\b", re.IGNORECASE)),
     ("raw local path", re.compile(r"(^|[\s\"=])/(Users|Applications|Volumes|private/var/folders|var/folders|tmp)/[^\s\"']+")),
@@ -910,6 +1110,8 @@ for current_root, dirs, files in os.walk(public_dir):
         for label, pattern in patterns:
             if pattern.search(text):
                 findings.append((rel_path, label))
+        if contains_raw_ipv6_literal(text):
+            findings.append((rel_path, "raw IPv6 endpoint"))
 
 if scanned_count == 0:
     print("Public smoke artifact directory has no scan-eligible files.", file=sys.stderr)

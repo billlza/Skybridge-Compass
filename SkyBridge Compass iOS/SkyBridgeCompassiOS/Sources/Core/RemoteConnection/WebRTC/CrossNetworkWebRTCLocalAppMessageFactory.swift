@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
 
 @available(iOS 17.0, *)
 enum CrossNetworkWebRTCLocalAppMessageFactoryError: Error, LocalizedError, Equatable {
@@ -28,7 +29,7 @@ enum CrossNetworkWebRTCLocalAppMessageFactoryError: Error, LocalizedError, Equat
 @available(iOS 17.0, *)
 enum CrossNetworkWebRTCLocalAppMessageFactory {
     static let routeBindingEndpointProvenance = "resolved-dns-sd-endpoint"
-    static let fileTransferServiceType = "_skybridge-transfer._tcp"
+    static let fileTransferServiceType = BonjourInteropProtocolContract.fileTransferServiceType
     static let fileTransferRouteKind = "fileTransfer"
 
     static func authenticatedFileTransferRouteBindingMessages(

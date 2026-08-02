@@ -10,6 +10,27 @@ import Foundation
 import Network
 import CryptoKit
 import ActivityKit
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
+import class SkyBridgeProtocolCore.ClassicTransferChunkCryptoWorker
+import class SkyBridgeProtocolCore.ClassicTransferJSONWorker
+import class SkyBridgeProtocolCore.ClassicTransferOutboundFileReadSession
+import class SkyBridgeProtocolCore.ClassicTransferReceiveOperation
+import class SkyBridgeProtocolCore.ClassicTransferSendOperation
+import class SkyBridgeProtocolCore.ClassicTransferSourceFileInspectionWorker
+import class SkyBridgeProtocolCore.ClassicTransferZlibCompressionWorker
+import class SkyBridgeProtocolCore.ClassicTransferZlibDecompressionWorker
+import class SkyBridgeProtocolCore.InboundFileTransferIOActor
+import enum SkyBridgeProtocolCore.ClassicTransferAuthenticationContract
+import enum SkyBridgeProtocolCore.ClassicTransferCanonicalTranscript
+import enum SkyBridgeProtocolCore.ClassicTransferChunkContract
+import enum SkyBridgeProtocolCore.ClassicTransferInboundPolicy
+import enum SkyBridgeProtocolCore.ClassicTransferMetadataContract
+import enum SkyBridgeProtocolCore.ClassicTransferReceiptContract
+import enum SkyBridgeProtocolCore.ClassicTransferSourceFileInspectionError
+import struct SkyBridgeProtocolCore.ClassicTransferEncryptedChunk
+import struct SkyBridgeProtocolCore.ClassicTransferSlotQueuePolicy
+import struct SkyBridgeProtocolCore.InboundFileTransferIOHandle
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -246,7 +267,7 @@ public class FileTransferManager: ObservableObject {
             // 建立连接：优先 Bonjour service（不依赖 IP/默认端口）
             //
             // ⚠️ 重要：activeConnections 里的 `DiscoveredDevice` 有时是“连接时快照”，services/ip 可能不完整。
-            // 这里尝试用发现管理器的最新记录补全（尤其是 `_skybridge-transfer._tcp`）。
+            // 这里尝试用发现管理器的最新记录补全（尤其是 `_skybridge-xfer._tcp`）。
             let resolvedDevice = resolveLatestTransferDevice(from: device)
 
             try await ensureClassicTransferIdentityBridgeReady(for: resolvedDevice)
@@ -380,6 +401,17 @@ public class FileTransferManager: ObservableObject {
             }
         }
 
+        for endpoint in DeviceDiscoveryManager.instance.liveBonjourServiceEndpoints(
+            for: device,
+            serviceType: .skybridgeTransfer
+        ) {
+            appendTransferEndpoint(
+                endpoint,
+                to: &endpoints,
+                seen: &seen
+            )
+        }
+
         if let bonjour = transferBonjourServiceIdentity(for: device) {
             appendTransferEndpoint(
                 .service(
@@ -488,7 +520,7 @@ public class FileTransferManager: ObservableObject {
         let candidates = transferIdentityCandidates(for: device)
 
         // Prefer the port carried by a candidate that advertises the explicit
-        // `_skybridge-transfer._tcp` Bonjour service (the authoritative transfer
+        // `_skybridge-xfer._tcp` Bonjour service (the authoritative transfer
         // endpoint). A session/pairing-derived record can carry the live P2P
         // session port in `portMap[fileTransferServiceType]` (and even gets the
         // transfer service appended to its `services` list when merged), so it
@@ -509,7 +541,7 @@ public class FileTransferManager: ObservableObject {
         return nil
     }
 
-    /// True when the candidate carries an explicit `_skybridge-transfer._tcp`
+    /// True when the candidate carries an explicit `_skybridge-xfer._tcp`
     /// advertisement, i.e. its port provenance is the real transfer-service
     /// Bonjour record (SRV/TXT) rather than a session/pairing heartbeat merge.
     ///
@@ -1053,22 +1085,38 @@ public class FileTransferManager: ObservableObject {
                     metadata.senderChip
                 ]
             )
+            SignedKEMRefreshSmokeStatusWriter.append(
+                "file-transfer inbound-metadata-contract-validated"
+            )
             securityContext = try classicTransferSecurityContext(peerContext: peerContext)
+            SignedKEMRefreshSmokeStatusWriter.append(
+                "file-transfer inbound-security-context-resolved matchedBy=\(securityContext.matchedBy.rawValue)"
+            )
             let unsignedMetadata = unsignedMetadataCopy(from: metadata)
             guard isValidAuthenticationTag(
                 metadata.metadataAuthTag,
                 payload: try metadataAuthenticationInput(unsignedMetadata),
                 key: securityContext.transferKey
             ) else {
+                SignedKEMRefreshSmokeStatusWriter.append(
+                    "file-transfer inbound-metadata-hmac-rejected"
+                )
                 throw FileTransferError.secureSessionRequired
             }
         } catch {
             let authenticationError = error as NSError
+            SignedKEMRefreshSmokeStatusWriter.append(
+                "file-transfer inbound-auth-rejected domain=\(authenticationError.domain) code=\(authenticationError.code)"
+            )
             SkyBridgeLogger.shared.error(
                 "⚠️ classic inbound rejected: authenticationBoundary=pre_authentication domain=\(authenticationError.domain) code=\(authenticationError.code)"
             )
             throw error
         }
+
+        SignedKEMRefreshSmokeStatusWriter.append(
+            "file-transfer inbound-authenticated stage=metadata"
+        )
 
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }

@@ -1,62 +1,30 @@
 use anyhow::{Result, anyhow, bail};
-use skybridge_agent::{
-    ensure_rust_pqc_identity_for_algorithm, refresh_auth_session_if_needed, signing_binding,
-    signing_signature,
-};
-use skybridge_core::{
-    CryptoSuite, PqcResponderConfig, ProtocolIdentityBinding, ProtocolSigningAlgorithm,
-    SignalServerClient, derive_tenant_identifier,
-};
+use skybridge_agent::{refresh_auth_session_if_needed, signing_binding, signing_signature};
+use skybridge_core::{SignalServerClient, derive_tenant_identifier};
 
 const ENV_PQC_BRIDGE_IDENTITY: &str = "SKYBRIDGE_PQC_BRIDGE_IDENTITY";
 
 pub(crate) fn pqc_bridge_identity_enabled() -> Result<bool> {
     match std::env::var(ENV_PQC_BRIDGE_IDENTITY) {
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotPresent) => parse_pqc_bridge_identity(None),
         Err(std::env::VarError::NotUnicode(_)) => {
             bail!("{ENV_PQC_BRIDGE_IDENTITY} is not valid Unicode")
         }
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" => Ok(true),
+        Ok(value) => parse_pqc_bridge_identity(Some(&value)),
+    }
+}
+
+fn parse_pqc_bridge_identity(value: Option<&str>) -> Result<bool> {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        None => Ok(false),
+        Some(value) => match value.as_str() {
+            "1" | "true" | "yes" => bail!(
+                "{ENV_PQC_BRIDGE_IDENTITY}=true is not supported: the independent PQC handshake identity has no signed binding to the control-plane identity; configure the primary protocol identity as ML-DSA instead"
+            ),
             "0" | "false" | "no" => Ok(false),
             _ => bail!("{ENV_PQC_BRIDGE_IDENTITY} must be one of true/false, 1/0, or yes/no"),
         },
     }
-}
-
-pub(crate) async fn maybe_inline_pqc_responder_config(
-    paths: &skybridge_agent::AgentPaths,
-    identity: &skybridge_agent::DeviceIdentityMaterial,
-    local_binding: &ProtocolIdentityBinding,
-) -> Result<Option<PqcResponderConfig>> {
-    let bridge_identity = pqc_bridge_identity_enabled()?;
-    if !local_binding.protocol_signing_algorithm.is_ml_dsa() && !bridge_identity {
-        return Ok(None);
-    }
-
-    let handshake_algorithm = if local_binding.protocol_signing_algorithm.is_ml_dsa() {
-        local_binding.protocol_signing_algorithm
-    } else {
-        ProtocolSigningAlgorithm::MlDsa65
-    };
-    let pqc_identity = ensure_rust_pqc_identity_for_algorithm(paths, handshake_algorithm).await?;
-    let pqc_binding = if local_binding.protocol_signing_algorithm.is_ml_dsa() {
-        local_binding.clone()
-    } else {
-        ProtocolIdentityBinding::new(
-            local_binding.device_id.clone(),
-            pqc_identity.signing_algorithm,
-            pqc_identity.signing_public_key.clone(),
-            None,
-        )?
-    };
-    Ok(Some(PqcResponderConfig {
-        local_binding: pqc_binding,
-        local_device_name: Some(identity.state.device.device_name.clone()),
-        identity: pqc_identity,
-        supported_suites: vec![CryptoSuite::XWING_MLDSA, CryptoSuite::MLKEM768_MLDSA65],
-        policy: skybridge_core::DowngradePolicy::PreferPqc,
-    }))
 }
 
 pub(crate) async fn request_admission_lease(
@@ -91,4 +59,19 @@ pub(crate) fn require_tenant_id(session: &skybridge_core::AuthSession) -> Result
     derive_tenant_identifier(&session.access_token).ok_or_else(|| {
         anyhow!("failed to derive tenant id from access token; set SKYBRIDGE_TENANT_ID if needed")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bridge_identity_configuration_fails_closed_without_a_signed_binding() {
+        assert!(!parse_pqc_bridge_identity(None).expect("unset should stay disabled"));
+        assert!(!parse_pqc_bridge_identity(Some("false")).expect("false should stay disabled"));
+        let unsupported = parse_pqc_bridge_identity(Some("true"))
+            .expect_err("an unbound bridge identity must fail closed");
+        assert!(unsupported.to_string().contains("no signed binding"));
+        assert!(parse_pqc_bridge_identity(Some("sometimes")).is_err());
+    }
 }

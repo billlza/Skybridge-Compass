@@ -16,14 +16,14 @@
  *
  *  \since version 3.0.0
  */
-/* #undef WITH_OPAQUE_SETTINGS */
+#define WITH_OPAQUE_SETTINGS
 
 /* #undef WITH_ADD_PLUGIN_TO_RPATH */
 /* #undef WITH_PROFILER */
 /* #undef WITH_GPROF */
 #define WITH_SIMD
 #define WITH_AVX2
-#define WITH_CUPS
+/* #undef WITH_CUPS */
 /* #undef WITH_JPEG */
 /* #undef WITH_WIN8 */
 #define WITH_AAD
@@ -33,7 +33,7 @@
 /* #undef WITH_RDPSND_DSOUND */
 
 /* #undef WITH_WINMM */
-#define WITH_MACAUDIO
+/* #undef WITH_MACAUDIO */
 /* #undef WITH_OSS */
 /* #undef WITH_ALSA */
 /* #undef WITH_PULSE */
@@ -63,8 +63,8 @@
 /* #undef WITH_VAAPI */
 /* #undef WITH_VIDEOTOOLBOX */
 
-#define WITH_CHANNELS
-#define WITH_CLIENT_CHANNELS
+/* #undef WITH_CHANNELS */
+/* #undef WITH_CLIENT_CHANNELS */
 /* #undef WITH_SERVER_CHANNELS */
 
 /* #undef WITH_CHANNEL_GFXREDIR */
@@ -74,33 +74,33 @@
 /* #undef WITH_RDPDR */
 
 /* Channels */
-#define CHANNEL_AINPUT
-#define CHANNEL_AINPUT_CLIENT
-#define CHANNEL_AINPUT_SERVER
-#define CHANNEL_AUDIN
-#define CHANNEL_AUDIN_CLIENT
-#define CHANNEL_AUDIN_SERVER
-#define CHANNEL_CLIPRDR
-#define CHANNEL_CLIPRDR_CLIENT
-#define CHANNEL_CLIPRDR_SERVER
-#define CHANNEL_DISP
-#define CHANNEL_DISP_CLIENT
-#define CHANNEL_DISP_SERVER
-#define CHANNEL_DRDYNVC
-#define CHANNEL_DRDYNVC_CLIENT
-#define CHANNEL_DRDYNVC_SERVER
-#define CHANNEL_DRIVE
-#define CHANNEL_DRIVE_CLIENT
+/* #undef CHANNEL_AINPUT */
+/* #undef CHANNEL_AINPUT_CLIENT */
+/* #undef CHANNEL_AINPUT_SERVER */
+/* #undef CHANNEL_AUDIN */
+/* #undef CHANNEL_AUDIN_CLIENT */
+/* #undef CHANNEL_AUDIN_SERVER */
+/* #undef CHANNEL_CLIPRDR */
+/* #undef CHANNEL_CLIPRDR_CLIENT */
+/* #undef CHANNEL_CLIPRDR_SERVER */
+/* #undef CHANNEL_DISP */
+/* #undef CHANNEL_DISP_CLIENT */
+/* #undef CHANNEL_DISP_SERVER */
+/* #undef CHANNEL_DRDYNVC */
+/* #undef CHANNEL_DRDYNVC_CLIENT */
+/* #undef CHANNEL_DRDYNVC_SERVER */
+/* #undef CHANNEL_DRIVE */
+/* #undef CHANNEL_DRIVE_CLIENT */
 /* #undef CHANNEL_DRIVE_SERVER */
 
-#define CHANNEL_ECHO
-#define CHANNEL_ECHO_CLIENT
-#define CHANNEL_ECHO_SERVER
-#define CHANNEL_ENCOMSP
-#define CHANNEL_ENCOMSP_CLIENT
-#define CHANNEL_ENCOMSP_SERVER
-#define CHANNEL_GEOMETRY
-#define CHANNEL_GEOMETRY_CLIENT
+/* #undef CHANNEL_ECHO */
+/* #undef CHANNEL_ECHO_CLIENT */
+/* #undef CHANNEL_ECHO_SERVER */
+/* #undef CHANNEL_ENCOMSP */
+/* #undef CHANNEL_ENCOMSP_CLIENT */
+/* #undef CHANNEL_ENCOMSP_SERVER */
+/* #undef CHANNEL_GEOMETRY */
+/* #undef CHANNEL_GEOMETRY_CLIENT */
 /* #undef CHANNEL_GEOMETRY_SERVER */
 /* #undef CHANNEL_GFXREDIR */
 /* #undef CHANNEL_GFXREDIR_CLIENT */
@@ -109,52 +109,52 @@
  *
  *  \since version 3.0.0
  */
-#define CHANNEL_LOCATION
+/* #undef CHANNEL_LOCATION */
 /** If defined location client side channel support is available.
  *
  *  \since version 3.0.0
  */
-#define CHANNEL_LOCATION_CLIENT
+/* #undef CHANNEL_LOCATION_CLIENT */
 /** If defined location server side channel support is available.
  *
  *  \since version 3.0.0
  */
-#define CHANNEL_LOCATION_SERVER
-#define CHANNEL_PARALLEL
+/* #undef CHANNEL_LOCATION_SERVER */
+/* #undef CHANNEL_PARALLEL */
 /* #undef CHANNEL_PARALLEL_CLIENT */
 /* #undef CHANNEL_PARALLEL_SERVER */
-#define CHANNEL_PRINTER
-#define CHANNEL_PRINTER_CLIENT
+/* #undef CHANNEL_PRINTER */
+/* #undef CHANNEL_PRINTER_CLIENT */
 /* #undef CHANNEL_PRINTER_SERVER */
-#define CHANNEL_RAIL
-#define CHANNEL_RAIL_CLIENT
-#define CHANNEL_RAIL_SERVER
+/* #undef CHANNEL_RAIL */
+/* #undef CHANNEL_RAIL_CLIENT */
+/* #undef CHANNEL_RAIL_SERVER */
 /* #undef CHANNEL_RDPAPPLIST */
 /* #undef CHANNEL_RDPAPPLIST_CLIENT */
 /* #undef CHANNEL_RDPAPPLIST_SERVER */
-#define CHANNEL_RDPDR
-#define CHANNEL_RDPDR_CLIENT
-#define CHANNEL_RDPDR_SERVER
-#define CHANNEL_RDPECAM
+/* #undef CHANNEL_RDPDR */
+/* #undef CHANNEL_RDPDR_CLIENT */
+/* #undef CHANNEL_RDPDR_SERVER */
+/* #undef CHANNEL_RDPECAM */
 /* #undef CHANNEL_RDPECAM_CLIENT */
-#define CHANNEL_RDPECAM_SERVER
+/* #undef CHANNEL_RDPECAM_SERVER */
 /* #undef CHANNEL_RDPEAR */
 /* #undef CHANNEL_RDPEAR_CLIENT */
 /* #undef CHANNEL_RDPEAR_SERVER */
 /* #undef CHANNEL_RDPEWA */
 /* #undef CHANNEL_RDPEWA_CLIENT */
 /* #undef CHANNEL_RDPEWA_SERVER */
-#define CHANNEL_RDPEI
-#define CHANNEL_RDPEI_CLIENT
-#define CHANNEL_RDPEI_SERVER
-#define CHANNEL_RDPGFX
-#define CHANNEL_RDPGFX_CLIENT
-#define CHANNEL_RDPGFX_SERVER
+/* #undef CHANNEL_RDPEI */
+/* #undef CHANNEL_RDPEI_CLIENT */
+/* #undef CHANNEL_RDPEI_SERVER */
+/* #undef CHANNEL_RDPGFX */
+/* #undef CHANNEL_RDPGFX_CLIENT */
+/* #undef CHANNEL_RDPGFX_SERVER */
 /** If defined mouse cursor channel support is available.
  *
  *  \since version 3.0.0
  */
-#define CHANNEL_RDPEMSC
+/* #undef CHANNEL_RDPEMSC */
 
 /** If defined mouse cursor channel support is available.
  *
@@ -166,33 +166,33 @@
  *
  *  \since version 3.0.0
  */
-#define CHANNEL_RDPEMSC_SERVER
-#define CHANNEL_RDPSND
-#define CHANNEL_RDPSND_CLIENT
-#define CHANNEL_RDPSND_SERVER
-#define CHANNEL_REMDESK
-#define CHANNEL_REMDESK_CLIENT
-#define CHANNEL_REMDESK_SERVER
-#define CHANNEL_SERIAL
+/* #undef CHANNEL_RDPEMSC_SERVER */
+/* #undef CHANNEL_RDPSND */
+/* #undef CHANNEL_RDPSND_CLIENT */
+/* #undef CHANNEL_RDPSND_SERVER */
+/* #undef CHANNEL_REMDESK */
+/* #undef CHANNEL_REMDESK_CLIENT */
+/* #undef CHANNEL_REMDESK_SERVER */
+/* #undef CHANNEL_SERIAL */
 /* #undef CHANNEL_SERIAL_CLIENT */
 /* #undef CHANNEL_SERIAL_SERVER */
-#define CHANNEL_SMARTCARD
-#define CHANNEL_SMARTCARD_CLIENT
+/* #undef CHANNEL_SMARTCARD */
+/* #undef CHANNEL_SMARTCARD_CLIENT */
 /* #undef CHANNEL_SMARTCARD_SERVER */
 /* #undef CHANNEL_SSHAGENT */
 /* #undef CHANNEL_SSHAGENT_CLIENT */
 /* #undef CHANNEL_SSHAGENT_SERVER */
-#define CHANNEL_TELEMETRY
+/* #undef CHANNEL_TELEMETRY */
 /* #undef CHANNEL_TELEMETRY_CLIENT */
-#define CHANNEL_TELEMETRY_SERVER
+/* #undef CHANNEL_TELEMETRY_SERVER */
 /* #undef CHANNEL_TSMF */
 /* #undef CHANNEL_TSMF_CLIENT */
 /* #undef CHANNEL_TSMF_SERVER */
 /* #undef CHANNEL_URBDRC */
 /* #undef CHANNEL_URBDRC_CLIENT */
 /* #undef CHANNEL_URBDRC_SERVER */
-#define CHANNEL_VIDEO
-#define CHANNEL_VIDEO_CLIENT
+/* #undef CHANNEL_VIDEO */
+/* #undef CHANNEL_VIDEO_CLIENT */
 /* #undef CHANNEL_VIDEO_SERVER */
 
 /* Debug */
@@ -239,7 +239,7 @@
  * \since version 3.17.2
  */
 #if !defined(WITHOUT_FREERDP_3x_DEPRECATED)
-/* #undef WITHOUT_FREERDP_3x_DEPRECATED */
+#define WITHOUT_FREERDP_3x_DEPRECATED
 #endif
 
 /** Build FILE_DIRECTORY_INFORMATION::FileName with type WCHAR instead of char

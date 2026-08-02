@@ -43,42 +43,26 @@ enum CrossNetworkTenantIdentifierPolicy {
         sessionTenantID: String?,
         sessionUserIdentifier: String?
     ) throws -> String {
-        let explicitTenant = try normalizedLocalIdentity(explicitTenantID)
-        let sessionTenant = try normalizedLocalIdentity(sessionTenantID)
-        let sessionUser = try normalizedLocalIdentity(sessionUserIdentifier)
-        if let explicitTenant, let sessionTenant, explicitTenant != sessionTenant {
-            throw ResolutionError.tenantIdentityMismatch
+        guard let token = try normalizedAccessToken(accessToken),
+              let jwtIdentity = try validatedJWTIdentity(accessToken: token) else {
+            throw ResolutionError.invalidJWTClaims
         }
-
-        let declaredTenant = explicitTenant ?? sessionTenant
-        guard let token = try normalizedAccessToken(accessToken) else {
-            if declaredTenant != nil {
-                throw ResolutionError.missingTenantClaim
-            }
-            return ""
-        }
-        guard let jwtIdentity = try validatedJWTIdentity(accessToken: token) else {
-            if declaredTenant != nil {
-                throw ResolutionError.missingTenantClaim
-            }
-            return sessionUser ?? ""
-        }
-
-        if let sessionUser, sessionUser != jwtIdentity.subject {
+        if let sessionUser = try normalizedLocalIdentity(sessionUserIdentifier),
+           sessionUser != jwtIdentity.subject {
             throw ResolutionError.userIdentityMismatch
         }
-
-        if let declaredTenant {
-            guard let tokenTenant = jwtIdentity.tenantID else {
-                throw ResolutionError.missingTenantClaim
-            }
-            guard tokenTenant == declaredTenant else {
-                throw ResolutionError.tenantIdentityMismatch
-            }
-            return tokenTenant
+        let expectedTenants = Set(
+            try [explicitTenantID, sessionTenantID].compactMap(normalizedLocalIdentity)
+        )
+        guard expectedTenants.count <= 1 else {
+            throw ResolutionError.tenantIdentityMismatch
         }
-
-        return jwtIdentity.tenantID ?? jwtIdentity.subject
+        let effectiveTenant = jwtIdentity.tenantID ?? jwtIdentity.subject
+        if let expectedTenant = expectedTenants.first,
+           expectedTenant != effectiveTenant {
+            throw ResolutionError.tenantIdentityMismatch
+        }
+        return effectiveTenant
     }
 
     static func resolveAuthenticatedIdentity(
@@ -163,11 +147,7 @@ enum CrossNetworkTenantIdentifierPolicy {
             appMetadata?["tenant_id"],
             appMetadata?["tenantId"],
             appMetadata?["org_id"],
-            appMetadata?["workspace_id"],
-            claims["tenant_id"],
-            claims["tenantId"],
-            claims["org_id"],
-            claims["workspace_id"]
+            appMetadata?["workspace_id"]
         ]
         let tenantValues = try Set(tenantCandidates.compactMap(validatedClaim))
         guard tenantValues.count <= 1 else {

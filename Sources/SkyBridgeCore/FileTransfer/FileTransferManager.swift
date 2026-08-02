@@ -130,6 +130,11 @@ actor ClassicTransferResumeStore {
     private static let privateDirectoryMode = mode_t(0o700)
     private static let privateFileMode = mode_t(0o600)
     private static let lockFileName = ".resume-store.lock"
+    /// POSIX record locks are process-associated, so two descriptors opened by
+    /// different store actors in this process do not serialize each other. Keep
+    /// this process lock in addition to the on-disk lock, which still coordinates
+    /// with other processes.
+    private static let processLock = NSLock()
     private static let maximumFutureClockSkew: TimeInterval = 5 * 60
     private let baseDirectoryOverride: URL?
     private let partialDirectoryOverride: URL?
@@ -578,6 +583,9 @@ actor ClassicTransferResumeStore {
     private func withResumeDirectory<Result>(
         _ operation: (Int32, URL) throws -> Result
     ) throws -> Result {
+        Self.processLock.lock()
+        defer { Self.processLock.unlock() }
+
         let directoryURL = try resumeDirectoryURL()
         let directoryFD = try openResumeDirectory()
         let lockFD: Int32
@@ -1541,7 +1549,7 @@ public class FileTransferManager: BaseManager {
     private var maxTransferSpeedBytesPerSecond: Double?
     private var automaticResumeEnabled = true
     private var virusScanEnabled: Bool = false
-    private var currentScanLevel: FileScanService.ScanLevel = .standard
+    private var currentScanLevel: FileScanLevel = .standard
     private var keepTransferHistory: Bool = true
     private var keepSystemAwakeDuringTransfer: Bool = false
     private var receiveBaseDirectory: URL?
@@ -1912,7 +1920,7 @@ public class FileTransferManager: BaseManager {
 
     public func updateSecuritySettings(
         virusScanEnabled: Bool? = nil,
-        scanLevel: FileScanService.ScanLevel? = nil
+        scanLevel: FileScanLevel? = nil
     ) {
         if let virusScanEnabled {
             self.virusScanEnabled = virusScanEnabled
@@ -2145,20 +2153,35 @@ public class FileTransferManager: BaseManager {
         logger.info(
             "🛡️ 开始扫描接收文件: level=\(self.currentScanLevel.rawValue, privacy: .public)"
         )
-        let configuration = FileScanService.ScanConfiguration(level: self.currentScanLevel)
+#if os(macOS)
+        let configuration = FileScanConfiguration(level: self.currentScanLevel)
         let result = await FileScanService.shared.scanFile(at: url, configuration: configuration)
+#else
+        // 扫描器实现依赖 macOS 专属能力（隔离属性 xattr、SecCode 代码签名、Process），
+        // 其它平台没有对应物。既然扫描是**用户已启用**的安全特性，这里必须 fail-closed：
+        // 报 `.unknown`（既有语义为「无法确定」，`isSafe` 为 false），让文件按未通过扫描处理，
+        // 而不是静默跳过 —— 静默跳过会让「开启扫描」与「未开启扫描」在本平台行为一致。
+        logger.error(
+            "⛔️ 已启用文件扫描，但本平台没有可用的扫描器实现；按未通过扫描处理"
+        )
+        let result = FileScanResult(
+            fileURL: url,
+            verdict: .unknown,
+            methodsUsed: [],
+            scanLevel: self.currentScanLevel
+        )
+#endif
 
-        if !result.isSafe {
-            logger.warning("🚨 接收文件扫描命中威胁")
-            NotificationCenter.default.post(
-                name: .fileThreatDetected,
-                object: nil,
-                userInfo: [
-                    "fileURL": url,
-                    "threatName": result.threatName ?? "Unknown",
-                    "scanMethod": result.scanMethod.rawValue
-                ]
-            )
+        if case .block(let reason) = result.automaticTransferAdmission {
+            switch reason {
+            case .unsafe:
+                logger.warning("🚨 接收文件扫描命中威胁")
+            case .reviewRequired, .incomplete:
+                logger.warning(
+                    "⛔️ 接收文件扫描未满足自动放行条件: verdict=\(result.verdict.rawValue, privacy: .public)"
+                )
+            }
+            postAutomaticTransferScanRejection(result: result, fileURL: url)
         }
 
         return result
@@ -2510,7 +2533,9 @@ public class FileTransferManager: BaseManager {
         preferredDeviceName: String? = nil
     ) async -> [ActivePeerRoute] {
         var routes: [ActivePeerRoute] = []
+        #if os(macOS)
         var usedCompatibilityFallback = false
+        #endif
         let targetAliases = Self.normalizedActiveRouteAliases(for: targetPeerIds)
         let normalizedPreferredName = Self.normalizedRouteDisplayName(preferredDeviceName)
 
@@ -2568,7 +2593,7 @@ public class FileTransferManager: BaseManager {
                 peerId: candidate.resolvedPeerDeviceId,
                 endpointLabel: endpointAddress.map { "host:\($0)" } ?? candidate.matchDeviceId,
                 discoveredDevices: P2PDiscoveryService.shared.discoveredDevices,
-                unifiedDevices: UnifiedOnlineDeviceManager.shared.onlineDevices
+                unifiedDevices: UnifiedOnlineDeviceSnapshotAccess.snapshot()
             )
             let port = ClassicTransferPeerResolutionPolicy.advertisedClassicTransferPort(in: candidate.capabilities)
                 ?? (resolved.transferPort > 0 ? resolved.transferPort : nil)
@@ -2620,12 +2645,14 @@ public class FileTransferManager: BaseManager {
             )
         }
 
+        #if os(macOS)
         if #available(macOS 14.0, *) {
-            let connectedDevices = UnifiedOnlineDeviceManager.shared.onlineDevices
+            let connectedDevices = UnifiedOnlineDeviceSnapshotAccess.snapshot()
                 .filter { !$0.isLocalDevice && $0.connectionStatus == .connected }
                 .sorted { ($0.lastConnectedAt ?? .distantPast) > ($1.lastConnectedAt ?? .distantPast) }
             for device in connectedDevices {
-                guard let transferPort = device.portMap["_skybridge-transfer._tcp"],
+                guard let transferPort = device.portMap[BonjourInteropContract.fileTransferServiceType]
+                        ?? device.portMap[BonjourInteropContract.legacyFileTransferServiceType],
                       (1...65535).contains(transferPort) else {
                     continue
                 }
@@ -2639,10 +2666,13 @@ public class FileTransferManager: BaseManager {
                 )
             }
         }
+        #endif
 
+        #if os(macOS)
         if usedCompatibilityFallback, !routeDescriptors.isEmpty {
             logger.warning("⚠️ 文件传输路由解析回退到兼容路径；首选应来自 PresenceRouteDescriptor")
         }
+        #endif
 
         let deduplicatedRoutes = Self.deduplicatedActivePeerRoutes(routes)
         guard !targetAliases.isEmpty || !normalizedPreferredName.isEmpty else {
@@ -3294,7 +3324,7 @@ public class FileTransferManager: BaseManager {
         defer { releaseTransferSlot() }
         let destinationDirectory = try await preparedInboundDestinationDirectory()
         try ensureCurrentLifecycle(lifecycleGeneration)
-        let stagingURL = Self.classicInboundPartialURL()
+        let stagingURL = try Self.classicInboundPartialURL()
         do {
             try await InboundFileTransferIOActor.shared.validateSameVolumeCommit(
                 stagingURL: stagingURL,
@@ -3374,10 +3404,8 @@ public class FileTransferManager: BaseManager {
             if let scanResult = await scanReceivedFileIfEnabled(stagingURL) {
                 transfer.scanResult = scanResult
                 logClassicReceiptPhase("post_receive_scan_completed", transferId: transfer.id)
-                if !scanResult.isSafe {
-                    throw FileTransferError.securityThreatDetected(
-                        threatName: scanResult.threatName ?? "未知威胁"
-                    )
+                if case .block(let reason) = scanResult.automaticTransferAdmission {
+                    throw reason.managerError
                 }
             } else if virusScanEnabled {
                 logClassicReceiptPhase("post_receive_scan_completed", transferId: transfer.id)
@@ -3720,7 +3748,7 @@ public class FileTransferManager: BaseManager {
         do {
             let ioHandle = try await InboundFileTransferIOActor.shared.resumeTemporaryFile(
                 at: localURL,
-                isolatedDirectory: Self.classicInboundPartialDirectory(),
+                isolatedDirectory: try Self.classicInboundPartialDirectory(),
                 declaredFileSize: resumeRecord.fileSize,
                 resumeOffset: acceptedOffset
             )
@@ -3758,10 +3786,8 @@ public class FileTransferManager: BaseManager {
             if let scanResult = await scanReceivedFileIfEnabled(localURL) {
                 transfer.scanResult = scanResult
                 logClassicReceiptPhase("post_receive_scan_completed", transferId: transfer.id)
-                guard scanResult.isSafe else {
-                    throw FileTransferError.securityThreatDetected(
-                        threatName: scanResult.threatName ?? "未知威胁"
-                    )
+                if case .block(let reason) = scanResult.automaticTransferAdmission {
+                    throw reason.managerError
                 }
             } else if virusScanEnabled {
                 logClassicReceiptPhase("post_receive_scan_completed", transferId: transfer.id)
@@ -4438,7 +4464,7 @@ public class FileTransferManager: BaseManager {
                     if didSuspendHandle {
                         try await InboundFileTransferIOActor.shared.discardSuspendedPartial(
                             at: partialURL,
-                            isolatedDirectory: Self.classicInboundPartialDirectory()
+                            isolatedDirectory: try Self.classicInboundPartialDirectory()
                         )
                     } else {
                         try await InboundFileTransferIOActor.shared.discard(ioHandle)
@@ -4455,7 +4481,7 @@ public class FileTransferManager: BaseManager {
             do {
                 try await InboundFileTransferIOActor.shared.discardSuspendedPartial(
                     at: partialURL,
-                    isolatedDirectory: Self.classicInboundPartialDirectory()
+                    isolatedDirectory: try Self.classicInboundPartialDirectory()
                 )
             } catch {
                 partialCleanupFailed = true
@@ -4525,7 +4551,7 @@ public class FileTransferManager: BaseManager {
             do {
                 try await InboundFileTransferIOActor.shared.discardSuspendedPartial(
                     at: partialURL,
-                    isolatedDirectory: Self.classicInboundPartialDirectory()
+                    isolatedDirectory: try Self.classicInboundPartialDirectory()
                 )
                 transfer.classicResumeSourcePath = nil
             } catch {
@@ -4681,7 +4707,7 @@ public class FileTransferManager: BaseManager {
             let snap = try await SelfIdentityProvider.shared
                 .snapshotEnsuringProtocolDeviceId(allowCreate: true)
             senderDeviceId = snap.deviceId
-            senderDeviceName = Host.current().localizedName
+            senderDeviceName = LocalHostName.localizedName
             senderPlatform = "macOS"
             senderOSVersion = ProcessInfo.processInfo.operatingSystemVersionString
             senderModelName = "Mac"
@@ -5561,36 +5587,36 @@ public class FileTransferManager: BaseManager {
         FileTransferPathPolicy.sanitizedFileName(raw)
     }
 
-    private static func classicInboundPartialDirectory() -> URL {
-        let cacheDirectory = FileManager.default.urls(
-            for: .cachesDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches", isDirectory: true)
-        return cacheDirectory
-            .appendingPathComponent("SkyBridge/ClassicInboundPartials", isDirectory: true)
+    private static func classicInboundPartialDirectory() throws -> URL {
+        guard let directory = FileTransferDirectoryLayout.classicInboundPartialDirectory() else {
+            throw InboundFileTransferIOError.destinationUnavailable
+        }
+        return directory
     }
 
-    private static func classicInboundPartialURL() -> URL {
-        classicInboundPartialDirectory().appendingPathComponent(
+    private static func classicInboundPartialURL() throws -> URL {
+        try classicInboundPartialDirectory().appendingPathComponent(
             ".skybridge-classic-\(UUID().uuidString).partial",
             isDirectory: false
         )
     }
 
     private static func isIsolatedClassicInboundPartial(_ url: URL) -> Bool {
-        url.standardizedFileURL.deletingLastPathComponent().path
-            == classicInboundPartialDirectory().standardizedFileURL.path
+        guard let directory = FileTransferDirectoryLayout.classicInboundPartialDirectory() else {
+            return false
+        }
+        return url.standardizedFileURL.deletingLastPathComponent().path
+            == directory.standardizedFileURL.path
             && url.lastPathComponent.hasPrefix(".skybridge-classic-")
             && url.pathExtension == "partial"
     }
 
     private func preparedInboundDestinationDirectory() async throws -> URL {
-        let candidates = [
-            receiveBaseDirectory,
-            Self.defaultReceiveDirectory(),
-            Self.appSupportReceiveDirectory()
-        ].compactMap { $0 }
+        let candidates = FileTransferDirectoryLayout.receiveDirectoryCandidates(
+            explicitDirectory: receiveBaseDirectory,
+            defaultDirectory: Self.defaultReceiveDirectory(),
+            applicationSupportDirectory: Self.appSupportReceiveDirectory()
+        )
         let directory = try await InboundFileTransferIOActor.shared.prepareFirstWritableDirectory(
             from: candidates
         )
@@ -5604,19 +5630,12 @@ public class FileTransferManager: BaseManager {
         digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func defaultReceiveDirectory() -> URL {
-        let base = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
-        return base.appendingPathComponent("SkyBridge", isDirectory: true)
+    private static func defaultReceiveDirectory() -> URL? {
+        FileTransferDirectoryLayout.defaultReceiveDirectory()
     }
 
-    private static func appSupportReceiveDirectory() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return base
-            .appendingPathComponent("SkyBridge", isDirectory: true)
-            .appendingPathComponent("Received Files", isDirectory: true)
+    private static func appSupportReceiveDirectory() -> URL? {
+        FileTransferDirectoryLayout.applicationSupportReceiveDirectory()
     }
 
     // MARK: - External (non-NWConnection) transfers (WebRTC DataChannel)

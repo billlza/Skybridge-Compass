@@ -15,9 +15,8 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
  // MARK: - 私有属性
     private let logger = Logger(subsystem: "com.skybridge.transfer", category: "Network")
     private var listener: NWListener?
-    private let serviceType = "_skybridge-transfer._tcp"
+    private let serviceType = BonjourInteropContract.fileTransferServiceType
     private let serviceDomain = "local."
-    private var netService: NetService?
     private var cancellables = Set<AnyCancellable>()
 
  // 连接管理
@@ -41,10 +40,14 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
  // MARK: - 公共方法
 
  /// 启动文件传输服务监听
-    public func startListening() throws {
+    public func startListening() async throws {
         guard !isListening else { return }
 
         logger.info("🚀 启动文件传输服务监听")
+
+        let identity = try await CanonicalBonjourAdvertisementIdentityProvider.current(
+            allowCreateDeviceId: true
+        )
 
  // 创建TCP监听器
         let parameters = NWParameters.tcp
@@ -57,27 +60,36 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             tcp.keepaliveCount = 4
         }
 
-        listener = try NWListener(using: parameters)
+        let activeListener = try NWListener(using: parameters)
+        activeListener.service = NWListener.Service(
+            name: LocalHostName.localizedName ?? "Mac",
+            type: serviceType,
+            domain: serviceDomain,
+            txtRecord: try BonjourInteropContract.makeCanonicalAdvertisementTXT(
+                deviceId: identity.deviceId,
+                pubKeyFingerprint: identity.protocolPublicKeyFingerprint,
+                platform: .macOS,
+                role: .dedicatedService
+            )
+        )
+        listener = activeListener
 
  // 设置新连接处理器
-        listener?.newConnectionHandler = { [weak self] connection in
+        activeListener.newConnectionHandler = { [weak self] connection in
             Task { @MainActor in
                 await self?.handleNewConnection(connection)
             }
         }
 
  // 设置状态更新处理器
-        listener?.stateUpdateHandler = { [weak self] state in
+        activeListener.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
                 await self?.handleListenerStateChange(state)
             }
         }
 
  // 启动监听器
-        listener?.start(queue: connectionQueue)
-
- // 注册Bonjour服务
-        try registerBonjourService()
+        activeListener.start(queue: connectionQueue)
 
         isListening = true
         logger.info("✅ 文件传输服务监听已启动")
@@ -93,12 +105,10 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         logger.info("🛑 停止文件传输服务监听")
 
  // 停止监听器
+        listener?.stateUpdateHandler = nil
+        listener?.newConnectionHandler = nil
         listener?.cancel()
         listener = nil
-
- // 取消Bonjour服务
-        netService?.stop()
-        netService = nil
 
  // 关闭所有活动连接
         cancelAllConnections()
@@ -301,39 +311,6 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
 
  // MARK: - 私有方法
 
- /// 注册Bonjour服务
-    private func registerBonjourService() throws {
-        guard let port = listener?.port?.rawValue else {
-            throw FileTransferNetworkError.invalidPort
-        }
-
-        let txtRecord = Self.makeBonjourTXTRecord(
-            deviceName: Host.current().localizedName ?? "Unknown",
-            port: port
-        )
-
-        let txtData = NetService.data(fromTXTRecord: txtRecord)
-
- // 创建并启动NetService
-        netService = NetService(domain: serviceDomain, type: self.serviceType, name: "", port: Int32(port))
-        netService?.setTXTRecord(txtData)
-        netService?.delegate = self
-        netService?.publish()
-
-        logger.info("📡 Bonjour服务已注册: \(self.serviceType) 端口: \(port)")
-    }
-
-    nonisolated static func makeBonjourTXTRecord(deviceName: String, port: UInt16) -> [String: Data] {
-        var record: [String: Data] = [
-            "version": Data("1.0".utf8),
-            "device": Data(deviceName.utf8),
-            "name": Data(deviceName.utf8),
-            "platform": Data("macos".utf8)
-        ]
-        BonjourInteropContract.attachFileTransferAdvertisementTXT(to: &record, port: port)
-        return record
-    }
-
  /// 处理新连接
     private func handleNewConnection(_ connection: NWConnection) async {
         logger.info("📞 收到新的文件传输连接")
@@ -488,26 +465,6 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
 
         let type = MessageType(rawValue: typeValue) ?? .unknown
         return (type: type, length: Int(lengthValue))
-    }
-}
-
-// MARK: - NetService Delegate
-
-extension FileTransferNetworkService: NetServiceDelegate {
-    nonisolated public func netServiceDidPublish(_ sender: NetService) {
-        Task { @MainActor in
-            self.logger.info("✅ Bonjour服务发布成功")
-        }
-    }
-
-    nonisolated public func netService(_ sender: NetService, didNotPublish errorDict: [String : NSNumber]) {
-        // Snapshot the delegate error payload into a Sendable value before hopping
-        // to the main actor; [String: NSNumber] is not Sendable and cannot be
-        // captured directly by the @MainActor closure under Swift 6 strict concurrency.
-        let failureDescription = errorDict.mapValues(\.stringValue)
-        Task { @MainActor in
-            self.logger.error("❌ Bonjour服务发布失败: \(failureDescription)")
-        }
     }
 }
 

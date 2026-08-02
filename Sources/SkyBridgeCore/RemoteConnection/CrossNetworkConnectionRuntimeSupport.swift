@@ -5,7 +5,7 @@ import Network
 
 enum CrossNetworkConnectionRuntimeSupport {
     static func deviceFingerprint(
-        localizedName: String? = Host.current().localizedName,
+        localizedName: String? = LocalHostName.localizedName,
         hostName: String = ProcessInfo.processInfo.hostName
     ) -> String {
         let deviceInfo = "\(localizedName ?? "")\(hostName)"

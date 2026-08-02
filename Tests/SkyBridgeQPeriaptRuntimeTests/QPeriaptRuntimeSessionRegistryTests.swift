@@ -146,7 +146,7 @@ final class QPeriaptRuntimeSessionRegistryTests: XCTestCase {
         var bigEndianVersion = version.bigEndian
         withUnsafeBytes(of: &bigEndianVersion) { encoded.append(contentsOf: $0) }
         encoded.append(Data(repeating: digestByte, count: 32))
-        return QPeriaptRuntimeSession(
+        return try QPeriaptRuntimeSession(
             decision: try QPeriaptPolicyDecision(validating: encoded),
             trustRootIdentifier: trustRootIdentifier,
             trustRootFingerprint: Data(repeating: rootFingerprintByte, count: 32)

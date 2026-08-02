@@ -474,6 +474,7 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(contextHelper.contains("SignalServerClient.AuthenticatedRequestContext("))
         #expect(contextHelper.contains("userID: identity.userID"))
         #expect(!factory.contains("bearerTokenProvider:"))
+        #expect(!source.contains("sessionTenantID: session?.nebulaId"))
         #expect(initializer.contains("self.signalServer = Self.makeAuthenticatedSignalServerClient()"))
         #expect(!initializer.contains("authenticatedRequestContextProvider:"))
     }

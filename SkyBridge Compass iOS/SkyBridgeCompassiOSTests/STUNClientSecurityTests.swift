@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import enum SkyBridgeProtocolCore.STUNMessageCodec
+import struct SkyBridgeProtocolCore.STUNMappedAddress
 import XCTest
 
 @testable import SkyBridgeCompass_iOS

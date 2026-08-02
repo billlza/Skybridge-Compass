@@ -986,14 +986,25 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
     }
 
     private func isSelfSignedCertificate(_ certificate: SecCertificate) -> Bool {
+#if !os(macOS)
+        // 判定自签需要读取 Subject/Issuer DN，而 `SecCertificateCopyValues` 与 `kSecOID*` 仅 macOS 可用，
+        // iOS 没有等价公开 API。无法验证时返回 false（fail-closed）：
+        // 调用方 `validatePinnedSelfSignedLocalCertificateContract` 会因此判定该 pinned 契约不成立，
+        // 而不是把一张无法核验的证书当成已核验。
+        _ = certificate
+        return false
+#else
         guard let subject = certificateNameEntries(certificate, oid: kSecOIDX509V1SubjectName),
               let issuer = certificateNameEntries(certificate, oid: kSecOIDX509V1IssuerName),
               !subject.isEmpty else {
             return false
         }
         return subject == issuer
+#endif
     }
 
+#if os(macOS)
+    // macOS-only：依赖 SecCertificateCopyValues 与 kSecOID* 常量。
     private func certificateNameEntries(_ certificate: SecCertificate, oid: CFString) -> [String]? {
         guard let values = SecCertificateCopyValues(certificate, [oid] as CFArray, nil) as? [CFString: Any],
               let valueDict = values[oid] as? [CFString: Any],
@@ -1009,6 +1020,7 @@ public class TLSSecurityManager: ObservableObject, @unchecked Sendable {
             return "\(label)=\(String(describing: value))"
         }
     }
+#endif
 
  /// C 字符串安全解码为 Swift 字符串（避免使用不推荐API）
     private func decodeCString(_ cstr: UnsafePointer<CChar>) -> String {

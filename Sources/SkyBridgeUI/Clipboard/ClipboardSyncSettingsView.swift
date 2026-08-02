@@ -50,6 +50,12 @@ public struct ClipboardSyncSettingsView: View {
                     .disabled(!syncService.isEnabled)
 
                 maxSizeRow
+
+                if syncService.clipboardContentSizeWasMigrated {
+                    Text("旧版的大剪贴板设置已迁移到 750 KiB 安全上限；更大内容请使用文件传输。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             } header: {
                 Label("同步内容", systemImage: "square.and.arrow.up.on.square")
             }
@@ -142,10 +148,9 @@ public struct ClipboardSyncSettingsView: View {
                 get: { syncService.configuration.maxContentSize },
                 set: { syncService.configuration.maxContentSize = $0 }
             )) {
-                Text("1 MB").tag(1 * 1024 * 1024)
-                Text("5 MB").tag(5 * 1024 * 1024)
-                Text("10 MB").tag(10 * 1024 * 1024)
-                Text("25 MB").tag(25 * 1024 * 1024)
+                Text("256 KB").tag(256 * 1024)
+                Text("512 KB").tag(512 * 1024)
+                Text("750 KiB").tag(750 * 1024)
             }
             .pickerStyle(.menu)
             .frame(width: 100)

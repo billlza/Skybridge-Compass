@@ -1,8 +1,35 @@
 import CryptoKit
 import Network
 import os
+import Security
 import XCTest
 @testable import SkyBridgeCompass_iOS
+
+final class ProtocolIdentityKeychainPolicyTests: XCTestCase {
+    func testLegacyClassProbeContinuesOnlyForExplicitClassMismatchStatuses() {
+        XCTAssertTrue(
+            IOSProtocolIdentityKeychainStore.shouldContinueLegacyClassProbe(
+                after: errSecItemNotFound
+            )
+        )
+        XCTAssertTrue(
+            IOSProtocolIdentityKeychainStore.shouldContinueLegacyClassProbe(
+                after: errSecNoSuchClass
+            )
+        )
+        XCTAssertFalse(
+            IOSProtocolIdentityKeychainStore.shouldContinueLegacyClassProbe(
+                after: errSecMissingEntitlement
+            )
+        )
+        XCTAssertFalse(
+            IOSProtocolIdentityKeychainStore.shouldContinueLegacyClassProbe(
+                after: errSecInteractionNotAllowed
+            )
+        )
+    }
+
+}
 
 final class AppleMobileDeviceIdentityTests: XCTestCase {
     private enum ListenerIdentityFailure: Error {
@@ -98,8 +125,15 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
         XCTAssertTrue(discovery.contains("authority: ProtocolIdentitySnapshot"))
         XCTAssertTrue(discovery.contains("validatedAuthority.deviceId"))
         XCTAssertTrue(discovery.contains("advertisingAuthority = authority"))
-        XCTAssertTrue(discovery.contains("record[\"protocolSigningAlgorithm\"]"))
-        XCTAssertTrue(discovery.contains("record[\"identityFingerprint\"]"))
+        XCTAssertTrue(
+            discovery.contains(
+                "protocolIdentityFingerprint: validatedAuthority.protocolPublicKeyFingerprint"
+            )
+        )
+        XCTAssertTrue(discovery.contains("Self.primaryBonjourInteropAdvertisementFields("))
+        XCTAssertTrue(discovery.contains("record[key] = value"))
+        XCTAssertFalse(discovery.contains("fields[\"protocolSigningAlgorithm\"]"))
+        XCTAssertFalse(discovery.contains("record[\"identityFingerprint\"]"))
 
         let p2pManager = try loadSource(
             "SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
@@ -113,18 +147,45 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
         let transfer = try loadSource(
             "SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift"
         )
-        XCTAssertTrue(transfer.contains("currentProtocolIdentitySnapshot()"))
+        XCTAssertTrue(transfer.contains("IOSCurrentPathAuthorityReadinessGate.shared.ensureReady()"))
+        XCTAssertTrue(transfer.contains("committedActiveProtocolIdentitySnapshot()"))
         XCTAssertTrue(transfer.contains("protocolIdentityFingerprint:"))
+        XCTAssertTrue(
+            transfer.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields(")
+        )
+        XCTAssertTrue(transfer.contains("role: .dedicatedService"))
+        let performStart = try XCTUnwrap(
+            transfer.range(of: "private func performStart(")
+        )
+        let makeService = try XCTUnwrap(
+            transfer.range(
+                of: "private func makeBonjourService(",
+                range: performStart.upperBound..<transfer.endIndex
+            )
+        )
+        let performStartBody = String(
+            transfer[performStart.lowerBound..<makeService.lowerBound]
+        )
         let transferIdentityOffset = try XCTUnwrap(
-            transfer.range(of: "currentProtocolIdentitySnapshot()")?.lowerBound
+            performStartBody.range(
+                of: "protocolIdentity = try await protocolIdentityResolver()"
+            )?.lowerBound
+        )
+        let transferServiceOffset = try XCTUnwrap(
+            performStartBody.range(of: "let advertisedService = try makeBonjourService(")?.lowerBound
         )
         let transferListenerOffset = try XCTUnwrap(
-            transfer.range(of: "listener = try listenerFactory(")?.lowerBound
+            performStartBody.range(of: "let newListener = try listenerFactory(")?.lowerBound
         )
         XCTAssertLessThan(
             transferIdentityOffset,
+            transferServiceOffset,
+            "The committed authority must be resolved before creating Bonjour metadata"
+        )
+        XCTAssertLessThan(
+            transferServiceOffset,
             transferListenerOffset,
-            "Cancellation or identity failure must occur before listener allocation"
+            "Identity validation and Bonjour metadata creation must occur before listener allocation"
         )
 
         let models = try loadSource("SkyBridgeCompassiOS/Sources/Models.swift")
@@ -275,6 +336,32 @@ final class ProtocolDeviceIdentityAuthorityTests: XCTestCase {
     private enum TestFailure: Error {
         case generatedUnexpectedly
         case invalidKeyMaterial
+    }
+
+    func testResolvedSnapshotUsesCanonicalAlgorithmTaggedFingerprint() async throws {
+        let material = Self.ed25519Material()
+        let store = ProtocolIdentityTestStore(
+            defaultsDeviceIds: ["ios-fingerprint-device"]
+        )
+        let authority = ProtocolDeviceIdentityAuthority { store }
+
+        let resolved = try await authority.resolveSigningIdentity(
+            for: .ed25519,
+            keyProtection: .softwareKeychain,
+            generate: { material },
+            validate: Self.validateEd25519,
+            decodeLegacy: Self.decodeLegacyEd25519
+        )
+        let expected = ProtocolIdentityPublicKeys(
+            protocolPublicKey: material.publicKey,
+            protocolAlgorithm: .ed25519
+        ).authoritativeFingerprint.lowercased()
+        let legacyRawKeyDigest = SHA256.hash(data: material.publicKey)
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        XCTAssertEqual(resolved.snapshot.signingPublicKeyFingerprint, expected)
+        XCTAssertNotEqual(resolved.snapshot.signingPublicKeyFingerprint, legacyRawKeyDigest)
     }
 
     func testFiftyConcurrentResolutionsGenerateOnceAndReturnOneTuple() async throws {

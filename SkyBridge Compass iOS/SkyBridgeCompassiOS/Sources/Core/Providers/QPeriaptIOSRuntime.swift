@@ -139,12 +139,15 @@ enum QPeriaptHandshakeAdmissionSnapshot: Sendable, Equatable {
               qPeriaptProvider.qPeriaptTrustRootFingerprint == trustRootFingerprint else {
             return QPeriaptRejectedHandshakeCryptoProvider(base: provider)
         }
-        return QPeriaptFrozenHandshakeCryptoProvider(
+        guard let frozenProvider = QPeriaptFrozenHandshakeCryptoProvider(
             base: qPeriaptProvider,
             authProfile: authProfile,
             trustRootFingerprint: trustRootFingerprint,
             protocolIdentityConfiguration: protocolIdentityConfiguration
-        )
+        ) else {
+            return QPeriaptRejectedHandshakeCryptoProvider(base: provider)
+        }
+        return frozenProvider
     }
 
     func isPeerEligible(_ capabilities: CryptoCapabilities) -> Bool {
@@ -176,14 +179,16 @@ private struct QPeriaptFrozenHandshakeCryptoProvider:
     var activeSuite: CryptoSuite { base.activeSuite }
     var supportedSuites: [CryptoSuite] { base.supportedSuites }
 
-    init(
+    init?(
         base: any QPeriaptRuntimeBoundCryptoProvider,
         authProfile: String,
         trustRootFingerprint: Data,
         protocolIdentityConfiguration: ProtocolIdentityConfigurationRecord
     ) {
-        precondition(base.qPeriaptAuthProfile == authProfile)
-        precondition(base.qPeriaptTrustRootFingerprint == trustRootFingerprint)
+        guard base.qPeriaptAuthProfile == authProfile,
+              base.qPeriaptTrustRootFingerprint == trustRootFingerprint else {
+            return nil
+        }
         self.base = base
         qPeriaptAuthProfile = authProfile
         qPeriaptTrustRootFingerprint = trustRootFingerprint

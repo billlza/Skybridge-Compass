@@ -102,7 +102,9 @@ enum DeviceIdentityAuthorityError: Error, LocalizedError, Sendable, Equatable {
     case candidateKeyPublicKeyMismatch
     case candidateCleanupFailed(String)
     case legacyIdentityConflictsWithAuthority
+    case legacyIdentityChangedDuringAudit
     case legacyIdentityIncomplete(String)
+    case legacyIdentityRequiresExplicitMigration
     case legacySecureEnclaveRequiresRotationAndRepinning
     case legacyPrivateKeyNotExportableRequiresRotationAndRepinning
     case immutableGenericPasswordConflict(service: String, account: String)
@@ -137,8 +139,12 @@ enum DeviceIdentityAuthorityError: Error, LocalizedError, Sendable, Equatable {
             return "Device identity candidate cleanup failed: \(reason)"
         case .legacyIdentityConflictsWithAuthority:
             return "Legacy device identity conflicts with the shared identity authority; explicit rotation and peer re-pinning are required"
+        case .legacyIdentityChangedDuringAudit:
+            return "Legacy device identity storage changed during the read-only audit"
         case .legacyIdentityIncomplete(let reason):
             return "Legacy device identity is incomplete: \(reason)"
+        case .legacyIdentityRequiresExplicitMigration:
+            return "A legacy device identity exists and requires explicit migration into the shared identity authority"
         case .legacySecureEnclaveRequiresRotationAndRepinning:
             return "A legacy Secure Enclave identity cannot be moved into the shared app/extension namespace; explicit rotation and peer re-pinning are required"
         case .legacyPrivateKeyNotExportableRequiresRotationAndRepinning:
@@ -176,63 +182,121 @@ struct DeviceIdentityLegacyState: Equatable, Sendable {
     }
 }
 
+/// A secret-free comparison count used by the signed diagnostic host. It
+/// deliberately carries no identity bytes, identifiers, Keychain locations,
+/// or persistent references.
+struct DeviceIdentityLegacyComparisonCount: Equatable, Sendable {
+    let matching: Int
+    let conflicting: Int
+
+    var total: Int {
+        matching + conflicting
+    }
+}
+
+/// Pure reconciliation evidence. Keeping the comparison beside the validator
+/// ensures diagnostics and the fail-closed startup decision cannot drift into
+/// two different definitions of an identity match.
+struct DeviceIdentityLegacyReconciliationAudit: Equatable, Sendable {
+    let keyInfos: DeviceIdentityLegacyComparisonCount
+    let deviceIds: DeviceIdentityLegacyComparisonCount
+    let privateKeys: DeviceIdentityLegacyComparisonCount
+
+    var hasConflicts: Bool {
+        keyInfos.conflicting > 0
+            || deviceIds.conflicting > 0
+            || privateKeys.conflicting > 0
+    }
+}
+
+struct DeviceIdentityAuthorityResidueResolution: Equatable, Sendable {
+    let authority: DeviceIdentityAuthorityRecord
+    let residueAudit: DeviceIdentityLegacyReconciliationAudit
+}
+
 enum DeviceIdentityLegacyReconciliation {
-    static func reconcile(
-        _ legacy: DeviceIdentityLegacyState,
-        with authority: DeviceIdentityAuthorityRecord,
-        cleanup: () throws -> Void
-    ) throws -> DeviceIdentityAuthorityRecord {
-        try validate(legacy, matches: authority)
-        try cleanup()
-        return authority
+    /// Once the shared authority and its exact private key have been validated
+    /// by the transaction store, legacy aliases are residue rather than voters.
+    /// They are retained for rollback safety and reported without vetoing the
+    /// immutable winner.
+    static func resolveValidatedAuthority(
+        _ authority: DeviceIdentityAuthorityRecord,
+        retaining legacy: DeviceIdentityLegacyState
+    ) throws -> DeviceIdentityAuthorityResidueResolution {
+        DeviceIdentityAuthorityResidueResolution(
+            authority: authority,
+            residueAudit: try audit(legacy, against: authority)
+        )
     }
 
-    static func validate(
+    static func audit(
         _ legacy: DeviceIdentityLegacyState,
-        matches authority: DeviceIdentityAuthorityRecord
-    ) throws {
+        against authority: DeviceIdentityAuthorityRecord
+    ) throws -> DeviceIdentityLegacyReconciliationAudit {
         for keyInfo in legacy.keyInfos {
             try validateLegacyKeyInfo(keyInfo)
-            guard keyInfo.deviceId == authority.deviceId,
-                  keyInfo.publicKey == authority.publicKey,
-                  keyInfo.pubKeyFP == authority.publicKeyFingerprint,
-                  keyInfo.createdAt == authority.createdAt,
-                  keyInfo.isSecureEnclave == authority.isSecureEnclave else {
-                throw DeviceIdentityAuthorityError
-                    .legacyIdentityConflictsWithAuthority
-            }
         }
-        guard legacy.deviceIds.allSatisfy({ $0 == authority.deviceId }),
-              legacy.privateKeyMetadata.allSatisfy({ metadata in
-                  metadata.publicKey == authority.publicKey
-                      && metadata.isSecureEnclave == authority.isSecureEnclave
-              }) else {
-            throw DeviceIdentityAuthorityError
-                .legacyIdentityConflictsWithAuthority
+
+        let keyInfoMatches = legacy.keyInfos.map {
+            keyInfoMatchesAuthority($0, authority: authority)
         }
+        let deviceIdMatches = legacy.deviceIds.map {
+            $0 == authority.deviceId
+        }
+        let privateKeyMatches = legacy.privateKeyMetadata.map {
+            privateKeyMetadataMatchesAuthority($0, authority: authority)
+        }
+        return DeviceIdentityLegacyReconciliationAudit(
+            keyInfos: comparisonCount(for: keyInfoMatches),
+            deviceIds: comparisonCount(for: deviceIdMatches),
+            privateKeys: comparisonCount(for: privateKeyMatches)
+        )
     }
 
-    /// Returns the one complete legacy identity eligible for migration.
-    /// Multiple namespaces are accepted only when every identity-bearing
-    /// value is exactly equal; choosing a first candidate would permit an
-    /// app/extension race to change the published identity.
-    static func migrationKeyInfo(
+    /// Compares legacy values with one another without electing a winner. The
+    /// first validated keyInfo is a diagnostic comparison basis only; normal
+    /// migration still requires every category to be present and converged.
+    static func auditCoherenceWithoutAuthority(
+        _ legacy: DeviceIdentityLegacyState
+    ) throws -> DeviceIdentityLegacyReconciliationAudit? {
+        guard let firstKeyInfo = legacy.keyInfos.first else {
+            return nil
+        }
+        for keyInfo in legacy.keyInfos {
+            try validateLegacyKeyInfo(keyInfo)
+        }
+        let keyInfoMatches = legacy.keyInfos.map { $0 == firstKeyInfo }
+        let deviceIdMatches = legacy.deviceIds.map {
+            $0 == firstKeyInfo.deviceId
+        }
+        let privateKeyMatches = legacy.privateKeyMetadata.map {
+            $0.publicKey == firstKeyInfo.publicKey
+                && $0.isSecureEnclave == firstKeyInfo.isSecureEnclave
+        }
+        return DeviceIdentityLegacyReconciliationAudit(
+            keyInfos: comparisonCount(for: keyInfoMatches),
+            deviceIds: comparisonCount(for: deviceIdMatches),
+            privateKeys: comparisonCount(for: privateKeyMatches)
+        )
+    }
+
+    /// Recovers the last fully committed identity written by the pre-authority
+    /// implementation. That implementation persisted deviceId first, created
+    /// the private key second, and wrote keyInfo last. A valid keyInfo plus its
+    /// exact private key is therefore the commit record; standalone deviceId
+    /// and orphan fixed-tag keys are retained as incomplete rotation residue.
+    static func committedMigrationKeyInfo(
         from legacy: DeviceIdentityLegacyState
     ) throws -> DeviceIdentityKeyInfo {
-        guard let firstKeyInfo = legacy.keyInfos.first,
-              !legacy.deviceIds.isEmpty,
-              !legacy.privateKeyMetadata.isEmpty else {
+        guard let firstKeyInfo = legacy.keyInfos.first else {
             throw DeviceIdentityAuthorityError.legacyIdentityIncomplete(
-                "fixed-tag key, keyInfo, and deviceId must all be present"
+                "a committed legacy keyInfo is required"
             )
         }
-        try validateLegacyKeyInfo(firstKeyInfo)
-        guard legacy.keyInfos.allSatisfy({ $0 == firstKeyInfo }),
-              legacy.deviceIds.allSatisfy({ $0 == firstKeyInfo.deviceId }),
-              legacy.privateKeyMetadata.allSatisfy({ metadata in
-                  metadata.publicKey == firstKeyInfo.publicKey
-                      && metadata.isSecureEnclave == firstKeyInfo.isSecureEnclave
-              }) else {
+        for keyInfo in legacy.keyInfos {
+            try validateLegacyKeyInfo(keyInfo)
+        }
+        guard legacy.keyInfos.allSatisfy({ $0 == firstKeyInfo }) else {
             throw DeviceIdentityAuthorityError
                 .legacyIdentityConflictsWithAuthority
         }
@@ -243,7 +307,28 @@ enum DeviceIdentityLegacyReconciliation {
         return firstKeyInfo
     }
 
-    private static func validateLegacyKeyInfo(
+    static func uniqueCommittedMigrationPrivateKey(
+        from candidates: [DeviceIdentityLegacyPrivateKeyCandidate],
+        matching keyInfo: DeviceIdentityKeyInfo
+    ) throws -> DeviceIdentityLegacyPrivateKeyCandidate {
+        try validateLegacyKeyInfo(keyInfo)
+        let matches = candidates.filter {
+            $0.metadata.publicKey == keyInfo.publicKey
+                && $0.metadata.isSecureEnclave == keyInfo.isSecureEnclave
+        }
+        guard !matches.isEmpty else {
+            throw DeviceIdentityAuthorityError.legacyIdentityIncomplete(
+                "the committed legacy keyInfo has no matching private key"
+            )
+        }
+        guard matches.count == 1 else {
+            throw DeviceIdentityAuthorityError
+                .legacyIdentityConflictsWithAuthority
+        }
+        return matches[0]
+    }
+
+    static func validateLegacyKeyInfo(
         _ keyInfo: DeviceIdentityKeyInfo
     ) throws {
         guard keyInfo.keyType == .p256Signing,
@@ -276,6 +361,35 @@ enum DeviceIdentityLegacyReconciliation {
                 "keyInfo fingerprint does not match its public key"
             )
         }
+    }
+
+    static func keyInfoMatchesAuthority(
+        _ keyInfo: DeviceIdentityKeyInfo,
+        authority: DeviceIdentityAuthorityRecord
+    ) -> Bool {
+        keyInfo.deviceId == authority.deviceId
+            && keyInfo.publicKey == authority.publicKey
+            && keyInfo.pubKeyFP == authority.publicKeyFingerprint
+            && keyInfo.createdAt == authority.createdAt
+            && keyInfo.isSecureEnclave == authority.isSecureEnclave
+    }
+
+    static func privateKeyMetadataMatchesAuthority(
+        _ metadata: DeviceIdentityPrivateKeyMetadata,
+        authority: DeviceIdentityAuthorityRecord
+    ) -> Bool {
+        metadata.publicKey == authority.publicKey
+            && metadata.isSecureEnclave == authority.isSecureEnclave
+    }
+
+    private static func comparisonCount(
+        for matches: [Bool]
+    ) -> DeviceIdentityLegacyComparisonCount {
+        let matching = matches.lazy.filter { $0 }.count
+        return DeviceIdentityLegacyComparisonCount(
+            matching: matching,
+            conflicting: matches.count - matching
+        )
     }
 }
 
@@ -741,7 +855,9 @@ struct DeviceIdentityKeychainAuthorityStore: DeviceIdentityAuthorityTransactionS
                 )
             }
         }
-        return candidates
+        return candidates.sorted {
+            $0.location.isOrderedBefore($1.location)
+        }
     }
 
     func exportLegacyPrivateKey(
@@ -766,26 +882,6 @@ struct DeviceIdentityKeychainAuthorityStore: DeviceIdentityAuthorityTransactionS
                 .legacyPrivateKeyNotExportableRequiresRotationAndRepinning
         }
         return privateKeyRepresentation
-    }
-
-    func deleteLegacyPrivateKey(
-        at location: LegacySecItemLocation
-    ) throws {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassKey
-        ]
-        location.applyPersistentReferenceMatch(to: &query)
-        forbidAuthenticationUI(&query)
-        applyDataProtectionKeychain(
-            location.usesDataProtectionKeychain,
-            to: &query
-        )
-        switch SecItemDelete(query as CFDictionary) {
-        case errSecSuccess, errSecItemNotFound:
-            return
-        case let status:
-            throw DeviceIdentityKeyError.keychainError(status)
-        }
     }
 
     private func loadPrivateKey(

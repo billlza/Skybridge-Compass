@@ -17,7 +17,7 @@ public enum LocalDevicePresentation {
     ) -> Snapshot {
         #if os(macOS)
         return Snapshot(
-            deviceName: Host.current().localizedName,
+            deviceName: LocalHostName.localizedName,
             modelName: "Mac",
             platformName: "macOS",
             osVersion: osVersion

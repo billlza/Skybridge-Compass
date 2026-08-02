@@ -1132,11 +1132,25 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
                 source.contains("RemoteControlSecurityPeerIdentityStore.record("),
             "DeviceDiscoveryManager inbound control sessions must record authenticated pairing identity metadata for P2P notice approval."
         )
-        XCTAssertTrue(
-            source.contains("recordRemoteControlSecurityIdentity(from: payload)") &&
-                source.contains("guard decision != PairingTrustApprovalService.Decision.reject else"),
-            "Remote identity must be recorded only after the pairing/trust decision has not rejected the payload."
+        let rejectionGuard = try XCTUnwrap(
+            source.range(
+                of: "guard decision != PairingTrustApprovalService.Decision.reject else"
+            )
         )
+        let durableAuthorityPersistence = try XCTUnwrap(
+            source.range(
+                of: "try await persistAuthenticatedRemoteAuthority(",
+                range: rejectionGuard.upperBound..<source.endIndex
+            )
+        )
+        let identityPublication = try XCTUnwrap(
+            source.range(
+                of: "recordRemoteControlSecurityIdentity(\n                                    from: payload,\n                                    validatedAuthority: validatedAuthority",
+                range: durableAuthorityPersistence.upperBound..<source.endIndex
+            )
+        )
+        XCTAssertLessThan(rejectionGuard.lowerBound, durableAuthorityPersistence.lowerBound)
+        XCTAssertLessThan(durableAuthorityPersistence.lowerBound, identityPublication.lowerBound)
         XCTAssertTrue(
             source.contains("payload.accountDisplayName") &&
                 source.contains("payload.nebulaId") &&

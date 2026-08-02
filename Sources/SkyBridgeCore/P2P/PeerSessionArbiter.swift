@@ -49,7 +49,7 @@ public actor PeerSessionArbiter {
     }
 
     public enum RegisterDecision: Sendable {
-        case accepted
+        case accepted(EstablishmentReservation)
         case alreadyConnected
         case alreadyInProgress
     }
@@ -64,6 +64,23 @@ public actor PeerSessionArbiter {
         case acceptAndSupersedeLocal(winnerPeerId: Data, winnerAttemptId: Data)
     }
 
+    /// Reservation-bearing admission used by modern handshake drivers. The
+    /// legacy `IncomingDecision` surface remains available below, but cannot
+    /// publish an established owner without an explicit reservation.
+    public enum IncomingReservationDecision: Sendable {
+        case accept(EstablishmentReservation)
+        case rejectAlreadyConnected
+        case rejectBinding
+        case rejectRateLimited
+        case rejectLocalWinner
+        case acceptAndReplaceEstablished(EstablishmentReservation)
+        case acceptAndSupersedeLocal(
+            reservation: EstablishmentReservation,
+            winnerPeerId: Data,
+            winnerAttemptId: Data
+        )
+    }
+
     public struct OutgoingAttempt: Sendable {
         public let pairKey: Data
         public let initiatorPeerId: Data
@@ -72,41 +89,221 @@ public actor PeerSessionArbiter {
         public let onSuperseded: @Sendable (Data, Data) async -> Void
     }
 
+    public struct EstablishedLease: Sendable, Equatable {
+        public let pairKey: Data
+        public let sessionId: String
+        private let ownerId: UUID
+
+        public init(pairKey: Data, sessionId: String) {
+            self.pairKey = pairKey
+            self.sessionId = sessionId
+            self.ownerId = UUID()
+        }
+    }
+
+    /// A one-shot capability to publish a session into an arbiter slot. The
+    /// expected owner is retained only inside the actor, so callers cannot
+    /// forge or widen the compare-and-swap precondition.
+    public struct EstablishmentReservation: Sendable, Equatable {
+        public let pairKey: Data
+        public let attemptId: Data
+        private let reservationId: UUID
+
+        fileprivate init(pairKey: Data, attemptId: Data, reservationId: UUID) {
+            self.pairKey = pairKey
+            self.attemptId = attemptId
+            self.reservationId = reservationId
+        }
+    }
+
+    public enum EstablishmentCommitError: Error, Sendable, Equatable {
+        case reservationInvalidated
+        case establishedOwnerChanged
+    }
+
+    private enum EstablishedOwner: Equatable {
+        case legacy(UUID)
+        case session(EstablishedLease)
+    }
+
+    private struct EstablishmentAttemptKey: Hashable {
+        let pairKey: Data
+        let attemptId: Data
+    }
+
+    private struct EstablishmentReservationRecord: Equatable {
+        let reservation: EstablishmentReservation
+        let expectedOwner: EstablishedOwner?
+    }
+
+    private struct RegisteredOutgoingAttempt {
+        let attempt: OutgoingAttempt
+        let reservation: EstablishmentReservation
+    }
+
     private let pendingWindowSeconds: TimeInterval = 10
     private let supersedeRateLimit: Int = 3
     private let supersedeRateWindowSeconds: TimeInterval = 60
 
-    private var outgoingByPair: [Data: OutgoingAttempt] = [:]
-    private var establishedPairs: Set<Data> = []
+    private var outgoingByPair: [Data: RegisteredOutgoingAttempt] = [:]
+    private var establishedOwnerByPair: [Data: EstablishedOwner] = [:]
+    private var establishmentReservationByAttempt: [
+        EstablishmentAttemptKey: EstablishmentReservationRecord
+    ] = [:]
     private var supersedeTimestampsByPair: [Data: [Date]] = [:]
 
+#if DEBUG || SKYBRIDGE_TESTING
+    public enum TestEstablishmentBarrierError: Error, Sendable, Equatable {
+        case barrierAlreadyConfigured
+        case attemptDoesNotOwnBarrier
+    }
+
+    private var testSuspendedEstablishmentAttemptId: Data?
+    private var testEstablishmentCommitContinuation: CheckedContinuation<Void, Never>?
+    private var testEstablishmentCommitIsSuspended = false
+
+    public func testOnlySuspendEstablishmentCommit(attemptId: Data) throws {
+        guard testEstablishmentCommitContinuation == nil,
+              testSuspendedEstablishmentAttemptId == nil else {
+            throw TestEstablishmentBarrierError.barrierAlreadyConfigured
+        }
+        testSuspendedEstablishmentAttemptId = attemptId
+    }
+
+    public func testOnlyIsEstablishmentCommitSuspended() -> Bool {
+        testEstablishmentCommitIsSuspended
+    }
+
+    public func testOnlyResumeEstablishmentCommit(attemptId: Data) throws {
+        guard testSuspendedEstablishmentAttemptId == attemptId else {
+            throw TestEstablishmentBarrierError.attemptDoesNotOwnBarrier
+        }
+        testSuspendedEstablishmentAttemptId = nil
+        let continuation = testEstablishmentCommitContinuation
+        testEstablishmentCommitContinuation = nil
+        continuation?.resume()
+    }
+#endif
+
     public func registerOutgoing(_ attempt: OutgoingAttempt) -> RegisterDecision {
-        if establishedPairs.contains(attempt.pairKey) {
+        if establishedOwnerByPair[attempt.pairKey] != nil {
             return .alreadyConnected
         }
-        if let existing = outgoingByPair[attempt.pairKey],
-           Date().timeIntervalSince(existing.startedAt) <= pendingWindowSeconds {
-            return .alreadyInProgress
+        if let existing = outgoingByPair[attempt.pairKey] {
+            if Date().timeIntervalSince(existing.attempt.startedAt) <= pendingWindowSeconds {
+                return .alreadyInProgress
+            }
+            removeOutgoingAttempt(existing, pairKey: attempt.pairKey)
         }
-        outgoingByPair[attempt.pairKey] = attempt
-        return .accepted
+        let reservation = reserveEstablishment(
+            pairKey: attempt.pairKey,
+            attemptId: attempt.attemptId,
+            expectedOwner: nil
+        )
+        outgoingByPair[attempt.pairKey] = RegisteredOutgoingAttempt(
+            attempt: attempt,
+            reservation: reservation
+        )
+        return .accepted(reservation)
     }
 
     public func clearOutgoing(pairKey: Data, attemptId: Data?) {
-        guard let existing = outgoingByPair[pairKey] else { return }
-        if let attemptId, existing.attemptId != attemptId { return }
-        outgoingByPair.removeValue(forKey: pairKey)
+        if let attemptId {
+            guard let existing = outgoingByPair[pairKey],
+                  existing.attempt.attemptId == attemptId else { return }
+            removeOutgoingAttempt(existing, pairKey: pairKey)
+            return
+        }
+
+        guard let existing = outgoingByPair.removeValue(forKey: pairKey) else { return }
+        cancelEstablishmentIfCurrent(existing.reservation)
     }
 
+    /// Removes only the outgoing registration that owns this unforgeable
+    /// reservation. Public pair/attempt bytes may be reused by a replacement,
+    /// but its private reservation identity cannot be reused by stale teardown.
+    @discardableResult
+    public func clearOutgoing(_ reservation: EstablishmentReservation) -> Bool {
+        guard let existing = outgoingByPair[reservation.pairKey],
+              existing.reservation == reservation else {
+            return false
+        }
+        removeOutgoingAttempt(existing, pairKey: reservation.pairKey)
+        return true
+    }
+
+    /// Legacy compatibility: creates only a legacy owner in a vacant slot.
+    /// It can neither replace nor acquire a modern session owner.
     public func markEstablished(pairKey: Data) {
-        establishedPairs.insert(pairKey)
-        outgoingByPair.removeValue(forKey: pairKey)
+        guard establishedOwnerByPair[pairKey] == nil else { return }
+        if let outgoing = outgoingByPair[pairKey] {
+            removeOutgoingAttempt(outgoing, pairKey: pairKey)
+        }
+        establishedOwnerByPair[pairKey] = .legacy(UUID())
+        invalidateEstablishmentReservations(for: pairKey)
     }
 
+    /// Legacy compatibility: pair-key teardown is deliberately restricted to
+    /// legacy owners and can never remove a reservation-committed session.
     public func clearEstablished(pairKey: Data) {
-        establishedPairs.remove(pairKey)
+        guard case .legacy? = establishedOwnerByPair[pairKey] else { return }
+        establishedOwnerByPair.removeValue(forKey: pairKey)
     }
 
+    @discardableResult
+    public func commitEstablished(
+        _ reservation: EstablishmentReservation,
+        sessionId: String
+    ) async throws -> EstablishedLease {
+#if DEBUG || SKYBRIDGE_TESTING
+        await waitAtTestEstablishmentBarrierIfNeeded(attemptId: reservation.attemptId)
+#endif
+
+        let attemptKey = EstablishmentAttemptKey(
+            pairKey: reservation.pairKey,
+            attemptId: reservation.attemptId
+        )
+        guard let record = establishmentReservationByAttempt[attemptKey],
+              record.reservation == reservation else {
+            throw EstablishmentCommitError.reservationInvalidated
+        }
+        guard establishedOwnerByPair[reservation.pairKey] == record.expectedOwner else {
+            establishmentReservationByAttempt.removeValue(forKey: attemptKey)
+            throw EstablishmentCommitError.establishedOwnerChanged
+        }
+
+        let lease = EstablishedLease(pairKey: reservation.pairKey, sessionId: sessionId)
+        establishedOwnerByPair[reservation.pairKey] = .session(lease)
+        if outgoingByPair[reservation.pairKey]?.reservation == reservation {
+            outgoingByPair.removeValue(forKey: reservation.pairKey)
+        }
+        invalidateEstablishmentReservations(for: reservation.pairKey)
+        return lease
+    }
+
+    @discardableResult
+    public func clearEstablished(_ lease: EstablishedLease) -> Bool {
+        guard establishedOwnerByPair[lease.pairKey] == .session(lease) else {
+            return false
+        }
+        establishedOwnerByPair.removeValue(forKey: lease.pairKey)
+        return true
+    }
+
+    @discardableResult
+    public func restoreEstablishedIfVacant(_ lease: EstablishedLease) -> Bool {
+        guard establishedOwnerByPair[lease.pairKey] == nil else { return false }
+        establishedOwnerByPair[lease.pairKey] = .session(lease)
+        if let outgoing = outgoingByPair[lease.pairKey] {
+            removeOutgoingAttempt(outgoing, pairKey: lease.pairKey)
+        }
+        invalidateEstablishmentReservations(for: lease.pairKey)
+        return true
+    }
+
+    /// Compatibility decision surface for callers that only arbitrate and do
+    /// not own the resulting session. Any accepted reservation is immediately
+    /// cancelled so legacy code cannot leave a latent committer behind.
     public func evaluateIncoming(
         pairKey: Data,
         remoteInitiatorPeerId: Data,
@@ -117,30 +314,88 @@ public actor PeerSessionArbiter {
         authenticationState: IncomingAuthenticationState,
         establishedPolicy: IncomingEstablishedPolicy = .rejectDuplicate
     ) -> IncomingDecision {
+        let admission = evaluateIncomingWithReservation(
+            pairKey: pairKey,
+            remoteInitiatorPeerId: remoteInitiatorPeerId,
+            remoteAttemptId: remoteAttemptId,
+            targetPeerId: targetPeerId,
+            expectedRemotePeerId: expectedRemotePeerId,
+            localPeerId: localPeerId,
+            authenticationState: authenticationState,
+            establishedPolicy: establishedPolicy
+        )
+        switch admission {
+        case .accept(let reservation):
+            cancelEstablishmentIfCurrent(reservation)
+            return .accept
+        case .rejectAlreadyConnected:
+            return .rejectAlreadyConnected
+        case .rejectBinding:
+            return .rejectBinding
+        case .rejectRateLimited:
+            return .rejectRateLimited
+        case .rejectLocalWinner:
+            return .rejectLocalWinner
+        case .acceptAndReplaceEstablished(let reservation):
+            cancelEstablishmentIfCurrent(reservation)
+            return .acceptAndReplaceEstablished
+        case .acceptAndSupersedeLocal(let reservation, let winnerPeerId, let winnerAttemptId):
+            cancelEstablishmentIfCurrent(reservation)
+            return .acceptAndSupersedeLocal(
+                winnerPeerId: winnerPeerId,
+                winnerAttemptId: winnerAttemptId
+            )
+        }
+    }
+
+    public func evaluateIncomingWithReservation(
+        pairKey: Data,
+        remoteInitiatorPeerId: Data,
+        remoteAttemptId: Data,
+        targetPeerId: Data,
+        expectedRemotePeerId: Data,
+        localPeerId: Data,
+        authenticationState: IncomingAuthenticationState,
+        establishedPolicy: IncomingEstablishedPolicy = .rejectDuplicate
+    ) -> IncomingReservationDecision {
         guard authenticationState == .authenticated else {
             return .rejectBinding
         }
         guard targetPeerId == localPeerId, remoteInitiatorPeerId == expectedRemotePeerId else {
             return .rejectBinding
         }
-        if establishedPairs.contains(pairKey) {
+        if establishedOwnerByPair[pairKey] != nil {
             switch establishedPolicy {
             case .rejectDuplicate:
                 return .rejectAlreadyConnected
             case .replaceAuthenticated:
-                establishedPairs.remove(pairKey)
-                outgoingByPair.removeValue(forKey: pairKey)
-                return .acceptAndReplaceEstablished
+                if let outgoing = outgoingByPair[pairKey] {
+                    removeOutgoingAttempt(outgoing, pairKey: pairKey)
+                }
+                return .acceptAndReplaceEstablished(reserveEstablishment(
+                    pairKey: pairKey,
+                    attemptId: remoteAttemptId,
+                    expectedOwner: establishedOwnerByPair[pairKey]
+                ))
             }
         }
 
-        guard let local = outgoingByPair[pairKey] else {
-            return .accept
+        guard let localRegistration = outgoingByPair[pairKey] else {
+            return .accept(reserveEstablishment(
+                pairKey: pairKey,
+                attemptId: remoteAttemptId,
+                expectedOwner: nil
+            ))
         }
+        let local = localRegistration.attempt
 
         if Date().timeIntervalSince(local.startedAt) > pendingWindowSeconds {
-            outgoingByPair.removeValue(forKey: pairKey)
-            return .accept
+            removeOutgoingAttempt(localRegistration, pairKey: pairKey)
+            return .accept(reserveEstablishment(
+                pairKey: pairKey,
+                attemptId: remoteAttemptId,
+                expectedOwner: nil
+            ))
         }
 
         guard canSupersede(pairKey: pairKey) else {
@@ -156,9 +411,14 @@ public actor PeerSessionArbiter {
 
         if remoteWins {
             recordSupersede(pairKey: pairKey)
-            outgoingByPair.removeValue(forKey: pairKey)
+            removeOutgoingAttempt(localRegistration, pairKey: pairKey)
             Task { await local.onSuperseded(remoteInitiatorPeerId, remoteAttemptId) }
             return .acceptAndSupersedeLocal(
+                reservation: reserveEstablishment(
+                    pairKey: pairKey,
+                    attemptId: remoteAttemptId,
+                    expectedOwner: nil
+                ),
                 winnerPeerId: remoteInitiatorPeerId,
                 winnerAttemptId: remoteAttemptId
             )
@@ -166,6 +426,73 @@ public actor PeerSessionArbiter {
 
         return .rejectLocalWinner
     }
+
+    @discardableResult
+    public func cancelEstablishment(_ reservation: EstablishmentReservation) -> Bool {
+        cancelEstablishmentIfCurrent(reservation)
+    }
+
+    private func reserveEstablishment(
+        pairKey: Data,
+        attemptId: Data,
+        expectedOwner: EstablishedOwner?
+    ) -> EstablishmentReservation {
+        // One pending committer per pair. A newer admitted attempt explicitly
+        // invalidates an older suspended Finished before it can publish.
+        invalidateEstablishmentReservations(for: pairKey)
+        let attemptKey = EstablishmentAttemptKey(pairKey: pairKey, attemptId: attemptId)
+        let reservation = EstablishmentReservation(
+            pairKey: pairKey,
+            attemptId: attemptId,
+            reservationId: UUID()
+        )
+        establishmentReservationByAttempt[attemptKey] = EstablishmentReservationRecord(
+            reservation: reservation,
+            expectedOwner: expectedOwner
+        )
+        return reservation
+    }
+
+    @discardableResult
+    private func cancelEstablishmentIfCurrent(
+        _ reservation: EstablishmentReservation
+    ) -> Bool {
+        let attemptKey = EstablishmentAttemptKey(
+            pairKey: reservation.pairKey,
+            attemptId: reservation.attemptId
+        )
+        guard establishmentReservationByAttempt[attemptKey]?.reservation == reservation else {
+            return false
+        }
+        establishmentReservationByAttempt.removeValue(forKey: attemptKey)
+        return true
+    }
+
+    private func removeOutgoingAttempt(
+        _ registration: RegisteredOutgoingAttempt,
+        pairKey: Data
+    ) {
+        guard outgoingByPair[pairKey]?.reservation == registration.reservation else { return }
+        outgoingByPair.removeValue(forKey: pairKey)
+        cancelEstablishmentIfCurrent(registration.reservation)
+    }
+
+    private func invalidateEstablishmentReservations(for pairKey: Data) {
+        establishmentReservationByAttempt = establishmentReservationByAttempt.filter {
+            $0.key.pairKey != pairKey
+        }
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    private func waitAtTestEstablishmentBarrierIfNeeded(attemptId: Data) async {
+        guard testSuspendedEstablishmentAttemptId == attemptId else { return }
+        testEstablishmentCommitIsSuspended = true
+        await withCheckedContinuation { continuation in
+            testEstablishmentCommitContinuation = continuation
+        }
+        testEstablishmentCommitIsSuspended = false
+    }
+#endif
 
     public nonisolated static func pairKey(
         localPeerId: Data,
@@ -251,21 +578,7 @@ public actor PeerSessionArbiter {
 
     private nonisolated static func normalizedUUID(in raw: String) -> String? {
         let direct = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let directUUID = UUID(uuidString: direct.uppercased()) {
-            return directUUID.uuidString.lowercased()
-        }
-
-        let pattern = #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
-        let range = NSRange(raw.startIndex..<raw.endIndex, in: raw)
-        guard let match = regex.firstMatch(in: raw, options: [], range: range),
-              let matchRange = Range(match.range, in: raw) else {
-            return nil
-        }
-        let candidate = String(raw[matchRange])
-        guard let parsed = UUID(uuidString: candidate.uppercased()) else {
+        guard let parsed = UUID(uuidString: direct.uppercased()) else {
             return nil
         }
         return parsed.uuidString.lowercased()

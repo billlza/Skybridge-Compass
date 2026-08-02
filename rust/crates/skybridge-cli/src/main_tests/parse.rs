@@ -1,4 +1,5 @@
 mod check;
+mod connect;
 #[cfg(target_os = "macos")]
 mod crossnet;
 mod device;

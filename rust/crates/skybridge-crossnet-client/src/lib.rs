@@ -247,8 +247,9 @@ pub struct SettingsSnapshotResult {
 /// Result of `crossnet.settings.set`.
 ///
 /// Deliberately a distinct type from [`SettingsSnapshotResult`]: the read
-/// projection stays pinned to `control_effect == "read_only"` with every entry
-/// immutable, so gaining a write verb cannot loosen the read contract.
+/// projection stays pinned to `control_effect == "read_only"` while each entry
+/// explicitly reports whether it is mutable, so gaining a write verb cannot
+/// loosen the read contract or bypass the mutation-specific result validation.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SettingsMutationResult {
     /// Runtime authority that applied the change.
@@ -786,6 +787,7 @@ fn parse_line(line: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[cfg(target_os = "macos")]
     use std::ffi::OsString;
     #[cfg(target_os = "macos")]
@@ -819,6 +821,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_socket_path_uses_home_application_support() -> Result<()> {
         let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
@@ -837,6 +840,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_socket_path_fails_when_home_missing() {
         let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
@@ -851,6 +855,7 @@ mod tests {
         assert!(message.contains("home_required"), "{message}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_socket_path_fails_when_home_empty_or_relative() {
         let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
@@ -1117,7 +1122,8 @@ mod tests {
             note: None,
         };
         assert!(
-            validate_settings_mutation_projection(ok.clone(), "logging.verbose", &requested).is_ok()
+            validate_settings_mutation_projection(ok.clone(), "logging.verbose", &requested)
+                .is_ok()
         );
 
         // Read-back disagreement must fail closed rather than report success.
@@ -1151,7 +1157,8 @@ mod tests {
             ..ok.clone()
         };
         assert!(
-            validate_settings_mutation_projection(read_only, "logging.verbose", &requested).is_err()
+            validate_settings_mutation_projection(read_only, "logging.verbose", &requested)
+                .is_err()
         );
 
         // The server must not answer about a different setting than was asked.

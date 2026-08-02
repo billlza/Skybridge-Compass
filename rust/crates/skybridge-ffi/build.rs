@@ -14,6 +14,7 @@ fn main() {
     // ---- 1. cbindgen: emit the C header ----
     let crate_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
     let crate_dir = PathBuf::from(crate_dir);
+    let c_abi_source = crate_dir.join("src").join("c_abi.rs");
     let config_path = crate_dir.join("cbindgen.toml");
     let header_path = crate_dir.join("include").join("skybridge_ffi.h");
 
@@ -27,7 +28,10 @@ fn main() {
         .unwrap_or_else(|err| panic!("failed to read cbindgen.toml: {err}"));
 
     match cbindgen::Builder::new()
-        .with_crate(&crate_dir)
+        // The public C ABI lives in one explicit source module. Parsing that
+        // module directly avoids cbindgen spawning a nested `cargo metadata`
+        // process with target-linker flags inherited from a cross build.
+        .with_src(&c_abi_source)
         .with_config(config)
         .generate()
     {
@@ -36,13 +40,8 @@ fn main() {
                 .expect("create include/ dir for generated header");
             bindings.write_to_file(&header_path);
         }
-        Err(cbindgen::Error::ParseSyntaxError { .. }) => {
-            // A transient/partial parse (e.g. during an incremental edit) must
-            // not fail the build; the header already on disk stays valid.
-            println!("cargo:warning=cbindgen parse error; keeping existing skybridge_ffi.h");
-        }
         Err(err) => {
-            // Any other cbindgen failure is a hard error: a stale header is worse
+            // Any cbindgen failure is a hard error: a stale header is worse
             // than a loud failure for an ABI surface.
             panic!("cbindgen failed to generate skybridge_ffi.h: {err}");
         }

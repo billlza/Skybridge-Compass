@@ -62,3 +62,14 @@ public enum P2PDiscoveryError: Error, LocalizedError {
         }
     }
 }
+
+enum AuthenticatedAppPayloadCryptoError: Error, LocalizedError, Sendable {
+    case combinedCiphertextUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .combinedCiphertextUnavailable:
+            return "已认证业务载荷加密失败：AES-GCM combined 密文不可用"
+        }
+    }
+}

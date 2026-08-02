@@ -2,13 +2,14 @@ import Foundation
 import Darwin
 import AppKit
 import CryptoKit
-import SkyBridgeCore
+import Dispatch
+@_spi(SkyBridgeSmokeDiagnostics) import SkyBridgeCore
 import SkyBridgeSmokeSupport
 import SkyBridgeUI
 
 @MainActor
 private final class LocalLanInteropHostCoordinator {
-    private let discoveryManager = DeviceDiscoveryManager()
+    private let p2pDiscoveryService = P2PDiscoveryService.shared
     private let fileTransferManager = FileTransferManager.shared
     private let remoteControlManager = RemoteControlManager()
     private lazy var reporter = SmokeStatusReporter(statusURL: self.statusURL())
@@ -51,19 +52,54 @@ private final class LocalLanInteropHostCoordinator {
             throw error
         }
         reporter.append("boot role=mac-host")
-        reporter.append("identity start storage=persistent-keychain")
+        reporter.append(
+            "discovery-profile compatibilityMode="
+                + (UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode") ? "1" : "0")
+                + " source=volatile-argument-domain"
+        )
+        let identityStorage = DeviceIdentityKeyManager.usesEphemeralIdentityStoreForCurrentProcess
+            ? "ephemeral-process"
+            : "persistent-keychain"
+        reporter.append("identity start storage=\(identityStorage)")
         do {
-            _ = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
+            let identityManager = DeviceIdentityKeyManager.shared
+            _ = try await identityManager.getOrCreateIdentityKey()
+            guard let residueStatus = await identityManager
+                .lastLegacyResidueInspectionStatus() else {
+                reporter.append(
+                    "failed stage=identity code=legacy-residue-inspection-missing"
+                )
+                throw HostStartupError.identityUnavailable(
+                    "legacy-residue-inspection-missing"
+                )
+            }
+            let residueReason = residueStatus.failureReason?.rawValue ?? "none"
+            let residueConflicts = residueStatus.hasConflicts.map { $0 ? "1" : "0" }
+                ?? "unknown"
+            reporter.append(
+                "identity legacyResidueInspectionComplete="
+                    + (residueStatus.inspectionComplete ? "1" : "0")
+                    + " conflicts=\(residueConflicts) reason=\(residueReason)"
+            )
+            guard residueStatus.inspectionComplete else {
+                let code = "legacy-residue-inspection-\(residueReason)"
+                reporter.append("failed stage=identity code=\(code)")
+                throw HostStartupError.identityUnavailable(code)
+            }
         } catch {
-            reporter.append("failed stage=identity error=\(sanitize(error.localizedDescription))")
-            throw error
+            if let startupError = error as? HostStartupError {
+                throw startupError
+            }
+            let code = Self.identityFailureCode(error)
+            reporter.append("failed stage=identity code=\(code)")
+            throw HostStartupError.identityUnavailable(code)
         }
         let protocolDeviceId = try await SelfIdentityProvider.shared
             .protocolIdentityDeviceId(allowCreate: true)
         reporter.append("identity ready device=\(sanitize(protocolDeviceId))")
         configureRemoteControlNoticeIdentity(protocolDeviceId: protocolDeviceId)
-        guard await discoveryManager.waitUntilInitialized(timeout: 5.0) else {
-            throw HostStartupError.initializationTimedOut("DeviceDiscoveryManager")
+        guard await p2pDiscoveryService.waitUntilInitialized(timeout: 5.0) else {
+            throw HostStartupError.initializationTimedOut("P2PDiscoveryService")
         }
         guard await fileTransferManager.waitUntilInitialized(timeout: 5.0) else {
             throw HostStartupError.initializationTimedOut("FileTransferManager")
@@ -77,7 +113,7 @@ private final class LocalLanInteropHostCoordinator {
         try await fileTransferListener.start()
         try await remoteControlServer.start()
         let remoteControlPort = try remoteControlListenerPort()
-        try await discoveryManager.start()
+        try await p2pDiscoveryService.ensureStartedAndScanning()
         try await exportLocalPQCIdentityIfRequested(reporter: reporter)
         let controlPort = try await waitForControlAdvertisementPort()
 
@@ -92,7 +128,7 @@ private final class LocalLanInteropHostCoordinator {
         emit("Settings reference: \(settingsPath.path)")
         emit("Keep this process running while Azure relay and Windows client are active.")
 
-        reporter.append("ready remote=_skybridge-remote._tcp port=\(remoteControlPort)")
+        reporter.append("ready remote=_skybridge-rd._tcp port=\(remoteControlPort)")
         reporter.append("ready discovery=_skybridge._tcp port=\(controlPort)")
         monitorPresence()
     }
@@ -144,6 +180,42 @@ private final class LocalLanInteropHostCoordinator {
             ?? resourceBundle.developmentLocalization
             ?? "unknown"
         return (requiredKeys.count, locale)
+    }
+
+    private static func identityFailureCode(_ error: Error) -> String {
+        guard let identityError = error as? DeviceIdentityKeyError else {
+            return "identity-unavailable"
+        }
+        switch identityError {
+        case .keyGenerationFailed:
+            return "key-generation-failed"
+        case .keyNotFound:
+            return "key-not-found"
+        case .keyAccessDenied:
+            return "key-access-denied"
+        case .secureEnclaveNotAvailable:
+            return "secure-enclave-unavailable"
+        case .invalidKeyData:
+            return "invalid-key-data"
+        case .incompleteKeyMaterial:
+            return "incomplete-key-material"
+        case .keychainError:
+            return "keychain-error"
+        case .signatureFailed:
+            return "signature-failed"
+        case .verificationFailed:
+            return "verification-failed"
+        case .keyRotationFailed:
+            return "rotation-required"
+        case .authorityConflict:
+            return "authority-conflict"
+        case .corruptIdentityAuthority:
+            return "authority-corrupt"
+        case .identityMigrationRequired:
+            return "migration-required"
+        case .identityMigrationRequiresRotationAndRepinning:
+            return "migration-requires-rotation-and-repinning"
+        }
     }
 
     private func configureRemoteControlNoticeIdentity(protocolDeviceId: String) {
@@ -200,7 +272,7 @@ private final class LocalLanInteropHostCoordinator {
     private func remoteControlListenerPort() throws -> UInt16 {
         guard let port = remoteControlServer.activePort, port > 0 else {
             reporter.append("failed stage=mac-host phase=remote_control_listener reason=remote_port_unavailable")
-            throw HostStartupError.advertisementPortUnavailable("_skybridge-remote._tcp")
+            throw HostStartupError.advertisementPortUnavailable("_skybridge-rd._tcp")
         }
         return port
     }
@@ -389,7 +461,12 @@ private final class LocalLanInteropHostCoordinator {
         }
         if let transferError = error as? FileTransferError {
             switch transferError {
-            case .secureSessionRequired, .securityThreatDetected, .receiverNotConfirmed, .receiverRejected:
+            case .secureSessionRequired,
+                 .securityThreatDetected,
+                 .securityScanReviewRequired,
+                 .securityScanIncomplete,
+                 .receiverNotConfirmed,
+                 .receiverRejected:
                 return "auth_policy"
             case .invalidHeader,
                  .inboundInvalidInitialHeader,
@@ -493,6 +570,10 @@ private final class LocalLanInteropHostCoordinator {
                 return "mac_file_transfer_secure_session_required"
             case .securityThreatDetected:
                 return "mac_file_transfer_security_threat_detected"
+            case .securityScanReviewRequired:
+                return "mac_file_transfer_security_scan_review_required"
+            case .securityScanIncomplete:
+                return "mac_file_transfer_security_scan_incomplete"
             case .partialFileCleanupFailed:
                 return "mac_file_transfer_partial_cleanup_failed"
             case .sourceFileCloseFailed:
@@ -592,7 +673,7 @@ private final class LocalLanInteropHostCoordinator {
                 code: 2002,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "未发现匹配 \(inboundTransfer.deviceId) 的 _skybridge-transfer._tcp Bonjour 路由"
+                        "未发现匹配 \(inboundTransfer.deviceId) 的 _skybridge-xfer._tcp Bonjour 路由"
                 ]
             )
         }
@@ -688,7 +769,7 @@ private struct BonjourFileTransferRoute {
 
 @MainActor
 private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency NetServiceBrowserDelegate, @preconcurrency NetServiceDelegate {
-    private let serviceType = "_skybridge-transfer._tcp."
+    private let serviceType = "_skybridge-xfer._tcp."
     private let serviceDomain = "local."
     private var browser: NetServiceBrowser?
     private var services: [NetService] = []
@@ -904,6 +985,7 @@ private enum HostStartupError: LocalizedError {
     case initializationTimedOut(String)
     case advertisementPortUnavailable(String)
     case embeddedLocalizationInvalid(String)
+    case identityUnavailable(String)
 
     var errorDescription: String? {
         switch self {
@@ -913,6 +995,8 @@ private enum HostStartupError: LocalizedError {
             return "\(serviceType) did not publish a connectable listener port before the host timeout."
         case .embeddedLocalizationInvalid(let reason):
             return "Embedded remote-control localization validation failed: \(reason)."
+        case .identityUnavailable(let code):
+            return "Device identity is unavailable (code=\(code))."
         }
     }
 }
@@ -922,14 +1006,29 @@ struct LocalLanInteropHostMain {
     @MainActor
     static func main() {
         setenv("SKYBRIDGE_SMOKE_ROLE", "mac-host", 1)
+        switch ProcessInfo.processInfo.environment[
+            "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY"
+        ] {
+        case nil, "0":
+            break
+        case "1":
+            runIdentityAuditAndExit()
+        default:
+            fputs(
+                "LocalLanInteropHost failed: invalid identity-audit mode.\n",
+                stderr
+            )
+            Foundation.exit(2)
+        }
         let enableCompatibilityBootstrap =
             ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ENABLE_COMPATIBILITY_MODE"] == "1"
             || ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_PQC_REKEY"] == "1"
-        if enableCompatibilityBootstrap {
-            var smokeDefaults = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
-            smokeDefaults["Settings.EnableCompatibilityMode"] = true
-            UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
-        }
+        // A smoke run must not inherit the user's persisted compatibility setting. Use the
+        // volatile argument domain for both true and false so the lab browser set is explicit,
+        // deterministic, and leaves the user's settings untouched.
+        var smokeDefaults = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        smokeDefaults["Settings.EnableCompatibilityMode"] = enableCompatibilityBootstrap
+        UserDefaults.standard.setVolatileDomain(smokeDefaults, forName: UserDefaults.argumentDomain)
 
         let application = NSApplication.shared
         if application.activationPolicy() != .regular {
@@ -964,6 +1063,32 @@ struct LocalLanInteropHostMain {
 
         application.run()
         LocalLanInteropHostLifetime.stopApprovalPresentation()
+    }
+
+    @MainActor
+    private static func runIdentityAuditAndExit() -> Never {
+        Task { @MainActor in
+            do {
+                let report = try await DeviceIdentityKeyManager.shared
+                    .legacyIdentityAuditReport()
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys]
+                var encoded = try encoder.encode(report)
+                encoded.append(0x0A)
+                try FileHandle.standardOutput.write(contentsOf: encoded)
+                Foundation.exit(0)
+            } catch {
+                // The audit output is intentionally less descriptive than the
+                // internal error: Keychain tags and scope details must never
+                // cross this diagnostic boundary.
+                fputs(
+                    "LocalLanInteropHost identity audit failed: read-only-audit-error.\n",
+                    stderr
+                )
+                Foundation.exit(1)
+            }
+        }
+        dispatchMain()
     }
 }
 

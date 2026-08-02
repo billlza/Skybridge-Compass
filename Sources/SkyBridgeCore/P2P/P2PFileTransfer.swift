@@ -183,6 +183,26 @@ public struct P2PFileChunk: Codable, Sendable, Equatable {
     }
 }
 
+enum P2PFileChunkWireCodec {
+    static func validateRawChunkByteCount(_ byteCount: Int) throws {
+        guard byteCount >= 0, byteCount <= P2PConstants.fileChunkSize else {
+            throw P2PFileTransferError.invalidMetadata(
+                "文件块超过 \(P2PConstants.fileChunkSize) 字节: \(byteCount)"
+            )
+        }
+    }
+
+    static func encode(_ chunk: P2PFileChunk) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(chunk)
+    }
+
+    static func decode(_ data: Data) throws -> P2PFileChunk {
+        try JSONDecoder().decode(P2PFileChunk.self, from: data)
+    }
+}
+
 /// P2P 文件块 ACK
 public struct P2PFileChunkAck: Codable, Sendable, Equatable {
  /// 传输 ID
@@ -789,7 +809,7 @@ public actor P2PChunkTransferService {
 
     private let jsonEncoder: JSONEncoder = {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return encoder
     }()
 
@@ -847,9 +867,20 @@ public actor P2PChunkTransferService {
     }
 
     private func handleQUICFileChunkReceived(channelId: FileChannelId, chunk: QUICFileChunk) async {
+        guard chunk.data.count <= QUICReliableFramePolicy.maximumEncodedFileChunkByteCount else {
+            SkyBridgeLogger.p2p.error("Rejected oversized encoded P2PFileChunk")
+            return
+        }
         // Decode P2PFileChunk from QUIC payload (JSON-encoded by sender).
-        guard let fileChunk = try? jsonDecoder.decode(P2PFileChunk.self, from: chunk.data) else {
+        guard let fileChunk = try? P2PFileChunkWireCodec.decode(chunk.data) else {
             SkyBridgeLogger.p2p.error("Failed to decode P2PFileChunk (transfer=\(channelId.transferId))")
+            return
+        }
+        guard channelId.transferId == fileChunk.transferId,
+              chunk.index == fileChunk.chunkIndex,
+              chunk.isLast == fileChunk.isLastChunk,
+              chunk.checksum == fileChunk.chunkHash else {
+            SkyBridgeLogger.p2p.error("Rejected inconsistent QUIC/P2P file-chunk envelope")
             return
         }
 
@@ -995,6 +1026,13 @@ public actor P2PChunkTransferService {
         dataProvider: @escaping @Sendable (UInt64) async throws -> Data
     ) async throws {
         await ensureTransportHandlersInstalled()
+        guard config.chunkSize > 0,
+              config.chunkSize <= P2PConstants.fileChunkSize,
+              metadata.chunkSize == config.chunkSize else {
+            throw P2PFileTransferError.invalidMetadata(
+                "发送块大小必须与本地配置一致且不超过 \(P2PConstants.fileChunkSize) 字节"
+            )
+        }
 
         let context = TransferContext(
             transferId: metadata.transferId,
@@ -1164,6 +1202,12 @@ public actor P2PChunkTransferService {
         }
 
         let data = try await dataProvider(chunkIndex)
+        try P2PFileChunkWireCodec.validateRawChunkByteCount(data.count)
+        guard data.count <= config.chunkSize else {
+            throw P2PFileTransferError.invalidMetadata(
+                "数据提供器返回了超限块: \(data.count) 字节"
+            )
+        }
         let chunkHash = Data(SHA256.hash(data: data))
 
         let chunk = P2PFileChunk(
@@ -1176,7 +1220,12 @@ public actor P2PChunkTransferService {
             isLastChunk: chunkIndex == totalChunks - 1
         )
 
-        let chunkData = try jsonEncoder.encode(chunk)
+        let chunkData = try P2PFileChunkWireCodec.encode(chunk)
+        guard chunkData.count <= QUICReliableFramePolicy.maximumEncodedFileChunkByteCount else {
+            throw P2PFileTransferError.networkError(
+                "编码后文件块超过 QUIC envelope 上限: \(chunkData.count) 字节"
+            )
+        }
 
         let quicChunk = QUICFileChunk(
             index: chunkIndex,
@@ -1199,6 +1248,13 @@ public actor P2PChunkTransferService {
     public func handleReceivedMetadata(_ metadata: P2PFileTransferMetadata) async throws {
         await ensureTransportHandlersInstalled()
 
+        guard metadata.chunkSize > 0,
+              metadata.chunkSize <= P2PConstants.fileChunkSize else {
+            throw P2PFileTransferError.invalidMetadata(
+                "对端块大小无效: \(metadata.chunkSize) 字节"
+            )
+        }
+
         let context = TransferContext(
             transferId: metadata.transferId,
             direction: .receive,
@@ -1214,6 +1270,12 @@ public actor P2PChunkTransferService {
     public func handleReceivedChunk(_ chunk: P2PFileChunk) async throws -> P2PFileChunkAck {
         guard let context = activeTransfers[chunk.transferId] else {
             throw P2PFileTransferError.invalidMetadata("未知的传输 ID")
+        }
+        try P2PFileChunkWireCodec.validateRawChunkByteCount(chunk.data.count)
+        guard chunk.chunkIndex < context.metadata.totalChunks,
+              chunk.data.count <= context.metadata.chunkSize,
+              chunk.chunkHash.count == QUICReliableFramePolicy.checksumByteCount else {
+            throw P2PFileTransferError.invalidMetadata("文件块索引、大小或校验和无效")
         }
         
  // 验证块哈希

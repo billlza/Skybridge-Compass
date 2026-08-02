@@ -258,71 +258,25 @@ public class PQCCryptoManager: ObservableObject {
     
     /// 验证设备
     public func verifyDevice(_ device: DiscoveredDevice, code: String) async throws {
-        // 验证 6 位数字码
         guard code.count == 6, code.allSatisfy(\.isNumber) else {
             throw PQCError.invalidCode
         }
 
-        // 1) 要求存在已建立的会话（验证码与握手 transcriptHash 绑定）
-        guard let suite = P2PConnectionManager.instance.negotiatedSuiteByDeviceId[device.id] else {
-            throw PQCError.verificationFailed
-        }
-
-        // 2) 严格模式：要求已切换到 PQC/Hybrid suite（论文 strictPQC）
-        if enforcePQCHandshake, !suite.isPQCGroup {
-            throw PQCError.verificationFailed
-        }
-
-        // 3) 生成期望验证码并比对
-        guard let expected = P2PConnectionManager.instance.pairingVerificationCode(for: device.id) else {
-            throw PQCError.verificationFailed
-        }
-        guard expected == code else {
-            SkyBridgeLogger.shared.warning("❌ 设备验证码不匹配: deviceRedacted=1")
-            throw PQCError.verificationFailed
-        }
-
-        var trustCandidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
-        trustCandidates.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
-        if let ipAddress = device.ipAddress {
-            trustCandidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
-        }
-        if let canonicalTrustedId = TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: device) {
-            trustCandidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: canonicalTrustedId))
-        }
-        if let persistentDeviceId = PeerIdentityAliasResolver.persistentDeviceId(from: device.id) {
-            trustCandidates.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: persistentDeviceId))
-        }
-
-        let protocolFingerprints = await ProtocolIdentityTrustStore.shared.trustedFingerprints(
-            forAny: Array(trustCandidates)
-        )
-        let currentPathFingerprints = TrustedDeviceStore.shared.currentPathFingerprints(
-            forAny: Array(trustCandidates)
-        )
-        let pinnedFingerprints = protocolFingerprints.union(currentPathFingerprints)
-        guard pinnedFingerprints.count == 1, let protocolFingerprint = pinnedFingerprints.first else {
+        do {
+            try await P2PConnectionManager.instance
+                .approveCurrentAuthenticatedSessionTrust(
+                    for: device,
+                    verificationCode: code,
+                    requirePQC: enforcePQCHandshake
+                )
+        } catch {
             SkyBridgeLogger.shared.warning(
-                "❌ 设备验证码通过但缺少唯一 protocol identity pin: device=\(device.name) fingerprints=\(pinnedFingerprints.count)"
+                "❌ 设备验证失败: errorType=\(String(describing: type(of: error)))"
             )
             throw PQCError.verificationFailed
         }
 
-        let declaredDeviceId =
-            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: device)
-            ?? PeerIdentityAliasResolver.persistentDeviceId(from: device.id)
-            ?? device.id
-        try TrustedDeviceStore.shared.trustResolvedPeer(
-            device,
-            declaredDeviceId: declaredDeviceId,
-            protocolPublicKeyFingerprint: protocolFingerprint
-        )
-        await ProtocolIdentityTrustStore.shared.upsert(
-            deviceId: declaredDeviceId,
-            fingerprints: [protocolFingerprint]
-        )
-        
-        SkyBridgeLogger.shared.info("✅ 设备验证成功: \(device.name)")
+        SkyBridgeLogger.shared.info("✅ 设备验证成功: deviceRedacted=1")
     }
     
     /// 获取当前 Provider 信息

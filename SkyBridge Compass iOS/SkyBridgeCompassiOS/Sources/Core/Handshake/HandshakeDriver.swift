@@ -218,6 +218,23 @@ public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
     }
 }
 
+/// Atomic proof exported by a completed handshake. Keeping the protocol-key
+/// authority and the signed SOA peer identifier in one value prevents callers
+/// from observing values from different handshake attempts across actor awaits.
+@available(iOS 17.0, *)
+public struct AuthenticatedHandshakePeerBinding: Sendable, Equatable {
+    public let authority: AuthenticatedRemoteAuthority
+    public let authenticatedRemoteSOAPeerId: Data?
+
+    public init(
+        authority: AuthenticatedRemoteAuthority,
+        authenticatedRemoteSOAPeerId: Data?
+    ) {
+        self.authority = authority
+        self.authenticatedRemoteSOAPeerId = authenticatedRemoteSOAPeerId
+    }
+}
+
 @available(iOS 17.0, *)
 struct DefaultHandshakeTrustProvider: HandshakeTrustProvider, Sendable {
     func trustedFingerprint(for deviceId: String) async -> String? { nil }
@@ -234,6 +251,7 @@ public struct HandshakeSOAMetadata: Sendable, Equatable {
     public let initiatorPeerId: Data // 32 bytes
     public let targetPeerId: Data // 32 bytes
     public let attemptId: Data // 16 bytes
+    public let extensionRaw: Data
 
     public init(initiatorPeerId: Data, targetPeerId: Data, attemptId: Data) throws {
         guard initiatorPeerId.count == HandshakeSOAExtension.initiatorPeerIdLength else {
@@ -248,14 +266,11 @@ public struct HandshakeSOAMetadata: Sendable, Equatable {
         self.initiatorPeerId = initiatorPeerId
         self.targetPeerId = targetPeerId
         self.attemptId = attemptId
-    }
-
-    public var extensionRaw: Data {
-        (try? HandshakeSOAExtension(
+        self.extensionRaw = try HandshakeSOAExtension(
             initiatorPeerId: initiatorPeerId,
             targetPeerId: targetPeerId,
             attemptId: attemptId
-        ).encodedTLV) ?? Data()
+        ).encodedTLV
     }
 }
 
@@ -264,7 +279,7 @@ public actor PeerSessionArbiter {
     public static let shared = PeerSessionArbiter()
 
     public enum RegisterDecision: Sendable {
-        case accepted
+        case accepted(EstablishmentReservation)
         case alreadyConnected
         case alreadyInProgress
     }
@@ -280,13 +295,17 @@ public actor PeerSessionArbiter {
     }
 
     public enum IncomingDecision: Sendable {
-        case accept
+        case accept(EstablishmentReservation)
         case rejectAlreadyConnected
         case rejectBinding
         case rejectRateLimited
         case rejectLocalWinner
-        case acceptAndReplaceEstablished
-        case acceptAndSupersedeLocal(winnerPeerId: Data, winnerAttemptId: Data)
+        case acceptAndReplaceEstablished(EstablishmentReservation)
+        case acceptAndSupersedeLocal(
+            reservation: EstablishmentReservation,
+            winnerPeerId: Data,
+            winnerAttemptId: Data
+        )
     }
 
     public struct OutgoingAttempt: Sendable {
@@ -297,39 +316,179 @@ public actor PeerSessionArbiter {
         public let onSuperseded: @Sendable (Data, Data) async -> Void
     }
 
+    public struct EstablishedLease: Sendable, Equatable {
+        public let pairKey: Data
+        public let sessionId: String
+        private let ownerId: UUID
+
+        public init(pairKey: Data, sessionId: String) {
+            self.pairKey = pairKey
+            self.sessionId = sessionId
+            ownerId = UUID()
+        }
+    }
+
+    /// A one-shot authorization to publish a session into an arbiter slot.
+    /// The actor retains the expected owner privately; callers cannot widen or
+    /// forge the compare-and-swap precondition.
+    public struct EstablishmentReservation: Sendable, Equatable {
+        public let pairKey: Data
+        public let attemptId: Data
+        private let reservationId: UUID
+
+        fileprivate init(pairKey: Data, attemptId: Data, reservationId: UUID) {
+            self.pairKey = pairKey
+            self.attemptId = attemptId
+            self.reservationId = reservationId
+        }
+    }
+
+    public enum EstablishmentCommitError: Error, Sendable, Equatable {
+        case reservationInvalidated
+        case establishedOwnerChanged
+    }
+
+    private struct EstablishmentAttemptKey: Hashable {
+        let pairKey: Data
+        let attemptId: Data
+    }
+
+    private struct EstablishmentReservationRecord: Equatable {
+        let reservation: EstablishmentReservation
+        let expectedOwner: EstablishedLease?
+    }
+
+    private struct RegisteredOutgoingAttempt {
+        let attempt: OutgoingAttempt
+        let reservation: EstablishmentReservation
+    }
+
     private let pendingWindowSeconds: TimeInterval = 10
     private let supersedeRateLimit: Int = 3
     private let supersedeRateWindowSeconds: TimeInterval = 60
 
-    private var outgoingByPair: [Data: OutgoingAttempt] = [:]
-    private var establishedPairs: Set<Data> = []
+    private var outgoingByPair: [Data: RegisteredOutgoingAttempt] = [:]
+    private var establishedOwnerByPair: [Data: EstablishedLease] = [:]
+    private var establishmentReservationByAttempt: [
+        EstablishmentAttemptKey: EstablishmentReservationRecord
+    ] = [:]
     private var supersedeTimestampsByPair: [Data: [Date]] = [:]
+#if DEBUG || SKYBRIDGE_TESTING
+    public enum TestEstablishmentBarrierError: Error, Sendable, Equatable {
+        case barrierAlreadyConfigured
+        case attemptDoesNotOwnBarrier
+    }
+
+    private var testSuspendedEstablishmentAttemptId: Data?
+    private var testEstablishmentCommitContinuation: CheckedContinuation<Void, Never>?
+    private var testEstablishmentCommitIsSuspended = false
+
+    public func testOnlySuspendEstablishmentCommit(attemptId: Data) throws {
+        guard testEstablishmentCommitContinuation == nil,
+              testSuspendedEstablishmentAttemptId == nil else {
+            throw TestEstablishmentBarrierError.barrierAlreadyConfigured
+        }
+        testSuspendedEstablishmentAttemptId = attemptId
+    }
+
+    public func testOnlyIsEstablishmentCommitSuspended() -> Bool {
+        testEstablishmentCommitIsSuspended
+    }
+
+    public func testOnlyResumeEstablishmentCommit(attemptId: Data) throws {
+        guard testSuspendedEstablishmentAttemptId == attemptId else {
+            throw TestEstablishmentBarrierError.attemptDoesNotOwnBarrier
+        }
+        testSuspendedEstablishmentAttemptId = nil
+        let continuation = testEstablishmentCommitContinuation
+        testEstablishmentCommitContinuation = nil
+        continuation?.resume()
+    }
+#endif
 
     public func registerOutgoing(_ attempt: OutgoingAttempt) -> RegisterDecision {
-        if establishedPairs.contains(attempt.pairKey) {
+        if establishedOwnerByPair[attempt.pairKey] != nil {
             return .alreadyConnected
         }
-        if let existing = outgoingByPair[attempt.pairKey],
-           Date().timeIntervalSince(existing.startedAt) <= pendingWindowSeconds {
-            return .alreadyInProgress
+        if let existing = outgoingByPair[attempt.pairKey] {
+            if Date().timeIntervalSince(existing.attempt.startedAt) <= pendingWindowSeconds {
+                return .alreadyInProgress
+            }
+            removeOutgoingAttempt(existing, pairKey: attempt.pairKey)
         }
-        outgoingByPair[attempt.pairKey] = attempt
-        return .accepted
+        let reservation = reserveEstablishment(
+            pairKey: attempt.pairKey,
+            attemptId: attempt.attemptId,
+            expectedOwner: nil
+        )
+        outgoingByPair[attempt.pairKey] = RegisteredOutgoingAttempt(
+            attempt: attempt,
+            reservation: reservation
+        )
+        return .accepted(reservation)
     }
 
-    public func clearOutgoing(pairKey: Data, attemptId: Data?) {
-        guard let existing = outgoingByPair[pairKey] else { return }
-        if let attemptId, existing.attemptId != attemptId { return }
-        outgoingByPair.removeValue(forKey: pairKey)
+    /// Removes only the outgoing registration that owns this unforgeable
+    /// reservation. This is the teardown primitive for suspended drivers: a
+    /// replacement may deliberately reuse the public pair/attempt bytes, but
+    /// it cannot reuse the private reservation UUID.
+    @discardableResult
+    func clearOutgoing(_ reservation: EstablishmentReservation) -> Bool {
+        guard let existing = outgoingByPair[reservation.pairKey],
+              existing.reservation == reservation else {
+            return false
+        }
+        removeOutgoingAttempt(existing, pairKey: reservation.pairKey)
+        return true
     }
 
-    public func markEstablished(pairKey: Data) {
-        establishedPairs.insert(pairKey)
-        outgoingByPair.removeValue(forKey: pairKey)
+    @discardableResult
+    public func commitEstablished(
+        _ reservation: EstablishmentReservation,
+        sessionId: String
+    ) async throws -> EstablishedLease {
+#if DEBUG || SKYBRIDGE_TESTING
+        await waitAtTestEstablishmentBarrierIfNeeded(attemptId: reservation.attemptId)
+#endif
+
+        let attemptKey = EstablishmentAttemptKey(
+            pairKey: reservation.pairKey,
+            attemptId: reservation.attemptId
+        )
+        guard let record = establishmentReservationByAttempt[attemptKey],
+              record.reservation == reservation else {
+            throw EstablishmentCommitError.reservationInvalidated
+        }
+        guard establishedOwnerByPair[reservation.pairKey] == record.expectedOwner else {
+            establishmentReservationByAttempt.removeValue(forKey: attemptKey)
+            throw EstablishmentCommitError.establishedOwnerChanged
+        }
+
+        let lease = EstablishedLease(pairKey: reservation.pairKey, sessionId: sessionId)
+        establishedOwnerByPair[reservation.pairKey] = lease
+        if outgoingByPair[reservation.pairKey]?.reservation == reservation {
+            outgoingByPair.removeValue(forKey: reservation.pairKey)
+        }
+        invalidateEstablishmentReservations(for: reservation.pairKey)
+        return lease
     }
 
-    public func clearEstablished(pairKey: Data) {
-        establishedPairs.remove(pairKey)
+    @discardableResult
+    public func clearEstablished(_ lease: EstablishedLease) -> Bool {
+        guard establishedOwnerByPair[lease.pairKey] == lease else {
+            return false
+        }
+        establishedOwnerByPair.removeValue(forKey: lease.pairKey)
+        return true
+    }
+
+    @discardableResult
+    public func restoreEstablishedIfVacant(_ lease: EstablishedLease) -> Bool {
+        guard establishedOwnerByPair[lease.pairKey] == nil else { return false }
+        establishedOwnerByPair[lease.pairKey] = lease
+        outgoingByPair.removeValue(forKey: lease.pairKey)
+        invalidateEstablishmentReservations(for: lease.pairKey)
+        return true
     }
 
     public func evaluateIncoming(
@@ -344,24 +503,39 @@ public actor PeerSessionArbiter {
         guard targetPeerId == localPeerId, remoteInitiatorPeerId == expectedRemotePeerId else {
             return .rejectBinding
         }
-        if establishedPairs.contains(pairKey) {
+        if establishedOwnerByPair[pairKey] != nil {
             switch establishedPolicy {
             case .rejectDuplicate:
                 return .rejectAlreadyConnected
             case .replaceAuthenticated:
-                establishedPairs.remove(pairKey)
-                outgoingByPair.removeValue(forKey: pairKey)
-                return .acceptAndReplaceEstablished
+                if let outgoing = outgoingByPair[pairKey] {
+                    removeOutgoingAttempt(outgoing, pairKey: pairKey)
+                }
+                let reservation = reserveEstablishment(
+                    pairKey: pairKey,
+                    attemptId: remoteAttemptId,
+                    expectedOwner: establishedOwnerByPair[pairKey]
+                )
+                return .acceptAndReplaceEstablished(reservation)
             }
         }
 
-        guard let local = outgoingByPair[pairKey] else {
-            return .accept
+        guard let localRegistration = outgoingByPair[pairKey] else {
+            return .accept(reserveEstablishment(
+                pairKey: pairKey,
+                attemptId: remoteAttemptId,
+                expectedOwner: nil
+            ))
         }
+        let local = localRegistration.attempt
 
         if Date().timeIntervalSince(local.startedAt) > pendingWindowSeconds {
-            outgoingByPair.removeValue(forKey: pairKey)
-            return .accept
+            removeOutgoingAttempt(localRegistration, pairKey: pairKey)
+            return .accept(reserveEstablishment(
+                pairKey: pairKey,
+                attemptId: remoteAttemptId,
+                expectedOwner: nil
+            ))
         }
 
         if !canSupersede(pairKey: pairKey) {
@@ -377,13 +551,88 @@ public actor PeerSessionArbiter {
 
         if remoteWins {
             recordSupersede(pairKey: pairKey)
-            outgoingByPair.removeValue(forKey: pairKey)
+            removeOutgoingAttempt(localRegistration, pairKey: pairKey)
             Task { await local.onSuperseded(remoteInitiatorPeerId, remoteAttemptId) }
-            return .acceptAndSupersedeLocal(winnerPeerId: remoteInitiatorPeerId, winnerAttemptId: remoteAttemptId)
+            return .acceptAndSupersedeLocal(
+                reservation: reserveEstablishment(
+                    pairKey: pairKey,
+                    attemptId: remoteAttemptId,
+                    expectedOwner: nil
+                ),
+                winnerPeerId: remoteInitiatorPeerId,
+                winnerAttemptId: remoteAttemptId
+            )
         }
 
         return .rejectLocalWinner
     }
+
+    private func reserveEstablishment(
+        pairKey: Data,
+        attemptId: Data,
+        expectedOwner: EstablishedLease?
+    ) -> EstablishmentReservation {
+        // One pending committer per pair keeps admission bounded and makes a
+        // newer accepted attempt explicitly supersede an older suspended one.
+        invalidateEstablishmentReservations(for: pairKey)
+        let attemptKey = EstablishmentAttemptKey(pairKey: pairKey, attemptId: attemptId)
+        let reservation = EstablishmentReservation(
+            pairKey: pairKey,
+            attemptId: attemptId,
+            reservationId: UUID()
+        )
+        establishmentReservationByAttempt[attemptKey] = EstablishmentReservationRecord(
+            reservation: reservation,
+            expectedOwner: expectedOwner
+        )
+        return reservation
+    }
+
+    @discardableResult
+    func cancelEstablishment(_ reservation: EstablishmentReservation) -> Bool {
+        cancelEstablishmentIfCurrent(reservation)
+    }
+
+    @discardableResult
+    private func cancelEstablishmentIfCurrent(
+        _ reservation: EstablishmentReservation
+    ) -> Bool {
+        let attemptKey = EstablishmentAttemptKey(
+            pairKey: reservation.pairKey,
+            attemptId: reservation.attemptId
+        )
+        guard establishmentReservationByAttempt[attemptKey]?.reservation == reservation else {
+            return false
+        }
+        establishmentReservationByAttempt.removeValue(forKey: attemptKey)
+        return true
+    }
+
+    private func removeOutgoingAttempt(
+        _ registration: RegisteredOutgoingAttempt,
+        pairKey: Data
+    ) {
+        guard outgoingByPair[pairKey]?.reservation == registration.reservation else { return }
+        outgoingByPair.removeValue(forKey: pairKey)
+        cancelEstablishmentIfCurrent(registration.reservation)
+    }
+
+    private func invalidateEstablishmentReservations(for pairKey: Data) {
+        establishmentReservationByAttempt = establishmentReservationByAttempt.filter {
+            $0.key.pairKey != pairKey
+        }
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    private func waitAtTestEstablishmentBarrierIfNeeded(attemptId: Data) async {
+        guard testSuspendedEstablishmentAttemptId == attemptId else { return }
+        testEstablishmentCommitIsSuspended = true
+        await withCheckedContinuation { continuation in
+            testEstablishmentCommitContinuation = continuation
+        }
+        testEstablishmentCommitIsSuspended = false
+    }
+#endif
 
     public nonisolated static func pairKey(
         localPeerId: Data,
@@ -402,6 +651,45 @@ public actor PeerSessionArbiter {
         scoped.append(0)
         scoped.append(baseKey)
         return scoped
+    }
+
+    public nonisolated static func soaPeerId(from identifier: String) -> Data {
+        let canonical = canonicalSOAIdentifier(identifier)
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+    }
+
+    public nonisolated static func canonicalSOAIdentifier(_ raw: String) -> String {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while normalized.hasPrefix("recent:") {
+            normalized.removeFirst("recent:".count)
+        }
+        if normalized.hasPrefix("mac:") {
+            normalized.removeFirst("mac:".count)
+        }
+        if normalized.hasPrefix("id:") {
+            normalized.removeFirst("id:".count)
+            return normalizedUUID(in: normalized) ?? normalized
+        }
+        if normalized.hasPrefix("bonjour:") {
+            let payload = String(normalized.dropFirst("bonjour:".count))
+            let components = payload.split(separator: "@", maxSplits: 1).map(String.init)
+            let name = components.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let rawDomain = components.count > 1 ? components[1] : "local."
+            let domain = rawDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+            return "bonjour:\(name)@\(domain.isEmpty ? "local." : domain)"
+        }
+        if normalized.hasPrefix("host:") {
+            return normalized
+        }
+        return normalizedUUID(in: normalized) ?? normalized
+    }
+
+    private nonisolated static func normalizedUUID(in raw: String) -> String? {
+        let direct = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = UUID(uuidString: direct.uppercased()) else {
+            return nil
+        }
+        return parsed.uuidString.lowercased()
     }
 
     private func isRemoteWinner(
@@ -535,10 +823,43 @@ public actor HandshakeDriver {
     /// 当前尝试 attempt id
     private var soaAttemptId: Data?
 
-    /// 已通过验签与 pinning 的远端协议身份快照。
-    /// 由 `HandshakeContext` 生成，但生命周期由 `HandshakeDriver` 持有，
-    /// 以便在 context zeroize 后仍可供上层持久化 trusted authority。
+    /// One-shot CAS capability issued by `PeerSessionArbiter` for this exact
+    /// SOA attempt. A Finished message cannot publish without this reservation.
+    private var establishmentReservation: PeerSessionArbiter.EstablishmentReservation?
+
+    /// Distinguishes a locally registered outgoing slot from an inbound
+    /// reservation that happens to use the same pair/attempt bytes.
+    private var soaAttemptRegisteredAsOutgoing = false
+
+    /// Exact owner for the established arbiter slot. Teardown/rekey must clear
+    /// this lease rather than deleting by pair key alone.
+    private var establishedArbiterLease: PeerSessionArbiter.EstablishedLease?
+
+    /// Serializes the Finished commit across actor reentrancy. Authority and
+    /// `.established` remain unpublished until the arbiter lease is durable.
+    private var finishedCommitToken: UUID?
+
+    /// Exact owner of an outbound handshake from the first suspension point
+    /// through terminal publication. The state becomes non-idle before the
+    /// cross-actor arbiter call, while this token rejects stale continuations.
+    private var activeOutboundOperationToken: UUID?
+
+    /// 已完成 Finished key confirmation 的远端协议身份快照。
     private var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+
+    /// SOA identity authenticated by the same handshake attempt as
+    /// `authenticatedRemoteAuthority`. For an initiator this is the exact
+    /// target put on MessageA; for a responder it is the initiator accepted
+    /// from the signed MessageA extension after arbitration succeeds.
+    private var authenticatedRemoteSOAPeerId: Data?
+
+    /// Signature-authenticated candidate retained while Finished is pending.
+    /// It is never exported as a completed handshake authority.
+    private var candidateRemoteAuthority: AuthenticatedRemoteAuthority?
+
+    /// Candidate SOA binding for the active attempt. It is promoted into the
+    /// exported atomic binding only together with an authenticated authority.
+    private var candidateRemoteSOAPeerId: Data?
     
     // MARK: - Initialization
     
@@ -598,19 +919,37 @@ public actor HandshakeDriver {
     public func getAuthenticatedRemoteAuthority() -> AuthenticatedRemoteAuthority? {
         authenticatedRemoteAuthority
     }
+
+    public func getAuthenticatedHandshakePeerBinding() -> AuthenticatedHandshakePeerBinding? {
+        guard let authenticatedRemoteAuthority else { return nil }
+        return AuthenticatedHandshakePeerBinding(
+            authority: authenticatedRemoteAuthority,
+            authenticatedRemoteSOAPeerId: authenticatedRemoteSOAPeerId
+        )
+    }
+
+    public func getEstablishedArbiterLease() -> PeerSessionArbiter.EstablishedLease? {
+        establishedArbiterLease
+    }
     
     // MARK: - Public API
     
     /// 发起握手（发起方调用）
     public func initiateHandshake(with peer: PeerIdentifier) async throws -> SessionKeys {
-        guard case .idle = state else {
+        guard case .idle = state, activeOutboundOperationToken == nil else {
             throw HandshakeError.alreadyInProgress
         }
+
+        let operationToken = UUID()
+        activeOutboundOperationToken = operationToken
+        // cancel() and inbound dispatch must observe the outbound attempt before
+        // registerOutgoing crosses the actor boundary.
+        state = .sendingMessageA
 
         clearAuthenticatedRemoteAuthority()
         currentPeer = peer
 
-        let outboundSOA = resolveOutboundSOAMetadata(for: peer)
+        let outboundSOA = try resolveOutboundSOAMetadata(for: peer)
         if let outboundSOA {
             let pairKey = PeerSessionArbiter.pairKey(
                 localPeerId: outboundSOA.initiatorPeerId,
@@ -629,22 +968,43 @@ public actor HandshakeDriver {
                     )
                 }
             ))
+            guard activeOutboundOperationToken == operationToken else {
+                if case .accepted(let reservation) = decision {
+                    _ = await sessionArbiter.clearOutgoing(reservation)
+                }
+                throw inactiveOutboundOperationError()
+            }
             switch decision {
-            case .accepted:
+            case .accepted(let reservation):
                 soaPairKey = pairKey
                 soaAttemptId = outboundSOA.attemptId
+                establishmentReservation = reservation
+                soaAttemptRegisteredAsOutgoing = true
+                candidateRemoteSOAPeerId = outboundSOA.targetPeerId
             case .alreadyConnected:
+                activeOutboundOperationToken = nil
+                state = .idle
+                currentPeer = nil
                 throw HandshakeError.failed(.peerRejected("already_connected"))
             case .alreadyInProgress:
+                activeOutboundOperationToken = nil
+                state = .idle
+                currentPeer = nil
                 throw HandshakeError.alreadyInProgress
             }
         } else {
             soaPairKey = nil
             soaAttemptId = nil
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
+            candidateRemoteSOAPeerId = nil
         }
         
         // 创建握手上下文
         let peerKEMPublicKeys = await trustProvider.trustedKEMPublicKeys(for: peer.deviceId)
+        guard activeOutboundOperationToken == operationToken else {
+            throw inactiveOutboundOperationError()
+        }
         let ctx = HandshakeContext(
             role: .initiator,
             cryptoProvider: cryptoProvider,
@@ -666,15 +1026,20 @@ public actor HandshakeDriver {
             )
         } catch {
             await ctx.zeroize()
-            context = nil
-            if let pairKey = soaPairKey {
-                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            guard activeOutboundOperationToken == operationToken else {
+                throw inactiveOutboundOperationError()
             }
+            context = nil
+            activeOutboundOperationToken = nil
+            state = .idle
+            currentPeer = nil
+            await releasePendingArbiterAttempt()
             throw error
         }
-        
-        // 更新状态
-        state = .sendingMessageA
+        guard activeOutboundOperationToken == operationToken else {
+            await ctx.zeroize()
+            throw inactiveOutboundOperationError()
+        }
         
         // 发送 MessageA
         do {
@@ -682,17 +1047,28 @@ public actor HandshakeDriver {
             let capBytes = (try? messageA.capabilities.deterministicEncode()) ?? Data()
             let policyBytes = messageA.policy.deterministicEncode()
             SkyBridgeLogger.shared.info("📤 Handshake MessageA: total=\(messageA.encoded.count) bytes, cap=\(capBytes.count) bytes, policy=\(policyBytes.count) bytes")
-            let padded = HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
+            let padded = try HandshakePadding.wrapIfEnabled(messageA.encoded, label: "MessageA")
             // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
             try await transport.send(to: peer, data: padded)
         } catch {
-            await ctx.zeroize()
-            context = nil
-            if let pairKey = soaPairKey {
-                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            guard activeOutboundOperationToken == operationToken else {
+                await ctx.zeroize()
+                throw inactiveOutboundOperationError()
             }
-            await transitionToFailed(.transportError(error.localizedDescription))
-            throw HandshakeError.failed(.transportError(error.localizedDescription))
+            if case .established = state {
+                // The peer may complete MessageB/Finished while send(MessageA)
+                // is suspended. Authenticated Finished is stronger terminal
+                // evidence than a late transport completion error.
+            } else {
+                await ctx.zeroize()
+                context = nil
+                await transitionToFailed(.transportError(error.localizedDescription))
+                throw HandshakeError.failed(.transportError(error.localizedDescription))
+            }
+        }
+        guard activeOutboundOperationToken == operationToken else {
+            await ctx.zeroize()
+            throw inactiveOutboundOperationError()
         }
         
         // 等待 MessageB（带超时）
@@ -717,6 +1093,11 @@ public actor HandshakeDriver {
             default:
                 break
             }
+        }
+        if case .established = state {
+            // Early Finished kept the token alive so this exact initiate call
+            // could consume its cached success after send(MessageA) returned.
+            activeOutboundOperationToken = nil
         }
         
         return try await withCheckedThrowingContinuation { continuation in
@@ -797,24 +1178,29 @@ public actor HandshakeDriver {
     /// 取消握手
     public func cancel() async {
         guard case .idle = state else {
-            // 清理上下文
-            if let ctx = context {
-                await ctx.zeroize()
-                context = nil
-            }
-
+            activeOutboundOperationToken = nil
+            finishedCommitToken = nil
+            let contextToZeroize = context
+            context = nil
+            pendingFinished = nil
             clearAuthenticatedRemoteAuthority()
+            state = .failed(reason: .cancelled)
+
             // 取消超时任务
             timeoutTask?.cancel()
             timeoutTask = nil
 
-            if let pairKey = soaPairKey {
-                await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+            if let contextToZeroize {
+                await contextToZeroize.zeroize()
+            }
+
+            await releasePendingArbiterAttempt()
+            if let lease = establishedArbiterLease {
+                establishedArbiterLease = nil
+                _ = await sessionArbiter.clearEstablished(lease)
             }
             
             finishOnce(with: .failure(HandshakeError.failed(.cancelled)))
-            
-            state = .failed(reason: .cancelled)
             return
         }
     }
@@ -885,13 +1271,39 @@ public actor HandshakeDriver {
                     localPeerId: localPeerId,
                     establishedPolicy: authenticatedIncomingEstablishedPolicy
                 )
+                guard case .processingMessageA = state else {
+                    switch decision {
+                    case .accept(let reservation),
+                         .acceptAndReplaceEstablished(let reservation),
+                         .acceptAndSupersedeLocal(let reservation, _, _):
+                        _ = await sessionArbiter.cancelEstablishment(reservation)
+                    case .rejectAlreadyConnected,
+                         .rejectBinding,
+                         .rejectRateLimited,
+                         .rejectLocalWinner:
+                        break
+                    }
+                    return
+                }
                 switch decision {
-                case .accept:
+                case .accept(let reservation):
                     soaPairKey = pairKey
-                case .acceptAndReplaceEstablished:
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .acceptAndReplaceEstablished(let reservation):
                     soaPairKey = pairKey
-                case .acceptAndSupersedeLocal:
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
+                case .acceptAndSupersedeLocal(let reservation, _, _):
                     soaPairKey = pairKey
+                    soaAttemptId = soa.attemptId
+                    establishmentReservation = reservation
+                    soaAttemptRegisteredAsOutgoing = false
+                    candidateRemoteSOAPeerId = soa.initiatorPeerId
                 case .rejectAlreadyConnected:
                     await transitionToFailed(.peerRejected("already_connected"))
                     return
@@ -928,7 +1340,7 @@ public actor HandshakeDriver {
             
             // 发送 MessageB
             do {
-                let padded = HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
+                let padded = try HandshakePadding.wrapIfEnabled(messageB.encoded, label: "MessageB")
                 // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
                 try await transport.send(to: peer, data: padded)
             } catch {
@@ -945,7 +1357,10 @@ public actor HandshakeDriver {
                 return
             }
 
-            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
+            captureCandidateRemoteAuthority(
+                await ctx.getAuthenticatedRemoteAuthority(),
+                authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
+            )
             
             // 清理敏感数据
             await ctx.zeroize()
@@ -959,7 +1374,7 @@ public actor HandshakeDriver {
             // 发送 Finished
             do {
                 let finished = try makeFinished(direction: .responderToInitiator, sessionKeys: sessionKeys)
-                let padded = HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
+                let padded = try HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
                 // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
                 try await transport.send(to: peer, data: padded)
             } catch {
@@ -1022,7 +1437,10 @@ public actor HandshakeDriver {
                 return
             }
 
-            captureAuthenticatedRemoteAuthority(await ctx.getAuthenticatedRemoteAuthority())
+            captureCandidateRemoteAuthority(
+                await ctx.getAuthenticatedRemoteAuthority(),
+                authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
+            )
             await ctx.zeroize()
             context = nil
             
@@ -1076,14 +1494,28 @@ public actor HandshakeDriver {
         await transitionToFailed(.timeout, negotiatedSuite: suite)
     }
 
-    private func captureAuthenticatedRemoteAuthority(
-        _ authority: AuthenticatedRemoteAuthority?
+    private func captureCandidateRemoteAuthority(
+        _ authority: AuthenticatedRemoteAuthority?,
+        authenticatedRemoteSOAPeerId: Data?
     ) {
-        authenticatedRemoteAuthority = authority
+        candidateRemoteAuthority = authority
+        candidateRemoteSOAPeerId = authority == nil ? nil : authenticatedRemoteSOAPeerId
+    }
+
+    private func promoteCandidateRemoteAuthority() -> Bool {
+        guard let candidateRemoteAuthority else { return false }
+        authenticatedRemoteAuthority = candidateRemoteAuthority
+        authenticatedRemoteSOAPeerId = candidateRemoteSOAPeerId
+        self.candidateRemoteAuthority = nil
+        candidateRemoteSOAPeerId = nil
+        return true
     }
 
     private func clearAuthenticatedRemoteAuthority() {
         authenticatedRemoteAuthority = nil
+        authenticatedRemoteSOAPeerId = nil
+        candidateRemoteAuthority = nil
+        candidateRemoteSOAPeerId = nil
     }
 
     private func enforceIdentityPinning(deviceId: String, identityPublicKey: Data) async throws {
@@ -1223,23 +1655,106 @@ public actor HandshakeDriver {
                 await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
             }
+
+            guard finishedCommitToken == nil else { return }
+            let commitToken = UUID()
+            finishedCommitToken = commitToken
             
             if expectingFrom == .responder {
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
-                    let padded = HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
+                    let padded = try HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
                     // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
                     try await transport.send(to: peer, data: padded)
                 } catch {
                     await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                     return
                 }
+                guard isCurrentFinishedCommit(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ) else {
+                    return
+                }
             }
-            
-            state = .established(sessionKeys: sessionKeys)
+
+            let committedArbiterLease: PeerSessionArbiter.EstablishedLease?
             if let pairKey = soaPairKey {
-                await sessionArbiter.markEstablished(pairKey: pairKey)
+                guard let establishmentReservation,
+                      establishmentReservation.pairKey == pairKey else {
+                    await transitionToFailed(
+                        .invalidMessageFormat("Missing SOA establishment reservation"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+                let lease: PeerSessionArbiter.EstablishedLease
+                do {
+                    lease = try await sessionArbiter.commitEstablished(
+                        establishmentReservation,
+                        sessionId: sessionKeys.sessionId
+                    )
+                } catch let error as PeerSessionArbiter.EstablishmentCommitError {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
+                    let reason: String
+                    switch error {
+                    case .reservationInvalidated:
+                        reason = "soa_establishment_reservation_invalidated"
+                    case .establishedOwnerChanged:
+                        reason = "soa_established_owner_changed"
+                    }
+                    await transitionToFailed(
+                        .peerRejected(reason),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                } catch {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else {
+                        return
+                    }
+                    await transitionToFailed(
+                        .peerRejected("soa_establishment_commit_failed"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+                guard isCurrentFinishedCommit(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
+                ) else {
+                    _ = await sessionArbiter.clearEstablished(lease)
+                    return
+                }
+                committedArbiterLease = lease
+            } else {
+                committedArbiterLease = nil
             }
+
+            guard promoteCandidateRemoteAuthority() else {
+                establishedArbiterLease = committedArbiterLease
+                await transitionToFailed(
+                    .invalidMessageFormat("Finished verified without an authenticated remote authority"),
+                    negotiatedSuite: sessionKeys.negotiatedSuite
+                )
+                return
+            }
+
+            establishedArbiterLease = committedArbiterLease
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
+            if pendingContinuation != nil {
+                activeOutboundOperationToken = nil
+            }
+            finishedCommitToken = nil
+            state = .established(sessionKeys: sessionKeys)
             finishOnce(with: .success(sessionKeys))
             
         default:
@@ -1248,6 +1763,8 @@ public actor HandshakeDriver {
     }
     
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        activeOutboundOperationToken = nil
+        finishedCommitToken = nil
         let contextToZeroize = context
         context = nil
         pendingFinished = nil
@@ -1256,10 +1773,45 @@ public actor HandshakeDriver {
         if let contextToZeroize {
             await contextToZeroize.zeroize()
         }
-        if let pairKey = soaPairKey {
-            await sessionArbiter.clearOutgoing(pairKey: pairKey, attemptId: soaAttemptId)
+        await releasePendingArbiterAttempt()
+        if let lease = establishedArbiterLease {
+            establishedArbiterLease = nil
+            _ = await sessionArbiter.clearEstablished(lease)
         }
         finishOnce(with: .failure(HandshakeError.failed(reason)))
+    }
+
+    private func isCurrentFinishedCommit(
+        _ token: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard finishedCommitToken == token,
+              case .waitingFinished(_, let currentKeys, _) = state else {
+            return false
+        }
+        return currentKeys.sessionId == sessionId
+    }
+
+    private func releasePendingArbiterAttempt() async {
+        let reservation = establishmentReservation
+        let registeredAsOutgoing = soaAttemptRegisteredAsOutgoing
+        establishmentReservation = nil
+        soaAttemptRegisteredAsOutgoing = false
+        soaPairKey = nil
+        soaAttemptId = nil
+        guard let reservation else { return }
+        if registeredAsOutgoing {
+            _ = await sessionArbiter.clearOutgoing(reservation)
+        } else {
+            _ = await sessionArbiter.cancelEstablishment(reservation)
+        }
+    }
+
+    private func inactiveOutboundOperationError() -> HandshakeError {
+        if case .failed(let reason) = state {
+            return .failed(reason)
+        }
+        return .failed(.cancelled)
     }
     
     private func finishOnce(with result: Result<SessionKeys, Error>) {
@@ -1403,7 +1955,7 @@ public actor HandshakeDriver {
         return value
     }
 
-    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) -> HandshakeSOAMetadata? {
+    private func resolveOutboundSOAMetadata(for _: PeerIdentifier) throws -> HandshakeSOAMetadata? {
         if let soaMetadata {
             return soaMetadata
         }
@@ -1414,7 +1966,7 @@ public actor HandshakeDriver {
             return nil
         }
         let attemptId = Self.randomAttemptId()
-        return try? HandshakeSOAMetadata(
+        return try HandshakeSOAMetadata(
             initiatorPeerId: localSOAPeerId,
             targetPeerId: expectedRemoteSOAPeerId,
             attemptId: attemptId
@@ -1426,18 +1978,23 @@ public actor HandshakeDriver {
         winnerAttemptId: Data
     ) async {
         guard case .idle = state else {
-            if let ctx = context {
-                await ctx.zeroize()
-                context = nil
-            }
+            activeOutboundOperationToken = nil
+            finishedCommitToken = nil
+            let contextToZeroize = context
+            context = nil
             timeoutTask?.cancel()
             timeoutTask = nil
+            establishmentReservation = nil
+            soaAttemptRegisteredAsOutgoing = false
             clearAuthenticatedRemoteAuthority()
             let reason = HandshakeFailureReason.supersededByConcurrentAttempt(
                 winnerPeerId: hexString(winnerPeerId),
                 winnerAttemptId: hexString(winnerAttemptId)
             )
             state = .failed(reason: reason)
+            if let contextToZeroize {
+                await contextToZeroize.zeroize()
+            }
             finishOnce(with: .failure(HandshakeError.failed(reason)))
             return
         }

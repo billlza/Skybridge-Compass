@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @available(iOS 17.0, *)
 struct RadarScanOverlay: View {
@@ -57,7 +60,12 @@ struct DeviceDiscoveryView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 16) {
                     scanStatusHeader
-                    
+
+                    AdvertisingLifecycleBanner(
+                        state: connectionManager.advertisingLifecycle,
+                        isBrowseAuthorizationBlocked: discoveryManager.isBrowseAuthorizationBlocked
+                    )
+
                     if discoveryManager.discoveredDevices.isEmpty {
                         emptyStateView
                     } else {
@@ -244,6 +252,142 @@ struct DeviceDiscoveryView: View {
     }
 }
 
+
+// MARK: - Advertising Lifecycle Banner
+
+/// Surfaces why this device is (not) discoverable by peers.
+///
+/// Advertising used to fail silently, which is indistinguishable from "nobody is nearby".
+/// The pending local-network permission case is the one blocker only the user can clear,
+/// so it gets an explicit action instead of a log line.
+struct AdvertisingLifecycleBanner: View {
+    let state: P2PConnectionManager.AdvertisingLifecycleState
+    /// Denied local-network access blocks browsing too, so it is reported here rather than leaving
+    /// the device list silently empty.
+    let isBrowseAuthorizationBlocked: Bool
+
+    var body: some View {
+        if isBrowseAuthorizationBlocked {
+            banner(
+                icon: "exclamationmark.triangle.fill",
+                tint: .orange,
+                title: "需要允许「本地网络」访问",
+                detail: """
+                未获授权时既看不到附近设备，本机也无法被发现。请在「设置 › 隐私与安全性 › \
+                本地网络」中允许 SkyBridge；授权后会自动重试。
+                """,
+                action: ("打开系统设置", openSystemSettings)
+            )
+        } else {
+            advertisingBanner
+        }
+    }
+
+    @ViewBuilder
+    private var advertisingBanner: some View {
+        switch state {
+        case .idle, .advertising:
+            EmptyView()
+
+        case .blockedByStartupFailure(let reason):
+            banner(
+                icon: "xmark.octagon.fill",
+                tint: .red,
+                title: "本机广播已停用",
+                detail: """
+                设备身份未就绪，为避免广播未绑定的身份，本机不会被其他设备发现（仍会继续查找附近设备）。\
+                原因：\(reason)
+                """,
+                action: nil
+            )
+
+        case .starting:
+            banner(
+                icon: "antenna.radiowaves.left.and.right",
+                tint: .cyan,
+                title: "正在开启本机广播…",
+                detail: "其他设备暂时还看不到这台设备。",
+                action: nil
+            )
+
+        case .awaitingLocalNetworkAuthorization(let nextRetryInSeconds):
+            banner(
+                icon: "exclamationmark.triangle.fill",
+                tint: .orange,
+                title: "需要允许「本地网络」访问",
+                detail: """
+                未获授权时本机无法被其他设备发现。请在「设置 › 隐私与安全性 › 本地网络」中\
+                允许 SkyBridge；授权后约 \(Int(nextRetryInSeconds)) 秒内会自动恢复广播。
+                """,
+                action: ("打开系统设置", openSystemSettings)
+            )
+
+        case .retrying(let attempt, let nextRetryInSeconds):
+            banner(
+                icon: "arrow.triangle.2.circlepath",
+                tint: .yellow,
+                title: "本机广播正在重试（第 \(attempt) 次）",
+                detail: "将在约 \(Int(nextRetryInSeconds)) 秒后重试，恢复前其他设备看不到这台设备。",
+                action: nil
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func banner(
+        icon: String,
+        tint: Color,
+        title: String,
+        detail: String,
+        action: (title: String, handler: () -> Void)?
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let action {
+                    Button(action.title, action: action.handler)
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(tint)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(tint.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(tint.opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(title))
+        .accessibilityValue(Text(detail))
+    }
+
+    private func openSystemSettings() {
+#if canImport(UIKit)
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+#endif
+    }
+}
 
 // MARK: - Info Row
 

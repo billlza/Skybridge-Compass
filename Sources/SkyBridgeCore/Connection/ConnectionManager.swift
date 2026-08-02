@@ -1,3 +1,9 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// macOS 侧的发现/连接编排实现。iOS 目前有自己的一份（iOS 侧连接管理），阶段 0 只让
+// SkyBridgeCore 能为 iOS 编译，不在同一二进制里立起第二套实现。采用 iOS 版本是
+// 阶段 3 的逐类型迁移工作，记录在 Docs/background-wake-capability-ledger.md。
+#if os(macOS)
 import Foundation
 import Network
 import OSLog
@@ -307,3 +313,4 @@ public enum ConnectionError: Error, LocalizedError {
         }
     }
 }
+#endif

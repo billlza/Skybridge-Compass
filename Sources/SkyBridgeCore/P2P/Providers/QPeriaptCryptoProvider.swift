@@ -195,7 +195,7 @@ public struct QPeriaptCryptoProvider: QPeriaptSessionBoundCryptoProvider, Sendab
         case .keyExchange:
             let keys = try await adapter.generateKeyPair()
             defer { keys.privateKey.zeroize() }
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(
                     suite: activeSuite,
                     usage: .keyExchange,
@@ -211,7 +211,7 @@ public struct QPeriaptCryptoProvider: QPeriaptSessionBoundCryptoProvider, Sendab
             )
         case .signing:
             let keys = try await signatureProvider.generateKeyPair(for: .signing)
-            return KeyPair(
+            return try KeyPair(
                 publicKey: KeyMaterial(
                     suite: activeSuite,
                     usage: .signing,

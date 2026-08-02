@@ -32,7 +32,7 @@ pub const XWING_SECRET_KEY_BYTES: usize = MLKEM768_SECRET_KEY_BYTES + X25519_SEC
 pub const XWING_CIPHERTEXT_BYTES: usize = MLKEM768_CIPHERTEXT_BYTES + X25519_PUBLIC_KEY_BYTES;
 const XWING_LABEL: &[u8] = b"\\.//^\\";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RustPqcIdentityMaterial {
     pub signing_algorithm: ProtocolSigningAlgorithm,
     pub signing_public_key: Vec<u8>,
@@ -49,6 +49,25 @@ pub struct RustPqcIdentityMaterial {
     /// Q-Periapt ContextBound hybrid KEM identity (`sk_pq || sk_trad`).
     #[cfg(feature = "q-periapt")]
     pub qperiapt_secret_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for RustPqcIdentityMaterial {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("RustPqcIdentityMaterial");
+        debug
+            .field("signing_algorithm", &self.signing_algorithm)
+            .field("signing_public_key_len", &self.signing_public_key.len())
+            .field("signing_secret_key", &"<redacted>")
+            .field("mlkem768_public_key_len", &self.mlkem768_public_key.len())
+            .field("mlkem768_secret_key", &"<redacted>")
+            .field("xwing_public_key_len", &self.xwing_public_key.len())
+            .field("xwing_secret_key", &"<redacted>");
+        #[cfg(feature = "q-periapt")]
+        debug
+            .field("qperiapt_public_key_len", &self.qperiapt_public_key.len())
+            .field("qperiapt_secret_key", &"<redacted>");
+        debug.finish()
+    }
 }
 
 impl RustPqcIdentityMaterial {

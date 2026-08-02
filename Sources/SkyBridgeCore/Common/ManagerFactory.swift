@@ -25,23 +25,43 @@ public final class ManagerFactory: Sendable {
     private init() {
         logger.info("🏭 管理器工厂初始化")
  // 注册已知管理器构造器（避免恒为 false 的类型强转告警）
+ // 部分管理器依赖 macOS-only 框架（AppKit / IOKit / CoreWLAN / ScreenCaptureKit），
+ // 仅在 macOS 注册；其它平台请求这些类型会走 registry 缺失路径。
+#if os(macOS)
         registry[ObjectIdentifier(ConnectionManager.self)] = { ConnectionManager() }
+#endif
+#if os(macOS)
         registry[ObjectIdentifier(DeviceDiscoveryManager.self)] = { DeviceDiscoveryManager() }
+#endif
+#if os(macOS)
         registry[ObjectIdentifier(AccessibilityManager.self)] = { AccessibilityManager() }
+#endif
+#if os(macOS)
         registry[ObjectIdentifier(KeyboardNavigationManager.self)] = { KeyboardNavigationManager() }
+#endif
+#if os(macOS)
         registry[ObjectIdentifier(ThermalManager.self)] = { ThermalManager() }
+#endif
+#if os(macOS)
         registry[ObjectIdentifier(WiFiManager.self)] = { WiFiManager() }
+#endif
         registry[ObjectIdentifier(AirPlayManager.self)] = { AirPlayManager() }
         registry[ObjectIdentifier(FileTransferManager.self)] = { FileTransferManager.shared }
         registry[ObjectIdentifier(LocationManager.self)] = { LocationManager() }
+#if os(macOS)
         registry[ObjectIdentifier(USBDeviceDiscoveryManager.self)] = { USBDeviceDiscoveryManager() }
+#endif
         registry[ObjectIdentifier(P2PSecurityManager.self)] = { P2PSecurityManager() }
  // DeviceTypesSecurityManager 已弃用，使用 DeviceSecurityManager 替代（见下方注册）
+#if os(macOS)
         registry[ObjectIdentifier(InteractiveClearManager.self)] = { InteractiveClearManager() }
+#endif
         registry[ObjectIdentifier(TLSSecurityManager.self)] = { TLSSecurityManager() }
         registry[ObjectIdentifier(DeviceSecurityManager.self)] = { DeviceSecurityManager.shared }
         registry[ObjectIdentifier(P2PPermissionManager.self)] = { P2PPermissionManager() }
+#if os(macOS)
         registry[ObjectIdentifier(RemoteControlManager.self)] = { RemoteControlManager() }
+#endif
         registry[ObjectIdentifier(UnifiedMemoryManager.self)] = { UnifiedMemoryManager() }
         registry[ObjectIdentifier(DeviceFilterManager.self)] = { DeviceFilterManager() }
  // 特殊：需要配置的管理器

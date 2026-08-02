@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SkyBridgeProtocolCore
 
 public enum FramedReaderError: Error, Sendable, Equatable {
     case peerClosed
@@ -41,13 +42,16 @@ public struct FramedReader: Sendable {
         return buffer
     }
 
-    public func receiveFrame(maxFrameLength: UInt32 = 1_048_576) async throws -> Data {
-        let lenData = try await receiveExactly(4)
+    public func receiveFrame(
+        maxFrameLength: UInt32 = UInt32(P2PControlFramePolicy.maximumBodyByteCount)
+    ) async throws -> Data {
+        let lenData = try await receiveExactly(P2PControlFramePolicy.lengthPrefixByteCount)
         let totalLen = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
-        guard totalLen > 0, totalLen <= maxFrameLength else {
+        guard let bodyByteCount = try? P2PControlFramePolicy.inboundBodyByteCount(from: totalLen),
+              totalLen <= maxFrameLength else {
             throw FramedReaderError.invalidLength(totalLen)
         }
-        return try await receiveExactly(Int(totalLen))
+        return try await receiveExactly(bodyByteCount)
     }
 
     public static func nwConnection(_ connection: NWConnection) -> FramedReader {

@@ -183,6 +183,8 @@ pub enum CurrentPathSecurityError {
     InvalidDeviceId,
     #[error("invalid signaling origin")]
     InvalidOrigin,
+    #[error("invalid insecure-loopback transport opt-in")]
+    InvalidInsecureLoopbackOptIn,
     #[error("invalid authoritative identity: {0}")]
     InvalidProtocolIdentity(String),
     #[error("invalid bootstrap payload: {0}")]
@@ -299,32 +301,104 @@ impl ProtocolIdentityBinding {
 
 pub struct CurrentPathOriginPolicy;
 
+/// Transport policy for externally supplied control-plane and signaling origins.
+///
+/// Production callers use [`SecureOnly`](OriginTransportPolicy::SecureOnly). Plaintext HTTP/WS
+/// exists only for explicitly opted-in local development and is still restricted to loopback
+/// hosts; it can never authorize plaintext traffic to a LAN or public address.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OriginTransportPolicy {
+    #[default]
+    SecureOnly,
+    AllowPlaintextLoopback,
+}
+
+impl OriginTransportPolicy {
+    pub const INSECURE_LOOPBACK_ENV: &'static str = "SKYBRIDGE_ALLOW_INSECURE_LOOPBACK_TRANSPORT";
+
+    pub fn from_environment() -> Result<Self, CurrentPathSecurityError> {
+        match std::env::var(Self::INSECURE_LOOPBACK_ENV) {
+            Ok(value) => Self::parse_explicit_opt_in(&value),
+            Err(std::env::VarError::NotPresent) => Ok(Self::SecureOnly),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(CurrentPathSecurityError::InvalidInsecureLoopbackOptIn)
+            }
+        }
+    }
+
+    pub fn parse_explicit_opt_in(raw: &str) -> Result<Self, CurrentPathSecurityError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => Ok(Self::AllowPlaintextLoopback),
+            "0" | "false" => Ok(Self::SecureOnly),
+            _ => Err(CurrentPathSecurityError::InvalidInsecureLoopbackOptIn),
+        }
+    }
+}
+
 impl CurrentPathOriginPolicy {
     pub fn canonical_origin(raw: &str) -> Result<String, CurrentPathSecurityError> {
+        Self::canonical_origin_with_policy(raw, OriginTransportPolicy::SecureOnly)
+    }
+
+    pub fn canonical_origin_with_policy(
+        raw: &str,
+        transport_policy: OriginTransportPolicy,
+    ) -> Result<String, CurrentPathSecurityError> {
+        canonical_transport_origin(raw, transport_policy, "https", "http")
+    }
+
+    pub fn canonical_websocket_origin(raw: &str) -> Result<String, CurrentPathSecurityError> {
+        Self::canonical_websocket_origin_with_policy(raw, OriginTransportPolicy::SecureOnly)
+    }
+
+    pub fn canonical_websocket_origin_with_policy(
+        raw: &str,
+        transport_policy: OriginTransportPolicy,
+    ) -> Result<String, CurrentPathSecurityError> {
         let parsed = url::Url::parse(raw).map_err(|_| CurrentPathSecurityError::InvalidOrigin)?;
-        let scheme = parsed.scheme().to_ascii_lowercase();
-        if scheme != "https" && scheme != "http" {
-            return Err(CurrentPathSecurityError::InvalidOrigin);
+        match parsed.scheme() {
+            "https" | "http" => Self::canonical_origin_with_policy(raw, transport_policy),
+            "wss" | "ws" => canonical_transport_origin(raw, transport_policy, "wss", "ws"),
+            _ => Err(CurrentPathSecurityError::InvalidOrigin),
         }
-        if parsed.host_str().is_none() || parsed.query().is_some() || parsed.fragment().is_some() {
-            return Err(CurrentPathSecurityError::InvalidOrigin);
-        }
-        if parsed.path() != "/" && !parsed.path().is_empty() {
-            return Err(CurrentPathSecurityError::InvalidOrigin);
-        }
-        let host = parsed
-            .host_str()
-            .ok_or(CurrentPathSecurityError::InvalidOrigin)?
-            .to_ascii_lowercase();
-        let port = parsed.port();
-        let explicit_port = match (scheme.as_str(), port) {
-            ("https", None | Some(443)) | ("http", None | Some(80)) => None,
-            (_, value) => value,
-        };
-        Ok(match explicit_port {
-            Some(port) => format!("{scheme}://{host}:{port}"),
-            None => format!("{scheme}://{host}"),
-        })
+    }
+}
+
+fn canonical_transport_origin(
+    raw: &str,
+    transport_policy: OriginTransportPolicy,
+    secure_scheme: &str,
+    plaintext_scheme: &str,
+) -> Result<String, CurrentPathSecurityError> {
+    let parsed = url::Url::parse(raw).map_err(|_| CurrentPathSecurityError::InvalidOrigin)?;
+    let scheme = parsed.scheme().to_ascii_lowercase();
+    if scheme != secure_scheme
+        && !(scheme == plaintext_scheme
+            && transport_policy == OriginTransportPolicy::AllowPlaintextLoopback
+            && is_strict_loopback_host(&parsed))
+    {
+        return Err(CurrentPathSecurityError::InvalidOrigin);
+    }
+    if parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(CurrentPathSecurityError::InvalidOrigin);
+    }
+    if parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err(CurrentPathSecurityError::InvalidOrigin);
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn is_strict_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -394,6 +468,97 @@ mod tests {
             "https://api.example.com:8443"
         );
         assert!(CurrentPathOriginPolicy::canonical_origin("https://api.example.com/ws").is_err());
+    }
+
+    #[test]
+    fn production_origin_policy_rejects_all_plaintext_origins() {
+        for origin in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+            "http://192.168.1.20:8080",
+            "http://api.example.com",
+        ] {
+            assert!(
+                CurrentPathOriginPolicy::canonical_origin(origin).is_err(),
+                "production policy accepted plaintext origin {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn plaintext_opt_in_is_restricted_to_strict_loopback_hosts() {
+        let policy = OriginTransportPolicy::AllowPlaintextLoopback;
+        assert_eq!(
+            CurrentPathOriginPolicy::canonical_origin_with_policy("http://localhost:8080", policy)
+                .unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            CurrentPathOriginPolicy::canonical_origin_with_policy("http://127.0.0.2:8080", policy)
+                .unwrap(),
+            "http://127.0.0.2:8080"
+        );
+        assert_eq!(
+            CurrentPathOriginPolicy::canonical_origin_with_policy("http://[::1]:8080", policy)
+                .unwrap(),
+            "http://[::1]:8080"
+        );
+
+        for origin in [
+            "http://localhost.example.com:8080",
+            "http://127.0.0.1.example.com:8080",
+            "http://192.168.1.20:8080",
+            "http://user@localhost:8080",
+            "http://localhost:8080/path",
+            "http://localhost:8080?token=secret",
+        ] {
+            assert!(
+                CurrentPathOriginPolicy::canonical_origin_with_policy(origin, policy).is_err(),
+                "loopback policy accepted unsafe origin {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn websocket_origin_policy_accepts_wss_and_restricts_ws_to_opted_in_loopback() {
+        assert_eq!(
+            CurrentPathOriginPolicy::canonical_websocket_origin("wss://signal.example:8443")
+                .unwrap(),
+            "wss://signal.example:8443"
+        );
+        assert!(
+            CurrentPathOriginPolicy::canonical_websocket_origin("ws://127.0.0.1:8080").is_err()
+        );
+        assert_eq!(
+            CurrentPathOriginPolicy::canonical_websocket_origin_with_policy(
+                "ws://127.0.0.1:8080",
+                OriginTransportPolicy::AllowPlaintextLoopback,
+            )
+            .unwrap(),
+            "ws://127.0.0.1:8080"
+        );
+        assert!(
+            CurrentPathOriginPolicy::canonical_websocket_origin_with_policy(
+                "ws://192.168.1.20:8080",
+                OriginTransportPolicy::AllowPlaintextLoopback,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn insecure_loopback_opt_in_parser_is_explicit() {
+        assert_eq!(
+            OriginTransportPolicy::parse_explicit_opt_in("true").unwrap(),
+            OriginTransportPolicy::AllowPlaintextLoopback
+        );
+        assert_eq!(
+            OriginTransportPolicy::parse_explicit_opt_in("0").unwrap(),
+            OriginTransportPolicy::SecureOnly
+        );
+        assert!(OriginTransportPolicy::parse_explicit_opt_in("yes").is_err());
+        assert!(OriginTransportPolicy::parse_explicit_opt_in("").is_err());
     }
 
     #[test]

@@ -392,7 +392,7 @@ public final class CloudBackupService: ObservableObject {
     }
 
     private func getDeviceName() -> String {
-        Host.current().localizedName ?? "Mac"
+        LocalHostName.localizedName ?? "Mac"
     }
 
     private func getDeviceID() -> String {

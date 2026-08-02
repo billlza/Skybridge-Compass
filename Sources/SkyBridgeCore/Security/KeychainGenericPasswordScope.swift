@@ -29,6 +29,20 @@ struct LegacySecItemLocation: Hashable, Sendable {
         query[kSecValuePersistentRef as String] = persistentReference
         #endif
     }
+
+    func isOrderedBefore(_ other: LegacySecItemLocation) -> Bool {
+        if usesDataProtectionKeychain != other.usesDataProtectionKeychain {
+            return !usesDataProtectionKeychain
+        }
+        let accessGroup = actualAccessGroup ?? ""
+        let otherAccessGroup = other.actualAccessGroup ?? ""
+        if accessGroup != otherAccessGroup {
+            return accessGroup < otherAccessGroup
+        }
+        return persistentReference.lexicographicallyPrecedes(
+            other.persistentReference
+        )
+    }
 }
 
 /// The small accessibility subset required by immutable key-pair records.
@@ -188,6 +202,7 @@ enum SkyBridgeKeychainAccessGroupResolver {
         }
 
         var resolved: String?
+#if os(macOS)
         if let task = SecTaskCreateFromSelf(nil),
            let entitlement = SecTaskCopyValueForEntitlement(
                task,
@@ -197,6 +212,22 @@ enum SkyBridgeKeychainAccessGroupResolver {
            let groups = entitlement as? [String] {
             resolved = sharedAccessGroup(from: groups)
         }
+#else
+        // `SecTaskCreateFromSelf` / `SecTaskCopyValueForEntitlement` are macOS-only, so the signed
+        // entitlement cannot be read directly on other platforms.
+        //
+        // Fails closed on purpose: `requiredSharedAccessGroup()` will throw
+        // `missingSharedIdentityAccessGroupEntitlement` rather than guessing a group, because
+        // guessing would either silently write identity material into the wrong keychain scope or
+        // hide a genuinely missing entitlement.
+        //
+        // Phase 2 migration source: the iOS app already resolves this by adding a probe item and
+        // reading back `kSecAttrAccessGroup`
+        // (`IOSProtocolIdentityKeychainStore.resolveSharedAccessGroup()`), including the
+        // `errSecMissingEntitlement` verification step. That technique should move here so both
+        // platforms share one resolver.
+        resolved = nil
+#endif
 
         let resolvedAccessGroup = resolved
         return state.withLock { current in

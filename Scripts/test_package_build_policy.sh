@@ -98,6 +98,17 @@ skybridge_normalize_versioned_framework_layout "${framework_layout_dir}" \
 skybridge_assert_no_nested_framework_versions_payload "${framework_layout_dir}" \
   || fail "framework layout verifier should accept normalized versioned frameworks"
 
+mkdir -p "${framework_layout_dir}/Versions/A"
+printf 'reviewed-webrtc-fixture' >"${framework_layout_dir}/Versions/A/WebRTC"
+original_webrtc_sha256="${SKYBRIDGE_WEBRTC_M150_MACOS_BINARY_SHA256}"
+SKYBRIDGE_WEBRTC_M150_MACOS_BINARY_SHA256="$(shasum -a 256 "${framework_layout_dir}/Versions/A/WebRTC" | awk '{print $1}')"
+skybridge_assert_webrtc_m150_framework "${framework_layout_dir}" \
+  || fail "WebRTC gate should accept the exact approved binary hash"
+SKYBRIDGE_WEBRTC_M150_MACOS_BINARY_SHA256="${original_webrtc_sha256}"
+if skybridge_assert_webrtc_m150_framework "${framework_layout_dir}" >/dev/null 2>&1; then
+  fail "WebRTC gate must reject an unapproved binary hash"
+fi
+
 [[ "$(skybridge_package_build_source "$xcode_dir" "$xcode_dir" "$swiftpm_dir")" == "xcode_release" ]] \
   || fail "xcode build dir should map to xcode_release"
 

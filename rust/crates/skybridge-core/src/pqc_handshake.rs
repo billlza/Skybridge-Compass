@@ -5,9 +5,11 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use anyhow::{Result, anyhow, bail};
 use getrandom::fill as fill_random;
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
+use crate::handshake_finished::{
+    FINISHED_I2R_INFO_PREFIX, FINISHED_R2I_INFO_PREFIX, derive_finished_mac, verify_finished_mac,
+};
 use crate::policy::{DowngradePolicy, encode_policy_wire_byte};
 use crate::{
     ClassicHandleResult, ClassicSessionKeys, CryptoSuite, ProtocolIdentityBinding,
@@ -18,7 +20,6 @@ use crate::{
 #[cfg(feature = "q-periapt")]
 use crate::{qperiapt_contextbound_decapsulate, qperiapt_contextbound_encapsulate};
 
-use crate::handshake_app_frame;
 pub use crate::handshake_app_frame::HeartbeatPayload;
 use crate::handshake_wire::{
     append_u16_le, encode_string, encode_string_array, unwrap_handshake_padding,
@@ -38,9 +39,7 @@ const FINISHED_MAGIC: &[u8; 4] = b"FIN1";
 const KDF_COMPOSITION_LABEL: &[u8] = b"v1-single";
 const HANDSHAKE_PAYLOAD_INFO: &[u8] = b"handshake-payload";
 
-type HmacSha256 = Hmac<Sha256>;
-
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PqcInitiatorConfig {
     pub local_binding: ProtocolIdentityBinding,
     pub signing_secret_key: Vec<u8>,
@@ -53,7 +52,30 @@ pub struct PqcInitiatorConfig {
     pub policy: DowngradePolicy,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for PqcInitiatorConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PqcInitiatorConfig")
+            .field(
+                "local_signing_algorithm",
+                &self.local_binding.protocol_signing_algorithm,
+            )
+            .field("signing_secret_key", &"<redacted>")
+            .field(
+                "local_device_name_present",
+                &self.local_device_name.is_some(),
+            )
+            .field("preferred_suites", &self.preferred_suites)
+            .field(
+                "peer_kem_public_key_suites",
+                &self.peer_kem_public_keys.keys().collect::<Vec<_>>(),
+            )
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct PqcResponderConfig {
     pub local_binding: ProtocolIdentityBinding,
     pub local_device_name: Option<String>,
@@ -64,19 +86,75 @@ pub struct PqcResponderConfig {
     pub policy: DowngradePolicy,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for PqcResponderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PqcResponderConfig")
+            .field(
+                "local_signing_algorithm",
+                &self.local_binding.protocol_signing_algorithm,
+            )
+            .field(
+                "local_device_name_present",
+                &self.local_device_name.is_some(),
+            )
+            .field("identity", &self.identity)
+            .field("supported_suites", &self.supported_suites)
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct PqcInitiatorHandshake {
     config: PqcInitiatorConfig,
     state: PqcInitiatorState,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for PqcInitiatorHandshake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &self.state {
+            PqcInitiatorState::Idle => "idle",
+            PqcInitiatorState::WaitingForMessageB(_) => "waiting_for_message_b",
+            PqcInitiatorState::WaitingForFinished(_) => "waiting_for_finished",
+            PqcInitiatorState::Established(_) => "established",
+        };
+        formatter
+            .debug_struct("PqcInitiatorHandshake")
+            .field(
+                "local_signing_algorithm",
+                &self.config.local_binding.protocol_signing_algorithm,
+            )
+            .field("state", &state)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct PqcResponderHandshake {
     config: PqcResponderConfig,
     state: PqcResponderState,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for PqcResponderHandshake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match &self.state {
+            PqcResponderState::Idle => "idle",
+            PqcResponderState::WaitingForFinished(_) => "waiting_for_finished",
+            PqcResponderState::Established(_) => "established",
+        };
+        formatter
+            .debug_struct("PqcResponderHandshake")
+            .field(
+                "local_signing_algorithm",
+                &self.config.local_binding.protocol_signing_algorithm,
+            )
+            .field("state", &state)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 enum PqcInitiatorState {
     Idle,
     WaitingForMessageB(WaitingForMessageBState),
@@ -84,14 +162,14 @@ enum PqcInitiatorState {
     Established(ClassicSessionKeys),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum PqcResponderState {
     Idle,
     WaitingForFinished(WaitingForFinishedState),
     Established(ClassicSessionKeys),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WaitingForMessageBState {
     offered_suites: Vec<CryptoSuite>,
     shared_secret_by_suite: BTreeMap<CryptoSuite, Vec<u8>>,
@@ -100,12 +178,12 @@ struct WaitingForMessageBState {
     pending_finished: Option<FinishedFrame>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct WaitingForFinishedState {
     session_keys: ClassicSessionKeys,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct FinishedFrame {
     direction: FinishedDirection,
     mac: [u8; 32],
@@ -241,74 +319,40 @@ impl PqcInitiatorHandshake {
             PqcInitiatorState::WaitingForMessageB(waiting) => {
                 let message_b = decode_message_b(&unwrapped)?;
                 let keys = process_message_b(&self.config, waiting, message_b)?;
-                let mut result = ClassicHandleResult::default();
                 let pending_finished = waiting.pending_finished.clone();
                 self.state = PqcInitiatorState::WaitingForFinished(WaitingForFinishedState {
-                    session_keys: keys.clone(),
+                    session_keys: keys,
                 });
                 if let Some(pending_finished) = pending_finished {
                     return self.handle_finished(pending_finished);
                 }
-                result.heartbeat_requested = true;
-                Ok(result)
-            }
-            PqcInitiatorState::WaitingForFinished(waiting) => {
-                if let Some(message) = handshake_app_frame::try_handle_encrypted_app_message(
-                    &unwrapped,
-                    &waiting.session_keys,
-                )? {
-                    return Ok(message);
-                }
-                bail!("unexpected frame while waiting for PQC Finished")
-            }
-            PqcInitiatorState::Established(keys) => {
-                if let Some(message) =
-                    handshake_app_frame::try_handle_encrypted_app_message(&unwrapped, keys)?
-                {
-                    return Ok(message);
-                }
                 Ok(ClassicHandleResult::default())
+            }
+            PqcInitiatorState::WaitingForFinished(_) => {
+                bail!("unexpected non-Finished frame while waiting for PQC Finished")
+            }
+            PqcInitiatorState::Established(_) => {
+                bail!("unexpected frame after PQC handshake establishment")
             }
             PqcInitiatorState::Idle => bail!("received frame before PQC handshake started"),
         }
     }
 
-    pub fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
-        handshake_app_frame::build_heartbeat_frame(
-            session_keys,
-            &self.config.local_binding.device_id,
-            self.config.local_device_name.as_deref(),
-        )
-    }
-
-    pub fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
-        handshake_app_frame::build_pong_frame(session_keys, id)
-    }
-
-    pub fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("PQC handshake is not established"))?;
-        handshake_app_frame::build_ping_frame(session_keys, id)
-    }
-
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
         match &self.state {
-            PqcInitiatorState::WaitingForFinished(waiting) => Some(&waiting.session_keys),
             PqcInitiatorState::Established(keys) => Some(keys),
-            PqcInitiatorState::Idle | PqcInitiatorState::WaitingForMessageB(_) => None,
+            PqcInitiatorState::Idle
+            | PqcInitiatorState::WaitingForMessageB(_)
+            | PqcInitiatorState::WaitingForFinished(_) => None,
         }
     }
 
     fn handle_finished(&mut self, finished: FinishedFrame) -> Result<ClassicHandleResult> {
         match &mut self.state {
             PqcInitiatorState::WaitingForMessageB(waiting) => {
+                if waiting.pending_finished.is_some() {
+                    bail!("duplicate responder Finished before MessageB");
+                }
                 waiting.pending_finished = Some(finished);
                 Ok(ClassicHandleResult::default())
             }
@@ -328,14 +372,9 @@ impl PqcInitiatorHandshake {
                 Ok(ClassicHandleResult {
                     outbound_frames: vec![initiator_finished],
                     established: Some(established),
-                    heartbeat_requested: true,
-                    pong_id: None,
-                    observed_pong_id: None,
-                    observed_heartbeat: false,
-                    inbound_file_frame: None,
                 })
             }
-            PqcInitiatorState::Established(_) => Ok(ClassicHandleResult::default()),
+            PqcInitiatorState::Established(_) => bail!("duplicate responder Finished"),
             PqcInitiatorState::Idle => bail!("received Finished before PQC handshake started"),
         }
     }
@@ -449,56 +488,19 @@ impl PqcResponderHandshake {
                     ..Default::default()
                 })
             }
-            PqcResponderState::WaitingForFinished(waiting) => {
-                if let Some(message) = handshake_app_frame::try_handle_encrypted_app_message(
-                    &unwrapped,
-                    &waiting.session_keys,
-                )? {
-                    return Ok(message);
-                }
-                bail!("unexpected frame while waiting for initiator Finished")
+            PqcResponderState::WaitingForFinished(_) => {
+                bail!("unexpected non-Finished frame while waiting for initiator Finished")
             }
-            PqcResponderState::Established(keys) => {
-                if let Some(message) =
-                    handshake_app_frame::try_handle_encrypted_app_message(&unwrapped, keys)?
-                {
-                    return Ok(message);
-                }
-                Ok(ClassicHandleResult::default())
+            PqcResponderState::Established(_) => {
+                bail!("unexpected frame after PQC responder handshake establishment")
             }
         }
     }
 
-    pub fn build_heartbeat_frame(&self) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
-        handshake_app_frame::build_heartbeat_frame(
-            session_keys,
-            &self.config.local_binding.device_id,
-            self.config.local_device_name.as_deref(),
-        )
-    }
-
-    pub fn build_pong_frame(&self, id: u64) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
-        handshake_app_frame::build_pong_frame(session_keys, id)
-    }
-
-    pub fn build_ping_frame(&self, id: u64) -> Result<Vec<u8>> {
-        let session_keys = self
-            .established_session_keys()
-            .ok_or_else(|| anyhow!("PQC responder handshake is not established"))?;
-        handshake_app_frame::build_ping_frame(session_keys, id)
-    }
-
     pub fn established_session_keys(&self) -> Option<&ClassicSessionKeys> {
         match &self.state {
-            PqcResponderState::WaitingForFinished(waiting) => Some(&waiting.session_keys),
             PqcResponderState::Established(keys) => Some(keys),
-            PqcResponderState::Idle => None,
+            PqcResponderState::Idle | PqcResponderState::WaitingForFinished(_) => None,
         }
     }
 
@@ -517,11 +519,10 @@ impl PqcResponderHandshake {
                 self.state = PqcResponderState::Established(established.clone());
                 Ok(ClassicHandleResult {
                     established: Some(established),
-                    heartbeat_requested: true,
                     ..Default::default()
                 })
             }
-            PqcResponderState::Established(_) => Ok(ClassicHandleResult::default()),
+            PqcResponderState::Established(_) => bail!("duplicate initiator Finished"),
         }
     }
 }
@@ -582,14 +583,19 @@ fn process_message_b(
     )?;
 
     let transcript_hash_b = Sha256::digest(message_b_encoded_without_signature(&message_b));
+    let peer_protocol_public_key_fingerprint =
+        ProtocolIdentityBinding::compute_fingerprint(identity.algorithm, &identity.public_key);
     derive_session_keys(
         suite,
         KDF_COMPOSITION_LABEL,
         shared_secret,
-        &waiting.client_nonce,
-        &message_b.server_nonce,
-        &waiting.transcript_hash_a,
-        transcript_hash_b.as_ref(),
+        SessionKeyDerivationContext {
+            client_nonce: &waiting.client_nonce,
+            server_nonce: &message_b.server_nonce,
+            transcript_hash_a: &waiting.transcript_hash_a,
+            transcript_hash_b: transcript_hash_b.as_ref(),
+            peer_protocol_public_key_fingerprint,
+        },
     )
 }
 
@@ -698,6 +704,10 @@ fn build_responder_message_b_and_keys(
     append_u16_le(&mut message_b, 0);
 
     let transcript_hash_b = Sha256::digest(&message_b_unsigned);
+    let peer_protocol_public_key_fingerprint = ProtocolIdentityBinding::compute_fingerprint(
+        message_a.initiator_identity_algorithm,
+        &message_a.initiator_identity_public_key,
+    );
     let responder_session_keys = derive_responder_session_keys(
         selected_suite,
         &shared_secret,
@@ -705,6 +715,7 @@ fn build_responder_message_b_and_keys(
         &server_nonce,
         &message_a.transcript_hash_a,
         transcript_hash_b.as_ref(),
+        peer_protocol_public_key_fingerprint,
     )?;
     Ok((message_b, responder_session_keys))
 }
@@ -734,7 +745,7 @@ fn pqc_capabilities_bytes(
     encode_string_array(&mut encoded, &["PQC"]);
     encode_string_array(&mut encoded, &["AES-256-GCM", "ChaCha20-Poly1305"]);
     encoded.push(0x01);
-    encode_string(&mut encoded, handshake_app_frame::HEARTBEAT_PLATFORM);
+    encode_string(&mut encoded, std::env::consts::OS);
     // Cross-platform provider-token: kept as the fixed wire string "liboqs" for
     // interop with existing Swift/Apple peers that match on this token. The actual
     // Rust PQC backend is the pure-Rust FIPS 203/204 provider (see
@@ -820,23 +831,28 @@ fn seal_payload_with_shared_secret(
     ))
 }
 
+struct SessionKeyDerivationContext<'a> {
+    client_nonce: &'a [u8; 32],
+    server_nonce: &'a [u8; 32],
+    transcript_hash_a: &'a [u8; 32],
+    transcript_hash_b: &'a [u8],
+    peer_protocol_public_key_fingerprint: String,
+}
+
 fn derive_session_keys(
     suite: CryptoSuite,
     composition_label: &[u8],
     shared_secret: &[u8],
-    client_nonce: &[u8; 32],
-    server_nonce: &[u8; 32],
-    transcript_hash_a: &[u8; 32],
-    transcript_hash_b: &[u8],
+    context: SessionKeyDerivationContext<'_>,
 ) -> Result<ClassicSessionKeys> {
     let mut kdf_info = Vec::from(b"SkyBridge-KDF".as_slice());
     kdf_info.push(0x01);
     append_u16_le(&mut kdf_info, suite.wire_id);
     kdf_info.extend_from_slice(composition_label);
-    kdf_info.extend_from_slice(transcript_hash_a);
-    kdf_info.extend_from_slice(transcript_hash_b);
-    kdf_info.extend_from_slice(client_nonce);
-    kdf_info.extend_from_slice(server_nonce);
+    kdf_info.extend_from_slice(context.transcript_hash_a);
+    kdf_info.extend_from_slice(context.transcript_hash_b);
+    kdf_info.extend_from_slice(context.client_nonce);
+    kdf_info.extend_from_slice(context.server_nonce);
 
     let mut salt_input = Vec::from(b"SkyBridge-KDF-Salt-v1|".as_slice());
     salt_input.extend_from_slice(&kdf_info);
@@ -859,14 +875,15 @@ fn derive_session_keys(
         .map_err(|_| anyhow!("failed to derive initiator receive key"))?;
 
     let mut transcript_input = Vec::new();
-    transcript_input.extend_from_slice(transcript_hash_a);
-    transcript_input.extend_from_slice(transcript_hash_b);
+    transcript_input.extend_from_slice(context.transcript_hash_a);
+    transcript_input.extend_from_slice(context.transcript_hash_b);
     let transcript_hash = Sha256::digest(&transcript_input);
 
     Ok(ClassicSessionKeys {
         send_key: send_key.to_vec(),
         receive_key: receive_key.to_vec(),
         negotiated_suite: suite.to_string(),
+        peer_protocol_public_key_fingerprint: context.peer_protocol_public_key_fingerprint,
         transcript_hash: transcript_hash.to_vec(),
     })
 }
@@ -878,15 +895,19 @@ fn derive_responder_session_keys(
     server_nonce: &[u8; 32],
     transcript_hash_a: &[u8; 32],
     transcript_hash_b: &[u8],
+    peer_protocol_public_key_fingerprint: String,
 ) -> Result<ClassicSessionKeys> {
     let mut keys = derive_session_keys(
         suite,
         KDF_COMPOSITION_LABEL,
         shared_secret,
-        client_nonce,
-        server_nonce,
-        transcript_hash_a,
-        transcript_hash_b,
+        SessionKeyDerivationContext {
+            client_nonce,
+            server_nonce,
+            transcript_hash_a,
+            transcript_hash_b,
+            peer_protocol_public_key_fingerprint,
+        },
     )?;
     std::mem::swap(&mut keys.send_key, &mut keys.receive_key);
     Ok(keys)
@@ -897,7 +918,11 @@ fn encode_finished_frame(
     mac_key: &[u8],
     transcript_hash: &[u8],
 ) -> Result<Vec<u8>> {
-    let mac = compute_finished_mac(mac_key, direction, transcript_hash)?;
+    let info_prefix = match direction {
+        FinishedDirection::ResponderToInitiator => FINISHED_R2I_INFO_PREFIX,
+        FinishedDirection::InitiatorToResponder => FINISHED_I2R_INFO_PREFIX,
+    };
+    let mac = derive_finished_mac(mac_key, info_prefix, transcript_hash)?;
     let mut encoded = Vec::with_capacity(38);
     encoded.extend_from_slice(FINISHED_MAGIC);
     encoded.push(HANDSHAKE_VERSION);
@@ -930,37 +955,19 @@ fn verify_finished(
     if frame.direction != expected_direction {
         bail!("Finished direction mismatch");
     }
-    let expected_mac = compute_finished_mac(
+    let info_prefix = match expected_direction {
+        FinishedDirection::ResponderToInitiator => FINISHED_R2I_INFO_PREFIX,
+        FinishedDirection::InitiatorToResponder => FINISHED_I2R_INFO_PREFIX,
+    };
+    if !verify_finished_mac(
         &session_keys.receive_key,
-        expected_direction,
+        info_prefix,
         &session_keys.transcript_hash,
-    )?;
-    if frame.mac != expected_mac {
+        &frame.mac,
+    )? {
         bail!("Finished MAC verification failed");
     }
     Ok(())
-}
-
-fn compute_finished_mac(
-    base_key: &[u8],
-    direction: FinishedDirection,
-    transcript_hash: &[u8],
-) -> Result<[u8; 32]> {
-    let info = match direction {
-        FinishedDirection::ResponderToInitiator => b"SkyBridge-FINISHED|R2I|".as_slice(),
-        FinishedDirection::InitiatorToResponder => b"SkyBridge-FINISHED|I2R|".as_slice(),
-    };
-    let hkdf = Hkdf::<Sha256>::new(None, base_key);
-    let mut mac_key = [0u8; 32];
-    hkdf.expand(info, &mut mac_key)
-        .map_err(|_| anyhow!("failed to derive Finished MAC key"))?;
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&mac_key)
-        .map_err(|error| anyhow!("invalid Finished MAC key: {error}"))?;
-    mac.update(transcript_hash);
-    let output = mac.finalize().into_bytes();
-    let mut encoded = [0u8; 32];
-    encoded.copy_from_slice(&output);
-    Ok(encoded)
 }
 
 impl FinishedDirection {
@@ -985,6 +992,40 @@ mod tests {
     use super::*;
     use crate::RustPqcIdentityMaterial;
 
+    fn mlkem768_handshake_pair() -> Result<(PqcInitiatorHandshake, PqcResponderHandshake)> {
+        let initiator_identity = RustPqcIdentityMaterial::generate()?;
+        let responder_identity = RustPqcIdentityMaterial::generate()?;
+        let initiator = PqcInitiatorHandshake::new(PqcInitiatorConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-finished-init",
+                initiator_identity.signing_algorithm,
+                initiator_identity.signing_public_key.clone(),
+                None,
+            )?,
+            signing_secret_key: initiator_identity.signing_secret_key,
+            local_device_name: Some("Rust PQC Initiator".to_owned()),
+            preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            peer_kem_public_keys: BTreeMap::from([(
+                CryptoSuite::MLKEM768_MLDSA65,
+                responder_identity.mlkem768_public_key.clone(),
+            )]),
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+        let responder = PqcResponderHandshake::new(PqcResponderConfig {
+            local_binding: ProtocolIdentityBinding::new(
+                "device-finished-resp",
+                responder_identity.signing_algorithm,
+                responder_identity.signing_public_key.clone(),
+                None,
+            )?,
+            local_device_name: Some("Rust PQC Responder".to_owned()),
+            identity: responder_identity,
+            supported_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
+            policy: DowngradePolicy::PreferPqc,
+        })?;
+        Ok((initiator, responder))
+    }
+
     #[test]
     fn mlkem768_initiator_handshake_round_trips() -> Result<()> {
         let initiator_identity = RustPqcIdentityMaterial::generate()?;
@@ -996,7 +1037,7 @@ mod tests {
             None,
         )?;
         let mut handshake = PqcInitiatorHandshake::new(PqcInitiatorConfig {
-            local_binding,
+            local_binding: local_binding.clone(),
             signing_secret_key: initiator_identity.signing_secret_key.clone(),
             local_device_name: Some("Rust PQC Agent".to_owned()),
             preferred_suites: vec![CryptoSuite::MLKEM768_MLDSA65],
@@ -1014,6 +1055,9 @@ mod tests {
             responder_identity.signing_public_key.clone(),
             None,
         )?;
+        let expected_initiator_fingerprint = local_binding.protocol_public_key_fingerprint.clone();
+        let expected_responder_fingerprint =
+            responder_binding.protocol_public_key_fingerprint.clone();
         let responder_message_a = decode_message_a(&message_a)?;
         let (message_b, responder_keys) = build_responder_message_b_and_keys(
             &PqcResponderConfig {
@@ -1037,6 +1081,14 @@ mod tests {
             .established
             .ok_or_else(|| anyhow!("expected established PQC session keys"))?;
         assert_eq!(established.negotiated_suite, "ML-KEM-768");
+        assert_eq!(
+            established.peer_protocol_public_key_fingerprint,
+            expected_responder_fingerprint
+        );
+        assert_eq!(
+            responder_keys.peer_protocol_public_key_fingerprint,
+            expected_initiator_fingerprint
+        );
         Ok(())
     }
 
@@ -1148,6 +1200,129 @@ mod tests {
         assert_eq!(initiator_keys.send_key, responder_keys.receive_key);
         assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
         assert_eq!(responder_keys.negotiated_suite, "ML-KEM-768");
+        assert!(
+            initiator
+                .handle_frame(b"unknown-established-frame")
+                .is_err(),
+            "PQC initiator must fail closed on unknown established frames"
+        );
+        assert!(
+            responder
+                .handle_frame(b"unknown-established-frame")
+                .is_err(),
+            "PQC responder must fail closed on unknown established frames"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pqc_finished_tampering_fails_both_directions() -> Result<()> {
+        let (mut initiator, mut responder) = mlkem768_handshake_pair()?;
+        let message_a = initiator.start()?;
+        let responder_actions = responder.handle_frame(&message_a)?;
+        let message_b = &responder_actions.outbound_frames[0];
+        let responder_finished = &responder_actions.outbound_frames[1];
+        let _ = initiator.handle_frame(message_b)?;
+
+        let mut tampered_responder_finished = responder_finished.clone();
+        *tampered_responder_finished
+            .last_mut()
+            .ok_or_else(|| anyhow!("responder Finished is empty"))? ^= 0x01;
+        let error = initiator
+            .handle_frame(&tampered_responder_finished)
+            .expect_err("tampered responder Finished must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("Finished MAC verification failed")
+        );
+
+        let initiator_actions = initiator.handle_frame(responder_finished)?;
+        let initiator_finished = &initiator_actions.outbound_frames[0];
+        let mut tampered_initiator_finished = initiator_finished.clone();
+        *tampered_initiator_finished
+            .last_mut()
+            .ok_or_else(|| anyhow!("initiator Finished is empty"))? ^= 0x01;
+        let error = responder
+            .handle_frame(&tampered_initiator_finished)
+            .expect_err("tampered initiator Finished must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("Finished MAC verification failed")
+        );
+        assert!(
+            responder
+                .handle_frame(initiator_finished)?
+                .established
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pqc_message_b_does_not_authorize_app_traffic_before_finished() -> Result<()> {
+        let (mut initiator, mut responder) = mlkem768_handshake_pair()?;
+        let message_a = initiator.start()?;
+        let responder_actions = responder.handle_frame(&message_a)?;
+        let message_b_actions = initiator.handle_frame(&responder_actions.outbound_frames[0])?;
+        assert!(message_b_actions.established.is_none());
+        assert!(message_b_actions.outbound_frames.is_empty());
+        assert!(initiator.established_session_keys().is_none());
+        assert!(responder.established_session_keys().is_none());
+        assert!(initiator.handle_frame(b"pre-finished-app-control").is_err());
+        assert!(responder.handle_frame(b"pre-finished-app-control").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pqc_established_states_reject_duplicate_finished_in_both_directions() -> Result<()> {
+        let (mut initiator, mut responder) = mlkem768_handshake_pair()?;
+        let message_a = initiator.start()?;
+        let responder_actions = responder.handle_frame(&message_a)?;
+        let responder_finished = responder_actions.outbound_frames[1].clone();
+        let _ = initiator.handle_frame(&responder_actions.outbound_frames[0])?;
+        let initiator_actions = initiator.handle_frame(&responder_finished)?;
+        let initiator_finished = initiator_actions.outbound_frames[0].clone();
+        assert!(
+            responder
+                .handle_frame(&initiator_finished)?
+                .established
+                .is_some()
+        );
+
+        let initiator_error = initiator
+            .handle_frame(&responder_finished)
+            .expect_err("established initiator must reject duplicate responder Finished");
+        assert_eq!(initiator_error.to_string(), "duplicate responder Finished");
+
+        let responder_error = responder
+            .handle_frame(&initiator_finished)
+            .expect_err("established responder must reject duplicate initiator Finished");
+        assert_eq!(responder_error.to_string(), "duplicate initiator Finished");
+        Ok(())
+    }
+
+    #[test]
+    fn pqc_rejects_duplicate_responder_finished_before_message_b() -> Result<()> {
+        let (mut initiator, mut responder) = mlkem768_handshake_pair()?;
+        let message_a = initiator.start()?;
+        let responder_actions = responder.handle_frame(&message_a)?;
+        let responder_finished = &responder_actions.outbound_frames[1];
+
+        assert!(
+            initiator
+                .handle_frame(responder_finished)?
+                .established
+                .is_none()
+        );
+        let error = initiator
+            .handle_frame(responder_finished)
+            .expect_err("duplicate responder Finished before MessageB must fail closed");
+        assert_eq!(
+            error.to_string(),
+            "duplicate responder Finished before MessageB"
+        );
         Ok(())
     }
 
@@ -1321,25 +1496,8 @@ mod tests {
         assert_eq!(initiator_keys.receive_key, responder_keys.send_key);
         assert_eq!(responder_keys.negotiated_suite, "Q-Periapt-ContextBound");
 
-        // Real AEAD round-trip through the established channel: the initiator
-        // encrypts a ping with its real session send key; the responder's real
-        // state machine decrypts it (receive key) and surfaces the ping id.
-        let ping = initiator.build_ping_frame(0x5159_4250_4552_4901)?;
-        let observed = responder.handle_frame(&ping)?;
-        assert_eq!(
-            observed.pong_id,
-            Some(0x5159_4250_4552_4901),
-            "responder must AEAD-decrypt the initiator's ping over the Q-Periapt session"
-        );
-
-        // And the reverse direction round-trips too (responder -> initiator).
-        let pong = responder.build_pong_frame(0x0102_0304_0506_0708)?;
-        let observed_back = initiator.handle_frame(&pong)?;
-        assert_eq!(
-            observed_back.observed_pong_id,
-            Some(0x0102_0304_0506_0708),
-            "initiator must AEAD-decrypt the responder's pong over the Q-Periapt session"
-        );
+        assert!(initiator.handle_frame(b"raw-app-frame").is_err());
+        assert!(responder.handle_frame(b"raw-app-frame").is_err());
         Ok(())
     }
 

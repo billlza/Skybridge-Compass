@@ -14,6 +14,7 @@
 import Foundation
 import Network
 import Atomics
+import SkyBridgeProtocolCore
 
 // MARK: - DiscoveryTransport Implementations
 
@@ -129,7 +130,7 @@ public actor BonjourDiscoveryTransport: DiscoveryTransport {
         let connection = try await getOrCreateConnection(to: peer)
 
  // 发送数据（带长度前缀）
-        let framedData = frameData(data)
+        let framedData = try frameData(data)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(
@@ -474,12 +475,22 @@ public actor BonjourDiscoveryTransport: DiscoveryTransport {
             }
 
  // 解析长度
-            let length = lengthData.withUnsafeBytes { ptr in
+            let encodedLength = lengthData.withUnsafeBytes { ptr in
                 ptr.loadUnaligned(as: UInt32.self).bigEndian
             }
 
+            guard let length = try? P2PControlFramePolicy.inboundBodyByteCount(
+                from: encodedLength
+            ) else {
+                connection.cancel()
+                Task {
+                    await self.closeConnection(to: peer)
+                }
+                return
+            }
+
  // 读取消息体
-            connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { [weak self] content, _, _, error in
+            connection.receive(minimumIncompleteLength: length, maximumLength: length) { [weak self] content, _, _, error in
                 guard let self = self else { return }
                 guard generation == self.connectionGeneration.load(ordering: .relaxed) else { return }
 
@@ -506,15 +517,8 @@ public actor BonjourDiscoveryTransport: DiscoveryTransport {
     }
 
  /// 添加长度前缀帧
-    private func frameData(_ data: Data) -> Data {
-        var framedData = Data()
-
- // 4 字节长度前缀（big-endian）
-        var length = UInt32(data.count).bigEndian
-        framedData.append(Data(bytes: &length, count: 4))
-        framedData.append(data)
-
-        return framedData
+    private func frameData(_ data: Data) throws -> Data {
+        try P2PControlFramePolicy.frame(body: data)
     }
 
  /// 解析地址字符串

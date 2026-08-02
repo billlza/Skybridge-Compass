@@ -20,9 +20,9 @@
     "@alicloud/openapi-client": "^0.4.15",
     "cors": "^2.8.5",
     "express": "^5.2.1",
-    "redis": "^6.0.0",
+    "redis": "^6.1.0",
     "standardwebhooks": "^1.0.0",
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "allowScripts": {
     "@alicloud/openapi-core@1.0.7": true

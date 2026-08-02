@@ -1,6 +1,6 @@
 import CryptoKit
 import Foundation
-import SkyBridgeProtocolCore
+@testable import SkyBridgeProtocolCore
 import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -24,6 +24,51 @@ final class InboundFileTransferIOActorTests: XCTestCase {
                 .path,
             "/various/payload"
         )
+    }
+
+    func testMobileContainerTraversalAnchorsAtTrustedContainerWithoutWeakeningDescendants() throws {
+        let trustedRoot = URL(
+            fileURLWithPath: "/var/mobile/Containers/Data/Application/APP-ID",
+            isDirectory: true
+        )
+        let target = trustedRoot
+            .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("Downloads", isDirectory: true)
+
+        let plan = try DarwinSecurePathPolicy.directoryTraversalPlan(
+            targetURL: target,
+            trustedContainerRootURL: trustedRoot
+        )
+
+        XCTAssertEqual(
+            plan.anchorURL.path,
+            "/private/var/mobile/Containers/Data/Application/APP-ID"
+        )
+        XCTAssertEqual(plan.relativeComponents, ["Documents", "Downloads"])
+        XCTAssertTrue(plan.requiresOwnedAnchor)
+    }
+
+    func testMobileContainerTraversalDoesNotAnchorSiblingOrEscapedTarget() throws {
+        let trustedRoot = URL(
+            fileURLWithPath: "/var/mobile/Containers/Data/Application/APP-ID",
+            isDirectory: true
+        )
+        let sibling = URL(
+            fileURLWithPath: "/var/mobile/Containers/Data/Application/OTHER-ID/Documents",
+            isDirectory: true
+        )
+        let escaped = trustedRoot
+            .appendingPathComponent("..", isDirectory: true)
+            .appendingPathComponent("OTHER-ID", isDirectory: true)
+
+        for target in [sibling, escaped] {
+            let plan = try DarwinSecurePathPolicy.directoryTraversalPlan(
+                targetURL: target,
+                trustedContainerRootURL: trustedRoot
+            )
+            XCTAssertEqual(plan.anchorURL.path, "/")
+            XCTAssertFalse(plan.requiresOwnedAnchor)
+        }
     }
 
     func testWriteDigestCommitAndReleasePreserveTwoPhaseLifecycle() async throws {

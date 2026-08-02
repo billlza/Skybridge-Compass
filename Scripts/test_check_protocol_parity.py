@@ -16,15 +16,46 @@ import check_protocol_parity as parity
 
 
 class AnchorRegistryTests(unittest.TestCase):
-    def test_production_registry_contains_thirty_four_unique_extracting_anchors(self) -> None:
-        self.assertEqual(len(parity.WIRE_ANCHORS), 34)
+    def test_production_registry_contains_thirty_six_unique_extracting_anchors(self) -> None:
+        self.assertEqual(len(parity.WIRE_ANCHORS), 36)
         labels = [label for label, _, _ in parity.WIRE_ANCHORS]
         self.assertEqual(len(labels), len(set(labels)))
         for label, pattern, filename in parity.WIRE_ANCHORS:
             with self.subTest(label=label):
                 self.assertGreater(parity._compile_anchor(pattern, label=label).groups, 0)
-                if filename is not None:
+                if isinstance(filename, tuple):
+                    self.assertEqual(len(filename), 2)
+                    self.assertTrue(all(path.endswith(".swift") for path in filename))
+                elif filename is not None:
                     self.assertTrue(filename.endswith(".swift"))
+
+    def test_legacy_p2p_message_case_names_are_not_misrepresented_as_wire_parity(self) -> None:
+        self.assertIn("P2PModels.swift", parity.EXEMPT)
+        labels = {label for label, _, _ in parity.WIRE_ANCHORS}
+        self.assertNotIn("P2P message operation cases", labels)
+
+    def test_cross_file_anchor_compares_explicit_different_basenames(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            ios_source = root / "IOSModels.swift"
+            macos_source = root / "MacModels.swift"
+            ios_source.write_text('case tablet = "tablet"\n', encoding="utf-8")
+            macos_source.write_text('case tablet = "tablet"\n', encoding="utf-8")
+            anchor: parity.Anchor = (
+                "cross-file model value",
+                r'case\s+(tablet)\s*=\s*"([^"]+)"',
+                (ios_source.name, macos_source.name),
+            )
+
+            self.assertEqual(
+                parity.check_wire_anchors(
+                    {ios_source.name: (ios_source.resolve(),)},
+                    {macos_source.name: (macos_source.resolve(),)},
+                    [anchor],
+                    shared_sources={},
+                ),
+                [],
+            )
 
 
 class CommandLineTests(unittest.TestCase):
@@ -37,6 +68,42 @@ class CommandLineTests(unittest.TestCase):
 
         update.assert_not_called()
         list_pairs.assert_not_called()
+
+
+class SharedCanonicalAnchorTests(unittest.TestCase):
+    def test_shared_anchor_uses_one_canonical_source_and_rejects_ios_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            canonical = root / "macos/CrossNetworkFileTransferWire.swift"
+            canonical.parent.mkdir()
+            canonical.write_text('let wireVersion = "v1"\n', encoding="utf-8")
+            anchor: parity.Anchor = (
+                "shared wire version",
+                r'wireVersion\s*=\s*"([^"]+)"',
+                canonical.name,
+            )
+            macos: parity.SourceIndex = {canonical.name: (canonical.resolve(),)}
+
+            self.assertEqual(
+                parity.check_wire_anchors(
+                    {},
+                    macos,
+                    [anchor],
+                    shared_sources={canonical.name: canonical},
+                ),
+                [],
+            )
+
+            ios_copy = root / "ios/CrossNetworkFileTransferWire.swift"
+            ios_copy.parent.mkdir()
+            ios_copy.write_text('let wireVersion = "v1"\n', encoding="utf-8")
+            with self.assertRaisesRegex(parity.ProtocolParityError, "local copy"):
+                parity.check_wire_anchors(
+                    {canonical.name: (ios_copy.resolve(),)},
+                    macos,
+                    [anchor],
+                    shared_sources={canonical.name: canonical},
+                )
 
 
 class NormalizerTests(unittest.TestCase):

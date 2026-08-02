@@ -363,12 +363,10 @@ final class RemoteControlTrustResolutionTests: XCTestCase {
         let trust = TrustSyncService.shared
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
-        defer {
+        try await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
             trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [edRecordId, mlRecordId])
-            }
         }
 
         _ = try await trust.addTrustRecord(

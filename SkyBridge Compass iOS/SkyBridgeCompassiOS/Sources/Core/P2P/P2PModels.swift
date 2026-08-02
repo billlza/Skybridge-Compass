@@ -23,6 +23,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
     case android = "Android"
     case windows = "Windows"
     case linux = "Linux"
+    case unknown = "Unknown"
     
     /// 设备类型显示名称
     public var displayName: String {
@@ -33,6 +34,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
         case .android: return "Android"
         case .windows: return "Windows"
         case .linux: return "Linux"
+        case .unknown: return "Unknown"
         }
     }
     
@@ -45,6 +47,7 @@ public enum P2PDeviceType: String, Codable, CaseIterable, Sendable {
         case .android: return "smartphone"
         case .windows: return "pc"
         case .linux: return "server.rack"
+        case .unknown: return "questionmark.circle"
         }
     }
 }

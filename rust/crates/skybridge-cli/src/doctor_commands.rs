@@ -11,6 +11,7 @@ pub(crate) async fn doctor_signaling(args: SignalingDoctorArgs) -> Result<()> {
     let as_json = args.output.json;
     let report = control_plane_doctor::build_signaling_doctor_report(
         args.base_url,
+        args.allow_insecure_loopback,
         args.expected_backend.as_deref(),
     )
     .await?;
@@ -21,6 +22,7 @@ pub(crate) async fn doctor_media_lease(args: MediaLeaseDoctorArgs) -> Result<()>
     let as_json = args.output.json;
     let report = control_plane_doctor::build_media_lease_doctor_report(
         args.base_url,
+        args.allow_insecure_loopback,
         args.session_id,
         args.media_admission_token,
     )

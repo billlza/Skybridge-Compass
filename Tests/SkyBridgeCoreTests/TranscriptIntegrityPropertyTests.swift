@@ -237,6 +237,51 @@ final class TranscriptIntegrityPropertyTests: XCTestCase {
         XCTAssertEqual(nonceData.count, 32)
         XCTAssertEqual(nonceData, Data(repeating: 0xAB, count: 32))
     }
+
+    func testTLVDecoderAcceptsNonZeroStartIndexSlice() throws {
+        var encoder = TLVEncoder()
+        encoder.encode(tag: .role, string: "initiator")
+        encoder.encode(tag: .initiatorNonce, value: Data(repeating: 0xA7, count: 32))
+
+        var storage = Data(repeating: 0xEE, count: 17)
+        storage.append(encoder.finalize())
+        let slice = storage.dropFirst(17)
+        XCTAssertNotEqual(slice.startIndex, 0)
+
+        var decoder = TLVDecoder(data: slice)
+        let fields = try decoder.decodeAll()
+
+        let role = try XCTUnwrap(fields[TranscriptTLVTag.role.rawValue])
+        XCTAssertEqual(String(data: role, encoding: .utf8), "initiator")
+        let nonce = try XCTUnwrap(fields[TranscriptTLVTag.initiatorNonce.rawValue])
+        XCTAssertEqual(nonce, Data(repeating: 0xA7, count: 32))
+        XCTAssertEqual(role.startIndex, 0)
+        XCTAssertEqual(nonce.startIndex, 0)
+    }
+
+    func testTLVDecoderRejectsTruncatedAndMaliciousLengthsFromNonZeroStartIndexSlices() {
+        let cases: [(wire: Data, expectedMessage: String)] = [
+            (Data([TranscriptTLVTag.role.rawValue, 0x00, 0x00, 0x00]), "Unexpected end of TLV length"),
+            (Data([TranscriptTLVTag.role.rawValue, 0x00, 0x00, 0x00, 0x03, 0x41, 0x42]), "TLV value exceeds data bounds"),
+            (Data([TranscriptTLVTag.role.rawValue, 0xFF, 0xFF, 0xFF, 0xFF]), "TLV value exceeds data bounds"),
+        ]
+
+        for testCase in cases {
+            var storage = Data(repeating: 0xEE, count: 17)
+            storage.append(testCase.wire)
+            let slice = storage.dropFirst(17)
+            XCTAssertNotEqual(slice.startIndex, 0)
+
+            var decoder = TLVDecoder(data: slice)
+            XCTAssertThrowsError(try decoder.decodeNext()) { error in
+                guard case TranscriptError.decodingError(let message) = error else {
+                    XCTFail("Expected TranscriptError.decodingError, got \(error)")
+                    return
+                }
+                XCTAssertEqual(message, testCase.expectedMessage)
+            }
+        }
+    }
     
  /// 测试 TLV 长度字段使用 big-endian
     func testTLVLengthIsBigEndian() throws {

@@ -33,8 +33,52 @@ extern "C"
 {
 #endif
 
+	/** @since version 3.28.0 */
+	typedef struct
+	{
+		char channelName[CHANNEL_NAME_LEN + 1];
+		uint32_t channelId;
+
+		uint64_t bytesIn;
+		uint64_t bytesOut;
+
+		uint64_t fragmentsIn;
+		uint64_t fragmentsOut;
+
+		uint64_t packetsIn;
+		uint64_t packetsOut;
+	} StaticClientChannelStat;
+
+	/** @since version 3.28.0 */
+	typedef struct
+	{
+		size_t count;
+		StaticClientChannelStat* stats;
+	} StaticClientChannelStats;
+
 	/** @since version 3.9.0 */
 	typedef BOOL (*freerdp_channel_handle_fkt_t)(rdpContext* context, void* userdata);
+
+	/** @brief free function for StaticClientChannelStat
+	 *
+	 *  @param stats A pointer to a \ref StaticClientChannelStats allocated by \ref
+	 * freerdp_channels_client_stats
+	 *
+	 *  @since version 3.28.0
+	 */
+	FREERDP_API void freerdp_channel_client_stats_free(StaticClientChannelStats* stats);
+
+	/** @brief return statistics for all static channels used
+	 *
+	 * @note must be called from RDP thread
+	 *
+	 * @param channels A pointer to the channels of the instance. Must not be nullptr
+	 *
+	 * @return An allocated \ref StaticClientChannelStats or nullptr in case of failure
+	 * @since version 3.28.0
+	 */
+	WINPR_ATTR_MALLOC(freerdp_channel_client_stats_free, 1)
+	FREERDP_API StaticClientChannelStats* freerdp_channels_client_stats(rdpChannels* channels);
 
 	WINPR_ATTR_NODISCARD
 	FREERDP_API int freerdp_channels_client_load(rdpChannels* channels, rdpSettings* settings,

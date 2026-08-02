@@ -10,9 +10,10 @@ use super::{control_plane_report, signal_server_client};
 
 pub(crate) async fn build_signaling_doctor_report(
     base_url: Option<String>,
+    allow_insecure_loopback: bool,
     expected_backend: Option<&str>,
 ) -> Result<crate::DoctorProbeReport> {
-    let signal_server = signal_server_client(base_url)?;
+    let signal_server = signal_server_client(base_url, allow_insecure_loopback)?;
     let target = signal_server.base_url.clone();
     let root = signal_server.probe_json_endpoint("/").await;
     let health = signal_server.probe_json_endpoint("/health").await;

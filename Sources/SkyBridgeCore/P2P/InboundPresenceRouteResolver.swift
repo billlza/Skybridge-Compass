@@ -126,7 +126,8 @@ private enum InboundPresenceRouteResolver {
         }
 
         func transferPort(from portMap: [String: Int]) -> Int {
-            guard let candidate = portMap["_skybridge-transfer._tcp"],
+            guard let candidate = portMap[BonjourInteropContract.fileTransferServiceType]
+                    ?? portMap[BonjourInteropContract.legacyFileTransferServiceType],
                   (1...65535).contains(candidate) else {
                 return -1
             }
@@ -296,7 +297,9 @@ private enum InboundPresenceRouteResolver {
                device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains(bonjourName.lowercased()) {
                 score += 180
             }
-            if score > 0, device.portMap["_skybridge-transfer._tcp"] != nil {
+            if score > 0,
+               device.portMap[BonjourInteropContract.fileTransferServiceType] != nil
+                || device.portMap[BonjourInteropContract.legacyFileTransferServiceType] != nil {
                 score += 40
             }
             return score
@@ -387,7 +390,9 @@ private enum InboundPresenceRouteResolver {
                device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == bonjourName.lowercased() {
                 score += 180
             }
-            if score > 0, device.portMap["_skybridge-transfer._tcp"] != nil {
+            if score > 0,
+               device.portMap[BonjourInteropContract.fileTransferServiceType] != nil
+                || device.portMap[BonjourInteropContract.legacyFileTransferServiceType] != nil {
                 score += 40
             }
             return score

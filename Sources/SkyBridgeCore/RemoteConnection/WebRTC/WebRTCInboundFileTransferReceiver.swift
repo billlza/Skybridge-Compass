@@ -13,6 +13,7 @@ final class WebRTCInboundFileTransferReceiver {
 
     private struct QueuedInboundOperation {
         let message: CrossNetworkFileTransferMessage
+        let reservation: CrossNetworkFileTransferOperationReservationLedger.Reservation
         let sessionID: String
         let endpointDescription: String
         let keys: SessionKeys
@@ -22,13 +23,22 @@ final class WebRTCInboundFileTransferReceiver {
         let onFatalError: @MainActor (Error) -> Void
     }
 
-    private enum InboundOperationQueueError: LocalizedError {
+    enum InboundOperationQueueError: LocalizedError {
         case capacityExceeded(maximum: Int)
+        case retainedByteCapacityExceeded(maximum: Int)
+        case accountingInvariantViolated
+        case invalidRequestOperation(op: CrossNetworkFileTransferOp)
 
         var errorDescription: String? {
             switch self {
             case .capacityExceeded(let maximum):
                 return "WebRTC inbound file-transfer operation queue exceeded maximum=\(maximum)"
+            case .retainedByteCapacityExceeded(let maximum):
+                return "WebRTC inbound file-transfer retained-byte budget exceeded maximum=\(maximum)"
+            case .accountingInvariantViolated:
+                return "WebRTC inbound file-transfer retained-byte accounting invariant failed"
+            case .invalidRequestOperation(let op):
+                return "WebRTC inbound file-transfer request queue rejected operation=\(op.rawValue)"
             }
         }
     }
@@ -44,7 +54,8 @@ final class WebRTCInboundFileTransferReceiver {
     private static let defaultTransferIdleTimeout: Duration = .seconds(120)
     private static let defaultMaxTerminalReceiptsPerSession = 128
     private static let defaultTerminalReceiptTTL: TimeInterval = 300
-    private static let maximumQueuedInboundOperations = 128
+    private static let maximumQueuedInboundOperations =
+        CrossNetworkFileTransferInboundAdmissionPolicy.maximumQueuedOperationCount
 
     private let destinationBaseDirectory: () -> URL?
     private let approvalProvider: ApprovalProvider
@@ -64,7 +75,14 @@ final class WebRTCInboundFileTransferReceiver {
     private var chunkOperationsInFlight: Set<String> = []
     private var cancelledTransportOperationIDs: Set<UUID> = []
     private var queuedInboundOperationsByTransferID: [String: [QueuedInboundOperation]] = [:]
-    private var queuedInboundOperationCount = 0
+    private var inboundOperationReservationLedger =
+        CrossNetworkFileTransferOperationReservationLedger()
+    var retainedInboundOperationByteCount: Int {
+        inboundOperationReservationLedger.retainedByteCount
+    }
+    var retainedInboundOperationCount: Int {
+        inboundOperationReservationLedger.reservationCount
+    }
     private var inboundOperationWorkers: [String: Task<Void, Never>] = [:]
     private var acceptsQueuedInboundOperations = true
     private var lifecycleToken = UUID()
@@ -110,8 +128,11 @@ final class WebRTCInboundFileTransferReceiver {
     func cleanupOnChannelClosed() -> Task<Void, Never> {
         lifecycleToken = UUID()
         acceptsQueuedInboundOperations = false
+        let queuedOperations = queuedInboundOperationsByTransferID.values.flatMap { $0 }
         queuedInboundOperationsByTransferID.removeAll(keepingCapacity: false)
-        queuedInboundOperationCount = 0
+        for operation in queuedOperations {
+            _ = releaseRetainedInboundOperationReservation(operation.reservation)
+        }
         let operationWorkers = Array(inboundOperationWorkers.values)
         for operationWorker in operationWorkers {
             operationWorker.cancel()
@@ -171,6 +192,7 @@ final class WebRTCInboundFileTransferReceiver {
     /// control, or the opposite-direction file sender.
     func enqueueInboundRequest(
         _ message: CrossNetworkFileTransferMessage,
+        encodedPayloadByteCount: Int,
         sessionID: String,
         endpointDescription: String,
         keys: SessionKeys,
@@ -183,19 +205,34 @@ final class WebRTCInboundFileTransferReceiver {
         case .metadata, .chunk, .complete, .cancel:
             break
         case .error, .metadataAck, .chunkAck, .completeAck:
-            preconditionFailure("Only inbound request operations may enter the request queue")
+            throw InboundOperationQueueError.invalidRequestOperation(op: message.op)
         }
+        let retainedByteCount = try CrossNetworkFileTransferInboundAdmissionPolicy
+            .retainedByteCharge(
+                for: message,
+                encodedPayloadByteCount: encodedPayloadByteCount
+            )
         guard acceptsQueuedInboundOperations else {
             throw CancellationError()
         }
-        guard queuedInboundOperationCount < Self.maximumQueuedInboundOperations else {
-            throw InboundOperationQueueError.capacityExceeded(
-                maximum: Self.maximumQueuedInboundOperations
+        let reservation: CrossNetworkFileTransferOperationReservationLedger.Reservation
+        do {
+            reservation = try inboundOperationReservationLedger.reserve(
+                byteCount: retainedByteCount
+            )
+        } catch CrossNetworkFileTransferInboundAdmissionError
+            .operationCapacityExceeded(let maximum) {
+            throw InboundOperationQueueError.capacityExceeded(maximum: maximum)
+        } catch CrossNetworkFileTransferInboundAdmissionError
+            .retainedByteCapacityExceeded(let maximum) {
+            throw InboundOperationQueueError.retainedByteCapacityExceeded(
+                maximum: maximum
             )
         }
         queuedInboundOperationsByTransferID[message.transferId, default: []].append(
             QueuedInboundOperation(
                 message: message,
+                reservation: reservation,
                 sessionID: sessionID,
                 endpointDescription: endpointDescription,
                 keys: keys,
@@ -205,12 +242,21 @@ final class WebRTCInboundFileTransferReceiver {
                 onFatalError: onFatalError
             )
         )
-        queuedInboundOperationCount += 1
         startInboundOperationWorkersIfPossible(preferredTransferID: message.transferId)
     }
 
     private var maximumActiveInboundOperationLanes: Int {
-        max(maxConcurrentInboundTransfers, min(maxGlobalConcurrentInboundTransfers, 32))
+        Self.activeInboundOperationLaneLimit(
+            sessionLimit: maxConcurrentInboundTransfers,
+            globalLimit: maxGlobalConcurrentInboundTransfers
+        )
+    }
+
+    static func activeInboundOperationLaneLimit(
+        sessionLimit: Int,
+        globalLimit: Int
+    ) -> Int {
+        min(sessionLimit, globalLimit, 32)
     }
 
     /// Runs one FIFO lane per transfer so approval or fsync for transfer A
@@ -243,6 +289,7 @@ final class WebRTCInboundFileTransferReceiver {
             var encounteredFatalError = false
             while !Task.isCancelled,
                   let operation = dequeueInboundOperation(for: transferID) {
+                var operationError: Error?
                 do {
                     try await handle(
                         operation.message,
@@ -254,9 +301,22 @@ final class WebRTCInboundFileTransferReceiver {
                         resumeSenderWaiter: operation.resumeSenderWaiter
                     )
                 } catch is CancellationError {
-                    break
+                    operationError = CancellationError()
                 } catch {
-                    operation.onFatalError(error)
+                    operationError = error
+                }
+                guard releaseRetainedInboundOperationReservation(operation.reservation) else {
+                    operation.onFatalError(
+                        InboundOperationQueueError.accountingInvariantViolated
+                    )
+                    encounteredFatalError = true
+                    break
+                }
+                if let operationError {
+                    if operationError is CancellationError {
+                        break
+                    }
+                    operation.onFatalError(operationError)
                     encounteredFatalError = true
                     break
                 }
@@ -276,7 +336,6 @@ final class WebRTCInboundFileTransferReceiver {
             return nil
         }
         let operation = operations.removeFirst()
-        queuedInboundOperationCount -= 1
         if operations.isEmpty {
             queuedInboundOperationsByTransferID.removeValue(forKey: transferID)
         } else {
@@ -289,7 +348,23 @@ final class WebRTCInboundFileTransferReceiver {
         guard let operations = queuedInboundOperationsByTransferID.removeValue(forKey: transferID) else {
             return
         }
-        queuedInboundOperationCount -= operations.count
+        for operation in operations {
+            _ = releaseRetainedInboundOperationReservation(operation.reservation)
+        }
+    }
+
+    @discardableResult
+    private func releaseRetainedInboundOperationReservation(
+        _ reservation: CrossNetworkFileTransferOperationReservationLedger.Reservation
+    ) -> Bool {
+        guard inboundOperationReservationLedger.release(reservation) else {
+            acceptsQueuedInboundOperations = false
+            logger.fault(
+                "WebRTC inbound file-transfer retained-byte accounting invariant failed"
+            )
+            return false
+        }
+        return true
     }
 
     func handle(

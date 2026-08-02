@@ -25,7 +25,7 @@ jobs:
       SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
@@ -206,7 +206,7 @@ jobs:
             --expected-source-sha "$GITHUB_SHA"
 
       - name: Upload Connectivity Matrix Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-device-connectivity-matrix-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-connectivity-matrix-public-redacted.tar.gz
@@ -214,7 +214,7 @@ jobs:
           retention-days: 30
 
       - name: Upload P2P Remote Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-device-p2p-remote-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-remote-smoke-public-redacted.tar.gz
@@ -222,7 +222,7 @@ jobs:
           retention-days: 30
 
       - name: Upload WebRTC Remote Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-device-webrtc-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-webrtc-smoke-public-redacted.tar.gz
@@ -230,7 +230,7 @@ jobs:
           retention-days: 30
 
       - name: Upload File Transfer Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-device-file-transfer-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-file-transfer-smoke-public-redacted.tar.gz
@@ -238,7 +238,7 @@ jobs:
           retention-days: 30
 
       - name: Upload P2P Notice Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-device-p2p-security-notice-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-security-notice-public-redacted.tar.gz
@@ -246,7 +246,7 @@ jobs:
           retention-days: 30
 
       - name: Upload WebRTC Notice Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: local-webrtc-security-notice-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/local-webrtc-security-notice-public-redacted.tar.gz
@@ -254,7 +254,7 @@ jobs:
           retention-days: 30
 
       - name: Upload macOS Notice Panel Evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: local-macos-security-notice-panel-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/local-macos-security-notice-panel-public-redacted.tar.gz

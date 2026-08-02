@@ -3,11 +3,15 @@ import Network
 import SkyBridgeProtocolCore
 
 enum BonjourInteropContract {
-    private typealias Core = BonjourInteropProtocolContract
+    typealias Core = BonjourInteropProtocolContract
+    typealias AdvertisementPlatform = Core.AdvertisementPlatform
+    typealias AdvertisementRole = Core.AdvertisementRole
 
     static let controlServiceType = Core.controlServiceType
     static let fileTransferServiceType = Core.fileTransferServiceType
     static let remoteControlServiceType = Core.remoteControlServiceType
+    static let legacyFileTransferServiceType = Core.legacyFileTransferServiceType
+    static let legacyRemoteControlServiceType = Core.legacyRemoteControlServiceType
     static let companionLinkServiceType = Core.companionLinkServiceType
     static let legacyQuicPrimaryServiceType = Core.legacyQuicPrimaryServiceType
 
@@ -30,28 +34,11 @@ enum BonjourInteropContract {
     static let pubKeyFingerprintTXTKeys = Core.pubKeyFingerprintTXTKeys
     static let deviceIdentityTXTKeys = Core.deviceIdentityTXTKeys
     static let pubKeyFingerprintPattern = Core.pubKeyFingerprintPattern
+    static let advertisementVersion = Core.advertisementVersion
+    static let canonicalAdvertisementTXTKeys = Core.canonicalAdvertisementTXTKeys
+    static let maximumRecommendedTXTRecordWireBytes = Core.maximumRecommendedTXTRecordWireBytes
 
     static let supportedRemoteVideoFormatTokens = Core.supportedRemoteVideoFormatTokens
-
-    static var primaryCapabilitiesTXTValue: String {
-        Core.primaryCapabilitiesTXTValue
-    }
-
-    static var basePrimaryCapabilitiesTXTValue: String {
-        Core.basePrimaryCapabilitiesTXTValue
-    }
-
-    static var fileTransferCapabilitiesTXTValue: String {
-        Core.fileTransferCapabilitiesTXTValue
-    }
-
-    static var remoteControlCapabilitiesTXTValue: String {
-        Core.remoteControlCapabilitiesTXTValue
-    }
-
-    static func supportedRemoteVideoFormatsTXTValue() -> String {
-        WebRTCRemoteDesktopVideoFormatPolicy.supportedRemoteVideoFormats().joined(separator: ",")
-    }
 
     static func normalizedRemoteVideoFormats<S: Sequence>(_ formats: S) -> [String] where S.Element == String {
         Core.normalizedRemoteVideoFormats(formats)
@@ -69,73 +56,99 @@ enum BonjourInteropContract {
         Core.isValidPubKeyFingerprint(value)
     }
 
-    static func primaryCapabilities(
-        transferPort: UInt16?,
-        remoteControlPort: UInt16?
-    ) -> [String] {
-        Core.primaryCapabilities(transferPort: transferPort, remoteControlPort: remoteControlPort)
+    static func isValidDNSServiceType(_ value: String) -> Bool {
+        Core.isValidDNSServiceType(value)
     }
 
-    static func primaryCapabilitiesTXTValue(
-        transferPort: UInt16?,
-        remoteControlPort: UInt16?
-    ) -> String {
-        Core.primaryCapabilitiesTXTValue(transferPort: transferPort, remoteControlPort: remoteControlPort)
+    static func advertisementRole(
+        for serviceType: String
+    ) -> AdvertisementRole? {
+        switch serviceType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case controlServiceType, legacyQuicPrimaryServiceType:
+            return .control
+        case fileTransferServiceType,
+             remoteControlServiceType,
+             legacyFileTransferServiceType,
+             legacyRemoteControlServiceType:
+            return .dedicatedService
+        default:
+            return nil
+        }
     }
 
-    static func attachPrimaryAdvertisementTXT(
-        to record: inout NWTXTRecord,
-        transferPort: UInt16?,
-        remoteControlPort: UInt16?
-    ) {
-        attach(
-            Core.primaryAdvertisementFields(
-                transferPort: transferPort,
-                remoteControlPort: remoteControlPort,
-                remoteVideoFormats: supportedRemoteVideoFormats()
-            ),
-            to: &record
+    static func discoveryProjection(
+        _ record: NWTXTRecord,
+        serviceType: String
+    ) throws -> Core.DiscoveryProjection? {
+        guard let role = advertisementRole(for: serviceType) else { return nil }
+        return try decodeAdvertisement(record, role: role).discoveryProjection
+    }
+
+    static func discoveryProjection(
+        _ rawTXTData: Data,
+        serviceType: String
+    ) throws -> Core.DiscoveryProjection? {
+        guard let role = advertisementRole(for: serviceType) else { return nil }
+        return try Core.decodeAdvertisement(rawTXTData, role: role).discoveryProjection
+    }
+
+    static func decodeAdvertisement(
+        _ record: NWTXTRecord,
+        role: AdvertisementRole
+    ) throws -> Core.DecodedAdvertisement {
+        try Core.decodeAdvertisement(record.data, role: role)
+    }
+
+    static func canonicalAdvertisementFields(
+        deviceId: String,
+        pubKeyFingerprint: String,
+        platform: AdvertisementPlatform,
+        role: AdvertisementRole
+    ) throws -> [String: String] {
+        try Core.canonicalAdvertisementFields(
+            deviceId: deviceId,
+            pubKeyFingerprint: pubKeyFingerprint,
+            platform: platform,
+            role: role
         )
     }
 
-    static func attachFileTransferAdvertisementTXT(to record: inout NWTXTRecord, port: UInt16) {
-        attach(Core.fileTransferAdvertisementFields(port: port), to: &record)
-    }
-
-    static func attachFileTransferAdvertisementTXT(to record: inout [String: Data], port: UInt16) {
-        attach(Core.fileTransferAdvertisementFields(port: port), to: &record)
-    }
-
-    static func attachRemoteControlAdvertisementTXT(to record: inout NWTXTRecord, port: UInt16) {
+    static func makeCanonicalAdvertisementTXT(
+        deviceId: String,
+        pubKeyFingerprint: String,
+        platform: AdvertisementPlatform,
+        role: AdvertisementRole
+    ) throws -> NWTXTRecord {
+        var record = NWTXTRecord()
         attach(
-            Core.remoteControlAdvertisementFields(
-                port: port,
-                remoteVideoFormats: supportedRemoteVideoFormats()
+            try canonicalAdvertisementFields(
+                deviceId: deviceId,
+                pubKeyFingerprint: pubKeyFingerprint,
+                platform: platform,
+                role: role
             ),
             to: &record
         )
+        return record
     }
 
-    static func attachRemoteControlAdvertisementTXT(to record: inout [String: Data], port: UInt16) {
+    static func makeCanonicalAdvertisementData(
+        deviceId: String,
+        pubKeyFingerprint: String,
+        platform: AdvertisementPlatform,
+        role: AdvertisementRole
+    ) throws -> [String: Data] {
+        var record: [String: Data] = [:]
         attach(
-            Core.remoteControlAdvertisementFields(
-                port: port,
-                remoteVideoFormats: supportedRemoteVideoFormats()
+            try canonicalAdvertisementFields(
+                deviceId: deviceId,
+                pubKeyFingerprint: pubKeyFingerprint,
+                platform: platform,
+                role: role
             ),
             to: &record
         )
-    }
-
-    static func attachRemoteVideoFormatTXT(to record: inout NWTXTRecord) {
-        attach(Core.remoteVideoFormatFields(supportedRemoteVideoFormats()), to: &record)
-    }
-
-    static func attachRemoteVideoFormatTXT(to record: inout [String: Data]) {
-        attach(Core.remoteVideoFormatFields(supportedRemoteVideoFormats()), to: &record)
-    }
-
-    private static func supportedRemoteVideoFormats() -> [String] {
-        WebRTCRemoteDesktopVideoFormatPolicy.supportedRemoteVideoFormats()
+        return record
     }
 
     private static func attach(_ fields: [String: String], to record: inout NWTXTRecord) {
@@ -148,5 +161,28 @@ enum BonjourInteropContract {
         for (key, value) in fields {
             record[key] = Data(value.utf8)
         }
+    }
+}
+
+struct CanonicalBonjourAdvertisementIdentity: Sendable, Equatable {
+    let deviceId: String
+    let protocolPublicKeyFingerprint: String
+}
+
+enum CanonicalBonjourAdvertisementIdentityProvider {
+    static func current(allowCreateDeviceId: Bool) async throws
+        -> CanonicalBonjourAdvertisementIdentity {
+        let deviceIdentity = try await SelfIdentityProvider.shared
+            .snapshotEnsuringProtocolDeviceId(allowCreate: allowCreateDeviceId)
+        let protocolIdentity = try await CommittedLocalProtocolIdentitySnapshot.loadActive()
+        let binding = try ProtocolIdentityBinding(
+            deviceId: deviceIdentity.deviceId,
+            protocolSigningAlgorithm: protocolIdentity.algorithm,
+            protocolPublicKeyBytes: protocolIdentity.publicKey
+        )
+        return CanonicalBonjourAdvertisementIdentity(
+            deviceId: binding.deviceId,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+        )
     }
 }

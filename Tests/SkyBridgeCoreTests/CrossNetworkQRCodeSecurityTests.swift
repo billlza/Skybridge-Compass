@@ -273,12 +273,10 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         let deviceId = qrData.deviceID
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [deviceId])
-        defer {
+        try await trust.removeRecordsForTesting(deviceIds: [deviceId])
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [deviceId])
             trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [deviceId])
-            }
         }
 
         _ = try await trust.addTrustRecord(
@@ -310,12 +308,10 @@ final class CrossNetworkQRCodeSecurityTests: XCTestCase {
         let qrData = try await makeSignedQRCode(deviceId: stableId)
 
         trust.setInMemoryPersistenceForTesting(true)
-        await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-        defer {
+        try await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
             trust.setInMemoryPersistenceForTesting(false)
-            Task { @MainActor in
-                await trust.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-            }
         }
 
         _ = try await trust.addTrustRecord(

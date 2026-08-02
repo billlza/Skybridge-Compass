@@ -1360,14 +1360,18 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         let key = protocolIdentityKey(.ed25519, seed: 0xD1)
         let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
 
-        XCTAssertTrue(
-            try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
-                for: device,
-                preferredCurrentDeviceId: stableId,
-                protocolSigningAlgorithm: "Ed25519",
-                protocolPublicKeyFingerprint: fingerprint,
-                protocolPublicKeyBytes: key
-            )
+        try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: stableId,
+            name: device.name,
+            platform: device.platform,
+            ipAddress: device.ipAddress,
+            protocolSigningAlgorithm: "Ed25519",
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKeyBytes: key
+        )
+        try TrustedDeviceStore.shared.trustResolvedPeer(
+            device,
+            declaredDeviceId: stableId
         )
 
         let conflict = TrustedDeviceStore.shared.evaluateCurrentPathBinding(
@@ -1392,14 +1396,18 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         let key = protocolIdentityKey(.ed25519, seed: 0xD2)
         let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
 
-        XCTAssertTrue(
-            try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
-                for: device,
-                preferredCurrentDeviceId: stableId,
-                protocolSigningAlgorithm: "Ed25519",
-                protocolPublicKeyFingerprint: fingerprint,
-                protocolPublicKeyBytes: key
-            )
+        try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: stableId,
+            name: device.name,
+            platform: device.platform,
+            ipAddress: device.ipAddress,
+            protocolSigningAlgorithm: "Ed25519",
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKeyBytes: key
+        )
+        try TrustedDeviceStore.shared.trustResolvedPeer(
+            device,
+            declaredDeviceId: stableId
         )
 
         let trusted = TrustedDeviceStore.shared.currentPathTrustRecord(
@@ -1420,9 +1428,30 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             PeerIdentityAliasResolver.persistentDeviceId(from: "11111111-2222-4333-8444-555555555555"),
             "id:11111111-2222-4333-8444-555555555555"
         )
+        XCTAssertNil(
+            PeerIdentityAliasResolver.persistentDeviceId(
+                from: "recent:mac:id:11111111-2222-4333-8444-555555555555"
+            )
+        )
+        XCTAssertEqual(
+            PeerIdentityAliasResolver.authorityBoundPersistentDeviceId(
+                from: "recent:mac:id:11111111-2222-4333-8444-555555555555"
+            ),
+            "id:11111111-2222-4333-8444-555555555555"
+        )
+        XCTAssertNil(
+            PeerIdentityAliasResolver.authorityBoundPersistentDeviceId(
+                from: "recent:host:192.168.10.22"
+            )
+        )
+        XCTAssertNil(
+            PeerIdentityAliasResolver.authorityBoundPersistentDeviceId(
+                from: "recent:bonjour:fixture@local."
+            )
+        )
     }
 
-    func testCanonicalTrustedDeviceIdFallsBackToUniqueTrustedNameForDiscoveryDevice() throws {
+    func testCanonicalTrustedDeviceIdDoesNotUseDisplayNameAsAuthority() throws {
         let key = protocolIdentityKey(.ed25519, seed: 0xD3)
         let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
         try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
@@ -1443,13 +1472,12 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             ipAddress: "fe80::81d:bb45:8c18:6d6a%en0"
         )
 
-        XCTAssertEqual(
-            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: discoveryDevice),
-            canonical("device-mac-stable")
+        XCTAssertNil(
+            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: discoveryDevice)
         )
     }
 
-    func testRecordAuthenticatedRemoteAuthorityUpdatesAliasMatchedTrustedRecord() throws {
+    func testRecordAuthenticatedRemoteAuthorityDoesNotMutateAliasMatchedTrustedRecord() throws {
         let stableId = "id:peer-mac-stable"
         let aliasDevice = DiscoveredDevice(
             id: "bonjour:Fixture MacBook Pro@local.",
@@ -1461,30 +1489,109 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
 
         try TrustedDeviceStore.shared.trustResolvedPeer(aliasDevice, declaredDeviceId: stableId)
+        let trustedBefore = try XCTUnwrap(TrustedDeviceStore.shared.trustedDevices.first)
         let key = protocolIdentityKey(.mlDSA65, seed: 0xE1)
         let fingerprint = protocolIdentityFingerprint(algorithm: .mlDSA65, key: key)
 
         let updated = try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
             for: aliasDevice,
-            preferredCurrentDeviceId: stableId,
             protocolSigningAlgorithm: "ML-DSA-65",
             protocolPublicKeyFingerprint: fingerprint,
             protocolPublicKeyBytes: key
         )
 
-        XCTAssertTrue(updated)
-        XCTAssertEqual(
-            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice),
-            stableId
+        XCTAssertEqual(updated, .pendingOperatorApproval)
+        XCTAssertEqual(TrustedDeviceStore.shared.trustedDevices.count, 1)
+        let trustedAfter = try XCTUnwrap(
+            TrustedDeviceStore.shared.trustedDevices.first(where: { $0.id == trustedBefore.id })
         )
-        let trusted = TrustedDeviceStore.shared.currentPathTrustRecord(
-            fingerprint: fingerprint
-        )
-        XCTAssertEqual(trusted?.currentDeviceId, stableId)
-        XCTAssertEqual(trusted?.protocolSigningAlgorithm, "ML-DSA-65")
+        XCTAssertEqual(trustedAfter, trustedBefore)
+        XCTAssertNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint))
     }
 
-    func testRecordAuthenticatedRemoteAuthorityRejectsEphemeralOnlyNewRecord() {
+    func testRecordAuthenticatedRemoteAuthorityRefreshesOnlyExactRawKeyBinding() throws {
+        let stableId = canonical("exact-key-device-1234")
+        let key = protocolIdentityKey(.ed25519, seed: 0xE3)
+        let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
+        try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: stableId,
+            name: "Exact Key Peer",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolPublicKeyFingerprint: fingerprint,
+            protocolPublicKeyBytes: key
+        )
+
+        let refreshedRoute = DiscoveredDevice(
+            id: "bonjour:Exact Key Peer@local.",
+            name: "Exact Key Peer",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.22"
+        )
+        XCTAssertEqual(
+            try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+                for: refreshedRoute,
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                protocolPublicKeyFingerprint: fingerprint,
+                protocolPublicKeyBytes: key
+            ),
+            .refreshedExistingAuthority
+        )
+
+        XCTAssertEqual(TrustedDeviceStore.shared.trustedDevices.count, 1)
+        let refreshed = try XCTUnwrap(TrustedDeviceStore.shared.trustedDevices.first)
+        XCTAssertEqual(refreshed.currentDeviceId, stableId)
+        XCTAssertEqual(refreshed.ipAddress, "192.168.1.22")
+        XCTAssertEqual(refreshed.currentPathLifecycleState, .active)
+    }
+
+    func testFreshAuthenticatedHandshakeAuthorityDoesNotCreateAutomaticTrust() throws {
+        let stableId = canonical("11111111-2222-4333-8444-555555555555")
+        let device = DiscoveredDevice(
+            id: "bonjour:Fresh Peer@local.",
+            name: "Fresh Peer",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "15.0"
+        )
+        let key = protocolIdentityKey(.ed25519, seed: 0xD4)
+        let fingerprint = protocolIdentityFingerprint(algorithm: .ed25519, key: key)
+
+        XCTAssertEqual(
+            try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+                for: device,
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                protocolPublicKeyFingerprint: fingerprint,
+                protocolPublicKeyBytes: key
+            ),
+            .pendingOperatorApproval
+        )
+
+        XCTAssertTrue(TrustedDeviceStore.shared.trustedDevices.isEmpty)
+
+        XCTAssertTrue(
+            try TrustedDeviceStore.shared.recordApprovedProtocolIdentityBinding(
+                peerId: device.id,
+                deviceId: stableId,
+                aliases: [device.id],
+                displayName: device.name,
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                protocolPublicKeyFingerprint: fingerprint,
+                protocolPublicKeyBytes: key
+            )
+        )
+        XCTAssertEqual(
+            TrustedDeviceStore.shared.uniqueExactActiveProtocolIdentityAuthorityDeviceId(
+                algorithm: .ed25519,
+                fingerprint: fingerprint,
+                publicKey: key
+            ),
+            stableId
+        )
+    }
+
+    func testRecordAuthenticatedRemoteAuthorityKeepsUnknownEphemeralKeySessionOnly() throws {
         let aliasDevice = DiscoveredDevice(
             id: "bonjour:Fixture MacBook Pro@local.",
             name: "Fixture MacBook Pro",
@@ -1496,25 +1603,45 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         let key = protocolIdentityKey(.mlDSA65, seed: 0xE2)
         let fingerprint = protocolIdentityFingerprint(algorithm: .mlDSA65, key: key)
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
                 for: aliasDevice,
-                preferredCurrentDeviceId: nil,
                 protocolSigningAlgorithm: "ML-DSA-65",
                 protocolPublicKeyFingerprint: fingerprint,
                 protocolPublicKeyBytes: key
+            ),
+            .pendingOperatorApproval
+        )
+        XCTAssertTrue(TrustedDeviceStore.shared.trustedDevices.isEmpty)
+        XCTAssertFalse(TrustedDeviceStore.shared.isTrusted(deviceId: aliasDevice.id))
+    }
+
+    func testRepeatedUnknownAuthenticatedAuthoritiesCannotGrowDurableStore() throws {
+        for seed in UInt8(1)...UInt8(32) {
+            let key = protocolIdentityKey(.ed25519, seed: seed)
+            let fingerprint = protocolIdentityFingerprint(
+                algorithm: .ed25519,
+                key: key
             )
-        ) { error in
+            let device = DiscoveredDevice(
+                id: "bonjour:Unapproved-\(seed)@local.",
+                name: "Unapproved \(seed)",
+                modelName: "Unknown",
+                platform: .unknown,
+                osVersion: "Unknown"
+            )
             XCTAssertEqual(
-                error as? TrustedDeviceStore.AuthorityUpdateError,
-                .missingStableDeviceIdentifier
+                try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+                    for: device,
+                    protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+                    protocolPublicKeyFingerprint: fingerprint,
+                    protocolPublicKeyBytes: key
+                ),
+                .pendingOperatorApproval
             )
         }
-        XCTAssertNil(
-            TrustedDeviceStore.shared.currentPathTrustRecord(
-                fingerprint: fingerprint
-            )
-        )
+
+        XCTAssertTrue(TrustedDeviceStore.shared.trustedDevices.isEmpty)
     }
 
     func testUpsertCurrentPathAuthorityRejectsSameAlgorithmKeyReplacementAndRequiresReverification() throws {
@@ -1606,6 +1733,72 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             )?.publicKeyBytes,
             mlKey
         )
+    }
+
+    func testApprovedBindingDoesNotMergeSharedRouteOrPersistForeignStableAlias() throws {
+        let victimStableId = canonical("victim-stable-1234")
+        let approvedStableId = canonical("approved-stable-5678")
+        let sharedRoute = "bonjour:Shared Route@local."
+        let victimKey = protocolIdentityKey(.ed25519, seed: 0x42)
+        let victimFingerprint = protocolIdentityFingerprint(
+            algorithm: .ed25519,
+            key: victimKey
+        )
+        try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: victimStableId,
+            name: "Victim",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolPublicKeyFingerprint: victimFingerprint,
+            protocolPublicKeyBytes: victimKey
+        )
+        try TrustedDeviceStore.shared.trustResolvedPeer(
+            DiscoveredDevice(
+                id: sharedRoute,
+                name: "Victim",
+                modelName: "MacBook Pro",
+                platform: .macOS,
+                osVersion: "15.0",
+                ipAddress: "192.168.1.23"
+            ),
+            declaredDeviceId: victimStableId
+        )
+        let victimBefore = try XCTUnwrap(
+            TrustedDeviceStore.shared.trustedDevices.first {
+                $0.currentDeviceId == victimStableId
+            }
+        )
+
+        let approvedKey = protocolIdentityKey(.mlDSA65, seed: 0x43)
+        let approvedFingerprint = protocolIdentityFingerprint(
+            algorithm: .mlDSA65,
+            key: approvedKey
+        )
+        XCTAssertTrue(
+            try TrustedDeviceStore.shared.recordApprovedProtocolIdentityBinding(
+                peerId: sharedRoute,
+                deviceId: approvedStableId,
+                aliases: [sharedRoute, victimStableId],
+                displayName: "Approved Peer",
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+                protocolPublicKeyFingerprint: approvedFingerprint,
+                protocolPublicKeyBytes: approvedKey
+            )
+        )
+
+        XCTAssertEqual(TrustedDeviceStore.shared.trustedDevices.count, 2)
+        let victimAfter = try XCTUnwrap(
+            TrustedDeviceStore.shared.trustedDevices.first {
+                $0.currentDeviceId == victimStableId
+            }
+        )
+        XCTAssertEqual(victimAfter, victimBefore)
+        let approved = try XCTUnwrap(
+            TrustedDeviceStore.shared.trustedDevices.first {
+                $0.currentDeviceId == approvedStableId
+            }
+        )
+        XCTAssertFalse(approved.knownDeviceIds?.contains(victimStableId) == true)
+        XCTAssertEqual(approved.knownDeviceIds, [approvedStableId])
     }
 
     func testMLDSA65And87RawBindingsCoexistAndResolveByAlgorithm() throws {
@@ -1758,45 +1951,33 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         await store.clearForTesting()
     }
 
-    func testRecordAuthenticatedRemoteAuthorityQuarantinesLegacySameAlgorithmConflicts() throws {
+    func testAuthenticatedObservationCannotQuarantineAliasMatchedSameAlgorithmAuthority() throws {
         let stableId = "11111111-2222-4333-8444-555555555555"
-        let aliasId = "bonjour:Fixture MacBook Pro@local."
         let deviceName = "Fixture MacBook Pro"
-        let oldFingerprint = String(repeating: "a", count: 64)
-        let staleFingerprint = String(repeating: "b", count: 64)
+        let trustedKey = protocolIdentityKey(.mlDSA65, seed: 0xC2)
+        let trustedFingerprint = protocolIdentityFingerprint(
+            algorithm: .mlDSA65,
+            key: trustedKey
+        )
         let authenticatedKey = protocolIdentityKey(.mlDSA65, seed: 0xC3)
         let authenticatedFingerprint = protocolIdentityFingerprint(
             algorithm: .mlDSA65,
             key: authenticatedKey
         )
 
-        try TrustedDeviceStore.shared.mergeFromCloud([
-            TrustedDeviceStore.TrustedDevice(
-                id: stableId,
-                name: deviceName,
-                platform: .macOS,
-                ipAddress: "192.168.1.20",
-                protocolSigningAlgorithm: "ML-DSA-65",
-                protocolPublicKeyFingerprint: oldFingerprint,
-                currentDeviceId: stableId,
-                knownDeviceIds: [stableId, aliasId],
-                currentPathLifecycleState: .active
-            ),
-            TrustedDeviceStore.TrustedDevice(
-                id: aliasId,
-                name: deviceName,
-                platform: .macOS,
-                ipAddress: "192.168.1.20",
-                protocolSigningAlgorithm: "ML-DSA-65",
-                protocolPublicKeyFingerprint: staleFingerprint,
-                currentDeviceId: stableId,
-                knownDeviceIds: [stableId, aliasId],
-                currentPathLifecycleState: .active
-            )
-        ])
+        try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: stableId,
+            name: deviceName,
+            platform: .macOS,
+            ipAddress: "192.168.1.20",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+            protocolPublicKeyFingerprint: trustedFingerprint,
+            protocolPublicKeyBytes: trustedKey
+        )
+        let trustedBefore = try XCTUnwrap(TrustedDeviceStore.shared.trustedDevices.first)
 
         let aliasDevice = DiscoveredDevice(
-            id: aliasId,
+            id: "bonjour:Fixture MacBook Pro@local.",
             name: deviceName,
             modelName: "MacBook Pro",
             platform: .macOS,
@@ -1804,29 +1985,77 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             ipAddress: "192.168.1.20"
         )
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
                 for: aliasDevice,
-                preferredCurrentDeviceId: stableId,
                 protocolSigningAlgorithm: "ML-DSA-65",
                 protocolPublicKeyFingerprint: authenticatedFingerprint,
                 protocolPublicKeyBytes: authenticatedKey
-            )
-        ) { error in
-            XCTAssertEqual(
-                error as? TrustedDeviceStore.AuthorityUpdateError,
-                .conflictingProtocolIdentityKey(algorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue)
-            )
-        }
+            ),
+            .pendingOperatorApproval
+        )
 
+        let trustedAfter = try XCTUnwrap(
+            TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: trustedFingerprint)
+        )
+        XCTAssertEqual(trustedAfter, trustedBefore)
+        XCTAssertEqual(trustedAfter.currentPathLifecycleState, .active)
+        XCTAssertNil(
+            TrustedDeviceStore.shared.currentPathTrustRecord(
+                fingerprint: authenticatedFingerprint
+            )
+        )
         XCTAssertEqual(TrustedDeviceStore.shared.trustedDevices.count, 1)
-        XCTAssertTrue(TrustedDeviceStore.shared.trustedDevices.allSatisfy {
-            $0.currentPathLifecycleState == .reverificationRequired
-        })
-        XCTAssertNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: oldFingerprint))
-        XCTAssertNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: staleFingerprint))
-        XCTAssertNil(TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: authenticatedFingerprint))
-        XCTAssertNil(TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: aliasDevice))
+    }
+
+    func testAuthenticatedObservationCannotAppendCrossAlgorithmKeyToStableIdVictim() throws {
+        let stableId = canonical("victim-device-1234")
+        let trustedKey = protocolIdentityKey(.ed25519, seed: 0xC4)
+        let trustedFingerprint = protocolIdentityFingerprint(
+            algorithm: .ed25519,
+            key: trustedKey
+        )
+        try TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: stableId,
+            name: "Shared Route Name",
+            platform: .macOS,
+            ipAddress: "192.168.1.21",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolPublicKeyFingerprint: trustedFingerprint,
+            protocolPublicKeyBytes: trustedKey
+        )
+        let trustedBefore = try XCTUnwrap(TrustedDeviceStore.shared.trustedDevices.first)
+
+        let attackerKey = protocolIdentityKey(.mlDSA65, seed: 0xC5)
+        let attackerFingerprint = protocolIdentityFingerprint(
+            algorithm: .mlDSA65,
+            key: attackerKey
+        )
+        let routeCollision = DiscoveredDevice(
+            id: "bonjour:Shared Route Name@local.",
+            name: "Shared Route Name",
+            modelName: "Unknown",
+            platform: .macOS,
+            osVersion: "15.0",
+            ipAddress: "192.168.1.21"
+        )
+
+        XCTAssertEqual(
+            try TrustedDeviceStore.shared.recordAuthenticatedRemoteAuthority(
+                for: routeCollision,
+                protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+                protocolPublicKeyFingerprint: attackerFingerprint,
+                protocolPublicKeyBytes: attackerKey
+            ),
+            .pendingOperatorApproval
+        )
+
+        XCTAssertEqual(TrustedDeviceStore.shared.trustedDevices, [trustedBefore])
+        XCTAssertNil(
+            TrustedDeviceStore.shared.currentPathTrustRecord(
+                fingerprint: attackerFingerprint
+            )
+        )
     }
 
     func testCanonicalTrustedDeviceIdIgnoresPollutedDisplayNameCurrentDeviceId() throws {
@@ -1908,7 +2137,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         )
     }
 
-    func testRepairLegacyTrustedDeviceIdentityPromotesUniqueLiveStableId() async throws {
+    func testStableAuthorityLookupDoesNotRepairLegacyRecordFromLiveRouteMetadata() throws {
         let stableId = "11111111-2222-4333-8444-555555555555"
         let canonicalStableId = canonical(stableId)
         let pollutedId = "id:fixture macbook pro"
@@ -1945,29 +2174,19 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
             services: ["_skybridge._tcp"],
             portMap: ["_skybridge._tcp": 9527]
         )
+        let beforeLookup = TrustedDeviceStore.shared.trustedDevices
 
-        let migratedAliases = TrustedDeviceStore.shared.repairLegacyTrustedDeviceIdentity(
-            requestedDevice: requestedDevice,
-            liveDiscoveredDevice: liveDevice
+        XCTAssertNil(
+            TrustedDeviceStore.shared.stableIdentifierMatchedTrustedDeviceId(
+                for: requestedDevice
+            )
         )
-
-        XCTAssertTrue(migratedAliases.contains(pollutedId))
-        XCTAssertEqual(
-            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: requestedDevice),
-            canonicalStableId
+        XCTAssertNil(
+            TrustedDeviceStore.shared.stableIdentifierMatchedTrustedDeviceId(
+                for: liveDevice
+            )
         )
-        XCTAssertEqual(
-            TrustedDeviceStore.shared.canonicalTrustedDeviceId(for: liveDevice),
-            canonicalStableId
-        )
-        XCTAssertEqual(
-            TrustedDeviceStore.shared.trustedDevices.first?.currentDeviceId,
-            canonicalStableId
-        )
-        XCTAssertEqual(
-            TrustedDeviceStore.shared.trustedDevices.first?.connectableContext?.bonjourServiceName,
-            "Fixture MacBook Pro"
-        )
+        XCTAssertEqual(TrustedDeviceStore.shared.trustedDevices, beforeLookup)
     }
 
     func testUntrustPersistsAliasAwareRevocationBeforePublishing() throws {
@@ -2003,6 +2222,46 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertFalse(store.trustedDevices.first?.knownDeviceIds?.contains(bonjourAlias) ?? false)
         XCTAssertFalse(store.isTrusted(deviceId: stableId))
         XCTAssertFalse(store.hasActiveDurableTrust(forAny: [bonjourAlias]))
+    }
+
+    func testUntrustFailsClosedWhenEndpointAliasMatchesMultipleStableAuthorities() throws {
+        let sharedAlias = "bonjour:reused-endpoint@local."
+        let first = TrustedDeviceStore.TrustedDevice(
+            id: "id:first-stable-authority",
+            name: "First",
+            platform: .macOS,
+            ipAddress: "192.0.2.70",
+            currentDeviceId: "id:first-stable-authority",
+            knownDeviceIds: [sharedAlias],
+            currentPathLifecycleState: .active
+        )
+        let second = TrustedDeviceStore.TrustedDevice(
+            id: "id:second-stable-authority",
+            name: "Second",
+            platform: .macOS,
+            ipAddress: "192.0.2.70",
+            currentDeviceId: "id:second-stable-authority",
+            knownDeviceIds: [sharedAlias],
+            currentPathLifecycleState: .active
+        )
+        var persisted = [first, second]
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let before = store.trustedDevices
+
+        XCTAssertThrowsError(try store.untrust(deviceId: sharedAlias)) { error in
+            XCTAssertEqual(
+                error as? TrustedDeviceStore.AuthorityUpdateError,
+                .ambiguousStableDeviceIdentifier
+            )
+        }
+        XCTAssertEqual(store.trustedDevices, before)
+        XCTAssertEqual(persisted, before)
+        XCTAssertTrue(store.trustedDevices.allSatisfy {
+            $0.currentPathLifecycleState == .active
+        })
     }
 
     func testMatchedRevocationScrubsAllEndpointAliasesFromDurableTombstone() throws {
@@ -2280,6 +2539,307 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertEqual(persisted.first?.currentPathLifecycleGeneration, 2)
     }
 
+    func testTrustMutationRollbackPreservesUnrelatedConcurrentDevice() throws {
+        var persisted: [TrustedDeviceStore.TrustedDevice] = []
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let firstStableId = "id:11111111-2222-4333-8444-555555555555"
+        let secondStableId = "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let firstDevice = DiscoveredDevice(
+            id: "bonjour:First Mac@local.",
+            name: "First Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+        let secondDevice = DiscoveredDevice(
+            id: "bonjour:Second Mac@local.",
+            name: "Second Mac",
+            modelName: "Mac mini",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        let firstReceipt = try store.trustResolvedPeer(
+            firstDevice,
+            declaredDeviceId: firstStableId
+        )
+        try store.trustResolvedPeer(
+            secondDevice,
+            declaredDeviceId: secondStableId
+        )
+        try store.rollbackTrustMutation(firstReceipt)
+
+        XCTAssertFalse(store.hasActiveDurableTrust(forAny: [firstStableId]))
+        XCTAssertTrue(store.hasActiveDurableTrust(forAny: [secondStableId]))
+        XCTAssertEqual(persisted.count, 1)
+        XCTAssertEqual(persisted.first?.currentDeviceId, secondStableId)
+    }
+
+    func testTrustMutationRollbackQuarantinesConflictingSameAuthorityMutation() throws {
+        var persisted: [TrustedDeviceStore.TrustedDevice] = []
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let stableId = "id:11111111-2222-4333-8444-555555555555"
+        let originalDevice = DiscoveredDevice(
+            id: "bonjour:Fixture Mac@local.",
+            name: "Fixture Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+        let renamedDevice = DiscoveredDevice(
+            id: originalDevice.id,
+            name: "Fixture Mac Renamed",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        let firstReceipt = try store.trustResolvedPeer(
+            originalDevice,
+            declaredDeviceId: stableId
+        )
+        try store.trustResolvedPeer(
+            renamedDevice,
+            declaredDeviceId: stableId
+        )
+
+        XCTAssertThrowsError(try store.rollbackTrustMutation(firstReceipt)) { error in
+            guard case TrustedDeviceStore.PersistenceError.concurrentModification = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+        XCTAssertFalse(store.hasActiveDurableTrust(forAny: [stableId]))
+        XCTAssertEqual(persisted.first?.currentPathLifecycleState, .quarantined)
+    }
+
+    func testTrustMutationRollbackCannotUndoIdenticalLaterReapproval() throws {
+        var persisted: [TrustedDeviceStore.TrustedDevice] = []
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let stableId = "id:11111111-2222-4333-8444-555555555555"
+        let device = DiscoveredDevice(
+            id: "bonjour:Fixture Mac@local.",
+            name: "Fixture Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        let staleReceipt = try store.trustResolvedPeer(
+            device,
+            declaredDeviceId: stableId
+        )
+        try store.trustResolvedPeer(device, declaredDeviceId: stableId)
+
+        XCTAssertThrowsError(try store.rollbackTrustMutation(staleReceipt)) { error in
+            guard case TrustedDeviceStore.PersistenceError.concurrentModification = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+        XCTAssertFalse(store.hasActiveDurableTrust(forAny: [stableId]))
+        XCTAssertEqual(persisted.first?.currentPathLifecycleState, .quarantined)
+    }
+
+    func testTrustMutationRollbackPreservesConcurrentRevocationTombstone() throws {
+        var persisted: [TrustedDeviceStore.TrustedDevice] = []
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let stableId = "id:11111111-2222-4333-8444-555555555555"
+        let device = DiscoveredDevice(
+            id: "bonjour:Fixture Mac@local.",
+            name: "Fixture Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        let staleReceipt = try store.trustResolvedPeer(
+            device,
+            declaredDeviceId: stableId
+        )
+        try store.untrust(deviceId: stableId)
+
+        XCTAssertThrowsError(try store.rollbackTrustMutation(staleReceipt)) { error in
+            guard case TrustedDeviceStore.PersistenceError.concurrentModification = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+        XCTAssertFalse(store.hasActiveDurableTrust(forAny: [stableId]))
+        XCTAssertEqual(persisted.first?.currentPathLifecycleState, .revoked)
+    }
+
+    func testTrustMutationRollbackQuarantinesDuplicateStableAuthorityRows() throws {
+        var persisted: [TrustedDeviceStore.TrustedDevice] = []
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let stableId = "id:11111111-2222-4333-8444-555555555555"
+        let device = DiscoveredDevice(
+            id: "bonjour:Fixture Mac@local.",
+            name: "Fixture Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        let staleReceipt = try store.trustResolvedPeer(
+            device,
+            declaredDeviceId: stableId
+        )
+        let committed = try XCTUnwrap(store.trustedDevices.first)
+        let duplicate = TrustedDeviceStore.TrustedDevice(
+            id: "id:duplicate-authority-row",
+            name: "Duplicate Fixture Mac",
+            platform: .macOS,
+            ipAddress: nil,
+            currentDeviceId: stableId,
+            knownDeviceIds: [device.id],
+            currentPathLifecycleState: .active
+        )
+        try store.replaceTrustedDevicesForTesting([committed, duplicate])
+
+        XCTAssertThrowsError(try store.rollbackTrustMutation(staleReceipt)) { error in
+            guard case TrustedDeviceStore.PersistenceError.concurrentModification = error else {
+                return XCTFail("unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(
+            Set(persisted.map { $0.currentPathLifecycleState ?? .active }),
+            [.quarantined]
+        )
+        XCTAssertFalse(store.hasActiveDurableTrust(forAny: [stableId]))
+    }
+
+    func testTrustResolvedPeerRejectsAndQuarantinesPreexistingDuplicateStableAuthorityRows() throws {
+        let stableId = "id:11111111-2222-4333-8444-555555555555"
+        let endpointAlias = "bonjour:Duplicate Fixture@local."
+        var persisted = [
+            TrustedDeviceStore.TrustedDevice(
+                id: stableId,
+                name: "Duplicate Fixture A",
+                platform: .macOS,
+                ipAddress: nil,
+                currentDeviceId: stableId,
+                knownDeviceIds: [endpointAlias],
+                currentPathLifecycleState: .active
+            ),
+            TrustedDeviceStore.TrustedDevice(
+                id: "id:duplicate-row",
+                name: "Duplicate Fixture B",
+                platform: .macOS,
+                ipAddress: nil,
+                currentDeviceId: stableId,
+                knownDeviceIds: [endpointAlias],
+                currentPathLifecycleState: .active
+            )
+        ]
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let device = DiscoveredDevice(
+            id: endpointAlias,
+            name: "Duplicate Fixture",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        XCTAssertThrowsError(
+            try store.trustResolvedPeer(device, declaredDeviceId: stableId)
+        ) { error in
+            XCTAssertEqual(
+                error as? TrustedDeviceStore.AuthorityUpdateError,
+                .ambiguousStableDeviceIdentifier
+            )
+        }
+        XCTAssertEqual(
+            Set(persisted.map { $0.currentPathLifecycleState ?? .active }),
+            [.quarantined]
+        )
+        XCTAssertFalse(store.hasActiveDurableTrust(forAny: [stableId]))
+    }
+
+    func testTrustResolvedPeerDoesNotMergeByReassignedEndpointAlias() throws {
+        let firstStableId = "id:11111111-2222-4333-8444-555555555555"
+        let secondStableId = "id:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let endpointAlias = "bonjour:Shared Endpoint@local."
+        var persisted = [
+            TrustedDeviceStore.TrustedDevice(
+                id: firstStableId,
+                name: "Original Owner",
+                platform: .macOS,
+                ipAddress: nil,
+                currentDeviceId: firstStableId,
+                knownDeviceIds: [endpointAlias],
+                currentPathLifecycleState: .active
+            )
+        ]
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let replacementDevice = DiscoveredDevice(
+            id: endpointAlias,
+            name: "Replacement Owner",
+            modelName: "Mac mini",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        try store.trustResolvedPeer(
+            replacementDevice,
+            declaredDeviceId: secondStableId
+        )
+
+        XCTAssertEqual(store.trustedDevices.count, 2)
+        XCTAssertTrue(store.hasActiveDurableTrust(forAny: [firstStableId]))
+        XCTAssertTrue(store.hasActiveDurableTrust(forAny: [secondStableId]))
+        XCTAssertEqual(
+            Set(store.trustedDevices.compactMap(\.currentDeviceId)),
+            [firstStableId, secondStableId]
+        )
+    }
+
+    func testTrustResolvedPeerRejectsMissingStableAuthority() throws {
+        var persisted: [TrustedDeviceStore.TrustedDevice] = []
+        let store = TrustedDeviceStore(
+            testingLoad: { persisted },
+            testingSave: { persisted = $0 }
+        )
+        let endpointOnlyDevice = DiscoveredDevice(
+            id: "bonjour:Endpoint Only@local.",
+            name: "Endpoint Only",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "26.5"
+        )
+
+        XCTAssertThrowsError(
+            try store.trustResolvedPeer(
+                endpointOnlyDevice,
+                declaredDeviceId: "bonjour:Endpoint Only@local."
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TrustedDeviceStore.AuthorityUpdateError,
+                .missingStableDeviceIdentifier
+            )
+        }
+        XCTAssertTrue(persisted.isEmpty)
+    }
+
     func testUnmatchedEndpointAliasDoesNotCreateDurableTombstone() throws {
         var persisted: [TrustedDeviceStore.TrustedDevice] = []
         let store = TrustedDeviceStore(
@@ -2293,17 +2853,15 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertTrue(persisted.isEmpty)
     }
 
-    func testKEMTrustStoreRebindCanonicalDeviceIdClearsLegacyAliases() async {
+    func testKEMTrustStoreRebindCanonicalDeviceIdRejectsPollutedLegacyAliases() async {
         let stableId = "id:11111111-2222-4333-8444-555555555555"
         let pollutedId = "id:fixture macbook pro"
         let legacyHostAlias = "host:id:fixture macbook pro"
         let mlkemKey = Data(repeating: 0xAA, count: 1_184)
 
         await KEMTrustStore.shared.clearForTesting()
-        defer {
-            Task {
-                await KEMTrustStore.shared.clearForTesting()
-            }
+        addTeardownBlock {
+            await KEMTrustStore.shared.clearForTesting()
         }
 
         await KEMTrustStore.shared.upsert(
@@ -2323,7 +2881,7 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         let stableKeys = await KEMTrustStore.shared.kemPublicKeys(for: stableId)
         let legacyKeys = await KEMTrustStore.shared.kemPublicKeys(for: legacyHostAlias)
 
-        XCTAssertEqual(stableKeys[CryptoSuite(wireId: 257)], mlkemKey)
+        XCTAssertNil(stableKeys[CryptoSuite(wireId: 257)])
         XCTAssertNil(legacyKeys[CryptoSuite(wireId: 257)])
     }
 }

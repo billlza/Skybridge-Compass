@@ -24,6 +24,9 @@ pub(crate) enum DoctorSubcommand {
 pub(crate) struct SignalingDoctorArgs {
     #[arg(long)]
     pub(crate) base_url: Option<String>,
+    /// Permit plaintext HTTP only when `--base-url` resolves to strict loopback.
+    #[arg(long)]
+    pub(crate) allow_insecure_loopback: bool,
     #[arg(long)]
     pub(crate) expected_backend: Option<String>,
     #[command(flatten)]
@@ -34,6 +37,9 @@ pub(crate) struct SignalingDoctorArgs {
 pub(crate) struct MediaLeaseDoctorArgs {
     #[arg(long)]
     pub(crate) base_url: Option<String>,
+    /// Permit plaintext HTTP only when `--base-url` resolves to strict loopback.
+    #[arg(long)]
+    pub(crate) allow_insecure_loopback: bool,
     #[arg(long)]
     pub(crate) session_id: Option<String>,
     #[arg(long, env = "SKYBRIDGE_MEDIA_ADMISSION_TOKEN")]

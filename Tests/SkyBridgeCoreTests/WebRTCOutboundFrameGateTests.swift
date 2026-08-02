@@ -1,6 +1,7 @@
 #if canImport(WebRTC)
 import XCTest
 @testable import SkyBridgeCore
+import SkyBridgeWebRTCRuntime
 
 final class WebRTCOutboundFrameGateTests: XCTestCase {
     func testQueuedCancellationRemovesWaiterWithoutRunningOrRetainingPayload() async throws {

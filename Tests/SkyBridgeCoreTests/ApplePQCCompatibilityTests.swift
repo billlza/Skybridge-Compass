@@ -1199,7 +1199,7 @@ final class ApplePQCCompatibilityTests: XCTestCase {
         addTeardownBlock {
             try DeviceIdentityKeyManager.testingResetMLDSAStorage(namespace: identityNamespace)
         }
-        let identityManager = DeviceIdentityKeyManager(
+        let identityManager = try DeviceIdentityKeyManager(
             testingStorageNamespace: identityNamespace,
             keychainScope: identityScope
         )
@@ -1229,7 +1229,7 @@ final class ApplePQCCompatibilityTests: XCTestCase {
             publicKey: protocolPublicKey
         )
         addTeardownBlock { @MainActor in
-            await trust.removeRecordsForTesting(deviceIds: [testPeerId])
+            try await trust.removeRecordsForTesting(deviceIds: [testPeerId])
             trust.setInMemoryPersistenceForTesting(false)
         }
         

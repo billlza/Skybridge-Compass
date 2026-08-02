@@ -1,36 +1,30 @@
-# Vendored FreeRDP / WinPR headers (3.26.0)
+# Vendored FreeRDP / WinPR headers
 
-These are the **public** C headers for FreeRDP and WinPR, pinned to **3.26.0** — the exact
-version produced by `Scripts/build_freerdp_dylibs.sh` and shipped in
-`Sources/Vendor/FreeRDPDylibs/`. They exist so `Sources/FreeRDPBridge` can be compiled
-against the **real** FreeRDP types/structs/enums (struct offsets and setting-key values are
-computed by the compiler) instead of opaque types + hardcoded pointer slots + fabricated
-constants. The dylibs are still loaded at runtime via `dlopen`/`dlsym`; these headers add no
-link-time dependency.
+These are the public and CMake-generated headers built by
+`Scripts/build_freerdp_dylibs.sh` from the same pinned FreeRDP source revision as
+the runtime closure in `Sources/Vendor/FreeRDPDylibs`.
 
-## Provenance / how to regenerate
+`Sources/Vendor/FreeRDPRuntime.provenance.json` is the machine-verifiable source
+of truth for the exact upstream versions, commits, build inputs, header-tree
+digest, binary hashes, architectures, deployment target, install names and
+dynamic dependency closure. A release must reject any header/runtime/provenance
+version mismatch.
 
-```sh
-git clone --depth 1 --branch 3.26.0 https://github.com/FreeRDP/FreeRDP.git <src>
-cmake -S <src> -B <build> -G Ninja -DWITH_OPENSSL=ON -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
-  -DWITH_CLIENT=ON -DWITH_SERVER=OFF -DWITH_X11=OFF -DWITH_SDL=OFF -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF
-# then:
-cp -R <src>/include/freerdp        include/freerdp
-cp -R <src>/winpr/include/winpr     include/winpr
-# overlay cmake-generated headers:
-cp <build>/include/freerdp/{config.h,version.h,buildflags.h,build-config.h,settings_keys.h} include/freerdp/
-cp <build>/winpr/include/winpr/{config.h,version.h,buildflags.h,build-config.h}             include/winpr/
-```
+The reviewed source patch in `Scripts/Patches` fixes CMake 4 flag detection,
+Apple arm64/NEON portability, disabled-feature stubs, signed-size checks and
+strict test return handling. It also removes duplicate link inputs. The recipe
+forbids warning suppressions and builds the product's actual surface: the
+libfreerdp/WinPR core, software GDI and basic input. Client-common and every
+channel plugin are not built or registered; FreeRDP audio, image scaling, USB
+redirection and smart-card support are explicitly disabled. The bridge also
+forces redirection, RemoteApp and display-control settings off before connect.
+The FreeRDP and WinPR deprecated 3.x API surfaces are disabled in both the
+runtime and bridge compilation.
 
-Include root is `include/` (so `<freerdp/...>` and `<winpr/...>` resolve). Wired into the
-`FreeRDPBridge` target's `cSettings` in `Package.swift` via `headerSearchPath`.
+The recipe copies the upstream public headers, overlays the generated
+configuration headers, and applies a separate header-only Apple compatibility
+change in `include/winpr/wtypes.h`: WinPR's `REFIID` typedef is omitted on Apple
+platforms because CoreFoundation already exports an incompatible definition.
+The RDP core paths consumed by `FreeRDPBridge` do not use that alias.
 
-## Local patch (must re-apply if regenerated)
-
-`include/winpr/wtypes.h` — winpr's `typedef IID* REFIID;` is guarded with `#ifndef __APPLE__`.
-On Apple, CoreFoundation's `CFPlugInCOM.h` already defines `REFIID` as `CFUUIDBytes` (exported
-through a clang module, so it can't be suppressed by a textual include guard), which otherwise
-collides with winpr. winpr's RDP core path (connect / GDI / input / settings) never uses
-`REFIID`, so deferring to the system definition on Apple is safe.
-
-License: FreeRDP and WinPR are Apache-2.0 (see the upstream `LICENSE`).
+FreeRDP and WinPR are licensed under Apache-2.0; see the upstream repository.

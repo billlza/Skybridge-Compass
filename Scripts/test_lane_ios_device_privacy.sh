@@ -95,6 +95,112 @@ JSON
   exit 0
 fi
 
+if [[ "${1:-}" == "devicectl" && "${2:-}" == "device" && "${3:-}" == "info" && "${4:-}" == "details" ]]; then
+  output_path=""
+  device_id=""
+  shift 4
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --device)
+        device_id="${2:?missing device identifier}"
+        shift 2
+        ;;
+      --timeout)
+        shift 2
+        ;;
+      --json-output)
+        output_path="${2:?missing reachability JSON output path}"
+        shift 2
+        ;;
+      *)
+        exit 64
+        ;;
+    esac
+  done
+
+  if [[ "${STUB_DEVICECTL_REACHABILITY_MODE:-connected}" == "fail" ]]; then
+    echo "reachability failed for ${device_id}" >&2
+    exit 68
+  fi
+  [[ -n "${output_path}" && -n "${device_id}" ]] || exit 64
+  connection_state="${STUB_DEVICECTL_REACHABILITY_MODE:-connected}"
+  cat >"${output_path}" <<JSON
+{
+  "result": {
+    "identifier": "${device_id}",
+    "connectionProperties": {
+      "pairingState": "paired",
+      "tunnelState": "${connection_state}"
+    },
+    "properties": {
+      "connection": {
+        "pairingState": "paired",
+        "state": "${connection_state}"
+      }
+    }
+  }
+}
+JSON
+  exit 0
+fi
+
+if [[ "${1:-}" == "devicectl" && "${2:-}" == "device" && "${3:-}" == "info" && "${4:-}" == "lockState" ]]; then
+  output_path=""
+  device_id=""
+  shift 4
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --device)
+        device_id="${2:?missing device identifier}"
+        shift 2
+        ;;
+      --timeout)
+        shift 2
+        ;;
+      --json-output)
+        output_path="${2:?missing lock-state JSON output path}"
+        shift 2
+        ;;
+      *)
+        exit 64
+        ;;
+    esac
+  done
+
+  if [[ "${STUB_DEVICECTL_LOCK_STATE:-unlocked}" == "fail" ]]; then
+    echo "lock-state probe failed for ${device_id}" >&2
+    exit 69
+  fi
+  [[ -n "${output_path}" && -n "${device_id}" ]] || exit 64
+  case "${STUB_DEVICECTL_LOCK_STATE:-unlocked}" in
+    unlocked)
+      passcode_required=false
+      unlocked_since_boot=true
+      ;;
+    locked)
+      passcode_required=true
+      unlocked_since_boot=true
+      ;;
+    cold)
+      passcode_required=true
+      unlocked_since_boot=false
+      ;;
+    *)
+      exit 64
+      ;;
+  esac
+  cat >"${output_path}" <<JSON
+{
+  "result": {
+    "deviceIdentifier": "${device_id}",
+    "passcodeRequired": ${passcode_required},
+    "unlockedSinceBoot": ${unlocked_since_boot}
+  }
+}
+JSON
+  exit 0
+fi
+
 exit 66
 SH
 
@@ -130,6 +236,14 @@ case "${STUB_XCODEBUILD_MODE:-success}" in
     ;;
   warning)
     echo "warning: destination SECRET-UDID-123 Sensitive iPad SECRET-SERIAL-456 secret-ipad.local secret-ipad-alt.local SECRET-HW-UDID-789 ${SKYBRIDGE_IOS_DEVICE_ID:-} /Applications/Xcode-beta.app/Contents/Developer"
+    exit 0
+    ;;
+  duplicate_class)
+    echo "objc[4242]: Class RTCVideoFrame is implemented in both ${STUB_TMP_ROOT}/Frameworks/WebRTC.framework/WebRTC (0x1000) and ${STUB_TMP_ROOT}/DerivedData/Build/Products/Debug-iphoneos/SkyBridgeCompassiOSTests-Runner.app/WebRTC.framework/WebRTC (0x2000). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed."
+    exit 0
+    ;;
+  xpc_runtime_error)
+    echo "2026-07-29 14:02:03.456 SkyBridgeCompassiOSTests-Runner[4242:1717] [XPCErrors] non-launching port for SECRET-UDID-123"
     exit 0
     ;;
   benign_device_support)
@@ -207,6 +321,16 @@ assert_no_device_metadata_files() {
   leaked_files="$(find "${TMP_DIR}" -name 'skybridge-ios-device-metadata.*' -print)"
   if [[ -n "${leaked_files}" ]]; then
     echo "Expected iOS device metadata files to be removed" >&2
+    printf '%s\n' "${leaked_files}" >&2
+    exit 1
+  fi
+}
+
+assert_no_device_reachability_files() {
+  local leaked_files=""
+  leaked_files="$(find "${TMP_DIR}" \( -name 'skybridge-ios-device-reachability.*' -o -name 'skybridge-ios-device-reachability-stderr.*' \) -print)"
+  if [[ -n "${leaked_files}" ]]; then
+    echo "Expected iOS device reachability files to be removed" >&2
     printf '%s\n' "${leaked_files}" >&2
     exit 1
   fi
@@ -408,30 +532,74 @@ fi
 assert_no_redaction_token_files
 assert_no_device_metadata_files
 
-DISCONNECTED_TUNNEL_OUTPUT="${TMP_DIR}/disconnected-tunnel.out"
+ON_DEMAND_TUNNEL_OUTPUT="${TMP_DIR}/on-demand-tunnel.out"
 set +e
-run_lane "${DISCONNECTED_TUNNEL_OUTPUT}" env \
+run_lane "${ON_DEMAND_TUNNEL_OUTPUT}" env \
   SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
   SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
   SKYBRIDGE_IOS_DEVICE_REQUIRE_IPAD=1 \
   STUB_DEVICE_TUNNEL_STATE=disconnected
-disconnected_tunnel_status=$?
+on_demand_tunnel_status=$?
 set -e
-if [[ "${disconnected_tunnel_status}" -eq 0 ]]; then
-  echo "Expected disconnected tunnel lane to fail before xcodebuild" >&2
-  cat "${DISCONNECTED_TUNNEL_OUTPUT}" >&2
+if [[ "${on_demand_tunnel_status}" -ne 0 ]]; then
+  echo "Expected paired device with an on-demand tunnel to pass the active reachability probe" >&2
+  cat "${ON_DEMAND_TUNNEL_OUTPUT}" >&2
   exit 1
 fi
-assert_contains "Requested iOS device does not satisfy required constraints" "${DISCONNECTED_TUNNEL_OUTPUT}"
-assert_contains "tunnelState == connected" "${DISCONNECTED_TUNNEL_OUTPUT}"
-assert_no_secret_output "${DISCONNECTED_TUNNEL_OUTPUT}"
+assert_contains "full suite passed on device" "${ON_DEMAND_TUNNEL_OUTPUT}"
+assert_no_secret_output "${ON_DEMAND_TUNNEL_OUTPUT}"
+assert_no_device_reachability_files
+
+UNREACHABLE_DEVICE_OUTPUT="${TMP_DIR}/unreachable-device.out"
+set +e
+run_lane "${UNREACHABLE_DEVICE_OUTPUT}" env \
+  SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_IPAD=1 \
+  STUB_DEVICE_TUNNEL_STATE=disconnected \
+  STUB_DEVICECTL_REACHABILITY_MODE=disconnected
+unreachable_device_status=$?
+set -e
+if [[ "${unreachable_device_status}" -eq 0 ]]; then
+  echo "Expected actively unreachable device lane to fail before xcodebuild" >&2
+  cat "${UNREACHABLE_DEVICE_OUTPUT}" >&2
+  exit 1
+fi
+assert_contains "selected device is paired but not actively reachable" "${UNREACHABLE_DEVICE_OUTPUT}"
+assert_no_secret_output "${UNREACHABLE_DEVICE_OUTPUT}"
 if [[ -s "${CALL_LOG}" ]]; then
-  echo "Expected disconnected tunnel lane to avoid xcodebuild calls" >&2
+  echo "Expected unreachable device lane to avoid xcodebuild calls" >&2
   cat "${CALL_LOG}" >&2
   exit 1
 fi
 assert_no_redaction_token_files
 assert_no_device_metadata_files
+assert_no_device_reachability_files
+
+LOCKED_DEVICE_OUTPUT="${TMP_DIR}/locked-device.out"
+set +e
+run_lane "${LOCKED_DEVICE_OUTPUT}" env \
+  SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_IPAD=1 \
+  STUB_DEVICECTL_LOCK_STATE=locked
+locked_device_status=$?
+set -e
+if [[ "${locked_device_status}" -eq 0 ]]; then
+  echo "Expected locked device lane to fail before xcodebuild" >&2
+  cat "${LOCKED_DEVICE_OUTPUT}" >&2
+  exit 1
+fi
+assert_contains "selected device is locked; unlock it before starting the test lane" "${LOCKED_DEVICE_OUTPUT}"
+assert_no_secret_output "${LOCKED_DEVICE_OUTPUT}"
+if [[ -s "${CALL_LOG}" ]]; then
+  echo "Expected locked device lane to avoid xcodebuild calls" >&2
+  cat "${CALL_LOG}" >&2
+  exit 1
+fi
+assert_no_redaction_token_files
+assert_no_device_metadata_files
+assert_no_device_reachability_files
 
 INVALID_OS_MAJOR_OUTPUT="${TMP_DIR}/invalid-os-major.out"
 set +e
@@ -672,6 +840,53 @@ assert_contains "<ios-device-sha256:" "${CLEAN_LOG_OUTPUT}"
 assert_no_secret_output "${CLEAN_LOG_OUTPUT}"
 assert_no_redaction_token_files
 assert_no_device_metadata_files
+
+DUPLICATE_CLASS_OUTPUT="${TMP_DIR}/duplicate-class.out"
+set +e
+run_lane "${DUPLICATE_CLASS_OUTPUT}" env \
+  SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_RELEASE_TYPE=Beta \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_IPAD=1 \
+  SKYBRIDGE_IOS_DEVICE_ENFORCE_CLEAN_XCODE_LOGS=1 \
+  STUB_XCODEBUILD_MODE=duplicate_class
+duplicate_class_status=$?
+set -e
+if [[ "${duplicate_class_status}" -eq 0 ]]; then
+  echo "Expected clean-log lane to fail on an Objective-C duplicate class diagnostic" >&2
+  cat "${DUPLICATE_CLASS_OUTPUT}" >&2
+  exit 1
+fi
+assert_contains "emitted warnings/errors under clean-log gate" "${DUPLICATE_CLASS_OUTPUT}"
+assert_contains "Class RTCVideoFrame is implemented in both <tmp>/Frameworks/WebRTC.framework/WebRTC" "${DUPLICATE_CLASS_OUTPUT}"
+assert_contains "One of the duplicates must be removed or renamed." "${DUPLICATE_CLASS_OUTPUT}"
+assert_no_secret_output "${DUPLICATE_CLASS_OUTPUT}"
+assert_no_redaction_token_files
+assert_no_device_metadata_files
+assert_no_device_reachability_files
+
+XPC_RUNTIME_ERROR_OUTPUT="${TMP_DIR}/xpc-runtime-error.out"
+set +e
+run_lane "${XPC_RUNTIME_ERROR_OUTPUT}" env \
+  SKYBRIDGE_IOS_DEVICE_ID=SECRET-SERIAL-456 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRED_OS_MAJOR=27 \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_RELEASE_TYPE=Beta \
+  SKYBRIDGE_IOS_DEVICE_REQUIRE_IPAD=1 \
+  SKYBRIDGE_IOS_DEVICE_ENFORCE_CLEAN_XCODE_LOGS=1 \
+  STUB_XCODEBUILD_MODE=xpc_runtime_error
+xpc_runtime_error_status=$?
+set -e
+if [[ "${xpc_runtime_error_status}" -eq 0 ]]; then
+  echo "Expected clean-log lane to fail on an explicit XPC runtime error" >&2
+  cat "${XPC_RUNTIME_ERROR_OUTPUT}" >&2
+  exit 1
+fi
+assert_contains "emitted warnings/errors under clean-log gate" "${XPC_RUNTIME_ERROR_OUTPUT}"
+assert_contains "[XPCErrors] non-launching port" "${XPC_RUNTIME_ERROR_OUTPUT}"
+assert_no_secret_output "${XPC_RUNTIME_ERROR_OUTPUT}"
+assert_no_redaction_token_files
+assert_no_device_metadata_files
+assert_no_device_reachability_files
 
 # The benign Xcode arch-fallback DeviceSupport diagnostic must NOT trip the
 # clean-log gate when device-specific symbols are present.

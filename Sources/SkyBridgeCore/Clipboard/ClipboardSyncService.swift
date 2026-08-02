@@ -1,3 +1,13 @@
+// DEDUPLICATION TARGET — not inherently macOS-only.
+//
+// This type is cross-platform in nature, but the iOS app currently ships its own
+// parallel implementation (ClipboardManager / ClipboardSyncService). Phase 0 of the iOS/SkyBridgeCore unification only
+// makes the core *compile* for iOS; adopting it on iOS is a later, deliberate migration
+// per type. Excluding it here avoids standing up a second implementation inside one
+// binary. The remaining macOS-only pieces are AppKit-based and must be replaced with
+// platform-neutral equivalents as part of that migration.
+// Tracked in Docs/background-wake-capability-ledger.md.
+#if os(macOS)
 //
 // ClipboardSyncService.swift
 // SkyBridgeCore
@@ -15,6 +25,7 @@ import AppKit
 import CryptoKit
 import Combine
 import OSLog
+import SkyBridgeProtocolCore
 
 // MARK: - 剪贴板同步服务协议
 
@@ -38,6 +49,12 @@ public protocol ClipboardSyncServiceProtocol: AnyObject {
 /// 通过 P2P 通道实现设备间剪贴板内容的安全同步
 @MainActor
 public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceProtocol {
+    private struct LocalSubmissionLease {
+        let id: UUID
+        let contentHash: String
+        let pasteboardChangeCount: Int
+        let task: Task<Void, Error>
+    }
 
     // MARK: - Singleton
 
@@ -62,8 +79,21 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
 
     /// 配置
     @Published public var configuration: ClipboardSyncConfiguration {
-        didSet { saveConfiguration() }
+        didSet {
+            let normalizedMaximum = min(
+                max(1, configuration.maxContentSize),
+                P2PControlFramePolicy.maximumInlineClipboardByteCount
+            )
+            guard normalizedMaximum == configuration.maxContentSize else {
+                configuration.maxContentSize = normalizedMaximum
+                clipboardContentSizeWasMigrated = true
+                return
+            }
+            saveConfiguration()
+        }
     }
+
+    @Published public private(set) var clipboardContentSizeWasMigrated: Bool
 
     // MARK: - Private Properties
 
@@ -71,6 +101,8 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     private let pasteboard = NSPasteboard.general
     private var changeCount: Int = 0
     private var lastContentHash: String?
+    private var activeLocalSubmission: LocalSubmissionLease?
+    private var deliveryConvergence = P2PClipboardDeliveryConvergence()
 
     // 监听器
     private var monitorTimer: Timer?
@@ -85,26 +117,38 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
 
     /// 本地剪贴板发生变化时回调，提供原始内容（mimeType + 原始字节），由集成方封装为
     /// AppMessage.clipboard 经 P2P 会话加密发送（不再叠加本服务自带的信封加密）。
-    public var onLocalContentChanged: ((_ mimeType: String, _ data: Data) async -> Void)?
+    public var onLocalContentChanged: (
+        @MainActor @Sendable (_ mimeType: String, _ data: Data) async throws -> Void
+    )?
 
     /// ClipboardContentType ↔ MIME 类型映射（与 AppMessage.ClipboardPayload.mimeType 对齐）。
     private static func mimeType(for type: ClipboardContentType) -> String {
         switch type {
-        case .text: return "text/plain"
-        case .image: return "image/png"
-        case .fileURL: return "application/x-skybridge-file-url"
-        case .richText: return "text/rtf"
-        case .html: return "text/html"
+        case .text: return P2PClipboardMIMEPolicy.plainText
+        case .image: return P2PClipboardMIMEPolicy.png
+        case .fileURL: return P2PClipboardMIMEPolicy.uriList
+        case .richText: return P2PClipboardMIMEPolicy.richText
+        case .html: return P2PClipboardMIMEPolicy.html
         }
     }
 
     private static func contentType(forMIME mime: String) -> ClipboardContentType? {
-        switch mime {
-        case "text/plain": return .text
-        case "image/png": return .image
-        case "application/x-skybridge-file-url": return .fileURL
-        case "text/rtf": return .richText
-        case "text/html": return .html
+        guard let canonical = P2PClipboardMIMEPolicy.canonicalWireValue(for: mime) else {
+            return nil
+        }
+        switch canonical {
+        case P2PClipboardMIMEPolicy.plainText,
+             P2PClipboardMIMEPolicy.utf8PlainText:
+            return .text
+        case P2PClipboardMIMEPolicy.png,
+             P2PClipboardMIMEPolicy.jpeg:
+            return .image
+        case P2PClipboardMIMEPolicy.uriList:
+            return .fileURL
+        case P2PClipboardMIMEPolicy.richText:
+            return .richText
+        case P2PClipboardMIMEPolicy.html:
+            return .html
         default: return nil
         }
     }
@@ -125,8 +169,25 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     // MARK: - Initialization
 
     private init() {
-        self.configuration = Self.loadConfiguration() ?? .default
+        var loadedConfiguration = Self.loadConfiguration() ?? .default
+        let storedMaximum = loadedConfiguration.maxContentSize
+        loadedConfiguration.maxContentSize = min(
+            max(1, storedMaximum),
+            P2PControlFramePolicy.maximumInlineClipboardByteCount
+        )
+        self.configuration = loadedConfiguration
+        self.clipboardContentSizeWasMigrated = loadedConfiguration.maxContentSize != storedMaximum
         self.history = Self.loadHistory()
+
+        if clipboardContentSizeWasMigrated {
+            do {
+                try Self.configurationStore.save(loadedConfiguration)
+            } catch {
+                logger.error(
+                    "📋 剪贴板大小迁移持久化失败: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
 
         logger.info("📋 剪贴板同步服务已初始化")
     }
@@ -151,6 +212,8 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     public func disable() {
         guard isEnabled else { return }
 
+        revokeActiveLocalSubmission()
+        deliveryConvergence = P2PClipboardDeliveryConvergence()
         isEnabled = false
         syncState = .disabled
         if configuration.isEnabled { configuration.isEnabled = false } // 持久化用户意图（didSet 保存）
@@ -165,11 +228,49 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
         guard isEnabled else { return }
         guard syncState != .syncing else { return }
 
+        let snapshotRead = P2PClipboardSnapshotPolicy.read(
+            changeCount: { pasteboard.changeCount },
+            value: { readLocalClipboard() }
+        )
+        guard case .stable(let snapshot, let pasteboardChangeCount) = snapshotRead else {
+            syncState = .idle
+            return
+        }
+        guard let content = snapshot else {
+            syncState = .idle
+            return
+        }
+        let submissionID = UUID()
         syncState = .syncing
-        defer { syncState = .idle }
-
-        if let content = readLocalClipboard() {
-            try await broadcastContent(content)
+        do {
+            try await runLocalSubmission(
+                content,
+                submissionID: submissionID,
+                pasteboardChangeCount: pasteboardChangeCount
+            )
+            guard activeLocalSubmission?.id == submissionID else { return }
+            lastContentHash = content.contentHash
+            let convergenceAchieved = deliveryConvergence.fullySubmitted(
+                generation: pasteboardChangeCount,
+                now: ContinuousClock.now
+            )
+            if convergenceAchieved {
+                changeCount = pasteboardChangeCount
+            }
+            clearActiveLocalSubmissionOwner(submissionID: submissionID)
+            syncState = .idle
+        } catch {
+            if activeLocalSubmission?.id == submissionID {
+                clearActiveLocalSubmissionOwner(submissionID: submissionID)
+                if isEnabled, pasteboard.changeCount == pasteboardChangeCount {
+                    deliveryConvergence.recordFailure(
+                        generation: pasteboardChangeCount,
+                        now: ContinuousClock.now
+                    )
+                }
+                syncState = .error(error.localizedDescription)
+            }
+            throw error
         }
     }
 
@@ -256,26 +357,92 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
         guard isEnabled else { return }
 
         let currentChangeCount = pasteboard.changeCount
-        guard currentChangeCount != changeCount else { return }
-        changeCount = currentChangeCount
-
-        // 读取剪贴板内容
-        guard let content = readLocalClipboard() else { return }
-
-        // 检查是否重复（避免循环同步）
-        guard content.contentHash != lastContentHash else { return }
-        lastContentHash = content.contentHash
-
-        // 广播到所有连接的设备
-        do {
-            try await broadcastContent(content)
-        } catch {
-            logger.error("📋 广播剪贴板内容失败: \(error.localizedDescription)")
-            syncState = .error(error.localizedDescription)
+        if let activeLocalSubmission {
+            guard activeLocalSubmission.pasteboardChangeCount != currentChangeCount else {
+                return
+            }
+            revokeActiveLocalSubmission()
         }
 
-        // 经 P2P AppMessage 传输：把原始内容交给集成方发送（连接时生效的“随航”同步）
-        await onLocalContentChanged?(Self.mimeType(for: content.type), content.data)
+        guard currentChangeCount != changeCount else { return }
+        guard deliveryConvergence.mayAttempt(
+            generation: currentChangeCount,
+            now: ContinuousClock.now
+        ) else {
+            return
+        }
+
+        let snapshotRead = P2PClipboardSnapshotPolicy.read(
+            changeCount: { pasteboard.changeCount },
+            value: { readLocalClipboard() }
+        )
+        guard case .stable(let snapshot, let observedChangeCount) = snapshotRead,
+              observedChangeCount == currentChangeCount else {
+            return
+        }
+        guard let content = snapshot else {
+            changeCount = currentChangeCount
+            deliveryConvergence.generationWasHandled(currentChangeCount)
+            syncState = .idle
+            return
+        }
+
+        // 检查是否重复（避免循环同步）
+        guard deliveryConvergence.requiresSubmission(
+            contentHash: content.contentHash,
+            committedHash: lastContentHash
+        ) else {
+            changeCount = currentChangeCount
+            deliveryConvergence.generationWasHandled(currentChangeCount)
+            syncState = .idle
+            return
+        }
+
+        // Submit through every configured route; only commit the local hash and
+        // history after all routes report actual network submission.
+        let submissionID = UUID()
+        syncState = .syncing
+        do {
+            try await runLocalSubmission(
+                content,
+                submissionID: submissionID,
+                pasteboardChangeCount: currentChangeCount
+            )
+            guard activeLocalSubmission?.id == submissionID else { return }
+            lastContentHash = content.contentHash
+            let convergenceAchieved = deliveryConvergence.fullySubmitted(
+                generation: currentChangeCount,
+                now: ContinuousClock.now
+            )
+            if convergenceAchieved {
+                changeCount = currentChangeCount
+            }
+            clearActiveLocalSubmissionOwner(submissionID: submissionID)
+            syncState = .idle
+        } catch is CancellationError {
+            if activeLocalSubmission?.id == submissionID {
+                clearActiveLocalSubmissionOwner(submissionID: submissionID)
+                if isEnabled, pasteboard.changeCount == currentChangeCount {
+                    deliveryConvergence.recordFailure(
+                        generation: currentChangeCount,
+                        now: ContinuousClock.now
+                    )
+                }
+                syncState = .idle
+            }
+        } catch {
+            if activeLocalSubmission?.id == submissionID {
+                clearActiveLocalSubmissionOwner(submissionID: submissionID)
+                if isEnabled, pasteboard.changeCount == currentChangeCount {
+                    deliveryConvergence.recordFailure(
+                        generation: currentChangeCount,
+                        now: ContinuousClock.now
+                    )
+                }
+                logger.error("📋 广播剪贴板内容失败: \(error.localizedDescription)")
+                syncState = .error(error.localizedDescription)
+            }
+        }
     }
 
     /// 摄入来自远端的原始剪贴板内容（经 P2P AppMessage.clipboard 解出），应用到本地并落历史。
@@ -284,18 +451,28 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     ///   - mimeType: 内容 MIME 类型
     ///   - data: 原始内容字节
     ///   - fromDeviceID: 来源设备 ID
-    public func ingestRemoteContent(mimeType: String, data: Data, fromDeviceID: String) async {
+    public func ingestRemoteContent(
+        mimeType: String,
+        data: Data,
+        fromDeviceID: String
+    ) async throws {
         guard isEnabled else { return }
+        try P2PControlFramePolicy.validateInlineClipboardByteCount(data.count)
+        guard data.count <= configuration.maxContentSize else {
+            throw ClipboardSyncError.contentTooLarge(
+                size: data.count,
+                maxSize: configuration.maxContentSize
+            )
+        }
         guard let type = Self.contentType(forMIME: mimeType) else {
-            logger.debug("📋 忽略未知 MIME 类型的远端剪贴板: \(mimeType, privacy: .public)")
-            return
+            throw ClipboardSyncError.unsupportedType(mimeType)
         }
         let content = ClipboardContent(type: type, data: data, sourceDeviceID: fromDeviceID)
         guard content.contentHash != lastContentHash else {
             logger.debug("📋 忽略重复的远端剪贴板内容")
             return
         }
-        applyRemoteContent(content)
+        try applyAuthoritativeInboundContent(content)
         let entry = ClipboardHistoryEntry(content: content, direction: .incoming, targetDeviceIDs: [])
         addToHistory(entry)
         lastSyncTime = Date()
@@ -306,15 +483,49 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     /// 并按持久化配置恢复启用状态。应在 App 启动后调用一次。
     public func attachP2PTransportAndRestore() async {
         onLocalContentChanged = { mimeType, data in
-            let payload = AppMessage.ClipboardPayload(mimeType: mimeType, dataBase64: data.base64EncodedString())
+            try P2PControlFramePolicy.validateInlineClipboardByteCount(data.count)
+            guard let canonicalMIMEType = P2PClipboardMIMEPolicy.canonicalWireValue(for: mimeType),
+                  canonicalMIMEType == P2PClipboardMIMEPolicy.plainText
+                    || canonicalMIMEType == P2PClipboardMIMEPolicy.utf8PlainText
+                    || canonicalMIMEType == P2PClipboardMIMEPolicy.png
+                    || canonicalMIMEType == P2PClipboardMIMEPolicy.jpeg
+                    || canonicalMIMEType == P2PClipboardMIMEPolicy.uriList else {
+                throw ClipboardSyncError.unsupportedType(mimeType)
+            }
+            let payload = AppMessage.ClipboardPayload(
+                mimeType: canonicalMIMEType,
+                dataBase64: data.base64EncodedString()
+            )
             // 在主线程快照当前活动连接（P2PConnection 为 @unchecked Sendable，可跨域传递），再逐个发送。
             let connections = await MainActor.run { Array(P2PNetworkManager.shared.activeConnections.values) }
+            guard !connections.isEmpty else {
+                throw ClipboardSyncError.noConnectedDevices
+            }
+            var firstFailure: Error?
             for connection in connections {
-                try? await connection.sendAppMessage(.clipboard(payload))
+                do {
+                    try Task.checkCancellation()
+                    try await connection.sendAppMessage(.clipboard(payload))
+                    try Task.checkCancellation()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    if firstFailure == nil {
+                        firstFailure = error
+                    }
+                }
+            }
+            if let firstFailure {
+                throw firstFailure
             }
         }
         if configuration.isEnabled {
-            try? await enable()
+            do {
+                try await enable()
+            } catch {
+                syncState = .error(error.localizedDescription)
+                logger.error("📋 恢复剪贴板同步失败: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -385,55 +596,166 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
     }
 
     /// 应用远程剪贴板内容到本地
-    private func applyRemoteContent(_ content: ClipboardContent) {
-        // 更新 hash 避免触发自己的同步
-        lastContentHash = content.contentHash
-
-        pasteboard.clearContents()
-
+    private func applyRemoteContent(_ content: ClipboardContent) throws -> Int {
+        let applied: Bool
         switch content.type {
         case .text:
-            if let text = String(data: content.data, encoding: .utf8) {
-                pasteboard.setString(text, forType: .string)
-                logger.debug("📋 已应用远程文本: \(text.prefix(50))")
+            guard let text = String(data: content.data, encoding: .utf8) else {
+                throw ClipboardSyncError.decodingFailed
             }
+            pasteboard.clearContents()
+            applied = pasteboard.setString(text, forType: .string)
 
         case .image:
-            if let image = NSImage(data: content.data) {
-                pasteboard.writeObjects([image])
-                logger.debug("📋 已应用远程图片")
+            guard let image = NSImage(data: content.data) else {
+                throw ClipboardSyncError.decodingFailed
             }
+            pasteboard.clearContents()
+            applied = pasteboard.writeObjects([image])
 
         case .fileURL:
-            if let path = String(data: content.data, encoding: .utf8) {
-                pasteboard.setString(path, forType: .string)
-                logger.debug("📋 已应用远程文件路径: \(path)")
+            guard let path = String(data: content.data, encoding: .utf8),
+                  !path.isEmpty else {
+                throw ClipboardSyncError.decodingFailed
             }
+            pasteboard.clearContents()
+            applied = pasteboard.setString(path, forType: .string)
 
         case .richText:
-            pasteboard.setData(content.data, forType: .rtf)
-            logger.debug("📋 已应用远程 RTF 内容")
+            guard !content.data.isEmpty else {
+                throw ClipboardSyncError.decodingFailed
+            }
+            pasteboard.clearContents()
+            applied = pasteboard.setData(content.data, forType: .rtf)
 
         case .html:
-            pasteboard.setData(content.data, forType: .html)
-            logger.debug("📋 已应用远程 HTML 内容")
+            guard !content.data.isEmpty else {
+                throw ClipboardSyncError.decodingFailed
+            }
+            pasteboard.clearContents()
+            applied = pasteboard.setData(content.data, forType: .html)
         }
 
-        // 更新 changeCount
-        changeCount = pasteboard.changeCount
+        guard applied else {
+            throw ClipboardSyncError.decodingFailed
+        }
+
+        // Update the loop-prevention hash only after the pasteboard accepted
+        // the content. Invalid data must remain retryable and observable.
+        lastContentHash = content.contentHash
+
+        return pasteboard.changeCount
+    }
+
+    private func applyAuthoritativeInboundContent(_ content: ClipboardContent) throws {
+        let inboundGeneration = try applyRemoteContent(content)
+        revokeActiveLocalSubmission()
+        let requiresCompensation = deliveryConvergence.authoritativeInboundApplied(
+            generation: inboundGeneration,
+            now: ContinuousClock.now
+        )
+        if !requiresCompensation {
+            changeCount = inboundGeneration
+        }
+        syncState = .idle
     }
 
     // MARK: - Private Methods - Network
 
-    /// 广播内容到所有设备
-    private func broadcastContent(_ content: ClipboardContent) async throws {
-        let message = try createSyncMessage(for: content)
-        let messageData = try JSONEncoder().encode(message)
-
-        // 使用回调发送
-        if let broadcast = onBroadcast {
-            try await broadcast(messageData)
+    private func runLocalSubmission(
+        _ content: ClipboardContent,
+        submissionID: UUID,
+        pasteboardChangeCount: Int
+    ) async throws {
+        let task = Task { @MainActor [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.submitLocalContent(content, submissionID: submissionID)
         }
+        activeLocalSubmission = LocalSubmissionLease(
+            id: submissionID,
+            contentHash: content.contentHash,
+            pasteboardChangeCount: pasteboardChangeCount,
+            task: task
+        )
+        try await task.value
+    }
+
+    private func requireActiveLocalSubmission(submissionID: UUID) throws {
+        try Task.checkCancellation()
+        guard let activeLocalSubmission,
+              activeLocalSubmission.id == submissionID,
+              pasteboard.changeCount == activeLocalSubmission.pasteboardChangeCount else {
+            throw CancellationError()
+        }
+    }
+
+    private func revokeActiveLocalSubmission() {
+        activeLocalSubmission?.task.cancel()
+        activeLocalSubmission = nil
+    }
+
+    private func clearActiveLocalSubmissionOwner(submissionID: UUID) {
+        guard activeLocalSubmission?.id == submissionID else { return }
+        activeLocalSubmission = nil
+    }
+
+    /// Submits a local clipboard value through every configured transport.
+    /// History and timestamps are committed only after every attempted route
+    /// reports successful network submission.
+    private func submitLocalContent(
+        _ content: ClipboardContent,
+        submissionID: UUID
+    ) async throws {
+        try P2PControlFramePolicy.validateInlineClipboardByteCount(content.data.count)
+        try requireActiveLocalSubmission(submissionID: submissionID)
+
+        var attemptedRouteCount = 0
+        var firstFailure: Error?
+
+        if let broadcast = onBroadcast {
+            try requireActiveLocalSubmission(submissionID: submissionID)
+            attemptedRouteCount += 1
+            do {
+                let message = try createSyncMessage(for: content)
+                let messageData = try JSONEncoder().encode(message)
+                try await deliveryConvergence.attemptRoute {
+                    try await broadcast(messageData)
+                }
+                try requireActiveLocalSubmission(submissionID: submissionID)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                firstFailure = error
+            }
+        }
+
+        if let onLocalContentChanged {
+            try requireActiveLocalSubmission(submissionID: submissionID)
+            attemptedRouteCount += 1
+            do {
+                try await deliveryConvergence.attemptRoute {
+                    try await onLocalContentChanged(
+                        Self.mimeType(for: content.type),
+                        content.data
+                    )
+                }
+                try requireActiveLocalSubmission(submissionID: submissionID)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if firstFailure == nil {
+                    firstFailure = error
+                }
+            }
+        }
+
+        guard attemptedRouteCount > 0 else {
+            throw ClipboardSyncError.noConnectedDevices
+        }
+        if let firstFailure {
+            throw firstFailure
+        }
+        try requireActiveLocalSubmission(submissionID: submissionID)
 
         // 记录历史
         let deviceIDs = connectedDevices.map { $0.deviceID }
@@ -445,7 +767,7 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
         addToHistory(entry)
 
         lastSyncTime = Date()
-        logger.info("📋 已广播剪贴板内容到 \(deviceIDs.count) 台设备")
+        logger.info("📋 剪贴板已提交到 \(attemptedRouteCount) 条活动路由")
     }
 
     /// 发送内容到特定设备
@@ -479,8 +801,10 @@ public final class ClipboardSyncService: ObservableObject, ClipboardSyncServiceP
         // 解码内容
         let content = try JSONDecoder().decode(ClipboardContent.self, from: contentData)
 
-        // 应用到本地剪贴板
-        applyRemoteContent(content)
+        // Only a successfully applied inbound value supersedes an in-flight
+        // local submission. Invalid inbound data must leave the local owner and
+        // its visible state intact.
+        try applyAuthoritativeInboundContent(content)
 
         // 记录历史
         let entry = ClipboardHistoryEntry(
@@ -655,3 +979,4 @@ private final class ClipboardEncryptor: @unchecked Sendable {
         SecItemAdd(addQuery as CFDictionary, nil)
     }
 }
+#endif

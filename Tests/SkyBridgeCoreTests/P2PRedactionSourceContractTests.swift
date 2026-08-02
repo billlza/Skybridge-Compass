@@ -79,6 +79,26 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         }
     }
 
+    func testDeviceIdentityDiagnosticsUseFixedCodesInsteadOfStorageDescriptions() throws {
+        let path = "Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift"
+        let source = try readSource(path)
+
+        XCTAssertTrue(source.contains("identityDiagnosticCode(for:"))
+        XCTAssertTrue(source.contains("legacy-residue-inspection-"))
+        assertSource(
+            source,
+            named: path,
+            excludes: [
+                "localizedDescription, privacy: .public",
+                "authorityError.localizedDescription",
+                "error.localizedDescription",
+                "candidateTag, privacy: .public",
+                "writeAccessGroup, privacy: .public",
+                "persistentReference, privacy: .public"
+            ]
+        )
+    }
+
     func testHandshakeDiagnosticsUseReasonCodesAndStateSummaries() throws {
         let helper = try readSource("Sources/SkyBridgeCore/Common/SkyBridgeDiagnosticRedaction.swift")
 
@@ -102,6 +122,18 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         XCTAssertTrue(coreDriver.contains(#""reason": reason.diagnosticReasonCode"#))
         XCTAssertFalse(coreDriver.contains(#""peer": currentPeer?.deviceId ?? "unknown""#))
         XCTAssertFalse(coreDriver.contains(#""reason": String(describing: reason)"#))
+        assertSource(
+            coreDriver,
+            named: "macOS HandshakeDriver diagnostics",
+            excludes: [
+                "peer=\\(peer.deviceId",
+                "error=\\(error.localizedDescription",
+                "transcriptHashPrefix",
+                #""sessionId": sessionKeys.sessionId"#,
+                #""transcriptHash": sessionKeys.transcriptHash"#,
+                "localizedDescription, privacy: .public"
+            ]
+        )
 
         XCTAssertTrue(coreTwoAttempt.contains("SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId)"))
         XCTAssertTrue(coreTwoAttempt.contains("SkyBridgeDiagnosticRedaction.errorSummary(error)"))
@@ -179,7 +211,7 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         XCTAssertTrue(pairingDiagnostics.contains("peer=\\(Self.protocolIdentityLogRedaction)"))
         XCTAssertTrue(pairingDiagnostics.contains("declaredDeviceId=\\(Self.protocolIdentityLogRedaction)"))
         XCTAssertTrue(pairingDiagnostics.contains("deviceId: localId"))
-        XCTAssertTrue(pairingDiagnostics.contains("await KEMTrustStore.shared.upsert(deviceId: declaredDeviceId"))
+        XCTAssertTrue(pairingDiagnostics.contains("AuthorityBoundPairingIdentityPersistence"))
         assertSource(
             pairingDiagnostics,
             named: "iOS pairingIdentityExchange diagnostics",

@@ -83,10 +83,22 @@ enum CrossNetworkConnectionCodeSnapshotStore {
     }
 
     private static func applicationSupportDirectory() -> URL {
+#if os(macOS)
+        // Unchanged on macOS: this is an existing on-disk location and moving it would be an
+        // unannounced persistence migration.
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
             .appendingPathComponent("SkyBridge", isDirectory: true)
+#else
+        // `homeDirectoryForCurrentUser` is unavailable on iOS; use the container's own
+        // Application Support directory.
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        return base.appendingPathComponent("SkyBridge", isDirectory: true)
+#endif
     }
 
     private static func snapshotURL() -> URL {

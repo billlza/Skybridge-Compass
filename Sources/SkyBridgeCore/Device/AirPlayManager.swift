@@ -495,7 +495,7 @@ extension AirPlayManager: NetServiceDelegate {
                 logger.info("🛑 过滤本机设备（IP匹配）: \(senderName) @ \(newDevice.ipAddress)")
                 return
             }
-            let localHostName = Host.current().localizedName ?? Host.current().name ?? ""
+            let localHostName = LocalHostName.localizedName ?? LocalHostName.networkName ?? ""
             if !localHostName.isEmpty {
                 let loweredServiceName = senderName.lowercased()
                 let loweredLocalName = localHostName.lowercased()

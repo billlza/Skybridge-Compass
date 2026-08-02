@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 /// 设置管理器
 @MainActor
@@ -78,9 +79,19 @@ public class SettingsManager: ObservableObject {
     }
 
     /// 最大内容大小（字节）
-    @Published public var clipboardMaxContentSize: Int = 1 * 1024 * 1024 {
-        didSet { persist(clipboardMaxContentSize, forKey: "clipboard_max_content_size") }
+    @Published public var clipboardMaxContentSize: Int = P2PControlFramePolicy.maximumInlineClipboardByteCount {
+        didSet {
+            let normalized = Self.normalizedClipboardMaxContentSize(clipboardMaxContentSize)
+            guard normalized == clipboardMaxContentSize else {
+                clipboardContentSizeWasMigrated = true
+                clipboardMaxContentSize = normalized
+                return
+            }
+            persist(clipboardMaxContentSize, forKey: "clipboard_max_content_size")
+        }
     }
+
+    @Published public private(set) var clipboardContentSizeWasMigrated = false
 
     /// 历史记录保留条数
     @Published public var clipboardHistoryLimit: Int = 25 {
@@ -125,7 +136,18 @@ public class SettingsManager: ObservableObject {
 
         discoveryEnabled = bool(forKey: "discovery_enabled", default: true)
         discoveryModePreset = defaults.object(forKey: "discovery_mode_preset") as? Int ?? 0
-        discoveryCustomServiceTypes = defaults.stringArray(forKey: "discovery_custom_services") ?? []
+        let storedDiscoveryServiceTypes = defaults.stringArray(
+            forKey: "discovery_custom_services"
+        ) ?? []
+        discoveryCustomServiceTypes = Self.migratedDiscoveryServiceTypes(
+            storedDiscoveryServiceTypes
+        )
+        if discoveryCustomServiceTypes != storedDiscoveryServiceTypes {
+            defaults.set(
+                discoveryCustomServiceTypes,
+                forKey: "discovery_custom_services"
+            )
+        }
         discoveryRefreshIntervalSeconds = defaults.object(forKey: "discovery_refresh_interval_seconds") as? Double ?? 0
         maxConcurrentConnections = defaults.object(forKey: "max_concurrent_connections") as? Int ?? 2
 
@@ -138,7 +160,13 @@ public class SettingsManager: ObservableObject {
         clipboardSyncEnabled = bool(forKey: "clipboard_sync_enabled", default: false)
         clipboardSyncImages = bool(forKey: "clipboard_sync_images", default: false)
         clipboardSyncFileURLs = bool(forKey: "clipboard_sync_file_urls", default: true)
-        clipboardMaxContentSize = defaults.object(forKey: "clipboard_max_content_size") as? Int ?? (1 * 1024 * 1024)
+        let storedClipboardMaximum = defaults.object(forKey: "clipboard_max_content_size") as? Int
+            ?? P2PControlFramePolicy.maximumInlineClipboardByteCount
+        clipboardMaxContentSize = Self.normalizedClipboardMaxContentSize(storedClipboardMaximum)
+        if clipboardMaxContentSize != storedClipboardMaximum {
+            defaults.set(clipboardMaxContentSize, forKey: "clipboard_max_content_size")
+            clipboardContentSizeWasMigrated = true
+        }
         clipboardHistoryLimit = defaults.object(forKey: "clipboard_history_limit") as? Int ?? 25
         clipboardPollIntervalSeconds = defaults.object(forKey: "clipboard_poll_interval_seconds") as? Double ?? 1.0
         clipboardMinSendIntervalSeconds = defaults.object(forKey: "clipboard_min_send_interval_seconds") as? Double ?? 0.8
@@ -152,8 +180,31 @@ public class SettingsManager: ObservableObject {
         defaults.object(forKey: key) as? Bool ?? defaultValue
     }
 
+    private static func migratedDiscoveryServiceTypes(_ stored: [String]) -> [String] {
+        var seen = Set<String>()
+        return stored.compactMap { raw in
+            let migrated: String
+            switch raw {
+            case BonjourInteropProtocolContract.legacyFileTransferServiceType:
+                migrated = BonjourInteropProtocolContract.fileTransferServiceType
+            case BonjourInteropProtocolContract.legacyRemoteControlServiceType:
+                migrated = BonjourInteropProtocolContract.remoteControlServiceType
+            default:
+                migrated = raw
+            }
+            return seen.insert(migrated).inserted ? migrated : nil
+        }
+    }
+
     private func persist(_ value: Any, forKey key: String) {
         guard shouldPersistChanges else { return }
         defaults.set(value, forKey: key)
+    }
+
+    private static func normalizedClipboardMaxContentSize(_ value: Int) -> Int {
+        guard value > 0 else {
+            return P2PControlFramePolicy.maximumInlineClipboardByteCount
+        }
+        return min(value, P2PControlFramePolicy.maximumInlineClipboardByteCount)
     }
 }

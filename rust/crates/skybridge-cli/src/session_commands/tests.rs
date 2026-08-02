@@ -92,7 +92,8 @@ async fn session_commands_cover_list_inspect_disconnect_and_missing_records() ->
 }
 
 #[tokio::test]
-async fn disconnect_fails_if_control_cleanup_cannot_be_persisted() -> Result<()> {
+async fn disconnect_fails_observably_but_closes_runtime_when_control_registry_is_unavailable()
+-> Result<()> {
     let state_dir = make_test_dir("session-disconnect-control-cleanup-failure")?;
     let paths = resolve_paths(Some(state_dir.clone()))?;
     upsert_session_runtime(
@@ -118,12 +119,20 @@ async fn disconnect_fails_if_control_cleanup_cannot_be_persisted() -> Result<()>
         result.is_err(),
         "disconnect must fail when managed session control cleanup cannot be persisted"
     );
+    assert!(
+        result
+            .expect_err("control registry failure")
+            .to_string()
+            .contains("managed control registry was unavailable"),
+        "the control-registry failure must remain explicit"
+    );
     let registry = load_session_registry(&paths).await?;
     let session = registry.get("SESSION1").expect("runtime record remains");
-    assert_eq!(session.state, RuntimeSessionState::Bound);
-    assert!(
-        session.last_error.is_none(),
-        "runtime must not be marked disconnected when control cleanup failed"
+    assert_eq!(session.state, RuntimeSessionState::Disconnected);
+    assert_eq!(
+        session.last_error.as_deref(),
+        Some("disconnected_by_operator"),
+        "runtime authority must fail closed even when corrupt control state cannot be cleaned"
     );
 
     Ok(())

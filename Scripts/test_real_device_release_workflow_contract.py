@@ -22,6 +22,13 @@ ACTIONLINT_CONFIG = ROOT / ".github/actionlint.yaml"
 EXTRACTOR = ROOT / "Scripts/extract_real_device_release_evidence_archive.py"
 FILE_SET_STAGER = ROOT / "Scripts/stage_real_device_release_evidence.py"
 MACOS_HANDOFF_EXTRACTOR = ROOT / "Scripts/extract_macos_release_handoff.py"
+CHECKOUT_V6 = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"  # v6.1.0
+UPLOAD_ARTIFACT_V4 = (
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"  # v4.6.2
+)
+DOWNLOAD_ARTIFACT_V4 = (
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"  # v4.3.0
+)
 
 
 def add_regular_file(
@@ -91,6 +98,14 @@ class RealDeviceReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn('${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE:-0}', consumer)
         self.assertIn("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK", consumer)
         self.assertLess(consumer.index(probe), consumer.index(build))
+
+    def test_rust_protocol_changes_trigger_the_apple_release_lane(self) -> None:
+        consumer = CONSUMER_WORKFLOW.read_text(encoding="utf-8")
+        self.assertEqual(
+            consumer.count('- "rust/**"'),
+            2,
+            "Rust SBWC/wire changes must trigger both pull-request and push Apple release checks",
+        )
 
     def test_producer_uploads_archives_and_consumer_extracts_them(self) -> None:
         producer = PRODUCER_WORKFLOW.read_text(encoding="utf-8")
@@ -163,10 +178,10 @@ class RealDeviceReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("inputs.publish_update_release == true", publish_job)
         self.assertIn("Scripts/publish_macos_update_release.sh", publish_job)
         self.assertIn("python3 Scripts/extract_macos_release_handoff.py", consumer)
-        self.assertIn("actions/upload-artifact@v4", signed_job)
-        self.assertIn("actions/download-artifact@v4", publish_job)
+        self.assertIn(UPLOAD_ARTIFACT_V4, signed_job)
+        self.assertIn(DOWNLOAD_ARTIFACT_V4, publish_job)
         self.assertEqual(
-            consumer.count("uses: actions/checkout@v6"),
+            consumer.count(f"uses: {CHECKOUT_V6}"),
             consumer.count("persist-credentials: false"),
         )
         handoff_extractor = MACOS_HANDOFF_EXTRACTOR.read_text(encoding="utf-8")

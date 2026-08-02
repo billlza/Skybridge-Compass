@@ -321,15 +321,23 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(source.contains("pre-session-drain"))
         XCTAssertTrue(source.contains("case .offer, .answer, .iceCandidate:\n            return true"))
 
-        XCTAssertTrue(source.contains("guard let session else {\n                    enqueuePreSessionSignalingEnvelope(env)\n                    return\n                }\n                session.setRemoteOffer(sdp)"))
-        XCTAssertTrue(source.contains("guard let session else {\n                    enqueuePreSessionSignalingEnvelope(env)\n                    return\n                }\n                session.setRemoteAnswer(sdp)"))
-        XCTAssertTrue(source.contains("guard let session else {\n                    enqueuePreSessionSignalingEnvelope(env)\n                    return\n                }\n                session.addRemoteICECandidate"))
+        XCTAssertTrue(source.contains("expectedLifecycleWitness: envelopeLifecycleWitness"))
+        XCTAssertTrue(source.contains("expectedSetupAttempt: setupAttempt"))
+        XCTAssertTrue(
+            source.contains(
+                "pendingEnvelope.lifecycleWitness == .setup(expectedSetupAttempt)"
+            )
+        )
+        XCTAssertTrue(source.contains("session.setRemoteOffer(sdp)"))
+        XCTAssertTrue(source.contains("session.setRemoteAnswer(sdp)"))
+        XCTAssertTrue(source.contains("session.addRemoteICECandidate"))
+        XCTAssertTrue(source.contains("CrossNetworkSignalingEnvelopeDrain.run("))
         XCTAssertFalse(source.contains("session?.setRemoteOffer"))
         XCTAssertFalse(source.contains("session?.setRemoteAnswer"))
         XCTAssertFalse(source.contains("session?.addRemoteICECandidate"))
 
         let sessionStart = try XCTUnwrap(source.range(of: "try await s.startAsync()"))
-        let drain = try XCTUnwrap(source.range(of: "drainPendingPreSessionSignalingEnvelopes(sessionId: sessionId)"))
+        let drain = try XCTUnwrap(source.range(of: "await drainPendingPreSessionSignalingEnvelopes("))
         let join = try XCTUnwrap(
             source.range(
                 of: "try await sendRequiredSetupEnvelope(",
@@ -374,16 +382,12 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(disconnectBody.contains("connectionCodeLifecycleEpoch &+= 1"))
     }
 
-    func testTenantIDBindsDeclaredSessionTenantToJWTClaimBeforeLegacyFallback() throws {
+    func testTenantIDUsesStrictJWTAuthorityWithoutOpaqueFallback() throws {
         let source = try Self.crossNetworkSignalServerClientSource()
 
         XCTAssertTrue(
-            source.contains("Self.resolveAuthenticatedTenantID("),
+            source.contains("resolveAuthenticatedJWTIdentity("),
             "iOS WebRTC signaling must resolve tenant identity through the strict JWT binding policy."
-        )
-        XCTAssertTrue(
-            source.contains("throw ClientError.missingTenantClaim"),
-            "A stored tenant must fail closed when the token has no tenant-bearing claim."
         )
         XCTAssertTrue(
             source.contains("throw ClientError.tenantIdentityMismatch"),
@@ -431,23 +435,20 @@ final class ConnectionCodeFormatTests: XCTestCase {
         }
     }
 
-    func testAuthenticatedTenantResolutionRejectsMissingClaimWhenSessionHasTenant() throws {
+    func testAuthenticatedTenantResolutionUsesSubjectAsEffectiveTenantAssertion() throws {
         let token = try Self.makeUnsignedJWTForTenantTests(
             payload: ["sub": "NEBULA-local", "exp": 4_102_444_800]
         )
 
-        XCTAssertThrowsError(
+        XCTAssertEqual(
             try SignalServerClientCompat.resolveAuthenticatedTenantID(
                 accessToken: token,
                 explicitTenantID: nil,
                 sessionTenantID: "NEBULA-local",
                 legacyUserIdentifier: "NEBULA-local"
-            )
-        ) { error in
-            guard case SignalServerClientCompat.ClientError.missingTenantClaim = error else {
-                return XCTFail("Unexpected error: \(error)")
-            }
-        }
+            ),
+            "NEBULA-local"
+        )
     }
 
     func testAuthenticatedTenantResolutionUsesJWTSubjectOnlyWithoutDeclaredTenant() throws {
@@ -548,16 +549,18 @@ final class ConnectionCodeFormatTests: XCTestCase {
         let token = try Self.makeUnsignedJWTForTenantTests(
             payload: [
                 "sub": "user-123",
-                "tenant_id": "root-tenant",
-                "app_metadata": ["tenant_id": "app-tenant"]
+                "app_metadata": [
+                    "tenant_id": "app-tenant",
+                    "workspace_id": "other-app-tenant"
+                ]
             ]
         )
 
         XCTAssertThrowsError(
             try SignalServerClientCompat.resolveAuthenticatedTenantID(
                 accessToken: token,
-                explicitTenantID: "root-tenant",
-                sessionTenantID: "root-tenant",
+                explicitTenantID: nil,
+                sessionTenantID: nil,
                 legacyUserIdentifier: "user-123"
             )
         ) { error in
@@ -583,21 +586,25 @@ final class ConnectionCodeFormatTests: XCTestCase {
                 legacyUserIdentifier: "user-123"
             )
         ) { error in
-            guard case SignalServerClientCompat.ClientError.missingTenantClaim = error else {
+            guard case SignalServerClientCompat.ClientError.tenantIdentityMismatch = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
         }
     }
 
-    func testAuthenticatedTenantResolutionKeepsOpaqueLegacyFallbackWithoutDeclaredTenant() throws {
-        let tenant = try SignalServerClientCompat.resolveAuthenticatedTenantID(
-            accessToken: "opaque-legacy-token",
-            explicitTenantID: nil,
-            sessionTenantID: nil,
-            legacyUserIdentifier: "legacy-user"
-        )
-
-        XCTAssertEqual(tenant, "legacy-user")
+    func testAuthenticatedTenantResolutionRejectsOpaqueLegacyToken() throws {
+        XCTAssertThrowsError(
+            try SignalServerClientCompat.resolveAuthenticatedTenantID(
+                accessToken: "opaque-legacy-token",
+                explicitTenantID: nil,
+                sessionTenantID: nil,
+                legacyUserIdentifier: "legacy-user"
+            )
+        ) { error in
+            guard case SignalServerClientCompat.ClientError.invalidAuthenticationClaims = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
     }
 
     func testRefreshedSessionRejectsJWTSubjectDriftBeforePersistence() throws {
@@ -643,6 +650,49 @@ final class ConnectionCodeFormatTests: XCTestCase {
                 return XCTFail("Unexpected error: \(error)")
             }
         }
+    }
+
+    func testRefreshedSubjectOnlySessionIgnoresBusinessNebulaIdentifierForTenantAuthority() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let original = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "exp": now.timeIntervalSince1970 - 1
+                ]
+            ),
+            refreshToken: "refresh-original",
+            userIdentifier: "user-123",
+            displayName: "User",
+            nebulaId: "NEBULA-business-identifier",
+            issuedAt: now.addingTimeInterval(-3_600)
+        )
+        let refreshed = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "exp": now.timeIntervalSince1970 + 3_600
+                ]
+            ),
+            refreshToken: "refresh-next",
+            userIdentifier: "user-123",
+            displayName: "Ignored",
+            nebulaId: "attacker-ignored",
+            issuedAt: now
+        )
+
+        let merged = try SignalServerClientCompat.validatedRefreshedAuthSession(
+            refreshed,
+            replacing: original,
+            explicitTenantID: nil,
+            now: now
+        )
+        XCTAssertEqual(merged.userIdentifier, "user-123")
+        XCTAssertEqual(
+            merged.nebulaId,
+            "NEBULA-business-identifier",
+            "Refresh keeps presentation metadata but must not treat it as signaling tenant authority"
+        )
     }
 
     func testRefreshedSessionRejectsJWTTenantDriftBeforePersistence() throws {

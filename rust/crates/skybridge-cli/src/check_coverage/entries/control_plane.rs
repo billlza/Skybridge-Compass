@@ -106,17 +106,21 @@ pub(super) fn append_entries(
             &[
                 "device.discovery.active_scan",
                 "pub(crate) scan: bool",
-                "device_discovery_active_scan_snapshot_missing",
-                "device_discovery_active_scan_snapshot_stale",
-                "agent_owned_discovery_scanner",
-                "skybridge device discover --nearby --scan [--json]",
-                "agent-owned active mDNS scanner",
-                "device_discover_active_scan_parses_command_shape",
-                "device_discover_dispatch_active_scan_fails_closed_without_active_snapshot",
+                "pub(crate) show_addresses: bool",
+                "run_active_scan",
+                "DEFAULT_ON_DEMAND_SCAN_SECONDS",
+                "advertised_unverified",
+                "device_discovery_permission_denied",
+                "active_scan_json_hides_addresses_by_default_and_labels_explicit_disclosure",
+                "active_scan_failure_json_distinguishes_permission_start_and_runtime_without_leaks",
+                "active_scan_with_no_devices_is_success_not_a_failure_projection",
+                "active_scan_persistence_keeps_ephemeral_address_out_of_registry",
+                "active_nearby_discovery_dispatch_never_falls_back_to_generic_json_failure",
+                "device_discover_active_scan_dispatch_shape_is_bounded_before_network_io",
                 "operator_capability_contract_covers_requested_surface_without_fake_success",
             ],
         ),
-        evidence: "active nearby scanning reads the agent-owned active mDNS scan snapshot read-only, fails closed when missing or stale, and never authorizes connection"
+        evidence: "active nearby scanning executes one bounded foreground mDNS pass, emits classified redacted JSON for permission/start/runtime failures, distinguishes an empty successful scan, persists only a locator-free candidate snapshot, hides addresses by default, and never authorizes connection"
             .to_owned(),
     });
     entries.push(CheckCoverageEntry {
@@ -134,7 +138,7 @@ pub(super) fn append_entries(
                 "load_file_transfer_request_registry",
                 "request_registered",
                 "pending_agent_observation",
-                "file_commands::receive_placeholder",
+                "file_commands::receive",
                 "file_commands::history",
                 "file_transfer_history_projects_pending_requests_without_private_details",
                 "file_transfer_contract_stays_planned_without_path_or_peer_leakage",
@@ -156,14 +160,17 @@ pub(super) fn append_entries(
                 "observe_file_transfer_requests_for_established_session",
                 "is_agent_observed",
                 "transfer_completed",
-                "file_transfer_dispatch_registers_pending_send_without_live_success",
+                "file_transfer_registry_registers_pending_send_without_live_success",
                 "file_transfer_json_contract_fails_closed_without_path_or_peer_leakage",
                 "transfer_started",
                 "receipt_verified",
                 "receipt_sha256_match",
+                "request.bytes_transferred == request.source.size_bytes",
+                "file_send_wait_decision_requires_verified_matching_receipt",
+                "file_send_timeout_json_does_not_claim_cancellation",
             ],
         ),
-        evidence: "file history surfaces evidence-gated transfer progress and SHA-256 receipt verification from the agent-owned request registry; success fields are true only when the agent recorded a verified receipt"
+        evidence: "file send waits for an agent-owned terminal request and reports success only when byte count and SHA-256 receipt evidence all match; detach and timeout never claim transfer completion"
             .to_owned(),
     });
     entries.push(CheckCoverageEntry {
@@ -198,15 +205,15 @@ pub(super) fn append_entries(
                 "RemoteDesktopSubcommand::Contract(output)",
                 "remote_desktop_commands::contract",
                 "remote_desktop_contract_keeps_live_application_unobserved",
-                "remote_desktop_dispatch_registers_pending_request_without_live_success",
+                "remote_desktop_dispatch_rejects_unverified_peer_without_registry_write",
                 "remote_desktop_json_contract_is_machine_readable_without_live_success_claims",
             ],
         ),
-        evidence: "remote desktop CLI contract is machine-readable while live start/stop/resolution/fps changes remain fail-closed until agent observation and real-device gates exist"
+        evidence: "remote desktop CLI contract is machine-readable while live start/stop/resolution/fps changes remain unavailable until standalone backend, authenticated apply/readback, and real-device gates exist"
             .to_owned(),
     });
     entries.push(CheckCoverageEntry {
-        id: "remote_desktop_pending_request_registry_gate",
+        id: "remote_desktop_unavailable_fail_closed_gate",
         domain: "control-plane",
         command: "skybridge remote-desktop start --session-id <id> --json",
         covered: source_has_all(
@@ -220,18 +227,20 @@ pub(super) fn append_entries(
                 "remote_desktop_commands::stop",
                 "remote_desktop_commands::set_resolution",
                 "remote_desktop_commands::set_fps",
-                "enqueue_remote_desktop_request_for_established_session",
+                "classify_mutation_unavailability",
                 "load_remote_desktop_request_registry",
-                "pending_agent_observation",
-                "request_registered",
-                "applied",
-                "remote_desktop_dispatch_registers_pending_request_without_live_success",
-                "remote_desktop_dispatch_persists_distinct_request_payloads",
+                "peer_capability_unverified",
+                "peer_capability_not_advertised",
+                "standalone_remote_desktop_backend_unavailable",
+                "request_registered: false",
+                "applied: false",
+                "remote_desktop_dispatch_rejects_unverified_peer_without_registry_write",
+                "remote_desktop_dispatch_rejects_all_mutations_without_registry_writes",
                 "remote_desktop_dispatch_rejects_invalid_start_without_registry_write",
                 "remote_desktop_json_contract_is_machine_readable_without_live_success_claims",
             ],
         ),
-        evidence: "remote desktop mutation commands persist agent-owned pending requests without claiming sender observation or live application"
+        evidence: "remote desktop mutations verify authenticated peer capability evidence and then reject without persistence because the standalone runtime has no screen-capture/media/input backend or applied readback receipt"
             .to_owned(),
     });
 }

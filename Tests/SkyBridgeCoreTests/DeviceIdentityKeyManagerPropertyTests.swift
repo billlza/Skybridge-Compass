@@ -344,8 +344,9 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
             "Persistent identity stores need an explicit partial-material error for public/private split keypairs."
         )
         XCTAssertTrue(
-            authoritySource.contains("fixed-tag key, keyInfo, and deviceId must all be present"),
-            "A stored identity record without its private key must not be treated as absent and regenerated."
+            authoritySource.contains("the committed legacy keyInfo has no matching private key")
+                && authoritySource.contains("uniqueCommittedMigrationPrivateKey("),
+            "A committed legacy identity without one exact matching private key must not be treated as absent or regenerated."
         )
         XCTAssertTrue(
             source.contains("ML-DSA-65 public/private keypair is incomplete"),

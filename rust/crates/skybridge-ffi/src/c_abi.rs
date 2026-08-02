@@ -31,7 +31,6 @@ use skybridge_core::{
     CryptoSuite, DowngradeDecision, DowngradePolicy, FallbackReason, NearbyDiscoverySnapshot,
     PolicyGate, RustPqcIdentityMaterial,
 };
-use std::collections::BTreeMap;
 
 // ===========================================================================
 // Status / error codes
@@ -863,12 +862,7 @@ pub unsafe extern "C" fn skybridge_client_free(client: *mut SkyBridgeClient) -> 
 
 /// Project resolved peers into a discovery snapshot (no trust priors).
 fn project_snapshot(peers: Vec<ResolvedNearbyPeer>) -> NearbyDiscoverySnapshot {
-    let trusted: BTreeMap<String, skybridge_core::NearbyDiscoveryTrustStatus> = BTreeMap::new();
-    build_active_scan_snapshot(
-        peers,
-        &trusted,
-        skybridge_agent::DEFAULT_ACTIVE_SCAN_TTL_SECONDS,
-    )
+    build_active_scan_snapshot(peers, skybridge_agent::DEFAULT_ACTIVE_SCAN_TTL_SECONDS)
 }
 
 // ===========================================================================

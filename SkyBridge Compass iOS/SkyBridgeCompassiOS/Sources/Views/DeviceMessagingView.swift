@@ -1,3 +1,4 @@
+import SkyBridgeProtocolCore
 import SwiftUI
 
 @available(iOS 17.0, *)
@@ -6,6 +7,7 @@ struct DeviceMessagingView: View {
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = DeviceMessageStore.shared
+    @ObservedObject private var offlineQueue = OfflineMessageQueue.shared
     @State private var draft = ""
     @State private var conversationFingerprint: String?
     @State private var errorMessage: String?
@@ -19,6 +21,7 @@ struct DeviceMessagingView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                offlineQueueNotice
                 messageList
                 Divider()
                 composer
@@ -52,8 +55,40 @@ struct DeviceMessagingView: View {
     }
 
     @ViewBuilder
+    private var offlineQueueNotice: some View {
+        if offlineQueue.isPersistenceBlocked {
+            Label(
+                RuntimeLocalization.string("离线消息队列不可用，自动投递已暂停。"),
+                systemImage: "externaldrive.badge.exclamationmark"
+            )
+            .font(.footnote)
+            .foregroundStyle(.red)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        } else if offlineQueue.lastPersistenceError
+                    == OfflineDeliveryFailureCode.storageCapacityExceeded.rawValue {
+            Label(
+                RuntimeLocalization.string("离线消息存储空间不足，自动投递会在队列状态变化后重试。"),
+                systemImage: "externaldrive.badge.exclamationmark"
+            )
+            .font(.footnote)
+            .foregroundStyle(.orange)
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
     private var messageList: some View {
-        if let errorMessage, conversationFingerprint == nil {
+        if store.isPersistenceBlocked {
+            ContentUnavailableView(
+                RuntimeLocalization.string("消息存储不可用"),
+                systemImage: "externaldrive.badge.exclamationmark",
+                description: Text(
+                    RuntimeLocalization.string("本地消息数据无法安全读取。为避免覆盖损坏数据，消息功能已停止写入。")
+                )
+            )
+        } else if let errorMessage, conversationFingerprint == nil {
             ContentUnavailableView(
                 RuntimeLocalization.string("无法打开消息"),
                 systemImage: "exclamationmark.triangle",
@@ -141,11 +176,18 @@ struct DeviceMessagingView: View {
 
     private var canSend: Bool {
         !isSending
+            && !store.isPersistenceBlocked
+            && !offlineQueue.isPersistenceBlocked
             && conversationFingerprint != nil
             && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func resolveConversation() {
+        guard !store.isPersistenceBlocked else {
+            conversationFingerprint = nil
+            errorMessage = RuntimeLocalization.string("本地消息存储不可用，已阻止继续写入。")
+            return
+        }
         do {
             conversationFingerprint = try DeviceMessagingService.shared.conversationFingerprint(for: device)
             errorMessage = nil
@@ -159,13 +201,16 @@ struct DeviceMessagingView: View {
     }
 
     private func sendDraft() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let submittedDraft = draft
+        let text = submittedDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        draft = ""
         isSending = true
         Task { @MainActor in
             do {
                 try await DeviceMessagingService.shared.send(text: text, to: device)
+                if draft == submittedDraft {
+                    draft = ""
+                }
                 isSending = false
             } catch {
                 isSending = false

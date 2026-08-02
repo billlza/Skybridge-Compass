@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Result;
 
 mod control_plane;
 mod parse;
@@ -16,6 +17,15 @@ async fn dispatch_covers_safe_placeholders_coverage_and_smoke_aliases() -> Resul
             &state,
             "file",
             "history",
+            "--json",
+        ][..],
+        &[
+            "skybridge",
+            "--state-dir",
+            &state,
+            "file",
+            "receive",
+            "--list",
             "--json",
         ][..],
         &[
@@ -72,11 +82,6 @@ async fn dispatch_covers_safe_placeholders_coverage_and_smoke_aliases() -> Resul
         ])?)
         .await
         .is_err()
-    );
-    assert!(
-        dispatch(Cli::try_parse_from(["skybridge", "file", "receive"])?)
-            .await
-            .is_err()
     );
     Ok(())
 }

@@ -133,76 +133,10 @@ public enum BonjourTXTParser: Sendable {
  // MARK: - 主解析方法
 
  /// 解析 NWTXTRecord 为字典
- /// - Parameter txtRecord: Network.framework 的 TXT 记录
- /// - Returns: 键值对字典
+    /// - Parameter txtRecord: Network.framework 的 TXT 记录
+    /// - Returns: 键值对字典
     public static func parse(_ txtRecord: NWTXTRecord) -> [String: String] {
-        var result: [String: String] = [:]
-
-        func mergeMissing(_ parsed: [String: String]) {
-            for (key, value) in parsed where result[key] == nil {
-                result[key] = value
-            }
-        }
-
- // 方法 1: 尝试使用原生 API（macOS 14.0+）
-        if #available(macOS 14.0, *) {
- // NWTXTRecord 在 macOS 14+ 提供更好的迭代支持
- // 通过 rawValue 获取底层数据
-            if let rawData = txtRecord.rawValue {
-                let parsed = parseRawTXTData(rawData)
-                mergeMissing(parsed)
-            }
-        }
-
- // 方法 2: 使用 NetService 兼容层
-        if let rawData = txtRecord.rawValue {
-            let dict = NetService.dictionary(fromTXTRecord: rawData)
-            var parsed: [String: String] = [:]
-            for (key, value) in dict {
-                if let stringValue = String(data: value, encoding: .utf8) {
-                    parsed[key] = stringValue
-                }
-            }
-            mergeMissing(parsed)
-        }
-
-        let direct = parseKnownKeys(txtRecord)
-        mergeMissing(direct)
-
- // 方法 3: 降级到字符串正则解析
-        if result.isEmpty {
-            let description = "\(txtRecord)"
-            mergeMissing(parseWithRegex(description))
-        }
-        return result
-    }
-
-    private static func parseKnownKeys(_ txtRecord: NWTXTRecord) -> [String: String] {
-        let keys = [
-            "deviceId", "deviceID", "device_id", "uuid", "id", "uniqueId", "unique_id",
-            "pubKeyFP", "pubKeyFp", "pub_key_fp", "identityFingerprint",
-            "platform", "osVersion", "os_version", "platformVersion", "platform_version", "os", "systemVersion",
-            "model", "modelName", "hardwareModel", "hwModel", "name",
-            "capabilities", "pqc", "version", "kemRefreshVersion", "kemKeyDigest", "hs_soa",
-            "linkKind", "networkType", "network_kind", "network_type", "interfaceType", "interface_type",
-            "radioAccessTechnology", "radio_access_technology", "radioTech", "radio_tech",
-            "cellularTechnology", "cellular_technology", "mobileDataLabel", "mobile_data_label",
-            "signalUnit", "signal_unit", "signalPercent", "signal_percent", "signalFraction", "signal_fraction",
-            "rssi", "signalStrength", "signal_strength", "signal",
-            "port", "skybridgePort", "p2pPort", "controlPort", "controlPortSource",
-            "transferPort", "fileTransferPort", "file_transfer_port",
-            "remotePort", "remoteControlPort", "remote_port",
-            "remoteVideoFormats", "remotevideoformats", "remote_video_formats", "remoteformats", "remotevideformats",
-            "lanHost", "lanIPv4", "lanIPv6", "host", "ip", "ipv4", "ipv6", "address", "hostAddress"
-        ]
-        var result: [String: String] = [:]
-        for key in keys {
-            if let value = txtRecord[key] ?? txtRecord[key.lowercased()] {
-                result[key] = value
-                result[key.lowercased()] = value
-            }
-        }
-        return result
+        parseRawTXTData(txtRecord.data)
     }
 
  /// 从原始 TXT 记录数据解析
@@ -365,37 +299,6 @@ public enum BonjourTXTParser: Sendable {
     public static func getDeviceType(_ txtRecord: NWTXTRecord) -> String? {
         let dict = parse(txtRecord)
         return dict["type"] ?? dict["model"] ?? dict["deviceType"]
-    }
-}
-
-// MARK: - NWTXTRecord 扩展
-
-extension NWTXTRecord {
- /// 获取原始数据（兼容层）
- /// NWTXTRecord 没有直接的 rawValue 属性，通过描述解析或使用 NetService 转换
-    public var rawValue: Data? {
- // 尝试从描述中提取数据
- // 这是一个兼容层，因为 NWTXTRecord 的内部实现可能变化
-        let description = "\(self)"
-
- // 如果描述包含有效数据，尝试重建
-        if description.contains("=") {
- // 构建 TXT 记录数据
-            var data = Data()
-            let pairs = BonjourTXTParser.parseWithRegex(description)
-
-            for (key, value) in pairs {
-                let entry = "\(key)=\(value)"
-                if let entryData = entry.data(using: .utf8), entryData.count < 256 {
-                    data.append(UInt8(entryData.count))
-                    data.append(entryData)
-                }
-            }
-
-            return data.isEmpty ? nil : data
-        }
-
-        return nil
     }
 }
 
