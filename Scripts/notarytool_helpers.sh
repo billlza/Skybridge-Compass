@@ -260,8 +260,15 @@ skybridge_assess_gatekeeper() {
   local target="$1"
   local target_type="${2:-execute}"
   local output
+  local -a extra_arguments=()
 
-  if output=$(spctl --assess --type "${target_type}" --verbose=4 "${target}" 2>&1); then
+  # Disk images need the primary-signature context; without it newer macOS
+  # releases reject the assessment outright with "Insufficient Context".
+  if [[ "${target_type}" == "open" ]]; then
+    extra_arguments+=(--context context:primary-signature)
+  fi
+
+  if output=$(spctl --assess --type "${target_type}" "${extra_arguments[@]}" --verbose=4 "${target}" 2>&1); then
     printf '%s\n' "${output}"
     return 0
   fi
