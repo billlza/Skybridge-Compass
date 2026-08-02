@@ -61,6 +61,7 @@ Artifacts/
 rust/target/
 rust/release-assets/
 rust/.release-staging/
+Tools/qperiapt-policy-ceremony/target/
 build-liboqs-14.0/
 External/
 rebuild-oqs-openssl-final14-env/
