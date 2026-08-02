@@ -17,35 +17,47 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.0"
 async-trait = "0.1.91"
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
-base64 = "0.22.1"
+# `simd-unsafe` (new default in 0.23) is deliberately off: it opts into freshly
+# introduced unsafe runtime-SIMD code, and no SkyBridge base64 path is
+# throughput-bound enough to justify the added unsafe surface. Scalar output is
+# byte-identical.
+base64 = { version = "0.23.0", default-features = false, features = ["std"] }
 bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive", "env"] }
 directories = "6.0.0"
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 futures-util = "0.3.33"
-getrandom = "0.3.4"
-hkdf = "0.12.4"
-hmac = "0.12.1"
+getrandom = "0.4.3"
+hkdf = "0.13.0"
+hmac = "0.13.0"
 hostname = "0.4.2"
-hpke = "0.13.0"
+# Only the classic X25519 / HKDF-SHA256 / ChaCha20-Poly1305 HPKE suite is used.
+# The 0.14 defaults would additionally pull the ML-KEM/X-Wing/SHAKE stack
+# (SkyBridge's PQC suites go through fips203/fips204 directly) and `getrandom`
+# (the sender RNG is passed explicitly via `setup_sender_with_rng`).
+hpke = { version = "0.14.0", default-features = false, features = ["alloc", "chacha", "x25519"] }
 fips203 = { version = "0.4.3", default-features = false, features = ["ml-kem-768"] }
 fips204 = { version = "0.4.6", default-features = false, features = ["ml-dsa-65", "ml-dsa-87"] }
 mdns-sd = "0.20.2"
-rand = "0.9.5"
-rand_core = { version = "0.6.4", features = ["getrandom"] }
-rtc = "0.20.0-rc.4"
-reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "json", "macos-system-configuration", "rustls-tls"] }
+rand = "0.10.2"
+rand_core = "0.10.1"
+rtc = "0.20.0"
+# reqwest 0.13 renames: `rustls-tls` -> `rustls` (roots now come from the OS
+# trust store via rustls-platform-verifier instead of compiled-in webpki roots),
+# `macos-system-configuration` -> `system-proxy`, and `.form()` moved behind the
+# new `form` feature.
+reqwest = { version = "0.13.4", default-features = false, features = ["charset", "form", "http2", "json", "rustls", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-sha2 = "0.10.9"
-sha3 = "0.10.9"
+sha2 = "0.11.0"
+sha3 = "0.12.0"
 thiserror = "2.0.19"
 time = { version = "0.3.54", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 tokio-util = { version = "0.7.19", features = ["rt"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
@@ -53,5 +65,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 url = "2.5.8"
 uuid = { version = "1.24.0", features = ["serde", "v4", "v7"] }
 webbrowser = "1.2.2"
-webrtc = "0.20.0-rc.4"
-x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }
+webrtc = "0.20.0"
+x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom"] }

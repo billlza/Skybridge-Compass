@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 pub(crate) const FINISHED_I2R_INFO_PREFIX: &[u8] = b"SkyBridge-FINISHED|I2R|";
@@ -48,7 +48,7 @@ fn initialized_finished_hmac(
     hkdf.expand(&info, &mut mac_key)
         .map_err(|_| anyhow!("failed to derive Finished MAC key"))?;
 
-    let mut hmac = <HmacSha256 as Mac>::new_from_slice(&mac_key)
+    let mut hmac = <HmacSha256 as KeyInit>::new_from_slice(&mac_key)
         .map_err(|error| anyhow!("failed to construct Finished HMAC: {error}"))?;
     hmac.update(transcript_hash);
     Ok(hmac)

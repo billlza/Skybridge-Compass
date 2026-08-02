@@ -8,7 +8,8 @@ use hpke::aead::ChaCha20Poly1305;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{
-    Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable, setup_receiver, setup_sender,
+    Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable, setup_receiver,
+    setup_sender_with_rng,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -566,7 +567,7 @@ fn build_responder_message_b_and_keys(
     let mut rng_seed = [0u8; 32];
     fill_random(&mut rng_seed)?;
     let mut rng = StdRng::from_seed(rng_seed);
-    let (encapsulated_key, mut sender) = setup_sender::<ClassicAead, ClassicKdf, ClassicKem, _>(
+    let (encapsulated_key, mut sender) = setup_sender_with_rng::<ClassicAead, ClassicKdf, ClassicKem>(
         &OpModeS::Base,
         &initiator_public_key,
         KEM_DEM_INFO,
@@ -820,13 +821,12 @@ fn process_message_b(
             .map_err(|_| anyhow!("failed to derive fallback MessageB payload key"))?;
         let cipher = Aes256Gcm::new_from_slice(&payload_key)
             .map_err(|error| anyhow!("invalid fallback payload key: {error}"))?;
+        let nonce = Nonce::try_from(message_b.encrypted_payload_nonce.as_slice())
+            .map_err(|_| anyhow!("invalid fallback MessageB nonce length"))?;
         let mut combined = message_b.encrypted_payload_ciphertext.clone();
         combined.extend_from_slice(&message_b.encrypted_payload_tag);
         let _peer_capabilities_plaintext = cipher
-            .decrypt(
-                Nonce::from_slice(&message_b.encrypted_payload_nonce),
-                combined.as_ref(),
-            )
+            .decrypt(&nonce, combined.as_ref())
             .map_err(|error| anyhow!("failed to open fallback MessageB payload: {error}"))?;
         let mut session_secret = [0u8; 32];
         session_secret.copy_from_slice(shared_secret.0.as_slice());

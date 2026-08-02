@@ -797,10 +797,12 @@ fn open_payload_with_shared_secret(
         .map_err(|_| anyhow!("failed to derive PQC payload key"))?;
     let cipher = Aes256Gcm::new_from_slice(&payload_key)
         .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
+    let nonce = Nonce::try_from(nonce)
+        .map_err(|_| anyhow!("invalid PQC MessageB payload nonce length"))?;
     let mut combined = ciphertext.to_vec();
     combined.extend_from_slice(tag);
     cipher
-        .decrypt(Nonce::from_slice(nonce), combined.as_ref())
+        .decrypt(&nonce, combined.as_ref())
         .map_err(|error| anyhow!("failed to decrypt PQC MessageB payload: {error}"))
 }
 
@@ -818,7 +820,7 @@ fn seal_payload_with_shared_secret(
     let mut nonce_bytes = [0u8; 12];
     fill_random(&mut nonce_bytes)?;
     let combined = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+        .encrypt(&Nonce::from(nonce_bytes), plaintext)
         .map_err(|error| anyhow!("failed to encrypt PQC payload: {error}"))?;
     let split = combined
         .len()

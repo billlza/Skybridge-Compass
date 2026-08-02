@@ -10,6 +10,9 @@ anyhow.workspace = true
 base64.workspace = true
 directories.workspace = true
 ed25519-dalek.workspace = true
+# `sys_rng` provides `getrandom::SysRng`, the rand_core-0.10 replacement for the
+# removed `rand_core::OsRng` used for Ed25519 signing-key generation.
+getrandom = { workspace = true, features = ["sys_rng"] }
 hostname.workspace = true
 mdns-sd.workspace = true
 rand_core.workspace = true

@@ -32,7 +32,6 @@ hpke.workspace = true
 fips203.workspace = true
 fips204.workspace = true
 rand.workspace = true
-rand_core.workspace = true
 rtc.workspace = true
 reqwest.workspace = true
 serde.workspace = true

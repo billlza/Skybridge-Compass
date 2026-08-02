@@ -6,7 +6,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
+use getrandom::SysRng;
+use rand_core::UnwrapErr;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use skybridge_core::{
@@ -3086,7 +3087,10 @@ fn parse_optional_protocol_signing_algorithm(
 fn generate_signing_key(algorithm: ProtocolSigningAlgorithm) -> Result<ProtocolSigningKeyMaterial> {
     match algorithm {
         ProtocolSigningAlgorithm::Ed25519 => Ok(ProtocolSigningKeyMaterial::Ed25519(
-            SigningKey::generate(&mut OsRng),
+            // `UnwrapErr(SysRng)` is the rand_core-0.10 replacement for the removed
+            // `rand_core::OsRng`: it panics if the OS CSPRNG fails, matching the
+            // previous OsRng behaviour and the pqc.rs randomness convention.
+            SigningKey::generate(&mut UnwrapErr(SysRng)),
         )),
         ProtocolSigningAlgorithm::MlDsa65 => {
             let (public_key, secret_key) = mldsa_generate_keypair(algorithm)?;

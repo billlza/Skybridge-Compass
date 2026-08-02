@@ -245,7 +245,7 @@ fn seal_with_nonce(
     let cipher = cipher(&keys.send_key)?;
     let encrypted = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: plaintext,
                 aad: &header,
@@ -311,7 +311,7 @@ pub(super) fn open(
     let cipher = cipher(&keys.receive_key)?;
     let plaintext = cipher
         .decrypt(
-            Nonce::from_slice(&parsed.nonce),
+            &Nonce::from(parsed.nonce),
             Payload {
                 msg: &packet[HEADER_LENGTH..],
                 aad: &packet[..HEADER_LENGTH],
