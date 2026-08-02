@@ -268,7 +268,9 @@ skybridge_assess_gatekeeper() {
     extra_arguments+=(--context context:primary-signature)
   fi
 
-  if output=$(spctl --assess --type "${target_type}" "${extra_arguments[@]}" --verbose=4 "${target}" 2>&1); then
+  # ${array[@]+...} keeps the empty-array expansion safe under set -u on
+  # bash 3.2 (the system bash that runs the readiness gate).
+  if output=$(spctl --assess --type "${target_type}" ${extra_arguments[@]+"${extra_arguments[@]}"} --verbose=4 "${target}" 2>&1); then
     printf '%s\n' "${output}"
     return 0
   fi
