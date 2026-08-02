@@ -3,6 +3,19 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class PairingIdentitySuiteAdvertisementTests: XCTestCase {
+    // The fail-closed assertions below assume no admitted runtime session in
+    // this process; production provisioning tests running earlier in the same
+    // process may have activated one.
+    override func setUp() {
+        super.setUp()
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+    }
+
+    override func tearDown() {
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        super.tearDown()
+    }
+
     func testNativeTierAddsInteropSuitesWhenActiveSuiteIsXWing() {
         let provider = MockCryptoProvider(
             tier: .nativePQC,

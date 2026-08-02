@@ -49,7 +49,9 @@ public enum QPeriaptPlatformPolicy {
     /// Keychain CAS, native probe, immutable registry install) and stays
     /// fail-closed: on any failure the suite remains dark and the failure is
     /// logged, because a policy that cannot be verified must never surface as
-    /// a supported capability.
+    /// a supported capability. The provisioning chain itself ends in the same
+    /// admission boundary as every other path:
+    /// only `activateRuntimeSession` can install an authenticated session.
     public static func prepareLocalRuntimeSupport() async -> Bool {
         #if os(macOS)
         do {

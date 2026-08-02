@@ -224,7 +224,13 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Providers/QPeriaptIOSRuntime.swift"
         )
         XCTAssertTrue(
-            iosRuntime.contains("static let entries: [QPeriaptProductionTrustRootEntry] = []"),
+            iosRuntime.contains(
+                "material: QPeriaptProductionTrustRootMaterial.makeSignedPolicyMaterial()"
+            ),
+            "The production registry must be built from the ceremony-generated shared material, never an inline fixture."
+        )
+        XCTAssertFalse(
+            iosRuntime.contains("makeFixtureSignedPolicyMaterial"),
             "Production must ship without a fixture or placeholder trust root."
         )
         XCTAssertTrue(
