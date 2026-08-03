@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 
+skybridge_xcode_swift_executable() {
+    local developer_dir
+    local swift_executable
+    developer_dir="$(xcode-select -p 2>/dev/null)" || return 1
+    swift_executable="$(xcrun --find swift 2>/dev/null)" || return 1
+    [[ -x "${swift_executable}" && "${swift_executable}" == "${developer_dir}"/* ]] \
+        || return 1
+    printf '%s\n' "${swift_executable}"
+}
+
 skybridge_validate_macos_arch() {
     local build_arch="${1:-}"
     case "${build_arch}" in

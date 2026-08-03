@@ -9,6 +9,10 @@ source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
 source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
+XCODE_SWIFT_BIN="$(skybridge_xcode_swift_executable)" || {
+  echo "Selected Xcode Swift executable is unavailable" >&2
+  exit 1
+}
 PROCESS_OWNERSHIP_HELPER="$ROOT_DIR/Scripts/webrtc_smoke_process_ownership.py"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_file_smoke_$(date +%Y%m%d_%H%M%S)}"
 PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"
@@ -994,7 +998,7 @@ if [[ "$MAC_HOST_MODE" == "swiftpm-host" ]]; then
     SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
     CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
     SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-    swift build \
+    "$XCODE_SWIFT_BIN" build \
       --disable-dependency-cache \
       --manifest-cache local \
       --scratch-path "$SMOKE_BUILD_DIR" \

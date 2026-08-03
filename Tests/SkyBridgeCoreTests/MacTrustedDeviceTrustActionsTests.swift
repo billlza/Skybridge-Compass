@@ -282,7 +282,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("append_mac_online_app_connected_result") &&
             remoteSmokeScript.contains("mac-online-connect-app action=button .*targetFamily=ipad .*result=success") &&
             remoteSmokeScript.contains("observer=app-status-after-ax-click") &&
-            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 swift -") &&
+            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 \"$XCODE_SWIFT_BIN\" -") &&
             remoteSmokeScript.contains("subprocess.Popen(command, stdin=subprocess.PIPE)") &&
             remoteSmokeScript.contains("kAXIdentifierAttribute") &&
             remoteSmokeScript.contains("appendButtonClickEvidence") &&
@@ -426,7 +426,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("subtreeContainsTargetDevice(child) && subtreeContainsConnectButton(child)") &&
             remoteSmokeScript.contains("AXUIElementSetMessagingTimeout(root, 0.25)") &&
             remoteSmokeScript.contains("let maxAXTraversalNodes = 5000") &&
-            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 swift -") &&
+            remoteSmokeScript.contains("run_stdin_command_with_hard_timeout 20 \"$XCODE_SWIFT_BIN\" -") &&
             remoteSmokeScript.contains("SKYBRIDGE_MAC_ONLINE_APP_PID=\"$MAC_ONLINE_PID\"") &&
             remoteSmokeScript.contains("let targetProcessIdentifier = ProcessInfo.processInfo.environment[\"SKYBRIDGE_MAC_ONLINE_APP_PID\"]") &&
             remoteSmokeScript.contains("app = candidates.first { $0.processIdentifier == targetProcessIdentifier }") &&

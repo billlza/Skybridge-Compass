@@ -11,6 +11,10 @@ source "$ROOT_DIR/Scripts/framework_artifact_helpers.sh"
 source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
+XCODE_SWIFT_BIN="$(skybridge_xcode_swift_executable)" || {
+  echo "Selected Xcode Swift executable is unavailable" >&2
+  exit 1
+}
 PROCESS_OWNERSHIP_HELPER="$ROOT_DIR/Scripts/webrtc_smoke_process_ownership.py"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_p2p_remote_smoke_$(date +%Y%m%d_%H%M%S)}"
 PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"
@@ -3554,7 +3558,7 @@ wait_for_mac_online_pattern() {
 }
 
 press_mac_online_ipad_connect_button() {
-  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
+  run_stdin_command_with_hard_timeout 20 "$XCODE_SWIFT_BIN" - <<'SWIFT'
 	import ApplicationServices
 	import AppKit
 	import Darwin
@@ -4135,7 +4139,7 @@ SWIFT
 }
 
 observe_mac_online_ipad_connected_row() {
-  run_stdin_command_with_hard_timeout 20 swift - <<'SWIFT'
+  run_stdin_command_with_hard_timeout 20 "$XCODE_SWIFT_BIN" - <<'SWIFT'
 	import ApplicationServices
 	import AppKit
 	import Darwin
@@ -4568,7 +4572,7 @@ print(decoded)
 PY
 )" || return 1
 
-  run_stdin_command_with_hard_timeout 8 swift - "$service_name" > /dev/null 2>"$probe_error" <<'SWIFT'
+  run_stdin_command_with_hard_timeout 8 "$XCODE_SWIFT_BIN" - "$service_name" > /dev/null 2>"$probe_error" <<'SWIFT'
 import Darwin
 import Foundation
 import Network
@@ -5347,7 +5351,7 @@ verify_mac_smoke_capture_source_visible() {
   sleep 0.45
   screencapture -x "$second"
 
-  if ! proof="$(swift - "$first" "$second" 2>&1 <<'SWIFT'
+  if ! proof="$("$XCODE_SWIFT_BIN" - "$first" "$second" 2>&1 <<'SWIFT'
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -7032,11 +7036,11 @@ echo "==> Building macOS LAN host"
   SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
   CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-  swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost
+  "$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost
   SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
   CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-  swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost
+  "$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost
 ) >"$ARTIFACT_DIR/macos-build.log"
 
 verify_source_input_binding_unchanged "mac-build"
