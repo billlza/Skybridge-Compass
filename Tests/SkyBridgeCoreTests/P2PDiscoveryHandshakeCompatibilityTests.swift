@@ -86,6 +86,48 @@ final class P2PDiscoveryHandshakeCompatibilityTests: XCTestCase {
         XCTAssertEqual(rejection, StrictPQCAdmissionRejection.localPQCUnavailable)
     }
 
+    func testEstablishedChannelAuthenticatesAppFrameBeforeHandshakeHeuristics() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
+            ),
+            encoding: .utf8
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "if let keys = sessionKeys {")
+        )
+        let end = try XCTUnwrap(
+            source.range(
+                of: "// 延迟初始化",
+                range: start.lowerBound..<source.endIndex
+            )
+        )
+        let authenticatedFrameBody = String(
+            source[start.lowerBound..<end.lowerBound]
+        )
+
+        XCTAssertTrue(
+            authenticatedFrameBody.contains(
+                "let plaintext = try decryptAppPayload(frame, with: keys)"
+            )
+        )
+        XCTAssertTrue(
+            authenticatedFrameBody.contains(
+                "guard (try? HandshakeMessageA.decode(from: frame)) != nil"
+            )
+        )
+        XCTAssertFalse(
+            authenticatedFrameBody.contains(
+                "if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame)"
+            ),
+            "Authenticated AES-GCM ciphertext must not be skipped because a byte-shape heuristic resembles a handshake frame."
+        )
+    }
+
     private func makeHandshakeMessageA(
         supportedSuites: [CryptoSuite] = [.x25519Ed25519],
         providerType: CryptoProviderType = .classic

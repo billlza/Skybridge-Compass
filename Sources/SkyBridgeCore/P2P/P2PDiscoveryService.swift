@@ -5911,10 +5911,12 @@ public class P2PDiscoveryService: BaseManager {
                     }
                 }
 
-                if let keys = sessionKeys, !isLikelyHandshakeControlPacket(frame) {
+                if let keys = sessionKeys {
+                    var handledAuthenticatedAppFrame = false
                     do {
                         let plaintext = try decryptAppPayload(frame, with: keys)
                         let msg = try AppMessage.decodeWireMessage(from: plaintext)
+                        handledAuthenticatedAppFrame = true
                         switch msg {
                             case .kemRefreshRequest, .signedKEMRefresh, .kemRefreshFailure,
                                  .protocolIdentityBindingRequest, .signedProtocolIdentityBinding,
@@ -6139,14 +6141,24 @@ public class P2PDiscoveryService: BaseManager {
                                 break
                         }
                     } catch {
-                        logger.error("❌ 已认证 P2P 通道业务帧验证失败，终止会话：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
-                        RemoteControlSmokeStatusWriter.append(
-                            "authenticated-channel-failed reason=invalid_app_frame"
-                        )
-                        connection.cancel()
-                        return
+                        // Once a session exists, authenticated application data
+                        // is attempted before any byte-shape handshake heuristic.
+                        // AES-GCM ciphertext can otherwise collide with the
+                        // heuristic and silently skip pairing/heartbeat frames.
+                        // Only an actually decodable MessageA may fall through
+                        // to the explicit rekey state machine.
+                        guard (try? HandshakeMessageA.decode(from: frame)) != nil else {
+                            logger.error("❌ 已认证 P2P 通道业务帧验证失败，终止会话：\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+                            RemoteControlSmokeStatusWriter.append(
+                                "authenticated-channel-failed reason=invalid_app_frame"
+                            )
+                            connection.cancel()
+                            return
+                        }
                     }
-                    continue
+                    if handledAuthenticatedAppFrame {
+                        continue
+                    }
                 }
 
                 // 延迟初始化：必须先看到 MessageA 才知道对端 offeredSuites 分组，
