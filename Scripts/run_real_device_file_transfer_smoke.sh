@@ -1304,7 +1304,7 @@ fi
 
 if [[ "$REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
   echo "==> Waiting for SKR-1 signed KEM refresh smoke proof"
-  wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1|verified and imported: .*suites=.*X-Wing.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound)' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 smoke proof"
+  wait_for_ios_status_pattern "SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1|verified and imported: .*suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound)" "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 ${EXPECTED_TARGET_SUITE} smoke proof"
 fi
 
 echo "==> Waiting for smoke success markers"

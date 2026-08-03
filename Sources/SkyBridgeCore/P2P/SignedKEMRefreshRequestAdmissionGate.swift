@@ -18,11 +18,17 @@ enum SignedKEMRefreshRequestAdmission: Equatable {
 actor SignedKEMRefreshRequestAdmissionGate {
     static let shared = SignedKEMRefreshRequestAdmissionGate()
 
+    private struct CachedResponse: Sendable {
+        let payload: AppMessage.SignedKEMRefreshPayload
+        let completedAt: TimeInterval
+    }
+
     private let ttl: TimeInterval
     private let rateLimitWindow: TimeInterval
     private let maxRequestsPerWindow: Int
     private let maxEntries: Int
     private var seenRequestHashes: [String: TimeInterval] = [:]
+    private var completedResponses: [String: CachedResponse] = [:]
     private var requesterWindows: [String: [TimeInterval]] = [:]
 
     init(
@@ -45,11 +51,11 @@ actor SignedKEMRefreshRequestAdmissionGate {
     ) -> SignedKEMRefreshRequestAdmission {
         prune(now: now)
 
-        let replayKey = [
-            requesterDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-            requesterFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-            requestHashHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        ].joined(separator: "|")
+        let replayKey = replayKey(
+            requestHashHex: requestHashHex,
+            requesterDeviceId: requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        )
         if let firstSeen = seenRequestHashes[replayKey], now - firstSeen <= ttl {
             return .replay
         }
@@ -72,9 +78,47 @@ actor SignedKEMRefreshRequestAdmissionGate {
         return .allowed
     }
 
+    func cachedCompletedResponse(
+        requestHashHex: String,
+        requesterDeviceId: String,
+        requesterFingerprint: String,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> AppMessage.SignedKEMRefreshPayload? {
+        prune(now: now)
+        let key = replayKey(
+            requestHashHex: requestHashHex,
+            requesterDeviceId: requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        )
+        guard seenRequestHashes[key] != nil else {
+            completedResponses.removeValue(forKey: key)
+            return nil
+        }
+        return completedResponses[key]?.payload
+    }
+
+    func recordCompletedResponse(
+        _ payload: AppMessage.SignedKEMRefreshPayload,
+        requestHashHex: String,
+        requesterDeviceId: String,
+        requesterFingerprint: String,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) {
+        prune(now: now)
+        let key = replayKey(
+            requestHashHex: requestHashHex,
+            requesterDeviceId: requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        )
+        guard seenRequestHashes[key] != nil else { return }
+        completedResponses[key] = CachedResponse(payload: payload, completedAt: now)
+        trimIfNeeded()
+    }
+
 #if DEBUG || SKYBRIDGE_TESTING
     func clearForTesting() {
         seenRequestHashes.removeAll()
+        completedResponses.removeAll()
         requesterWindows.removeAll()
     }
 #endif
@@ -82,6 +126,7 @@ actor SignedKEMRefreshRequestAdmissionGate {
     private func prune(now: TimeInterval) {
         let replayCutoff = now - ttl
         seenRequestHashes = seenRequestHashes.filter { $0.value >= replayCutoff }
+        completedResponses = completedResponses.filter { $0.value.completedAt >= replayCutoff }
 
         let rateCutoff = now - rateLimitWindow
         requesterWindows = requesterWindows.compactMapValues { samples in
@@ -95,6 +140,19 @@ actor SignedKEMRefreshRequestAdmissionGate {
         let overflow = seenRequestHashes.count - maxEntries
         for key in seenRequestHashes.sorted(by: { $0.value < $1.value }).prefix(overflow).map(\.key) {
             seenRequestHashes.removeValue(forKey: key)
+            completedResponses.removeValue(forKey: key)
         }
+    }
+
+    private func replayKey(
+        requestHashHex: String,
+        requesterDeviceId: String,
+        requesterFingerprint: String
+    ) -> String {
+        [
+            requesterDeviceId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            requesterFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            requestHashHex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        ].joined(separator: "|")
     }
 }

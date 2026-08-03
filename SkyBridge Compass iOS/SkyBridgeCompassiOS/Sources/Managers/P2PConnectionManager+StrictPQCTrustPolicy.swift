@@ -344,6 +344,14 @@ extension P2PConnectionManager {
         30
     }
 
+    static func signedLANRefreshResponseTimeoutSeconds() -> Double {
+        // A cold Keychain/KEM load followed by native PQC signing can exceed
+        // the generic short control-message budget. Keep SKR aligned with the
+        // PIB cryptographic response budget while request freshness remains
+        // independently enforced by the signed payload timestamps.
+        30
+    }
+
     static func protocolIdentityBindingStoredPolicyAction(
         pairingPolicyByPeerId: [String: String],
         policyCandidates: [String],

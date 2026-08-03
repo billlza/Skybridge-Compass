@@ -136,6 +136,71 @@ public struct CommittedLocalProtocolIdentitySnapshot: Sendable {
         return nil
     }
 
+    /// Resolves the exact pinned local authority for SKR-1. The committed
+    /// active authority is checked before any compatibility slot so a stale,
+    /// unrelated slot cannot break a refresh that targets the active identity.
+    ///
+    /// Compatibility slots are consulted only when the pinned fingerprint
+    /// explicitly differs from the active authority. A slot is accepted solely
+    /// when its authoritative fingerprint matches the requested pin.
+    static func loadPreferred(
+        matchingAuthoritativeFingerprint targetFingerprint: String?,
+        keyManager: DeviceIdentityKeyManager = .shared
+    ) async throws -> Self? {
+        let active = try await loadActive(keyManager: keyManager)
+        return try await selectPreferred(
+            matchingAuthoritativeFingerprint: targetFingerprint,
+            active: active
+        ) { algorithm in
+            guard let identity = try await keyManager.existingProtocolSigningIdentity(
+                for: algorithm,
+                protection: .softwareKeychain
+            ) else {
+                return nil
+            }
+            return Self(
+                algorithm: algorithm,
+                protection: .softwareKeychain,
+                publicKey: identity.publicKey,
+                keyHandle: identity.keyHandle
+            )
+        }
+    }
+
+    static func selectPreferred(
+        matchingAuthoritativeFingerprint targetFingerprint: String?,
+        active: Self,
+        loadCompatibility: @Sendable (ProtocolSigningAlgorithm) async throws -> Self?
+    ) async throws -> Self? {
+        let normalizedTarget: String?
+        if let targetFingerprint {
+            let value = targetFingerprint
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard value.count == 64, value.allSatisfy(\.isHexDigit) else {
+                return nil
+            }
+            normalizedTarget = value
+        } else {
+            normalizedTarget = nil
+        }
+
+        guard let normalizedTarget else {
+            return active
+        }
+        if active.authoritativeFingerprint == normalizedTarget {
+            return active
+        }
+        for algorithm in [ProtocolSigningAlgorithm.mlDSA65, .ed25519]
+        where algorithm != active.algorithm {
+            if let compatibility = try await loadCompatibility(algorithm),
+               compatibility.authoritativeFingerprint == normalizedTarget {
+                return compatibility
+            }
+        }
+        return nil
+    }
+
     /// Returns the active authority first, followed by established software
     /// compatibility identities. Inactive ML-DSA-87 slots are intentionally not
     /// advertised: presence of 87 is the peer-visible active-capability signal.

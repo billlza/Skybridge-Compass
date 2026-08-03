@@ -2521,6 +2521,7 @@ public class P2PDiscoveryService: BaseManager {
             }
         }
 
+        var identityBindingCompleted = false
         do {
             let reboundFingerprint = try await attemptOutboundOOBProtocolIdentityBinding(
                 for: device,
@@ -2528,6 +2529,7 @@ public class P2PDiscoveryService: BaseManager {
                 candidates: candidates,
                 endpoints: bootstrapEndpoints
             )
+            identityBindingCompleted = true
             pinnedFingerprints = [reboundFingerprint]
             try await attemptOutboundSignedLANKEMRefresh(
                 for: device,
@@ -2538,6 +2540,16 @@ public class P2PDiscoveryService: BaseManager {
                 preferredTargetSuite: preferredTargetSuite
             )
         } catch {
+            if let discoveryError = error as? P2PDiscoveryError,
+               case .localNetworkPermissionDenied = discoveryError {
+                throw discoveryError
+            }
+            if identityBindingCompleted {
+                let line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-kem-refresh reason=\(Self.protocolIdentityLogRedaction) pinnedProtocolIdentity=1 lifecycle=identity-oob>pinned>missing-kem>failed"
+                logger.warning("\(line, privacy: .public)")
+                RemoteControlSmokeStatusWriter.append(line)
+                throw error
+            }
             let baseReason = refreshFailure.map { "after SKR failure \($0.localizedDescription); " } ?? ""
             throw P2PDiscoveryError.strictPQCTrustPreflightFailed(baseReason + error.localizedDescription)
         }
@@ -2597,14 +2609,14 @@ public class P2PDiscoveryService: BaseManager {
         RemoteControlSmokeStatusWriter.append(connectStartLine)
 
         let responseTimeoutSeconds = Self.protocolIdentityBindingResponseTimeoutSeconds()
+        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
+        logger.info("\(requestLine, privacy: .public)")
+        RemoteControlSmokeStatusWriter.append(requestLine)
         let exchange = try await exchangeBootstrapControlMessage(
             .protocolIdentityBindingRequest(request),
             endpoints: endpoints,
             timeoutSeconds: responseTimeoutSeconds
         )
-        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
-        logger.info("\(requestLine, privacy: .public)")
-        RemoteControlSmokeStatusWriter.append(requestLine)
 
         if case .kemRefreshFailure(let failure) = exchange.response {
             throw Self.protocolIdentityBindingFailure("remote rejected PIB-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode) reason=\(failure.reason)")
@@ -2780,14 +2792,15 @@ public class P2PDiscoveryService: BaseManager {
         logger.info("\(connectStartLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(connectStartLine)
         let startedAt = Date()
+        let responseTimeoutSeconds = Self.signedLANRefreshResponseTimeoutSeconds()
+        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
+        logger.info("\(requestLine, privacy: .public)")
+        RemoteControlSmokeStatusWriter.append(requestLine)
         let exchange = try await exchangeBootstrapControlMessage(
             .kemRefreshRequest(request),
             endpoints: endpoints,
-            timeoutSeconds: 8.0
+            timeoutSeconds: responseTimeoutSeconds
         )
-        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
-        logger.info("\(requestLine, privacy: .public)")
-        RemoteControlSmokeStatusWriter.append(requestLine)
 
         if case .kemRefreshFailure(let failure) = exchange.response {
             throw Self.signedLANRefreshFailure("remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode)")
@@ -2842,6 +2855,7 @@ public class P2PDiscoveryService: BaseManager {
         timeoutSeconds: TimeInterval
     ) async throws -> BootstrapControlExchangeResult {
         var lastError: Error?
+        var localNetworkPermissionError: Error?
         var failedAttemptCount = 0
         for (index, endpoint) in endpoints.enumerated() {
             try Task.checkCancellation()
@@ -2883,24 +2897,30 @@ public class P2PDiscoveryService: BaseManager {
                     attemptCount: index + 1,
                     failedAttemptCount: failedAttemptCount
                 )
-	            } catch {
-	                if error is CancellationError || Task.isCancelled {
-	                    connection.stateUpdateHandler = nil
-	                    connection.cancel()
-	                    throw CancellationError()
-	                }
-	                failedAttemptCount += 1
-	                lastError = error
-	                connection.cancel()
-	                logger.warning(
-	                    "⚠️ bootstrap control exchange failed endpoint=\(Self.protocolIdentityLogRedaction, privacy: .public) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
-	                )
+            } catch {
+                if error is CancellationError || Task.isCancelled {
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    throw CancellationError()
+                }
+                failedAttemptCount += 1
+                lastError = error
+                if let discoveryError = error as? P2PDiscoveryError,
+                   case .localNetworkPermissionDenied = discoveryError {
+                    localNetworkPermissionError = discoveryError
+                }
+                connection.cancel()
+                logger.warning(
+                    "⚠️ bootstrap control exchange failed endpoint=\(Self.protocolIdentityLogRedaction, privacy: .public) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                )
                 RemoteControlSmokeStatusWriter.append(
                     "bootstrap-control-failed index=\(index) endpointClass=\(Self.smokeEndpointClass(endpoint)) error=\(SkyBridgeDiagnosticRedaction.errorSummary(error))"
                 )
-	            }
+            }
         }
-        throw lastError ?? P2PDiscoveryError.connectionCancelled
+        throw localNetworkPermissionError
+            ?? lastError
+            ?? P2PDiscoveryError.connectionCancelled
     }
 
     private func waitForBootstrapControlConnection(
@@ -3340,6 +3360,10 @@ public class P2PDiscoveryService: BaseManager {
             return 195
         }
         return Double(min(max(value + 15, 45), 315))
+    }
+
+    nonisolated static func signedLANRefreshResponseTimeoutSeconds() -> Double {
+        30
     }
 
     private nonisolated static func isNonRoutableIPv4Endpoint(_ value: String) -> Bool {

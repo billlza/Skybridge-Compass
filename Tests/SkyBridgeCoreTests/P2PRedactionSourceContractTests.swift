@@ -174,7 +174,8 @@ final class P2PRedactionSourceContractTests: XCTestCase {
 
         XCTAssertTrue(inboundStatusBuilder.contains("SKR-1 signed LAN KEM refresh served"))
         XCTAssertTrue(inboundStatusBuilder.contains("SKR-1 signed LAN KEM refresh rejected"))
-        XCTAssertTrue(inboundStatusBuilder.contains("reason: error.localizedDescription"))
+        XCTAssertFalse(inboundStatusBuilder.contains("reason: error.localizedDescription"))
+        XCTAssertTrue(inboundStatusBuilder.contains("reason: reasonCode"))
         XCTAssertTrue(inboundStatusBuilder.contains("reason=%@ responderLatencyMs"))
         XCTAssertTrue(inboundStatusBuilder.contains("requestHashHex: request.canonicalRequestHashHex"))
         XCTAssertTrue(inboundStatusBuilder.contains("requesterDeviceId: request.requesterDeviceId"))

@@ -561,6 +561,17 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         )
     }
 
+    func testInvalidProvisionalFrameEmitsVisibleClassificationFailure() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+
+        XCTAssertTrue(source.contains("stage=preflight-frame-classification"))
+        XCTAssertTrue(source.contains("reason=unsupported_or_malformed"))
+        XCTAssertTrue(source.contains("SkyBridgeLogger.shared.warning(line)"))
+        XCTAssertTrue(source.contains("SignedKEMRefreshSmokeStatusWriter.append(line)"))
+    }
+
     func testStrictPQCUsesBootstrapWhenPreferredKEMIsMissing() {
         XCTAssertFalse(
             P2PConnectionManager.canSatisfyStrictPQCWithTrustedKEM(
@@ -1034,6 +1045,54 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("case .kemRefreshFailure(let failure)"))
         XCTAssertTrue(source.contains("remote rejected SKR-1 stage="))
         XCTAssertTrue(source.contains("reasonCode=\\(failure.reasonCode)"))
+    }
+
+    func testSignedLANRefreshUsesCryptographicResponseBudget() throws {
+        XCTAssertEqual(
+            P2PConnectionManager.signedLANRefreshResponseTimeoutSeconds(),
+            30
+        )
+
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        XCTAssertTrue(
+            source.contains(
+                "let responseTimeoutSeconds = Self.signedLANRefreshResponseTimeoutSeconds()"
+            )
+        )
+        XCTAssertTrue(source.contains("responseTimeoutSeconds=\\(Int(responseTimeoutSeconds))"))
+        XCTAssertTrue(source.contains("timeoutSeconds: responseTimeoutSeconds"))
+        XCTAssertFalse(source.contains("timeoutSeconds: 6.0"))
+    }
+
+    func testSignedLANRefreshRetriesReuseCompletedSignedResponse() throws {
+        let managerSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let gateSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/SignedKEMRefreshRequestAdmissionGate.swift"
+        )
+        let cacheLookup = try XCTUnwrap(
+            managerSource.range(of: "admissionGate.cachedCompletedResponse(")
+        )
+        let replayAdmission = try XCTUnwrap(
+            managerSource.range(
+                of: "let admission = await admissionGate.admit(",
+                range: cacheLookup.upperBound..<managerSource.endIndex
+            )
+        )
+        let cacheRecord = try XCTUnwrap(
+            managerSource.range(
+                of: "await admissionGate.recordCompletedResponse(",
+                range: replayAdmission.upperBound..<managerSource.endIndex
+            )
+        )
+
+        XCTAssertLessThan(cacheLookup.lowerBound, replayAdmission.lowerBound)
+        XCTAssertLessThan(replayAdmission.lowerBound, cacheRecord.lowerBound)
+        XCTAssertTrue(gateSource.contains("private let maxEntries: Int"))
+        XCTAssertTrue(gateSource.contains("completedResponses.removeValue(forKey: key)"))
     }
 
     func testSignedLANRefreshRequestBindsPolicyHashOnIOS() {
@@ -2162,8 +2221,10 @@ final class P2PBootstrapPolicyTests: XCTestCase {
 
         XCTAssertTrue(reviewedStatusBuilder.contains("SKR-1 signed LAN KEM refresh served"))
         XCTAssertTrue(reviewedStatusBuilder.contains("SKR-1 signed LAN KEM refresh rejected"))
-        XCTAssertTrue(reviewedStatusBuilder.contains("reasonCode: Self.signedKEMRefreshFailureCode(for: error)"))
-        XCTAssertTrue(reviewedStatusBuilder.contains("reason: error.localizedDescription"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("let reasonCode = Self.signedKEMRefreshFailureCode(for: error)"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("reasonCode: reasonCode"))
+        XCTAssertTrue(reviewedStatusBuilder.contains("reason: reasonCode"))
+        XCTAssertFalse(reviewedStatusBuilder.contains("reason: error.localizedDescription"))
         XCTAssertTrue(reviewedStatusBuilder.contains("reason=%@ responderLatencyMs"))
         XCTAssertTrue(reviewedStatusBuilder.contains("requestHashHex: request.canonicalRequestHashHex"))
         XCTAssertTrue(reviewedStatusBuilder.contains("requesterDeviceId: request.requesterDeviceId"))

@@ -142,6 +142,8 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         XCTAssertTrue(source.contains("request_replay_detected"))
         XCTAssertTrue(source.contains("requester rate limited"))
         XCTAssertTrue(source.contains("requester_rate_limited"))
+        XCTAssertTrue(source.contains("admissionGate.cachedCompletedResponse("))
+        XCTAssertTrue(source.contains("admissionGate.recordCompletedResponse("))
         XCTAssertTrue(source.contains("missing_requested_suite"))
         XCTAssertTrue(source.contains("limitingTo: requestedSuites"))
         XCTAssertTrue(source.contains("responderLatencyMs="))
@@ -267,6 +269,43 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         await SignedKEMRefreshRequestAdmissionGate.shared.clearForTesting()
     }
 
+    func testMacResponderReturnsSameCompletedResponseForExactRetry() async throws {
+        let store = PeerProtocolIdentityBootstrapStore.shared
+        await store.clearForTesting()
+        let gate = SignedKEMRefreshRequestAdmissionGate.shared
+        await gate.clearForTesting()
+        await store.upsert(deviceIds: ["id:ios-1"], fingerprints: [fingerprint])
+
+        let request = validKEMRefreshRequest(sentAt: Date())
+        let admission = await gate.admit(
+            requestHashHex: request.canonicalRequestHashHex,
+            requesterDeviceId: request.requesterDeviceId,
+            requesterFingerprint: fingerprint
+        )
+        XCTAssertEqual(admission, .allowed)
+        let responseDate = Date()
+        let completedResponse = validPayload(
+            sentAt: responseDate,
+            expiresAt: responseDate.addingTimeInterval(300),
+            requestNonce: request.nonce,
+            requestHashHex: request.canonicalRequestHashHex
+        )
+        await gate.recordCompletedResponse(
+            completedResponse,
+            requestHashHex: request.canonicalRequestHashHex,
+            requesterDeviceId: request.requesterDeviceId,
+            requesterFingerprint: fingerprint
+        )
+
+        let retry = try await P2PDiscoveryService.makeSignedKEMRefreshPayload(for: request)
+        XCTAssertEqual(retry, completedResponse)
+        XCTAssertEqual(retry.requestHashHex, request.canonicalRequestHashHex)
+        XCTAssertFalse(retry.signature.isEmpty)
+
+        await store.clearForTesting()
+        await gate.clearForTesting()
+    }
+
     func testMacResponderProtocolIdentityBindingFailsFastOnNonStrictPolicy() async throws {
         let fallbackAllowed = AppMessage.ProtocolIdentityBindingRequestPayload(
             requesterDeviceId: "id:ios-1",
@@ -333,6 +372,50 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
             now: 13
         )
         XCTAssertEqual(rateLimitedAdmission, .rateLimited)
+    }
+
+    func testSignedKEMRefreshAdmissionGateReplaysCompletedResponseIdempotently() async {
+        let gate = SignedKEMRefreshRequestAdmissionGate(
+            ttl: 300,
+            rateLimitWindow: 60,
+            maxRequestsPerWindow: 2,
+            maxEntries: 32
+        )
+        let requester = "id:ios-1"
+        let requesterFingerprint = fingerprint.lowercased()
+        let requestHash = String(repeating: "a", count: 64)
+
+        let firstAdmission = await gate.admit(
+            requestHashHex: requestHash,
+            requesterDeviceId: requester,
+            requesterFingerprint: requesterFingerprint,
+            now: 10
+        )
+        XCTAssertEqual(firstAdmission, .allowed)
+
+        let response = validPayload(requestHashHex: requestHash)
+        await gate.recordCompletedResponse(
+            response,
+            requestHashHex: requestHash,
+            requesterDeviceId: requester,
+            requesterFingerprint: requesterFingerprint,
+            now: 11
+        )
+
+        let cached = await gate.cachedCompletedResponse(
+            requestHashHex: requestHash,
+            requesterDeviceId: requester,
+            requesterFingerprint: requesterFingerprint,
+            now: 12
+        )
+        XCTAssertEqual(cached, response)
+        let expired = await gate.cachedCompletedResponse(
+            requestHashHex: requestHash,
+            requesterDeviceId: requester,
+            requesterFingerprint: requesterFingerprint,
+            now: 311
+        )
+        XCTAssertNil(expired)
     }
 
     func testSignaturePreimageNormalizesAliasesAndExcludesSignatureBytes() throws {

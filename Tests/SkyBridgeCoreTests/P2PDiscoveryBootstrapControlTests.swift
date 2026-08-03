@@ -48,6 +48,43 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertFalse(controlResponse.isFailure)
     }
 
+    func testKEMRefreshServesMLKEM768WireID0101ForStrictImport() async throws {
+        XCTAssertEqual(CryptoSuite.mlkem768MLDSA65.wireId, 0x0101)
+        let request = kemRefreshRequest(
+            requestedSuiteWireIds: [CryptoSuite.mlkem768MLDSA65.wireId]
+        )
+        let response = await P2PDiscoveryService.makeBootstrapControlResponse(
+            for: .kemRefreshRequest(request),
+            makeSignedKEMRefreshPayload: { request in
+                self.signedKEMRefreshPayload(
+                    for: request,
+                    suite: .mlkem768MLDSA65,
+                    publicKeyByteCount: 1_184
+                )
+            },
+            makeSignedProtocolIdentityBindingPayload: { _ in
+                throw Self.testError("unexpected PIB-1 path")
+            }
+        )
+
+        let controlResponse = try XCTUnwrap(response)
+        guard case .signedKEMRefresh(let payload) = controlResponse.message else {
+            return XCTFail("Expected signed ML-KEM-768 refresh")
+        }
+        XCTAssertEqual(payload.kemPublicKeys.map(\.suiteWireId), [0x0101])
+        XCTAssertEqual(payload.kemPublicKeys.first?.publicKey.count, 1_184)
+        XCTAssertTrue(controlResponse.statusLine.contains("wireId=0x0101"))
+        XCTAssertFalse(payload.signature.isEmpty)
+
+        let validated = try payload.validatedForStrictPQCImport(
+            request: request,
+            now: now,
+            pinnedProtocolFingerprints: [fingerprint],
+            minimumGeneration: 8
+        )
+        XCTAssertEqual(validated.kemPublicKeys.map(\.suiteWireId), [0x0101])
+    }
+
     func testKEMRefreshRequestMapsGeneratorFailureToDiagnosticFailure() async throws {
         let request = kemRefreshRequest(requestedSuiteWireIds: [0x0000])
         let response = await P2PDiscoveryService.makeBootstrapControlResponse(
@@ -69,6 +106,8 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         }
         XCTAssertEqual(failure.stage, "kem_refresh")
         XCTAssertEqual(failure.reasonCode, "unknown_suite")
+        XCTAssertEqual(failure.reason, failure.reasonCode)
+        XCTAssertFalse(failure.reason.contains("0x0000"))
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=request>rejected"))
         XCTAssertTrue(controlResponse.statusLine.contains("responderLatencyMs="))
@@ -79,6 +118,36 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertTrue(controlResponse.statusLine.contains("target=<redacted>"))
         XCTAssertTrue(controlResponse.statusLine.contains("reason=<redacted>"))
         XCTAssertTrue(controlResponse.isFailure)
+    }
+
+    func testKEMRefreshResponderLocalFailureCodesRemainNonSecretAndActionable() {
+        let cases: [(reason: String, code: String)] = [
+            (
+                "local protocol identity unavailable",
+                "local_protocol_identity_unavailable"
+            ),
+            (
+                "local PQC KEM material unavailable",
+                "local_pqc_kem_unavailable"
+            ),
+            (
+                "local protocol identity signing unavailable",
+                "local_protocol_identity_signing_unavailable"
+            ),
+            (
+                "local device id unavailable",
+                "local_device_id_unavailable"
+            )
+        ]
+
+        for testCase in cases {
+            XCTAssertEqual(
+                P2PDiscoveryService.signedKEMRefreshFailureCode(
+                    for: Self.testError(testCase.reason)
+                ),
+                testCase.code
+            )
+        }
     }
 
     func testKEMRefreshRequestResponderRejectsStrictPolicyFailuresAsDiagnosticOnly() async throws {
@@ -123,6 +192,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             XCTAssertTrue(controlResponse.isFailure, entry.name)
             XCTAssertEqual(failure.stage, "kem_refresh", entry.name)
             XCTAssertEqual(failure.reasonCode, entry.reasonCode, entry.name)
+            XCTAssertEqual(failure.reason, failure.reasonCode, entry.name)
             XCTAssertEqual(failure.requestHashHex, entry.request.canonicalRequestHashHex, entry.name)
             XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=request>rejected"), entry.name)
             XCTAssertFalse(controlResponse.statusLine.contains("served"), entry.name)
@@ -238,6 +308,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         }
         XCTAssertEqual(failure.stage, "identity_binding")
         XCTAssertEqual(failure.reasonCode, "policy_mismatch")
+        XCTAssertEqual(failure.reason, failure.reasonCode)
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=identity-oob>rejected"))
         XCTAssertTrue(controlResponse.isFailure)
@@ -260,6 +331,78 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
 
         XCTAssertEqual(selected?.algorithm, .mlDSA65)
         XCTAssertEqual(selected?.publicKey, active.publicKey)
+    }
+
+    func testSignedKEMRefreshPrefersPinnedActiveIdentityWithoutLoadingUnrelatedCompatibilitySlot() async throws {
+        let active = CommittedLocalProtocolIdentitySnapshot(
+            algorithm: .mlDSA65,
+            protection: .softwareKeychain,
+            publicKey: Data(repeating: 0x51, count: 1_952),
+            keyHandle: .softwareKey(Data(repeating: 0x52, count: 4_032))
+        )
+
+        let selected = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+            matchingAuthoritativeFingerprint: active.authoritativeFingerprint,
+            active: active
+        ) { _ in
+            throw Self.testError("unrelated malformed compatibility identity was loaded")
+        }
+
+        XCTAssertEqual(selected?.authoritativeFingerprint, active.authoritativeFingerprint)
+        XCTAssertEqual(selected?.publicKey, active.publicKey)
+
+        let unpinnedTarget = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+            matchingAuthoritativeFingerprint: nil,
+            active: active
+        ) { _ in
+            throw Self.testError("target-less SKR loaded an unrelated compatibility identity")
+        }
+        XCTAssertEqual(unpinnedTarget?.authoritativeFingerprint, active.authoritativeFingerprint)
+    }
+
+    func testSignedKEMRefreshCompatibilityIdentityRequiresExactPinnedFingerprint() async throws {
+        let active = CommittedLocalProtocolIdentitySnapshot(
+            algorithm: .mlDSA87,
+            protection: .softwareKeychain,
+            publicKey: Data(repeating: 0x61, count: 2_592),
+            keyHandle: .softwareKey(Data(repeating: 0x62, count: 4_896))
+        )
+        let compatibility = CommittedLocalProtocolIdentitySnapshot(
+            algorithm: .ed25519,
+            protection: .softwareKeychain,
+            publicKey: Data(repeating: 0x63, count: 32),
+            keyHandle: .softwareKey(Data(repeating: 0x64, count: 32))
+        )
+
+        let selected = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+            matchingAuthoritativeFingerprint: compatibility.authoritativeFingerprint,
+            active: active
+        ) { algorithm in
+            algorithm == .ed25519 ? compatibility : nil
+        }
+
+        XCTAssertEqual(selected?.algorithm, .ed25519)
+        XCTAssertEqual(selected?.authoritativeFingerprint, compatibility.authoritativeFingerprint)
+
+        let mismatch = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+            matchingAuthoritativeFingerprint: String(repeating: "f", count: 64),
+            active: active
+        ) { algorithm in
+            algorithm == .ed25519 ? compatibility : nil
+        }
+        XCTAssertNil(mismatch)
+
+        do {
+            _ = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+                matchingAuthoritativeFingerprint: String(repeating: "e", count: 64),
+                active: active
+            ) { _ in
+                throw Self.testError("requested compatibility identity is malformed")
+            }
+            XCTFail("A compatibility identity load failure must remain fail-closed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("requested compatibility identity is malformed"))
+        }
     }
 
     func testProtocolIdentityBindingFailsClosedWhenRequestedCompatibilitySlotIsMalformed() async throws {
@@ -391,6 +534,137 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         }
     }
 
+    func testMacSignedLANRefreshUsesCryptographicResponseBudget() throws {
+        XCTAssertEqual(
+            P2PDiscoveryService.signedLANRefreshResponseTimeoutSeconds(),
+            30
+        )
+
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(
+            source.contains(
+                "let responseTimeoutSeconds = Self.signedLANRefreshResponseTimeoutSeconds()"
+            )
+        )
+        XCTAssertTrue(source.contains("responseTimeoutSeconds=\\(Int(responseTimeoutSeconds))"))
+        XCTAssertTrue(source.contains("timeoutSeconds: responseTimeoutSeconds"))
+        XCTAssertFalse(source.contains("timeoutSeconds: 8.0"))
+    }
+
+    func testMacBootstrapRequestDiagnosticsPrecedePotentialExchangeFailure() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"),
+            encoding: .utf8
+        )
+        let pibStart = try XCTUnwrap(
+            source.range(of: "private func attemptOutboundOOBProtocolIdentityBinding(")
+        )
+        let skrStart = try XCTUnwrap(
+            source.range(
+                of: "private func attemptOutboundSignedLANKEMRefresh(",
+                range: pibStart.upperBound..<source.endIndex
+            )
+        )
+        let exchangeStart = try XCTUnwrap(
+            source.range(
+                of: "private func exchangeBootstrapControlMessage(",
+                range: skrStart.upperBound..<source.endIndex
+            )
+        )
+        let pibSource = String(source[pibStart.lowerBound..<skrStart.lowerBound])
+        let skrSource = String(source[skrStart.lowerBound..<exchangeStart.lowerBound])
+
+        for (label, methodSource) in [("PIB-1", pibSource), ("SKR-1", skrSource)] {
+            let requestLog = try XCTUnwrap(
+                methodSource.range(of: "RemoteControlSmokeStatusWriter.append(requestLine)"),
+                "\(label) request status log missing"
+            )
+            let exchange = try XCTUnwrap(
+                methodSource.range(of: "let exchange = try await exchangeBootstrapControlMessage("),
+                "\(label) exchange missing"
+            )
+            XCTAssertLessThan(
+                requestLog.lowerBound,
+                exchange.lowerBound,
+                "\(label) request must remain observable when connection or response exchange fails"
+            )
+        }
+    }
+
+    func testBootstrapRecoveryDiagnosticsPreserveRootCauseAndStage() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let macSource = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"),
+            encoding: .utf8
+        )
+        let responderSource = try String(
+            contentsOf: repositoryRoot
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PDiscoveryService+BootstrapControl.swift"),
+            encoding: .utf8
+        )
+        let iOSSource = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+            ),
+            encoding: .utf8
+        )
+        let inboundResponseStart = try XCTUnwrap(
+            iOSSource.range(of: "private func makeInboundBootstrapControlResponse(")
+        )
+        let inboundResponseEnd = try XCTUnwrap(
+            iOSSource.range(
+                of: "private func makeInboundSignedKEMRefreshPayload(",
+                range: inboundResponseStart.upperBound..<iOSSource.endIndex
+            )
+        )
+        let iOSInboundResponseSource = String(
+            iOSSource[inboundResponseStart.lowerBound..<inboundResponseEnd.lowerBound]
+        )
+
+        XCTAssertTrue(
+            responderSource.contains(
+                "matchingAuthoritativeFingerprint: request.targetProtocolIdentityFingerprint"
+            )
+        )
+        XCTAssertFalse(responderSource.contains("reason: error.localizedDescription"))
+        XCTAssertFalse(iOSInboundResponseSource.contains("reason: error.localizedDescription"))
+        XCTAssertTrue(responderSource.contains("code=local_device_id_unavailable"))
+        XCTAssertTrue(responderSource.contains(#"throw makeSKRFailure("local device id unavailable")"#))
+        XCTAssertTrue(macSource.contains("var localNetworkPermissionError: Error?"))
+        XCTAssertTrue(macSource.contains("throw localNetworkPermissionError"))
+        XCTAssertTrue(macSource.contains("var identityBindingCompleted = false"))
+        XCTAssertTrue(macSource.contains("if identityBindingCompleted"))
+        XCTAssertTrue(
+            macSource.contains(
+                "stage=preflight-kem-refresh reason=\\(Self.protocolIdentityLogRedaction)"
+            )
+        )
+        XCTAssertTrue(iOSSource.contains("var identityBindingCompleted = false"))
+        XCTAssertTrue(iOSSource.contains("if identityBindingCompleted"))
+        XCTAssertTrue(
+            iOSSource.contains(
+                "SKR-1 signed LAN KEM refresh failed after PIB-1"
+            )
+        )
+    }
+
     private func kemRefreshRequest(
         requestedSuiteWireIds: [UInt16] = [CryptoSuite.xwingMLDSA.wireId],
         policyHashHex: String? = nil,
@@ -456,13 +730,16 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertTrue(controlResponse.isFailure, message)
         XCTAssertEqual(failure.stage, "kem_refresh", message)
         XCTAssertEqual(failure.reasonCode, reasonCode, message)
+        XCTAssertEqual(failure.reason, failure.reasonCode, message)
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex, message)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=request>rejected"), message)
         XCTAssertFalse(controlResponse.statusLine.contains("lifecycle=request>served"), message)
     }
 
     private func signedKEMRefreshPayload(
-        for request: AppMessage.KEMRefreshRequestPayload
+        for request: AppMessage.KEMRefreshRequestPayload,
+        suite: CryptoSuite = .xwingMLDSA,
+        publicKeyByteCount: Int = 1_216
     ) -> AppMessage.SignedKEMRefreshPayload {
         AppMessage.SignedKEMRefreshPayload(
             deviceId: "id:mac-1",
@@ -472,8 +749,8 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             protocolIdentityFingerprint: fingerprint,
             kemPublicKeys: [
                 KEMPublicKeyInfo(
-                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
-                    publicKey: Data(repeating: 0x55, count: 1216)
+                    suiteWireId: suite.wireId,
+                    publicKey: Data(repeating: 0x55, count: publicKeyByteCount)
                 )
             ],
             keyId: "skr1-test",

@@ -507,6 +507,16 @@ grep -q 'phase=app-local-network-privacy reason=local-network-permission-denied'
   || fail "Mac online iPad smoke must fail fast when the packaged app is denied Local Network privacy"
 grep -q 'bootstrap-control-waiting .*reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must consume app-side Local Network denial evidence instead of waiting for connected-row timeout"
+grep -q 'MAC_ONLINE_WAIT_FAILURE_PATTERN=' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad wait loops must use one explicit immediate-failure contract"
+grep -q 'mac-online-connect-app .*result=failure' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad wait loops must fail immediately on app-authored connection failures"
+grep -q 'grep -qE "$MAC_ONLINE_WAIT_FAILURE_PATTERN"' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad wait loops must consume bootstrap and app failure evidence"
+grep -q 'mac remote established .*suite=${EXPECTED_TARGET_SUITE}' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad handshake evidence must follow the configured strict PQC suite"
+grep -q 'suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1' "$SMOKE_SCRIPT" \
+  || fail "SKR-1 import evidence must accept the configured strict PQC suite, including ML-KEM-768"
 grep -q 'mac-online-connect-result .*targetFamily=ipad .*result=success' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must verify that the synchronized artifact contains connected-row success before the CLI gate"
 grep -q 'failed stage=mac-online-ipad phase=status-sync reason=status-sync-missing-success' "$SMOKE_SCRIPT" \

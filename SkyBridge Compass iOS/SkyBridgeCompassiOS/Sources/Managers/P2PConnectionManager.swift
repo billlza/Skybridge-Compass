@@ -1420,11 +1420,13 @@ public class P2PConnectionManager: ObservableObject {
         )
         if initialPreflightAction == .attemptOOBProtocolIdentityBindingThenRefresh
             || recoveryPreflightAction == .attemptOOBProtocolIdentityBindingThenRefresh {
+            var identityBindingCompleted = false
             do {
                 let reboundFingerprint = try await attemptOOBProtocolIdentityBinding(
                     for: device,
                     candidates: candidates
                 )
+                identityBindingCompleted = true
                 pinnedFingerprints = [reboundFingerprint]
                 signedRefreshFailureReason = nil
                 try await attemptSignedLANKEMRefresh(
@@ -1446,8 +1448,14 @@ public class P2PConnectionManager: ObservableObject {
                 }
                 signedRefreshFailureReason = "PIB-1 completed but SKR-1 did not import required suite"
             } catch {
-                signedRefreshFailureReason = "PIB-1 protocol identity binding failed: \(Self.diagnosticErrorSummary(error))"
-                let line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-identity-binding reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>failed"
+                let line: String
+                if identityBindingCompleted {
+                    signedRefreshFailureReason = "SKR-1 signed LAN KEM refresh failed after PIB-1: \(Self.diagnosticErrorSummary(error))"
+                    line = "⛔️ SKR-1 signed LAN KEM refresh failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-kem-refresh reason=\(Self.protocolIdentityLogRedaction) pinnedProtocolIdentity=1 lifecycle=identity-oob>pinned>missing-kem>failed"
+                } else {
+                    signedRefreshFailureReason = "PIB-1 protocol identity binding failed: \(Self.diagnosticErrorSummary(error))"
+                    line = "⛔️ PIB-1 protocol identity binding failed: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-identity-binding reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>failed"
+                }
                 SkyBridgeLogger.shared.warning(line)
                 SignedKEMRefreshSmokeStatusWriter.append(line)
             }
@@ -1578,12 +1586,16 @@ public class P2PConnectionManager: ObservableObject {
             || selectedEndpointClass == "bonjour-service"
         defer { connection.cancel() }
 
-        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) selectedEndpointClass=\(selectedEndpointClass) selectedEndpointDirect=\(selectedEndpointDirect ? 1 : 0) selectedEndpointDirectLAN=\(selectedEndpointDirectLAN ? 1 : 0) selectedEndpointPeerToPeer=\(connectionResult.selectedEndpointPeerToPeer ? 1 : 0) directHostCandidate=\(directHostCandidate ? 1 : 0) directLANCandidate=\(directLANCandidate ? 1 : 0) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
+        let responseTimeoutSeconds = Self.signedLANRefreshResponseTimeoutSeconds()
+        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) selectedEndpointClass=\(selectedEndpointClass) selectedEndpointDirect=\(selectedEndpointDirect ? 1 : 0) selectedEndpointDirectLAN=\(selectedEndpointDirectLAN ? 1 : 0) selectedEndpointPeerToPeer=\(connectionResult.selectedEndpointPeerToPeer ? 1 : 0) directHostCandidate=\(directHostCandidate ? 1 : 0) directLANCandidate=\(directLANCandidate ? 1 : 0) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
         SkyBridgeLogger.shared.info(requestLine)
         SignedKEMRefreshSmokeStatusWriter.append(requestLine)
         let exchangeStartedAt = Date()
         try await sendPlainFramed(JSONEncoder().encode(AppMessage.kemRefreshRequest(request)), over: connection)
-        let responseFrame = try await receivePlainFrame(over: connection, timeoutSeconds: 6.0)
+        let responseFrame = try await receivePlainFrame(
+            over: connection,
+            timeoutSeconds: responseTimeoutSeconds
+        )
         let responseLatencyMs = Date().timeIntervalSince(exchangeStartedAt) * 1_000.0
         let response = try AppMessage.decodeWireMessage(from: responseFrame)
         if case .kemRefreshFailure(let failure) = response {
@@ -4264,6 +4276,9 @@ public class P2PConnectionManager: ObservableObject {
                                 }
 
                                 guard classification.handshakeMessageA != nil else {
+                                    let line = "⛔️ inbound pre-handshake frame rejected: peer=\(Self.protocolIdentityLogRedaction) stage=preflight-frame-classification reason=unsupported_or_malformed"
+                                    SkyBridgeLogger.shared.warning(line)
+                                    SignedKEMRefreshSmokeStatusWriter.append(line)
                                     self.handleInboundReceiveFailure(
                                         connection,
                                         peerId: peerId,
@@ -4793,12 +4808,13 @@ public class P2PConnectionManager: ObservableObject {
                 return .init(message: .signedKEMRefresh(payload), statusLine: line, isFailure: false)
             } catch {
                 let responderLatencyMs = Date().timeIntervalSince(responseStartedAt) * 1_000.0
+                let reasonCode = Self.signedKEMRefreshFailureCode(for: error)
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: request.requesterDeviceId,
                     targetDeviceId: request.targetDeviceId,
                     stage: "kem_refresh",
-                    reasonCode: Self.signedKEMRefreshFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: reasonCode,
                     requestHashHex: request.canonicalRequestHashHex
                 )
                 let line = String(
@@ -4821,12 +4837,13 @@ public class P2PConnectionManager: ObservableObject {
                 let line = "🔐 PIB-1 protocol identity binding served: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>served"
                 return .init(message: .signedProtocolIdentityBinding(payload), statusLine: line, isFailure: false)
             } catch {
+                let reasonCode = Self.protocolIdentityBindingFailureCode(for: error)
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: request.requesterDeviceId,
                     targetDeviceId: request.targetDeviceId,
                     stage: "identity_binding",
-                    reasonCode: Self.protocolIdentityBindingFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: reasonCode,
                     requestHashHex: request.canonicalRequestHashHex
                 )
                 let line = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
@@ -4846,12 +4863,13 @@ public class P2PConnectionManager: ObservableObject {
                     isFailure: false
                 )
             } catch {
+                let reasonCode = Self.protocolIdentityBindingFailureCode(for: error)
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: confirm.requesterDeviceId,
                     targetDeviceId: confirm.responderDeviceId,
                     stage: "identity_binding_confirm",
-                    reasonCode: Self.protocolIdentityBindingFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: reasonCode,
                     requestHashHex: confirm.requestHashHex
                 )
                 let line = "⛔️ PIB-1 v3 confirm rejected: requester=\(Self.protocolIdentityLogRedaction) transaction=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>confirm>rejected"
@@ -4878,7 +4896,15 @@ public class P2PConnectionManager: ObservableObject {
             throw signedLANRefreshFailure("requester protocol identity fingerprint not pinned")
         }
 
-        let admission = await SignedKEMRefreshRequestAdmissionGate.shared.admit(
+        let admissionGate = SignedKEMRefreshRequestAdmissionGate.shared
+        if let cached = await admissionGate.cachedCompletedResponse(
+            requestHashHex: request.canonicalRequestHashHex,
+            requesterDeviceId: request.requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        ) {
+            return cached
+        }
+        let admission = await admissionGate.admit(
             requestHashHex: request.canonicalRequestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
@@ -4932,7 +4958,7 @@ public class P2PConnectionManager: ObservableObject {
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
         let signature = try await signatureProvider.sign(unsigned.signaturePreimage, key: selectedIdentity.keyHandle)
-        return AppMessage.SignedKEMRefreshPayload(
+        let response = AppMessage.SignedKEMRefreshPayload(
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -4951,6 +4977,13 @@ public class P2PConnectionManager: ObservableObject {
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
             signature: signature
         )
+        await admissionGate.recordCompletedResponse(
+            response,
+            requestHashHex: request.canonicalRequestHashHex,
+            requesterDeviceId: request.requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        )
+        return response
     }
 
     private func makeInboundSignedProtocolIdentityBindingPayload(

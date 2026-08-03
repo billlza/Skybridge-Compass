@@ -103,12 +103,13 @@ extension P2PDiscoveryService {
                 )
             } catch {
                 let responderLatencyMs = Date().timeIntervalSince(responseStartedAt) * 1_000.0
+                let reasonCode = Self.signedKEMRefreshFailureCode(for: error)
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: request.requesterDeviceId,
                     targetDeviceId: request.targetDeviceId,
                     stage: "kem_refresh",
-                    reasonCode: Self.signedKEMRefreshFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: reasonCode,
                     requestHashHex: request.canonicalRequestHashHex
                 )
                 let statusLine = String(
@@ -143,12 +144,13 @@ extension P2PDiscoveryService {
                     protocolIdentityBindingCode: code
                 )
             } catch {
+                let reasonCode = Self.protocolIdentityBindingFailureCode(for: error)
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: request.requesterDeviceId,
                     targetDeviceId: request.targetDeviceId,
                     stage: "identity_binding",
-                    reasonCode: Self.protocolIdentityBindingFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: reasonCode,
                     requestHashHex: request.canonicalRequestHashHex
                 )
                 let statusLine = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
@@ -174,12 +176,13 @@ extension P2PDiscoveryService {
                     protocolIdentityBindingCode: nil
                 )
             } catch {
+                let reasonCode = Self.protocolIdentityBindingFailureCode(for: error)
                 let failure = AppMessage.KEMRefreshFailurePayload(
                     requesterDeviceId: confirm.requesterDeviceId,
                     targetDeviceId: confirm.responderDeviceId,
                     stage: "identity_binding_confirm",
-                    reasonCode: Self.protocolIdentityBindingFailureCode(for: error),
-                    reason: error.localizedDescription,
+                    reasonCode: reasonCode,
+                    reason: reasonCode,
                     requestHashHex: confirm.requestHashHex
                 )
                 return BootstrapControlResponse(
@@ -217,8 +220,13 @@ extension P2PDiscoveryService {
             for: request,
             keyManager: keyManager,
             loadLocalIdentities: {
-                try await CommittedLocalProtocolIdentitySnapshot
-                    .loadActiveAndCompatibility(keyManager: keyManager)
+                guard let preferred = try await CommittedLocalProtocolIdentitySnapshot.loadPreferred(
+                    matchingAuthoritativeFingerprint: request.targetProtocolIdentityFingerprint,
+                    keyManager: keyManager
+                ) else {
+                    return []
+                }
+                return [preferred]
             }
         )
     }
@@ -256,7 +264,15 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("requester protocol identity fingerprint not pinned")
         }
 
-        let admission = await SignedKEMRefreshRequestAdmissionGate.shared.admit(
+        let admissionGate = SignedKEMRefreshRequestAdmissionGate.shared
+        if let cached = await admissionGate.cachedCompletedResponse(
+            requestHashHex: request.canonicalRequestHashHex,
+            requesterDeviceId: request.requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        ) {
+            return cached
+        }
+        let admission = await admissionGate.admit(
             requestHashHex: request.canonicalRequestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
@@ -270,11 +286,19 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("requester rate limited")
         }
 
-        let selectedIdentity = try await loadLocalIdentities()
-            .first { identity in
-                targetFingerprint == nil
-                    || targetFingerprint == identity.authoritativeFingerprint
-            }
+        let localIdentities: [CommittedLocalProtocolIdentitySnapshot]
+        do {
+            localIdentities = try await loadLocalIdentities()
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "SKR-1 responder local identity load failed: code=local_protocol_identity_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+            )
+            throw makeSKRFailure("local protocol identity unavailable")
+        }
+        let selectedIdentity = localIdentities.first { identity in
+            targetFingerprint == nil
+                || targetFingerprint == identity.authoritativeFingerprint
+        }
         guard let selectedIdentity else {
             throw makeSKRFailure("target protocol identity fingerprint mismatch")
         }
@@ -283,10 +307,18 @@ extension P2PDiscoveryService {
             policy: .requirePQC,
             peerSupportedSuites: requestedSuites
         )
-        let rawKEMKeys = try await keyManager.pairingIdentityKEMPublicKeys(
-            using: provider,
-            limitingTo: requestedSuites
-        )
+        let rawKEMKeys: [KEMPublicKeyInfo]
+        do {
+            rawKEMKeys = try await keyManager.pairingIdentityKEMPublicKeys(
+                using: provider,
+                limitingTo: requestedSuites
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "SKR-1 responder KEM material load failed: code=local_pqc_kem_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+            )
+            throw makeSKRFailure("local PQC KEM material unavailable")
+        }
         let requestedWireIds = Set(requestedSuites.map(\.wireId))
         let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(rawKEMKeys).filter { key in
             requestedWireIds.contains(key.suiteWireId)
@@ -295,8 +327,16 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("no requested PQC KEM public key available")
         }
 
-        let localIdRaw = try await SelfIdentityProvider.shared
-            .protocolIdentityDeviceId(allowCreate: true)
+        let localIdRaw: String
+        do {
+            localIdRaw = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "SKR-1 responder local device identity load failed: code=local_device_id_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+            )
+            throw makeSKRFailure("local device id unavailable")
+        }
         let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !localId.isEmpty else {
             throw makeSKRFailure("local device id unavailable")
@@ -329,8 +369,19 @@ extension P2PDiscoveryService {
             signature: Data()
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
-        let signature = try await signatureProvider.sign(unsigned.signaturePreimage, key: selectedIdentity.keyHandle)
-        return AppMessage.SignedKEMRefreshPayload(
+        let signature: Data
+        do {
+            signature = try await signatureProvider.sign(
+                unsigned.signaturePreimage,
+                key: selectedIdentity.keyHandle
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "SKR-1 responder signing failed: code=local_protocol_identity_signing_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
+            )
+            throw makeSKRFailure("local protocol identity signing unavailable")
+        }
+        let response = AppMessage.SignedKEMRefreshPayload(
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -349,6 +400,13 @@ extension P2PDiscoveryService {
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
             signature: signature
         )
+        await admissionGate.recordCompletedResponse(
+            response,
+            requestHashHex: request.canonicalRequestHashHex,
+            requesterDeviceId: request.requesterDeviceId,
+            requesterFingerprint: requesterFingerprint
+        )
+        return response
     }
 
     nonisolated private static func makeSKRFailure(_ reason: String) -> NSError {
@@ -738,6 +796,18 @@ extension P2PDiscoveryService {
         }
         if reason.contains("no requested pqc kem public key available") {
             return "missing_requested_pqc_kem"
+        }
+        if reason.contains("local protocol identity unavailable") {
+            return "local_protocol_identity_unavailable"
+        }
+        if reason.contains("local pqc kem material unavailable") {
+            return "local_pqc_kem_unavailable"
+        }
+        if reason.contains("local protocol identity signing unavailable") {
+            return "local_protocol_identity_signing_unavailable"
+        }
+        if reason.contains("local device id unavailable") {
+            return "local_device_id_unavailable"
         }
         return "kem_refresh_rejected"
     }

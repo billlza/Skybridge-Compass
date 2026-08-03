@@ -569,6 +569,7 @@ P2P_NOTICE_SESSION=""
 COMMON_REMOTE_SMOKE_FAILURE_PATTERN='classic fallback|compatibility fallback|fallback=true|legacyFallback=true|pipeline=stillImageFallback|orientation=verticalFlip|orientation=horizontalFlip|orientation=inverted|renderOrientation=verticalFlip|renderOrientation=horizontalFlip|renderOrientation=inverted|已立即回退|已回退到|fallback producer|perf=extreme.*h264|h264.*perf=extreme|suite_rejected_unknown|wireId=0x0000|wireId=0X0000|unknown suite|unknown-suite|signed LAN KEM refresh rejected|signed LAN KEM refresh failed|PIB-1 protocol identity binding failed|PIB-1 protocol identity binding rejected|PIB-1 protocol identity binding timed out|lifecycle=request>rejected|lifecycle=missing-kem>failed|lifecycle=identity-oob>failed|lifecycle=identity-oob>timeout|remoteControlNoticeRejected .*missing_required_notice_metadata|render-main-path-failed|strict-media-failed|already_connected|rejectAlreadyConnected|对端拒绝连接：already_connected|Peer rejected handshake: already_connected'
 IOS_REMOTE_SMOKE_FAILURE_PATTERN="failed stage=|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|crossNetwork=1|audioRxPlaybackDrop=[1-9][0-9]*|audioRxJitterEvicted=[1-9][0-9]*|audioRxUnderflow=[1-9][0-9]*|audioRxRebuffer=[1-9][0-9]*|jitterEvicted=[1-9][0-9]*|playbackDrop=[1-9][0-9]*|datagrams=[1-9][0-9][0-9]+ .*probable=rx-decode-stalled|HEVC 连续失败|临时降级 H\\.264|codec=h264"
 HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=mac-host|failed stage=mac-smoke-source|failed stage=(identity|handshake|remote-desktop|remote-control|media)|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
+MAC_ONLINE_WAIT_FAILURE_PATTERN="failed stage=|mac-online-connect-result .*result=failure|mac-online-connect-app .*result=failure|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}"
 REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS=(
   "remoteControl.securityNotice.account"
   "remoteControl.securityNotice.activeTitle"
@@ -3514,7 +3515,7 @@ wait_for_mac_online_pattern() {
       print_smoke_tail_for_operator 80 "$MAC_ONLINE_APP_STDERR"
       return 1
     fi
-    if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE 'failed stage=|mac-online-connect-result .*result=failure' "$MAC_ONLINE_STATUS"; then
+    if [[ -f "$MAC_ONLINE_STATUS" ]] && grep -qE "$MAC_ONLINE_WAIT_FAILURE_PATTERN" "$MAC_ONLINE_STATUS"; then
       echo "Detected macOS online iPad UI failure while waiting for ${label}: ${MAC_ONLINE_STATUS}" >&2
       sync_mac_online_launch_stdio
       print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
@@ -4863,9 +4864,9 @@ run_mac_online_ipad_button_smoke() {
   wait_for_mac_online_pattern 'mac-online-connect-start .*targetFamily=ipad .*source=OnlineDeviceCard .*evidenceSource=external-ax' 30 "macOS online iPad connect start from clicked row"
   wait_for_mac_online_pattern 'p2p-connection-ready-path .*pathStatus=satisfied .*routeClass=(wifi|awdl) .*attached=0 .*linkLocal=0' "$SMOKE_TIMEOUT_SECONDS" "macOS-to-iOS product Wi-Fi/AWDL P2P path"
   validate_mac_online_product_p2p_path
-  wait_for_mac_online_pattern 'mac remote established .*suite=X-Wing' "$SMOKE_TIMEOUT_SECONDS" "macOS-to-iOS authenticated X-Wing remote-control handshake"
-  wait_for_ios_status_pattern 'p2p-inbound handshake-established .*suite=X-Wing' "$SMOKE_TIMEOUT_SECONDS" "iOS inbound X-Wing P2P handshake"
-  wait_for_ios_status_pattern 'lan-remote handshake-established .*suite=X-Wing' "$SMOKE_TIMEOUT_SECONDS" "iOS inbound X-Wing remote-control handshake"
+  wait_for_mac_online_pattern "mac remote established .*suite=${EXPECTED_TARGET_SUITE}" "$SMOKE_TIMEOUT_SECONDS" "macOS-to-iOS authenticated ${EXPECTED_TARGET_SUITE} remote-control handshake"
+  wait_for_ios_status_pattern "p2p-inbound handshake-established .*suite=${EXPECTED_TARGET_SUITE}" "$SMOKE_TIMEOUT_SECONDS" "iOS inbound ${EXPECTED_TARGET_SUITE} P2P handshake"
+  wait_for_ios_status_pattern "lan-remote handshake-established .*suite=${EXPECTED_TARGET_SUITE}" "$SMOKE_TIMEOUT_SECONDS" "iOS inbound ${EXPECTED_TARGET_SUITE} remote-control handshake"
   MAC_TO_IOS_CRYPTO_HANDSHAKE_COMPLETE=1
   wait_for_mac_online_connected_row "$SMOKE_TIMEOUT_SECONDS"
   sync_mac_online_launch_stdio
@@ -7342,8 +7343,10 @@ if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
   echo "==> Waiting for SKR-1 signed KEM refresh evidence"
   wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh request: .*lifecycle=missing-kem>request' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 request"
   wait_for_file_pattern "$HOST_STATUS" 'SKR-1 signed LAN KEM refresh served: .*lifecycle=request>served' "$SMOKE_TIMEOUT_SECONDS" "macOS SKR-1 served"
-  wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh verified and imported: .*suites=.*X-Wing.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound .*lifecycle=served>verified' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 verified import"
-  wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1)' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 smoke evidence"
+  wait_for_ios_status_pattern "SKR-1 signed LAN KEM refresh verified and imported: .*suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound .*lifecycle=served>verified" "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 verified ${EXPECTED_TARGET_SUITE} import"
+  if [[ "$EXPECTED_TARGET_SUITE" == "X-Wing" ]]; then
+    wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1)' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 X-Wing smoke evidence"
+  fi
 fi
 wait_for_ios_status_pattern "streamConfigSent .*preferred=hevc, formats=hevc, fps=${SMOKE_TARGET_FPS}.*perf=extreme" "$SMOKE_TIMEOUT_SECONDS" "strict HEVC-only stream configuration"
 wait_for_remote_control_notice_lifecycle
