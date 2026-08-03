@@ -10,6 +10,24 @@ import Foundation
 import CryptoKit
 import Security
 
+public enum PQCProviderPreference: String, CaseIterable, Identifiable, Sendable, Equatable {
+    case mlkem
+    case xwingHybrid
+    case qPeriaptBeta
+
+    public var id: String { rawValue }
+}
+
+public struct PQCProviderAvailability: Sendable, Equatable {
+    public let isAvailable: Bool
+    public let detail: String
+
+    public init(isAvailable: Bool, detail: String) {
+        self.isAvailable = isAvailable
+        self.detail = detail
+    }
+}
+
 /// PQC 加密管理器 - 后量子密码学加密管理
 /// 使用 ML-KEM-768 (Kyber) 和 ML-DSA-65 (Dilithium) 算法
 @available(iOS 17.0, *)
@@ -83,21 +101,21 @@ public class PQCCryptoManager: ObservableObject {
     /// 初始化 PQC 系统
     public func initialize() async throws {
         // 重新检测能力并选择最佳 Provider
-        self.cryptoProvider = CryptoProviderFactory.make(policy: Self.selectionPolicy(
+        let selectedProvider = CryptoProviderFactory.make(policy: Self.selectionPolicy(
             enforcePQC: enforcePQCHandshake,
             allowClassicFallbackForCompatibility: allowClassicFallbackForCompatibility
         ))
-        self.currentTier = cryptoProvider.tier
-        self.currentSuite = cryptoProvider.activeSuite
+        clearInMemoryKeyMaterial()
+        self.cryptoProvider = selectedProvider
+        self.currentTier = selectedProvider.tier
+        self.currentSuite = selectedProvider.activeSuite
+        self.keychainLoadError = nil
 
-        if keychainLoadError != nil {
-            do {
-                try loadKeysFromKeychain()
-                self.keychainLoadError = nil
-            } catch {
-                self.keychainLoadError = error
-                throw error
-            }
+        do {
+            try loadKeysFromKeychain()
+        } catch {
+            self.keychainLoadError = error
+            throw error
         }
         
         if !hasKeyPair {
@@ -105,6 +123,143 @@ public class PQCCryptoManager: ObservableObject {
         }
         
         SkyBridgeLogger.shared.info("✅ PQC 加密系统已初始化 (Tier: \(currentTier.rawValue), Suite: \(currentSuite.rawValue))")
+    }
+
+    public static func currentProviderPreference(
+        userDefaults: UserDefaults = .standard
+    ) -> PQCProviderPreference {
+        if userDefaults.bool(forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta) {
+            return .qPeriaptBeta
+        }
+        if userDefaults.bool(forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid) {
+            return .xwingHybrid
+        }
+        return .mlkem
+    }
+
+    public func providerAvailability(
+        _ preference: PQCProviderPreference
+    ) -> PQCProviderAvailability {
+        let capability = CryptoProviderFactory.detectCapability()
+        let qPeriaptOSAvailable: Bool
+        if #available(iOS 26.0, *) {
+            qPeriaptOSAvailable = true
+        } else {
+            qPeriaptOSAvailable = false
+        }
+        let qPeriaptIdentityEligible =
+            (try? ProtocolSigningIdentityPolicy.requiredConfiguration())?
+                .algorithm == .mlDSA65
+        return Self.providerAvailability(
+            preference,
+            capability: capability,
+            qPeriaptOSAvailable: qPeriaptOSAvailable,
+            qPeriaptIdentityEligible: qPeriaptIdentityEligible
+        )
+    }
+
+    internal static func providerAvailability(
+        _ preference: PQCProviderPreference,
+        capability: CryptoProviderFactory.Capability,
+        qPeriaptOSAvailable: Bool,
+        qPeriaptIdentityEligible: Bool
+    ) -> PQCProviderAvailability {
+        switch preference {
+        case .mlkem:
+            let available = capability.hasApplePQC || capability.hasLiboqs
+            return PQCProviderAvailability(
+                isAvailable: available,
+                detail: available
+                    ? "可用；优先 Apple ML-KEM，必要时使用已编译的 liboqs"
+                    : "不可用；当前构建没有 Apple PQC 或 liboqs runtime"
+            )
+        case .xwingHybrid:
+            return PQCProviderAvailability(
+                isAvailable: capability.hasAppleXWing,
+                detail: capability.hasAppleXWing
+                    ? "可用；Apple X-Wing runtime 自检通过"
+                    : "不可用；需要 iOS 26+、HAS_APPLE_PQC_SDK 与 X-Wing runtime 自检通过"
+            )
+        case .qPeriaptBeta:
+            guard qPeriaptOSAvailable else {
+                return PQCProviderAvailability(
+                    isAvailable: false,
+                    detail: "不可用；Q-Periapt ABI2 需要 iOS 26+"
+                )
+            }
+            guard qPeriaptIdentityEligible else {
+                return PQCProviderAvailability(
+                    isAvailable: false,
+                    detail: "不可用；请先应用 ML-DSA-65 主协议身份"
+                )
+            }
+            return PQCProviderAvailability(
+                isAvailable: true,
+                detail: "可配置；应用时必须通过签名策略、Keychain CAS 与原生 ABI2 自检"
+            )
+        }
+    }
+
+    /// Applies one exclusive provider preference and proves that it became
+    /// active. Failed selection restores both the durable preference and the
+    /// previous runtime so settings cannot claim a provider that is not in use.
+    public func applyProviderPreference(_ preference: PQCProviderPreference) async throws {
+        if preference == .qPeriaptBeta {
+            let identityConfiguration = try ProtocolSigningIdentityPolicy.requiredConfiguration()
+            guard identityConfiguration.algorithm == .mlDSA65 else {
+                throw PQCProviderPreferenceError.qPeriaptRequiresMLDSA65
+            }
+            guard try await QPeriaptIOSRuntime.prepareProductionSession() == .activated else {
+                throw PQCProviderPreferenceError.requestedProviderUnavailable(preference)
+            }
+        }
+
+        let defaults = UserDefaults.standard
+        let previousXWing = defaults.bool(
+            forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
+        )
+        let previousQPeriapt = defaults.bool(
+            forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
+        )
+
+        defaults.set(
+            preference == .xwingHybrid,
+            forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
+        )
+        defaults.set(
+            preference == .qPeriaptBeta,
+            forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
+        )
+
+        do {
+            try await initialize()
+            guard Self.activeProviderMatches(
+                preference,
+                tier: currentTier,
+                suite: currentSuite
+            ) else {
+                throw PQCProviderPreferenceError.requestedProviderUnavailable(preference)
+            }
+        } catch {
+            let applyErrorClass = String(reflecting: Swift.type(of: error))
+            defaults.set(
+                previousXWing,
+                forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
+            )
+            defaults.set(
+                previousQPeriapt,
+                forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
+            )
+            do {
+                try await initialize()
+            } catch {
+                throw PQCProviderPreferenceError.rollbackFailed(
+                    applyErrorClass: applyErrorClass,
+                    rollbackErrorClass: String(reflecting: Swift.type(of: error))
+                )
+            }
+            throw error
+        }
     }
 
     private static func selectionPolicy(
@@ -147,6 +302,8 @@ public class PQCCryptoManager: ObservableObject {
             )
         }.value
 
+        kemPrivateKey?.zeroize()
+        signingPrivateKey?.zeroize()
         kemPrivateKey = SecureBytes(data: kemKeyPair.privateKey.bytes)
         kemPublicKey = kemKeyPair.publicKey.bytes
         signingPrivateKey = SecureBytes(data: sigKeyPair.privateKey.bytes)
@@ -286,10 +443,42 @@ public class PQCCryptoManager: ObservableObject {
     
     /// 是否使用 PQC
     public var isPQCActive: Bool {
-        currentTier == .nativePQC || currentTier == .liboqsPQC
+        currentTier == .qperiaptPQC
+            || currentTier == .nativePQC
+            || currentTier == .liboqsPQC
     }
     
     // MARK: - Private Methods
+
+    private static func activeProviderMatches(
+        _ preference: PQCProviderPreference,
+        tier: CryptoTier,
+        suite: CryptoSuite
+    ) -> Bool {
+        switch preference {
+        case .mlkem:
+            return (tier == .nativePQC || tier == .liboqsPQC)
+                && suite.providerCompatibilitySuite
+                    == CryptoSuite.mlkem768.providerCompatibilitySuite
+        case .xwingHybrid:
+            return tier == .nativePQC
+                && suite.providerCompatibilitySuite
+                    == CryptoSuite.xwing.providerCompatibilitySuite
+        case .qPeriaptBeta:
+            return tier == .qperiaptPQC && suite == .qperiaptABI2PolicyBound
+        }
+    }
+
+    private func clearInMemoryKeyMaterial() {
+        kemPrivateKey?.zeroize()
+        signingPrivateKey?.zeroize()
+        kemPrivateKey = nil
+        kemPublicKey = nil
+        signingPrivateKey = nil
+        signingPublicKey = nil
+        hasKeyPair = false
+        keyGenerationDate = nil
+    }
     
     private func loadKeysFromKeychain() throws {
         // 尝试加载当前 suite 的密钥
@@ -343,6 +532,34 @@ public class PQCCryptoManager: ObservableObject {
             return nil
         }
         return attrs[kSecAttrCreationDate as String] as? Date
+    }
+}
+
+public enum PQCProviderPreferenceError: Error, LocalizedError, Sendable {
+    case qPeriaptRequiresMLDSA65
+    case requestedProviderUnavailable(PQCProviderPreference)
+    case rollbackFailed(applyErrorClass: String, rollbackErrorClass: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .qPeriaptRequiresMLDSA65:
+            return "Q-Periapt ABI2 需要先启用并应用 ML-DSA-65 主协议身份"
+        case .requestedProviderUnavailable(let preference):
+            return "\(Self.displayName(for: preference)) 当前不可用，设置未更改"
+        case .rollbackFailed(let applyErrorClass, let rollbackErrorClass):
+            return "Provider 切换失败且运行时回滚失败（apply=\(applyErrorClass), rollback=\(rollbackErrorClass)）"
+        }
+    }
+
+    private static func displayName(for preference: PQCProviderPreference) -> String {
+        switch preference {
+        case .mlkem:
+            return "ML-KEM"
+        case .xwingHybrid:
+            return "X-Wing 混合加密"
+        case .qPeriaptBeta:
+            return "Q-Periapt"
+        }
     }
 }
 

@@ -527,6 +527,8 @@ private final class LocalLanInteropHostCoordinator {
             switch discoveryError {
             case .noConnectableEndpoint:
                 return "mac_smoke_reconnect_control_endpoint_missing"
+            case .noLiveControlRoute:
+                return "mac_smoke_reconnect_live_control_route_missing"
             case .deviceNotConnected:
                 return "mac_smoke_reconnect_device_not_connected"
             case .connectionCancelled:

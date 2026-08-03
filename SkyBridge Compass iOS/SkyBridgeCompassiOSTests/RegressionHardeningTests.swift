@@ -2272,7 +2272,7 @@ final class RegressionHardeningTests: XCTestCase {
         "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence:"))
     XCTAssertTrue(
       scriptSource.contains(
-        "verified and imported: .*suites=.*X-Wing.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound"))
+        "verified and imported: .*suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound"))
     XCTAssertTrue(
       appSource.contains(
         "try await assertSignedKEMRefreshIfRequired(for: target, reporter: reporter)"))
@@ -8140,6 +8140,19 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   @MainActor
+  func testSettingsPQCPolicyStatusSupportsQPeriaptReadyState() {
+    let status = SettingsView.pqcPolicyStatusPresentation(
+      enforcePQCHandshake: true,
+      currentTier: .qperiaptPQC,
+      currentSuite: .qperiaptABI2PolicyBound,
+      hasKeyPair: true
+    )
+
+    XCTAssertEqual(status.label, "PQC 就绪")
+    XCTAssertEqual(status.tone, .ready)
+  }
+
+  @MainActor
   func testSettingsPQCPolicyStatusRejectsClassicSuiteEvenWhenTierIsPQC() {
     let status = SettingsView.pqcPolicyStatusPresentation(
       enforcePQCHandshake: true,
@@ -8731,7 +8744,7 @@ final class RegressionHardeningTests: XCTestCase {
       let iosInboundRange = script.range(
         of: "wait_for_ios_status_pattern 'file-transfer inbound-complete name=mac-smoke-'"),
       let smokeEvidenceRange = script.range(
-        of: "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence:"),
+        of: "wait_for_ios_status_pattern \"SKR-1 signed LAN KEM refresh (smoke-evidence:"),
       let smokeSuccessRange = script.range(of: "echo \"==> Waiting for smoke success markers\"")
     else {
       XCTFail(

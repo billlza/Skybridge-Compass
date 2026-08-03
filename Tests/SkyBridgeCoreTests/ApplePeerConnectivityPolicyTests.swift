@@ -1,0 +1,254 @@
+import XCTest
+import SkyBridgeProtocolCore
+
+final class ApplePeerConnectivityPolicyTests: XCTestCase {
+    private let fingerprintA = String(repeating: "a", count: 64)
+    private let fingerprintB = String(repeating: "b", count: 64)
+
+    func testCanonicalServiceKindsHaveOneSharedSourceOfTruth() {
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.ServiceKind(
+                serviceType: BonjourInteropProtocolContract.controlServiceType
+            ),
+            .control
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.ServiceKind(
+                serviceType: BonjourInteropProtocolContract.fileTransferServiceType
+            ),
+            .fileTransfer
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.ServiceKind(
+                serviceType: BonjourInteropProtocolContract.remoteControlServiceType
+            ),
+            .remoteControl
+        )
+    }
+
+    func testRouteIdentityNormalizesTypeAndDomainWithoutChangingInstanceName() throws {
+        let route = try XCTUnwrap(
+            ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+                name: "Bill’s iPad",
+                type: " _SKYBRIDGE._TCP ",
+                domain: "LOCAL"
+            )
+        )
+
+        XCTAssertEqual(route.name, "Bill’s iPad")
+        XCTAssertEqual(route.type, BonjourInteropProtocolContract.controlServiceType)
+        XCTAssertEqual(route.domain, "local.")
+    }
+
+    func testStrongAuthorityMatchOutranksExactRouteMatch() throws {
+        let exactRoute = try route(name: "Exact")
+        let authorityRoute = try route(name: "Renamed")
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: ["ios-device-00000001"],
+            protocolPublicKeyFingerprints: [fingerprintA],
+            routes: [exactRoute]
+        )
+        let claims = [
+            claim(
+                route: exactRoute,
+                deviceId: nil,
+                fingerprint: nil
+            ),
+            claim(
+                route: authorityRoute,
+                deviceId: "ios-device-00000001",
+                fingerprint: fingerprintA
+            )
+        ]
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.orderedEligibleClaimIndices(
+                target: target,
+                claims: claims,
+                requiredServiceKind: .control
+            ),
+            [1, 0]
+        )
+    }
+
+    func testConflictingAuthorityCannotBorrowMatchingRouteName() throws {
+        let route = try route(name: "Shared Name")
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: ["ios-device-00000001"],
+            protocolPublicKeyFingerprints: [fingerprintA],
+            routes: [route]
+        )
+        let conflicting = claim(
+            route: route,
+            deviceId: "other-device-0000001",
+            fingerprint: fingerprintB
+        )
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.match(
+                target: target,
+                claim: conflicting,
+                requiredServiceKind: .control
+            ),
+            .rejectedAuthorityConflict
+        )
+    }
+
+    func testPersistedMetadataIsNeverDialEligible() throws {
+        let route = try route(name: "Persisted")
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: [],
+            protocolPublicKeyFingerprints: [],
+            routes: [route]
+        )
+        let claim = ApplePeerConnectivityPolicy.RouteClaim(
+            route: route,
+            authority: .init(
+                deviceId: nil,
+                protocolPublicKeyFingerprint: nil,
+                platform: nil
+            ),
+            provenance: .persistedMetadata
+        )
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.match(
+                target: target,
+                claim: claim,
+                requiredServiceKind: .control
+            ),
+            .rejectedUnprovenRoute
+        )
+    }
+
+    func testConnectionFailureClassificationIsStableAcrossAdapters() {
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.connectionFailureCode(
+                event: .timedOut,
+                pathReason: .localNetworkDenied,
+                errorDescriptions: []
+            ),
+            .localNetworkPermissionDenied
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.connectionFailureCode(
+                event: .failed,
+                pathReason: nil,
+                errorDescriptions: ["Local network prohibited by privacy settings"]
+            ),
+            .localNetworkPermissionDenied
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.connectionFailureCode(
+                event: .timedOut,
+                pathReason: .wifiDenied,
+                errorDescriptions: []
+            ),
+            .transportTimedOut
+        )
+    }
+
+    func testApplePeersRequireCurrentBonjourRouteEvidence() {
+        XCTAssertTrue(
+            ApplePeerConnectivityPolicy.requiresLiveBonjourRoute(platform: .macOS)
+        )
+        XCTAssertTrue(
+            ApplePeerConnectivityPolicy.requiresLiveBonjourRoute(platform: .iOS)
+        )
+        XCTAssertTrue(
+            ApplePeerConnectivityPolicy.requiresLiveBonjourRoute(platform: .iPadOS)
+        )
+        XCTAssertFalse(
+            ApplePeerConnectivityPolicy.requiresLiveBonjourRoute(platform: .windows)
+        )
+    }
+
+    func testMacAndIOSAdaptersDelegateToTheSharedPolicy() throws {
+        let macBonjourPolicy = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryBonjourPolicy.swift"
+        )
+        let macP2P = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
+        )
+        let macPermission = try repositorySource(
+            "Sources/SkyBridgeCore/Network/NetworkFrameworkLocalNetworkPermissionClassifier.swift"
+        )
+        let iosEndpointPolicy = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionEndpointPolicy.swift"
+        )
+        let iosConnectionManager = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let iosP2PError = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/P2PError.swift"
+        )
+        let macP2PError = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/P2PDiscoveryModels.swift"
+        )
+        let iosDiscovery = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+        )
+
+        XCTAssertTrue(macBonjourPolicy.contains("ApplePeerConnectivityPolicy.DialTarget"))
+        XCTAssertTrue(macP2P.contains("ApplePeerConnectivityPolicy.match("))
+        XCTAssertTrue(macPermission.contains("ApplePeerConnectivityPolicy.isLocalNetworkPermissionDenied("))
+        XCTAssertTrue(iosEndpointPolicy.contains("ApplePeerConnectivityPolicy.orderedEligibleClaimIndices("))
+        XCTAssertTrue(
+            iosConnectionManager.contains("ApplePeerConnectivityPolicy")
+                && iosConnectionManager.contains(".connectionFailureCode(")
+        )
+        XCTAssertTrue(iosP2PError.contains("case noLiveControlRoute"))
+        XCTAssertTrue(macP2PError.contains("case noLiveControlRoute"))
+        XCTAssertFalse(
+            macP2P.contains("interface: nil"),
+            "macOS must not reconstruct a Bonjour endpoint without its live browser route ownership."
+        )
+        for duplicatedLiteral in [
+            "case skybridge = \"_skybridge._tcp\"",
+            "case skybridgeTransfer = \"_skybridge-xfer._tcp\"",
+            "case skybridgeRemote = \"_skybridge-rd._tcp\""
+        ] {
+            XCTAssertFalse(
+                iosDiscovery.contains(duplicatedLiteral),
+                "iOS service constants must come from SkyBridgeProtocolCore: \(duplicatedLiteral)"
+            )
+        }
+    }
+
+    private func route(
+        name: String
+    ) throws -> ApplePeerConnectivityPolicy.BonjourRouteIdentity {
+        try XCTUnwrap(
+            ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+                name: name,
+                type: BonjourInteropProtocolContract.controlServiceType,
+                domain: "local."
+            )
+        )
+    }
+
+    private func claim(
+        route: ApplePeerConnectivityPolicy.BonjourRouteIdentity,
+        deviceId: String?,
+        fingerprint: String?
+    ) -> ApplePeerConnectivityPolicy.RouteClaim {
+        ApplePeerConnectivityPolicy.RouteClaim(
+            route: route,
+            authority: .init(
+                deviceId: deviceId,
+                protocolPublicKeyFingerprint: fingerprint,
+                platform: .iPadOS
+            ),
+            provenance: .liveBrowser
+        )
+    }
+
+    private func repositorySource(_ relativePath: String) throws -> String {
+        try String(
+            contentsOf: URL(
+                fileURLWithPath: FileManager.default.currentDirectoryPath
+            ).appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
+    }
+}

@@ -3,6 +3,7 @@ import Foundation
 public enum P2PError: Error, LocalizedError {
     case noIPAddress
     case noConnectableEndpoint
+    case noLiveControlRoute
     case noData
     case handshakeFailed
     case connectionFailed
@@ -27,6 +28,7 @@ public enum P2PError: Error, LocalizedError {
         switch self {
         case .noIPAddress: return "设备没有 IP 地址"
         case .noConnectableEndpoint: return "设备缺少可连接地址（Bonjour/IP）"
+        case .noLiveControlRoute: return "当前 Bonjour 浏览周期没有可拨控制路由"
         case .noData: return "没有接收到数据"
         case .handshakeFailed: return "PQC 握手失败"
         case .connectionFailed: return "连接失败"

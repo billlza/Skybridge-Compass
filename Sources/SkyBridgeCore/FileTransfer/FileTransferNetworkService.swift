@@ -2,6 +2,7 @@ import Foundation
 import Network
 import OSLog
 import Combine
+import SkyBridgeProtocolCore
 
 /// 文件传输网络服务 - 负责建立和管理文件传输的网络连接
 @MainActor
@@ -124,11 +125,53 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         }
         logger.info("🔗 连接到设备: \(deviceName) (\(ipAddress))")
 
-        let host = NWEndpoint.Host(ipAddress)
-        let nwPort = NWEndpoint.Port(integerLiteral: UInt16(port))
+        return try await connect(
+            to: .hostPort(
+                host: NWEndpoint.Host(ipAddress),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port))
+            ),
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+    }
+
+    func connectToDevice(
+        endpoint: NWEndpoint,
+        deviceId: String,
+        deviceName: String
+    ) async throws -> NWConnection {
+        guard case .service(let name, let type, let domain, _) = endpoint,
+              let route = ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+                name: name,
+                type: type,
+                domain: domain
+              ),
+              route.serviceKind == .fileTransfer else {
+            throw FileTransferNetworkError.invalidEndpoint
+        }
+        logger.info(
+            "🔗 通过 authority-bound live Bonjour 文件路由连接设备: \(deviceName)"
+        )
+        return try await connect(
+            to: endpoint,
+            deviceId: deviceId,
+            deviceName: deviceName
+        )
+    }
+
+    private func connect(
+        to endpoint: NWEndpoint,
+        deviceId: String,
+        deviceName: String
+    ) async throws -> NWConnection {
 
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = true
+        parameters.allowLocalEndpointReuse = true
+        if case .service(_, _, _, let observedInterface) = endpoint,
+           let observedInterface {
+            parameters.requiredInterface = observedInterface
+        }
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.enableKeepalive = true
             tcp.keepaliveIdle = 30
@@ -136,7 +179,7 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
             tcp.keepaliveCount = 4
         }
 
-        let connection = NWConnection(host: host, port: nwPort, using: parameters)
+        let connection = NWConnection(to: endpoint, using: parameters)
         let attemptID = UUID()
 
         return try await withTaskCancellationHandler(operation: {
@@ -173,11 +216,34 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
         _ state: NWConnection.State,
         attemptID: UUID
     ) {
+        guard let connection = pendingConnectionAttempts[attemptID]?.connection else {
+            return
+        }
         switch state {
         case .ready:
             completeConnectionAttempt(attemptID, result: .success(()))
+        case .waiting(let error):
+            if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                error: error,
+                path: connection.currentPath
+            ) {
+                connection.cancel()
+                completeConnectionAttempt(
+                    attemptID,
+                    result: .failure(FileTransferNetworkError.localNetworkPermissionDenied)
+                )
+            }
         case .failed(let error):
-            completeConnectionAttempt(attemptID, result: .failure(error))
+            let failure: Error
+            if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                error: error,
+                path: connection.currentPath
+            ) {
+                failure = FileTransferNetworkError.localNetworkPermissionDenied
+            } else {
+                failure = error
+            }
+            completeConnectionAttempt(attemptID, result: .failure(failure))
         case .cancelled:
             completeConnectionAttempt(
                 attemptID,
@@ -190,10 +256,18 @@ public class FileTransferNetworkService: NSObject, ObservableObject {
 
     private func timeoutConnectionAttempt(_ attemptID: UUID) {
         guard let attempt = pendingConnectionAttempts[attemptID] else { return }
+        let failure: Error
+        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+            path: attempt.connection.currentPath
+        ) {
+            failure = FileTransferNetworkError.localNetworkPermissionDenied
+        } else {
+            failure = FileTransferNetworkError.connectionTimeout
+        }
         attempt.connection.cancel()
         completeConnectionAttempt(
             attemptID,
-            result: .failure(FileTransferNetworkError.connectionTimeout)
+            result: .failure(failure)
         )
     }
 
@@ -499,9 +573,11 @@ private enum MessageType: UInt32 {
 
 // MARK: - 错误类型
 
-public enum FileTransferNetworkError: Error, LocalizedError {
+public enum FileTransferNetworkError: Error, LocalizedError, Sendable {
     case connectionTimeout
     case connectionCancelled
+    case localNetworkPermissionDenied
+    case invalidEndpoint
     case invalidPort
     case invalidMessageType
     case incompleteData
@@ -513,6 +589,10 @@ public enum FileTransferNetworkError: Error, LocalizedError {
             return "连接超时"
         case .connectionCancelled:
             return "连接已取消"
+        case .localNetworkPermissionDenied:
+            return "本地网络权限被系统拒绝。请在“系统设置 → 隐私与安全性 → 本地网络”中允许 SkyBridge Compass Pro 后重试"
+        case .invalidEndpoint:
+            return "文件传输路由缺少当前 Bonjour 服务证明"
         case .invalidPort:
             return "无效端口"
         case .invalidMessageType:

@@ -2,9 +2,9 @@
   "AppMessage.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/AppMessage.swift",
-    "ios_hash": "e1fd974b75a79442b69d9438ff01a9203277d5841223d66abadc8b24b58c39fd",
+    "ios_hash": "d69a03c0e8f277a8b2c9d66a5452a0a84b416d8a01a4f2dd8457dbbe58e0720f",
     "macos": "Sources/SkyBridgeCore/P2P/AppMessage.swift",
-    "macos_hash": "5bf75535bb6e73fcb6eab5dd435bafabc342a60e870b9522a613a028c70396d1"
+    "macos_hash": "504015c53de3ea94d33ac79c18aab0cfb90279e4d617d74eb39cc635e7b389e5"
   },
   "ApplePQCProvider.swift": {
     "forked": false,
@@ -51,7 +51,7 @@
   "CryptoProviderFactory.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CryptoProviderFactory.swift",
-    "ios_hash": "762ecd86ff8c430fb7bb62473ec3a02c2a1e7c892a7b88a8a51f4fddfdcf07f2",
+    "ios_hash": "b2a018b413407d253247b79821510aa004c5b35e640c65a92017bdab2888f85f",
     "macos": "Sources/SkyBridgeCore/P2P/CryptoProviderFactory.swift",
     "macos_hash": "f2f764622c15db7d4c91b110bf6996ca26523455f8b19e94c2905ff1b14a96d8"
   },
@@ -72,23 +72,30 @@
   "DeviceMessageStore.swift": {
     "forked": true,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/DeviceMessageStore.swift",
-    "ios_hash": "46d1439be8747e9514bf587ab1c0b876963ca53603fb35fb635e3aa607a9cbcb",
+    "ios_hash": "06b4301f6f0224f385f66a7d0c078e89aef8afea2155e4bcfe8aba7c0e098047",
     "macos": "Sources/SkyBridgeCore/Messaging/DeviceMessageStore.swift",
-    "macos_hash": "14ff27f8c29e7d7ec1bffec5db508d295dc9531e1ef7c875dbe88c656457ea01"
+    "macos_hash": "1d15dde84ace0f3a03b0de5eba577b9a79e943de3fab733b2b545853a9c8b725"
   },
   "DeviceMessagingService.swift": {
     "forked": true,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/DeviceMessagingService.swift",
-    "ios_hash": "25cc8eeea34340e3ed06948ff8d79b70cacbf775a43194a2062277511824da5d",
+    "ios_hash": "0905e20267085d62e6fe684c755c4396fdbbed9d469d4b2d501d2b93965cf3ef",
     "macos": "Sources/SkyBridgeCore/Messaging/DeviceMessagingService.swift",
-    "macos_hash": "ddfaa4a132cbef7652d171a6e5ea9d9259a22087e67b6867ee607de189285b78"
+    "macos_hash": "ad0a09e10028a23b82acddbb736e211aaf07a4d32a0558924a19b9985c51213c"
+  },
+  "DeviceTextQueueEnvelope.swift": {
+    "forked": false,
+    "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/DeviceTextQueueEnvelope.swift",
+    "ios_hash": "ee71e8313b6a97b4b993bdc424bad17b5b09bd08b974908d8d7aaa384dc8ca3f",
+    "macos": "Sources/SkyBridgeCore/Messaging/DeviceTextQueueEnvelope.swift",
+    "macos_hash": "f006ca2dfd702a82fa1affa8a0df43a88deaeaefa3aab630100657360775af64"
   },
   "FileTransferNetworkService.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift",
     "ios_hash": "d1a802606b6214403dfe7eac67a7e0bf83359766e67e647fcb0900d52d4b8825",
     "macos": "Sources/SkyBridgeCore/FileTransfer/FileTransferNetworkService.swift",
-    "macos_hash": "4183a3785ffefd2415586e928eeaad9cd1e05c2481ac1da98ff84225061ebd17"
+    "macos_hash": "3ab69d38315808bf0529ddb35a5bbfe0c4e4d27f391f7f28d76bd105268063e5"
   },
   "HandshakeDriver.swift": {
     "forked": false,
@@ -135,9 +142,9 @@
   "OfflineMessageQueue.swift": {
     "forked": true,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/OfflineMessageQueue.swift",
-    "ios_hash": "892a2f4bce19d6fe66ba625068522e8778980c8b2b43f53686b5d33f253e2a4d",
+    "ios_hash": "6c88fdb579c9223c248ee4e92088f2910ad1dff3829d2f4501a81534b65dabd5",
     "macos": "Sources/SkyBridgeCore/Messaging/OfflineMessageQueue.swift",
-    "macos_hash": "cd96852b047dde571902f5fddbc20ad0aded374e7c3595794eceb959afecf526"
+    "macos_hash": "7b9fb89f9f393e49c8fc16f9ee3209fb8e643744dae2926d12a49f5a8eb4282b"
   },
   "P2PConnectionService.swift": {
     "forked": false,
@@ -191,9 +198,9 @@
   "SignedKEMRefreshRequestAdmissionGate.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/SignedKEMRefreshRequestAdmissionGate.swift",
-    "ios_hash": "b1d30e6a3ff2d9988d08a5238d79bfa4100d49104f193037d003881575d7cd86",
+    "ios_hash": "394dfe2bf64051791e836d8e195bf0127e048de04674e7199f17053daa3c9aa9",
     "macos": "Sources/SkyBridgeCore/P2P/SignedKEMRefreshRequestAdmissionGate.swift",
-    "macos_hash": "b2918c12a35e8fc61d4ba3d6c36d65dcf545fb3334cb7044898933d6ae065f27"
+    "macos_hash": "b4b1d0a4bc305a5af753b46afcfd256c4663659ddb50ec865198b7b1ec6c1c28"
   },
   "TrafficPadding.swift": {
     "forked": false,
@@ -212,9 +219,16 @@
   "TwoAttemptHandshakeManager.swift": {
     "forked": true,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Handshake/TwoAttemptHandshakeManager.swift",
-    "ios_hash": "93867c4f279f29ffa1c76b1c7ff59bd27e1d57baf79c7efc088f72831339deac",
+    "ios_hash": "cd33bdb7297f390861a7f8f76aec49af25809a2a94c58d1c29d495b9f8aa06aa",
     "macos": "Sources/SkyBridgeCore/P2P/TwoAttemptHandshakeManager.swift",
     "macos_hash": "3ca9a822ea58c86e5f12f0b058940a22f900564a17eee2caa3506edc32165e08"
+  },
+  "UnifiedDeviceMessagingRuntime.swift": {
+    "forked": false,
+    "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/UnifiedDeviceMessagingRuntime.swift",
+    "ios_hash": "8513d8c5fb3acb964e2dfc4fc64fad4ea018cd0b42ff589041fbb9976c395d37",
+    "macos": "Sources/SkyBridgeCore/Messaging/UnifiedDeviceMessagingRuntime.swift",
+    "macos_hash": "0f3307d2d72c3f2f8d98c2b8090de260a4bebfadfd2f8399229c1c21f966fdd2"
   },
   "WebRTCSDPCandidateInjector.swift": {
     "forked": false,

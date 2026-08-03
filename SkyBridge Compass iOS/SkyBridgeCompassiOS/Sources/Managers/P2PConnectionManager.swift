@@ -3807,7 +3807,7 @@ public class P2PConnectionManager: ObservableObject {
 
         let endpoints = connectionEndpointCandidates(for: targetDevice)
         guard !endpoints.isEmpty else {
-            throw P2PError.noConnectableEndpoint
+            throw P2PError.noLiveControlRoute
         }
 
         // 更新状态（UI：连接中）
@@ -10157,6 +10157,7 @@ public class P2PConnectionManager: ObservableObject {
                 )
                 attemptDurationsMs.append(connectLatencyMs)
                 failedAttemptCount += 1
+                let terminalPath = connection.currentPath
                 connection.stateUpdateHandler = nil
                 connection.pathUpdateHandler = nil
                 connection.cancel()
@@ -10168,16 +10169,40 @@ public class P2PConnectionManager: ObservableObject {
                     throw CancellationError()
                 }
 
-                lastError = error
+                let event: ApplePeerConnectivityPolicy.ConnectionEvent =
+                    error is ConnectionReadyTimeoutError ? .timedOut : .failed
+                let errorDescriptions: [String] = {
+                    var descriptions = [
+                        String(describing: error),
+                        (error as NSError).localizedDescription
+                    ]
+                    if let timeout = error as? ConnectionReadyTimeoutError,
+                       let waitingError = timeout.lastWaitingError {
+                        descriptions.append(String(describing: waitingError))
+                        descriptions.append(
+                            (waitingError as NSError).localizedDescription
+                        )
+                    }
+                    return descriptions
+                }()
+                let failureCode = ApplePeerConnectivityPolicy
+                    .connectionFailureCode(
+                        event: event,
+                        pathReason: Self.sharedPathUnsatisfiedReason(
+                            terminalPath
+                        ),
+                        errorDescriptions: errorDescriptions
+                    )
+                lastError = ConnectionAttemptFailure(code: failureCode)
                 if let timeout = error as? ConnectionReadyTimeoutError {
                     let waitingError = timeout.lastWaitingError
                         .map(Self.connectionAttemptNetworkErrorToken) ?? "none"
                     SignedKEMRefreshSmokeStatusWriter.append(
-                        "p2p-connect-attempt dialRef=\(dialReference) index=\(index + 1) terminal=timeout requiredInterface=\(requiredInterface) elapsedMs=\(Int(connectLatencyMs.rounded())) lastState=\(timeout.lastState.rawValue) lastWaitingError=\(waitingError)"
+                        "p2p-connect-attempt dialRef=\(dialReference) index=\(index + 1) terminal=timeout requiredInterface=\(requiredInterface) elapsedMs=\(Int(connectLatencyMs.rounded())) lastState=\(timeout.lastState.rawValue) lastWaitingError=\(waitingError) failureCode=\(failureCode.rawValue)"
                     )
                 } else {
                     SignedKEMRefreshSmokeStatusWriter.append(
-                        "p2p-connect-attempt dialRef=\(dialReference) index=\(index + 1) terminal=failed requiredInterface=\(requiredInterface) elapsedMs=\(Int(connectLatencyMs.rounded())) error=\(Self.connectionAttemptErrorToken(error))"
+                        "p2p-connect-attempt dialRef=\(dialReference) index=\(index + 1) terminal=failed requiredInterface=\(requiredInterface) elapsedMs=\(Int(connectLatencyMs.rounded())) error=\(Self.connectionAttemptErrorToken(error)) failureCode=\(failureCode.rawValue)"
                     )
                 }
                 SkyBridgeLogger.shared.warning(
@@ -10262,6 +10287,26 @@ public class P2PConnectionManager: ObservableObject {
         let interfaces = Set(path.availableInterfaces.map(connectionAttemptInterfaceToken))
             .sorted()
         return "pathStatus=\(status) pathReason=\(reason) pathInterfaces=\(interfaces.isEmpty ? "none" : interfaces.joined(separator: ","))"
+    }
+
+    private nonisolated static func sharedPathUnsatisfiedReason(
+        _ path: NWPath?
+    ) -> ApplePeerConnectivityPolicy.PathUnsatisfiedReason? {
+        guard let path, path.status != .satisfied else { return nil }
+        switch path.unsatisfiedReason {
+        case .notAvailable:
+            return .notAvailable
+        case .cellularDenied:
+            return .cellularDenied
+        case .wifiDenied:
+            return .wifiDenied
+        case .localNetworkDenied:
+            return .localNetworkDenied
+        case .vpnInactive:
+            return .vpnInactive
+        @unknown default:
+            return .unknown
+        }
     }
 
     private nonisolated static func connectionAttemptNetworkErrorToken(_ error: NWError) -> String {

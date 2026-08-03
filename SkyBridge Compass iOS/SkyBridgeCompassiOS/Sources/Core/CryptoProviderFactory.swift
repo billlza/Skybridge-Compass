@@ -9,6 +9,11 @@
 
 import Foundation
 
+enum PQCProviderPreferenceStorageKeys {
+    static let preferXWingHybrid = "Settings.PreferXWingHybrid"
+    static let preferQPeriaptBeta = "Settings.PreferQPeriaptBeta"
+}
+
 // MARK: - CryptoProviderFactory
 
 /// Provider 工厂 - 单一事实来源
@@ -71,6 +76,9 @@ public enum CryptoProviderFactory {
 
         /// iOS 26+ CryptoKit PQC 是否可用
         public let hasApplePQC: Bool
+
+        /// Apple CryptoKit X-Wing runtime self-test 是否可用
+        public let hasAppleXWing: Bool
         
         /// liboqs 是否可用
         public let hasLiboqs: Bool
@@ -82,9 +90,11 @@ public enum CryptoProviderFactory {
             hasApplePQC: Bool,
             hasLiboqs: Bool,
             hasQPeriapt: Bool = false,
+            hasAppleXWing: Bool? = nil,
             osVersion: String
         ) {
             self.hasApplePQC = hasApplePQC
+            self.hasAppleXWing = hasAppleXWing ?? hasApplePQC
             self.hasLiboqs = hasLiboqs
             self.hasQPeriapt = hasQPeriapt
             self.osVersion = osVersion
@@ -121,6 +131,7 @@ public enum CryptoProviderFactory {
             hasApplePQC: hasApplePQC,
             hasLiboqs: hasLiboqs,
             hasQPeriapt: QPeriaptIOSRuntime.isEnabledForLocalRuntime(),
+            hasAppleXWing: hasAppleXWingRuntimeSupport,
             osVersion: osVersion
         )
     }
@@ -142,7 +153,9 @@ public enum CryptoProviderFactory {
             return .xwing
         }
 
-        if UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid") {
+        if UserDefaults.standard.bool(
+            forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
+        ) {
             return .xwing
         }
 

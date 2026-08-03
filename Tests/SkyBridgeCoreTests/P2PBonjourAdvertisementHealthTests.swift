@@ -1026,13 +1026,14 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             "Bootstrap/control sends must have a bounded continuation lifecycle so cancelled NWConnection sends cannot suspend forever."
         )
         XCTAssertTrue(
-            p2pSource.contains("let freshBonjourHostFallbackEndpoints = await makeFreshBonjourHostFallbackEndpoints(") &&
+            p2pSource.contains("liveBonjourEndpointAttemptsAwaitingHydration(") &&
+            p2pSource.contains("ApplePeerConnectivityPolicy.match(") &&
+            p2pSource.contains("provenance: .liveBrowser") &&
+            p2pSource.contains("if requiresLiveAppleRoute {\n            freshBonjourHostFallbackEndpoints = []") &&
             p2pSource.contains("} else if !bonjourEndpointAttempts.isEmpty {\n            endpointAttempts.append(contentsOf: bonjourEndpointAttempts)\n            endpointAttempts.append(contentsOf: freshBonjourHostFallbackEndpoints)\n            endpointAttempts.append(contentsOf: hostFallbackEndpoints)") &&
-            p2pSource.contains("resolveNetServiceEndpoint(") &&
-            p2pSource.contains("Self.resolveNetServiceEndpointOnMain(") &&
-            p2pSource.contains("timeoutSeconds: 3.0") &&
-            p2pSource.contains("return (directRoutable + directAny + service).filter"),
-            "Automatic LAN connects should still prefer live Bonjour/current NetService endpoints, while strict-PQC bootstrap should try already-resolved direct LAN endpoints before Bonjour service fallback."
+            p2pSource.contains("reason=no_live_control_route") &&
+            !p2pSource.contains("interface: nil"),
+            "Apple LAN connects must use authority-bound endpoints from the current browser generation and must never reconstruct an interface-less Bonjour route from persisted presentation metadata."
         )
     }
 
@@ -1058,9 +1059,19 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
             to: "private func sendBootstrapFrame",
             in: p2pSource
         )
+        let outboundConnectionWaitBody = try sourceSlice(
+            from: "private func waitForConnection(",
+            to: "// MARK: - 辅助方法：名称 / 网络信息解析",
+            in: p2pSource
+        )
 
         XCTAssertTrue(makeConnectionBody.contains("params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)"))
         XCTAssertFalse(makeConnectionBody.contains("params.includePeerToPeer = true"))
+        XCTAssertTrue(
+            makeConnectionBody.contains("applyRouteOwnership(") &&
+                p2pSource.contains("parameters.requiredInterface = observedInterface"),
+            "A live Bonjour endpoint must retain the NWInterface observed by the same browser result."
+        )
         XCTAssertTrue(endpointPolicyBody.contains("guard case .hostPort(let host, _) = endpoint else { return true }"))
         XCTAssertTrue(endpointPolicyBody.contains("if IPv4Address(value) != nil {\n            return value.hasPrefix(\"169.254.\")\n        }"))
         XCTAssertTrue(endpointPolicyBody.contains("if IPv6Address(value) != nil {\n            return value.hasPrefix(\"fe80:\")\n        }"))
@@ -1071,10 +1082,18 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(bootstrapExchangeBody.contains("peerToPeer=\\(Self.shouldIncludePeerToPeer(for: endpoint) ? 1 : 0)"))
         XCTAssertTrue(
             bootstrapWaitBody.contains("case .waiting(let error):") &&
+            bootstrapWaitBody.contains("case .failed(let error):") &&
             bootstrapWaitBody.contains("connection.currentPath") &&
+            bootstrapWaitBody.contains("NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(") &&
             p2pSource.contains("reason=local-network-permission-denied") &&
             bootstrapWaitBody.contains("P2PDiscoveryError.localNetworkPermissionDenied"),
             "Strict-PQC bootstrap must fail fast when Network.framework reports Local Network privacy denial, instead of collapsing the app-side authorization failure into a generic timeout."
+        )
+        XCTAssertTrue(
+            outboundConnectionWaitBody.contains("case .waiting(let error):") &&
+            outboundConnectionWaitBody.contains("NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(") &&
+            outboundConnectionWaitBody.contains("P2PDiscoveryError.localNetworkPermissionDenied"),
+            "Authenticated outbound P2P dials must preserve the same Local Network privacy diagnosis after strict-PQC preflight has already succeeded."
         )
     }
 

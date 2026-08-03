@@ -377,6 +377,11 @@ final class BonjourInteropContractTests: XCTestCase {
         XCTAssertFalse(discoverySource.contains("record[\"controlPort\"]"))
         XCTAssertFalse(discoverySource.contains("record[\"vendorDeviceId\"]"))
         XCTAssertTrue(
+            discoverySource.contains(
+                "return BonjourInteropProtocolContract.remoteControlServiceType"
+            )
+        )
+        XCTAssertFalse(
             discoverySource.contains("case skybridgeRemote = \"_skybridge-rd._tcp\"")
         )
         XCTAssertTrue(discoverySource.contains("return [\"file\", \"file_transfer\"]"))

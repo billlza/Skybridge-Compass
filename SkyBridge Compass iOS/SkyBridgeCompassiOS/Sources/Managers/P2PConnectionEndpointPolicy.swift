@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SkyBridgeProtocolCore
 
 /// The persistable identity portion of one DNS-SD route. A service endpoint is actionable
 /// only when this tuple and the Network.framework interface came from the same live result.
@@ -9,20 +10,24 @@ import Network
 /// that no peer actually published. The interface itself remains in the process-local discovery
 /// snapshot because `NWInterface` has no supported persistence/reconstruction contract.
 struct BonjourRouteTuple: Equatable, Sendable {
-    let name: String
-    let type: String
-    let domain: String
+    private let identity: ApplePeerConnectivityPolicy.BonjourRouteIdentity
+
+    var name: String { identity.name }
+    var type: String { identity.type }
+    var domain: String { identity.domain }
+    var sharedIdentity: ApplePeerConnectivityPolicy.BonjourRouteIdentity {
+        identity
+    }
 
     init?(name: String?, type: String?, domain: String?) {
-        guard let name = BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(name),
-              let type = type?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !type.isEmpty,
-              let domain = Self.normalizedDomain(domain) else {
+        guard let identity = ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+            name: BonjourServiceIdentitySanitizer.sanitizedServiceInstanceName(name),
+            type: type,
+            domain: domain
+        ) else {
             return nil
         }
-        self.name = name
-        self.type = type
-        self.domain = domain
+        self.identity = identity
     }
 
     init?(_ device: DiscoveredDevice) {
@@ -34,7 +39,7 @@ struct BonjourRouteTuple: Equatable, Sendable {
     }
 
     var isPrimaryControlRoute: Bool {
-        type == DiscoveryServiceType.skybridge.rawValue
+        identity.serviceKind == .control
     }
 
     /// Selects one complete route without combining fields.
@@ -64,14 +69,6 @@ struct BonjourRouteTuple: Equatable, Sendable {
         device.bonjourServiceName = nil
         device.bonjourServiceType = nil
         device.bonjourServiceDomain = nil
-    }
-
-    private static func normalizedDomain(_ rawDomain: String?) -> String? {
-        guard let trimmed = rawDomain?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed.hasSuffix(".") ? trimmed : "\(trimmed)."
     }
 }
 
@@ -244,18 +241,45 @@ enum P2PConnectionEndpointPolicy {
             return []
         }
 
-        var seenEndpointKeys = Set<String>()
-        return liveBonjourControlEndpoints.filter { endpoint in
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: [normalizedStrongDeviceId(for: device)].compactMap { $0 },
+            protocolPublicKeyFingerprints: [],
+            routes: [advertisedRoute.sharedIdentity]
+        )
+        var endpointClaims: [(endpoint: NWEndpoint, claim: ApplePeerConnectivityPolicy.RouteClaim)] = []
+        for endpoint in liveBonjourControlEndpoints {
             guard case .service(let liveName, let liveType, let liveDomain, _) = endpoint,
                   let liveRoute = BonjourRouteTuple(
                     name: liveName,
                     type: liveType,
                     domain: liveDomain
-                  ),
-                  liveRoute == advertisedRoute else {
-                return false
+                  ) else {
+                continue
             }
+            endpointClaims.append((
+                endpoint,
+                ApplePeerConnectivityPolicy.RouteClaim(
+                    route: liveRoute.sharedIdentity,
+                    authority: .init(
+                        deviceId: nil,
+                        protocolPublicKeyFingerprint: nil,
+                        platform: nil
+                    ),
+                    provenance: .liveBrowser
+                )
+            ))
+        }
+        let orderedIndices = ApplePeerConnectivityPolicy.orderedEligibleClaimIndices(
+            target: target,
+            claims: endpointClaims.map(\.claim),
+            requiredServiceKind: .control
+        )
+        var seenEndpointKeys = Set<String>()
+        return orderedIndices.compactMap { index in
+            let endpoint = endpointClaims[index].endpoint
             return seenEndpointKeys.insert(BonjourBrowseEndpointIdentity.key(for: endpoint)).inserted
+                ? endpoint
+                : nil
         }
     }
 

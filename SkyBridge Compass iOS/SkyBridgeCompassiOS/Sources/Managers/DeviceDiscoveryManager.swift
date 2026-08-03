@@ -26,42 +26,83 @@ import UIKit
 // MARK: - Service Types
 
 /// 跨平台服务类型定义
-public enum DiscoveryServiceType: String, CaseIterable, Sendable {
+public enum DiscoveryServiceType: CaseIterable, Sendable, RawRepresentable {
     /// SkyBridge 主服务（所有平台）
-    case skybridge = "_skybridge._tcp"
+    case skybridge
 
     /// SkyBridge QUIC 服务（高性能传输）
-    case skybridgeQUIC = "_skybridge._udp"
+    case skybridgeQUIC
 
     /// SkyBridge 文件传输服务
-    case skybridgeTransfer = "_skybridge-xfer._tcp"
+    case skybridgeTransfer
 
     /// SkyBridge 远程桌面/远控服务
-    case skybridgeRemote = "_skybridge-rd._tcp"
+    case skybridgeRemote
     
     /// Apple Companion Link（Apple 设备间）
-    case companionLink = "_companion-link._tcp"
+    case companionLink
     
     /// AirDrop 服务（Apple 设备）
-    case airdrop = "_airdrop._tcp"
+    case airdrop
     
     /// SFTP/SSH 服务（开发者设备）
-    case sftp = "_sftp-ssh._tcp"
+    case sftp
     
     /// SMB 文件共享（Windows/Linux/macOS）
-    case smb = "_smb._tcp"
+    case smb
     
     /// HTTP 服务（通用 Web 服务）
-    case http = "_http._tcp"
+    case http
 
     /// 局域网摄像头 RTSP 服务（仅用于预填用户确认的流地址）
-    case rtsp = "_rtsp._tcp"
+    case rtsp
     
     /// 远程桌面（RDP 协议）
-    case rdp = "_rdlink._tcp"
+    case rdp
     
     /// 自定义 Android 服务（如果 Android 客户端使用）
-    case androidShare = "_androidshare._tcp"
+    case androidShare
+
+    public var rawValue: String {
+        switch self {
+        case .skybridge:
+            return BonjourInteropProtocolContract.controlServiceType
+        case .skybridgeQUIC:
+            return BonjourInteropProtocolContract.legacyQuicPrimaryServiceType
+        case .skybridgeTransfer:
+            return BonjourInteropProtocolContract.fileTransferServiceType
+        case .skybridgeRemote:
+            return BonjourInteropProtocolContract.remoteControlServiceType
+        case .companionLink:
+            return BonjourInteropProtocolContract.companionLinkServiceType
+        case .airdrop:
+            return "_airdrop._tcp"
+        case .sftp:
+            return "_sftp-ssh._tcp"
+        case .smb:
+            return "_smb._tcp"
+        case .http:
+            return "_http._tcp"
+        case .rtsp:
+            return "_rtsp._tcp"
+        case .rdp:
+            return "_rdlink._tcp"
+        case .androidShare:
+            return "_androidshare._tcp"
+        }
+    }
+
+    public init?(rawValue: String) {
+        let normalized = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let match = Self.allCases.first(where: {
+            $0.rawValue.lowercased() == normalized
+        }) else {
+            return nil
+        }
+        self = match
+    }
 
     /// 运行时可能浏览的全部 Bonjour 服务；Info.plist 的 NSBonjourServices 需要覆盖这份清单。
     public static var requiredBonjourPrivacyDeclarations: [String] {

@@ -362,6 +362,51 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertEqual(sorted.first?.deviceId, "bonjour:iPhone@local.")
     }
 
+    func testAuthorityBoundLiveBonjourTransferRouteOutranksHostFallbacks() {
+        let liveEndpoint = NWEndpoint.service(
+            name: "Bill’s iPad",
+            type: BonjourInteropContract.fileTransferServiceType,
+            domain: "local.",
+            interface: nil
+        )
+        let liveRoute = FileTransferManager.ActivePeerRoute(
+            deviceId: "ios-device-00000001",
+            deviceName: "Bill’s iPad",
+            ipAddress: "bonjour-service",
+            port: 8080,
+            routeSource: "live-bonjour-transfer",
+            liveEndpoint: liveEndpoint
+        )
+        let hostFallback = FileTransferManager.ActivePeerRoute(
+            deviceId: liveRoute.deviceId,
+            deviceName: liveRoute.deviceName,
+            ipAddress: "fe80::1%awdl0",
+            port: 8080,
+            routeSource: "authenticated-session"
+        )
+
+        let sorted = FileTransferManager.sortedActivePeerRoutes([
+            hostFallback,
+            liveRoute
+        ])
+
+        XCTAssertEqual(sorted.first?.routeSource, "live-bonjour-transfer")
+        XCTAssertEqual(sorted.first?.liveEndpoint, liveEndpoint)
+    }
+
+    func testRouteAvailabilityErrorsDoNotClaimThePeerIsOffline() {
+        XCTAssertEqual(
+            FileTransferRouteAvailabilityError.noAuthenticatedPeer
+                .localizedDescription,
+            "未建立目标设备的已认证 P2P 会话"
+        )
+        XCTAssertEqual(
+            FileTransferRouteAvailabilityError.noLiveTransferRoute
+                .localizedDescription,
+            "已认证设备当前没有 authority-bound 文件传输路由"
+        )
+    }
+
     func testPeerHostTokenNormalizerPreservesLinkLocalIPv6Zone() {
         // 链路本地 IPv6 (fe80::/10) 必须保留 %zone 作用域 id，否则地址不可路由，
         // 入站文件传输到 fe80::…%en0 会连接失败（修复 #6 的回归保护）。
@@ -475,6 +520,7 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("== \"already_connected\""))
         XCTAssertTrue(source.contains("shouldFallbackToTransferRouteAfterControlReconnectFailure"))
         XCTAssertTrue(source.contains("case .noConnectableEndpoint"))
+        XCTAssertTrue(source.contains("case .noLiveControlRoute"))
         XCTAssertTrue(source.contains("macInitiatedTransfer=1"))
         XCTAssertTrue(source.contains("macReconnectControl="))
         XCTAssertTrue(source.contains("macReconnectRoute="))
@@ -489,6 +535,24 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("mac_smoke_reconnect_control_endpoint_missing"))
         XCTAssertTrue(source.contains("mac_smoke_reconnect_stable_identity_missing"))
         XCTAssertTrue(source.contains("mac_smoke_reconnect_transfer_route_timeout"))
+    }
+
+    func testRealDeviceFileTransferRequiresMacInitiatedReconnectByDefault() throws {
+        let script = try String(
+            contentsOf: URL(
+                fileURLWithPath: FileManager.default.currentDirectoryPath
+            ).appendingPathComponent(
+                "Scripts/run_real_device_file_transfer_smoke.sh"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(
+            script.contains(
+                "SKYBRIDGE_SMOKE_REQUIRE_MAC_INITIATED_RECONNECT:-1"
+            ),
+            "The release smoke must exercise a fresh Mac-initiated reconnect by default."
+        )
     }
 
     func testP2PDiscoveryDisconnectTracksInboundControlSessions() throws {

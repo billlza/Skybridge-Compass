@@ -565,6 +565,8 @@ public struct FileTransferView: View {
             var failedFiles: [URL] = []
             var failureMessages: [String] = []
             var requiresExplicitTargetSelection = false
+            var localNetworkPermissionDenied = false
+            var routeAvailabilityError: FileTransferRouteAvailabilityError?
 
             for fileURL in filesToSend {
                 do {
@@ -587,6 +589,13 @@ public struct FileTransferView: View {
                        case .ambiguousTarget = transferError {
                         requiresExplicitTargetSelection = true
                     }
+                    if let networkError = error as? FileTransferNetworkError,
+                       case .localNetworkPermissionDenied = networkError {
+                        localNetworkPermissionDenied = true
+                    }
+                    if let routeError = error as? FileTransferRouteAvailabilityError {
+                        routeAvailabilityError = routeError
+                    }
                     failedFiles.append(fileURL)
                     failureMessages.append("\(fileURL.lastPathComponent): \(error.localizedDescription)")
                     SkyBridgeLogger.ui.error("传输失败: \(error.localizedDescription, privacy: .private)")
@@ -599,10 +608,24 @@ public struct FileTransferView: View {
             if !failureMessages.isEmpty {
                 let details = failureMessages.prefix(3).joined(separator: "\n")
                 let suffix = failureMessages.count > 3 ? "\n..." : ""
-                let guidance = requiresExplicitTargetSelection
-                    ? "检测到多个已认证设备。为避免误发，请从目标设备的详情页发起传输。"
-                    : "设备离线或没有可用的已认证传输会话。待发送文件已保留，请重新连接后重试。"
-                transferErrorMessage = "\(guidance)\n\n\(details)\(suffix)"
+                let guidance: String
+                if localNetworkPermissionDenied {
+                    guidance = "macOS 已阻止 SkyBridge Compass Pro 访问本地网络。请在“系统设置 → 隐私与安全性 → 本地网络”中开启权限后重试。"
+                } else if requiresExplicitTargetSelection {
+                    guidance = "检测到多个已认证设备。为避免误发，请从目标设备的详情页发起传输。"
+                } else if let routeAvailabilityError {
+                    switch routeAvailabilityError {
+                    case .noAuthenticatedPeer:
+                        guidance = "目标设备尚未建立已认证 P2P 会话；这不代表设备离线。请先连接该设备后重试。"
+                    case .noLiveTransferRoute:
+                        guidance = "目标设备已认证，但当前 Bonjour 浏览周期没有可拨文件传输路由。请保持 iOS 在前台并刷新设备后重试。"
+                    }
+                } else {
+                    guidance = "文件传输连接失败，但不能据此判定设备离线。请检查连接详情后重试。"
+                }
+                transferErrorMessage =
+                    "\(guidance)\n待发送文件已保留，请重新连接后重试。\n\n" +
+                    "\(details)\(suffix)"
             }
         }
     }

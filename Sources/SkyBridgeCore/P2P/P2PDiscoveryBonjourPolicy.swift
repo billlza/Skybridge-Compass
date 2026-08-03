@@ -1,16 +1,18 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 enum P2PDiscoveryBonjourPolicy {
     nonisolated static func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
         // This list feeds a connector built with `NWParameters.tcp`. A UDP/QUIC advertisement
         // remains discovery evidence, but it is never a TCP dial route.
-        let allowedTypes: Set<String> = [BonjourInteropContract.controlServiceType]
         var seen = Set<String>()
         var ordered: [String] = []
 
         for rawType in rawTypes {
             let normalized = rawType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard allowedTypes.contains(normalized), isValidBonjourServiceType(normalized) else {
+            guard ApplePeerConnectivityPolicy.ServiceKind(serviceType: normalized) == .control,
+                  normalized == BonjourInteropContract.controlServiceType,
+                  isValidBonjourServiceType(normalized) else {
                 continue
             }
             if seen.insert(normalized).inserted {
@@ -26,6 +28,103 @@ enum P2PDiscoveryBonjourPolicy {
             return nil
         }
         return port
+    }
+
+    nonisolated static func sharedDialTarget(
+        for device: DiscoveredDevice,
+        serviceTypes: [String]
+    ) -> ApplePeerConnectivityPolicy.DialTarget {
+        var deviceIds: [String] = []
+        var seenDeviceIds = Set<String>()
+        func appendDeviceId(_ raw: String?) {
+            guard let raw,
+                  let deviceId = PeerTrustLookup.persistentDeviceId(from: raw),
+                  seenDeviceIds.insert(deviceId).inserted else {
+                return
+            }
+            deviceIds.append(deviceId)
+        }
+        appendDeviceId(device.deviceId)
+        appendDeviceId(device.uniqueIdentifier)
+        device.routeIdentifiers.forEach(appendDeviceId)
+
+        var routes: [ApplePeerConnectivityPolicy.BonjourRouteIdentity] = []
+        var seenRoutes = Set<ApplePeerConnectivityPolicy.BonjourRouteIdentity>()
+        for name in resolvedBonjourServiceNameCandidates(for: device) {
+            for serviceType in serviceTypes {
+                guard let route = ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+                    name: name,
+                    type: serviceType,
+                    domain: "local."
+                ), seenRoutes.insert(route).inserted else {
+                    continue
+                }
+                routes.append(route)
+            }
+        }
+
+        return ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: deviceIds,
+            protocolPublicKeyFingerprints: [device.pubKeyFP].compactMap { $0 },
+            routes: routes
+        )
+    }
+
+    nonisolated static func sharedRouteIdentity(
+        name: String,
+        type: String,
+        domain: String
+    ) -> ApplePeerConnectivityPolicy.BonjourRouteIdentity? {
+        ApplePeerConnectivityPolicy.BonjourRouteIdentity(
+            name: sanitizedBonjourServiceName(name),
+            type: type,
+            domain: domain
+        )
+    }
+
+    nonisolated static func advertisementPlatform(
+        for device: DiscoveredDevice
+    ) -> BonjourInteropProtocolContract.AdvertisementPlatform? {
+        let raw = device.platformName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        switch raw {
+        case "macos", "mac":
+            return .macOS
+        case "ios", "iphoneos", "iphone":
+            return .iOS
+        case "ipados", "ipad":
+            return .iPadOS
+        case "android":
+            return .android
+        case "windows":
+            return .windows
+        case "linux":
+            return .linux
+        default:
+            let presentation = [
+                device.platformName,
+                device.modelName,
+                device.name
+            ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+            if presentation.contains("ipad") {
+                return .iPadOS
+            }
+            if presentation.contains("iphone") || presentation.contains("ios") {
+                return .iOS
+            }
+            if presentation.contains("macbook")
+                || presentation.contains("imac")
+                || presentation.contains("mac mini")
+                || presentation.contains("mac studio")
+                || presentation.contains("mac pro") {
+                return .macOS
+            }
+            return nil
+        }
     }
 
     nonisolated static func isValidBonjourServiceType(_ raw: String) -> Bool {
@@ -320,16 +419,14 @@ enum P2PDiscoveryBonjourPolicy {
 
     nonisolated static func advertisedServicePort(from txt: [String: String], serviceType: String) -> Int? {
         let keys: [String]
-        switch serviceType {
-        case "_skybridge._tcp", "_skybridge._udp":
+        switch ApplePeerConnectivityPolicy.ServiceKind(serviceType: serviceType) {
+        case .control:
             keys = ["port", "skybridgePort", "p2pPort", "controlPort"]
-        case BonjourInteropContract.fileTransferServiceType,
-             BonjourInteropContract.legacyFileTransferServiceType:
+        case .fileTransfer:
             keys = ["transferPort", "fileTransferPort", "file_transfer_port", "port"]
-        case BonjourInteropContract.remoteControlServiceType,
-             BonjourInteropContract.legacyRemoteControlServiceType:
+        case .remoteControl:
             keys = ["remotePort", "remoteControlPort", "remote_port", "port"]
-        default:
+        case .unsupported:
             keys = ["port"]
         }
 

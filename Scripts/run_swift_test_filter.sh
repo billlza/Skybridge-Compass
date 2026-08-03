@@ -9,6 +9,11 @@ fi
 FILTER="$1"
 shift
 LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/skybridge-swift-test-filter.XXXXXX")"
+SWIFT_EXECUTABLE="${SKYBRIDGE_SWIFT_EXECUTABLE:-swift}"
+if [[ ! -x "${SWIFT_EXECUTABLE}" ]] && ! command -v "${SWIFT_EXECUTABLE}" >/dev/null 2>&1; then
+  echo "Swift executable is unavailable: ${SWIFT_EXECUTABLE}" >&2
+  exit 2
+fi
 
 cleanup() {
   rm -f "${LOG_FILE}"
@@ -16,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 set +e
-swift test --filter "${FILTER}" "$@" 2>&1 | tee "${LOG_FILE}"
+"${SWIFT_EXECUTABLE}" test --filter "${FILTER}" "$@" 2>&1 | tee "${LOG_FILE}"
 SWIFT_TEST_STATUS="${PIPESTATUS[0]}"
 set -e
 

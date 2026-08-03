@@ -333,7 +333,9 @@ struct SettingsView: View {
             )
         }
 
-        guard currentTier == .nativePQC || currentTier == .liboqsPQC,
+        guard currentTier == .qperiaptPQC
+                || currentTier == .nativePQC
+                || currentTier == .liboqsPQC,
               currentSuite.isPQCGroup
         else {
             return PQCPolicyStatusPresentation(
@@ -379,6 +381,8 @@ struct PQCSecuritySettingsView: View {
     @EnvironmentObject private var authManager: AuthenticationManager
     @StateObject private var pqcManager = PQCCryptoManager.instance
     @State private var errorMessage: String?
+    @State private var requestedProviderPreference: PQCProviderPreference = .mlkem
+    @State private var isApplyingProviderPreference = false
     @State private var requestedProtocolSigningAlgorithm =
         ProtocolSigningIdentityPolicy.requestedPQCAlgorithm()
     @State private var requestedSecureEnclave =
@@ -412,6 +416,59 @@ struct PQCSecuritySettingsView: View {
                 LabeledContent("当前套件", value: pqcManager.currentSuite.rawValue)
                 LabeledContent("Provider", value: pqcManager.providerInfo)
                 LabeledContent("安全层级", value: pqcManager.currentTier.rawValue)
+
+                let selectedProviderAvailability = pqcManager
+                    .providerAvailability(requestedProviderPreference)
+                Picker("首选 KEM / Provider", selection: $requestedProviderPreference) {
+                    ForEach(PQCProviderPreference.allCases) { preference in
+                        let availability = pqcManager.providerAvailability(preference)
+                        Text(
+                            "\(Self.providerPreferenceLabel(preference)) · " +
+                                (availability.isAvailable ? "可用" : "不可用")
+                        )
+                            .tag(preference)
+                    }
+                }
+
+                Button {
+                    applyProviderPreference()
+                } label: {
+                    if isApplyingProviderPreference {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("正在验证并切换…")
+                        }
+                    } else {
+                        Text("应用首选套件")
+                    }
+                }
+                .disabled(
+                    isApplyingProviderPreference
+                        || isApplyingProtocolIdentity
+                        || !selectedProviderAvailability.isAvailable
+                )
+
+                Text(selectedProviderAvailability.detail)
+                    .font(.footnote)
+                    .foregroundColor(
+                        selectedProviderAvailability.isAvailable
+                            ? .secondary
+                            : .orange
+                    )
+
+                if requestedProviderPreference == .qPeriaptBeta {
+                    Text("Q-Periapt ABI2 为策略绑定 Beta 路径，仅在生产策略会话已验证且主协议身份为 ML-DSA-65 时启用；不满足条件会拒绝并回滚。")
+                        .font(.footnote)
+                        .foregroundColor(
+                            requestedProtocolSigningAlgorithm == .mlDSA65
+                                ? .secondary
+                                : .orange
+                        )
+                } else if requestedProviderPreference == .xwingHybrid {
+                    Text("X-Wing 将 ML-KEM-768 与 X25519 组合；仅在本机 Apple PQC 运行时自检通过时启用。")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section("主协议身份签名") {
@@ -458,6 +515,7 @@ struct PQCSecuritySettingsView: View {
                 }
                 .disabled(
                     isApplyingProtocolIdentity
+                        || isApplyingProviderPreference
                         || (requestedProtocolSigningAlgorithm == .mlDSA87
                             && !Self.mlDSA87SoftwareAvailable)
                         || (requestedSecureEnclave
@@ -533,6 +591,7 @@ struct PQCSecuritySettingsView: View {
                     .onChange(of: pqcManager.enforcePQCHandshake) { _, _ in
                         reinitializePQCProvider()
                     }
+                    .disabled(isApplyingProviderPreference || isApplyingProtocolIdentity)
 
                 LabeledContent(
                     "允许经典降级（兼容旧设备）",
@@ -577,6 +636,7 @@ struct PQCSecuritySettingsView: View {
         .navigationTitle("后量子加密")
         .navigationBarTitleDisplayMode(.inline)
         .task {
+            requestedProviderPreference = PQCCryptoManager.currentProviderPreference()
             refreshProtocolIdentityPresentation()
         }
         .alert(
@@ -595,6 +655,37 @@ struct PQCSecuritySettingsView: View {
             }
         } message: {
             Text(errorMessage ?? "")
+        }
+    }
+
+    internal static func providerPreferenceLabel(
+        _ preference: PQCProviderPreference
+    ) -> String {
+        switch preference {
+        case .mlkem:
+            return "ML-KEM-768（标准）"
+        case .xwingHybrid:
+            return "X-Wing 混合加密"
+        case .qPeriaptBeta:
+            return "Q-Periapt ABI2（Beta）"
+        }
+    }
+
+    private func applyProviderPreference() {
+        let preference = requestedProviderPreference
+        isApplyingProviderPreference = true
+        Task { @MainActor in
+            defer { isApplyingProviderPreference = false }
+            do {
+                try await pqcManager.applyProviderPreference(preference)
+                requestedProviderPreference = PQCCryptoManager.currentProviderPreference()
+            } catch {
+                requestedProviderPreference = PQCCryptoManager.currentProviderPreference()
+                errorMessage = error.localizedDescription
+                SkyBridgeLogger.shared.error(
+                    "❌ PQC Provider 首选项应用失败: errorClass=\(String(reflecting: Swift.type(of: error)))"
+                )
+            }
         }
     }
     

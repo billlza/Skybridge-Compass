@@ -7,6 +7,12 @@ export GATE_NAME GATE_DOMAIN
 source "$(cd "$(dirname "$0")" && pwd)/_gate_common.sh"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
 
+XCODE_SWIFT_BIN="$(xcrun --find swift)"
+[[ -x "${XCODE_SWIFT_BIN}" ]] || {
+  echo "[source-quality] Xcode Swift toolchain executable is unavailable" >&2
+  exit 1
+}
+
 IOS_PROJECT="${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 IOS_TEST_LANE="${ROOT_DIR}/SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
@@ -95,19 +101,19 @@ run_check_strict_no_warnings \
   "swift-build" \
   "code" \
   "source-quality" \
-  swift build --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
+  "${XCODE_SWIFT_BIN}" build --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
 
 run_check_strict_no_warnings \
   "swift-test-localization-notification-isolation" \
   "code" \
   "source-quality" \
-  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
+  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 SKYBRIDGE_SWIFT_EXECUTABLE="${XCODE_SWIFT_BIN}" bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" SkyBridgeCoreTests.LocalizationManagerNotificationIsolationTests --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
 
 run_check_strict_no_warnings \
   "swift-test" \
   "code" \
   "source-quality" \
-  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" '.*' --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
+  env HOME="${SOURCE_QUALITY_TEST_HOME}" CFFIXED_USER_HOME="${SOURCE_QUALITY_TEST_HOME}" SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 SKYBRIDGE_SWIFT_EXECUTABLE="${XCODE_SWIFT_BIN}" bash "${ROOT_DIR}/Scripts/run_swift_test_filter.sh" '.*' --disable-automatic-resolution --disable-prefetching -Xswiftc -warnings-as-errors
 
 run_check_strict_no_warnings \
   "ios-debug-build" \

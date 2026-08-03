@@ -955,6 +955,124 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(contentSource.contains("Button(RuntimeLocalization.string(\"关闭\")) { onDecision(.reject) }"))
     }
 
+    @MainActor
+    func testPQCProviderPreferenceDecodingUsesOneDeterministicPriority() throws {
+        let suiteName = "P2PBootstrapPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(
+            PQCCryptoManager.currentProviderPreference(userDefaults: defaults),
+            .mlkem
+        )
+
+        defaults.set(
+            true,
+            forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
+        )
+        XCTAssertEqual(
+            PQCCryptoManager.currentProviderPreference(userDefaults: defaults),
+            .xwingHybrid
+        )
+
+        defaults.set(
+            true,
+            forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
+        )
+        XCTAssertEqual(
+            PQCCryptoManager.currentProviderPreference(userDefaults: defaults),
+            .qPeriaptBeta
+        )
+    }
+
+    @MainActor
+    func testPQCProviderAvailabilityDistinguishesEveryVisibleOption() {
+        let capability = CryptoProviderFactory.Capability(
+            hasApplePQC: true,
+            hasLiboqs: true,
+            hasQPeriapt: false,
+            hasAppleXWing: false,
+            osVersion: "test"
+        )
+
+        XCTAssertTrue(
+            PQCCryptoManager.providerAvailability(
+                .mlkem,
+                capability: capability,
+                qPeriaptOSAvailable: true,
+                qPeriaptIdentityEligible: true
+            ).isAvailable
+        )
+        XCTAssertFalse(
+            PQCCryptoManager.providerAvailability(
+                .xwingHybrid,
+                capability: capability,
+                qPeriaptOSAvailable: true,
+                qPeriaptIdentityEligible: true
+            ).isAvailable,
+            "General Apple PQC availability must not be mistaken for an X-Wing runtime proof."
+        )
+        XCTAssertFalse(
+            PQCCryptoManager.providerAvailability(
+                .qPeriaptBeta,
+                capability: capability,
+                qPeriaptOSAvailable: false,
+                qPeriaptIdentityEligible: true
+            ).isAvailable
+        )
+        XCTAssertFalse(
+            PQCCryptoManager.providerAvailability(
+                .qPeriaptBeta,
+                capability: capability,
+                qPeriaptOSAvailable: true,
+                qPeriaptIdentityEligible: false
+            ).isAvailable
+        )
+        XCTAssertTrue(
+            PQCCryptoManager.providerAvailability(
+                .qPeriaptBeta,
+                capability: capability,
+                qPeriaptOSAvailable: true,
+                qPeriaptIdentityEligible: true
+            ).isAvailable
+        )
+    }
+
+    func testPQCProviderPreferenceUIUsesTransactionalRuntimeApplication() throws {
+        let settingsSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/SettingsView.swift"
+        )
+        let managerSource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/PQCCryptoManager.swift"
+        )
+        let factorySource = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/CryptoProviderFactory.swift"
+        )
+
+        XCTAssertTrue(settingsSource.contains("X-Wing 混合加密"))
+        XCTAssertTrue(settingsSource.contains("Q-Periapt ABI2（Beta）"))
+        XCTAssertTrue(settingsSource.contains("availability.isAvailable ? \"可用\" : \"不可用\""))
+        XCTAssertTrue(settingsSource.contains("selectedProviderAvailability.detail"))
+        XCTAssertTrue(settingsSource.contains("try await pqcManager.applyProviderPreference(preference)"))
+        XCTAssertTrue(managerSource.contains("preference == .xwingHybrid"))
+        XCTAssertTrue(managerSource.contains("preference == .qPeriaptBeta"))
+        XCTAssertTrue(managerSource.contains("PQCProviderPreferenceError.qPeriaptRequiresMLDSA65"))
+        XCTAssertTrue(managerSource.contains("previousXWing"))
+        XCTAssertTrue(managerSource.contains("previousQPeriapt"))
+        XCTAssertTrue(managerSource.contains("try await initialize()"))
+        XCTAssertTrue(managerSource.contains("clearInMemoryKeyMaterial()"))
+        XCTAssertEqual(
+            factorySource.components(separatedBy: "\"Settings.PreferXWingHybrid\"").count - 1,
+            1,
+            "The iOS provider preference key must have one source of truth."
+        )
+        XCTAssertEqual(
+            factorySource.components(separatedBy: "\"Settings.PreferQPeriaptBeta\"").count - 1,
+            1,
+            "The iOS Q-Periapt preference key must have one source of truth."
+        )
+    }
+
     func testLegacyPQCVerificationDelegatesToExactAuthenticatedSessionTrustApproval() throws {
         let pqcSource = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/PQCCryptoManager.swift"
@@ -2127,7 +2245,12 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(endpointPolicySource.contains("liveBonjourControlEndpoints"))
         XCTAssertTrue(endpointPolicySource.contains("discards the"))
         XCTAssertTrue(endpointPolicySource.contains("live result's interface"))
-        XCTAssertTrue(endpointPolicySource.contains("liveRoute == advertisedRoute"))
+        XCTAssertTrue(
+            endpointPolicySource.contains(
+                "ApplePeerConnectivityPolicy.orderedEligibleClaimIndices("
+            )
+        )
+        XCTAssertTrue(endpointPolicySource.contains("provenance: .liveBrowser"))
         XCTAssertTrue(source.contains("selectedEndpointClass=\\(selectedEndpointClass)"))
         XCTAssertTrue(source.contains("selectedEndpointDirect=\\(selectedEndpointDirect ? 1 : 0)"))
         XCTAssertTrue(source.contains("selectedEndpointDirectLAN=\\(selectedEndpointDirectLAN ? 1 : 0)"))

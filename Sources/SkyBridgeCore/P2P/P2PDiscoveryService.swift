@@ -1755,31 +1755,31 @@ public class P2PDiscoveryService: BaseManager {
             serviceTypesToTry = [primaryServiceType]
         }
 
-        var bonjourEndpointAttempts = liveBonjourEndpointAttempts(
+        let requiresLiveAppleRoute =
+            ApplePeerConnectivityPolicy.requiresLiveBonjourRoute(
+                platform: P2PDiscoveryBonjourPolicy.advertisementPlatform(
+                    for: device
+                )
+            )
+        let bonjourEndpointAttempts = try await liveBonjourEndpointAttemptsAwaitingHydration(
             for: device,
             serviceTypes: serviceTypesToTry
         )
-        if shouldAttemptBonjourService {
-            for candidateServiceName in serviceNameCandidates where !candidateServiceName.isEmpty && !P2PDiscoveryBonjourPolicy.isLikelyIPAddress(candidateServiceName) {
-                for serviceType in serviceTypesToTry {
-                    bonjourEndpointAttempts.append(
-                        .service(
-                            name: candidateServiceName,
-                            type: serviceType,
-                            domain: serviceDomain,
-                            interface: nil
-                        )
-                    )
-                }
-            }
+        let freshBonjourHostFallbackEndpoints: [NWEndpoint]
+        if requiresLiveAppleRoute {
+            freshBonjourHostFallbackEndpoints = []
+        } else {
+            freshBonjourHostFallbackEndpoints = await makeFreshBonjourHostFallbackEndpoints(
+                serviceNameCandidates: shouldAttemptBonjourService ? serviceNameCandidates : [],
+                serviceTypes: serviceTypesToTry,
+                domain: serviceDomain
+            )
         }
-        let freshBonjourHostFallbackEndpoints = await makeFreshBonjourHostFallbackEndpoints(
-            serviceNameCandidates: shouldAttemptBonjourService ? serviceNameCandidates : [],
-            serviceTypes: serviceTypesToTry,
-            domain: serviceDomain
-        )
         try requireCurrentAttempt()
-        let hostFallbackEndpoints = makeHostFallbackEndpoints(device: device, portValue: portValue)
+        let hostFallbackEndpoints =
+            !requiresLiveAppleRoute || preferUSBRoute
+                ? makeHostFallbackEndpoints(device: device, portValue: portValue)
+                : []
 
         var endpointAttempts: [NWEndpoint] = []
         if disableDirectRoute {
@@ -1811,27 +1811,13 @@ public class P2PDiscoveryService: BaseManager {
             "p2p-connect-plan dialRef=\(dialReference) serviceCandidates=\(serviceNameCandidates.count) serviceEndpoints=\(bonjourEndpointAttempts.count) freshHostEndpoints=\(freshBonjourHostFallbackEndpoints.count) hostFallbackEndpoints=\(hostFallbackEndpoints.count) endpointOrder=\(Self.smokeEndpointPlanSummary(endpointAttempts))"
         )
 
-        // If type metadata is missing but we still have Bonjour identity, probe SkyBridge default service.
-        if endpointAttempts.isEmpty, shouldAttemptBonjourService {
-            for candidateServiceName in serviceNameCandidates where !candidateServiceName.isEmpty && !P2PDiscoveryBonjourPolicy.isLikelyIPAddress(candidateServiceName) {
-                endpointAttempts.append(
-                    .service(
-                        name: candidateServiceName,
-                        type: primaryServiceType,
-                        domain: serviceDomain,
-                        interface: nil
-                    )
-                )
-            }
-        }
-
         guard !endpointAttempts.isEmpty else {
             NetworkActivityLogStore.shared.record(
                 category: "p2p",
-                message: "connect failed device=\(deviceDiagnosticLabel) reason=no_connectable_endpoint",
+                message: "connect failed device=\(deviceDiagnosticLabel) reason=no_live_control_route",
                 level: "WARN"
             )
-            throw P2PDiscoveryError.noConnectableEndpoint
+            throw P2PDiscoveryError.noLiveControlRoute
         }
 
         try await ensureStrictPQCOutboundPreflightReady(
@@ -2127,7 +2113,11 @@ public class P2PDiscoveryService: BaseManager {
             let params = NWParameters(tls: tls, tcp: tcp)
             params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)
             params.allowLocalEndpointReuse = true
-            applyInterfacePreference(interfacePreference, to: params)
+            applyRouteOwnership(
+                endpoint: endpoint,
+                fallbackPreference: interfacePreference,
+                to: params
+            )
             if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
                 tcpOptions.enableKeepalive = true
                 tcpOptions.keepaliveIdle = 30
@@ -2145,7 +2135,11 @@ public class P2PDiscoveryService: BaseManager {
         let params = NWParameters.tcp
         params.includePeerToPeer = Self.shouldIncludePeerToPeer(for: endpoint)
         params.allowLocalEndpointReuse = true
-        applyInterfacePreference(interfacePreference, to: params)
+        applyRouteOwnership(
+            endpoint: endpoint,
+            fallbackPreference: interfacePreference,
+            to: params
+        )
         if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.enableKeepalive = true
             tcpOptions.keepaliveIdle = 30
@@ -2181,6 +2175,19 @@ public class P2PDiscoveryService: BaseManager {
         params.requiredInterfaceType = .wiredEthernet
     }
 
+    private func applyRouteOwnership(
+        endpoint: NWEndpoint,
+        fallbackPreference: InterfacePreference,
+        to parameters: NWParameters
+    ) {
+        if case .service(_, _, _, let observedInterface) = endpoint,
+           let observedInterface {
+            parameters.requiredInterface = observedInterface
+            return
+        }
+        applyInterfacePreference(fallbackPreference, to: parameters)
+    }
+
     private func resolvedTCPControlPort(for device: DiscoveredDevice) -> Int {
         P2PDiscoveryBonjourPolicy.tcpControlPort(from: device.portMap) ?? 0
     }
@@ -2193,22 +2200,50 @@ public class P2PDiscoveryService: BaseManager {
         for device: DiscoveredDevice,
         serviceTypes: [String]
     ) -> [NWEndpoint] {
-        let normalizedRoutes = Set(
-            ([device.uniqueIdentifier].compactMap { $0 } + device.routeIdentifiers)
-                .compactMap(P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching)
+        let target = P2PDiscoveryBonjourPolicy.sharedDialTarget(
+            for: device,
+            serviceTypes: serviceTypes
         )
-        guard !normalizedRoutes.isEmpty else { return [] }
 
-        var candidates: [(endpoint: NWEndpoint, priority: Int, key: String)] = []
+        var candidates: [(
+            endpoint: NWEndpoint,
+            matchStrength: ApplePeerConnectivityPolicy.MatchStrength,
+            interfacePriority: Int,
+            key: String
+        )] = []
         for serviceType in serviceTypes {
             guard let snapshot = browserResultSnapshots[serviceType] else { continue }
             for result in snapshot.results {
                 guard case .service(let name, let type, let domain, let reportedInterface) = result.endpoint,
                       type == serviceType,
-                      let routeIdentifier = bonjourIdentifier(from: result.endpoint),
-                      let normalizedRoute = P2PDiscoveryBonjourPolicy
-                        .normalizeIdentifierForMatching(routeIdentifier),
-                      normalizedRoutes.contains(normalizedRoute) else {
+                      let route = P2PDiscoveryBonjourPolicy.sharedRouteIdentity(
+                        name: name,
+                        type: type,
+                        domain: domain
+                      ),
+                      let advertisement = validatedAdvertisement(
+                        from: result,
+                        serviceType: serviceType
+                      ) else {
+                    continue
+                }
+                let projection = advertisement.skyBridgeProjection
+                let claim = ApplePeerConnectivityPolicy.RouteClaim(
+                    route: route,
+                    authority: .init(
+                        deviceId: projection?.deviceId,
+                        protocolPublicKeyFingerprint:
+                            projection?.protocolPublicKeyFingerprint,
+                        platform: projection?.platform
+                    ),
+                    provenance: .liveBrowser
+                )
+                guard case .eligible(let matchStrength) =
+                    ApplePeerConnectivityPolicy.match(
+                        target: target,
+                        claim: claim,
+                        requiredServiceKind: .control
+                    ) else {
                     continue
                 }
 
@@ -2228,6 +2263,7 @@ public class P2PDiscoveryService: BaseManager {
                     )
                     candidates.append((
                         endpoint,
+                        matchStrength,
                         Self.liveBonjourInterfacePriority(reportedInterface),
                         endpoint.debugDescription
                     ))
@@ -2241,6 +2277,7 @@ public class P2PDiscoveryService: BaseManager {
                         )
                         candidates.append((
                             endpoint,
+                            matchStrength,
                             Self.liveBonjourInterfacePriority(interface),
                             endpoint.debugDescription
                         ))
@@ -2252,12 +2289,172 @@ public class P2PDiscoveryService: BaseManager {
         var seen = Set<String>()
         return candidates
             .sorted {
-                if $0.priority != $1.priority { return $0.priority < $1.priority }
+                if $0.matchStrength != $1.matchStrength {
+                    return $0.matchStrength > $1.matchStrength
+                }
+                if $0.interfacePriority != $1.interfacePriority {
+                    return $0.interfacePriority < $1.interfacePriority
+                }
                 return $0.key < $1.key
             }
             .compactMap { candidate in
                 seen.insert(candidate.key).inserted ? candidate.endpoint : nil
             }
+    }
+
+    private func liveBonjourEndpointAttemptsAwaitingHydration(
+        for device: DiscoveredDevice,
+        serviceTypes: [String],
+        timeout: Duration = .seconds(3)
+    ) async throws -> [NWEndpoint] {
+        var endpoints = liveBonjourEndpointAttempts(
+            for: device,
+            serviceTypes: serviceTypes
+        )
+        guard endpoints.isEmpty else { return endpoints }
+
+        let target = P2PDiscoveryBonjourPolicy.sharedDialTarget(
+            for: device,
+            serviceTypes: serviceTypes
+        )
+        guard target.hasStrongIdentity || !target.routes.isEmpty else {
+            return []
+        }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(50))
+            endpoints = liveBonjourEndpointAttempts(
+                for: device,
+                serviceTypes: serviceTypes
+            )
+            if !endpoints.isEmpty {
+                logger.info(
+                    "✅ 当前 Bonjour generation 已水合可拨控制路由: count=\(endpoints.count, privacy: .public)"
+                )
+                return endpoints
+            }
+        }
+        try Task.checkCancellation()
+        logger.warning(
+            "⛔️ 当前 Bonjour generation 未提供 authority-bound 控制路由: reason=no_live_control_route"
+        )
+        return []
+    }
+
+    func liveFileTransferEndpointAttempts(
+        forPeerDeviceIds rawPeerDeviceIds: [String]
+    ) -> [NWEndpoint] {
+        let peerDeviceIds = rawPeerDeviceIds.compactMap {
+            PeerTrustLookup.persistentDeviceId(from: $0)
+        }
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: peerDeviceIds,
+            protocolPublicKeyFingerprints: [],
+            routes: []
+        )
+        guard target.hasStrongIdentity else { return [] }
+
+        let serviceTypes = [
+            BonjourInteropContract.fileTransferServiceType,
+            BonjourInteropContract.legacyFileTransferServiceType
+        ]
+        var candidates: [(
+            endpoint: NWEndpoint,
+            matchStrength: ApplePeerConnectivityPolicy.MatchStrength,
+            interfacePriority: Int,
+            key: String
+        )] = []
+        for serviceType in serviceTypes {
+            guard let snapshot = browserResultSnapshots[serviceType] else { continue }
+            for result in snapshot.results {
+                guard case .service(let name, let type, let domain, let reportedInterface) =
+                        result.endpoint,
+                      let route = P2PDiscoveryBonjourPolicy.sharedRouteIdentity(
+                        name: name,
+                        type: type,
+                        domain: domain
+                      ),
+                      let advertisement = validatedAdvertisement(
+                        from: result,
+                        serviceType: serviceType
+                      ) else {
+                    continue
+                }
+                let projection = advertisement.skyBridgeProjection
+                let claim = ApplePeerConnectivityPolicy.RouteClaim(
+                    route: route,
+                    authority: .init(
+                        deviceId: projection?.deviceId,
+                        protocolPublicKeyFingerprint:
+                            projection?.protocolPublicKeyFingerprint,
+                        platform: projection?.platform
+                    ),
+                    provenance: .liveBrowser
+                )
+                guard case .eligible(let matchStrength) =
+                    ApplePeerConnectivityPolicy.match(
+                        target: target,
+                        claim: claim,
+                        requiredServiceKind: .fileTransfer
+                    ) else {
+                    continue
+                }
+
+                let interfaces = Array(Set(result.interfaces)).sorted {
+                    let lhsPriority = Self.liveBonjourInterfacePriority($0)
+                    let rhsPriority = Self.liveBonjourInterfacePriority($1)
+                    if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+                    if $0.name != $1.name { return $0.name < $1.name }
+                    return $0.index < $1.index
+                }
+                if interfaces.isEmpty {
+                    let endpoint = NWEndpoint.service(
+                        name: name,
+                        type: type,
+                        domain: domain,
+                        interface: reportedInterface
+                    )
+                    candidates.append((
+                        endpoint,
+                        matchStrength,
+                        Self.liveBonjourInterfacePriority(reportedInterface),
+                        endpoint.debugDescription
+                    ))
+                } else {
+                    for interface in interfaces {
+                        let endpoint = NWEndpoint.service(
+                            name: name,
+                            type: type,
+                            domain: domain,
+                            interface: interface
+                        )
+                        candidates.append((
+                            endpoint,
+                            matchStrength,
+                            Self.liveBonjourInterfacePriority(interface),
+                            endpoint.debugDescription
+                        ))
+                    }
+                }
+            }
+        }
+
+        var seen = Set<String>()
+        return candidates.sorted {
+            if $0.matchStrength != $1.matchStrength {
+                return $0.matchStrength > $1.matchStrength
+            }
+            if $0.interfacePriority != $1.interfacePriority {
+                return $0.interfacePriority < $1.interfacePriority
+            }
+            return $0.key < $1.key
+        }
+        .compactMap { candidate in
+            seen.insert(candidate.key).inserted ? candidate.endpoint : nil
+        }
     }
 
     private nonisolated static func liveBonjourInterfacePriority(
@@ -2378,29 +2575,16 @@ public class P2PDiscoveryService: BaseManager {
         }
     }
 
-    private nonisolated static func isLocalNetworkPermissionDenied(_ error: NWError, path: NWPath?) -> Bool {
-        if #available(macOS 11.0, iOS 14.0, *),
-           path?.unsatisfiedReason == .localNetworkDenied {
-            return true
-        }
-        let details = [
-            String(describing: error),
-            (error as NSError).localizedDescription
-        ]
-        .joined(separator: " ")
-        .lowercased()
-        return details.contains("local network prohibited")
-            || details.contains("local network denied")
-            || details.contains("localnetworkdenied")
-    }
-
     private nonisolated static func bootstrapConnectionWaitingSummary(_ error: NWError, path: NWPath?) -> String {
         let nsError = error as NSError
         var fields = [
             "error_domain=\(nsError.domain)",
             "code=\(nsError.code)"
         ]
-        if Self.isLocalNetworkPermissionDenied(error, path: path) {
+        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+            error: error,
+            path: path
+        ) {
             fields.append("reason=local-network-permission-denied")
         }
         if #available(macOS 11.0, iOS 14.0, *),
@@ -2947,13 +3131,25 @@ public class P2PDiscoveryService: BaseManager {
                                 "bootstrap-control-waiting index=\(attemptIndex) endpointClass=\(Self.smokeEndpointClass(endpoint)) \(Self.bootstrapConnectionWaitingSummary(error, path: path))"
                             )
                         }
-                        if Self.isLocalNetworkPermissionDenied(error, path: path) {
+                        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                            error: error,
+                            path: path
+                        ) {
                             context.complete(.failure(P2PDiscoveryError.localNetworkPermissionDenied)) {
                                 connection.stateUpdateHandler = nil
                             }
                         }
                     case .failed(let error):
-                        context.complete(.failure(error)) {
+                        let failure: Error
+                        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                            error: error,
+                            path: connection.currentPath
+                        ) {
+                            failure = P2PDiscoveryError.localNetworkPermissionDenied
+                        } else {
+                            failure = error
+                        }
+                        context.complete(.failure(failure)) {
                             connection.stateUpdateHandler = nil
                         }
                     case .cancelled:
@@ -2976,9 +3172,17 @@ public class P2PDiscoveryService: BaseManager {
                         return
                     }
                     guard !Task.isCancelled else { return }
+                    let failure: Error
+                    if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                        path: connection.currentPath
+                    ) {
+                        failure = P2PDiscoveryError.localNetworkPermissionDenied
+                    } else {
+                        failure = P2PDiscoveryError.timeout
+                    }
                     connection.stateUpdateHandler = nil
                     connection.cancel()
-                    context.complete(.failure(P2PDiscoveryError.timeout))
+                    context.complete(.failure(failure))
                 }
             }
         } onCancel: {
@@ -6472,8 +6676,28 @@ public class P2PDiscoveryService: BaseManager {
                                 }
                             }
                         }
+                    case .waiting(let error):
+                        let path = connection.currentPath
+                        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                            error: error,
+                            path: path
+                        ) {
+                            context.complete(.failure(P2PDiscoveryError.localNetworkPermissionDenied)) {
+                                connection.stateUpdateHandler = nil
+                                connection.cancel()
+                            }
+                        }
                     case .failed(let error):
-                        context.complete(.failure(error)) {
+                        let failure: Error
+                        if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                            error: error,
+                            path: connection.currentPath
+                        ) {
+                            failure = P2PDiscoveryError.localNetworkPermissionDenied
+                        } else {
+                            failure = error
+                        }
+                        context.complete(.failure(failure)) {
                             connection.stateUpdateHandler = nil
                         }
                     case .cancelled:
@@ -6498,9 +6722,17 @@ public class P2PDiscoveryService: BaseManager {
                         return
                     }
                     guard !Task.isCancelled else { return }
+                    let failure: Error
+                    if NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                        path: connection.currentPath
+                    ) {
+                        failure = P2PDiscoveryError.localNetworkPermissionDenied
+                    } else {
+                        failure = P2PDiscoveryError.timeout
+                    }
                     connection.stateUpdateHandler = nil
                     connection.cancel()
-                    context.complete(.failure(P2PDiscoveryError.timeout))
+                    context.complete(.failure(failure))
                 }
             }
         } onCancel: {

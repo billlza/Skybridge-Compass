@@ -711,6 +711,8 @@ final class LocalP2PFileTransferSmokeHarness {
             switch discoveryError {
             case .noConnectableEndpoint:
                 return "mac_smoke_reconnect_control_endpoint_missing"
+            case .noLiveControlRoute:
+                return "mac_smoke_reconnect_live_control_route_missing"
             case .deviceNotConnected:
                 return "mac_smoke_reconnect_device_not_connected"
             case .connectionCancelled:
@@ -811,6 +813,9 @@ final class LocalP2PFileTransferSmokeHarness {
     private static func shouldFallbackToTransferRouteAfterControlReconnectFailure(_ error: Error) -> Bool {
         guard let discoveryError = error as? P2PDiscoveryError else { return false }
         if case .noConnectableEndpoint = discoveryError {
+            return true
+        }
+        if case .noLiveControlRoute = discoveryError {
             return true
         }
         return false

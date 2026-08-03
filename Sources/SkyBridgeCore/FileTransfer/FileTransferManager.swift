@@ -1493,6 +1493,25 @@ private struct RetryableActiveRouteConnectionError: Error {
     let underlying: Error
 }
 
+public enum FileTransferRouteAvailabilityError:
+    Error,
+    LocalizedError,
+    Sendable,
+    Equatable
+{
+    case noAuthenticatedPeer
+    case noLiveTransferRoute
+
+    public var errorDescription: String? {
+        switch self {
+        case .noAuthenticatedPeer:
+            return "未建立目标设备的已认证 P2P 会话"
+        case .noLiveTransferRoute:
+            return "已认证设备当前没有 authority-bound 文件传输路由"
+        }
+    }
+}
+
 /// 文件传输管理器 - 负责高速文件传输，支持分块传输和断点续传
 @MainActor
 public class FileTransferManager: BaseManager {
@@ -2412,11 +2431,7 @@ public class FileTransferManager: BaseManager {
 
         let routes = try await resolveActivePeerRoutesWithReadinessWait()
         guard !routes.isEmpty else {
-            throw NSError(
-                domain: "SkyBridge.FileTransfer",
-                code: -1001,
-                userInfo: [NSLocalizedDescriptionKey: "未建立可用 P2P 连接 (No Authenticated Peer or UDP Link)"]
-            )
+            throw await routeAvailabilityError()
         }
 
         try await sendFile(at: url, over: routes)
@@ -2437,12 +2452,8 @@ public class FileTransferManager: BaseManager {
             preferredDeviceName: preferredDeviceName
         )
         guard !routes.isEmpty else {
-            throw NSError(
-                domain: "SkyBridge.FileTransfer",
-                code: -1004,
-                userInfo: [
-                    NSLocalizedDescriptionKey: "未建立目标设备可用 P2P 连接 (No Authenticated Route for Target Peer)"
-                ]
+            throw await routeAvailabilityError(
+                matchingPeerIds: peerIds
             )
         }
 
@@ -2455,38 +2466,43 @@ public class FileTransferManager: BaseManager {
         public let ipAddress: String
         public let port: Int
         public let routeSource: String
+        public let liveEndpoint: NWEndpoint?
 
         public init(
             deviceId: String,
             deviceName: String,
             ipAddress: String,
             port: Int,
-            routeSource: String
+            routeSource: String,
+            liveEndpoint: NWEndpoint? = nil
         ) {
             self.deviceId = deviceId
             self.deviceName = deviceName
             self.ipAddress = ipAddress
             self.port = port
             self.routeSource = routeSource
+            self.liveEndpoint = liveEndpoint
         }
     }
 
     nonisolated static func activeRouteSourcePriority(_ routeSource: String) -> Int {
         switch routeSource {
-        case "authenticated-session":
+        case "live-bonjour-transfer":
             return 0
-        case "recent-authenticated-inbound-transfer":
+        case "authenticated-session":
             return 1
-        case "classic-session-registry":
+        case "recent-authenticated-inbound-transfer":
             return 2
-        case "presence:outbound":
+        case "classic-session-registry":
             return 3
-        case "presence:inbound":
+        case "presence:outbound":
             return 4
-        case "unified":
+        case "presence:inbound":
             return 5
-        default:
+        case "unified":
             return 6
+        default:
+            return 7
         }
     }
 
@@ -2512,7 +2528,9 @@ public class FileTransferManager: BaseManager {
         var selectedRoutes: [ActivePeerRoute] = []
 
         for route in routes {
-            let key = "\(route.deviceId.lowercased())|\(route.ipAddress.lowercased()):\(route.port)"
+            let endpointKey = route.liveEndpoint?.debugDescription
+                ?? "\(route.ipAddress.lowercased()):\(route.port)"
+            let key = "\(route.deviceId.lowercased())|\(endpointKey)"
             if let existingIndex = selectedIndexByEndpoint[key] {
                 let existing = selectedRoutes[existingIndex]
                 if activeRouteSourcePriority(route.routeSource) < activeRouteSourcePriority(existing.routeSource) {
@@ -2558,17 +2576,22 @@ public class FileTransferManager: BaseManager {
             deviceName: String,
             address: String?,
             port: Int = 8080,
-            routeSource: String
+            routeSource: String,
+            liveEndpoint: NWEndpoint? = nil
         ) {
-            guard let address = sanitizeAddress(address) else { return }
+            let sanitizedAddress = sanitizeAddress(address)
+            guard sanitizedAddress != nil || liveEndpoint != nil else { return }
             guard (1...65535).contains(port) else { return }
             routes.append(
                 ActivePeerRoute(
                     deviceId: deviceId,
                     deviceName: deviceName.isEmpty ? "P2P Device" : deviceName,
-                    ipAddress: address,
+                    ipAddress: sanitizedAddress
+                        ?? liveEndpoint?.debugDescription
+                        ?? "bonjour-service",
                     port: port,
-                    routeSource: routeSource
+                    routeSource: routeSource,
+                    liveEndpoint: liveEndpoint
                 )
             )
         }
@@ -2595,14 +2618,31 @@ public class FileTransferManager: BaseManager {
                 discoveredDevices: P2PDiscoveryService.shared.discoveredDevices,
                 unifiedDevices: UnifiedOnlineDeviceSnapshotAccess.snapshot()
             )
-            let port = ClassicTransferPeerResolutionPolicy.advertisedClassicTransferPort(in: candidate.capabilities)
+            let resolvedPort = ClassicTransferPeerResolutionPolicy.advertisedClassicTransferPort(in: candidate.capabilities)
                 ?? (resolved.transferPort > 0 ? resolved.transferPort : nil)
-            guard let port else { return }
+            let peerCandidates = [
+                candidate.resolvedPeerDeviceId,
+                candidate.matchDeviceId
+            ] + candidate.aliases
+            for endpoint in P2PDiscoveryService.shared
+                .liveFileTransferEndpointAttempts(
+                    forPeerDeviceIds: peerCandidates
+                ) {
+                appendRoute(
+                    deviceId: candidate.resolvedPeerDeviceId,
+                    deviceName: resolved.name.isEmpty ? "P2P Device" : resolved.name,
+                    address: resolved.displayAddress ?? endpointAddress,
+                    port: resolvedPort ?? Self.defaultClassicTransferPort,
+                    routeSource: "live-bonjour-transfer",
+                    liveEndpoint: endpoint
+                )
+            }
+            guard let resolvedPort else { return }
             appendRoute(
                 deviceId: candidate.resolvedPeerDeviceId,
                 deviceName: resolved.name.isEmpty ? "P2P Device" : resolved.name,
                 address: resolved.displayAddress ?? endpointAddress,
-                port: port,
+                port: resolvedPort,
                 routeSource: routeSource
             )
         }
@@ -2714,6 +2754,45 @@ public class FileTransferManager: BaseManager {
         return lastRoutes
     }
 
+    private func routeAvailabilityError(
+        matchingPeerIds targetPeerIds: [String] = []
+    ) async -> FileTransferRouteAvailabilityError {
+        let targetAliases = Self.normalizedActiveRouteAliases(
+            for: targetPeerIds
+        )
+        let liveConnections =
+            Array(P2PNetworkManager.shared.activeConnections.values)
+                + P2PDiscoveryService.shared
+                    .activeAuthenticatedConnectionsForClassicTransfer()
+                + (await ClassicTransferSessionRegistry.shared.activeConnections())
+        let liveCandidates = liveConnections
+            .filter { $0.status == .authenticated }
+            .map(Self.classicTransferAuthenticatedPeerCandidate(for:))
+        let snapshotCandidates = await ClassicTransferSessionRegistry.shared
+            .activeSessions()
+            .map(Self.classicTransferAuthenticatedPeerCandidate(for:))
+        let candidates = liveCandidates + snapshotCandidates
+
+        let hasMatchingAuthenticatedPeer: Bool
+        if targetAliases.isEmpty {
+            hasMatchingAuthenticatedPeer = !candidates.isEmpty
+        } else {
+            hasMatchingAuthenticatedPeer = candidates.contains { candidate in
+                let aliases = Self.normalizedActiveRouteAliases(
+                    for: [
+                        candidate.matchDeviceId,
+                        candidate.resolvedPeerDeviceId,
+                        candidate.endpointHostOrIP
+                    ].compactMap { $0 } + candidate.aliases
+                )
+                return !aliases.isDisjoint(with: targetAliases)
+            }
+        }
+        return hasMatchingAuthenticatedPeer
+            ? .noLiveTransferRoute
+            : .noAuthenticatedPeer
+    }
+
     private func sendFile(at url: URL, over routes: [ActivePeerRoute]) async throws {
         guard ClassicTransferRouteRetryPolicy.hasSingleTarget(
             deviceIDs: routes.map(\.deviceId)
@@ -2733,6 +2812,7 @@ public class FileTransferManager: BaseManager {
                     deviceName: route.deviceName,
                     ipAddress: route.ipAddress,
                     port: route.port,
+                    liveEndpoint: route.liveEndpoint,
                     wrapRetryableConnectionFailure: routes.count > 1
                 )
                 return
@@ -2839,6 +2919,7 @@ public class FileTransferManager: BaseManager {
             deviceName: deviceName,
             ipAddress: ipAddress,
             port: port,
+            liveEndpoint: nil,
             wrapRetryableConnectionFailure: false
         )
     }
@@ -2849,6 +2930,7 @@ public class FileTransferManager: BaseManager {
         deviceName: String,
         ipAddress: String,
         port: Int,
+        liveEndpoint: NWEndpoint?,
         wrapRetryableConnectionFailure: Bool
     ) async throws {
         guard (1...65535).contains(port) else {
@@ -2908,12 +2990,20 @@ public class FileTransferManager: BaseManager {
             do {
                 let connection: NWConnection
                 do {
-                    connection = try await networkService.connectToDevice(
-                        ipAddress: ipAddress,
-                        port: port,
-                        deviceId: deviceId,
-                        deviceName: deviceName
-                    )
+                    if let liveEndpoint {
+                        connection = try await networkService.connectToDevice(
+                            endpoint: liveEndpoint,
+                            deviceId: deviceId,
+                            deviceName: deviceName
+                        )
+                    } else {
+                        connection = try await networkService.connectToDevice(
+                            ipAddress: ipAddress,
+                            port: port,
+                            deviceId: deviceId,
+                            deviceName: deviceName
+                        )
+                    }
                 } catch {
                     try ensureCurrentLifecycle(transferLifecycleGeneration)
                     if wrapRetryableConnectionFailure,

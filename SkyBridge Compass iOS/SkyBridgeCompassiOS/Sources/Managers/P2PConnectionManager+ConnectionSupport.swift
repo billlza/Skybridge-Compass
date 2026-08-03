@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 enum NetworkContentProcessedError: Error, LocalizedError, Sendable, Equatable {
@@ -308,6 +309,31 @@ extension P2PConnectionManager {
 
     struct ConnectionReadyCancelledError: Error, LocalizedError {
         var errorDescription: String? { "连接在建立完成前被网络栈取消" }
+    }
+
+    struct ConnectionAttemptFailure: Error, LocalizedError, Sendable {
+        let code: ApplePeerConnectivityPolicy.ConnectionFailureCode
+
+        var errorDescription: String? {
+            switch code {
+            case .localNetworkPermissionDenied:
+                return "本地网络权限被系统拒绝"
+            case .transportWaiting:
+                return "网络路径仍在等待"
+            case .transportFailed:
+                return "网络传输连接失败"
+            case .transportTimedOut:
+                return "网络传输连接超时"
+            case .noLiveControlRoute:
+                return "当前 Bonjour 浏览周期没有可拨控制路由"
+            case .noLiveFileTransferRoute:
+                return "当前 Bonjour 浏览周期没有可拨文件传输路由"
+            case .noAuthenticatedPeer:
+                return "目标设备没有已认证会话"
+            case .ambiguousTarget:
+                return "目标设备不唯一"
+            }
+        }
     }
 
     struct ReadyConnectionResult {

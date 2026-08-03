@@ -453,7 +453,9 @@ enum QPeriaptIOSRuntime {
            preferredSuite == "q-periapt" || preferredSuite == "qperiapt" {
             return true
         }
-        return userDefaults.bool(forKey: "Settings.PreferQPeriaptBeta")
+        return userDefaults.bool(
+            forKey: PQCProviderPreferenceStorageKeys.preferQPeriaptBeta
+        )
     }
 
     /// ML-DSA-65 is part of the authenticated ABI2 policy contract. A current

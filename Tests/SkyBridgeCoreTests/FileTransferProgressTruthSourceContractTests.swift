@@ -64,6 +64,40 @@ final class FileTransferProgressTruthSourceContractTests: XCTestCase {
         )
     }
 
+    func testMacFileTransferPreservesLocalNetworkPermissionDiagnosis() throws {
+        let networkSource = try repositorySource(
+            "Sources/SkyBridgeCore/FileTransfer/FileTransferNetworkService.swift"
+        )
+        let viewSource = try repositorySource(
+            "Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift"
+        )
+
+        XCTAssertTrue(networkSource.contains("case .waiting(let error):"))
+        XCTAssertTrue(
+            networkSource.contains("NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(")
+        )
+        XCTAssertTrue(
+            networkSource.contains("FileTransferNetworkError.localNetworkPermissionDenied")
+        )
+        XCTAssertTrue(
+            viewSource.contains("case .localNetworkPermissionDenied = networkError")
+        )
+        XCTAssertTrue(
+            viewSource.contains("系统设置 → 隐私与安全性 → 本地网络")
+        )
+        XCTAssertTrue(
+            viewSource.contains("FileTransferRouteAvailabilityError")
+        )
+        XCTAssertTrue(
+            viewSource.contains("这不代表设备离线")
+        )
+        XCTAssertFalse(
+            viewSource.contains(
+                "设备离线或没有可用的已认证传输会话"
+            )
+        )
+    }
+
     private func repositorySource(_ relativePath: String) throws -> String {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

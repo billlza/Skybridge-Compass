@@ -296,7 +296,9 @@ public struct TwoAttemptHandshakeManager: Sendable {
             return true
         }
 
-        return UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid")
+        return UserDefaults.standard.bool(
+            forKey: PQCProviderPreferenceStorageKeys.preferXWingHybrid
+        )
     }
 
     private static func explicitlyPrefersXWingHybridSuite() -> Bool {
