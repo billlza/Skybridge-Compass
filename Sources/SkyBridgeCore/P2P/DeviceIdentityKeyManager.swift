@@ -335,6 +335,7 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
 #if DEBUG || SKYBRIDGE_TESTING
 enum DeviceIdentityTestingConfigurationError: Error, Sendable, Equatable {
     case emptyStorageNamespace
+    case requiresNamespacedInMemoryStore
 }
 #endif
 
@@ -518,6 +519,13 @@ public actor DeviceIdentityKeyManager {
             return KeychainConstants.mldsaService
         }
         return KeychainConstants.mldsaService + ".testing." + testingStorageNamespace
+    }
+
+    private var kemStorageService: String {
+        guard let testingStorageNamespace else {
+            return KeychainConstants.kemService
+        }
+        return KeychainConstants.kemService + ".testing." + testingStorageNamespace
     }
 
     private var mldsaMirrorDefaultsKey: String {
@@ -2306,51 +2314,41 @@ public actor DeviceIdentityKeyManager {
         let currentRecord = try loadKEMKeyRecord(
             account: tierAccount,
             suiteWireId: suiteWireId,
-            tier: tier
+            validationPolicy: .providerTier(tier)
         )
 
-        // Legacy records omitted the provider tier. They remain migration
-        // inputs even after a tiered winner exists so a competing old identity
-        // cannot be ignored on retry.
+        // Legacy records omitted the provider tier. Decode them against the
+        // union of supported persisted contracts before assigning exactly one
+        // provider namespace; validating them as the requested tier would turn
+        // a legitimate liboqs-to-Apple transition into apparent corruption.
         let legacyAccount = kemAccount(suiteWireId: suiteWireId, tier: nil)
         let legacyRecord = try loadKEMKeyRecord(
             account: legacyAccount,
             suiteWireId: suiteWireId,
-            tier: tier
+            validationPolicy: .untieredLegacy
         )
-        if let currentRecord {
-            try validateKEMRecord(
-                currentRecord,
-                suiteWireId: suiteWireId,
-                tier: tier
-            )
-            if let legacyRecord {
+        guard let legacyRecord else {
+            return currentRecord
+        }
+
+        let legacyTier = try providerTierForUntieredKEMRecord(
+            legacyRecord,
+            suiteWireId: suiteWireId
+        )
+        if legacyTier == tier {
+            if let currentRecord {
                 guard legacyRecord == currentRecord else {
                     throw DeviceIdentityAuthorityError
                         .immutableGenericPasswordConflict(
-                            service: KeychainConstants.kemService,
+                            service: kemStorageService,
                             account: legacyAccount
                         )
                 }
                 try deleteGenericPasswordItems(
-                    service: KeychainConstants.kemService,
+                    service: kemStorageService,
                     account: legacyAccount
                 )
-            }
-            return currentRecord
-        }
-
-        if let legacyRecord {
-            guard kemRecordMatchesProvider(
-                legacyRecord,
-                suiteWireId: suiteWireId,
-                tier: tier
-            ) else {
-                throw DeviceIdentityAuthorityError
-                    .immutableGenericPasswordConflict(
-                        service: KeychainConstants.kemService,
-                        account: legacyAccount
-                    )
+                return currentRecord
             }
             let winner = try saveKEMKeyRecord(
                 legacyRecord,
@@ -2358,19 +2356,156 @@ public actor DeviceIdentityKeyManager {
                 conflictPolicy: .requireExactCandidate
             )
             try deleteGenericPasswordItems(
-                service: KeychainConstants.kemService,
+                service: kemStorageService,
                 account: legacyAccount
             )
             return winner
         }
-        return nil
+
+        // A valid record from another provider is a separate KEM identity, not
+        // a conflicting candidate for this tier. Bind it to its uniquely
+        // inferred namespace before removing the ambiguous legacy slot. If a
+        // different winner already occupies that namespace, the exact-candidate
+        // policy still fails closed and leaves the legacy record intact.
+        _ = try saveKEMKeyRecord(
+            legacyRecord,
+            tier: legacyTier,
+            conflictPolicy: .requireExactCandidate
+        )
+        try deleteGenericPasswordItems(
+            service: kemStorageService,
+            account: legacyAccount
+        )
+        return currentRecord
     }
+
+    private func providerTierForUntieredKEMRecord(
+        _ record: KEMIdentityKeyRecord,
+        suiteWireId: UInt16
+    ) throws -> CryptoTier {
+        guard record.suiteWireId == suiteWireId else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "stored untiered KEM suite does not match its identity slot"
+            )
+        }
+        let matchingTiers = [
+            CryptoTier.qperiaptPQC,
+            .nativePQC,
+            .liboqsPQC
+        ].filter {
+            kemRecordMatchesProvider(
+                record,
+                suiteWireId: suiteWireId,
+                tier: $0
+            )
+        }
+        guard matchingTiers.count == 1, let matchedTier = matchingTiers.first else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "stored untiered KEM identity does not match exactly one provider contract"
+            )
+        }
+        return matchedTier
+    }
+
+    private enum KEMRecordValidationPolicy {
+        case providerTier(CryptoTier)
+        case untieredLegacy
+    }
+
+    private func validateDecodedKEMRecord(
+        _ record: KEMIdentityKeyRecord,
+        suiteWireId: UInt16,
+        policy: KEMRecordValidationPolicy
+    ) throws {
+        switch policy {
+        case .providerTier(let tier):
+            try validateKEMRecord(
+                record,
+                suiteWireId: suiteWireId,
+                tier: tier
+            )
+        case .untieredLegacy:
+            _ = try providerTierForUntieredKEMRecord(
+                record,
+                suiteWireId: suiteWireId
+            )
+        }
+    }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    internal func seedUntieredKEMIdentityRecordForTesting(
+        _ record: KEMIdentityKeyRecord
+    ) throws {
+        guard Self.useInMemoryKeychain, testingStorageNamespace != nil else {
+            throw DeviceIdentityTestingConfigurationError
+                .requiresNamespacedInMemoryStore
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        let data = try encoder.encode(record)
+        try validateDecodedKEMRecord(
+            record,
+            suiteWireId: record.suiteWireId,
+            policy: .untieredLegacy
+        )
+        let account = kemAccount(suiteWireId: record.suiteWireId, tier: nil)
+        let key = kemStorageService + "|" + account
+        let inserted = Self.inMemoryKEMLock.withLock { () -> Bool in
+            guard Self.inMemoryKEMStore[key] == nil else { return false }
+            Self.inMemoryKEMStore[key] = data
+            return true
+        }
+        guard inserted else {
+            throw DeviceIdentityKeyError.authorityConflict(
+                "test KEM identity slot already contains a record"
+            )
+        }
+    }
+
+    internal func storedKEMIdentityRecordForTesting(
+        suiteWireId: UInt16,
+        tier: CryptoTier?
+    ) throws -> KEMIdentityKeyRecord? {
+        guard Self.useInMemoryKeychain, testingStorageNamespace != nil else {
+            throw DeviceIdentityTestingConfigurationError
+                .requiresNamespacedInMemoryStore
+        }
+        let account = kemAccount(suiteWireId: suiteWireId, tier: tier)
+        let key = kemStorageService + "|" + account
+        guard let data = Self.inMemoryKEMLock.withLock({
+            Self.inMemoryKEMStore[key]
+        }) else {
+            return nil
+        }
+        let policy = tier.map(KEMRecordValidationPolicy.providerTier)
+            ?? .untieredLegacy
+        return try decodeKEMRecord(
+            data,
+            suiteWireId: suiteWireId,
+            validationPolicy: policy
+        )
+    }
+
+    internal func clearKEMIdentityRecordsForTesting() throws {
+        guard Self.useInMemoryKeychain, testingStorageNamespace != nil else {
+            throw DeviceIdentityTestingConfigurationError
+                .requiresNamespacedInMemoryStore
+        }
+        let keyPrefix = kemStorageService + "|"
+        Self.inMemoryKEMLock.withLock {
+            Self.inMemoryKEMStore = Self.inMemoryKEMStore.filter {
+                !$0.key.hasPrefix(keyPrefix)
+            }
+        }
+        cachedKEMPublicKeys.removeAll()
+    }
+    #endif
 
     private func deleteGenericPasswordItems(
         service: String,
         account: String
     ) throws {
-        if Self.useInMemoryKeychain, service == KeychainConstants.kemService {
+        if Self.useInMemoryKeychain, service == kemStorageService {
             Self.inMemoryKEMLock.withLock {
                 _ = Self.inMemoryKEMStore.removeValue(
                     forKey: service + "|" + account
@@ -2412,7 +2547,7 @@ public actor DeviceIdentityKeyManager {
         
         let account = kemAccount(suiteWireId: record.suiteWireId, tier: tier)
         if Self.useInMemoryKeychain {
-            let key = KeychainConstants.kemService + "|" + account
+            let key = kemStorageService + "|" + account
             let winnerData = Self.inMemoryKEMLock.withLock { () -> Data in
                 if let existing = Self.inMemoryKEMStore[key] {
                     return existing
@@ -2423,18 +2558,18 @@ public actor DeviceIdentityKeyManager {
             let winner = try decodeKEMRecord(
                 winnerData,
                 suiteWireId: record.suiteWireId,
-                tier: tier
+                validationPolicy: .providerTier(tier)
             )
             if conflictPolicy == .requireExactCandidate, winner != record {
                 throw DeviceIdentityKeyError.authorityConflict(
-                    "immutable Keychain winner differs for \(KeychainConstants.kemService)/\(account)"
+                    "immutable Keychain winner differs for \(kemStorageService)/\(account)"
                 )
             }
             return winner
         }
 
         let winnerData = try insertImmutableGenericPasswordCandidate(
-            service: KeychainConstants.kemService,
+            service: kemStorageService,
             account: account,
             data: data,
             conflictPolicy: conflictPolicy,
@@ -2442,25 +2577,25 @@ public actor DeviceIdentityKeyManager {
                 _ = try self.decodeKEMRecord(
                     encoded,
                     suiteWireId: record.suiteWireId,
-                    tier: tier
+                    validationPolicy: .providerTier(tier)
                 )
             },
             equivalent: { lhs, rhs in
                 try self.decodeKEMRecord(
                     lhs,
                     suiteWireId: record.suiteWireId,
-                    tier: tier
+                    validationPolicy: .providerTier(tier)
                 ) == self.decodeKEMRecord(
                     rhs,
                     suiteWireId: record.suiteWireId,
-                    tier: tier
+                    validationPolicy: .providerTier(tier)
                 )
             }
         )
         return try decodeKEMRecord(
             winnerData,
             suiteWireId: record.suiteWireId,
-            tier: tier
+            validationPolicy: .providerTier(tier)
         )
     }
 
@@ -2479,10 +2614,10 @@ public actor DeviceIdentityKeyManager {
     private func loadKEMKeyRecord(
         account: String,
         suiteWireId: UInt16,
-        tier: CryptoTier
+        validationPolicy: KEMRecordValidationPolicy
     ) throws -> KEMIdentityKeyRecord? {
         if Self.useInMemoryKeychain {
-            let key = KeychainConstants.kemService + "|" + account
+            let key = kemStorageService + "|" + account
             Self.inMemoryKEMLock.lock()
             let data = Self.inMemoryKEMStore[key]
             Self.inMemoryKEMLock.unlock()
@@ -2490,28 +2625,28 @@ public actor DeviceIdentityKeyManager {
             return try decodeKEMRecord(
                 data,
                 suiteWireId: suiteWireId,
-                tier: tier
+                validationPolicy: validationPolicy
             )
         }
         guard let data = try readGenericPasswordData(
-            service: KeychainConstants.kemService,
+            service: kemStorageService,
             account: account,
             validate: { encoded in
                 _ = try self.decodeKEMRecord(
                     encoded,
                     suiteWireId: suiteWireId,
-                    tier: tier
+                    validationPolicy: validationPolicy
                 )
             },
             equivalent: { lhs, rhs in
                 try self.decodeKEMRecord(
                     lhs,
                     suiteWireId: suiteWireId,
-                    tier: tier
+                    validationPolicy: validationPolicy
                 ) == self.decodeKEMRecord(
                     rhs,
                     suiteWireId: suiteWireId,
-                    tier: tier
+                    validationPolicy: validationPolicy
                 )
             }
         ) else {
@@ -2521,19 +2656,23 @@ public actor DeviceIdentityKeyManager {
         return try decodeKEMRecord(
             data,
             suiteWireId: suiteWireId,
-            tier: tier
+            validationPolicy: validationPolicy
         )
     }
 
     private func decodeKEMRecord(
         _ data: Data,
         suiteWireId: UInt16,
-        tier: CryptoTier
+        validationPolicy: KEMRecordValidationPolicy
     ) throws -> KEMIdentityKeyRecord {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
         let record = try decoder.decode(KEMIdentityKeyRecord.self, from: data)
-        try validateKEMRecord(record, suiteWireId: suiteWireId, tier: tier)
+        try validateDecodedKEMRecord(
+            record,
+            suiteWireId: suiteWireId,
+            policy: validationPolicy
+        )
         return record
     }
 

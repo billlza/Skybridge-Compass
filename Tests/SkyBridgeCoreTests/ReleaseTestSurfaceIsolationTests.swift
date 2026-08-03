@@ -201,6 +201,14 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
                 ]
             ),
             .init(
+                relativePath: "Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift",
+                markers: [
+                    "func seedUntieredKEMIdentityRecordForTesting(",
+                    "func storedKEMIdentityRecordForTesting(",
+                    "func clearKEMIdentityRecordsForTesting()"
+                ]
+            ),
+            .init(
                 relativePath: "Sources/SkyBridgeCore/P2P/DiscoveryTransport.swift",
                 markers: [
                     "public actor InMemoryDiscoveryTransport",

@@ -264,6 +264,100 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
         #endif
     }
 
+    func testUntieredLiboqsKEMMigratesWithoutBlockingNativeIdentity() async throws {
+        let context = try DeviceIdentityKeychainTestContext()
+        let manager = context.manager
+        addTeardownBlock {
+            try await manager.clearKEMIdentityRecordsForTesting()
+            try context.reset()
+        }
+
+        let legacyRecord = KEMIdentityKeyRecord(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0x31, count: 1_184),
+            privateKey: Data(repeating: 0x42, count: 2_400),
+            createdAt: Date(timeIntervalSince1970: 1_735_689_600)
+        )
+        try await manager.seedUntieredKEMIdentityRecordForTesting(legacyRecord)
+
+        let generatedKeyPair = try Self.nativeMLKEMKeyPair(
+            publicByte: 0xA5,
+            privateByte: 0x5A
+        )
+        let provider = DeterministicNativeMLKEMProvider(
+            generatedKeyPair: generatedKeyPair
+        )
+        let publicKey = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        let untieredRecord = try await manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            tier: nil
+        )
+        let migratedLiboqsRecord = try await manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            tier: .liboqsPQC
+        )
+        let nativeRecord = try await manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            tier: .nativePQC
+        )
+
+        XCTAssertEqual(publicKey, generatedKeyPair.publicKey.bytes)
+        XCTAssertNil(untieredRecord)
+        XCTAssertEqual(migratedLiboqsRecord, legacyRecord)
+        XCTAssertEqual(nativeRecord?.publicKey, generatedKeyPair.publicKey.bytes)
+    }
+
+    func testUntieredSameTierKEMConflictStillFailsClosed() async throws {
+        let context = try DeviceIdentityKeychainTestContext()
+        let manager = context.manager
+        addTeardownBlock {
+            try await manager.clearKEMIdentityRecordsForTesting()
+            try context.reset()
+        }
+
+        let generatedKeyPair = try Self.nativeMLKEMKeyPair(
+            publicByte: 0xA5,
+            privateByte: 0x5A
+        )
+        let provider = DeterministicNativeMLKEMProvider(
+            generatedKeyPair: generatedKeyPair
+        )
+        _ = try await manager.getKEMPublicKey(
+            for: .mlkem768MLDSA65,
+            provider: provider
+        )
+        let conflictingLegacyRecord = KEMIdentityKeyRecord(
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0xC3, count: 1_184),
+            privateKey: Data(repeating: 0xD4, count: 96),
+            createdAt: Date(timeIntervalSince1970: 1_735_689_601)
+        )
+        try await manager.seedUntieredKEMIdentityRecordForTesting(
+            conflictingLegacyRecord
+        )
+
+        do {
+            _ = try await manager.getKEMPublicKey(
+                for: .mlkem768MLDSA65,
+                provider: provider
+            )
+            XCTFail("A different untiered identity for the same provider tier must fail closed")
+        } catch DeviceIdentityAuthorityError.immutableGenericPasswordConflict {
+            let survivingLegacyRecord = try await manager
+                .storedKEMIdentityRecordForTesting(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    tier: nil
+                )
+            XCTAssertEqual(
+                survivingLegacyRecord,
+                conflictingLegacyRecord
+            )
+        }
+    }
+
     func testAppleKEMIdentitySlotsRemainSuiteCorrectInBothLookupOrders() async throws {
         #if HAS_APPLE_PQC_SDK
         guard #available(macOS 26.0, iOS 26.0, *) else {
@@ -354,6 +448,24 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
         )
     }
 
+    private static func nativeMLKEMKeyPair(
+        publicByte: UInt8,
+        privateByte: UInt8
+    ) throws -> KeyPair {
+        try KeyPair(
+            publicKey: KeyMaterial(
+                suite: .mlkem768MLDSA65,
+                usage: .keyExchange,
+                bytes: Data(repeating: publicByte, count: 1_184)
+            ),
+            privateKey: KeyMaterial(
+                suite: .mlkem768MLDSA65,
+                usage: .keyExchange,
+                bytes: Data(repeating: privateByte, count: 96)
+            )
+        )
+    }
+
     private func repositorySource(_ relativePath: String) throws -> String {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -363,5 +475,58 @@ final class DeviceIdentityKeyManagerPropertyTests: XCTestCase {
             contentsOf: repoRoot.appendingPathComponent(relativePath),
             encoding: .utf8
         )
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+private struct DeterministicNativeMLKEMProvider: CryptoProvider, Sendable {
+    let providerName = "DeterministicNativeMLKEM"
+    let tier: CryptoTier = .nativePQC
+    let activeSuite: CryptoSuite = .mlkem768MLDSA65
+    let supportedSuites: [CryptoSuite] = [.mlkem768MLDSA65]
+    let generatedKeyPair: KeyPair
+
+    func supportsSuite(_ suite: CryptoSuite) -> Bool {
+        supportedSuites.contains { $0.wireId == suite.wireId }
+    }
+
+    func hpkeSeal(
+        plaintext: Data,
+        recipientPublicKey: Data,
+        info: Data
+    ) async throws -> HPKESealedBox {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.hpkeSeal"
+        )
+    }
+
+    func hpkeOpen(
+        sealedBox: HPKESealedBox,
+        privateKey: SecureBytes,
+        info: Data
+    ) async throws -> Data {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.hpkeOpen"
+        )
+    }
+
+    func sign(data: Data, using keyHandle: SigningKeyHandle) async throws -> Data {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.sign"
+        )
+    }
+
+    func verify(
+        data: Data,
+        signature: Data,
+        publicKey: Data
+    ) async throws -> Bool {
+        throw CryptoProviderError.notImplemented(
+            "DeterministicNativeMLKEMProvider.verify"
+        )
+    }
+
+    func generateKeyPair(for usage: KeyUsage) async throws -> KeyPair {
+        generatedKeyPair
     }
 }
