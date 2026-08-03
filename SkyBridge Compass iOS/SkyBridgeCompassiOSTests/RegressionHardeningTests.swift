@@ -5337,7 +5337,7 @@ final class RegressionHardeningTests: XCTestCase {
       fileTransferBody.range(of: "ConnectableAddressCanonicalizer.isRoutableLANAddress")?.lowerBound
     )
     let transferBonjour = try XCTUnwrap(
-      fileTransferBody.range(of: "transferBonjourServiceIdentity")?.lowerBound
+      fileTransferBody.range(of: "liveBonjourServiceEndpoints")?.lowerBound
     )
     let transferLinkLocal = try XCTUnwrap(
       fileTransferBody.range(of: "ConnectableAddressCanonicalizer.isLinkLocal")?.lowerBound
@@ -5349,6 +5349,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertLessThan(transferLanDirect, transferBonjour)
     XCTAssertLessThan(transferBonjour, transferLinkLocal)
     XCTAssertLessThan(transferLinkLocal, transferActivePeer)
+    XCTAssertFalse(fileTransferBody.contains("interface: nil"))
+    XCTAssertTrue(fileTransferBody.contains("provenance: .liveBrowser"))
+    XCTAssertTrue(fileTransferBody.contains("provenance: .authenticatedHost"))
     XCTAssertTrue(
       fileTransferSource.contains(
         "parameters.includePeerToPeer = FileTransferLANRoutePolicy.shouldIncludePeerToPeer(for: endpoint)"))
@@ -5362,8 +5365,9 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(fileTransferSource.contains("private static func resolvedRouteRejection("))
     XCTAssertTrue(fileTransferRoutePolicySource.contains("unverified Bonjour file-transfer route rejected"))
     XCTAssertTrue(fileTransferRoutePolicySource.contains("resolved peer-to-peer file-transfer route rejected"))
+    XCTAssertTrue(fileTransferRoutePolicySource.contains("provenance.isDialEligible"))
     XCTAssertTrue(fileTransferSource.contains("connect_route_rejected"))
-    XCTAssertTrue(fileTransferSource.contains("file-transfer-route-ready requestedAddressClass="))
+    XCTAssertTrue(fileTransferSource.contains("file-transfer-route-ready provenance="))
     XCTAssertTrue(
       fileTransferSource.contains(
         "resolvedAddressClass=\\(FileTransferLANRoutePolicy.routeAddressClass(for: resolvedEndpoint))"))

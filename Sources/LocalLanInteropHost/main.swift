@@ -22,6 +22,10 @@ private final class LocalLanInteropHostCoordinator {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER"] == "1"
     }
 
+    private var requiresMacInitiatedReconnectSmoke: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_MAC_INITIATED_RECONNECT"] == "1"
+    }
+
     private var expectedHandshakeSuite: String {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -345,9 +349,11 @@ private final class LocalLanInteropHostCoordinator {
                         if sawClassicHandshake && sawRekey && normalizedSuite == "X-WING" {
                             if expectsFileTransferSmoke {
                                 do {
-                                    try await performBidirectionalFileTransferSmoke(reporter: reporter)
+                                    let successFields = try await performFileTransferSmokeSequence(
+                                        reporter: reporter
+                                    )
                                     reporter.append(
-                                        "success peer=\(sanitize(newestConnection.id)) suite=X-Wing bootstrapRekey=1 fileTransfer=1"
+                                        "success peer=\(sanitize(newestConnection.id)) suite=X-Wing bootstrapRekey=1 \(successFields)"
                                     )
                                 } catch {
                                     reporter.append(fileTransferFailureLine(for: error))
@@ -365,9 +371,11 @@ private final class LocalLanInteropHostCoordinator {
                               Date().timeIntervalSince(stableSince) >= 1.0 {
                         if expectsFileTransferSmoke {
                             do {
-                                try await performBidirectionalFileTransferSmoke(reporter: reporter)
+                                let successFields = try await performFileTransferSmokeSequence(
+                                    reporter: reporter
+                                )
                                 reporter.append(
-                                    "success peer=\(sanitize(newestConnection.id)) suite=\(sanitize(newestConnection.suite)) handshakeOnly=1 fileTransfer=1"
+                                    "success peer=\(sanitize(newestConnection.id)) suite=\(sanitize(newestConnection.suite)) handshakeOnly=1 \(successFields)"
                                 )
                             } catch {
                                 reporter.append(fileTransferFailureLine(for: error))
@@ -626,9 +634,29 @@ private final class LocalLanInteropHostCoordinator {
         return "mac_smoke_unclassified_\(sanitizePhase(nsError.domain))_\(nsError.code)"
     }
 
+    private func performFileTransferSmokeSequence(
+        reporter: SmokeStatusReporter
+    ) async throws -> String {
+        let peer = try await performBidirectionalFileTransferSmoke(reporter: reporter)
+        guard requiresMacInitiatedReconnectSmoke else {
+            return "fileTransfer=1"
+        }
+
+        let reconnectResult = try await performMacInitiatedReconnectSmoke(
+            peer: peer,
+            reporter: reporter
+        )
+        return """
+        fileTransfer=1 macInitiatedTransfer=1 \
+        macReconnect=\(reconnectResult.controlReconnect ? 1 : 0) \
+        macReconnectControl=\(reconnectResult.controlReconnect ? 1 : 0) \
+        macReconnectRoute=\(sanitize(reconnectResult.route))
+        """
+    }
+
     private func performBidirectionalFileTransferSmoke(
         reporter: SmokeStatusReporter
-    ) async throws {
+    ) async throws -> MacFileTransferSmokePeerContext {
         let inboundName = "ios-smoke-\(fileTransferRunID).txt"
         let outboundName = "mac-smoke-\(fileTransferRunID).txt"
 
@@ -690,6 +718,273 @@ private final class LocalLanInteropHostCoordinator {
             port: route.port
         )
         reporter.append("file-transfer outbound-complete name=\(sanitize(outboundName)) sha256=\(outboundHash)")
+        return MacFileTransferSmokePeerContext(
+            deviceId: inboundTransfer.deviceId,
+            deviceName: inboundTransfer.deviceName
+        )
+    }
+
+    // This executable and the signed-app harness are separate process adapters.
+    // Their reconnect sequence is parity-locked by FileTransferRouteResolutionTests;
+    // route ownership, identity, and trust decisions remain in the shared product services.
+    private func performMacInitiatedReconnectSmoke(
+        peer: MacFileTransferSmokePeerContext,
+        reporter: SmokeStatusReporter
+    ) async throws -> MacInitiatedReconnectSmokeResult {
+        let outboundName = "mac-reconnect-smoke-\(fileTransferRunID).txt"
+        reporter.append(
+            "mac-reconnect discovery-start peer=\(sanitize(peer.deviceId)) name=\(sanitize(peer.deviceName ?? "-"))"
+        )
+
+        _ = await p2pDiscoveryService.disconnectFromDevice(peer.deviceId)
+        try await Task.sleep(for: .seconds(2))
+
+        if let target = try await waitForReconnectTarget(peer: peer, timeoutSeconds: 30) {
+            do {
+                return try await performMacInitiatedControlReconnectTransfer(
+                    peer: peer,
+                    target: target,
+                    outboundName: outboundName,
+                    reporter: reporter
+                )
+            } catch {
+                guard Self.shouldFallbackToTransferRouteAfterControlReconnectFailure(error) else {
+                    throw error
+                }
+                reporter.append(
+                    """
+                    mac-reconnect control-connect-unavailable \
+                    phase=\(sanitizePhase(fileTransferFailurePhase(for: error))) \
+                    peer=\(sanitize(peer.deviceId)) error=\(sanitize(error.localizedDescription))
+                    """
+                )
+                return try await performMacInitiatedTransferRouteReconnect(
+                    peer: peer,
+                    outboundName: outboundName,
+                    reporter: reporter
+                )
+            }
+        }
+
+        reporter.append("mac-reconnect control-discovery-timeout peer=\(sanitize(peer.deviceId))")
+        return try await performMacInitiatedTransferRouteReconnect(
+            peer: peer,
+            outboundName: outboundName,
+            reporter: reporter
+        )
+    }
+
+    private func performMacInitiatedControlReconnectTransfer(
+        peer: MacFileTransferSmokePeerContext,
+        target: DiscoveredDevice,
+        outboundName: String,
+        reporter: SmokeStatusReporter
+    ) async throws -> MacInitiatedReconnectSmokeResult {
+        reporter.append(
+            """
+            mac-reconnect target id=\(target.id.uuidString) deviceId=\(sanitize(target.deviceId ?? "-")) \
+            unique=\(sanitize(target.uniqueIdentifier ?? "-")) name=\(sanitize(target.name))
+            """
+        )
+        reporter.append("mac-reconnect connect-start")
+        try await connectToDeviceForMacReconnect(target, peer: peer, reporter: reporter)
+        reporter.append("mac-reconnect connected")
+
+        let outboundURL = try makeSmokeTransferFile(
+            fileName: outboundName,
+            contents: """
+            role=mac-reconnect
+            run=\(fileTransferRunID)
+            sentAt=\(ISO8601DateFormatter().string(from: Date()))
+            target=\(target.deviceId ?? target.uniqueIdentifier ?? target.id.uuidString)
+            """
+        )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
+        let reconnectPeerIds = Self.reconnectPeerIds(peer: peer, target: target)
+        let routeProbe = await waitForActiveRouteProbe(
+            matchingPeerIds: reconnectPeerIds,
+            preferredDeviceName: target.name,
+            timeoutSeconds: 15.0,
+            disallowedRouteSource: "presence:inbound"
+        )
+        if let routeProbe {
+            reporter.append(
+                """
+                mac-reconnect outbound-route-probe source=\(sanitize(routeProbe.routeSource)) \
+                device=\(sanitize(routeProbe.deviceId)) host=\(sanitize(routeProbe.ipAddress)) port=\(routeProbe.port)
+                """
+            )
+            if routeProbe.routeSource == "presence:inbound" {
+                throw NSError(
+                    domain: "SkyBridge.Smoke",
+                    code: 2011,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Mac 重连后的首选文件路由仍是旧 inbound presence，拒绝伪通过"
+                    ]
+                )
+            }
+        } else {
+            reporter.append("mac-reconnect outbound-route-probe missing")
+        }
+
+        try await fileTransferManager.sendFileToActivePeer(
+            at: outboundURL,
+            matchingPeerIds: reconnectPeerIds,
+            preferredDeviceName: target.name
+        )
+        reporter.append(
+            "mac-reconnect outbound-complete name=\(sanitize(outboundName)) sha256=\(outboundHash)"
+        )
+        return MacInitiatedReconnectSmokeResult(
+            route: "control:\(routeProbe?.routeSource ?? "active-peer")",
+            controlReconnect: true
+        )
+    }
+
+    private func connectToDeviceForMacReconnect(
+        _ target: DiscoveredDevice,
+        peer: MacFileTransferSmokePeerContext,
+        reporter: SmokeStatusReporter
+    ) async throws {
+        let maxAttempts = 6
+        var lastAlreadyConnected: Error?
+        for attempt in 1...maxAttempts {
+            do {
+                try await p2pDiscoveryService.connectToDevice(target)
+                return
+            } catch {
+                guard Self.isAlreadyConnectedHandshakeRejection(error) else {
+                    throw error
+                }
+                lastAlreadyConnected = error
+                reporter.append(
+                    """
+                    mac-reconnect already-connected \
+                    peer=\(sanitize(peer.deviceId)) action=wait-remote-cleanup attempt=\(attempt)
+                    """
+                )
+                if attempt < maxAttempts {
+                    try await Task.sleep(for: .seconds(2))
+                }
+            }
+        }
+        throw lastAlreadyConnected ?? HandshakeError.failed(.peerRejected(message: "already_connected"))
+    }
+
+    private func performMacInitiatedTransferRouteReconnect(
+        peer: MacFileTransferSmokePeerContext,
+        outboundName: String,
+        reporter: SmokeStatusReporter
+    ) async throws -> MacInitiatedReconnectSmokeResult {
+        guard let stablePeerDeviceId = Self.stableBonjourTargetDeviceId(peer.deviceId) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 2012,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Mac 主动回连缺少稳定 iOS deviceId，拒绝使用弱 Bonjour/name 路由: \(peer.deviceId)"
+                ]
+            )
+        }
+
+        reporter.append(
+            "mac-reconnect transfer-route-discovery-start device=\(sanitize(stablePeerDeviceId)) name=\(sanitize(peer.deviceName ?? "-"))"
+        )
+        guard let transferRoute = await BonjourFileTransferRouteResolver().resolve(
+            targetDeviceId: stablePeerDeviceId,
+            preferredName: nil,
+            timeoutSeconds: 12.0
+        ) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 2013,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "Mac 主动回连未发现带稳定 deviceId 的 iOS 文件传输路由: \(stablePeerDeviceId)"
+                ]
+            )
+        }
+
+        let routeDeviceId = transferRoute.deviceId ?? stablePeerDeviceId
+        reporter.append(
+            """
+            mac-reconnect transfer-route-target source=bonjour-transfer \
+            device=\(sanitize(routeDeviceId)) host=\(sanitize(transferRoute.host)) \
+            port=\(transferRoute.port) name=\(sanitize(transferRoute.name))
+            """
+        )
+
+        let outboundURL = try makeSmokeTransferFile(
+            fileName: outboundName,
+            contents: """
+            role=mac-reconnect
+            run=\(fileTransferRunID)
+            sentAt=\(ISO8601DateFormatter().string(from: Date()))
+            target=\(peer.deviceId)
+            routeSource=bonjour-transfer
+            """
+        )
+        let outboundHash = try Self.sha256Hex(url: outboundURL)
+        reporter.append(
+            """
+            mac-reconnect outbound-route-probe source=bonjour-transfer \
+            device=\(sanitize(routeDeviceId)) host=\(sanitize(transferRoute.host)) port=\(transferRoute.port)
+            """
+        )
+        try await fileTransferManager.sendFile(
+            at: outboundURL,
+            to: peer.deviceId,
+            deviceName: transferRoute.name,
+            ipAddress: transferRoute.host,
+            port: transferRoute.port
+        )
+        reporter.append(
+            "mac-reconnect outbound-complete name=\(sanitize(outboundName)) sha256=\(outboundHash)"
+        )
+        return MacInitiatedReconnectSmokeResult(route: "bonjour-transfer", controlReconnect: false)
+    }
+
+    private func waitForActiveRouteProbe(
+        matchingPeerIds peerIds: [String],
+        preferredDeviceName: String?,
+        timeoutSeconds: TimeInterval,
+        disallowedRouteSource: String? = nil
+    ) async -> FileTransferManager.ActivePeerRoute? {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var lastDisallowedRoute: FileTransferManager.ActivePeerRoute?
+        while Date() < deadline {
+            let route = await fileTransferManager.resolveActivePeerRoutes(
+                matchingPeerIds: peerIds,
+                preferredDeviceName: preferredDeviceName
+            ).first
+            if let route {
+                if let disallowedRouteSource, route.routeSource == disallowedRouteSource {
+                    lastDisallowedRoute = route
+                    try? await Task.sleep(for: .milliseconds(250))
+                    continue
+                }
+                return route
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return lastDisallowedRoute
+    }
+
+    private func waitForReconnectTarget(
+        peer: MacFileTransferSmokePeerContext,
+        timeoutSeconds: TimeInterval
+    ) async throws -> DiscoveredDevice? {
+        p2pDiscoveryService.startDiscovery()
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if let target = Self.bestReconnectTarget(
+                from: p2pDiscoveryService.discoveredDevices,
+                peer: peer
+            ) {
+                return target
+            }
+            await p2pDiscoveryService.refreshDevices()
+            try? await Task.sleep(for: .milliseconds(750))
+        }
+        return nil
     }
 
     private static func stableBonjourTargetDeviceId(_ raw: String) -> String? {
@@ -705,6 +1000,166 @@ private final class LocalLanInteropHostCoordinator {
             return String(trimmed.dropFirst("id:".count))
         }
         return trimmed
+    }
+
+    private static func shouldFallbackToTransferRouteAfterControlReconnectFailure(
+        _ error: Error
+    ) -> Bool {
+        guard let discoveryError = error as? P2PDiscoveryError else { return false }
+        if case .noConnectableEndpoint = discoveryError {
+            return true
+        }
+        if case .noLiveControlRoute = discoveryError {
+            return true
+        }
+        return false
+    }
+
+    private static func isAlreadyConnectedHandshakeRejection(_ error: Error) -> Bool {
+        guard let handshakeError = error as? HandshakeError,
+              case .failed(.peerRejected(let message)) = handshakeError else {
+            return false
+        }
+        return message.trimmingCharacters(in: .whitespacesAndNewlines) == "already_connected"
+    }
+
+    private static func reconnectPeerIds(
+        peer: MacFileTransferSmokePeerContext,
+        target: DiscoveredDevice
+    ) -> [String] {
+        let stableInboundPeerId = stableBonjourTargetDeviceId(peer.deviceId)
+        let stableTargetDeviceId = stableBonjourTargetDeviceId(target.deviceId ?? "")
+        let candidates: [String?] = [
+            stableInboundPeerId,
+            stableTargetDeviceId,
+            target.uniqueIdentifier,
+            target.id.uuidString
+        ]
+        return candidates.compactMap { raw -> String? in
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return trimmed
+        }
+    }
+
+    private static func bestReconnectTarget(
+        from devices: [DiscoveredDevice],
+        peer: MacFileTransferSmokePeerContext
+    ) -> DiscoveredDevice? {
+        let peerAliases = Set(
+            reconnectAliasCandidates(for: peer.deviceId)
+                + reconnectAliasCandidates(for: stableBonjourTargetDeviceId(peer.deviceId))
+        )
+        let name = normalizedDeviceName(peer.deviceName)
+        let eligible = devices.filter { !$0.isLocalDevice }
+
+        let idMatches = eligible.filter { device in
+            !peerAliases.isDisjoint(
+                with: reconnectAliasCandidates(for: device.deviceId)
+                    + reconnectAliasCandidates(for: device.uniqueIdentifier)
+                    + reconnectAliasCandidates(for: device.id.uuidString)
+                    + reconnectAliasCandidates(for: device.ipv4)
+                    + reconnectAliasCandidates(for: device.ipv6)
+            )
+        }
+        if let match = preferredConnectableDevice(from: idMatches) {
+            return match
+        }
+
+        guard peerAliases.isEmpty, let name else {
+            return nil
+        }
+        let nameMatches = eligible.filter { normalizedDeviceName($0.name) == name }
+        return preferredConnectableDevice(from: nameMatches)
+    }
+
+    private static func preferredConnectableDevice(
+        from devices: [DiscoveredDevice]
+    ) -> DiscoveredDevice? {
+        devices
+            .sorted { left, right in
+                let leftScore = reconnectTargetScore(left)
+                let rightScore = reconnectTargetScore(right)
+                if leftScore != rightScore {
+                    return leftScore > rightScore
+                }
+                return left.name < right.name
+            }
+            .first
+    }
+
+    private static func reconnectTargetScore(_ device: DiscoveredDevice) -> Int {
+        var score = 0
+        if device.services.contains("_skybridge._tcp") { score += 100 }
+        if device.portMap["_skybridge._tcp"] != nil { score += 50 }
+        if device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            score += 25
+        }
+        if device.uniqueIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            score += 10
+        }
+        if device.ipv4?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            score += 5
+        }
+        if device.ipv6?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            score += 5
+        }
+        return score
+    }
+
+    private static func reconnectAliasCandidates(for raw: String?) -> [String] {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return []
+        }
+
+        var values: [String] = []
+        func append(_ value: String?) {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                return
+            }
+            values.append(value.lowercased())
+        }
+
+        append(raw)
+        let lowered = raw.lowercased()
+        if lowered.hasPrefix("id:") {
+            append(String(raw.dropFirst(3)))
+        } else {
+            append("id:\(raw)")
+        }
+        if lowered.hasPrefix("recent:") {
+            append(String(raw.dropFirst("recent:".count)))
+        }
+        if lowered.hasPrefix("host:") {
+            append(
+                String(raw.dropFirst("host:".count))
+                    .split(separator: "%", maxSplits: 1)
+                    .first
+                    .map(String.init)
+            )
+        } else if raw.contains(":") || raw.split(separator: ".").count == 4 {
+            append("host:\(raw)")
+            append(
+                "host:\(raw.split(separator: "%", maxSplits: 1).first.map(String.init) ?? raw)"
+            )
+        }
+        return Array(Set(values))
+    }
+
+    private static func normalizedDeviceName(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        for suffix in [" 📱", " 🍎"] where value.hasSuffix(suffix) {
+            value = String(value.dropLast(suffix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value.isEmpty ? nil : value.lowercased()
     }
 
     private func makeSmokeTransferFile(fileName: String, contents: String) throws -> URL {
@@ -759,6 +1214,16 @@ private final class LocalLanInteropHostCoordinator {
             userInfo: [NSLocalizedDescriptionKey: "等待传输完成超时: \(fileName)"]
         )
     }
+}
+
+private struct MacFileTransferSmokePeerContext {
+    let deviceId: String
+    let deviceName: String?
+}
+
+private struct MacInitiatedReconnectSmokeResult {
+    let route: String
+    let controlReconnect: Bool
 }
 
 private struct BonjourFileTransferRoute {

@@ -204,7 +204,7 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         )
     }
 
-    func testRejectsUnverifiedBonjourAndPeerToPeerRoutes() {
+    func testRejectsUnverifiedPeerRoutesAndAcceptsProvenanceBoundRoutes() {
         let bonjour = NWEndpoint.service(
             name: "Mac",
             type: DiscoveredDevice.fileTransferServiceType,
@@ -240,6 +240,20 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
                 resolvedEndpoint: linkLocalHost
             ),
             "resolved peer-to-peer file-transfer route rejected: requested=\(String(describing: bonjour)) resolved=\(String(describing: linkLocalHost))"
+        )
+        XCTAssertNil(
+            FileTransferLANRoutePolicy.resolvedRouteRejection(
+                requestedEndpoint: bonjour,
+                resolvedEndpoint: linkLocalHost,
+                provenance: .liveBrowser
+            )
+        )
+        XCTAssertNil(
+            FileTransferLANRoutePolicy.resolvedRouteRejection(
+                requestedEndpoint: linkLocalHost,
+                resolvedEndpoint: linkLocalHost,
+                provenance: .authenticatedHost
+            )
         )
     }
 
@@ -518,7 +532,7 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
             )
         )
 
-        let receiveStart = try XCTUnwrap(managerSource.range(of: "    func receiveFile(\n"))
+        let receiveStart = try XCTUnwrap(managerSource.range(of: "    func receiveFile("))
         let receiveEnd = try XCTUnwrap(
             managerSource.range(
                 of: "    /// 取消传输",

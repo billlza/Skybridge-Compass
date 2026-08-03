@@ -1,5 +1,11 @@
 import Foundation
 import Network
+import SkyBridgeProtocolCore
+
+struct FileTransferEndpointCandidate {
+    let endpoint: NWEndpoint
+    let provenance: ApplePeerConnectivityPolicy.RouteProvenance
+}
 
 enum FileTransferLANRoutePolicy {
     static func shouldIncludePeerToPeer(for endpoint: NWEndpoint) -> Bool {
@@ -9,11 +15,14 @@ enum FileTransferLANRoutePolicy {
 
     static func resolvedRouteRejection(
         requestedEndpoint: NWEndpoint,
-        resolvedEndpoint: NWEndpoint?
+        resolvedEndpoint: NWEndpoint?,
+        provenance: ApplePeerConnectivityPolicy.RouteProvenance = .persistedMetadata
     ) -> String? {
         if case .hostPort(let host, _) = requestedEndpoint,
            ConnectableAddressCanonicalizer.prefersPeerToPeer(for: String(describing: host)) {
-            return "requested peer-to-peer file-transfer route rejected: requested=\(String(describing: requestedEndpoint))"
+            guard provenance.isDialEligible else {
+                return "requested peer-to-peer file-transfer route rejected: requested=\(String(describing: requestedEndpoint))"
+            }
         }
 
         guard let resolvedEndpoint else {
@@ -29,7 +38,10 @@ enum FileTransferLANRoutePolicy {
 
         let resolvedHostText = String(describing: resolvedHost)
         if ConnectableAddressCanonicalizer.prefersPeerToPeer(for: resolvedHostText) {
-            return "resolved peer-to-peer file-transfer route rejected: requested=\(String(describing: requestedEndpoint)) resolved=\(String(describing: resolvedEndpoint))"
+            guard provenance.isDialEligible else {
+                return "resolved peer-to-peer file-transfer route rejected: requested=\(String(describing: requestedEndpoint)) resolved=\(String(describing: resolvedEndpoint))"
+            }
+            return nil
         }
 
         if case .service = requestedEndpoint,

@@ -10,6 +10,7 @@ import Foundation
 import Network
 import CryptoKit
 import ActivityKit
+import enum SkyBridgeProtocolCore.ApplePeerConnectivityPolicy
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import class SkyBridgeProtocolCore.ClassicTransferChunkCryptoWorker
@@ -378,11 +379,12 @@ public class FileTransferManager: ObservableObject {
         return resolved
     }
 
-    private func makeTransferEndpointCandidates(for device: DiscoveredDevice) async throws -> [NWEndpoint] {
-        let transferServiceType = DiscoveredDevice.fileTransferServiceType
+    private func makeTransferEndpointCandidates(for device: DiscoveredDevice) async throws -> [FileTransferEndpointCandidate] {
         let explicitTransferPort = preferredTransferPort(for: device)
         let hasActivePeerSession = activePeerSessionExists(for: device)
-        var endpoints: [NWEndpoint] = []
+        let hostProvenance: ApplePeerConnectivityPolicy.RouteProvenance =
+            hasActivePeerSession ? .authenticatedHost : .persistedMetadata
+        var endpoints: [FileTransferEndpointCandidate] = []
         var seen = Set<String>()
         let directIP = bestIPAddress(for: device)
         let resolvedIP = await resolveTransferIPAddress(for: device)
@@ -395,6 +397,7 @@ public class FileTransferManager: ObservableObject {
                     ip,
                     port: port,
                     reason: "lan-direct",
+                    provenance: hostProvenance,
                     to: &endpoints,
                     seen: &seen
                 )
@@ -407,32 +410,21 @@ public class FileTransferManager: ObservableObject {
         ) {
             appendTransferEndpoint(
                 endpoint,
+                provenance: .liveBrowser,
                 to: &endpoints,
                 seen: &seen
             )
         }
 
-        if let bonjour = transferBonjourServiceIdentity(for: device) {
-            appendTransferEndpoint(
-                .service(
-                    name: bonjour.name,
-                    type: transferServiceType,
-                    domain: bonjour.domain,
-                    interface: nil
-                ),
-                to: &endpoints,
-                seen: &seen
-            )
-        }
-
-        if let port = explicitTransferPort {
+        if hasActivePeerSession, let port = explicitTransferPort {
             for ip in [directIP, resolvedIP]
                 .compactMap({ $0 })
                 .filter({ ConnectableAddressCanonicalizer.isLinkLocal($0) }) {
                 appendTransferHostEndpoint(
                     ip,
                     port: port,
-                    reason: "link-local-fallback",
+                    reason: "authenticated-link-local",
+                    provenance: .authenticatedHost,
                     to: &endpoints,
                     seen: &seen
                 )
@@ -449,6 +441,7 @@ public class FileTransferManager: ObservableObject {
                     activePeerIP,
                     port: port,
                     reason: "active-peer-fallback",
+                    provenance: .authenticatedHost,
                     to: &endpoints,
                     seen: &seen
                 )
@@ -489,14 +482,16 @@ public class FileTransferManager: ObservableObject {
         _ ip: String,
         port: UInt16,
         reason: String,
-        to endpoints: inout [NWEndpoint],
+        provenance: ApplePeerConnectivityPolicy.RouteProvenance,
+        to endpoints: inout [FileTransferEndpointCandidate],
         seen: inout Set<String>
     ) {
         SkyBridgeLogger.shared.info(
-            "📡 文件传输候选地址: reason=\(reason) port=\(port) routeClass=\(ConnectableAddressCanonicalizer.routeClass(ip)) peerToPeer=\(ConnectableAddressCanonicalizer.prefersPeerToPeer(for: ip))"
+            "📡 文件传输候选地址: reason=\(reason) port=\(port) routeClass=\(ConnectableAddressCanonicalizer.routeClass(ip)) peerToPeer=\(ConnectableAddressCanonicalizer.prefersPeerToPeer(for: ip)) provenance=\(provenance.rawValue)"
         )
         appendTransferEndpoint(
             .hostPort(host: .init(ip), port: .init(integerLiteral: port)),
+            provenance: provenance,
             to: &endpoints,
             seen: &seen
         )
@@ -504,12 +499,13 @@ public class FileTransferManager: ObservableObject {
 
     private func appendTransferEndpoint(
         _ endpoint: NWEndpoint,
-        to endpoints: inout [NWEndpoint],
+        provenance: ApplePeerConnectivityPolicy.RouteProvenance,
+        to endpoints: inout [FileTransferEndpointCandidate],
         seen: inout Set<String>
     ) {
         let key = String(describing: endpoint)
         guard seen.insert(key).inserted else { return }
-        endpoints.append(endpoint)
+        endpoints.append(.init(endpoint: endpoint, provenance: provenance))
     }
 
     private func hasAdvertisedTransferService(for device: DiscoveredDevice) -> Bool {
@@ -599,7 +595,12 @@ public class FileTransferManager: ObservableObject {
 
     private func ensureClassicTransferIdentityBridgeReady(for device: DiscoveredDevice) async throws {
         let bridgeKey = Self.normalizedTransferIdentity(device.id)
-        let wasPreviouslyConfirmed = classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] != nil
+        let wasPreviouslyConfirmed =
+            classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] != nil
+        if connectionManager.hasCurrentPairingIdentityExchangeActivity(with: device.id) {
+            classicTransferIdentityBridgeConfirmedAtByDeviceId[bridgeKey] = Date()
+            return
+        }
         let since = Date()
 
         do {
@@ -1968,7 +1969,7 @@ public class FileTransferManager: ObservableObject {
     // MARK: - Private Methods - Network
 
     /// 创建连接
-    private func createConnection(toAnyOf endpoints: [NWEndpoint]) async throws -> NWConnection {
+    private func createConnection(toAnyOf endpoints: [FileTransferEndpointCandidate]) async throws -> NWConnection {
         guard !endpoints.isEmpty else {
             throw FileTransferError.networkStageFailed(
                 stage: "connect_no_endpoint_candidates",
@@ -1978,7 +1979,8 @@ public class FileTransferManager: ObservableObject {
         }
 
         var lastError: Error?
-        for (index, endpoint) in endpoints.enumerated() {
+        for (index, candidate) in endpoints.enumerated() {
+            let endpoint = candidate.endpoint
             let endpointDescription = String(describing: endpoint)
             let addressClass = FileTransferLANRoutePolicy.routeAddressClass(for: endpoint)
             let peerToPeer = FileTransferLANRoutePolicy.shouldIncludePeerToPeer(for: endpoint)
@@ -1986,11 +1988,14 @@ public class FileTransferManager: ObservableObject {
                 "🔗 文件传输连接候选[\(index + 1)/\(endpoints.count)]: addressClass=\(addressClass) peerToPeer=\(peerToPeer)"
             )
             SkyBridgeDiagnosticTrace.appendStatus(
-                "file-transfer-route candidate=\(index + 1)/\(endpoints.count) addressClass=\(addressClass) peerToPeer=\(peerToPeer) endpoint=\(FileTransferLANRoutePolicy.statusToken(endpointDescription))"
+                "file-transfer-route candidate=\(index + 1)/\(endpoints.count) addressClass=\(addressClass) peerToPeer=\(peerToPeer) provenance=\(candidate.provenance.rawValue) endpoint=\(FileTransferLANRoutePolicy.statusToken(endpointDescription))"
             )
 
             do {
-                let connection = try await createConnection(to: endpoint)
+                let connection = try await createConnection(
+                    to: endpoint,
+                    provenance: candidate.provenance
+                )
                 SkyBridgeLogger.shared.info(
                     "✅ 文件传输连接就绪: addressClass=\(addressClass) peerToPeer=\(peerToPeer)"
                 )
@@ -2014,7 +2019,10 @@ public class FileTransferManager: ObservableObject {
         )
     }
 
-    private func createConnection(to endpoint: NWEndpoint) async throws -> NWConnection {
+    private func createConnection(
+        to endpoint: NWEndpoint,
+        provenance: ApplePeerConnectivityPolicy.RouteProvenance
+    ) async throws -> NWConnection {
         let endpointDescription = String(describing: endpoint)
         let parameters = NWParameters.tcp
         parameters.includePeerToPeer = FileTransferLANRoutePolicy.shouldIncludePeerToPeer(for: endpoint)
@@ -2048,13 +2056,14 @@ public class FileTransferManager: ObservableObject {
                 switch state {
                 case .ready:
                     let resolvedEndpoint = connection.currentPath?.remoteEndpoint
-                    let routeReadyLine = "file-transfer-route-ready requestedAddressClass=\(FileTransferLANRoutePolicy.routeAddressClass(for: endpoint)) resolvedAddressClass=\(FileTransferLANRoutePolicy.routeAddressClass(for: resolvedEndpoint)) resolvedPeerToPeer=\(FileTransferLANRoutePolicy.routePrefersPeerToPeer(for: resolvedEndpoint)) requested=\(FileTransferLANRoutePolicy.statusToken(endpointDescription)) resolved=\(FileTransferLANRoutePolicy.statusToken(FileTransferLANRoutePolicy.routeDescription(for: resolvedEndpoint)))"
+                    let routeReadyLine = "file-transfer-route-ready provenance=\(provenance.rawValue) requestedAddressClass=\(FileTransferLANRoutePolicy.routeAddressClass(for: endpoint)) resolvedAddressClass=\(FileTransferLANRoutePolicy.routeAddressClass(for: resolvedEndpoint)) resolvedPeerToPeer=\(FileTransferLANRoutePolicy.routePrefersPeerToPeer(for: resolvedEndpoint)) requested=\(FileTransferLANRoutePolicy.statusToken(endpointDescription)) resolved=\(FileTransferLANRoutePolicy.statusToken(FileTransferLANRoutePolicy.routeDescription(for: resolvedEndpoint)))"
                     SkyBridgeLogger.shared.info(routeReadyLine)
                     SkyBridgeDiagnosticTrace.appendStatus(routeReadyLine)
                     SkyBridgeDiagnosticTrace.append(routeReadyLine)
                     if let rejection = FileTransferLANRoutePolicy.resolvedRouteRejection(
                         requestedEndpoint: endpoint,
-                        resolvedEndpoint: resolvedEndpoint
+                        resolvedEndpoint: resolvedEndpoint,
+                        provenance: provenance
                     ) {
                         once.run {
                             connection.stateUpdateHandler = nil

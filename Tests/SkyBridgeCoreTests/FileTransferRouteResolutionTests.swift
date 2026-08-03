@@ -485,64 +485,85 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
     func testMacReconnectSmokeWaitsForNonInboundPresenceRouteBeforeFailing() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let source = try String(
+        let signedAppSource = try String(
             contentsOf: root.appendingPathComponent(
                 "Sources/SkyBridgeCompassApp/LocalP2PFileTransferSmokeHarness.swift"
             ),
             encoding: .utf8
         )
+        let swiftPMHostSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/LocalLanInteropHost/main.swift"
+            ),
+            encoding: .utf8
+        )
 
-        XCTAssertTrue(source.contains("disallowedRouteSource: \"presence:inbound\""))
-        XCTAssertTrue(source.contains("timeoutSeconds: 15.0"))
-        XCTAssertTrue(source.contains("var lastDisallowedRoute: FileTransferManager.ActivePeerRoute?"))
-        XCTAssertTrue(source.contains("route.routeSource == disallowedRouteSource"))
-        XCTAssertTrue(source.contains("return lastDisallowedRoute"))
-        XCTAssertTrue(source.contains("mac_smoke_stale_inbound_presence_route"))
+        for source in [signedAppSource, swiftPMHostSource] {
+            XCTAssertTrue(source.contains("disallowedRouteSource: \"presence:inbound\""))
+            XCTAssertTrue(source.contains("timeoutSeconds: 15.0"))
+            XCTAssertTrue(source.contains("var lastDisallowedRoute: FileTransferManager.ActivePeerRoute?"))
+            XCTAssertTrue(source.contains("route.routeSource == disallowedRouteSource"))
+            XCTAssertTrue(source.contains("return lastDisallowedRoute"))
+            XCTAssertTrue(source.contains("mac_smoke_stale_inbound_presence_route"))
+        }
     }
 
     func testMacReconnectSmokeUsesStrongTransferBonjourRouteWhenControlRediscoveryIsUnavailable() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        let source = try String(
+        let signedAppSource = try String(
             contentsOf: root.appendingPathComponent(
                 "Sources/SkyBridgeCompassApp/LocalP2PFileTransferSmokeHarness.swift"
             ),
             encoding: .utf8
         )
+        let swiftPMHostSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/LocalLanInteropHost/main.swift"
+            ),
+            encoding: .utf8
+        )
 
-        XCTAssertTrue(source.contains("mac-reconnect control-discovery-timeout"))
-        XCTAssertTrue(source.contains("mac-reconnect control-connect-unavailable"))
-        XCTAssertTrue(source.contains("mac-reconnect already-connected"))
-        XCTAssertTrue(source.contains("action=wait-remote-cleanup"))
-        XCTAssertTrue(source.contains("connectToDeviceForMacReconnect"))
-        XCTAssertTrue(source.contains("let maxAttempts = 6"))
-        XCTAssertTrue(source.contains("isAlreadyConnectedHandshakeRejection"))
-        XCTAssertTrue(source.contains("case .failed(.peerRejected(let message))"))
-        XCTAssertTrue(source.contains("== \"already_connected\""))
-        XCTAssertTrue(source.contains("shouldFallbackToTransferRouteAfterControlReconnectFailure"))
-        XCTAssertTrue(source.contains("case .noConnectableEndpoint"))
-        XCTAssertTrue(source.contains("case .noLiveControlRoute"))
-        XCTAssertTrue(source.contains("macInitiatedTransfer=1"))
-        XCTAssertTrue(source.contains("macReconnectControl="))
-        XCTAssertTrue(source.contains("macReconnectRoute="))
-        XCTAssertTrue(source.contains("performMacInitiatedTransferRouteReconnect"))
-        XCTAssertTrue(source.contains("guard let stablePeerDeviceId = Self.stableBonjourTargetDeviceId(peer.deviceId)"))
-        XCTAssertTrue(source.contains("targetDeviceId: stablePeerDeviceId"))
-        XCTAssertTrue(source.contains("preferredName: nil"))
-        XCTAssertTrue(source.contains("mac-reconnect transfer-route-target source=bonjour-transfer"))
-        XCTAssertTrue(source.contains("fileTransferManager.sendFile("))
-        XCTAssertTrue(source.contains("to: peer.deviceId"))
-        XCTAssertTrue(source.contains("ipAddress: transferRoute.host"))
-        XCTAssertTrue(source.contains("mac_smoke_reconnect_control_endpoint_missing"))
-        XCTAssertTrue(source.contains("mac_smoke_reconnect_stable_identity_missing"))
-        XCTAssertTrue(source.contains("mac_smoke_reconnect_transfer_route_timeout"))
+        for source in [signedAppSource, swiftPMHostSource] {
+            XCTAssertTrue(source.contains("mac-reconnect control-discovery-timeout"))
+            XCTAssertTrue(source.contains("mac-reconnect control-connect-unavailable"))
+            XCTAssertTrue(source.contains("mac-reconnect already-connected"))
+            XCTAssertTrue(source.contains("action=wait-remote-cleanup"))
+            XCTAssertTrue(source.contains("connectToDeviceForMacReconnect"))
+            XCTAssertTrue(source.contains("let maxAttempts = 6"))
+            XCTAssertTrue(source.contains("isAlreadyConnectedHandshakeRejection"))
+            XCTAssertTrue(source.contains("case .failed(.peerRejected(let message))"))
+            XCTAssertTrue(source.contains("== \"already_connected\""))
+            XCTAssertTrue(source.contains("shouldFallbackToTransferRouteAfterControlReconnectFailure"))
+            XCTAssertTrue(source.contains("case .noConnectableEndpoint"))
+            XCTAssertTrue(source.contains("case .noLiveControlRoute"))
+            XCTAssertTrue(source.contains("macInitiatedTransfer=1"))
+            XCTAssertTrue(source.contains("macReconnectControl="))
+            XCTAssertTrue(source.contains("macReconnectRoute="))
+            XCTAssertTrue(source.contains("performMacInitiatedTransferRouteReconnect"))
+            XCTAssertTrue(source.contains("guard let stablePeerDeviceId = Self.stableBonjourTargetDeviceId(peer.deviceId)"))
+            XCTAssertTrue(source.contains("targetDeviceId: stablePeerDeviceId"))
+            XCTAssertTrue(source.contains("preferredName: nil"))
+            XCTAssertTrue(source.contains("mac-reconnect transfer-route-target source=bonjour-transfer"))
+            XCTAssertTrue(source.contains("fileTransferManager.sendFile("))
+            XCTAssertTrue(source.contains("to: peer.deviceId"))
+            XCTAssertTrue(source.contains("ipAddress: transferRoute.host"))
+            XCTAssertTrue(source.contains("mac_smoke_reconnect_control_endpoint_missing"))
+            XCTAssertTrue(source.contains("mac_smoke_reconnect_stable_identity_missing"))
+            XCTAssertTrue(source.contains("mac_smoke_reconnect_transfer_route_timeout"))
+        }
     }
 
     func testRealDeviceFileTransferRequiresMacInitiatedReconnectByDefault() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let script = try String(
-            contentsOf: URL(
-                fileURLWithPath: FileManager.default.currentDirectoryPath
-            ).appendingPathComponent(
+            contentsOf: root.appendingPathComponent(
                 "Scripts/run_real_device_file_transfer_smoke.sh"
+            ),
+            encoding: .utf8
+        )
+        let swiftPMHost = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/LocalLanInteropHost/main.swift"
             ),
             encoding: .utf8
         )
@@ -552,6 +573,28 @@ final class FileTransferRouteResolutionTests: XCTestCase {
                 "SKYBRIDGE_SMOKE_REQUIRE_MAC_INITIATED_RECONNECT:-1"
             ),
             "The release smoke must exercise a fresh Mac-initiated reconnect by default."
+        )
+        XCTAssertTrue(
+            script.contains(
+                #"if [[ "$USER_REALISTIC" == "1" ]]; then"#
+            )
+        )
+        XCTAssertTrue(
+            script.contains(#"MAC_HOST_MODE="swiftpm-host""#),
+            "The default lane must use a host whose smoke diagnostics are compiled in."
+        )
+        XCTAssertTrue(
+            swiftPMHost.contains(
+                #"ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_MAC_INITIATED_RECONNECT"] == "1""#
+            )
+        )
+        XCTAssertTrue(swiftPMHost.contains("performMacInitiatedReconnectSmoke"))
+        XCTAssertTrue(swiftPMHost.contains("p2pDiscoveryService.connectToDevice(target)"))
+        XCTAssertTrue(swiftPMHost.contains("macInitiatedTransfer=1"))
+        XCTAssertTrue(swiftPMHost.contains("macReconnectControl="))
+        XCTAssertTrue(swiftPMHost.contains("macReconnectRoute="))
+        XCTAssertTrue(
+            swiftPMHost.contains("mac-reconnect transfer-route-target source=bonjour-transfer")
         )
     }
 
@@ -912,8 +955,19 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
         XCTAssertTrue(source.contains("ensureClassicTransferIdentityBridgeReady(for: resolvedDevice)"))
         XCTAssertTrue(source.contains("connectionManager.sendPairingIdentityExchange(to: device.id)"))
+        XCTAssertTrue(source.contains("connectionManager.hasCurrentPairingIdentityExchangeActivity("))
         XCTAssertTrue(source.contains("waitForPairingIdentityExchangeActivity"))
         XCTAssertTrue(p2pSource.contains("pairingIdentityObservationAliases(for: deviceId)"))
+        XCTAssertTrue(
+            p2pSource.contains(
+                "expectedConnectionGeneration: current.receipt.lease.generation"
+            )
+        )
+        XCTAssertTrue(
+            p2pSource.contains(
+                "expectedSessionId: current.receipt.sessionId"
+            )
+        )
         XCTAssertTrue(source.contains("P2P pairing identity exchange 未被对端确认，拒绝启动经典文件传输"))
         XCTAssertTrue(source.contains("stage: \"identity_bridge_send_failed\""))
         XCTAssertTrue(source.contains("stage: \"identity_bridge_not_confirmed\""))
@@ -921,6 +975,65 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("stage: \"route_resolution_invalid_destination\""))
         XCTAssertTrue(source.contains("stage: \"connect_no_endpoint_candidates\""))
         XCTAssertTrue(source.contains("stage: \"\\(stage)_connection_closed\""))
+
+        let endpointStart = try XCTUnwrap(
+            source.range(of: "private func makeTransferEndpointCandidates(")
+        )
+        let endpointEnd = try XCTUnwrap(
+            source.range(
+                of: "private func appendTransferHostEndpoint(",
+                range: endpointStart.upperBound..<source.endIndex
+            )
+        )
+        let endpointBody = String(
+            source[endpointStart.lowerBound..<endpointEnd.lowerBound]
+        )
+        XCTAssertTrue(endpointBody.contains("liveBonjourServiceEndpoints("))
+        XCTAssertTrue(endpointBody.contains("provenance: .liveBrowser"))
+        XCTAssertTrue(endpointBody.contains("provenance: .authenticatedHost"))
+        XCTAssertFalse(
+            endpointBody.contains("interface: nil"),
+            "Apple file-transfer routes must retain the exact live browser interface."
+        )
+
+        let bridgeStart = try XCTUnwrap(
+            source.range(
+                of: "private func ensureClassicTransferIdentityBridgeReady("
+            )
+        )
+        let bridgeEnd = try XCTUnwrap(
+            source.range(
+                of: "private func preferredTransferDevice(",
+                range: bridgeStart.upperBound..<source.endIndex
+            )
+        )
+        let bridgeBody = String(
+            source[bridgeStart.lowerBound..<bridgeEnd.lowerBound]
+        )
+        let currentObservationCheck = try XCTUnwrap(
+            bridgeBody.range(
+                of: "hasCurrentPairingIdentityExchangeActivity("
+            )
+        )
+        let networkSend = try XCTUnwrap(
+            bridgeBody.range(of: "sendPairingIdentityExchange(to: device.id)")
+        )
+        let previousConfirmationReturn = try XCTUnwrap(
+            bridgeBody.range(
+                of: "if wasPreviouslyConfirmed {",
+                range: networkSend.upperBound..<bridgeBody.endIndex
+            )
+        )
+        XCTAssertLessThan(
+            currentObservationCheck.lowerBound,
+            networkSend.lowerBound,
+            "A current-session pairing identity observation must satisfy the bridge before a duplicate request can be rate-limited."
+        )
+        XCTAssertLessThan(
+            networkSend.lowerBound,
+            previousConfirmationReturn.lowerBound,
+            "A confirmation from an older session must not suppress the current session's identity refresh."
+        )
 
         let handlerStart = try XCTUnwrap(
             p2pSource.range(of: "private func handlePairingIdentityExchangeRequest(")

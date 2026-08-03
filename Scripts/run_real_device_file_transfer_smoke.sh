@@ -963,7 +963,7 @@ echo "==> Mac host mode: $MAC_HOST_MODE"
 if [[ "$USER_REALISTIC" == "1" ]]; then
   echo "==> Mode: user-realistic (persistent keychain, SKR-1 signed LAN KEM refresh, no raw peer trust injection, no auto-approval, no compatibility preference mutation)"
 else
-  echo "==> Mode: lab smoke (in-memory keychain, injected/auto-approved trust allowed)"
+  echo "==> Mode: lab smoke (in-memory keychain and injected KEM material; unpinned PIB-1 approval remains manual)"
 fi
 echo "==> Signed KEM refresh required: $REQUIRE_SIGNED_KEM_REFRESH"
 echo "==> Force signed KEM refresh by clearing KEM cache: $FORCE_SIGNED_KEM_REFRESH"
@@ -1200,6 +1200,7 @@ xcrun devicectl device install app --device "$IOS_DEVICE_ID" "$IOS_APP_PATH" >/d
 
 echo "==> Launching iOS smoke app"
 echo "    if the iPad shows a Local Network permission alert, tap Allow"
+echo "    keep the iPad unlocked and verify/approve any PIB-1 pairing code prompt"
 IOS_PQC_PEER_DEVICE_ID="$MAC_PQC_DEVICE_ID"
 IOS_PQC_PEER_XWING_PUBLIC_KEY_BASE64="$MAC_PQC_XWING_PUBLIC_KEY_BASE64"
 IOS_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64="$MAC_PQC_MLKEM768_PUBLIC_KEY_BASE64"

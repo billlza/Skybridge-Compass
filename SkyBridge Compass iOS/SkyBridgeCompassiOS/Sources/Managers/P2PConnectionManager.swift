@@ -7992,6 +7992,24 @@ public class P2PConnectionManager: ObservableObject {
         return false
     }
 
+    public func hasCurrentPairingIdentityExchangeActivity(
+        with deviceId: String
+    ) -> Bool {
+        guard let current = currentAuthenticatedSession(
+            forAnyPeerId: deviceId,
+            requireConnectedStatus: true
+        ) else {
+            return false
+        }
+        return hasPairingIdentityObservation(
+            in: lastPairingIdentityExchangeReceivedAt,
+            matching: pairingIdentityObservationAliases(for: deviceId),
+            since: .distantPast,
+            expectedConnectionGeneration: current.receipt.lease.generation,
+            expectedSessionId: current.receipt.sessionId
+        )
+    }
+
     private func waitForPairingIdentityExchangeActivity(
         with deviceId: String,
         since: Date,
