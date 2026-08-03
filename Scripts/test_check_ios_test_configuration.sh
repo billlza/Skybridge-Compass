@@ -250,14 +250,14 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-needle = '        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""\n'
+needle = '        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: HAS_APPLE_PQC_SDK\n'
 if needle not in text:
     raise SystemExit("missing Apple PQC build setting in project.yml fixture")
 path.write_text(text.replace(needle, "", 1), encoding="utf-8")
 PY
 expect_failure_contains \
   "project.yml missing Apple PQC explicit build setting" \
-  "project.yml 的 app/test target 必须声明空的 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 默认值" \
+  "project.yml 的 app/test target 必须默认编译 HAS_APPLE_PQC_SDK" \
   bash "${CHECK_SCRIPT}" --root "${missing_pqc_sdk_root}" --static-only
 
 forbidden_pqc_yml_root="$(make_fixture forbidden-pqc-sdk-selector-yml)"
@@ -275,7 +275,7 @@ path.write_text(text.replace(needle, replacement, 1), encoding="utf-8")
 PY
 expect_failure_contains \
   "project.yml rejects SDK-selector Apple PQC gate" \
-  "project.yml 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK" \
+  "project.yml 不得使用 SDK selector 启用 HAS_APPLE_PQC_SDK" \
   bash "${CHECK_SCRIPT}" --root "${forbidden_pqc_yml_root}" --static-only
 
 forbidden_pqc_pbxproj_root="$(make_fixture forbidden-pqc-sdk-selector-pbxproj)"
@@ -308,7 +308,7 @@ path.write_text(text[: match.start()] + replacement + text[match.end() :], encod
 PY
 expect_failure_contains \
   "project.pbxproj rejects SDK-selector Apple PQC gate" \
-  "project.pbxproj 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK" \
+  "project.pbxproj 不得使用 SDK selector 启用 HAS_APPLE_PQC_SDK" \
   bash "${CHECK_SCRIPT}" --root "${forbidden_pqc_pbxproj_root}" --static-only
 
 raised_deployment_root="$(make_fixture raised-deployment-target)"

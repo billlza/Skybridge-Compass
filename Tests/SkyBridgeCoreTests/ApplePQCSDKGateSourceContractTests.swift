@@ -804,10 +804,11 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         }
     }
 
-    func testIOSXcodeApplePQCCompileGateRequiresExplicitProbeSetting() throws {
+    func testIOSXcodeApplePQCCompileGateDefaultsOnForPinnedToolchainAndReleaseProbe() throws {
         let projectYAML = try readSource("SkyBridge Compass iOS/project.yml")
         let pbxproj = try readSource("SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj")
         let deviceLane = try readSource("SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh")
+        let releaseProducer = try readSource("Scripts/build_ios_release_candidate.sh")
 
         let forbiddenPattern = try NSRegularExpression(
             pattern: #"SWIFT_ACTIVE_COMPILATION_CONDITIONS\[sdk=(iphoneos|iphonesimulator)[0-9]+\*\].*HAS_APPLE_PQC_SDK"#
@@ -820,18 +821,22 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
             forbiddenPattern.firstMatch(in: pbxproj, range: NSRange(pbxproj.startIndex..., in: pbxproj)),
             "project.pbxproj must not infer Apple PQC SDK availability from SDK selectors."
         )
-        XCTAssertGreaterThanOrEqual(projectYAML.components(separatedBy: #"SKYBRIDGE_APPLE_PQC_SDK_CONDITION: """#).count - 1, 2)
+        XCTAssertTrue(projectYAML.contains(#"xcodeVersion: "26.5""#))
+        XCTAssertGreaterThanOrEqual(projectYAML.components(separatedBy: "SKYBRIDGE_APPLE_PQC_SDK_CONDITION: HAS_APPLE_PQC_SDK").count - 1, 2)
         XCTAssertGreaterThanOrEqual(
             projectYAML.components(separatedBy: #"SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)""#).count - 1,
             2
         )
-        XCTAssertGreaterThanOrEqual(pbxproj.components(separatedBy: #"SKYBRIDGE_APPLE_PQC_SDK_CONDITION = "";"#).count - 1, 4)
+        XCTAssertGreaterThanOrEqual(pbxproj.components(separatedBy: "SKYBRIDGE_APPLE_PQC_SDK_CONDITION = HAS_APPLE_PQC_SDK;").count - 1, 4)
         XCTAssertGreaterThanOrEqual(
             pbxproj.components(separatedBy: #"SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)";"#).count - 1,
             4
         )
         XCTAssertTrue(deviceLane.contains("validate_apple_pqc_sdk_condition_env()"))
         XCTAssertTrue(deviceLane.contains(#"build_args+=("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=${SKYBRIDGE_APPLE_PQC_SDK_CONDITION}")"#))
+        XCTAssertTrue(releaseProducer.contains(#"source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh""#))
+        XCTAssertTrue(releaseProducer.contains("skybridge_require_apple_pqc_sdk_symbol_probe iphoneos"))
+        XCTAssertTrue(releaseProducer.contains("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK"))
     }
 
     func testMacOSSwiftPMScopesWebRTCAudioHeaderOverlayAndTestRPath() throws {

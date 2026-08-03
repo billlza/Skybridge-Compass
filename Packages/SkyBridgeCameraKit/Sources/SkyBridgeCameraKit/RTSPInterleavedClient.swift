@@ -278,7 +278,7 @@ actor RTSPPendingReceiveBroker {
         }
 
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation(isolation: self) { continuation in
+            try await withCheckedThrowingContinuation { continuation in
                 let timeoutHandle = timeoutScheduler.schedule(timeout) { [weak self] result in
                     switch result {
                     case .success:

@@ -2556,9 +2556,10 @@ public class P2PDiscoveryService: BaseManager {
         let unsignedRequest = AppMessage.ProtocolIdentityBindingRequestPayload(
             requesterDeviceId: requesterDeviceId,
             targetDeviceId: targetDeviceId,
-            requestedProtocolSigningAlgorithms: try await CommittedLocalProtocolIdentitySnapshot
-                .loadActiveAndCompatibility()
-                .map { $0.algorithm.rawValue },
+            requestedProtocolSigningAlgorithms: Self.protocolIdentityBindingAlgorithmCandidates(
+                activeAlgorithm: requesterIdentity.algorithm
+            )
+                .map(\.rawValue),
             requesterProtocolSigningAlgorithm: requesterIdentity.algorithm.rawValue,
             requesterProtocolIdentityPublicKey: requesterIdentity.publicKey,
             requesterProtocolIdentityFingerprint: requesterIdentity.fingerprint,
@@ -3026,11 +3027,20 @@ public class P2PDiscoveryService: BaseManager {
         targetFingerprint: String? = nil
     ) async throws -> LocalProtocolIdentityProof {
         let normalizedTargetFingerprint = Self.normalizedFingerprint(targetFingerprint)
+        let active = try await CommittedLocalProtocolIdentitySnapshot.loadActive()
+        if normalizedTargetFingerprint == nil
+            || normalizedTargetFingerprint == active.authoritativeFingerprint {
+            return LocalProtocolIdentityProof(
+                algorithm: active.algorithm,
+                publicKey: active.publicKey,
+                keyHandle: active.keyHandle,
+                fingerprint: active.authoritativeFingerprint
+            )
+        }
         let identities = try await CommittedLocalProtocolIdentitySnapshot
             .loadActiveAndCompatibility()
         if let identity = identities.first(where: {
-            normalizedTargetFingerprint == nil
-                || normalizedTargetFingerprint == $0.authoritativeFingerprint
+            normalizedTargetFingerprint == $0.authoritativeFingerprint
         }) {
             return LocalProtocolIdentityProof(
                 algorithm: identity.algorithm,
@@ -3040,6 +3050,15 @@ public class P2PDiscoveryService: BaseManager {
             )
         }
         throw Self.protocolIdentityBindingFailure("missing local protocol identity proof")
+    }
+
+    nonisolated static func protocolIdentityBindingAlgorithmCandidates(
+        activeAlgorithm: ProtocolSigningAlgorithm
+    ) -> [ProtocolSigningAlgorithm] {
+        var seen = Set<ProtocolSigningAlgorithm>()
+        return [activeAlgorithm, .mlDSA65, .ed25519].filter {
+            seen.insert($0).inserted
+        }
     }
 
     private func localOutboundProtocolIdentityDeviceId() async throws -> String {
@@ -5580,38 +5599,49 @@ public class P2PDiscoveryService: BaseManager {
                 let frame = Self.normalizeInboundControlFrame(payload)
 
                 if let plaintextControl = try? AppMessage.decodeWireMessage(from: frame),
-                   let controlResponse = await Self.makeBootstrapControlResponse(for: plaintextControl) {
+                   Self.isInboundBootstrapControlRequest(plaintextControl) {
+                    // Clear the provisional first-frame timer before SKR/PIB signing.
+                    // Keychain + PQC sign can exceed provisionalInboundTimeoutSeconds and
+                    // otherwise cancel the socket mid-serve, leaving the requester without
+                    // a candidate and with no SAS UI.
                     await MainActor.run {
                         self.finishProvisionalInboundConnection(connection)
                     }
-                    let encoded = try JSONEncoder().encode(controlResponse.message)
-                    try await sendFramed(encoded)
-                    if let binding = controlResponse.protocolIdentityBindingPayload,
-                       let code = controlResponse.protocolIdentityBindingCode {
-                        await MainActor.run {
-                            PairingTrustApprovalService.shared.showProtocolIdentityBindingCode(
-                                peerEndpoint: endpointDescriptionForPresence,
-                                declaredDeviceId: binding.deviceId,
-                                displayName: resolvedDisplayName(
-                                    raw: binding.deviceName,
+                    if let controlResponse = await Self.makeBootstrapControlResponse(for: plaintextControl) {
+                        let encoded = try JSONEncoder().encode(controlResponse.message)
+                        try await sendFramed(encoded)
+                        if let binding = controlResponse.protocolIdentityBindingPayload,
+                           let code = controlResponse.protocolIdentityBindingCode {
+                            await MainActor.run {
+                                PairingTrustApprovalService.shared.showProtocolIdentityBindingCode(
+                                    peerEndpoint: endpointDescriptionForPresence,
+                                    declaredDeviceId: binding.deviceId,
+                                    displayName: resolvedDisplayName(
+                                        raw: binding.deviceName,
+                                        model: nil,
+                                        platform: nil,
+                                        fallbackPeerId: peer.deviceId
+                                    ),
                                     model: nil,
                                     platform: nil,
-                                    fallbackPeerId: peer.deviceId
-                                ),
-                                model: nil,
-                                platform: nil,
-                                osVersion: nil,
-                                verificationCode: code,
-                                protocolIdentityFingerprint: binding.protocolIdentityFingerprint
-                            )
+                                    osVersion: nil,
+                                    verificationCode: code,
+                                    protocolIdentityFingerprint: binding.protocolIdentityFingerprint
+                                )
+                            }
                         }
+                        if controlResponse.isFailure {
+                            logger.error("\(controlResponse.statusLine, privacy: .public)")
+                        } else {
+                            logger.info("\(controlResponse.statusLine, privacy: .public)")
+                        }
+                        RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)
+                        connection.cancel()
+                        return
                     }
-                    if controlResponse.isFailure {
-                        logger.error("\(controlResponse.statusLine, privacy: .public)")
-                    } else {
-                        logger.info("\(controlResponse.statusLine, privacy: .public)")
-                    }
-                    RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)
+                    logger.error(
+                        "⛔️ bootstrap control frame recognized but produced no response; closing provisional inbound"
+                    )
                     connection.cancel()
                     return
                 }

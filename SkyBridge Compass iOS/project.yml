@@ -121,11 +121,14 @@ targets:
         SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST: unbound
         SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY: unbound
         SKYBRIDGE_PACKAGING_PRODUCT_SURFACE: unbound
-        SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS: unbound
-        # Apple CryptoKit PQC symbols are enabled only after Scripts/apple_pqc_sdk_probe.sh
-        # proves the selected toolchain can typecheck them. The default stays empty so
-        # stable iOS 17+ build lanes remain portable and fail closed.
-        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""
+        SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS: HAS_APPLE_PQC_SDK
+        # This Xcode project requires the pinned Xcode 26.5+ toolchain above, whose
+        # iPhoneOS and Simulator SDKs expose the reviewed CryptoKit PQC symbol set.
+        # Keep Apple PQC in ordinary Xcode builds: an incompatible SDK must fail at
+        # compile time instead of silently producing a package that cannot negotiate
+        # PQC. Formal release/device lanes still run Scripts/apple_pqc_sdk_probe.sh
+        # before invoking xcodebuild.
+        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: HAS_APPLE_PQC_SDK
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
       configs:
         Debug:
@@ -212,7 +215,7 @@ targets:
         SWIFT_STRICT_CONCURRENCY: complete
         OTHER_CFLAGS: "$(inherited)"
         OTHER_CPLUSPLUSFLAGS: "$(inherited)"
-        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: ""
+        SKYBRIDGE_APPLE_PQC_SDK_CONDITION: HAS_APPLE_PQC_SDK
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
       configs:
         Debug:

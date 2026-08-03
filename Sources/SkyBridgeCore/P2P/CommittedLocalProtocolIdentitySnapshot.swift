@@ -86,6 +86,56 @@ public struct CommittedLocalProtocolIdentitySnapshot: Sendable {
         )
     }
 
+    /// Resolves the first requested local authority without loading unrelated
+    /// compatibility slots. A malformed inactive identity must not prevent the
+    /// committed active authority from serving a protocol it already satisfies.
+    ///
+    /// If the active authority is not requested, each requested compatibility
+    /// slot is still loaded strictly; corruption in a slot needed for this
+    /// exchange therefore remains a fail-closed error.
+    static func loadPreferred(
+        matching requestedAlgorithms: Set<ProtocolSigningAlgorithm>,
+        keyManager: DeviceIdentityKeyManager = .shared
+    ) async throws -> Self? {
+        guard !requestedAlgorithms.isEmpty else { return nil }
+        let active = try await loadActive(keyManager: keyManager)
+        return try await selectPreferred(
+            matching: requestedAlgorithms,
+            active: active
+        ) { algorithm in
+            guard let identity = try await keyManager.existingProtocolSigningIdentity(
+                for: algorithm,
+                protection: .softwareKeychain
+            ) else {
+                return nil
+            }
+            return Self(
+                algorithm: algorithm,
+                protection: .softwareKeychain,
+                publicKey: identity.publicKey,
+                keyHandle: identity.keyHandle
+            )
+        }
+    }
+
+    static func selectPreferred(
+        matching requestedAlgorithms: Set<ProtocolSigningAlgorithm>,
+        active: Self,
+        loadCompatibility: @Sendable (ProtocolSigningAlgorithm) async throws -> Self?
+    ) async throws -> Self? {
+        guard !requestedAlgorithms.isEmpty else { return nil }
+        if requestedAlgorithms.contains(active.algorithm) {
+            return active
+        }
+        for algorithm in [ProtocolSigningAlgorithm.mlDSA65, .ed25519]
+        where algorithm != active.algorithm && requestedAlgorithms.contains(algorithm) {
+            if let compatibility = try await loadCompatibility(algorithm) {
+                return compatibility
+            }
+        }
+        return nil
+    }
+
     /// Returns the active authority first, followed by established software
     /// compatibility identities. Inactive ML-DSA-87 slots are intentionally not
     /// advertised: presence of 87 is the peer-visible active-capability signal.

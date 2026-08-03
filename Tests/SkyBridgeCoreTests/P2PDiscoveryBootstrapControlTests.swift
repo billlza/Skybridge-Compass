@@ -243,9 +243,152 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertTrue(controlResponse.isFailure)
     }
 
+    func testProtocolIdentityBindingPrefersActiveIdentityWithoutLoadingUnrelatedCompatibilitySlot() async throws {
+        let active = CommittedLocalProtocolIdentitySnapshot(
+            algorithm: .mlDSA65,
+            protection: .softwareKeychain,
+            publicKey: Data(repeating: 0x41, count: 1_952),
+            keyHandle: .softwareKey(Data(repeating: 0x42, count: 4_032))
+        )
+
+        let selected = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+            matching: [.mlDSA65, .ed25519],
+            active: active
+        ) { _ in
+            throw Self.testError("unrelated malformed compatibility identity was loaded")
+        }
+
+        XCTAssertEqual(selected?.algorithm, .mlDSA65)
+        XCTAssertEqual(selected?.publicKey, active.publicKey)
+    }
+
+    func testProtocolIdentityBindingFailsClosedWhenRequestedCompatibilitySlotIsMalformed() async throws {
+        let active = CommittedLocalProtocolIdentitySnapshot(
+            algorithm: .mlDSA87,
+            protection: .softwareKeychain,
+            publicKey: Data(repeating: 0x87, count: 2_592),
+            keyHandle: .softwareKey(Data(repeating: 0x88, count: 4_896))
+        )
+
+        do {
+            _ = try await CommittedLocalProtocolIdentitySnapshot.selectPreferred(
+                matching: [.ed25519],
+                active: active
+            ) { algorithm in
+                throw Self.testError("malformed requested \(algorithm.rawValue) identity")
+            }
+            XCTFail("A malformed requested compatibility identity must fail closed")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("malformed requested Ed25519 identity"))
+        }
+    }
+
+    func testProtocolIdentityBindingAlgorithmCandidatesMatchIOSOrdering() {
+        XCTAssertEqual(
+            P2PDiscoveryService.protocolIdentityBindingAlgorithmCandidates(activeAlgorithm: .mlDSA65),
+            [.mlDSA65, .ed25519]
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.protocolIdentityBindingAlgorithmCandidates(activeAlgorithm: .mlDSA87),
+            [.mlDSA87, .mlDSA65, .ed25519]
+        )
+    }
+
+    func testProtocolIdentityBindingTargetMatchRequiresLocalIdOrAlias() {
+        XCTAssertTrue(
+            P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
+                targetDeviceId: "id:mac-1",
+                localId: "id:mac-1",
+                aliases: ["host:Studio"]
+            )
+        )
+        XCTAssertTrue(
+            P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
+                targetDeviceId: "host:Studio",
+                localId: "id:mac-1",
+                aliases: ["host:Studio"]
+            )
+        )
+        XCTAssertFalse(
+            P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
+                targetDeviceId: "id:other-device",
+                localId: "id:mac-1",
+                aliases: ["host:Studio"]
+            )
+        )
+        XCTAssertFalse(
+            P2PDiscoveryService.localResponderMatchesProtocolIdentityBindingTarget(
+                targetDeviceId: "   ",
+                localId: "id:mac-1",
+                aliases: []
+            )
+        )
+    }
+
+    func testProtocolIdentityBindingTargetMismatchMapsToDiagnosticReasonCode() {
+        let error = NSError(
+            domain: "SkyBridge.ProtocolIdentityBinding",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "request target does not identify local responder"]
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.protocolIdentityBindingFailureCode(for: error),
+            "request_target_mismatch"
+        )
+    }
+
+    func testInboundBootstrapControlRequestClassifierMatchesOwnedFramesOnly() {
+        XCTAssertTrue(
+            P2PDiscoveryService.isInboundBootstrapControlRequest(
+                .protocolIdentityBindingRequest(protocolIdentityBindingRequest())
+            )
+        )
+        XCTAssertTrue(
+            P2PDiscoveryService.isInboundBootstrapControlRequest(
+                .kemRefreshRequest(kemRefreshRequest())
+            )
+        )
+        XCTAssertFalse(
+            P2PDiscoveryService.isInboundBootstrapControlRequest(.ping(.init(id: 7)))
+        )
+        XCTAssertFalse(
+            P2PDiscoveryService.isInboundBootstrapControlRequest(
+                .signedKEMRefresh(signedKEMRefreshPayload(for: kemRefreshRequest()))
+            )
+        )
+    }
+
     func testNonBootstrapControlMessageDoesNotProduceResponse() async {
         let response = await P2PDiscoveryService.makeBootstrapControlResponse(for: .ping(.init(id: 7)))
         XCTAssertNil(response)
+    }
+
+    func testInboundBootstrapPathClearsProvisionalTimeoutBeforeSigning() throws {
+        let source = try String(
+            contentsOfFile: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+                .path,
+            encoding: .utf8
+        )
+        let marker = "Self.isInboundBootstrapControlRequest(plaintextControl)"
+        guard let markerRange = source.range(of: marker) else {
+            return XCTFail("Missing inbound bootstrap control request classifier")
+        }
+        let window = String(source[markerRange.lowerBound...].prefix(900))
+        let finishIndex = window.range(of: "finishProvisionalInboundConnection(connection)")?.lowerBound
+        let responseIndex = window.range(of: "makeBootstrapControlResponse(for: plaintextControl)")?.lowerBound
+        XCTAssertNotNil(finishIndex)
+        XCTAssertNotNil(responseIndex)
+        if let finishIndex, let responseIndex {
+            XCTAssertLessThan(
+                finishIndex,
+                responseIndex,
+                "Provisional inbound timeout must clear before SKR/PIB signing"
+            )
+        }
     }
 
     private func kemRefreshRequest(

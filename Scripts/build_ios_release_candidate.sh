@@ -19,6 +19,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IOS_PROJECT="${ROOT_DIR}/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 EXPORT_OPTIONS="${ROOT_DIR}/Scripts/ios_release_candidate_export_options.plist"
+# shellcheck source=Scripts/apple_pqc_sdk_probe.sh
+source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
 
 OUTPUT_DIR="${SKYBRIDGE_RC_OUTPUT_DIR:-${ROOT_DIR}/.sandbox-home/release-candidate}"
 ARCHIVE_PATH="${OUTPUT_DIR}/SkyBridgeCompass-iOS.xcarchive"
@@ -41,6 +43,13 @@ if [[ ! "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "[ios-release-candidate] ERROR: could not resolve a full-length HEAD commit." >&2
   exit 1
 fi
+
+if ! skybridge_require_apple_pqc_sdk_symbol_probe iphoneos; then
+  echo "[ios-release-candidate] ERROR: the selected iPhoneOS SDK cannot typecheck the required Apple CryptoKit PQC symbol set." >&2
+  echo "[ios-release-candidate] ${SKYBRIDGE_PQC_PROBE_ERROR:-Apple PQC symbol probe failed without details}" >&2
+  exit 1
+fi
+log "Apple PQC symbols verified (sdk=${SKYBRIDGE_PQC_SDK_VER}, target=${SKYBRIDGE_PQC_SWIFT_TARGET}, secure-enclave=${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE})"
 
 rm -rf "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"

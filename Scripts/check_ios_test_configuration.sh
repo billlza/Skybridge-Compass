@@ -115,6 +115,7 @@ PQC_SDK_SELECTOR_PATTERN = re.compile(
     r"SWIFT_ACTIVE_COMPILATION_CONDITIONS\[sdk=(?:iphoneos|iphonesimulator)[0-9]+\*\].*HAS_APPLE_PQC_SDK"
 )
 PQC_XCODEBUILD_SETTING = "SKYBRIDGE_APPLE_PQC_SDK_CONDITION"
+PQC_DEFAULT_CONDITION = "HAS_APPLE_PQC_SDK"
 PQC_CONDITION_REFERENCE = "$(SKYBRIDGE_APPLE_PQC_SDK_CONDITION)"
 WEBRTC_RUNTIME_PRODUCT = "SkyBridgeWebRTCRuntime"
 WEBRTC_RUNTIME_TARGETS = (
@@ -419,15 +420,17 @@ for required_snippet in [
 ]:
     require(required_snippet in pbxproj_text, f"测试 target 缺少必需配置: {required_snippet}")
 
-# Apple PQC SDK availability must be proven by symbol probe. SDK version selectors
-# are not proof that CryptoKit PQC symbols typecheck for this build lane.
+# The project pins Xcode 26.5+, so ordinary developer builds must compile the
+# reviewed Apple PQC surface instead of silently removing it. Formal release and
+# device lanes still typecheck the full symbol set before invoking xcodebuild.
+# Keep one explicit setting rather than fragile per-SDK selectors.
 require(
     PQC_SDK_SELECTOR_PATTERN.search(pbxproj_text) is None,
-    "project.pbxproj 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK；必须由 Apple PQC symbol probe 后显式传入 SKYBRIDGE_APPLE_PQC_SDK_CONDITION",
+    "project.pbxproj 不得使用 SDK selector 启用 HAS_APPLE_PQC_SDK；必须通过统一 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 接入",
 )
 require(
-    pbxproj_text.count(f'{PQC_XCODEBUILD_SETTING} = "";') >= 4,
-    "project.pbxproj 的 app/test build configs 必须声明空的 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 默认值",
+    pbxproj_text.count(f"{PQC_XCODEBUILD_SETTING} = {PQC_DEFAULT_CONDITION};") >= 4,
+    "project.pbxproj 的 app/test build configs 必须默认编译 HAS_APPLE_PQC_SDK；不兼容工具链应构建失败而非静默移除 PQC",
 )
 require(
     pbxproj_text.count(f'SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) {PQC_CONDITION_REFERENCE}";') >= 4,
@@ -650,11 +653,15 @@ require(
 if project_yaml_text is not None:
     require(
         PQC_SDK_SELECTOR_PATTERN.search(project_yaml_text) is None,
-        "project.yml 不得使用 SDK selector 默认启用 HAS_APPLE_PQC_SDK；必须由 Apple PQC symbol probe 后显式传入 SKYBRIDGE_APPLE_PQC_SDK_CONDITION",
+        "project.yml 不得使用 SDK selector 启用 HAS_APPLE_PQC_SDK；必须通过统一 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 接入",
     )
     require(
-        project_yaml_text.count(f'{PQC_XCODEBUILD_SETTING}: ""') >= 2,
-        "project.yml 的 app/test target 必须声明空的 SKYBRIDGE_APPLE_PQC_SDK_CONDITION 默认值",
+        project_yaml_text.count(f"{PQC_XCODEBUILD_SETTING}: {PQC_DEFAULT_CONDITION}") >= 2,
+        "project.yml 的 app/test target 必须默认编译 HAS_APPLE_PQC_SDK；不兼容工具链应构建失败而非静默移除 PQC",
+    )
+    require(
+        'xcodeVersion: "26.5"' in project_yaml_text,
+        "project.yml 默认启用 Apple PQC 时必须固定 Xcode 26.5+ 工具链",
     )
     require(
         project_yaml_text.count(f'SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) {PQC_CONDITION_REFERENCE}"') >= 2,

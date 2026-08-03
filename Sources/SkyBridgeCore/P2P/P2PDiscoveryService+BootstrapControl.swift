@@ -404,11 +404,9 @@ extension P2PDiscoveryService {
             throw makePIBFailure("requester protocol identity signature invalid")
         }
 
-        let selectedIdentity = try await CommittedLocalProtocolIdentitySnapshot
-            .loadActiveAndCompatibility()
-            .first { identity in
-                requestedAlgorithms.contains(identity.algorithm)
-            }
+        let selectedIdentity = try await CommittedLocalProtocolIdentitySnapshot.loadPreferred(
+            matching: requestedAlgorithms
+        )
         guard let selectedIdentity else {
             throw makePIBFailure("local protocol identity unavailable")
         }
@@ -419,13 +417,21 @@ extension P2PDiscoveryService {
         guard !localId.isEmpty else {
             throw makePIBFailure("local device id unavailable")
         }
+        let localAliases = PeerTrustLookup.lookupCandidates(for: localId)
+        guard Self.localResponderMatchesProtocolIdentityBindingTarget(
+            targetDeviceId: request.targetDeviceId,
+            localId: localId,
+            aliases: localAliases
+        ) else {
+            throw makePIBFailure("request target does not identify local responder")
+        }
 
         let now = Date()
         let localPresentation = LocalDevicePresentation.current()
         let unsigned = AppMessage.SignedProtocolIdentityBindingPayload(
             transactionId: request.transactionId,
             deviceId: localId,
-            aliases: PeerTrustLookup.lookupCandidates(for: localId),
+            aliases: localAliases,
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
             protocolIdentityPublicKey: selectedIdentity.publicKey,
             protocolIdentityFingerprint: selectedIdentity.authoritativeFingerprint,
@@ -647,7 +653,34 @@ extension P2PDiscoveryService {
         if reason.contains("local device id unavailable") {
             return "local_device_id_unavailable"
         }
+        if reason.contains("request target does not identify local responder") {
+            return "request_target_mismatch"
+        }
         return "protocol_identity_binding_rejected"
+    }
+
+    /// Mirrors the iOS PIB responder gate: only serve when the request names this
+    /// host via its stable id or an established alias.
+    nonisolated static func localResponderMatchesProtocolIdentityBindingTarget(
+        targetDeviceId: String,
+        localId: String,
+        aliases: [String]
+    ) -> Bool {
+        let normalizedTarget = targetDeviceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTarget.isEmpty else { return false }
+        return Set([localId] + aliases).contains(normalizedTarget)
+    }
+
+    /// Request frames that `makeBootstrapControlResponse` owns. Distinct from
+    /// `P2PConnection.isBootstrapControlMessage`, which also classifies responses
+    /// and pairing-identity exchange for established-channel admission.
+    nonisolated static func isInboundBootstrapControlRequest(_ message: AppMessage) -> Bool {
+        switch message {
+        case .kemRefreshRequest, .protocolIdentityBindingRequest, .protocolIdentityBindingConfirm:
+            return true
+        default:
+            return false
+        }
     }
 
     nonisolated static func signedKEMRefreshFailureCode(for error: Error) -> String {
