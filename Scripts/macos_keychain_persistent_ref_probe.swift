@@ -4,6 +4,11 @@ import Security
 import Darwin
 
 #if os(macOS)
+private enum PersistentReferenceOrigin {
+    case secItemAdd
+    case discovery
+}
+
 private enum ProbeFailure: Error, CustomStringConvertible {
     case security(operation: String, status: OSStatus)
     case malformedResult(operation: String)
@@ -29,6 +34,21 @@ private struct KeychainDomain {
     func apply(to query: inout [String: Any]) {
         query[kSecUseDataProtectionKeychain as String] =
             usesDataProtectionKeychain
+    }
+
+    func applyPersistentReference(
+        _ persistentReference: Data,
+        origin: PersistentReferenceOrigin,
+        to query: inout [String: Any]
+    ) {
+        query.removeValue(forKey: kSecMatchItemList as String)
+        query.removeValue(forKey: kSecValuePersistentRef as String)
+        switch (origin, usesDataProtectionKeychain) {
+        case (.secItemAdd, _), (.discovery, true):
+            query[kSecValuePersistentRef as String] = persistentReference
+        case (.discovery, false):
+            query[kSecMatchItemList as String] = [persistentReference]
+        }
     }
 }
 
@@ -192,7 +212,8 @@ private func loadUniqueProbeValues(
 /// then loaded through the selected reference because the legacy file Keychain
 /// rejects the combined broad query with `errSecParam`.
 private func loadLegacyDiscoveryRows(
-    in domain: KeychainDomain
+    in domain: KeychainDomain,
+    expectedValue: Data
 ) throws -> Int {
     var query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
@@ -241,10 +262,11 @@ private func loadLegacyDiscoveryRows(
         }
         guard try loadGenericPassword(
             persistentReference: persistentReference,
+            origin: .discovery,
             in: domain
-        ) != nil else {
+        ) == expectedValue else {
             throw ProbeFailure.invariant(
-                "production-shaped \(domain.name) discovery row disappeared"
+                "production-shaped \(domain.name) discovery row resolved to the wrong item"
             )
         }
     }
@@ -257,8 +279,12 @@ private func delete(
 ) throws {
     var query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecMatchItemList as String: [persistentReference],
     ]
+    domain.applyPersistentReference(
+        persistentReference,
+        origin: .secItemAdd,
+        to: &query
+    )
     domain.apply(to: &query)
     forbidAuthenticationUI(&query)
     let status = SecItemDelete(query as CFDictionary)
@@ -272,14 +298,19 @@ private func delete(
 
 private func loadGenericPassword(
     persistentReference: Data,
+    origin: PersistentReferenceOrigin,
     in domain: KeychainDomain
 ) throws -> Data? {
     var query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecMatchItemList as String: [persistentReference],
         kSecReturnData as String: true,
         kSecMatchLimit as String: kSecMatchLimitOne,
     ]
+    domain.applyPersistentReference(
+        persistentReference,
+        origin: origin,
+        to: &query
+    )
     domain.apply(to: &query)
     forbidAuthenticationUI(&query)
 
@@ -385,10 +416,14 @@ private func loadPrivateKey(
 ) throws -> SecKey? {
     var query: [String: Any] = [
         kSecClass as String: kSecClassKey,
-        kSecMatchItemList as String: [persistentReference],
         kSecReturnRef as String: true,
         kSecMatchLimit as String: kSecMatchLimitOne,
     ]
+    domain.applyPersistentReference(
+        persistentReference,
+        origin: .discovery,
+        to: &query
+    )
     domain.apply(to: &query)
     forbidAuthenticationUI(&query)
 
@@ -456,8 +491,12 @@ private func deletePrivateKey(
 ) throws {
     var query: [String: Any] = [
         kSecClass as String: kSecClassKey,
-        kSecMatchItemList as String: [persistentReference],
     ]
+    domain.applyPersistentReference(
+        persistentReference,
+        origin: .discovery,
+        to: &query
+    )
     domain.apply(to: &query)
     forbidAuthenticationUI(&query)
     let status = SecItemDelete(query as CFDictionary)
@@ -854,6 +893,7 @@ private func runGenericPasswordProbeBody() throws {
     try require(
         try loadGenericPassword(
             persistentReference: legacyReference,
+            origin: .secItemAdd,
             in: legacyDomain
         ) == legacyValue,
         "legacy item could not be freshly compared by persistent reference"
@@ -861,6 +901,7 @@ private func runGenericPasswordProbeBody() throws {
     try require(
         try loadGenericPassword(
             persistentReference: dataProtectionReference,
+            origin: .secItemAdd,
             in: dataProtectionDomain
         ) == dataProtectionValue,
         "Data Protection item could not be freshly compared by persistent reference"
@@ -879,11 +920,17 @@ private func runGenericPasswordProbeBody() throws {
             + describe(initialDataProtectionValues)
     )
     try require(
-        try loadLegacyDiscoveryRows(in: legacyDomain) == 1,
+        try loadLegacyDiscoveryRows(
+            in: legacyDomain,
+            expectedValue: legacyValue
+        ) == 1,
         "legacy production-shaped discovery did not return exactly one row"
     )
     try require(
-        try loadLegacyDiscoveryRows(in: dataProtectionDomain) == 1,
+        try loadLegacyDiscoveryRows(
+            in: dataProtectionDomain,
+            expectedValue: dataProtectionValue
+        ) == 1,
         "Data Protection production-shaped discovery did not return exactly one row"
     )
 

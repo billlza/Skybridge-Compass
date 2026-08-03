@@ -20,11 +20,19 @@ struct LegacySecItemLocation: Hashable, Sendable {
     func applyPersistentReferenceMatch(
         to query: inout [String: Any]
     ) {
-        // Callers must also provide the concrete kSecClass and, on macOS, the
-        // explicit Data Protection domain selector. Security.framework rejects
-        // an otherwise under-specified persistent-reference mutation.
+        query.removeValue(forKey: kSecMatchItemList as String)
+        query.removeValue(forKey: kSecValuePersistentRef as String)
+
+        // Keep the established file-Keychain path for references returned by
+        // legacy discovery. Data Protection references must be treated as
+        // opaque persistent-ref values: kSecMatchItemList can report success
+        // while returning an unrelated item of the same class.
         #if os(macOS)
-        query[kSecMatchItemList as String] = [persistentReference]
+        if usesDataProtectionKeychain {
+            query[kSecValuePersistentRef as String] = persistentReference
+        } else {
+            query[kSecMatchItemList as String] = [persistentReference]
+        }
         #else
         query[kSecValuePersistentRef as String] = persistentReference
         #endif

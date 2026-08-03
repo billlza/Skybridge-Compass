@@ -161,6 +161,12 @@ final class StrictIdentityFailClosedSourceContractTests: XCTestCase {
         XCTAssertTrue(probe.contains("try verifyAbsent()"))
         XCTAssertTrue(probe.contains("verifyAbsent: verifyGenericPasswordArtifactsAbsent"))
         XCTAssertTrue(probe.contains("try verifyPrivateKeyArtifactsAbsent(accessGroup: accessGroup)"))
+        XCTAssertTrue(
+            probe.contains("case (.secItemAdd, _), (.discovery, true):"),
+            "Data Protection discovery references must use kSecValuePersistentRef"
+        )
+        XCTAssertTrue(probe.contains("origin: .discovery"))
+        XCTAssertTrue(probe.contains(") == expectedValue else"))
         XCTAssertFalse(probe.contains("try? removeUniqueProbe"))
     }
 

@@ -2252,6 +2252,48 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         }
     }
 
+    func testSKR1OutboundFailurePreservesOnlyAValidatedDiagnosticReasonCode() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+
+        XCTAssertTrue(source.contains("reasonCode: failure.reasonCode"))
+        XCTAssertTrue(
+            source.contains(
+                "summary += \" remote_reason_code=\\(reasonCode)\""
+            )
+        )
+        XCTAssertTrue(source.contains("value.utf8.count <= 64"))
+        XCTAssertTrue(
+            source.contains("(97...122).contains($0)")
+        )
+
+        let validError = P2PConnectionManager.signedLANRefreshFailure(
+            "remote detail remains private",
+            reasonCode: "LOCAL_PQC_KEM_UNAVAILABLE"
+        )
+        XCTAssertEqual(
+            validError.userInfo["SkyBridgeSignedLANRefreshReasonCode"] as? String,
+            "local_pqc_kem_unavailable"
+        )
+
+        let invalidError = P2PConnectionManager.signedLANRefreshFailure(
+            "remote detail remains private",
+            reasonCode: "bad\ninjected=value"
+        )
+        XCTAssertNil(
+            invalidError.userInfo["SkyBridgeSignedLANRefreshReasonCode"]
+        )
+
+        let nonASCIIError = P2PConnectionManager.signedLANRefreshFailure(
+            "remote detail remains private",
+            reasonCode: "local_pqc_不可用"
+        )
+        XCTAssertNil(
+            nonASCIIError.userInfo["SkyBridgeSignedLANRefreshReasonCode"]
+        )
+    }
+
     func testPairingIdentityExchangeDiagnosticsRedactStableIdentifiersAndErrors() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"

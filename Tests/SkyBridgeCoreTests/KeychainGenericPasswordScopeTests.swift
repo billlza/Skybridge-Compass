@@ -1,8 +1,41 @@
+import Security
 import XCTest
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, *)
 final class KeychainGenericPasswordScopeTests: XCTestCase {
+    func testPersistentReferenceMatchingUsesTheCorrectKeychainDomainSelector() {
+        let reference = Data([0x53, 0x42, 0x50, 0x52])
+
+        var dataProtectionQuery: [String: Any] = [
+            kSecMatchItemList as String: [Data([0x00])]
+        ]
+        LegacySecItemLocation(
+            actualAccessGroup: "TEAM.group.com.skybridge.compass",
+            usesDataProtectionKeychain: true,
+            persistentReference: reference
+        ).applyPersistentReferenceMatch(to: &dataProtectionQuery)
+        XCTAssertEqual(
+            dataProtectionQuery[kSecValuePersistentRef as String] as? Data,
+            reference
+        )
+        XCTAssertNil(dataProtectionQuery[kSecMatchItemList as String])
+
+        var fileKeychainQuery: [String: Any] = [
+            kSecValuePersistentRef as String: Data([0x00])
+        ]
+        LegacySecItemLocation(
+            actualAccessGroup: nil,
+            usesDataProtectionKeychain: false,
+            persistentReference: reference
+        ).applyPersistentReferenceMatch(to: &fileKeychainQuery)
+        XCTAssertEqual(
+            fileKeychainQuery[kSecMatchItemList as String] as? [Data],
+            [reference]
+        )
+        XCTAssertNil(fileKeychainQuery[kSecValuePersistentRef as String])
+    }
+
     func testMissingOrAppOnlyAccessGroupFailsClosed() {
         XCTAssertThrowsError(
             try SkyBridgeKeychainAccessGroupResolver.requiredSharedAccessGroup(from: [])

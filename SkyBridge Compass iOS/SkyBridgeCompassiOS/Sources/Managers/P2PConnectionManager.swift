@@ -763,9 +763,38 @@ public class P2PConnectionManager: ObservableObject {
 
     private nonisolated static var protocolIdentityLogRedaction: String { "<redacted>" }
 
+    private nonisolated static var signedLANRefreshReasonCodeUserInfoKey: String {
+        "SkyBridgeSignedLANRefreshReasonCode"
+    }
+
+    private nonisolated static func normalizedDiagnosticReasonCode(
+        _ raw: String?
+    ) -> String? {
+        guard let raw else { return nil }
+        let value = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !value.isEmpty,
+              value.utf8.count <= 64,
+              value.utf8.allSatisfy({
+                  (97...122).contains($0)
+                      || (48...57).contains($0)
+                      || $0 == 95
+              }) else {
+            return nil
+        }
+        return value
+    }
+
     private nonisolated static func diagnosticErrorSummary(_ error: Error) -> String {
         let nsError = error as NSError
-        return "error_domain=\(nsError.domain) code=\(nsError.code)"
+        var summary = "error_domain=\(nsError.domain) code=\(nsError.code)"
+        if let reasonCode = normalizedDiagnosticReasonCode(
+            nsError.userInfo[signedLANRefreshReasonCodeUserInfoKey] as? String
+        ) {
+            summary += " remote_reason_code=\(reasonCode)"
+        }
+        return summary
     }
 
     private nonisolated static func diagnosticConnectionState(_ state: NWConnection.State) -> String {
@@ -1600,7 +1629,8 @@ public class P2PConnectionManager: ObservableObject {
         let response = try AppMessage.decodeWireMessage(from: responseFrame)
         if case .kemRefreshFailure(let failure) = response {
             throw signedLANRefreshFailure(
-                "remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode)"
+                "remote rejected SKR-1 stage=\(failure.stage) reasonCode=\(failure.reasonCode)",
+                reasonCode: failure.reasonCode
             )
         }
         guard case .signedKEMRefresh(let payload) = response else {
@@ -2361,16 +2391,26 @@ public class P2PConnectionManager: ObservableObject {
         return try await gate.wait(timeoutSeconds: timeoutSeconds)
     }
 
-    nonisolated static func signedLANRefreshFailure(_ reason: String) -> NSError {
-        NSError(
+    nonisolated static func signedLANRefreshFailure(
+        _ reason: String,
+        reasonCode: String? = nil
+    ) -> NSError {
+        var userInfo: [String: Any] = [NSLocalizedDescriptionKey: reason]
+        if let reasonCode = normalizedDiagnosticReasonCode(reasonCode) {
+            userInfo[signedLANRefreshReasonCodeUserInfoKey] = reasonCode
+        }
+        return NSError(
             domain: "SkyBridge.SignedLANRefresh",
             code: 1,
-            userInfo: [NSLocalizedDescriptionKey: reason]
+            userInfo: userInfo
         )
     }
 
-    private func signedLANRefreshFailure(_ reason: String) -> NSError {
-        Self.signedLANRefreshFailure(reason)
+    private func signedLANRefreshFailure(
+        _ reason: String,
+        reasonCode: String? = nil
+    ) -> NSError {
+        Self.signedLANRefreshFailure(reason, reasonCode: reasonCode)
     }
 
     nonisolated private static func protocolIdentityBindingFailure(_ reason: String) -> NSError {
