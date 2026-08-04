@@ -809,6 +809,174 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         }
     }
 
+    func testIndependentSignalClientsShareSingleFlightRefreshAndReplayExactCAS() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let expiredToken = try makeAuthTestJWT(
+            subject: "user-123",
+            tenantID: "tenant-123",
+            expiration: 1
+        )
+        let refreshedToken = try makeAuthTestJWT(
+            subject: "user-123",
+            tenantID: "tenant-123",
+            expiration: 4_102_444_800
+        )
+        let original = makeAuthTestSession(
+            token: expiredToken,
+            refreshToken: "refresh-original",
+            userID: "user-123",
+            tenantID: "tenant-123"
+        )
+        let refreshed = makeAuthTestSession(
+            token: refreshedToken,
+            refreshToken: "refresh-next",
+            userID: "user-123",
+            tenantID: "tenant-123"
+        )
+        let repository = AuthSessionRepositoryProbe(session: original)
+        let refreshProbe = SingleFlightAuthRefreshProbe(response: refreshed)
+        let dependencies = SignalServerClientCompat.AuthenticationDependencies(
+            accessTokenOverride: { "" },
+            tenantIDOverride: { "" },
+            loadPersistedSession: { await repository.load() },
+            refreshSession: { token in try await refreshProbe.refresh(token: token) },
+            validateRefreshedAccessToken: { _ in },
+            replacePersistedSession: { expected, replacement in
+                await repository.replace(expected: expected, with: replacement)
+            }
+        )
+        let firstURLSession = makeAuthenticatedRequestTestURLSession()
+        let secondURLSession = makeAuthenticatedRequestTestURLSession()
+        defer {
+            firstURLSession.invalidateAndCancel()
+            secondURLSession.invalidateAndCancel()
+        }
+        let firstClient = SignalServerClientCompat(
+            urlSession: firstURLSession,
+            authenticationDependencies: dependencies
+        )
+        let secondClient = SignalServerClientCompat(
+            urlSession: secondURLSession,
+            authenticationDependencies: dependencies
+        )
+        let binding = try makeAuthTestProtocolBinding()
+        let firstRequest = Task {
+            try await firstClient.requestAdmissionChallenge(binding: binding)
+        }
+        let secondRequest = Task {
+            try await secondClient.requestAdmissionChallenge(binding: binding)
+        }
+        defer {
+            firstRequest.cancel()
+            secondRequest.cancel()
+            Task { await refreshProbe.release() }
+        }
+
+        try await waitForAuthRefreshCallerCount(2, probe: refreshProbe)
+        await refreshProbe.release()
+        _ = try await (firstRequest.value, secondRequest.value)
+
+        let refreshCallerCount = await refreshProbe.callerCount()
+        let refreshExchangeCount = await refreshProbe.exchangeCount()
+        let replaceAttemptCount = await repository.replaceAttemptCount()
+        let replaceCount = await repository.replaceCount()
+        let exactReplayCount = await repository.exactReplayCount()
+        XCTAssertEqual(refreshCallerCount, 2)
+        XCTAssertEqual(refreshExchangeCount, 1)
+        XCTAssertEqual(replaceAttemptCount, 2)
+        XCTAssertEqual(replaceCount, 1)
+        XCTAssertEqual(exactReplayCount, 1)
+        let persisted = await repository.currentSession()
+        XCTAssertEqual(persisted.accessToken, refreshedToken)
+        XCTAssertEqual(persisted.refreshToken, "refresh-next")
+        XCTAssertEqual(AuthenticatedRequestURLProtocol.requests().count, 2)
+        for request in AuthenticatedRequestURLProtocol.requests() {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(refreshedToken)")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id"), "tenant-123")
+        }
+    }
+
+    func testConcurrentNewLoginIsNotAcceptedAsExactRefreshReplacement() async throws {
+        AuthenticatedRequestURLProtocol.reset()
+        defer { AuthenticatedRequestURLProtocol.reset() }
+        let expiredToken = try makeAuthTestJWT(
+            subject: "user-123",
+            tenantID: "tenant-123",
+            expiration: 1
+        )
+        let refreshedToken = try makeAuthTestJWT(
+            subject: "user-123",
+            tenantID: "tenant-123",
+            expiration: 4_102_444_800
+        )
+        let newLoginToken = try makeAuthTestJWT(
+            subject: "user-123",
+            tenantID: "tenant-123",
+            expiration: 4_102_444_900
+        )
+        let original = makeAuthTestSession(
+            token: expiredToken,
+            refreshToken: "refresh-original",
+            userID: "user-123",
+            tenantID: "tenant-123"
+        )
+        let refreshed = makeAuthTestSession(
+            token: refreshedToken,
+            refreshToken: "refresh-next",
+            userID: "user-123",
+            tenantID: "tenant-123"
+        )
+        let newLogin = makeAuthTestSession(
+            token: newLoginToken,
+            refreshToken: "refresh-new-login",
+            userID: "user-123",
+            tenantID: "tenant-123"
+        )
+        let repository = AuthSessionRepositoryProbe(session: original)
+        let dependencies = SignalServerClientCompat.AuthenticationDependencies(
+            accessTokenOverride: { "" },
+            tenantIDOverride: { "" },
+            loadPersistedSession: { await repository.load() },
+            refreshSession: { token in
+                guard token == "refresh-original" else {
+                    throw AuthRequestTestError.unexpectedRefresh
+                }
+                await repository.install(newLogin)
+                return refreshed
+            },
+            validateRefreshedAccessToken: { _ in },
+            replacePersistedSession: { expected, replacement in
+                await repository.replace(expected: expected, with: replacement)
+            }
+        )
+        let urlSession = makeAuthenticatedRequestTestURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        let client = SignalServerClientCompat(
+            urlSession: urlSession,
+            authenticationDependencies: dependencies
+        )
+
+        do {
+            _ = try await client.requestAdmissionChallenge(binding: makeAuthTestProtocolBinding())
+            XCTFail("A concurrent new login must not be accepted as an idempotent refresh replay")
+        } catch SignalServerClientCompat.ClientError.authenticationSessionChanged {
+            // Exact replacement replay is allowed; every other persisted session stays fail-closed.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let replaceAttemptCount = await repository.replaceAttemptCount()
+        let replaceCount = await repository.replaceCount()
+        let exactReplayCount = await repository.exactReplayCount()
+        let persisted = await repository.currentSession()
+        XCTAssertEqual(replaceAttemptCount, 1)
+        XCTAssertEqual(replaceCount, 0)
+        XCTAssertEqual(exactReplayCount, 0)
+        XCTAssertEqual(persisted, newLogin)
+        XCTAssertTrue(AuthenticatedRequestURLProtocol.requests().isEmpty)
+    }
+
     func testIdentityDriftingRefreshIsRejectedBeforePersistenceOrRequestSend() async throws {
         AuthenticatedRequestURLProtocol.reset()
         let expiredToken = try makeAuthTestJWT(
@@ -2214,6 +2382,7 @@ private actor AsyncOneShotTestLatch {
 private enum AuthRequestTestError: Error {
     case unexpectedRefresh
     case timedOutWaitingForConcurrentLoads
+    case timedOutWaitingForRefreshCallers
     case timedOutWaitingForRequestCancellation
     case timedOutWaitingForRegistrationRequest
     case timedOutWaitingForAuthorityRecovery
@@ -2299,6 +2468,21 @@ private func waitForAuthSessionLoads(
 }
 
 @available(iOS 17.0, *)
+private func waitForAuthRefreshCallerCount(
+    _ expectedCount: Int,
+    probe: SingleFlightAuthRefreshProbe
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while await probe.callerCount() < expectedCount {
+        guard clock.now < deadline else {
+            throw AuthRequestTestError.timedOutWaitingForRefreshCallers
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+}
+
+@available(iOS 17.0, *)
 private actor SequentialAuthSessionLoader {
     private let sessions: [AuthSession]
     private var loads = 0
@@ -2321,6 +2505,8 @@ private actor AuthSessionRepositoryProbe {
     private var session: AuthSession
     private var loads = 0
     private var replacements = 0
+    private var replacementAttempts = 0
+    private var exactReplays = 0
 
     init(session: AuthSession) {
         self.session = session
@@ -2332,14 +2518,93 @@ private actor AuthSessionRepositoryProbe {
     }
 
     func replace(expected: AuthSession, with replacement: AuthSession) -> Bool {
+        replacementAttempts += 1
+        if session == replacement {
+            exactReplays += 1
+            return true
+        }
         guard session == expected else { return false }
         session = replacement
         replacements += 1
         return true
     }
 
+    func install(_ replacement: AuthSession) {
+        session = replacement
+    }
+
     func loadCount() -> Int { loads }
     func replaceCount() -> Int { replacements }
+    func replaceAttemptCount() -> Int { replacementAttempts }
+    func exactReplayCount() -> Int { exactReplays }
+    func currentSession() -> AuthSession { session }
+}
+
+@available(iOS 17.0, *)
+private actor AuthRefreshReleaseGate {
+    private var isReleased = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { continuation in
+            if isReleased {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+            }
+        }
+    }
+
+    func release() {
+        guard !isReleased else { return }
+        isReleased = true
+        let waiting = waiters
+        waiters.removeAll(keepingCapacity: false)
+        for continuation in waiting {
+            continuation.resume()
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+private actor SingleFlightAuthRefreshProbe {
+    private let response: AuthSession
+    private let releaseGate = AuthRefreshReleaseGate()
+    private var inFlight: Task<AuthSession, Never>?
+    private var callers = 0
+    private var exchanges = 0
+
+    init(response: AuthSession) {
+        self.response = response
+    }
+
+    func refresh(token: String) async throws -> AuthSession {
+        guard token == "refresh-original" else {
+            throw AuthRequestTestError.unexpectedRefresh
+        }
+        callers += 1
+        if let inFlight {
+            return await inFlight.value
+        }
+
+        exchanges += 1
+        let response = response
+        let releaseGate = releaseGate
+        let task = Task {
+            await releaseGate.wait()
+            return response
+        }
+        inFlight = task
+        return await task.value
+    }
+
+    func release() async {
+        await releaseGate.release()
+    }
+
+    func callerCount() -> Int { callers }
+    func exchangeCount() -> Int { exchanges }
 }
 
 @available(iOS 17.0, *)

@@ -854,10 +854,17 @@ struct UserProfileOverlay: View {
         }
 
  // 尝试刷新 Token 以确保有效性
-        if let refreshToken = session.refreshToken {
+        if session.refreshToken != nil {
             do {
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] 尝试刷新访问令牌")
-                let newSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+                guard AuthenticationService.shared.currentSessionSnapshot()?.userIdentifier
+                        == session.userIdentifier,
+                      let newSession = try await AuthenticationService.shared.validSession(
+                        forceRefresh: true
+                      ),
+                      newSession.userIdentifier == session.userIdentifier else {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+                }
                 session = newSession
                 do {
                     resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
@@ -867,9 +874,10 @@ struct UserProfileOverlay: View {
                 } catch {
                     SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileOverlay] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
                 }
-                try await AuthenticationService.shared.updateSession(newSession)
                 await MainActor.run { authModel.currentSession = newSession }
                 SkyBridgeLogger.ui.debugOnly("✅ [UserProfileOverlay] 访问令牌刷新成功")
+            } catch AuthenticationService.AuthenticationError.sessionChangedDuringRefresh {
+                throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
             } catch {
                 SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileOverlay] 令牌刷新失败，使用现有令牌: \(error.localizedDescription)")
             }
@@ -928,11 +936,17 @@ struct UserProfileOverlay: View {
                     phoneNumber: phoneNumber,
                     accessToken: session.accessToken
                 )
-            } else if let refreshToken = session.refreshToken {
+            } else if session.refreshToken != nil {
                 SkyBridgeLogger.ui.debugOnly("🔄 [UserProfileOverlay] auth API 失败，尝试刷新令牌并重试")
-                let newSession = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+                guard AuthenticationService.shared.currentSessionSnapshot()?.userIdentifier
+                        == session.userIdentifier,
+                      let newSession = try await AuthenticationService.shared.validSession(
+                        forceRefresh: true
+                      ),
+                      newSession.userIdentifier == session.userIdentifier else {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+                }
                 session = newSession
-                try await AuthenticationService.shared.updateSession(newSession)
                 await MainActor.run { authModel.currentSession = newSession }
                 do {
                     success = try await SupabaseService.shared.updateUserProfile(

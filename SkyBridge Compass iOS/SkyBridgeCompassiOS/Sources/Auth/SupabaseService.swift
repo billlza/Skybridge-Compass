@@ -177,7 +177,10 @@ public final class SupabaseService: ObservableObject {
     private let urlSession: URLSession
     private var configuration: Configuration?
     private var configurationResolutionCompleted = false
-    private var inFlightRefreshSession: (token: String, id: UUID, task: Task<AuthSession, Error>)?
+    /// One app-wide refresh operation, retained after success until the source refresh token
+    /// advances. Supabase refresh tokens rotate, so a late caller holding the consumed source
+    /// token must receive the exact completed result instead of replaying that token.
+    private var refreshSessionOperation: (token: String, id: UUID, task: Task<AuthSession, Error>)?
 
     private init() {
         let cfg = URLSessionConfiguration.default
@@ -286,6 +289,7 @@ public final class SupabaseService: ObservableObject {
     }
 
     public func updateConfiguration(_ configuration: Configuration) {
+        cancelRefreshSessionOperation()
         self.configuration = configuration
         configurationResolutionCompleted = true
     }
@@ -456,9 +460,10 @@ public final class SupabaseService: ObservableObject {
             throw SupabaseError.invalidResponse
         }
 
-        if let current = inFlightRefreshSession,
-           current.token == normalizedRefreshToken {
-            return try await current.task.value
+        if let current = refreshSessionOperation {
+            if current.token == normalizedRefreshToken {
+                return try await current.task.value
+            }
         }
 
         let config = try await requireConfiguration()
@@ -469,14 +474,15 @@ public final class SupabaseService: ObservableObject {
                 refreshToken: normalizedRefreshToken
             )
         }
-        inFlightRefreshSession = (token: normalizedRefreshToken, id: refreshID, task: task)
+        refreshSessionOperation = (token: normalizedRefreshToken, id: refreshID, task: task)
 
         do {
-            let session = try await task.value
-            clearInFlightRefreshSession(ifMatches: refreshID)
-            return session
+            // Keep the successful task memoized. Both current-path activation and profile
+            // hydration can arrive after the HTTP request completed but before their local
+            // session snapshots converge.
+            return try await task.value
         } catch {
-            clearInFlightRefreshSession(ifMatches: refreshID)
+            clearRefreshSessionOperation(ifMatches: refreshID)
             throw error
         }
     }
@@ -788,9 +794,14 @@ public final class SupabaseService: ObservableObject {
         return try await performAuthRequest(request)
     }
 
-    private func clearInFlightRefreshSession(ifMatches refreshID: UUID) {
-        guard inFlightRefreshSession?.id == refreshID else { return }
-        inFlightRefreshSession = nil
+    private func clearRefreshSessionOperation(ifMatches refreshID: UUID) {
+        guard refreshSessionOperation?.id == refreshID else { return }
+        refreshSessionOperation = nil
+    }
+
+    private func cancelRefreshSessionOperation() {
+        refreshSessionOperation?.task.cancel()
+        refreshSessionOperation = nil
     }
 
     // MARK: - Database (Nebula ID)

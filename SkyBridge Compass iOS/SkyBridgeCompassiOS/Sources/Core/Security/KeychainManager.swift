@@ -1285,8 +1285,14 @@ public extension KeychainManager {
     /// Atomically replaces a persisted authentication session only when it is still the
     /// exact session that initiated a token refresh. Keeping the comparison and write in
     /// this actor prevents a late refresh from overwriting a newer login or logout state.
+    /// An already-installed exact replacement is an idempotent success; every other
+    /// divergence remains fail-closed.
     func replaceAuthSession(expected: AuthSession, with replacement: AuthSession) throws -> Bool {
-        guard try loadAuthSessionStrict() == expected else {
+        let current = try loadAuthSessionStrict()
+        if current == replacement {
+            return true
+        }
+        guard current == expected else {
             return false
         }
         try storeAuthSession(replacement)

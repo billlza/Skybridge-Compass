@@ -1845,7 +1845,7 @@ actor SignalServerClientCompat {
             email: original.email,
             avatarURL: original.avatarURL,
             nebulaId: original.nebulaId,
-            issuedAt: now
+            issuedAt: refreshed.issuedAt
         )
     }
 

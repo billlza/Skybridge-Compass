@@ -87,6 +87,14 @@ import Combine
         sessionSubject.value
     }
 
+    /// Resolves and, when requested, refreshes the authoritative session through the
+    /// single owner before returning a snapshot from the same actor turn.
+    @MainActor
+    public func validSession(forceRefresh: Bool = false) async throws -> AuthSession? {
+        _ = try await validAccessToken(forceRefresh: forceRefresh)
+        return currentSessionSnapshot()
+    }
+
     public func hasAuthenticatedSessionForProtectedServices() -> Bool {
         sessionSubject.value?.isAuthenticatedForProtectedServices == true
     }

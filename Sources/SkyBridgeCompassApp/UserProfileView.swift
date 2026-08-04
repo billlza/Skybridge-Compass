@@ -524,9 +524,16 @@ struct UserProfileView: View {
         }
 
         // Best-effort: refresh token if possible.
-        if let refreshToken = session.refreshToken {
+        if session.refreshToken != nil {
             do {
-                let refreshed = try await SupabaseService.shared.refreshAccessToken(refreshToken)
+                guard AuthenticationService.shared.currentSessionSnapshot()?.userIdentifier
+                        == session.userIdentifier,
+                      let refreshed = try await AuthenticationService.shared.validSession(
+                        forceRefresh: true
+                      ),
+                      refreshed.userIdentifier == session.userIdentifier else {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+                }
                 activeSession = refreshed
                 do {
                     resolvedAvatarURL = try await SupabaseService.shared.getUserAvatarUrl(
@@ -536,8 +543,9 @@ struct UserProfileView: View {
                 } catch {
                     SkyBridgeLogger.ui.debugOnly("ℹ️ [UserProfileView] 刷新后预取云端头像 URL 失败（忽略）: \(error.localizedDescription)")
                 }
-                try await AuthenticationService.shared.updateSession(refreshed)
                 await MainActor.run { authModel.currentSession = refreshed }
+            } catch AuthenticationService.AuthenticationError.sessionChangedDuringRefresh {
+                throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
             } catch {
                 SkyBridgeLogger.ui.debugOnly("⚠️ [UserProfileView] 令牌刷新失败，使用现有令牌: \(error.localizedDescription)")
             }

@@ -1493,12 +1493,15 @@ extension KeychainManager {
     /// Atomically replaces the persisted authentication session only when the
     /// exact source session is still authoritative. Actor isolation keeps the
     /// read/compare/write sequence indivisible with respect to sign-out and
-    /// account-switch writes.
+    /// account-switch writes. An already-installed exact replacement is an
+    /// idempotent success; every other divergence remains fail-closed.
     public func replaceAuthSession(
         expected: AuthSession,
         with replacement: AuthSession
     ) throws -> Bool {
-        guard try loadAuthSessionStrict() == expected else { return false }
+        let current = try loadAuthSessionStrict()
+        if current == replacement { return true }
+        guard current == expected else { return false }
         try storeAuthSession(replacement)
         return true
     }

@@ -300,7 +300,10 @@ public final class SupabaseService: BaseManager {
     
     private let urlSession: URLSession
     private var configuration: Configuration?
-    private var inFlightAccessTokenRefresh: (token: String, id: UUID, task: Task<AuthSession, Error>)?
+    /// Retains the last successful single-flight operation until the source refresh token
+    /// advances. A consumed rotating token is never replayed merely because another owner
+    /// joined after the network request completed.
+    private var accessTokenRefreshOperation: (token: String, id: UUID, task: Task<AuthSession, Error>)?
     
  // MARK: - 初始化
     
@@ -345,6 +348,7 @@ public final class SupabaseService: BaseManager {
     
  /// 更新Supabase配置
     public func updateConfiguration(_ configuration: Configuration) {
+        cancelAccessTokenRefreshOperation()
         self.configuration = configuration
     }
 
@@ -2107,9 +2111,10 @@ extension SupabaseService {
             throw SupabaseError.invalidResponse
         }
 
-        if let current = inFlightAccessTokenRefresh,
-           current.token == normalizedRefreshToken {
-            return try await current.task.value
+        if let current = accessTokenRefreshOperation {
+            if current.token == normalizedRefreshToken {
+                return try await current.task.value
+            }
         }
 
         guard let config = configuration else {
@@ -2123,14 +2128,12 @@ extension SupabaseService {
                 refreshToken: normalizedRefreshToken
             )
         }
-        inFlightAccessTokenRefresh = (token: normalizedRefreshToken, id: refreshID, task: task)
+        accessTokenRefreshOperation = (token: normalizedRefreshToken, id: refreshID, task: task)
 
         do {
-            let session = try await task.value
-            clearInFlightAccessTokenRefresh(ifMatches: refreshID)
-            return session
+            return try await task.value
         } catch {
-            clearInFlightAccessTokenRefresh(ifMatches: refreshID)
+            clearAccessTokenRefreshOperation(ifMatches: refreshID)
             throw error
         }
     }
@@ -2205,8 +2208,13 @@ extension SupabaseService {
         }
     }
 
-    private func clearInFlightAccessTokenRefresh(ifMatches refreshID: UUID) {
-        guard inFlightAccessTokenRefresh?.id == refreshID else { return }
-        inFlightAccessTokenRefresh = nil
+    private func clearAccessTokenRefreshOperation(ifMatches refreshID: UUID) {
+        guard accessTokenRefreshOperation?.id == refreshID else { return }
+        accessTokenRefreshOperation = nil
+    }
+
+    private func cancelAccessTokenRefreshOperation() {
+        accessTokenRefreshOperation?.task.cancel()
+        accessTokenRefreshOperation = nil
     }
 }

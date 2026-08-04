@@ -695,6 +695,61 @@ final class ConnectionCodeFormatTests: XCTestCase {
         )
     }
 
+    func testRefreshedSessionMergeIsDeterministicAcrossCallerClocks() throws {
+        let firstCallerNow = Date(timeIntervalSince1970: 2_000_000_000)
+        let secondCallerNow = firstCallerNow.addingTimeInterval(30)
+        let refreshedIssuedAt = firstCallerNow.addingTimeInterval(-15)
+        let original = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "app_metadata": ["tenant_id": "tenant-123"],
+                    "exp": firstCallerNow.timeIntervalSince1970 - 1
+                ]
+            ),
+            refreshToken: "refresh-original",
+            userIdentifier: "user-123",
+            displayName: "Original User",
+            email: "original@example.test",
+            avatarURL: "https://example.test/original.png",
+            nebulaId: "tenant-123",
+            issuedAt: firstCallerNow.addingTimeInterval(-3_600)
+        )
+        let refreshed = AuthSession(
+            accessToken: try Self.makeUnsignedJWTForTenantTests(
+                payload: [
+                    "sub": "user-123",
+                    "app_metadata": ["tenant_id": "tenant-123"],
+                    "exp": secondCallerNow.timeIntervalSince1970 + 3_600
+                ]
+            ),
+            refreshToken: "refresh-next",
+            userIdentifier: "user-123",
+            displayName: "Provider User",
+            email: "provider@example.test",
+            avatarURL: "https://example.test/provider.png",
+            nebulaId: "provider-presentation-value",
+            issuedAt: refreshedIssuedAt
+        )
+
+        let firstMerged = try SignalServerClientCompat.validatedRefreshedAuthSession(
+            refreshed,
+            replacing: original,
+            explicitTenantID: "tenant-123",
+            now: firstCallerNow
+        )
+        let secondMerged = try SignalServerClientCompat.validatedRefreshedAuthSession(
+            refreshed,
+            replacing: original,
+            explicitTenantID: "tenant-123",
+            now: secondCallerNow
+        )
+
+        XCTAssertEqual(firstMerged, secondMerged)
+        XCTAssertEqual(firstMerged.issuedAt, refreshed.issuedAt)
+        XCTAssertEqual(secondMerged.issuedAt, refreshed.issuedAt)
+    }
+
     func testRefreshedSessionRejectsJWTTenantDriftBeforePersistence() throws {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let original = AuthSession(

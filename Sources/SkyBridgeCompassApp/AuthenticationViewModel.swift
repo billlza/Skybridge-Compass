@@ -2692,6 +2692,20 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
         usernameCheckInProgress = false
     }
 
+    private func forceRefreshedSession(
+        maintainingUserIdentifierFrom expectedSession: AuthSession
+    ) async throws -> AuthSession {
+        guard authService.currentSessionSnapshot()?.userIdentifier
+                == expectedSession.userIdentifier else {
+            throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+        }
+        guard let refreshed = try await authService.validSession(forceRefresh: true),
+              refreshed.userIdentifier == expectedSession.userIdentifier else {
+            throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+        }
+        return refreshed
+    }
+
  // MARK: - 用户资料更新方法
 
  /// 更新用户显示名称
@@ -2716,12 +2730,18 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
            session.accessToken != "pending_verification",
            SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
             var activeSession = session
-            if let refreshToken = session.refreshToken {
+            if session.refreshToken != nil {
                 // Best-effort refresh for 403/expired tokens
-                if let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
+                do {
+                    let refreshed = try await forceRefreshedSession(
+                        maintainingUserIdentifierFrom: session
+                    )
                     activeSession = refreshed
-                    try await AuthenticationService.shared.updateSession(refreshed)
                     currentSession = refreshed
+                } catch AuthenticationService.AuthenticationError.sessionChangedDuringRefresh {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+                } catch {
+                    // Preserve the existing best-effort boundary for transient failures.
                 }
             }
 
@@ -2790,11 +2810,17 @@ final class AuthenticationViewModel: NSObject, ObservableObject {
            session.accessToken != "pending_verification",
            SupabaseService.shared.isSupabaseAccessToken(session.accessToken) {
             var activeSession = session
-            if let refreshToken = session.refreshToken {
-                if let refreshed = try? await SupabaseService.shared.refreshAccessToken(refreshToken) {
+            if session.refreshToken != nil {
+                do {
+                    let refreshed = try await forceRefreshedSession(
+                        maintainingUserIdentifierFrom: session
+                    )
                     activeSession = refreshed
-                    try await AuthenticationService.shared.updateSession(refreshed)
                     currentSession = refreshed
+                } catch AuthenticationService.AuthenticationError.sessionChangedDuringRefresh {
+                    throw AuthenticationService.AuthenticationError.sessionChangedDuringRefresh
+                } catch {
+                    // Preserve the existing best-effort boundary for transient failures.
                 }
             }
 

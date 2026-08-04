@@ -114,6 +114,29 @@ final class AuthenticationViewSourceContractTests: XCTestCase {
         )
     }
 
+    func testMacSupabaseRefreshCallSitesUseAuthenticationServiceSingleOwner() throws {
+        let refreshCallSites = [
+            "Sources/SkyBridgeCompassApp/AuthenticationViewModel.swift",
+            "Sources/SkyBridgeCompassApp/UserProfileOverlay.swift",
+            "Sources/SkyBridgeCompassApp/UserProfileView.swift"
+        ]
+
+        for relativePath in refreshCallSites {
+            let source = try repositorySource(relativePath)
+            let whitespaceCollapsed = source.components(
+                separatedBy: .whitespacesAndNewlines
+            ).joined()
+            XCTAssertFalse(
+                source.contains(".refreshAccessToken("),
+                "\(relativePath) must not bypass AuthenticationService's session-bound refresh owner."
+            )
+            XCTAssertTrue(
+                whitespaceCollapsed.contains("validSession(forceRefresh:true)"),
+                "\(relativePath) must force refresh through AuthenticationService's authoritative session owner."
+            )
+        }
+    }
+
     private func repositorySource(_ relativePath: String) throws -> String {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

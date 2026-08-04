@@ -59,6 +59,13 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
 
         XCTAssertEqual(server.requestCount, 1)
         XCTAssertEqual(Set(sessions.map(\.accessToken)).count, 1)
+
+        let lateSession = try await SupabaseService.shared.refreshAccessToken("refresh-token")
+        XCTAssertEqual(lateSession.accessToken, sessions[0].accessToken)
+        XCTAssertEqual(server.requestCount, 1)
+
+        _ = try await SupabaseService.shared.refreshAccessToken("refresh-token-next")
+        XCTAssertEqual(server.requestCount, 2)
     }
 
     func testAuthenticationServiceValidAccessTokenDeduplicatesConcurrentRefreshRequests() async throws {
@@ -266,12 +273,19 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
             displayName: "Replacement",
             issuedAt: Date(timeIntervalSince1970: 1_700_000_011)
         )
-        let staleReplacement = AuthSession(
-            accessToken: "stale-access-token",
-            refreshToken: "stale-refresh-token",
+        let issuedAtDriftedReplacement = AuthSession(
+            accessToken: replacement.accessToken,
+            refreshToken: replacement.refreshToken,
             userIdentifier: "source-user",
-            displayName: "Stale",
+            displayName: "Replacement",
             issuedAt: Date(timeIntervalSince1970: 1_700_000_012)
+        )
+        let tokenDriftedReplacement = AuthSession(
+            accessToken: "different-access-token",
+            refreshToken: "different-refresh-token",
+            userIdentifier: "source-user",
+            displayName: "Replacement",
+            issuedAt: replacement.issuedAt
         )
         try await keychain.storeAuthSession(source)
 
@@ -279,12 +293,22 @@ final class AuthenticationServiceRefreshTokenTests: XCTestCase {
             expected: source,
             with: replacement
         )
-        let staleResult = try await keychain.replaceAuthSession(
+        let exactReplay = try await keychain.replaceAuthSession(
             expected: source,
-            with: staleReplacement
+            with: replacement
+        )
+        let issuedAtDriftResult = try await keychain.replaceAuthSession(
+            expected: source,
+            with: issuedAtDriftedReplacement
+        )
+        let tokenDriftResult = try await keychain.replaceAuthSession(
+            expected: source,
+            with: tokenDriftedReplacement
         )
         XCTAssertTrue(firstReplacement)
-        XCTAssertFalse(staleResult)
+        XCTAssertTrue(exactReplay)
+        XCTAssertFalse(issuedAtDriftResult)
+        XCTAssertFalse(tokenDriftResult)
         let persisted = try await keychain.loadAuthSessionStrict()
         XCTAssertEqual(persisted, replacement)
         try await keychain.deleteAuthSession()
