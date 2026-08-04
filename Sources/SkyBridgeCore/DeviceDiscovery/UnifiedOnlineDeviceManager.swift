@@ -50,6 +50,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  /// 设备去重映射表: 唯一标识符 -> OnlineDevice
     private var deviceMap: [String: OnlineDevice] = [:]
 
+    /// 网络发现层已经用本机稳定身份判定过的结果。强身份结论优先于展示层名称/MAC启发式。
+    private var authoritativeNetworkLocalClassifications: [String: Bool] = [:]
+
  /// 设备持久化存储
     private let storage = DeviceStorage()
 
@@ -171,12 +174,17 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     func replaceDevicesForTesting(_ devices: [OnlineDevice]) {
         onlineDevices = devices
         deviceMap = Dictionary(uniqueKeysWithValues: devices.map { ($0.uniqueIdentifier, $0) })
+        authoritativeNetworkLocalClassifications.removeAll()
         updateDeviceStats()
     }
 
     func replaceNetworkDiscoveredDevicesForTesting(_ devices: [DiscoveredDevice]) {
         networkDiscovery.discoveredDevices = devices
         updateDiscoveryMetadataSummary(from: devices)
+    }
+
+    func applyNetworkDeviceUpdateForTesting(_ devices: [DiscoveredDevice]) {
+        handleNetworkDevicesUpdate(devices)
     }
 
     func reloadPersistedDevicesForTesting() {
@@ -187,6 +195,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
     func recomputeDeviceStatusesForTesting() {
         updateDevicesList()
+    }
+
+    func recomputeLocalFlagsForTesting() {
+        recomputeLocalFlagsForAllDevices()
     }
     #endif
 
@@ -1033,7 +1045,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         logger.debug("📡 网络设备更新: \(devices.count) 台")
         updateDiscoveryMetadataSummary(from: devices)
 
-        for device in devices {
+        let identifiedDevices = devices.map { device in
             let preferredMAC = preferredMACAddress(from: device.macSet)
             let identifier = generateUniqueIdentifier(
                 stableDeviceId: device.deviceId,
@@ -1045,9 +1057,27 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 ipv6: device.ipv6,
                 discoveryIdentifier: device.uniqueIdentifier
             )
+            return (device: device, preferredMAC: preferredMAC, identifier: identifier)
+        }
+
+        var classifications: [String: Bool] = [:]
+        for identified in identifiedDevices {
+            let keys = Self.authoritativeLocalIdentityKeys(
+                identifier: identified.identifier,
+                deviceId: identified.device.deviceId,
+                protocolFingerprint: identified.device.pubKeyFP
+            )
+            for key in keys {
+                classifications[key] = (classifications[key] == true) || identified.device.isLocalDevice
+            }
+        }
+        authoritativeNetworkLocalClassifications = classifications
+
+        for identified in identifiedDevices {
+            let device = identified.device
 
             mergeOrCreateDevice(
-                identifier: identifier,
+                identifier: identified.identifier,
                 name: device.name,
                 deviceType: device.deviceType,
                 ipv4: device.ipv4,
@@ -1056,7 +1086,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 osVersion: device.osVersion,
                 modelName: device.modelName,
                 chip: device.chip,
-                macAddress: preferredMAC,
+                macAddress: identified.preferredMAC,
                 serialNumber: nil,
                 connectionTypes: device.connectionTypes,
                 services: device.services,
@@ -1068,7 +1098,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 protocolFingerprint: device.pubKeyFP,
                 source: DeviceSource.skybridgeBonjour,
                 signalStrength: device.signalStrength,
-                isConnectable: Self.hasResolvedSkyBridgeControlRoute(device)
+                isConnectable: Self.hasResolvedSkyBridgeControlRoute(device),
+                authoritativeIsLocalDevice: device.isLocalDevice
             )
         }
 
@@ -1270,7 +1301,8 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         isConnectable: Bool = true,
         isAuthorized: Bool = false,
         lastSeen: Date = Date(),
-        initialConnectionStatus: OnlineDeviceStatus = .online
+        initialConnectionStatus: OnlineDeviceStatus = .online,
+        authoritativeIsLocalDevice: Bool = false
     ) {
  // 检查是否已存在
         if var existingDevice = deviceMap[identifier] {
@@ -1312,13 +1344,20 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             if upgradedIdentifier != existingDevice.uniqueIdentifier {
                 existingDevice = Self.copyDevice(existingDevice, uniqueIdentifier: upgradedIdentifier)
             }
+            recordAuthoritativeLocalClassificationIfNeeded(
+                authoritativeIsLocalDevice,
+                identifier: existingDevice.uniqueIdentifier,
+                protocolFingerprint: existingDevice.protocolFingerprint
+            )
  // 合并完成后基于最新来源/MAC/类型重算本机标记
             existingDevice.isLocalDevice = isLocalCandidate(
                 identifier: existingDevice.uniqueIdentifier,
+                protocolFingerprint: existingDevice.protocolFingerprint,
                 name: existingDevice.name,
                 macAddress: existingDevice.macAddress,
                 deviceType: existingDevice.deviceType,
-                sources: existingDevice.sources
+                sources: existingDevice.sources,
+                authoritativeIsLocalDevice: authoritativeIsLocalDevice
             )
 
             deviceMap[identifier] = existingDevice
@@ -1376,13 +1415,20 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     if upgradedIdentifier != existingDevice.uniqueIdentifier {
                         existingDevice = Self.copyDevice(existingDevice, uniqueIdentifier: upgradedIdentifier)
                     }
+                    recordAuthoritativeLocalClassificationIfNeeded(
+                        authoritativeIsLocalDevice,
+                        identifier: existingDevice.uniqueIdentifier,
+                        protocolFingerprint: existingDevice.protocolFingerprint
+                    )
  // 合并完成后基于最新来源/MAC/类型重算本机标记
                     existingDevice.isLocalDevice = isLocalCandidate(
                         identifier: existingDevice.uniqueIdentifier,
+                        protocolFingerprint: existingDevice.protocolFingerprint,
                         name: existingDevice.name,
                         macAddress: existingDevice.macAddress,
                         deviceType: existingDevice.deviceType,
-                        sources: existingDevice.sources
+                        sources: existingDevice.sources,
+                        authoritativeIsLocalDevice: authoritativeIsLocalDevice
                     )
 
  // 更新两个标识符的映射
@@ -1394,6 +1440,11 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 }
             } else {
  // 创建新设备
+                recordAuthoritativeLocalClassificationIfNeeded(
+                    authoritativeIsLocalDevice,
+                    identifier: identifier,
+                    protocolFingerprint: protocolFingerprint
+                )
                 let newDevice = OnlineDevice(
                     id: UUID(),
                     name: name,
@@ -1419,10 +1470,12 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                     lastConnectedAt: nil,
                     isLocalDevice: isLocalCandidate(
                         identifier: identifier,
+                        protocolFingerprint: protocolFingerprint,
                         name: name,
                         macAddress: macAddress,
                         deviceType: deviceType,
-                        sources: [source]
+                        sources: [source],
+                        authoritativeIsLocalDevice: authoritativeIsLocalDevice
                     ),
                     isAuthorized: isAuthorized,
                     signalStrength: signalStrength,
@@ -4158,14 +4211,61 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         monitor.start(queue: DispatchQueue(label: "com.skybridge.pathmonitor"))
     }
 
- /// 严格版：根据来源/设备类型/MAC/名称综合判定是否为本机候选（避免 DHCP/IP 复用导致误判）
+    private nonisolated static func authoritativeLocalIdentityKeys(
+        identifier: String?,
+        deviceId: String?,
+        protocolFingerprint: String?
+    ) -> Set<String> {
+        var keys = Set<String>()
+        for candidate in [identifier, deviceId] {
+            if let persistentDeviceId = PeerTrustLookup.persistentDeviceId(from: candidate) {
+                keys.insert("device:\(persistentDeviceId)")
+            }
+        }
+        if let identifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !identifier.isEmpty {
+            keys.insert("discovery:\(identifier.lowercased())")
+        }
+        if let fingerprint = BonjourInteropContract.normalizedPubKeyFingerprint(protocolFingerprint) {
+            keys.insert("fingerprint:\(fingerprint)")
+        }
+        return keys
+    }
+
+    private func recordAuthoritativeLocalClassificationIfNeeded(
+        _ isLocalDevice: Bool,
+        identifier: String,
+        protocolFingerprint: String?
+    ) {
+        guard isLocalDevice else { return }
+        for key in Self.authoritativeLocalIdentityKeys(
+            identifier: identifier,
+            deviceId: nil,
+            protocolFingerprint: protocolFingerprint
+        ) {
+            authoritativeNetworkLocalClassifications[key] = true
+        }
+    }
+
+ /// 严格版：强身份结论优先；没有强身份结论时才按来源/类型/MAC/名称判断。
     private func isLocalCandidate(
         identifier: String,
+        protocolFingerprint: String?,
         name: String,
         macAddress: String?,
         deviceType: DeviceClassifier.DeviceType,
-        sources: [DeviceSource]
+        sources: [DeviceSource],
+        authoritativeIsLocalDevice: Bool = false
     ) -> Bool {
+        if authoritativeIsLocalDevice { return true }
+        let authoritativeClassifications = Self.authoritativeLocalIdentityKeys(
+            identifier: identifier,
+            deviceId: nil,
+            protocolFingerprint: protocolFingerprint
+        ).compactMap { authoritativeNetworkLocalClassifications[$0] }
+        if authoritativeClassifications.contains(true) { return true }
+        if !authoritativeClassifications.isEmpty { return false }
+
  // A. 唯一本机条目（local:）直接视为本机
         if identifier.hasPrefix("local:") { return true }
 
@@ -4198,6 +4298,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         for (key, var device) in deviceMap {
             let newFlag = isLocalCandidate(
                 identifier: device.uniqueIdentifier,
+                protocolFingerprint: device.protocolFingerprint,
                 name: device.name,
                 macAddress: device.macAddress,
                 deviceType: device.deviceType,
@@ -4225,6 +4326,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  // 启动时按严格规则重算本机标记，清理历史污染
             offlineDevice.isLocalDevice = isLocalCandidate(
                 identifier: offlineDevice.uniqueIdentifier,
+                protocolFingerprint: offlineDevice.protocolFingerprint,
                 name: offlineDevice.name,
                 macAddress: offlineDevice.macAddress,
                 deviceType: offlineDevice.deviceType,

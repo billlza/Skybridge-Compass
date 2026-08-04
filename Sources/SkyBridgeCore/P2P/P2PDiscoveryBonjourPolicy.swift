@@ -1,7 +1,109 @@
 import Foundation
+import Network
 import SkyBridgeProtocolCore
 
 enum P2PDiscoveryBonjourPolicy {
+    enum LocalTargetEvidence: String, Sendable, Equatable {
+        case authoritativeLocalClassification
+        case stableDeviceIdentity
+        case protocolIdentityFingerprint
+        case authorityConflict
+        case loopbackAddress
+        case localInterfaceAddress
+        case loopbackPath
+    }
+
+    nonisolated static func localTargetEvidence(
+        for device: DiscoveredDevice,
+        localIdentity: CanonicalBonjourAdvertisementIdentity,
+        localInterfaceAddresses: Set<String>
+    ) -> LocalTargetEvidence? {
+        let target = sharedDialTarget(for: device, serviceTypes: [])
+        let local = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: [localIdentity.deviceId],
+            protocolPublicKeyFingerprints: [localIdentity.protocolPublicKeyFingerprint],
+            routes: []
+        )
+
+        let matchingDeviceIds = target.deviceIds.intersection(local.deviceIds)
+        let foreignDeviceIds = target.deviceIds.subtracting(local.deviceIds)
+        let matchingFingerprints = target.protocolPublicKeyFingerprints
+            .intersection(local.protocolPublicKeyFingerprints)
+        let foreignFingerprints = target.protocolPublicKeyFingerprints
+            .subtracting(local.protocolPublicKeyFingerprints)
+
+        if !matchingDeviceIds.isEmpty {
+            if !foreignDeviceIds.isEmpty || !foreignFingerprints.isEmpty {
+                return .authorityConflict
+            }
+            return .stableDeviceIdentity
+        }
+        if !matchingFingerprints.isEmpty {
+            if !foreignDeviceIds.isEmpty || !foreignFingerprints.isEmpty {
+                return .authorityConflict
+            }
+            return .protocolIdentityFingerprint
+        }
+        if device.isLocalDevice {
+            return target.hasStrongIdentity
+                ? .authorityConflict
+                : .authoritativeLocalClassification
+        }
+
+        for address in [device.ipv4, device.ipv6].compactMap({ $0 }) {
+            if let evidence = localNetworkAddressEvidence(
+                address,
+                localInterfaceAddresses: localInterfaceAddresses
+            ) {
+                return target.hasStrongIdentity ? .authorityConflict : evidence
+            }
+        }
+        return nil
+    }
+
+    nonisolated static func localNetworkAddressEvidence(
+        _ rawAddress: String,
+        localInterfaceAddresses: Set<String>
+    ) -> LocalTargetEvidence? {
+        guard let address = normalizeIPAddressForMatching(rawAddress) else { return nil }
+        if address == "localhost" || address == "localhost." || isLoopbackIPAddress(address) {
+            return .loopbackAddress
+        }
+        let normalizedLocalAddresses = Set(
+            localInterfaceAddresses.compactMap(normalizeIPAddressForMatching)
+        )
+        return normalizedLocalAddresses.contains(address) ? .localInterfaceAddress : nil
+    }
+
+    nonisolated static func resolvedLocalRouteEvidence(
+        address: String?,
+        usesLoopbackPath: Bool,
+        targetHasStrongAuthority: Bool,
+        localInterfaceAddresses: Set<String>
+    ) -> LocalTargetEvidence? {
+        let routeEvidence: LocalTargetEvidence?
+        if usesLoopbackPath {
+            routeEvidence = .loopbackPath
+        } else if let address {
+            routeEvidence = localNetworkAddressEvidence(
+                address,
+                localInterfaceAddresses: localInterfaceAddresses
+            )
+        } else {
+            routeEvidence = nil
+        }
+        guard let routeEvidence else { return nil }
+        return targetHasStrongAuthority ? .authorityConflict : routeEvidence
+    }
+
+    nonisolated static func isLoopbackIPAddress(_ normalizedAddress: String) -> Bool {
+        if normalizedAddress == "::1" || normalizedAddress == "0:0:0:0:0:0:0:1" {
+            return true
+        }
+        let octets = normalizedAddress.split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4 && octets.first == "127"
+    }
+
     nonisolated static func normalizedConnectableServiceTypes(from rawTypes: [String]) -> [String] {
         // This list feeds a connector built with `NWParameters.tcp`. A UDP/QUIC advertisement
         // remains discovery evidence, but it is never a TCP dial route.
@@ -479,8 +581,23 @@ enum P2PDiscoveryBonjourPolicy {
         guard let raw else { return nil }
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !value.isEmpty else { return nil }
+        if value.hasPrefix("[") && value.hasSuffix("]") {
+            value.removeFirst()
+            value.removeLast()
+        }
         if value.contains(":"), let base = value.split(separator: "%", maxSplits: 1).first {
             value = String(base)
+        }
+        if let ipv4 = IPv4Address(value) {
+            return String(describing: ipv4)
+        }
+        if let ipv6 = IPv6Address(value) {
+            let canonical = String(describing: ipv6).lowercased()
+            if canonical.hasPrefix("::ffff:"),
+               let mappedIPv4 = IPv4Address(String(canonical.dropFirst("::ffff:".count))) {
+                return String(describing: mappedIPv4)
+            }
+            return canonical
         }
         return value
     }

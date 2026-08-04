@@ -33,6 +33,10 @@ enum OnlineDeviceConnectionCoordinator {
                 await unifiedDeviceManager.markDeviceAsConnected(device.id)
                 return
             } catch {
+                if let discoveryError = error as? P2PDiscoveryError,
+                   discoveryError.preventsCandidateFallback {
+                    throw discoveryError
+                }
                 lastError = error
                 let candidateLabel = redactedPeerLabel(candidate.deviceId ?? candidate.uniqueIdentifier ?? candidate.name)
                 SkyBridgeLogger.discovery.warning(

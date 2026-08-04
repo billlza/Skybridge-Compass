@@ -231,10 +231,6 @@ public enum ApplePeerConnectivityPolicy {
                 && !target.protocolPublicKeyFingerprints.isDisjoint(
                     with: claimFingerprints
                 )
-        if deviceIdMatches || fingerprintMatches {
-            return .eligible(.strongAuthority)
-        }
-
         let deviceIdConflicts =
             !target.deviceIds.isEmpty
                 && !claimDeviceIds.isEmpty
@@ -247,6 +243,10 @@ public enum ApplePeerConnectivityPolicy {
                 )
         if deviceIdConflicts || fingerprintConflicts {
             return .rejectedAuthorityConflict
+        }
+
+        if deviceIdMatches || fingerprintMatches {
+            return .eligible(.strongAuthority)
         }
 
         if target.routes.contains(claim.route) {

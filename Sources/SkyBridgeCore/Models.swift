@@ -323,7 +323,7 @@ public struct DiscoveredDevice: Identifiable, Hashable, Sendable {
     public var uniqueIdentifier: String?
  /// 真实可拨路由标识符（例如 Bonjour service instance），与稳定身份分开保存。
     public var routeIdentifiers: [String]
- /// 链路强度（0-100），来源于真实测量（RSSI或RTT映射）
+ /// 链路强度（0-100），仅来源于已发布或已认证的链路元数据；未知时保持 nil。
     public var signalStrength: Double?
  /// 对端声明的真实网络链路状态；没有公开/协议来源时保持 nil，不做猜测。
     public var networkLinkStatus: DeviceNetworkLinkStatus?

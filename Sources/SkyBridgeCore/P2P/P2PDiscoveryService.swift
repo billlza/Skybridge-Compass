@@ -1674,6 +1674,22 @@ public class P2PDiscoveryService: BaseManager {
         routePreference: ConnectionRoutePreference
     ) async throws {
         let device = resolveLatestConnectableDevice(from: device)
+        let localIdentity = try await CanonicalBonjourAdvertisementIdentityProvider
+            .current(allowCreateDeviceId: true)
+        let localInterfaceAddresses = localInterfaceCacheSnapshot(forceRefresh: true).addresses
+        if let evidence = P2PDiscoveryBonjourPolicy.localTargetEvidence(
+            for: device,
+            localIdentity: localIdentity,
+            localInterfaceAddresses: localInterfaceAddresses
+        ) {
+            logger.error(
+                "⛔️ 拒绝本机连接目标: reason=\(evidence.rawValue, privacy: .public)"
+            )
+            if evidence == .authorityConflict {
+                throw P2PDiscoveryError.targetAuthorityConflict
+            }
+            throw P2PDiscoveryError.localDeviceTarget
+        }
         let deviceDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(
             device.deviceId ?? device.uniqueIdentifier ?? device.name
         )
@@ -1874,6 +1890,18 @@ public class P2PDiscoveryService: BaseManager {
                             throw CancellationError()
                         }
 
+                        if let evidence = readyConnectionLocalTargetEvidence(
+                            connection,
+                            targetHasStrongAuthority: hasStrongRouteIdentity
+                        ) {
+                            logger.error(
+                                "⛔️ 已阻止解析到本机的连接: reason=\(evidence.rawValue, privacy: .public)"
+                            )
+                            throw evidence == .authorityConflict
+                                ? P2PDiscoveryError.targetAuthorityConflict
+                                : P2PDiscoveryError.localDeviceTarget
+                        }
+
                         if shouldAuthenticateAsSkyBridgeControl(
                             endpoint: endpoint,
                             device: device,
@@ -1922,6 +1950,11 @@ public class P2PDiscoveryService: BaseManager {
                         if error is CancellationError || Task.isCancelled
                             || outboundConnectionAttemptIds[deviceKey] != attemptId {
                             throw CancellationError()
+                        }
+                        if let discoveryError = error as? P2PDiscoveryError,
+                           discoveryError.preventsCandidateFallback {
+                            connectionStatus = .failed
+                            throw discoveryError
                         }
                         lastError = error
                         logger.warning("⚠️ 连接尝试失败，将回退到下一方案: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
@@ -2737,6 +2770,10 @@ public class P2PDiscoveryService: BaseManager {
             )
         } catch {
             if let discoveryError = error as? P2PDiscoveryError,
+               discoveryError.preventsCandidateFallback {
+                throw discoveryError
+            }
+            if let discoveryError = error as? P2PDiscoveryError,
                case .localNetworkPermissionDenied = discoveryError {
                 throw discoveryError
             }
@@ -2811,7 +2848,8 @@ public class P2PDiscoveryService: BaseManager {
         let exchange = try await exchangeBootstrapControlMessage(
             .protocolIdentityBindingRequest(request),
             endpoints: endpoints,
-            timeoutSeconds: responseTimeoutSeconds
+            timeoutSeconds: responseTimeoutSeconds,
+            targetHasStrongAuthority: true
         )
 
         if case .kemRefreshFailure(let failure) = exchange.response {
@@ -2911,7 +2949,8 @@ public class P2PDiscoveryService: BaseManager {
         let confirmationExchange = try await exchangeBootstrapControlMessage(
             .protocolIdentityBindingConfirm(confirm),
             endpoints: confirmationEndpoints,
-            timeoutSeconds: responseTimeoutSeconds
+            timeoutSeconds: responseTimeoutSeconds,
+            targetHasStrongAuthority: true
         )
         if case .kemRefreshFailure(let failure) = confirmationExchange.response {
             throw Self.protocolIdentityBindingFailure(
@@ -3002,7 +3041,8 @@ public class P2PDiscoveryService: BaseManager {
         let exchange = try await exchangeBootstrapControlMessage(
             .kemRefreshRequest(request),
             endpoints: endpoints,
-            timeoutSeconds: responseTimeoutSeconds
+            timeoutSeconds: responseTimeoutSeconds,
+            targetHasStrongAuthority: true
         )
 
         if case .kemRefreshFailure(let failure) = exchange.response {
@@ -3056,7 +3096,8 @@ public class P2PDiscoveryService: BaseManager {
     private func exchangeBootstrapControlMessage(
         _ message: AppMessage,
         endpoints: [NWEndpoint],
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        targetHasStrongAuthority: Bool
     ) async throws -> BootstrapControlExchangeResult {
         var lastError: Error?
         var localNetworkPermissionError: Error?
@@ -3075,6 +3116,15 @@ public class P2PDiscoveryService: BaseManager {
                     attemptIndex: index,
                     timeoutSeconds: min(10, max(3, timeoutSeconds))
                 )
+                if let evidence = readyConnectionLocalTargetEvidence(
+                    connection,
+                    targetHasStrongAuthority: targetHasStrongAuthority
+                ) {
+                    connection.cancel()
+                    throw evidence == .authorityConflict
+                        ? P2PDiscoveryError.targetAuthorityConflict
+                        : P2PDiscoveryError.localDeviceTarget
+                }
                 let connectLatencyMs = Date().timeIntervalSince(connectStartedAt) * 1_000.0
                 RemoteControlSmokeStatusWriter.append(
                     String(
@@ -3106,6 +3156,12 @@ public class P2PDiscoveryService: BaseManager {
                     connection.stateUpdateHandler = nil
                     connection.cancel()
                     throw CancellationError()
+                }
+                if let discoveryError = error as? P2PDiscoveryError,
+                   discoveryError.preventsCandidateFallback {
+                    connection.stateUpdateHandler = nil
+                    connection.cancel()
+                    throw discoveryError
                 }
                 failedAttemptCount += 1
                 lastError = error
@@ -6577,8 +6633,29 @@ public class P2PDiscoveryService: BaseManager {
 
  /// 判断给定 IPv4 地址是否属于本机，避免自连接导致路径冲突
     private func isLocalIPAddress(_ address: String) -> Bool {
-        guard let normalizedAddress = P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching(address) else { return false }
-        return localInterfaceCacheSnapshot().addresses.contains(normalizedAddress)
+        P2PDiscoveryBonjourPolicy.localNetworkAddressEvidence(
+            address,
+            localInterfaceAddresses: localInterfaceCacheSnapshot().addresses
+        ) != nil
+    }
+
+    private func readyConnectionLocalTargetEvidence(
+        _ connection: NWConnection,
+        targetHasStrongAuthority: Bool
+    ) -> P2PDiscoveryBonjourPolicy.LocalTargetEvidence? {
+        guard let path = connection.currentPath else { return nil }
+        let address: String?
+        if case .hostPort(let host, _) = path.remoteEndpoint {
+            address = String(describing: host)
+        } else {
+            address = nil
+        }
+        return P2PDiscoveryBonjourPolicy.resolvedLocalRouteEvidence(
+            address: address,
+            usesLoopbackPath: path.usesInterfaceType(.loopback),
+            targetHasStrongAuthority: targetHasStrongAuthority,
+            localInterfaceAddresses: localInterfaceCacheSnapshot(forceRefresh: true).addresses
+        )
     }
 
     nonisolated static func smokeConnectionPathClassification(

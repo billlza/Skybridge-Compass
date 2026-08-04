@@ -718,6 +718,10 @@ final class LocalP2PFileTransferSmokeHarness {
                 return "mac_smoke_reconnect_control_endpoint_missing"
             case .noLiveControlRoute:
                 return "mac_smoke_reconnect_live_control_route_missing"
+            case .localDeviceTarget:
+                return "mac_smoke_reconnect_local_device_target"
+            case .targetAuthorityConflict:
+                return "mac_smoke_reconnect_target_authority_conflict"
             case .deviceNotConnected:
                 return "mac_smoke_reconnect_device_not_connected"
             case .connectionCancelled:

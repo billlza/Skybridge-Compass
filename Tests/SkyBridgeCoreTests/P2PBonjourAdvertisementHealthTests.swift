@@ -2,6 +2,246 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class P2PBonjourAdvertisementHealthTests: XCTestCase {
+    private let localIdentity = CanonicalBonjourAdvertisementIdentity(
+        deviceId: "mac-device-00000001",
+        protocolPublicKeyFingerprint: String(repeating: "a", count: 64)
+    )
+
+    func testLocalTargetPolicyRejectsEveryIndependentSelfAuthority() {
+        let localByFlag = discoveredDevice(isLocalDevice: true)
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: localByFlag,
+                localIdentity: localIdentity,
+                localInterfaceAddresses: []
+            ),
+            .authoritativeLocalClassification
+        )
+
+        let localByDeviceId = discoveredDevice(deviceId: localIdentity.deviceId)
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: localByDeviceId,
+                localIdentity: localIdentity,
+                localInterfaceAddresses: []
+            ),
+            .stableDeviceIdentity
+        )
+
+        let localByFingerprint = discoveredDevice(
+            pubKeyFP: localIdentity.protocolPublicKeyFingerprint
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: localByFingerprint,
+                localIdentity: localIdentity,
+                localInterfaceAddresses: []
+            ),
+            .protocolIdentityFingerprint
+        )
+
+        for address in ["127.0.0.2", "::1", "192.0.2.44", "fe80::1234%en0"] {
+            let localByAddress = discoveredDevice(
+                ipv4: address.contains(":") ? nil : address,
+                ipv6: address.contains(":") ? address : nil
+            )
+            XCTAssertNotNil(
+                P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                    for: localByAddress,
+                    localIdentity: localIdentity,
+                    localInterfaceAddresses: ["192.0.2.44", "fe80::1234"]
+                ),
+                address
+            )
+        }
+    }
+
+    func testLocalTargetPolicyRejectsMixedLocalAndRemoteAuthority() {
+        let remoteFingerprint = String(repeating: "b", count: 64)
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: discoveredDevice(
+                    deviceId: localIdentity.deviceId,
+                    pubKeyFP: remoteFingerprint
+                ),
+                localIdentity: localIdentity,
+                localInterfaceAddresses: []
+            ),
+            .authorityConflict
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: discoveredDevice(
+                    deviceId: "ios-device-00000001",
+                    pubKeyFP: localIdentity.protocolPublicKeyFingerprint
+                ),
+                localIdentity: localIdentity,
+                localInterfaceAddresses: []
+            ),
+            .authorityConflict
+        )
+    }
+
+    func testLocalTargetPolicyAllowsIndependentRemoteAuthority() {
+        XCTAssertNil(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: discoveredDevice(
+                    ipv4: "198.51.100.20",
+                    deviceId: "ios-device-00000001",
+                    pubKeyFP: String(repeating: "b", count: 64)
+                ),
+                localIdentity: localIdentity,
+                localInterfaceAddresses: ["192.0.2.44"]
+            )
+        )
+    }
+
+    func testLocalTargetPolicyClassifiesForeignAuthorityOnLocalAddressAsConflict() {
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localTargetEvidence(
+                for: discoveredDevice(
+                    ipv4: "192.0.2.44",
+                    deviceId: "ios-device-00000001",
+                    pubKeyFP: String(repeating: "b", count: 64)
+                ),
+                localIdentity: localIdentity,
+                localInterfaceAddresses: ["192.0.2.44"]
+            ),
+            .authorityConflict
+        )
+    }
+
+    func testResolvedLocalRouteClassifiesForeignStrongAuthorityAsConflict() {
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.resolvedLocalRouteEvidence(
+                address: "::1",
+                usesLoopbackPath: true,
+                targetHasStrongAuthority: true,
+                localInterfaceAddresses: []
+            ),
+            .authorityConflict
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.resolvedLocalRouteEvidence(
+                address: "127.0.0.1",
+                usesLoopbackPath: false,
+                targetHasStrongAuthority: false,
+                localInterfaceAddresses: []
+            ),
+            .loopbackAddress
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.resolvedLocalRouteEvidence(
+                address: "192.0.2.44",
+                usesLoopbackPath: false,
+                targetHasStrongAuthority: true,
+                localInterfaceAddresses: ["192.0.2.44"]
+            ),
+            .authorityConflict
+        )
+        XCTAssertNil(
+            P2PDiscoveryBonjourPolicy.resolvedLocalRouteEvidence(
+                address: "198.51.100.20",
+                usesLoopbackPath: false,
+                targetHasStrongAuthority: true,
+                localInterfaceAddresses: ["192.0.2.44"]
+            )
+        )
+    }
+
+    func testLocalAddressPolicyCanonicalizesEquivalentIPForms() {
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching("0:0:0:0:0:0:0:1"),
+            "::1"
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching("[fe80::1234%en0]"),
+            "fe80::1234"
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching("::ffff:127.0.0.1"),
+            "127.0.0.1"
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localNetworkAddressEvidence(
+                "0:0:0:0:0:0:0:1",
+                localInterfaceAddresses: []
+            ),
+            .loopbackAddress
+        )
+        XCTAssertEqual(
+            P2PDiscoveryBonjourPolicy.localNetworkAddressEvidence(
+                "fe80:0:0:0:0:0:0:1234%awdl0",
+                localInterfaceAddresses: ["fe80::1234"]
+            ),
+            .localInterfaceAddress
+        )
+    }
+
+    func testSelfTargetAdmissionErrorsForbidCandidateFallback() {
+        XCTAssertTrue(P2PDiscoveryError.localDeviceTarget.preventsCandidateFallback)
+        XCTAssertTrue(P2PDiscoveryError.targetAuthorityConflict.preventsCandidateFallback)
+        XCTAssertFalse(P2PDiscoveryError.timeout.preventsCandidateFallback)
+        XCTAssertFalse(
+            P2PDiscoveryError.strictPQCTrustPreflightFailed("fixture")
+                .preventsCandidateFallback
+        )
+    }
+
+    func testMacConnectionBlocksSelfBeforeDialAndAfterRouteResolution() throws {
+        let source = try readSource("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+        let preDial = try XCTUnwrap(source.range(of: "P2PDiscoveryBonjourPolicy.localTargetEvidence("))
+        let attemptRegistration = try XCTUnwrap(source.range(of: "outboundConnectionAttemptIds[deviceKey] = attemptId"))
+        XCTAssertLessThan(preDial.lowerBound, attemptRegistration.lowerBound)
+
+        let postReady = try XCTUnwrap(source.range(of: "readyConnectionLocalTargetEvidence("))
+        let authentication = try XCTUnwrap(
+            source.range(of: "authenticateConnection(", range: postReady.upperBound..<source.endIndex)
+        )
+        XCTAssertLessThan(postReady.lowerBound, authentication.lowerBound)
+        XCTAssertTrue(source.contains("path.usesInterfaceType(.loopback)"))
+
+        let bootstrap = try sourceSlice(
+            from: "private func exchangeBootstrapControlMessage(",
+            to: "private func waitForBootstrapControlConnection(",
+            in: source
+        )
+        let bootstrapAdmission = try XCTUnwrap(
+            bootstrap.range(of: "readyConnectionLocalTargetEvidence(")
+        )
+        let bootstrapSend = try XCTUnwrap(bootstrap.range(of: "sendBootstrapFrame("))
+        XCTAssertLessThan(bootstrapAdmission.lowerBound, bootstrapSend.lowerBound)
+        XCTAssertTrue(bootstrap.contains("discoveryError.preventsCandidateFallback"))
+
+        let coordinator = try readSource(
+            "Sources/SkyBridgeCompassApp/Services/OnlineDeviceConnectionCoordinator.swift"
+        )
+        XCTAssertTrue(coordinator.contains("discoveryError.preventsCandidateFallback"))
+    }
+
+    private func discoveredDevice(
+        ipv4: String? = nil,
+        ipv6: String? = nil,
+        isLocalDevice: Bool = false,
+        deviceId: String? = nil,
+        pubKeyFP: String? = nil
+    ) -> DiscoveredDevice {
+        DiscoveredDevice(
+            id: UUID(),
+            name: "Policy Fixture",
+            ipv4: ipv4,
+            ipv6: ipv6,
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: deviceId.map { "id:\($0)" },
+            source: .skybridgeBonjour,
+            isLocalDevice: isLocalDevice,
+            deviceId: deviceId,
+            pubKeyFP: pubKeyFP
+        )
+    }
+
     func testAdvertisementSnapshotRequiresReadyListenerAndPort() {
         let absent = ServiceAdvertisementSnapshot(serviceType: "_skybridge._tcp")
         XCTAssertFalse(absent.isAdvertising)

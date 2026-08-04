@@ -5,6 +5,80 @@ import XCTest
 final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
     private let liveProtocolFingerprint = "336b022ee58b653f08569a1be0e32a740da127882b79897589e75a95f0e2b94c"
 
+    @MainActor
+    func testNetworkLocalAuthoritySurvivesUnifiedMergeAndRecompute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let deviceId = "550e8400-e29b-41d4-a716-446655440099"
+        let fingerprint = String(repeating: "9", count: 64)
+        let localDiscovery = DiscoveredDevice(
+            id: UUID(),
+            name: "Local Authority Fixture",
+            ipv4: "192.0.2.10",
+            ipv6: nil,
+            platformName: nil,
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(deviceId)",
+            routeIdentifiers: ["bonjour:Local Authority Fixture@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: true,
+            deviceId: deviceId,
+            pubKeyFP: fingerprint
+        )
+        XCTAssertEqual(localDiscovery.deviceType, .unknown)
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([localDiscovery])
+        let merged = try XCTUnwrap(manager.device(withIdentifier: "id:\(deviceId)"))
+        XCTAssertTrue(merged.isLocalDevice)
+
+        manager.recomputeLocalFlagsForTesting()
+        XCTAssertTrue(
+            try XCTUnwrap(manager.device(withIdentifier: "id:\(deviceId)")).isLocalDevice
+        )
+    }
+
+    @MainActor
+    func testMACOnlyNetworkLocalAuthoritySurvivesMergeAndRecompute() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let macAddress = "02:00:00:00:00:99"
+        let localDiscovery = DiscoveredDevice(
+            id: UUID(),
+            name: "Layer Zero Fixture",
+            ipv4: "192.0.2.11",
+            ipv6: nil,
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            source: .skybridgeBonjour,
+            isLocalDevice: true,
+            macSet: [macAddress]
+        )
+        XCTAssertEqual(localDiscovery.deviceType, .unknown)
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([localDiscovery])
+        XCTAssertTrue(
+            try XCTUnwrap(manager.device(withIdentifier: "mac:\(macAddress)")).isLocalDevice
+        )
+
+        manager.recomputeLocalFlagsForTesting()
+        XCTAssertTrue(
+            try XCTUnwrap(manager.device(withIdentifier: "mac:\(macAddress)")).isLocalDevice
+        )
+    }
+
     func testRecentStableIdentityCollapsesWhenStrongRecordExists() {
         let recent = makeDevice(
             name: "MacBook Pro",

@@ -1624,12 +1624,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             )
 
  // 更新设备信息
-            let resolvedSignalStrength: Double?
-            if let advertisedSignalStrength = Self.signalPercentage(from: networkLinkStatus) {
-                resolvedSignalStrength = advertisedSignalStrength
-            } else {
-                resolvedSignalStrength = await self.measureLinkQuality(host: ipv4 ?? ipv6, port: port)
-            }
+            let resolvedSignalStrength = Self.signalPercentage(from: networkLinkStatus)
             let updatedDevice = DiscoveredDevice(
                 id: deviceId,
                 name: deviceName,
@@ -1939,78 +1934,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 return String(decoding: trimmed, as: UTF8.self)
             default:
                 return ""
-            }
-        }
-    }
-
-    private func measureLinkQuality(host: String?, port: Int) async -> Double? {
-        guard let host = host else { return nil }
- // 🔧 修复：端口为 0 时使用常见端口进行测量
-        let effectivePort = port > 0 ? port : 80  // 回退到 HTTP 端口
-        let start = DispatchTime.now()
-        return await withCheckedContinuation { continuation in
-            let tcp = NWProtocolTCP.Options()
-            let params = NWParameters(tls: nil, tcp: tcp)
-            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(integerLiteral: UInt16(effectivePort)))
-            let conn = NWConnection(to: endpoint, using: params)
-
- // 🔧 修复：使用线程安全的状态管理类（Swift 6并发安全）
-            final class ResumeState: @unchecked Sendable {
-                private let lock = NSLock()
-                private var _hasResumed = false
-
-                var hasResumed: Bool {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    return _hasResumed
-                }
-
-                func markResumed() -> Bool {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !_hasResumed else { return false }
-                    _hasResumed = true
-                    return true
-                }
-            }
-
-            let state = ResumeState()
-
-            conn.stateUpdateHandler = { connectionState in
-                switch connectionState {
-                case .ready:
- // 只有第一次调用会返回true
-                    guard state.markResumed() else { return }
-
-                    let end = DispatchTime.now()
-                    let nanos = end.uptimeNanoseconds - start.uptimeNanoseconds
-                    let ms = Double(nanos) / 1_000_000.0
-                    let clamped = max(0.0, min(200.0, ms))
-                    let score = 100.0 - (clamped / 200.0) * 100.0
-                    continuation.resume(returning: score)
-                    conn.stateUpdateHandler = nil // 清理handler防止后续调用
-                    conn.cancel()
-
-                case .failed(_), .cancelled:
- // 只有第一次调用会返回true
-                    guard state.markResumed() else { return }
-
-                    continuation.resume(returning: nil)
-                    conn.stateUpdateHandler = nil // 清理handler
-
-                default:
-                    break
-                }
-            }
-            conn.start(queue: discoveryQueue)
-
- // 🔧 添加超时机制，防止永不resume
-            discoveryQueue.asyncAfter(deadline: .now() + 3.0) {
-                guard state.markResumed() else { return }
-
-                continuation.resume(returning: nil)
-                conn.stateUpdateHandler = nil
-                conn.cancel()
             }
         }
     }
@@ -3788,7 +3711,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 }
             }
 
- // 🔧 超时兜底（对齐 measureLinkQuality 的模式），避免不可达对端在 .waiting/.preparing 永久挂起
+ // 超时边界：避免不可达对端在 .waiting/.preparing 永久挂起。
             discoveryQueue.asyncAfter(deadline: .now() + 10.0) {
                 guard claim() else { return }
                 connection.stateUpdateHandler = nil

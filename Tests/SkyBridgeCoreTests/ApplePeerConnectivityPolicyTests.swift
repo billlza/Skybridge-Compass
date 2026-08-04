@@ -125,6 +125,52 @@ final class ApplePeerConnectivityPolicyTests: XCTestCase {
         )
     }
 
+    func testMatchingDeviceIdCannotOverrideConflictingFingerprint() throws {
+        let route = try route(name: "Conflicting Fingerprint")
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: ["ios-device-00000001"],
+            protocolPublicKeyFingerprints: [fingerprintA],
+            routes: []
+        )
+        let conflicting = claim(
+            route: route,
+            deviceId: "ios-device-00000001",
+            fingerprint: fingerprintB
+        )
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.match(
+                target: target,
+                claim: conflicting,
+                requiredServiceKind: .control
+            ),
+            .rejectedAuthorityConflict
+        )
+    }
+
+    func testMatchingFingerprintCannotOverrideConflictingDeviceId() throws {
+        let route = try route(name: "Conflicting Device ID")
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: ["ios-device-00000001"],
+            protocolPublicKeyFingerprints: [fingerprintA],
+            routes: []
+        )
+        let conflicting = claim(
+            route: route,
+            deviceId: "other-device-0000001",
+            fingerprint: fingerprintA
+        )
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.match(
+                target: target,
+                claim: conflicting,
+                requiredServiceKind: .control
+            ),
+            .rejectedAuthorityConflict
+        )
+    }
+
     func testPersistedMetadataIsNeverDialEligible() throws {
         let route = try route(name: "Persisted")
         let target = ApplePeerConnectivityPolicy.DialTarget(

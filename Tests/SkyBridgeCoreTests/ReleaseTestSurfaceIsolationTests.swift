@@ -161,8 +161,10 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
                 markers: [
                     "func replaceDevicesForTesting(",
                     "func replaceNetworkDiscoveredDevicesForTesting(",
+                    "func applyNetworkDeviceUpdateForTesting(",
                     "func reloadPersistedDevicesForTesting()",
                     "func recomputeDeviceStatusesForTesting()",
+                    "func recomputeLocalFlagsForTesting()",
                     "struct SmokeDiscoveryDiagnostic",
                     "func smokeDiscoveryDiagnostics("
                 ]

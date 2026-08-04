@@ -285,6 +285,20 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
         )
     }
 
+    func testDiscoveryDoesNotProbeStatefulServicePortsForSignalStrength() throws {
+        let source = try repositorySource(
+            "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift"
+        )
+
+        XCTAssertTrue(
+            source.contains(
+                "let resolvedSignalStrength = Self.signalPercentage(from: networkLinkStatus)"
+            )
+        )
+        XCTAssertFalse(source.contains("measureLinkQuality("))
+        XCTAssertFalse(source.contains("effectivePort = port > 0 ? port : 80"))
+    }
+
     func testWeakNameMergeDoesNotCoalesceStableProtocolIdentities() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift")
 
