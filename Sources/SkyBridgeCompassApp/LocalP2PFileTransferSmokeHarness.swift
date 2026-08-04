@@ -275,6 +275,11 @@ final class LocalP2PFileTransferSmokeHarness {
         )
         let inboundHash = try Self.sha256Hex(url: URL(fileURLWithPath: inboundPath))
         reporter.append("file-transfer inbound-complete name=\(Self.sanitize(inboundName)) sha256=\(inboundHash)")
+        // A durable receipt is sent before the remote sender necessarily commits
+        // it locally. Keep the two smoke directions non-overlapping so reverse
+        // transfer setup cannot race the sender's session-state transition.
+        try await Task.sleep(for: .seconds(1))
+        reporter.append("file-transfer direction-handoff-ready delayMs=1000")
 
         let outboundURL = try makeSmokeTransferFile(
             fileName: outboundName,

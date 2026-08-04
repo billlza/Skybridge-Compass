@@ -1460,6 +1460,20 @@ enum ClassicTransferRouteRetryPolicy {
                 return false
             }
         }
+        if let networkError = error as? FileTransferNetworkError {
+            switch networkError {
+            case .connectionTimeout,
+                 .connectionCancelled,
+                 .localNetworkPermissionDenied,
+                 .invalidEndpoint:
+                return true
+            case .invalidPort,
+                 .invalidMessageType,
+                 .incompleteData,
+                 .maxConnectionsReached:
+                return false
+            }
+        }
 
         guard let networkError = error as? NWError,
               case .posix(let code) = networkError else {
@@ -2546,6 +2560,39 @@ public class FileTransferManager: BaseManager {
         return selectedRoutes
     }
 
+    nonisolated static func shouldAwaitLiveTransferRoute(
+        routes: [ActivePeerRoute],
+        matchingPeerIds targetPeerIds: [String],
+        discoveredDevices: [DiscoveredDevice]
+    ) -> Bool {
+        guard !routes.contains(where: { $0.liveEndpoint != nil }) else {
+            return false
+        }
+        let requestedAliases = normalizedActiveRouteAliases(for: targetPeerIds)
+        let targetAliases = requestedAliases.isEmpty
+            ? normalizedActiveRouteAliases(for: routes.map(\.deviceId))
+            : requestedAliases
+        guard !targetAliases.isEmpty else { return false }
+
+        let transferServiceTypes = Set([
+            BonjourInteropContract.fileTransferServiceType,
+            BonjourInteropContract.legacyFileTransferServiceType
+        ])
+        return discoveredDevices.contains { device in
+            guard !transferServiceTypes.isDisjoint(with: device.services) else {
+                return false
+            }
+            let deviceAliases = normalizedActiveRouteAliases(for: [
+                device.deviceId,
+                device.uniqueIdentifier,
+                device.id.uuidString,
+                device.ipv4,
+                device.ipv6
+            ])
+            return !deviceAliases.isDisjoint(with: targetAliases)
+        }
+    }
+
     public func resolveActivePeerRoutes(
         matchingPeerIds targetPeerIds: [String] = [],
         preferredDeviceName: String? = nil
@@ -2744,10 +2791,15 @@ public class FileTransferManager: BaseManager {
                 matchingPeerIds: targetPeerIds,
                 preferredDeviceName: preferredDeviceName
             )
-            if !routes.isEmpty {
+            lastRoutes = routes
+            let shouldAwaitLiveRoute = Self.shouldAwaitLiveTransferRoute(
+                routes: routes,
+                matchingPeerIds: targetPeerIds,
+                discoveredDevices: P2PDiscoveryService.shared.discoveredDevices
+            )
+            if !routes.isEmpty, !shouldAwaitLiveRoute {
                 return routes
             }
-            lastRoutes = routes
             try await Task.sleep(for: .seconds(activeRouteReadinessPollIntervalSeconds))
         } while Date() < deadline
 

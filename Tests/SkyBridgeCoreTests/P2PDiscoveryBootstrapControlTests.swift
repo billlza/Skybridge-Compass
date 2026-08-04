@@ -1,3 +1,4 @@
+import Network
 import XCTest
 @testable import SkyBridgeCore
 
@@ -10,6 +11,71 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             protocolPublicKey: protocolPublicKey,
             protocolAlgorithm: .mlDSA65
         ).authoritativeFingerprint
+    }
+
+    func testProvenBootstrapEndpointIsPromotedWithoutChangingCandidateSet() {
+        let first = NWEndpoint.hostPort(host: "192.0.2.10", port: 9_527)
+        let second = NWEndpoint.hostPort(host: "192.0.2.11", port: 9_527)
+        let proven = NWEndpoint.hostPort(host: "192.0.2.12", port: 9_527)
+        let original = [first, second, proven]
+
+        let prioritized = P2PDiscoveryService.prioritizingProvenEndpoint(
+            proven,
+            in: original
+        )
+
+        XCTAssertEqual(prioritized.map(\.debugDescription), [
+            proven.debugDescription,
+            first.debugDescription,
+            second.debugDescription
+        ])
+        XCTAssertEqual(Set(prioritized.map(\.debugDescription)), Set(original.map(\.debugDescription)))
+    }
+
+    func testUnknownOrMissingBootstrapEndpointDoesNotChangeCandidateOrder() {
+        let first = NWEndpoint.hostPort(host: "192.0.2.10", port: 9_527)
+        let second = NWEndpoint.hostPort(host: "192.0.2.11", port: 9_527)
+        let unknown = NWEndpoint.hostPort(host: "192.0.2.99", port: 9_527)
+        let original = [first, second]
+        let originalKeys = original.map(\.debugDescription)
+
+        XCTAssertEqual(
+            P2PDiscoveryService.prioritizingProvenEndpoint(nil, in: original)
+                .map(\.debugDescription),
+            originalKeys
+        )
+        XCTAssertEqual(
+            P2PDiscoveryService.prioritizingProvenEndpoint(unknown, in: original)
+                .map(\.debugDescription),
+            originalKeys
+        )
+    }
+
+    func testAuthenticatedBootstrapEndpointFeedsEachSubsequentConnectionPhase() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(
+            "let confirmationEndpoints = Self.prioritizingProvenEndpoint(\n            exchange.endpoint"
+        ))
+        XCTAssertTrue(source.contains(
+            "let refreshEndpoints = Self.prioritizingProvenEndpoint(\n                identityBinding.endpoint"
+        ))
+        XCTAssertTrue(source.contains("return exchange.endpoint"))
+        XCTAssertTrue(source.contains(
+            "let provenPreflightEndpoint = try await ensureStrictPQCOutboundPreflightReady("
+        ))
+        XCTAssertTrue(source.contains(
+            "endpointAttempts = Self.prioritizingProvenEndpoint(\n            provenPreflightEndpoint"
+        ))
     }
 
     func testKEMRefreshRequestMapsSuccessToSignedRefreshAndServedStatus() async throws {

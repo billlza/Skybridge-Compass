@@ -30,6 +30,26 @@ final class FileTransferRouteResolutionTests: XCTestCase {
                 after: FileTransferError.timeout
             )
         )
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferNetworkError.localNetworkPermissionDenied
+            )
+        )
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferNetworkError.connectionTimeout
+            )
+        )
+        XCTAssertTrue(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferNetworkError.invalidEndpoint
+            )
+        )
+        XCTAssertFalse(
+            ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
+                after: FileTransferNetworkError.incompleteData
+            )
+        )
         XCTAssertFalse(
             ClassicTransferRouteRetryPolicy.shouldTryNextRoute(
                 after: FileTransferError.receiverRejected
@@ -392,6 +412,71 @@ final class FileTransferRouteResolutionTests: XCTestCase {
 
         XCTAssertEqual(sorted.first?.routeSource, "live-bonjour-transfer")
         XCTAssertEqual(sorted.first?.liveEndpoint, liveEndpoint)
+    }
+
+    func testAdvertisedTransferServiceWaitsForLiveRouteBeforeUsingHostFallback() {
+        let peerID = "ios-device-00000001"
+        let hostFallback = FileTransferManager.ActivePeerRoute(
+            deviceId: peerID,
+            deviceName: "Bill’s iPad",
+            ipAddress: "192.168.0.104",
+            port: 8080,
+            routeSource: "authenticated-session"
+        )
+        let advertisedPeer = DiscoveredDevice(
+            id: UUID(),
+            name: "Bill’s iPad",
+            ipv4: "192.168.0.104",
+            ipv6: nil,
+            services: [
+                BonjourInteropContract.controlServiceType,
+                BonjourInteropContract.fileTransferServiceType
+            ],
+            portMap: [BonjourInteropContract.fileTransferServiceType: 8080],
+            uniqueIdentifier: "id:\(peerID)",
+            source: .skybridgeBonjour,
+            deviceId: peerID
+        )
+
+        XCTAssertTrue(
+            FileTransferManager.shouldAwaitLiveTransferRoute(
+                routes: [hostFallback],
+                matchingPeerIds: ["id:\(peerID)"],
+                discoveredDevices: [advertisedPeer]
+            )
+        )
+
+        let liveEndpoint = NWEndpoint.service(
+            name: advertisedPeer.name,
+            type: BonjourInteropContract.fileTransferServiceType,
+            domain: "local.",
+            interface: nil
+        )
+        let liveRoute = FileTransferManager.ActivePeerRoute(
+            deviceId: peerID,
+            deviceName: advertisedPeer.name,
+            ipAddress: "bonjour-service",
+            port: 8080,
+            routeSource: "live-bonjour-transfer",
+            liveEndpoint: liveEndpoint
+        )
+        XCTAssertFalse(
+            FileTransferManager.shouldAwaitLiveTransferRoute(
+                routes: [liveRoute, hostFallback],
+                matchingPeerIds: [peerID],
+                discoveredDevices: [advertisedPeer]
+            )
+        )
+
+        var controlOnlyPeer = advertisedPeer
+        controlOnlyPeer.services = [BonjourInteropContract.controlServiceType]
+        XCTAssertFalse(
+            FileTransferManager.shouldAwaitLiveTransferRoute(
+                routes: [hostFallback],
+                matchingPeerIds: [peerID],
+                discoveredDevices: [controlOnlyPeer]
+            )
+        )
     }
 
     func testRouteAvailabilityErrorsDoNotClaimThePeerIsOffline() {
@@ -1287,6 +1372,43 @@ final class FileTransferRouteResolutionTests: XCTestCase {
         XCTAssertTrue(source.contains("Mac 重连后的首选文件路由仍是旧 inbound presence"))
         XCTAssertFalse(source.contains("[\n            peer.deviceId,"))
         XCTAssertFalse(source.contains("sendFileToFirstActivePeer(at: outboundURL)"))
+    }
+
+    func testMacSmokeDirectionsDoNotOverlapReceiptCommitTransition() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sources = try [
+            "Sources/SkyBridgeCompassApp/LocalP2PFileTransferSmokeHarness.swift",
+            "Sources/LocalLanInteropHost/main.swift"
+        ].map {
+            try String(
+                contentsOf: root.appendingPathComponent($0),
+                encoding: .utf8
+            )
+        }
+
+        for source in sources {
+            let inboundComplete = try XCTUnwrap(
+                source.range(of: "file-transfer inbound-complete name=")
+            )
+            let handoff = try XCTUnwrap(
+                source.range(
+                    of: "file-transfer direction-handoff-ready delayMs=1000",
+                    range: inboundComplete.upperBound..<source.endIndex
+                )
+            )
+            let outboundStart = try XCTUnwrap(
+                source.range(
+                    of: "file-transfer outbound-start name=",
+                    range: handoff.upperBound..<source.endIndex
+                )
+            )
+            XCTAssertTrue(source.contains("try await Task.sleep(for: .seconds(1))"))
+            XCTAssertLessThan(inboundComplete.lowerBound, handoff.lowerBound)
+            XCTAssertLessThan(handoff.lowerBound, outboundStart.lowerBound)
+        }
     }
 
     func testProductionFileTransferCallersUseCanonicalAuthenticatedManager() throws {

@@ -1820,11 +1820,20 @@ public class P2PDiscoveryService: BaseManager {
             throw P2PDiscoveryError.noLiveControlRoute
         }
 
-        try await ensureStrictPQCOutboundPreflightReady(
+        let provenPreflightEndpoint = try await ensureStrictPQCOutboundPreflightReady(
             for: device,
             endpointAttempts: endpointAttempts,
             preferredServiceType: preferredServiceType
         )
+        endpointAttempts = Self.prioritizingProvenEndpoint(
+            provenPreflightEndpoint,
+            in: endpointAttempts
+        )
+        if let provenPreflightEndpoint {
+            RemoteControlSmokeStatusWriter.append(
+                "p2p-connect-plan promotedPreflightEndpoint=1 endpointClass=\(Self.smokeEndpointClass(provenPreflightEndpoint))"
+            )
+        }
         try requireCurrentAttempt()
 
         var lastError: Error?
@@ -2637,14 +2646,14 @@ public class P2PDiscoveryService: BaseManager {
         for device: DiscoveredDevice,
         endpointAttempts: [NWEndpoint],
         preferredServiceType: String?
-    ) async throws {
+    ) async throws -> NWEndpoint? {
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
-        guard policy.requirePQC else { return }
+        guard policy.requirePQC else { return nil }
         guard endpointAttempts.contains(where: {
             isSkyBridgeControlEndpoint($0, device: device, preferredServiceType: preferredServiceType)
         }) else {
-            return
+            return nil
         }
 
         let stableTargetCandidates = Self.stableProtocolIdentityCandidates(for: device)
@@ -2675,7 +2684,7 @@ public class P2PDiscoveryService: BaseManager {
             pinnedProtocolFingerprints: pinnedFingerprints,
             preferredTargetSuite: preferredTargetSuite
         )
-        guard preflightAction != .proceed else { return }
+        guard preflightAction != .proceed else { return nil }
 
         let bootstrapEndpoints = Self.strictPQCBootstrapEndpointCandidates(from: endpointAttempts)
         guard !bootstrapEndpoints.isEmpty else {
@@ -2685,7 +2694,7 @@ public class P2PDiscoveryService: BaseManager {
         var refreshFailure: Error?
         if preflightAction == .attemptSignedLANRefresh {
             do {
-                try await attemptOutboundSignedLANKEMRefresh(
+                return try await attemptOutboundSignedLANKEMRefresh(
                     for: device,
                     targetDeviceId: targetDeviceId,
                     candidates: candidates,
@@ -2693,7 +2702,6 @@ public class P2PDiscoveryService: BaseManager {
                     pinnedProtocolFingerprints: pinnedFingerprints,
                     preferredTargetSuite: preferredTargetSuite
                 )
-                return
             } catch {
                 refreshFailure = error
                 guard Self.shouldAttemptOOBProtocolIdentityBinding(afterSKRFailure: error) else {
@@ -2707,19 +2715,23 @@ public class P2PDiscoveryService: BaseManager {
 
         var identityBindingCompleted = false
         do {
-            let reboundFingerprint = try await attemptOutboundOOBProtocolIdentityBinding(
+            let identityBinding = try await attemptOutboundOOBProtocolIdentityBinding(
                 for: device,
                 targetDeviceId: targetDeviceId,
                 candidates: candidates,
                 endpoints: bootstrapEndpoints
             )
             identityBindingCompleted = true
-            pinnedFingerprints = [reboundFingerprint]
-            try await attemptOutboundSignedLANKEMRefresh(
+            pinnedFingerprints = [identityBinding.fingerprint]
+            let refreshEndpoints = Self.prioritizingProvenEndpoint(
+                identityBinding.endpoint,
+                in: bootstrapEndpoints
+            )
+            return try await attemptOutboundSignedLANKEMRefresh(
                 for: device,
                 targetDeviceId: targetDeviceId,
                 candidates: candidates,
-                endpoints: bootstrapEndpoints,
+                endpoints: refreshEndpoints,
                 pinnedProtocolFingerprints: pinnedFingerprints,
                 preferredTargetSuite: preferredTargetSuite
             )
@@ -2744,7 +2756,7 @@ public class P2PDiscoveryService: BaseManager {
         targetDeviceId: String,
         candidates: [String],
         endpoints: [NWEndpoint]
-    ) async throws -> String {
+    ) async throws -> (fingerprint: String, endpoint: NWEndpoint) {
         let requesterIdentity = try await localProtocolIdentityProofForOutboundPIB()
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let nonce = Self.secureRandomNonce()
@@ -2892,9 +2904,13 @@ public class P2PDiscoveryService: BaseManager {
             expiresAt: unsignedConfirm.expiresAt,
             requesterSignature: confirmSignature
         )
+        let confirmationEndpoints = Self.prioritizingProvenEndpoint(
+            exchange.endpoint,
+            in: endpoints
+        )
         let confirmationExchange = try await exchangeBootstrapControlMessage(
             .protocolIdentityBindingConfirm(confirm),
-            endpoints: endpoints,
+            endpoints: confirmationEndpoints,
             timeoutSeconds: responseTimeoutSeconds
         )
         if case .kemRefreshFailure(let failure) = confirmationExchange.response {
@@ -2944,7 +2960,10 @@ public class P2PDiscoveryService: BaseManager {
         let pinnedLine = "🔐 PIB-1 protocol identity binding pinned: peer=\(Self.protocolIdentityLogRedaction) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(approval.rawValue) lifecycle=identity-oob>pinned"
         logger.info("\(pinnedLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(pinnedLine)
-        return validated.protocolIdentityFingerprint.lowercased()
+        return (
+            validated.protocolIdentityFingerprint.lowercased(),
+            confirmationExchange.endpoint
+        )
     }
 
     private func attemptOutboundSignedLANKEMRefresh(
@@ -2954,7 +2973,7 @@ public class P2PDiscoveryService: BaseManager {
         endpoints: [NWEndpoint],
         pinnedProtocolFingerprints: Set<String>,
         preferredTargetSuite: CryptoSuite?
-    ) async throws {
+    ) async throws -> NWEndpoint {
         let requestedSuites = await Self.signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let requesterProof = try await localProtocolIdentityProofForOutboundPIB()
@@ -3031,6 +3050,7 @@ public class P2PDiscoveryService: BaseManager {
         guard Self.signedRefreshEvidenceSatisfiesStrictPQC(evidence, preferredTargetSuite: preferredTargetSuite) else {
             throw Self.signedLANRefreshFailure("SKR-1 completed but strict suite still unsatisfied")
         }
+        return exchange.endpoint
     }
 
     private func exchangeBootstrapControlMessage(
@@ -3436,6 +3456,25 @@ public class P2PDiscoveryService: BaseManager {
             let key = endpoint.debugDescription
             return seen.insert(key).inserted
         }
+    }
+
+    /// Keeps the exact endpoint that completed an authenticated bootstrap exchange
+    /// at the front of subsequent phases without adding or weakening any route.
+    nonisolated static func prioritizingProvenEndpoint(
+        _ provenEndpoint: NWEndpoint?,
+        in endpoints: [NWEndpoint]
+    ) -> [NWEndpoint] {
+        guard let provenEndpoint else { return endpoints }
+        let provenKey = provenEndpoint.debugDescription
+        guard let index = endpoints.firstIndex(where: {
+            $0.debugDescription == provenKey
+        }), index != endpoints.startIndex else {
+            return endpoints
+        }
+
+        var prioritized = endpoints
+        prioritized.insert(prioritized.remove(at: index), at: prioritized.startIndex)
+        return prioritized
     }
 
     private static func isRoutableBootstrapHost(_ raw: String) -> Bool {

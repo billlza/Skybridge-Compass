@@ -681,6 +681,11 @@ private final class LocalLanInteropHostCoordinator {
         )
         let inboundHash = try Self.sha256Hex(url: inboundURL)
         reporter.append("file-transfer inbound-complete name=\(sanitize(inboundName)) sha256=\(inboundHash)")
+        // The receiver emits its durable receipt before the remote sender has
+        // necessarily committed that receipt locally. Keep the smoke directions
+        // non-overlapping so the reverse leg cannot race sender-session teardown.
+        try await Task.sleep(for: .seconds(1))
+        reporter.append("file-transfer direction-handoff-ready delayMs=1000")
 
         let outboundURL = try makeSmokeTransferFile(
             fileName: outboundName,

@@ -100,7 +100,9 @@ public enum ApplePeerConnectivityPolicy {
             protocolPublicKeyFingerprint rawFingerprint: String?,
             platform: BonjourInteropProtocolContract.AdvertisementPlatform?
         ) {
-            deviceId = BonjourInteropProtocolContract.normalizedDeviceId(rawDeviceId)
+            deviceId = ApplePeerConnectivityPolicy.normalizedAuthorityDeviceId(
+                rawDeviceId
+            )
             protocolPublicKeyFingerprint =
                 BonjourInteropProtocolContract.normalizedPubKeyFingerprint(rawFingerprint)
             self.platform = platform
@@ -123,7 +125,7 @@ public enum ApplePeerConnectivityPolicy {
         ) {
             deviceIds = Set(
                 rawDeviceIds.compactMap(
-                    BonjourInteropProtocolContract.normalizedDeviceId
+                    ApplePeerConnectivityPolicy.normalizedAuthorityDeviceId
                 )
             )
             protocolPublicKeyFingerprints = Set(
@@ -137,6 +139,21 @@ public enum ApplePeerConnectivityPolicy {
         public var hasStrongIdentity: Bool {
             !deviceIds.isEmpty || !protocolPublicKeyFingerprints.isEmpty
         }
+    }
+
+    private static func normalizedAuthorityDeviceId(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        if value.lowercased().hasPrefix("id:") {
+            value.removeFirst("id:".count)
+        }
+        guard let validated =
+                BonjourInteropProtocolContract.normalizedDeviceId(value) else {
+            return nil
+        }
+        return validated.lowercased()
     }
 
     public enum RouteProvenance: String, Sendable, Equatable {

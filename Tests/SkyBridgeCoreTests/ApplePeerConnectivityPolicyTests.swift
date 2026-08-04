@@ -71,6 +71,37 @@ final class ApplePeerConnectivityPolicyTests: XCTestCase {
         )
     }
 
+    func testDeviceAuthorityNormalizesAliasPrefixAndCase() throws {
+        let route = try route(name: "iPad Transfer Owner")
+        let target = ApplePeerConnectivityPolicy.DialTarget(
+            deviceIds: ["id:07cb9a6e-7492-4680-9dd7-f37dc8568891"],
+            protocolPublicKeyFingerprints: [],
+            routes: []
+        )
+        let claim = self.claim(
+            route: route,
+            deviceId: "07CB9A6E-7492-4680-9DD7-F37DC8568891",
+            fingerprint: nil
+        )
+
+        XCTAssertEqual(
+            target.deviceIds,
+            ["07cb9a6e-7492-4680-9dd7-f37dc8568891"]
+        )
+        XCTAssertEqual(
+            claim.authority.deviceId,
+            "07cb9a6e-7492-4680-9dd7-f37dc8568891"
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.match(
+                target: target,
+                claim: claim,
+                requiredServiceKind: .control
+            ),
+            .eligible(.strongAuthority)
+        )
+    }
+
     func testConflictingAuthorityCannotBorrowMatchingRouteName() throws {
         let route = try route(name: "Shared Name")
         let target = ApplePeerConnectivityPolicy.DialTarget(

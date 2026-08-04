@@ -68,23 +68,36 @@ fn file_transfer_pib_oob_then_skr1_golden_fixture_passes() -> Result<()> {
 }
 
 #[test]
-fn file_transfer_skr_direct_route_rejects_bonjour_selected_endpoint() -> Result<()> {
+fn file_transfer_skr_direct_route_requires_proven_bonjour_selected_endpoint() -> Result<()> {
     let artifact_dir = make_test_dir("file-transfer-bonjour-skr-route")?;
-    std::fs::write(
-        artifact_dir.join("ios-real-device-RUN.status.log"),
-        "[2026-05-16T01:00:00.000Z] strictPQC trust preflight failed: missing peer KEM suite=X-Wing reason=missing_pinned_identity_requires_oob\n[2026-05-16T01:00:00.010Z] PIB-1 protocol identity binding request: peer=mac lifecycle=identity-oob>request\n[2026-05-16T01:00:00.200Z] PIB-1 protocol identity binding signature verified: peer=mac fingerprint=abc code=123456 lifecycle=identity-oob>verified\n[2026-05-16T01:00:00.240Z] PIB-1 protocol identity binding pinned: peer=mac deviceId=id:mac fingerprint=abc lifecycle=identity-oob>pinned\n[2026-05-16T01:00:00.260Z] SKR-1 signed LAN KEM refresh request peer=mac endpoint=Mac._skybridge._tcp.local. selectedEndpointClass=bonjour-service selectedEndpointDirect=0 directHostCandidate=1 suites=X-Wing suiteWireIds=0x0001 pinnedProtocolIdentity=1 lifecycle=missing-kem>request\n[2026-05-16T01:00:00.520Z] SKR-1 signed LAN KEM refresh verified and imported peer=mac suites=X-Wing wireId=0x0001 pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=72.0 jitterMs=2.0 successRatePct=100.0 applicationLossPct=0 retryCount=0 lifecycle=served>verified\n[2026-05-16T01:00:00.600Z] file-transfer outbound-complete name=ios-smoke-RUN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n[2026-05-16T01:00:00.610Z] file-transfer inbound-complete name=mac-smoke-RUN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n[2026-05-16T01:00:00.620Z] success suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n",
-    )?;
+    let ios_log = "[2026-05-16T01:00:00.000Z] strictPQC trust preflight failed: missing peer KEM suite=X-Wing reason=missing_pinned_identity_requires_oob\n[2026-05-16T01:00:00.010Z] PIB-1 protocol identity binding request: peer=mac lifecycle=identity-oob>request\n[2026-05-16T01:00:00.200Z] PIB-1 protocol identity binding signature verified: peer=mac fingerprint=abc code=123456 lifecycle=identity-oob>verified\n[2026-05-16T01:00:00.240Z] PIB-1 protocol identity binding pinned: peer=mac deviceId=id:mac fingerprint=abc lifecycle=identity-oob>pinned\n[2026-05-16T01:00:00.260Z] SKR-1 signed LAN KEM refresh request peer=mac endpoint=Mac._skybridge._tcp.local. selectedEndpointClass=bonjour-service selectedEndpointDirect=0 directHostCandidate=1 suites=X-Wing suiteWireIds=0x0001 pinnedProtocolIdentity=1 lifecycle=missing-kem>request\n[2026-05-16T01:00:00.520Z] SKR-1 signed LAN KEM refresh verified and imported peer=mac suites=X-Wing wireId=0x0001 pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=72.0 jitterMs=2.0 successRatePct=100.0 applicationLossPct=0 retryCount=0 lifecycle=served>verified\n[2026-05-16T01:00:00.600Z] file-transfer outbound-complete name=ios-smoke-RUN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n[2026-05-16T01:00:00.610Z] file-transfer inbound-complete name=mac-smoke-RUN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n[2026-05-16T01:00:00.620Z] success suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n";
+    std::fs::write(artifact_dir.join("ios-real-device-RUN.status.log"), ios_log)?;
     std::fs::write(
         artifact_dir.join("mac.status.log"),
         "[2026-05-16T01:00:00.005Z] boot role=mac-p2p-host\n[2026-05-16T01:00:00.100Z] PIB-1 protocol identity binding served: requester=ios target=mac fingerprint=abc code=123456 lifecycle=identity-oob>served\n[2026-05-16T01:00:00.420Z] SKR-1 signed LAN KEM refresh served requester=ios target=mac keyId=skr1 generation=100 suites=0x0001 wireId=0x0001 lifecycle=request>served\n[2026-05-16T01:00:00.550Z] suite peer=id:peer suite=X-Wing\n[2026-05-16T01:00:00.560Z] file-transfer inbound-complete name=ios-smoke-RUN.txt sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n[2026-05-16T01:00:00.570Z] file-transfer outbound-route-probe source=bonjour-transfer host=mac.local. port=8080\n[2026-05-16T01:00:00.580Z] file-transfer outbound-complete name=mac-smoke-RUN.txt sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n[2026-05-16T01:00:00.630Z] success peer=id:peer suite=X-Wing handshakeOnly=1 fileTransfer=1 macReconnect=0\n",
     )?;
 
-    let args = performance_artifact_args(PerformanceKindArg::FileTransfer, artifact_dir);
+    let args = performance_artifact_args(PerformanceKindArg::FileTransfer, artifact_dir.clone());
     let report = build_file_transfer_performance_report(&args)?;
     assert!(doctor_check(&report, "file_transfer_signed_kem_refresh").ok);
     let route = doctor_check(&report, "file_transfer_skr_direct_route");
     assert!(!route.ok, "{}", route.detail);
     assert!(route.detail.contains("selectedEndpointDirect=false"));
+
+    std::fs::write(
+        artifact_dir.join("ios-real-device-RUN.status.log"),
+        ios_log.replace(
+            "selectedEndpointDirect=0 directHostCandidate=1",
+            "selectedEndpointDirect=0 selectedEndpointDirectLAN=1 selectedEndpointPeerToPeer=1 directHostCandidate=0",
+        ),
+    )?;
+    let report = build_file_transfer_performance_report(&performance_artifact_args(
+        PerformanceKindArg::FileTransfer,
+        artifact_dir,
+    ))?;
+    let route = doctor_check(&report, "file_transfer_skr_direct_route");
+    assert!(route.ok, "{}", route.detail);
+    assert!(route.detail.contains("provenDirectLANRoute=true"));
     Ok(())
 }
 

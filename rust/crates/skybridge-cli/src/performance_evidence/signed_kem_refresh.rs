@@ -58,6 +58,8 @@ pub(crate) struct SignedKEMRefreshEvidence {
     pub(crate) selected_endpoint_class: Option<String>,
     pub(crate) direct_host_candidate_seen: bool,
     pub(crate) selected_endpoint_direct_seen: bool,
+    pub(crate) selected_endpoint_direct_lan_seen: bool,
+    pub(crate) selected_endpoint_peer_to_peer_seen: bool,
     pub(crate) latency_ms_max: Option<f64>,
     pub(crate) jitter_ms_max: Option<f64>,
     pub(crate) success_rate_pct_min: Option<f64>,
@@ -86,7 +88,7 @@ fn remember_evidence_token(slot: &mut Option<String>, value: Option<String>) {
 
 pub(crate) fn signed_kem_refresh_check_detail(evidence: &SignedKEMRefreshEvidence) -> String {
     format!(
-        "requestSeen={} servedSeen={} verifiedImported={} iosRequestSeen={} macServedSeen={} iosVerifiedImported={} pinnedIdentity={} signatureVerified={} requestHashBound={} xwingSuite={} xwingWireId={} missingKEMPreflight={} strictXWingAfterRefresh={} unsignedOrTOFU={} classicSuite={} unknownSuite={} rejectedSeen={} firstRejection={} lifecycleSamples={} requestSeq={:?} latestRequestSeq={:?} servedSeq={:?} verifiedSeq={:?} strictXWingSeq={:?} skrRequestPeerSeen={} skrServedTargetSeen={} skrVerifiedPeerSeen={} skrProtocolIdentityFingerprintSeen={} selectedEndpointSeen={} selectedEndpointClass={} directHostCandidate={} selectedEndpointDirect={} pibSkrIdentityBound={} latencyMsMax={:?} jitterMsMax={:?} successRatePctMin={:?} applicationLossPctMax={:?} retryCountMax={:?} {} limits=latency<={:.1},jitter<={:.1},successRate>={:.1},appLossPct<={:.1},retry<={}",
+        "requestSeen={} servedSeen={} verifiedImported={} iosRequestSeen={} macServedSeen={} iosVerifiedImported={} pinnedIdentity={} signatureVerified={} requestHashBound={} xwingSuite={} xwingWireId={} missingKEMPreflight={} strictXWingAfterRefresh={} unsignedOrTOFU={} classicSuite={} unknownSuite={} rejectedSeen={} firstRejection={} lifecycleSamples={} requestSeq={:?} latestRequestSeq={:?} servedSeq={:?} verifiedSeq={:?} strictXWingSeq={:?} skrRequestPeerSeen={} skrServedTargetSeen={} skrVerifiedPeerSeen={} skrProtocolIdentityFingerprintSeen={} selectedEndpointSeen={} selectedEndpointClass={} directHostCandidate={} selectedEndpointDirect={} selectedEndpointDirectLAN={} selectedEndpointPeerToPeer={} pibSkrIdentityBound={} latencyMsMax={:?} jitterMsMax={:?} successRatePctMin={:?} applicationLossPctMax={:?} retryCountMax={:?} {} limits=latency<={:.1},jitter<={:.1},successRate>={:.1},appLossPct<={:.1},retry<={}",
         evidence.request_seen,
         evidence.served_seen,
         evidence.verified_imported_seen,
@@ -119,6 +121,8 @@ pub(crate) fn signed_kem_refresh_check_detail(evidence: &SignedKEMRefreshEvidenc
         evidence.selected_endpoint_class.as_deref().unwrap_or("-"),
         evidence.direct_host_candidate_seen,
         evidence.selected_endpoint_direct_seen,
+        evidence.selected_endpoint_direct_lan_seen,
+        evidence.selected_endpoint_peer_to_peer_seen,
         protocol_identity_binding_matches_skr(evidence),
         evidence.latency_ms_max,
         evidence.jitter_ms_max,

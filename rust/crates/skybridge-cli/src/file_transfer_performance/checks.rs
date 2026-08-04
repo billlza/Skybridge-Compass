@@ -137,20 +137,30 @@ pub(super) fn check_file_transfer_skr_direct_route(
     evidence: &FileTransferPerformanceEvidence,
 ) -> DoctorCheck {
     let refresh = &evidence.signed_kem_refresh;
+    let direct_host_route =
+        refresh.direct_host_candidate_seen && refresh.selected_endpoint_direct_seen;
+    let authority_bound_bonjour_route = refresh.selected_endpoint_direct_lan_seen
+        && refresh
+            .selected_endpoint_class
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("bonjour-service"));
     let ok = refresh.request_seen
-        && refresh.direct_host_candidate_seen
-        && refresh.selected_endpoint_direct_seen;
+        && refresh.selected_endpoint.is_some()
+        && (direct_host_route || authority_bound_bonjour_route);
     simple_doctor_check(
         "file_transfer_skr_direct_route",
         ok,
         if ok { "info" } else { "error" },
         format!(
-            "requestSeen={} directHostCandidate={} selectedEndpointDirect={} selectedEndpointClass={} selectedEndpointSeen={}",
+            "requestSeen={} directHostCandidate={} selectedEndpointDirect={} selectedEndpointDirectLAN={} selectedEndpointPeerToPeer={} selectedEndpointClass={} selectedEndpointSeen={} provenDirectLANRoute={}",
             refresh.request_seen,
             refresh.direct_host_candidate_seen,
             refresh.selected_endpoint_direct_seen,
+            refresh.selected_endpoint_direct_lan_seen,
+            refresh.selected_endpoint_peer_to_peer_seen,
             refresh.selected_endpoint_class.as_deref().unwrap_or("-"),
-            refresh.selected_endpoint.is_some()
+            refresh.selected_endpoint.is_some(),
+            direct_host_route || authority_bound_bonjour_route
         ),
     )
 }

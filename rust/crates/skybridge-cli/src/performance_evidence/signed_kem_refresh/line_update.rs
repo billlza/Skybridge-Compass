@@ -95,6 +95,10 @@ pub(crate) fn update_signed_kem_refresh_evidence(
             .is_some_and(|value| value == 1)
             || extract_text_value(line, "selectedEndpointClass")
                 .is_some_and(|value| value.eq_ignore_ascii_case("direct-host"));
+        evidence.selected_endpoint_direct_lan_seen |=
+            extract_text_u64(line, "selectedEndpointDirectLAN").is_some_and(|value| value == 1);
+        evidence.selected_endpoint_peer_to_peer_seen |=
+            extract_text_u64(line, "selectedEndpointPeerToPeer").is_some_and(|value| value == 1);
     }
     if request_event && source_is_ios_only && !evidence.verified_imported_seen {
         evidence.latest_request_sequence = Some(sequence);
@@ -196,37 +200,40 @@ pub(crate) fn update_signed_kem_refresh_evidence(
     {
         evidence.lifecycle_samples += 1;
     }
-    update_max_f64(
-        &mut evidence.latency_ms_max,
-        extract_text_f64(line, "latencyMs")
-            .or_else(|| extract_text_f64(line, "totalLatencyMs"))
-            .or_else(|| extract_text_f64(line, "responseLatencyMs")),
-    );
-    update_max_f64(
-        &mut evidence.jitter_ms_max,
-        extract_text_f64(line, "jitterMs").or_else(|| extract_text_f64(line, "attemptJitterMs")),
-    );
-    update_max_f64(
-        &mut evidence.application_loss_pct_max,
-        extract_text_f64(line, "applicationLossPct")
+    if verified_imported_event && source_is_ios_only {
+        update_max_f64(
+            &mut evidence.latency_ms_max,
+            extract_text_f64(line, "latencyMs")
+                .or_else(|| extract_text_f64(line, "totalLatencyMs"))
+                .or_else(|| extract_text_f64(line, "responseLatencyMs")),
+        );
+        update_max_f64(
+            &mut evidence.jitter_ms_max,
+            extract_text_f64(line, "jitterMs")
+                .or_else(|| extract_text_f64(line, "attemptJitterMs")),
+        );
+        update_max_f64(
+            &mut evidence.application_loss_pct_max,
+            extract_text_f64(line, "applicationLossPct")
+                .or_else(|| extract_text_f64(line, "appLossPct"))
+                .or_else(|| extract_text_f64(line, "packetLossPct"))
+                .or_else(|| extract_text_f64(line, "lossPct")),
+        );
+        let loss_pct = extract_text_f64(line, "applicationLossPct")
             .or_else(|| extract_text_f64(line, "appLossPct"))
             .or_else(|| extract_text_f64(line, "packetLossPct"))
-            .or_else(|| extract_text_f64(line, "lossPct")),
-    );
-    let loss_pct = extract_text_f64(line, "applicationLossPct")
-        .or_else(|| extract_text_f64(line, "appLossPct"))
-        .or_else(|| extract_text_f64(line, "packetLossPct"))
-        .or_else(|| extract_text_f64(line, "lossPct"));
-    update_min_f64(
-        &mut evidence.success_rate_pct_min,
-        extract_text_f64(line, "successRatePct")
-            .or_else(|| extract_text_f64(line, "attemptSuccessPct"))
-            .or_else(|| loss_pct.map(|value| (100.0 - value).max(0.0))),
-    );
-    update_max_u64(
-        &mut evidence.retry_count_max,
-        extract_text_u64(line, "retryCount").or_else(|| extract_text_u64(line, "retries")),
-    );
+            .or_else(|| extract_text_f64(line, "lossPct"));
+        update_min_f64(
+            &mut evidence.success_rate_pct_min,
+            extract_text_f64(line, "successRatePct")
+                .or_else(|| extract_text_f64(line, "attemptSuccessPct"))
+                .or_else(|| loss_pct.map(|value| (100.0 - value).max(0.0))),
+        );
+        update_max_u64(
+            &mut evidence.retry_count_max,
+            extract_text_u64(line, "retryCount").or_else(|| extract_text_u64(line, "retries")),
+        );
+    }
     sequence
 }
 

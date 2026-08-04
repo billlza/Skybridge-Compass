@@ -18,6 +18,22 @@ fn signed_kem_refresh_parser_requires_distinct_source_events() {
     assert!(!evidence.served_seen);
     assert!(!evidence.mac_served_seen);
     assert!(!evidence.request_seen);
+    assert_eq!(evidence.latency_ms_max, Some(72.0));
+
+    let mac_verified = "SKR-1 signed LAN KEM refresh verified and imported suites=X-Wing wireId=0x0001 pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=900 jitterMs=40 applicationLossPct=0 retryCount=0 lifecycle=served>verified";
+    update_signed_kem_refresh_evidence(
+        &mut evidence,
+        mac_verified,
+        &mac_verified.to_ascii_lowercase(),
+        true,
+        false,
+        None,
+    );
+    assert_eq!(
+        evidence.latency_ms_max,
+        Some(72.0),
+        "iOS performance evidence must not be contaminated by a reverse Mac refresh"
+    );
 
     let mac_request = "SKR-1 signed LAN KEM refresh request suites=X-Wing suiteWireIds=0x0001 pinnedProtocolIdentity=1 lifecycle=missing-kem>request";
     update_signed_kem_refresh_evidence(
