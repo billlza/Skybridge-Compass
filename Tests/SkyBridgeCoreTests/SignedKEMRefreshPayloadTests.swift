@@ -13,6 +13,66 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         ).authoritativeFingerprint
     }
 
+    func testCanonicalMillisecondsRejectNonFiniteAndOutOfInt64RangeWithoutClamping() {
+        let upperBoundExclusive = -Double(Int64.min)
+
+        XCTAssertEqual(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: 1.999), 1)
+        XCTAssertEqual(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: -0.001), -1)
+        XCTAssertEqual(
+            AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: Double(Int64.min)),
+            Int64.min
+        )
+        XCTAssertEqual(
+            AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: upperBoundExclusive.nextDown),
+            Int64(upperBoundExclusive.nextDown)
+        )
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: upperBoundExclusive))
+        XCTAssertNil(
+            AppMessage.canonicalMillisecondsSinceEpoch(
+                milliseconds: Double(Int64.min).nextDown
+            )
+        )
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: .infinity))
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: -.infinity))
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: .nan))
+    }
+
+    func testKEMRefreshRequestRejectsUnrepresentableCanonicalTimestampWithoutHashing() {
+        let request = validKEMRefreshRequest(
+            sentAt: Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        )
+
+        XCTAssertNil(request.canonicalRequestHashHexIfRepresentable)
+        XCTAssertThrowsError(try request.validatedStrictResponderSuites(now: now)) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .unrepresentableTimestamp
+            )
+        }
+    }
+
+    func testSignedKEMRefreshRejectsEitherUnrepresentableCanonicalTimestampBeforePreimageUse() {
+        let hugeDate = Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        let cases = [
+            validPayload(sentAt: hugeDate, expiresAt: now.addingTimeInterval(300)),
+            validPayload(sentAt: now, expiresAt: hugeDate)
+        ]
+
+        for payload in cases {
+            XCTAssertThrowsError(
+                try payload.validatedForStrictPQCImport(
+                    now: now,
+                    pinnedProtocolFingerprints: [fingerprint]
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppMessage.KEMRefreshValidationError,
+                    .unrepresentableTimestamp
+                )
+            }
+        }
+    }
+
     func testRequestCanonicalHashIsStableAcrossSuiteOrdering() {
         let nonce = Data(repeating: 0x44, count: 24)
         let left = AppMessage.KEMRefreshRequestPayload(

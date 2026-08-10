@@ -5255,11 +5255,11 @@ public class P2PConnectionManager: ObservableObject {
         switch message {
         case .kemRefreshRequest(let request):
             let responseStartedAt = Date()
+            let requestHashHex = request.canonicalRequestHashHexIfRepresentable
             do {
                 let payload = try await makeInboundSignedKEMRefreshPayload(for: request)
-                guard let requestReference = P2PEvidenceReference.requestHash(
-                    request.canonicalRequestHashHex
-                ) else {
+                guard let requestHashHex,
+                      let requestReference = P2PEvidenceReference.requestHash(requestHashHex) else {
                     throw signedLANRefreshFailure("canonical inbound SKR request hash is invalid")
                 }
                 let payloadHashHex = SHA256.hash(data: payload.signaturePreimage)
@@ -5291,7 +5291,7 @@ public class P2PConnectionManager: ObservableObject {
                     stage: "kem_refresh",
                     reasonCode: reasonCode,
                     reason: reasonCode,
-                    requestHashHex: request.canonicalRequestHashHex
+                    requestHashHex: requestHashHex
                 )
                 let line = String(
                     format: "⛔️ SKR-1 signed LAN KEM refresh rejected: requester=%@ target=%@ reasonCode=%@ reason=%@ responderLatencyMs=%.1f lifecycle=request>rejected",
@@ -5305,6 +5305,7 @@ public class P2PConnectionManager: ObservableObject {
             }
 
         case .protocolIdentityBindingRequest(let request):
+            let requestHashHex = request.canonicalRequestHashHexIfRepresentable
             do {
                 let payload = try await makeInboundSignedProtocolIdentityBindingPayload(
                     for: request,
@@ -5321,7 +5322,7 @@ public class P2PConnectionManager: ObservableObject {
                     stage: "identity_binding",
                     reasonCode: reasonCode,
                     reason: reasonCode,
-                    requestHashHex: request.canonicalRequestHashHex
+                    requestHashHex: requestHashHex
                 )
                 let line = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
                 return .init(message: .kemRefreshFailure(failure), statusLine: line, isFailure: true)
@@ -5364,6 +5365,9 @@ public class P2PConnectionManager: ObservableObject {
     ) async throws -> AppMessage.SignedKEMRefreshPayload {
         try Task.checkCancellation()
         let requestedSuites = try request.validatedStrictResponderSuites()
+        guard let requestHashHex = request.canonicalRequestHashHexIfRepresentable else {
+            throw signedLANRefreshFailure("request timestamp is not representable as canonical milliseconds")
+        }
         guard let requesterFingerprint = Self.normalizedProtocolIdentityFingerprint(
             request.requesterProtocolIdentityFingerprint
         ) else {
@@ -5378,7 +5382,7 @@ public class P2PConnectionManager: ObservableObject {
 
         let admissionGate = SignedKEMRefreshRequestAdmissionGate.shared
         if let cached = await admissionGate.cachedCompletedResponse(
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         ) {
@@ -5386,7 +5390,7 @@ public class P2PConnectionManager: ObservableObject {
             return cached
         }
         let admission = await admissionGate.admit(
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         )
@@ -5433,7 +5437,7 @@ public class P2PConnectionManager: ObservableObject {
             sentAt: now,
             expiresAt: now.addingTimeInterval(300),
             requestNonce: request.nonce,
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             policyRequirePQC: true,
             policyAllowClassicFallback: false,
             routeScope: "lan",
@@ -5465,7 +5469,7 @@ public class P2PConnectionManager: ObservableObject {
         try Task.checkCancellation()
         await admissionGate.recordCompletedResponse(
             response,
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         )
@@ -5480,6 +5484,9 @@ public class P2PConnectionManager: ObservableObject {
         try Task.checkCancellation()
         guard request.version == AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion else {
             throw protocolIdentityBindingFailure("invalid request version")
+        }
+        guard let requestHashHex = request.canonicalRequestHashHexIfRepresentable else {
+            throw protocolIdentityBindingFailure("request timestamp is not representable as canonical milliseconds")
         }
         guard request.policyRequirePQC, !request.policyAllowClassicFallback else {
             throw protocolIdentityBindingFailure("policy mismatch")
@@ -5555,7 +5562,7 @@ public class P2PConnectionManager: ObservableObject {
                 P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds
             ),
             requestNonce: request.nonce,
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             policyRequirePQC: true,
             policyAllowClassicFallback: false,
             routeScope: "lan",
@@ -5727,12 +5734,15 @@ public class P2PConnectionManager: ObservableObject {
         for confirm: AppMessage.ProtocolIdentityBindingConfirmPayload,
         peerId: String
     ) async throws -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload {
-        let confirmHashHex = confirm.canonicalConfirmHashHex
         let admission = await ProtocolIdentityBindingV3StateStore.shared.beginConfirm(confirm)
         let context: ProtocolIdentityBindingV3ResponderContext
+        let validatedConfirm: AppMessage.ProtocolIdentityBindingConfirmPayload
+        let confirmHashHex: String
         switch admission {
-        case .allowed(let allowedContext):
-            context = allowedContext
+        case .allowed(let admittedConfirm):
+            context = admittedConfirm.context
+            validatedConfirm = admittedConfirm.validatedConfirm
+            confirmHashHex = admittedConfirm.confirmHashHex
         case .replay(let finalAck):
             return finalAck
         case .inFlight:
@@ -5742,10 +5752,6 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         do {
-            let validatedConfirm = try confirm.validatedForCandidate(
-                request: context.request,
-                candidate: context.candidate
-            )
             let requesterSignatureProvider = ProtocolSignatureProviderSelector.select(
                 for: context.requesterProtocolSigningAlgorithm
             )
@@ -5797,7 +5803,7 @@ public class P2PConnectionManager: ObservableObject {
                 confirmationNonce: validatedConfirm.confirmationNonce,
                 requestHashHex: context.request.canonicalRequestHashHex,
                 candidateHashHex: context.candidate.canonicalCandidateHashHex,
-                confirmHashHex: validatedConfirm.canonicalConfirmHashHex,
+                confirmHashHex: confirmHashHex,
                 sasTranscriptHashHex: context.candidate.sasTranscriptHashHex(request: context.request),
                 accepted: true,
                 sentAt: now,
@@ -5931,6 +5937,7 @@ public class P2PConnectionManager: ObservableObject {
         if reason.contains("policy mismatch") { return "policy_mismatch" }
         if reason.contains("invalid route scope") { return "invalid_route_scope" }
         if reason.contains("invalid request nonce") { return "invalid_request_nonce" }
+        if reason.contains("timestamp is not representable") { return "invalid_timestamp" }
         if reason.contains("requester protocol identity proof invalid") { return "invalid_requester_protocol_identity" }
         if reason.contains("requester protocol identity signature invalid") { return "invalid_requester_signature" }
         if reason.contains("requester active transaction quota reached") { return "requester_quota_reached" }
@@ -5949,6 +5956,7 @@ public class P2PConnectionManager: ObservableObject {
         if reason.contains("invalid request version") { return "invalid_request_version" }
         if reason.contains("policy mismatch") { return "policy_mismatch" }
         if reason.contains("policy hash mismatch") { return "policy_hash_mismatch" }
+        if reason.contains("timestamp is not representable") { return "invalid_timestamp" }
         if reason.contains("request replay detected") { return "request_replay_detected" }
         if reason.contains("requester rate limited") { return "requester_rate_limited" }
         if reason.contains("requester protocol identity fingerprint not pinned") { return "requester_protocol_identity_not_pinned" }

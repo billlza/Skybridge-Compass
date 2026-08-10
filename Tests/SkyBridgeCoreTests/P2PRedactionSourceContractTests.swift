@@ -177,12 +177,17 @@ final class P2PRedactionSourceContractTests: XCTestCase {
         XCTAssertFalse(inboundStatusBuilder.contains("reason: error.localizedDescription"))
         XCTAssertTrue(inboundStatusBuilder.contains("reason: reasonCode"))
         XCTAssertTrue(inboundStatusBuilder.contains("reason=%@ responderLatencyMs"))
-        XCTAssertTrue(inboundStatusBuilder.contains("requestHashHex: request.canonicalRequestHashHex"))
+        XCTAssertTrue(inboundStatusBuilder.contains(
+            "let requestHashHex = request.canonicalRequestHashHexIfRepresentable"
+        ))
+        XCTAssertTrue(inboundStatusBuilder.contains("requestHashHex: requestHashHex"))
         XCTAssertTrue(inboundStatusBuilder.contains("requesterDeviceId: request.requesterDeviceId"))
         XCTAssertTrue(inboundStatusBuilder.contains("targetDeviceId: request.targetDeviceId"))
         XCTAssertTrue(inboundStatusBuilder.contains("""
                     Self.protocolIdentityLogRedaction,
                     Self.protocolIdentityLogRedaction,
+                    requestReference,
+                    payloadReference,
                     Self.protocolIdentityLogRedaction,
 """))
         XCTAssertTrue(inboundStatusBuilder.contains("""

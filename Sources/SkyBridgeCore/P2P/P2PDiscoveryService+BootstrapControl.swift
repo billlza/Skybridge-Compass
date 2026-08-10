@@ -109,11 +109,11 @@ extension P2PDiscoveryService {
         switch plaintextControl {
         case .kemRefreshRequest(let request):
             let responseStartedAt = Date()
+            let requestHashHex = request.canonicalRequestHashHexIfRepresentable
             do {
                 let refresh = try await makeSignedKEMRefreshPayload(request)
-                guard let requestReference = P2PEvidenceReference.requestHash(
-                    request.canonicalRequestHashHex
-                ) else {
+                guard let requestHashHex,
+                      let requestReference = P2PEvidenceReference.requestHash(requestHashHex) else {
                     throw AppMessage.KEMRefreshValidationError.requestHashMismatch
                 }
                 let payloadHashHex = SHA256.hash(data: refresh.signaturePreimage)
@@ -152,7 +152,7 @@ extension P2PDiscoveryService {
                     stage: "kem_refresh",
                     reasonCode: reasonCode,
                     reason: reasonCode,
-                    requestHashHex: request.canonicalRequestHashHex
+                    requestHashHex: requestHashHex
                 )
                 let statusLine = String(
                     format: "⛔️ SKR-1 signed LAN KEM refresh rejected: requester=%@ target=%@ reasonCode=%@ reason=%@ responderLatencyMs=%.1f lifecycle=request>rejected",
@@ -173,6 +173,7 @@ extension P2PDiscoveryService {
             }
 
         case .protocolIdentityBindingRequest(let request):
+            let requestHashHex = request.canonicalRequestHashHexIfRepresentable
             do {
                 let binding = try await makeSignedProtocolIdentityBindingPayload(request)
                 let code = binding.shortAuthenticationCode(request: request)
@@ -194,7 +195,7 @@ extension P2PDiscoveryService {
                     stage: "identity_binding",
                     reasonCode: reasonCode,
                     reason: reasonCode,
-                    requestHashHex: request.canonicalRequestHashHex
+                    requestHashHex: requestHashHex
                 )
                 let statusLine = "⛔️ PIB-1 protocol identity binding rejected: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) reasonCode=\(failure.reasonCode) reason=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>rejected"
                 return BootstrapControlResponse(
@@ -291,6 +292,9 @@ extension P2PDiscoveryService {
         } catch {
             throw makeSKRFailure(error.localizedDescription)
         }
+        guard let requestHashHex = request.canonicalRequestHashHexIfRepresentable else {
+            throw makeSKRFailure("request timestamp is not representable as canonical milliseconds")
+        }
         guard request.requesterProtocolIdentityFingerprint != nil else {
             throw makeSKRFailure("requester protocol identity fingerprint missing")
         }
@@ -312,14 +316,14 @@ extension P2PDiscoveryService {
 
         let admissionGate = SignedKEMRefreshRequestAdmissionGate.shared
         if let cached = await admissionGate.cachedCompletedResponse(
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         ) {
             return cached
         }
         let admission = await admissionGate.admit(
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         )
@@ -413,7 +417,7 @@ extension P2PDiscoveryService {
             sentAt: now,
             expiresAt: now.addingTimeInterval(300),
             requestNonce: request.nonce,
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             policyRequirePQC: true,
             policyAllowClassicFallback: false,
             routeScope: "lan",
@@ -457,7 +461,7 @@ extension P2PDiscoveryService {
         )
         await admissionGate.recordCompletedResponse(
             response,
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         )
@@ -480,6 +484,9 @@ extension P2PDiscoveryService {
         let requestValidationNow = Date()
         guard request.version == AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion else {
             throw makePIBFailure("invalid request version")
+        }
+        guard let requestHashHex = request.canonicalRequestHashHexIfRepresentable else {
+            throw makePIBFailure("request timestamp is not representable as canonical milliseconds")
         }
         guard request.policyRequirePQC, !request.policyAllowClassicFallback else {
             throw makePIBFailure("policy mismatch")
@@ -562,7 +569,7 @@ extension P2PDiscoveryService {
                 P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds
             ),
             requestNonce: request.nonce,
-            requestHashHex: request.canonicalRequestHashHex,
+            requestHashHex: requestHashHex,
             policyRequirePQC: true,
             policyAllowClassicFallback: false,
             routeScope: "lan",
@@ -764,6 +771,9 @@ extension P2PDiscoveryService {
         if reason.contains("invalid request nonce") || reason.contains("request nonce is missing") {
             return "invalid_request_nonce"
         }
+        if reason.contains("timestamp is not representable") {
+            return "invalid_timestamp"
+        }
         if reason.contains("requester protocol identity is missing") {
             return "missing_requester_protocol_identity"
         }
@@ -841,6 +851,9 @@ extension P2PDiscoveryService {
         }
         if reason.contains("too far in the future") {
             return "future_request"
+        }
+        if reason.contains("timestamp is not representable") {
+            return "invalid_timestamp"
         }
         if reason.contains("requested suite list is empty") {
             return "missing_requested_suite"

@@ -568,6 +568,40 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertTrue(controlResponse.isFailure)
     }
 
+    func testUnrepresentableKEMRequestTimestampReturnsHashlessFailureWithoutIO() async throws {
+        let request = kemRefreshRequest(
+            sentAt: Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        )
+        var kemResponderCallCount = 0
+        var bindingResponderCallCount = 0
+        let response = await P2PDiscoveryService.makeBootstrapControlResponse(
+            for: .kemRefreshRequest(request),
+            makeSignedKEMRefreshPayload: { request in
+                kemResponderCallCount += 1
+                _ = try request.validatedStrictResponderSuites(now: self.now)
+                throw Self.testError("unreachable valid SKR request")
+            },
+            makeSignedProtocolIdentityBindingPayload: { _ in
+                bindingResponderCallCount += 1
+                throw Self.testError("unexpected PIB-1 path")
+            }
+        )
+
+        let controlResponse = try XCTUnwrap(response)
+        guard case .signedKEMRefreshRejected = controlResponse.kind else {
+            return XCTFail("Expected unrepresentable SKR timestamp to reject")
+        }
+        guard case .kemRefreshFailure(let failure) = controlResponse.message else {
+            return XCTFail("Expected diagnostic kemRefreshFailure")
+        }
+        XCTAssertEqual(kemResponderCallCount, 1)
+        XCTAssertEqual(bindingResponderCallCount, 0)
+        XCTAssertEqual(failure.reasonCode, "invalid_timestamp")
+        XCTAssertNil(failure.requestHashHex)
+        XCTAssertTrue(controlResponse.isFailure)
+        XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=request>rejected"))
+    }
+
     func testKEMRefreshResponderLocalFailureCodesRemainNonSecretAndActionable() {
         let cases: [(reason: String, code: String)] = [
             (
@@ -759,6 +793,41 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertEqual(failure.reason, failure.reasonCode)
         XCTAssertEqual(failure.requestHashHex, request.canonicalRequestHashHex)
         XCTAssertTrue(controlResponse.statusLine.contains("lifecycle=identity-oob>rejected"))
+        XCTAssertTrue(controlResponse.isFailure)
+    }
+
+    func testUnrepresentablePIBRequestTimestampReturnsHashlessFailureWithoutIO() async throws {
+        let request = protocolIdentityBindingRequest(
+            sentAt: Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        )
+        var kemResponderCallCount = 0
+        var bindingResponderCallCount = 0
+        let response = await P2PDiscoveryService.makeBootstrapControlResponse(
+            for: .protocolIdentityBindingRequest(request),
+            makeSignedKEMRefreshPayload: { _ in
+                kemResponderCallCount += 1
+                throw Self.testError("unexpected SKR-1 path")
+            },
+            makeSignedProtocolIdentityBindingPayload: { request in
+                bindingResponderCallCount += 1
+                guard request.canonicalRequestHashHexIfRepresentable != nil else {
+                    throw AppMessage.ProtocolIdentityBindingValidationError.unrepresentableTimestamp
+                }
+                throw Self.testError("unreachable valid PIB-1 request")
+            }
+        )
+
+        let controlResponse = try XCTUnwrap(response)
+        guard case .protocolIdentityBindingRejected = controlResponse.kind else {
+            return XCTFail("Expected unrepresentable PIB timestamp to reject")
+        }
+        guard case .kemRefreshFailure(let failure) = controlResponse.message else {
+            return XCTFail("Expected diagnostic kemRefreshFailure")
+        }
+        XCTAssertEqual(kemResponderCallCount, 0)
+        XCTAssertEqual(bindingResponderCallCount, 1)
+        XCTAssertEqual(failure.reasonCode, "invalid_timestamp")
+        XCTAssertNil(failure.requestHashHex)
         XCTAssertTrue(controlResponse.isFailure)
     }
 
@@ -1401,7 +1470,9 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         )
     }
 
-    private func protocolIdentityBindingRequest() -> AppMessage.ProtocolIdentityBindingRequestPayload {
+    private func protocolIdentityBindingRequest(
+        sentAt: Date? = nil
+    ) -> AppMessage.ProtocolIdentityBindingRequestPayload {
         AppMessage.ProtocolIdentityBindingRequestPayload(
             requesterDeviceId: "id:ios-1",
             targetDeviceId: "id:mac-1",
@@ -1411,7 +1482,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             ],
             bonjourEndpointDigest: String(repeating: "c", count: 64),
             nonce: Data(repeating: 0x66, count: 24),
-            sentAt: now
+            sentAt: sentAt ?? now
         )
     }
 

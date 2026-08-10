@@ -154,6 +154,95 @@ final class PIB1V3ProtocolTests: XCTestCase {
         )
     }
 
+    func testNetworkPIBTimestampsRejectUnrepresentableCanonicalMillisecondsBeforeHashUse() {
+        let hugeDate = Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        let unrepresentableRequest = makeRequest(sentAt: hugeDate)
+        XCTAssertNil(unrepresentableRequest.canonicalRequestHashHexIfRepresentable)
+
+        let request = makeRequest()
+        let validCandidate = makeCandidate(request: request)
+        let candidateCases = [
+            makeCandidate(
+                request: request,
+                sentAt: hugeDate,
+                expiresAt: now.addingTimeInterval(300)
+            ),
+            makeCandidate(request: request, sentAt: now, expiresAt: hugeDate)
+        ]
+        for candidate in candidateCases {
+            XCTAssertThrowsError(
+                try candidate.validatedForOOBBinding(request: request, now: now)
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppMessage.ProtocolIdentityBindingValidationError,
+                    .unrepresentableTimestamp
+                )
+            }
+        }
+
+        let confirmCases = [
+            makeConfirm(
+                request: request,
+                candidate: validCandidate,
+                sentAt: hugeDate,
+                expiresAt: now.addingTimeInterval(300)
+            ),
+            makeConfirm(
+                request: request,
+                candidate: validCandidate,
+                sentAt: now,
+                expiresAt: hugeDate
+            )
+        ]
+        for confirm in confirmCases {
+            XCTAssertThrowsError(
+                try confirm.validatedForCandidate(
+                    request: request,
+                    candidate: validCandidate,
+                    now: now
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppMessage.ProtocolIdentityBindingValidationError,
+                    .unrepresentableTimestamp
+                )
+            }
+        }
+
+        let validConfirm = makeConfirm(request: request, candidate: validCandidate)
+        let finalAckCases = [
+            makeAck(
+                request: request,
+                candidate: validCandidate,
+                confirm: validConfirm,
+                sentAt: hugeDate,
+                expiresAt: now.addingTimeInterval(300)
+            ),
+            makeAck(
+                request: request,
+                candidate: validCandidate,
+                confirm: validConfirm,
+                sentAt: now,
+                expiresAt: hugeDate
+            )
+        ]
+        for finalAck in finalAckCases {
+            XCTAssertThrowsError(
+                try finalAck.validatedForFinalization(
+                    request: request,
+                    candidate: validCandidate,
+                    confirm: validConfirm,
+                    now: now
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? AppMessage.ProtocolIdentityBindingValidationError,
+                    .unrepresentableTimestamp
+                )
+            }
+        }
+    }
+
     func testConfirmBindsTransactionRequestCandidateAndFullSASTranscript() throws {
         let request = makeRequest()
         let candidate = makeCandidate(request: request)
@@ -399,7 +488,8 @@ final class PIB1V3ProtocolTests: XCTestCase {
     private func makeRequest(
         version: Int = AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion,
         transactionId: UUID = UUID(),
-        requesterKeyByte: UInt8 = 1
+        requesterKeyByte: UInt8 = 1,
+        sentAt: Date? = nil
     ) -> AppMessage.ProtocolIdentityBindingRequestPayload {
         let publicKey = Data(repeating: requesterKeyByte, count: 32)
         let fingerprint = ProtocolIdentityPublicKeys(
@@ -417,7 +507,7 @@ final class PIB1V3ProtocolTests: XCTestCase {
             requesterProtocolIdentityFingerprint: fingerprint,
             requesterSignature: Data(repeating: 2, count: 64),
             nonce: Data(repeating: 3, count: 24),
-            sentAt: now
+            sentAt: sentAt ?? now
         )
     }
 
@@ -447,7 +537,8 @@ final class PIB1V3ProtocolTests: XCTestCase {
     private func makeCandidate(
         request: AppMessage.ProtocolIdentityBindingRequestPayload,
         version: Int = AppMessage.SignedProtocolIdentityBindingPayload.currentVersion,
-        sentAt: Date? = nil
+        sentAt: Date? = nil,
+        expiresAt: Date? = nil
     ) -> AppMessage.SignedProtocolIdentityBindingPayload {
         let candidateSentAt = sentAt ?? now
         return AppMessage.SignedProtocolIdentityBindingPayload(
@@ -458,7 +549,7 @@ final class PIB1V3ProtocolTests: XCTestCase {
             protocolIdentityPublicKey: Data(repeating: 4, count: 32),
             protocolIdentityFingerprint: responderFingerprint,
             sentAt: candidateSentAt,
-            expiresAt: candidateSentAt.addingTimeInterval(300),
+            expiresAt: expiresAt ?? candidateSentAt.addingTimeInterval(300),
             requestNonce: request.nonce,
             requestHashHex: request.canonicalRequestHashHex,
             signature: Data(repeating: 5, count: 64)
@@ -467,7 +558,9 @@ final class PIB1V3ProtocolTests: XCTestCase {
 
     private func makeConfirm(
         request: AppMessage.ProtocolIdentityBindingRequestPayload,
-        candidate: AppMessage.SignedProtocolIdentityBindingPayload
+        candidate: AppMessage.SignedProtocolIdentityBindingPayload,
+        sentAt: Date? = nil,
+        expiresAt: Date? = nil
     ) -> AppMessage.ProtocolIdentityBindingConfirmPayload {
         AppMessage.ProtocolIdentityBindingConfirmPayload(
             transactionId: request.transactionId,
@@ -480,8 +573,8 @@ final class PIB1V3ProtocolTests: XCTestCase {
             candidateHashHex: candidate.canonicalCandidateHashHex,
             sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request),
             confirmationNonce: Data(repeating: 6, count: 24),
-            sentAt: now,
-            expiresAt: now.addingTimeInterval(300),
+            sentAt: sentAt ?? now,
+            expiresAt: expiresAt ?? now.addingTimeInterval(300),
             requesterSignature: Data(repeating: 7, count: 64)
         )
     }
@@ -489,7 +582,9 @@ final class PIB1V3ProtocolTests: XCTestCase {
     private func makeAck(
         request: AppMessage.ProtocolIdentityBindingRequestPayload,
         candidate: AppMessage.SignedProtocolIdentityBindingPayload,
-        confirm: AppMessage.ProtocolIdentityBindingConfirmPayload
+        confirm: AppMessage.ProtocolIdentityBindingConfirmPayload,
+        sentAt: Date? = nil,
+        expiresAt: Date? = nil
     ) -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload {
         AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
             transactionId: request.transactionId,
@@ -504,8 +599,8 @@ final class PIB1V3ProtocolTests: XCTestCase {
             sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request),
             confirmHashHex: confirm.canonicalConfirmHashHex,
             accepted: true,
-            sentAt: now,
-            expiresAt: now.addingTimeInterval(300),
+            sentAt: sentAt ?? now,
+            expiresAt: expiresAt ?? now.addingTimeInterval(300),
             responderSignature: Data(repeating: 8, count: 64)
         )
     }

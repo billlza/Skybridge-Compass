@@ -136,6 +136,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case targetDeviceIdMismatch
         case expired
         case invalidValidityWindow
+        case unrepresentableTimestamp
         case generationRollback(current: UInt64, incoming: UInt64)
         case policyMismatch
         case invalidRouteScope
@@ -169,6 +170,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             case .targetDeviceIdMismatch: return "SKR-1 response device id does not match request target"
             case .expired: return "SKR-1 signed KEM refresh is expired"
             case .invalidValidityWindow: return "SKR-1 validity window is invalid"
+            case .unrepresentableTimestamp: return "SKR-1 timestamp is not representable as canonical milliseconds"
             case .generationRollback(let current, let incoming):
                 return "SKR-1 generation rollback detected current=\(current) incoming=\(incoming)"
             case .policyMismatch: return "SKR-1 policy does not match strict PQC"
@@ -261,12 +263,22 @@ public enum AppMessage: Codable, Sendable, Equatable {
             AppMessage.sha256Hex(canonicalPreimage)
         }
 
+        var canonicalRequestHashHexIfRepresentable: String? {
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil else {
+                return nil
+            }
+            return canonicalRequestHashHex
+        }
+
         public func validatedStrictResponderSuites(
             now: Date = Date(),
             maximumAcceptedAge: TimeInterval = Self.maximumAcceptedAge,
             maximumAcceptedFutureSkew: TimeInterval = Self.maximumAcceptedFutureSkew
         ) throws -> [CryptoSuite] {
             guard version == Self.currentVersion else { throw KEMRefreshValidationError.invalidVersion }
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil else {
+                throw KEMRefreshValidationError.unrepresentableTimestamp
+            }
             guard policyRequirePQC, !policyAllowClassicFallback else { throw KEMRefreshValidationError.policyMismatch }
             guard hasExpectedPolicyHash else { throw KEMRefreshValidationError.requestPolicyHashMismatch }
             guard routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "lan" else {
@@ -325,6 +337,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
         case missingRequesterSignature
         case expired
         case invalidValidityWindow
+        case unrepresentableTimestamp
         case policyMismatch
         case invalidRouteScope
         case targetDeviceIdMismatch
@@ -349,6 +362,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             case .missingRequesterSignature: return "PIB-1 requester signature is missing"
             case .expired: return "PIB-1 signed protocol identity binding is expired"
             case .invalidValidityWindow: return "PIB-1 validity window is invalid"
+            case .unrepresentableTimestamp: return "PIB-1 timestamp is not representable as canonical milliseconds"
             case .policyMismatch: return "PIB-1 policy does not match strict PQC"
             case .invalidRouteScope: return "PIB-1 route scope is invalid"
             case .targetDeviceIdMismatch: return "PIB-1 response device id does not match request target"
@@ -418,6 +432,13 @@ public enum AppMessage: Codable, Sendable, Equatable {
 
         public var canonicalRequestHashHex: String {
             AppMessage.sha256Hex(canonicalPreimage)
+        }
+
+        var canonicalRequestHashHexIfRepresentable: String? {
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil else {
+                return nil
+            }
+            return canonicalRequestHashHex
         }
 
         public var normalizedRequesterProtocolIdentity: ProtocolIdentityPublicKeyInfo? {
@@ -638,6 +659,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
                   request.version == ProtocolIdentityBindingRequestPayload.currentVersion else {
                 throw ProtocolIdentityBindingValidationError.invalidVersion
             }
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil,
+                  AppMessage.canonicalMillisecondsSinceEpoch(expiresAt) != nil else {
+                throw ProtocolIdentityBindingValidationError.unrepresentableTimestamp
+            }
             let rawAlgorithm = protocolSigningAlgorithm.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let algorithm = ProtocolSigningAlgorithm(rawValue: rawAlgorithm) else {
                 throw ProtocolIdentityBindingValidationError.invalidSignatureAlgorithm
@@ -831,6 +856,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
                   candidate.version == SignedProtocolIdentityBindingPayload.currentVersion else {
                 throw ProtocolIdentityBindingValidationError.invalidVersion
             }
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil,
+                  AppMessage.canonicalMillisecondsSinceEpoch(expiresAt) != nil else {
+                throw ProtocolIdentityBindingValidationError.unrepresentableTimestamp
+            }
             guard policyRequirePQC, !policyAllowClassicFallback else {
                 throw ProtocolIdentityBindingValidationError.policyMismatch
             }
@@ -979,6 +1008,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
         ) throws -> SignedProtocolIdentityBindingFinalAckPayload {
             guard version == Self.currentVersion else {
                 throw ProtocolIdentityBindingValidationError.invalidVersion
+            }
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil,
+                  AppMessage.canonicalMillisecondsSinceEpoch(expiresAt) != nil else {
+                throw ProtocolIdentityBindingValidationError.unrepresentableTimestamp
             }
             guard accepted else {
                 throw ProtocolIdentityBindingValidationError.policyMismatch
@@ -1166,6 +1199,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
             minimumGeneration: UInt64? = nil
         ) throws -> SignedKEMRefreshPayload {
             guard version == Self.currentVersion else { throw KEMRefreshValidationError.invalidVersion }
+            guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil,
+                  AppMessage.canonicalMillisecondsSinceEpoch(expiresAt) != nil else {
+                throw KEMRefreshValidationError.unrepresentableTimestamp
+            }
             let rawAlgorithm = protocolSigningAlgorithm.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let algorithm = ProtocolSigningAlgorithm(rawValue: rawAlgorithm) else {
                 throw KEMRefreshValidationError.invalidSignatureAlgorithm
@@ -1484,8 +1521,28 @@ public enum AppMessage: Codable, Sendable, Equatable {
         Data(fields.map { "\($0.0)=\($0.1)" }.joined(separator: "\n").utf8)
     }
 
+    static func canonicalMillisecondsSinceEpoch(_ date: Date) -> Int64? {
+        canonicalMillisecondsSinceEpoch(
+            milliseconds: date.timeIntervalSince1970 * 1_000.0
+        )
+    }
+
+    static func canonicalMillisecondsSinceEpoch(milliseconds: Double) -> Int64? {
+        guard milliseconds.isFinite else { return nil }
+        let flooredMilliseconds = milliseconds.rounded(.down)
+        let upperBoundExclusive = -Double(Int64.min)
+        guard flooredMilliseconds >= Double(Int64.min),
+              flooredMilliseconds < upperBoundExclusive else {
+            return nil
+        }
+        return Int64(flooredMilliseconds)
+    }
+
     private static func millisecondsSinceEpoch(_ date: Date) -> Int64 {
-        Int64((date.timeIntervalSince1970 * 1000.0).rounded(.down))
+        guard let milliseconds = canonicalMillisecondsSinceEpoch(date) else {
+            preconditionFailure("Canonical timestamp is not representable as Int64 milliseconds")
+        }
+        return milliseconds
     }
 
     private static func normalizedToken(_ raw: String) -> String {

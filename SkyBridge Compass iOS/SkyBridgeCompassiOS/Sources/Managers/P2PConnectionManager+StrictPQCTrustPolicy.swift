@@ -14,6 +14,13 @@ struct ProtocolIdentityBindingV3ResponderContext: Sendable {
 }
 
 @available(iOS 17.0, *)
+struct ProtocolIdentityBindingV3AdmittedConfirm: Sendable {
+    let context: ProtocolIdentityBindingV3ResponderContext
+    let validatedConfirm: AppMessage.ProtocolIdentityBindingConfirmPayload
+    let confirmHashHex: String
+}
+
+@available(iOS 17.0, *)
 enum ProtocolIdentityBindingV3CandidateRegistration: Sendable {
     case stored(ProtocolIdentityBindingV3ResponderContext)
     case replay(ProtocolIdentityBindingV3ResponderContext)
@@ -26,7 +33,7 @@ enum ProtocolIdentityBindingV3CandidateRegistration: Sendable {
 
 @available(iOS 17.0, *)
 enum ProtocolIdentityBindingV3ConfirmAdmission: Sendable {
-    case allowed(ProtocolIdentityBindingV3ResponderContext)
+    case allowed(ProtocolIdentityBindingV3AdmittedConfirm)
     case replay(AppMessage.SignedProtocolIdentityBindingFinalAckPayload)
     case inFlight
     case rejected
@@ -189,7 +196,17 @@ actor ProtocolIdentityBindingV3StateStore {
               entry.sasTranscriptHashHex == confirm.sasTranscriptHashHex.lowercased() else {
             return .rejected
         }
-        let confirmHashHex = confirm.canonicalConfirmHashHex
+        let validatedConfirm: AppMessage.ProtocolIdentityBindingConfirmPayload
+        do {
+            validatedConfirm = try confirm.validatedForCandidate(
+                request: entry.context.request,
+                candidate: entry.context.candidate,
+                now: now
+            )
+        } catch {
+            return .rejected
+        }
+        let confirmHashHex = validatedConfirm.canonicalConfirmHashHex
         if let finalAck = entry.finalAck {
             guard entry.completedConfirmHashHex == confirmHashHex else {
                 return .rejected
@@ -210,7 +227,13 @@ actor ProtocolIdentityBindingV3StateStore {
         // comparing SAS. Do not leave an expiry task armed against that entry:
         // repeatedly scheduling an already-expired deadline would busy-loop.
         scheduleCleanup()
-        return .allowed(entry.context)
+        return .allowed(
+            ProtocolIdentityBindingV3AdmittedConfirm(
+                context: entry.context,
+                validatedConfirm: validatedConfirm,
+                confirmHashHex: confirmHashHex
+            )
+        )
     }
 
     func completeConfirm(

@@ -1262,6 +1262,76 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertFalse(missingRequesterIdentity.hasRequesterProtocolIdentityFingerprint)
     }
 
+    func testCanonicalMillisecondsRejectNonFiniteAndInt64OverflowOnIOS() {
+        let upperBoundExclusive = -Double(Int64.min)
+
+        XCTAssertEqual(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: 1.999), 1)
+        XCTAssertEqual(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: -0.001), -1)
+        XCTAssertEqual(
+            AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: Double(Int64.min)),
+            Int64.min
+        )
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: upperBoundExclusive))
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: .infinity))
+        XCTAssertNil(AppMessage.canonicalMillisecondsSinceEpoch(milliseconds: .nan))
+    }
+
+    func testUnrepresentableSKRRequestAndResponseTimestampsFailClosedOnIOS() {
+        let hugeDate = Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let protocolPublicKey = Data(repeating: 0x33, count: 1_184)
+        let fingerprint = ProtocolIdentityPublicKeys(
+            protocolPublicKey: protocolPublicKey,
+            protocolAlgorithm: .mlDSA65
+        ).authoritativeFingerprint
+        let request = AppMessage.KEMRefreshRequestPayload(
+            requesterDeviceId: "id:ios-1",
+            targetDeviceId: "id:mac-1",
+            requesterProtocolIdentityFingerprint: fingerprint,
+            requestedSuiteWireIds: [CryptoSuite.xwingMLDSA.wireId],
+            nonce: Data(repeating: 0x44, count: 24),
+            sentAt: hugeDate
+        )
+        XCTAssertNil(request.canonicalRequestHashHexIfRepresentable)
+        XCTAssertThrowsError(try request.validatedStrictResponderSuites(now: now)) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .unrepresentableTimestamp
+            )
+        }
+
+        let response = AppMessage.SignedKEMRefreshPayload(
+            deviceId: "id:mac-1",
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.mlDSA65.rawValue,
+            protocolIdentityPublicKey: protocolPublicKey,
+            protocolIdentityFingerprint: fingerprint,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x55, count: 1_216)
+                )
+            ],
+            keyId: "skr-1",
+            generation: 1,
+            sentAt: now,
+            expiresAt: hugeDate,
+            requestNonce: Data(repeating: 0x44, count: 24),
+            requestHashHex: String(repeating: "a", count: 64),
+            signature: Data(repeating: 0x99, count: 64)
+        )
+        XCTAssertThrowsError(
+            try response.validatedForStrictPQCImport(
+                now: now,
+                pinnedProtocolFingerprints: [fingerprint]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.KEMRefreshValidationError,
+                .unrepresentableTimestamp
+            )
+        }
+    }
+
     func testSignedLANRefreshRequestCarriesRequesterIdentityAndVerifiesBeforeImport() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
@@ -2352,12 +2422,17 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(reviewedStatusBuilder.contains("reason: reasonCode"))
         XCTAssertFalse(reviewedStatusBuilder.contains("reason: error.localizedDescription"))
         XCTAssertTrue(reviewedStatusBuilder.contains("reason=%@ responderLatencyMs"))
-        XCTAssertTrue(reviewedStatusBuilder.contains("requestHashHex: request.canonicalRequestHashHex"))
+        XCTAssertTrue(reviewedStatusBuilder.contains(
+            "let requestHashHex = request.canonicalRequestHashHexIfRepresentable"
+        ))
+        XCTAssertTrue(reviewedStatusBuilder.contains("requestHashHex: requestHashHex"))
         XCTAssertTrue(reviewedStatusBuilder.contains("requesterDeviceId: request.requesterDeviceId"))
         XCTAssertTrue(reviewedStatusBuilder.contains("targetDeviceId: request.targetDeviceId"))
         XCTAssertTrue(reviewedStatusBuilder.contains("""
                     Self.protocolIdentityLogRedaction,
                     Self.protocolIdentityLogRedaction,
+                    requestReference,
+                    payloadReference,
                     Self.protocolIdentityLogRedaction,
 """))
         XCTAssertTrue(reviewedStatusBuilder.contains("""
@@ -2849,6 +2924,33 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertFalse(candidatePhase.contains("installOOBProtocolIdentityBinding"))
     }
 
+    func testPIB1V3ConfirmCallerConsumesOnlyAdmittedValidatedHash() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "private func makeInboundSignedProtocolIdentityBindingFinalAck(")
+        )
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private static func inboundBootstrapDeviceIdCandidates(",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let confirmPhase = String(source[start.lowerBound..<end.lowerBound])
+        let admission = try XCTUnwrap(
+            confirmPhase.range(
+                of: "ProtocolIdentityBindingV3StateStore.shared.beginConfirm(confirm)"
+            )
+        )
+        let beforeAdmission = confirmPhase[..<admission.lowerBound]
+
+        XCTAssertFalse(beforeAdmission.contains("canonicalConfirmHashHex"))
+        XCTAssertTrue(confirmPhase.contains("validatedConfirm = admittedConfirm.validatedConfirm"))
+        XCTAssertTrue(confirmPhase.contains("confirmHashHex = admittedConfirm.confirmHashHex"))
+        XCTAssertFalse(confirmPhase.contains("let validatedConfirm = try confirm.validatedForCandidate"))
+    }
+
     func testPIB1V3RequesterPinsOnlyAfterVerifiedFinalAckOnNewConnection() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
@@ -3167,6 +3269,116 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
         }
     }
 
+    func testUnrepresentablePIBNetworkTimestampsFailClosedOnIOS() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let hugeDate = Date(timeIntervalSince1970: .greatestFiniteMagnitude)
+        let transcript = try makeTranscript(now: now)
+        let request = AppMessage.ProtocolIdentityBindingRequestPayload(
+            version: transcript.request.version,
+            transactionId: transcript.request.transactionId,
+            requesterDeviceId: transcript.request.requesterDeviceId,
+            targetDeviceId: transcript.request.targetDeviceId,
+            requestedProtocolSigningAlgorithms: transcript.request.requestedProtocolSigningAlgorithms,
+            requesterProtocolSigningAlgorithm: transcript.request.requesterProtocolSigningAlgorithm,
+            requesterProtocolIdentityPublicKey: transcript.request.requesterProtocolIdentityPublicKey,
+            requesterProtocolIdentityFingerprint: transcript.request.requesterProtocolIdentityFingerprint,
+            requesterSignature: transcript.request.requesterSignature,
+            nonce: transcript.request.nonce,
+            sentAt: hugeDate
+        )
+        XCTAssertNil(request.canonicalRequestHashHexIfRepresentable)
+
+        let candidate = AppMessage.SignedProtocolIdentityBindingPayload(
+            version: transcript.candidate.version,
+            transactionId: transcript.candidate.transactionId,
+            deviceId: transcript.candidate.deviceId,
+            aliases: transcript.candidate.aliases,
+            protocolSigningAlgorithm: transcript.candidate.protocolSigningAlgorithm,
+            protocolIdentityPublicKey: transcript.candidate.protocolIdentityPublicKey,
+            protocolIdentityFingerprint: transcript.candidate.protocolIdentityFingerprint,
+            deviceName: transcript.candidate.deviceName,
+            sentAt: transcript.candidate.sentAt,
+            expiresAt: hugeDate,
+            requestNonce: transcript.candidate.requestNonce,
+            requestHashHex: transcript.candidate.requestHashHex,
+            signature: transcript.candidate.signature
+        )
+        XCTAssertThrowsError(
+            try candidate.validatedForOOBBinding(request: transcript.request, now: now)
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.ProtocolIdentityBindingValidationError,
+                .unrepresentableTimestamp
+            )
+        }
+
+        let validConfirm = try makeConfirm(transcript: transcript, now: now)
+        let confirm = AppMessage.ProtocolIdentityBindingConfirmPayload(
+            transactionId: validConfirm.transactionId,
+            requesterDeviceId: validConfirm.requesterDeviceId,
+            responderDeviceId: validConfirm.responderDeviceId,
+            requesterProtocolIdentityFingerprint: validConfirm.requesterProtocolIdentityFingerprint,
+            responderProtocolIdentityFingerprint: validConfirm.responderProtocolIdentityFingerprint,
+            requestNonce: validConfirm.requestNonce,
+            requestHashHex: validConfirm.requestHashHex,
+            candidateHashHex: validConfirm.candidateHashHex,
+            sasTranscriptHashHex: validConfirm.sasTranscriptHashHex,
+            confirmationNonce: validConfirm.confirmationNonce,
+            sentAt: hugeDate,
+            expiresAt: validConfirm.expiresAt,
+            requesterSignature: validConfirm.requesterSignature
+        )
+        XCTAssertThrowsError(
+            try confirm.validatedForCandidate(
+                request: transcript.request,
+                candidate: transcript.candidate,
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.ProtocolIdentityBindingValidationError,
+                .unrepresentableTimestamp
+            )
+        }
+
+        let validAck = try makeFinalAck(
+            transcript: transcript,
+            confirm: validConfirm,
+            now: now
+        )
+        let finalAck = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
+            version: validAck.version,
+            transactionId: validAck.transactionId,
+            requesterDeviceId: validAck.requesterDeviceId,
+            responderDeviceId: validAck.responderDeviceId,
+            requesterProtocolIdentityFingerprint: validAck.requesterProtocolIdentityFingerprint,
+            responderProtocolIdentityFingerprint: validAck.responderProtocolIdentityFingerprint,
+            requestNonce: validAck.requestNonce,
+            confirmationNonce: validAck.confirmationNonce,
+            requestHashHex: validAck.requestHashHex,
+            candidateHashHex: validAck.candidateHashHex,
+            confirmHashHex: validAck.confirmHashHex,
+            sasTranscriptHashHex: validAck.sasTranscriptHashHex,
+            accepted: validAck.accepted,
+            sentAt: validAck.sentAt,
+            expiresAt: hugeDate,
+            responderSignature: validAck.responderSignature
+        )
+        XCTAssertThrowsError(
+            try finalAck.validatedForFinalization(
+                request: transcript.request,
+                candidate: transcript.candidate,
+                confirm: validConfirm,
+                now: now
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AppMessage.ProtocolIdentityBindingValidationError,
+                .unrepresentableTimestamp
+            )
+        }
+    }
+
     func testV3CrossPlatformGoldenVectorMatchesMacOS() {
         let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
         let transactionId = UUID(uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF")!
@@ -3360,6 +3572,88 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
         let expiredCount = await store.entryCountForTesting(now: now.addingTimeInterval(301))
         XCTAssertEqual(liveCount, 2)
         XCTAssertEqual(expiredCount, 0)
+    }
+
+    func testResponderBeginConfirmRejectsHugeFiniteDateBeforeHashAndReturnsCallerSafeAdmission() async throws {
+        let now = Date()
+        let store = ProtocolIdentityBindingV3StateStore(ttl: 300, maximumEntries: 2)
+        let transcript = try makeTranscript(now: now)
+        let context = ProtocolIdentityBindingV3ResponderContext(
+            request: transcript.request,
+            candidate: transcript.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: transcript.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                transcript.responderKey.rawRepresentation
+            ),
+            peerId: "peer",
+            expiresAt: now.addingTimeInterval(300)
+        )
+        guard case .stored = await store.registerCandidate(context, now: now) else {
+            return XCTFail("Candidate must be stored before confirm admission")
+        }
+
+        let validConfirm = try makeConfirm(transcript: transcript, now: now)
+        let unrepresentableConfirm = AppMessage.ProtocolIdentityBindingConfirmPayload(
+            version: validConfirm.version,
+            transactionId: validConfirm.transactionId,
+            requesterDeviceId: validConfirm.requesterDeviceId,
+            responderDeviceId: validConfirm.responderDeviceId,
+            requesterProtocolIdentityFingerprint: validConfirm.requesterProtocolIdentityFingerprint,
+            responderProtocolIdentityFingerprint: validConfirm.responderProtocolIdentityFingerprint,
+            requestNonce: validConfirm.requestNonce,
+            requestHashHex: validConfirm.requestHashHex,
+            candidateHashHex: validConfirm.candidateHashHex,
+            sasTranscriptHashHex: validConfirm.sasTranscriptHashHex,
+            confirmationNonce: validConfirm.confirmationNonce,
+            sentAt: Date(timeIntervalSince1970: .greatestFiniteMagnitude),
+            expiresAt: validConfirm.expiresAt,
+            requesterSignature: validConfirm.requesterSignature
+        )
+        guard case .rejected = await store.beginConfirm(unrepresentableConfirm, now: now) else {
+            return XCTFail("An unrepresentable confirm timestamp must reject before hashing")
+        }
+
+        let admitted: ProtocolIdentityBindingV3AdmittedConfirm
+        switch await store.beginConfirm(validConfirm, now: now) {
+        case .allowed(let value):
+            admitted = value
+        default:
+            return XCTFail("A valid confirm must remain admissible after the rejected input")
+        }
+        XCTAssertEqual(admitted.context.request.transactionId, transcript.request.transactionId)
+        XCTAssertEqual(admitted.validatedConfirm, validConfirm)
+        XCTAssertEqual(admitted.confirmHashHex, validConfirm.canonicalConfirmHashHex)
+
+        guard case .inFlight = await store.beginConfirm(validConfirm, now: now) else {
+            return XCTFail("An identical admitted confirm must preserve in-flight idempotence")
+        }
+        let conflictingConfirm = AppMessage.ProtocolIdentityBindingConfirmPayload(
+            version: validConfirm.version,
+            transactionId: validConfirm.transactionId,
+            requesterDeviceId: validConfirm.requesterDeviceId,
+            responderDeviceId: validConfirm.responderDeviceId,
+            requesterProtocolIdentityFingerprint: validConfirm.requesterProtocolIdentityFingerprint,
+            responderProtocolIdentityFingerprint: validConfirm.responderProtocolIdentityFingerprint,
+            requestNonce: validConfirm.requestNonce,
+            requestHashHex: validConfirm.requestHashHex,
+            candidateHashHex: validConfirm.candidateHashHex,
+            sasTranscriptHashHex: validConfirm.sasTranscriptHashHex,
+            confirmationNonce: validConfirm.confirmationNonce,
+            sentAt: validConfirm.sentAt,
+            expiresAt: validConfirm.expiresAt,
+            requesterSignature: Data(repeating: 0xEE, count: validConfirm.requesterSignature.count)
+        )
+        guard case .rejected = await store.beginConfirm(conflictingConfirm, now: now) else {
+            return XCTFail("A conflicting in-flight confirm must remain rejected")
+        }
+
+        await store.abortConfirm(
+            transactionId: transcript.request.transactionId,
+            confirmHashHex: admitted.confirmHashHex,
+            now: now
+        )
     }
 
     func testResponderInFlightConfirmSuspendsExpiryCleanupUntilCompletion() async throws {
