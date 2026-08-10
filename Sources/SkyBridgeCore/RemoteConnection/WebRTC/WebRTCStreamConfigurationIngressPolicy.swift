@@ -26,6 +26,12 @@ extension CrossNetworkConnectionManager {
     }
 
     struct WebRTCStreamConfigurationIngressPlan: Equatable {
+        enum CommitMode: Equatable {
+            case none
+            case afterAcknowledgement
+            case exactStopWithoutAcknowledgement
+        }
+
         struct Acknowledgement: Equatable {
             let transaction: RemoteDesktopStreamConfigurationTransaction
             let streamRefreshToken: UInt64?
@@ -45,6 +51,8 @@ extension CrossNetworkConnectionManager {
 
         let effectiveConfig: RemoteDesktopStreamConfiguration
         let transactionDecision: RemoteDesktopStreamConfigurationIngressDecision
+        let commitMode: CommitMode
+        let isExactStopRequest: Bool
         let remoteVideoFormats: Set<String>
         let isStopRequest: Bool
         let shouldStopScreenStreaming: Bool
@@ -60,6 +68,86 @@ extension CrossNetworkConnectionManager {
         let acknowledgement: Acknowledgement?
     }
 
+    enum WebRTCStreamConfigurationIngressAcknowledgementPurpose: Equatable {
+        case duplicate
+        case commitAfterAcknowledgement
+    }
+
+    struct WebRTCStreamConfigurationIngressAcknowledgementAction: Equatable {
+        let acknowledgement: WebRTCStreamConfigurationIngressPlan.Acknowledgement
+        let purpose: WebRTCStreamConfigurationIngressAcknowledgementPurpose
+    }
+
+    enum WebRTCStreamConfigurationIngressCoordination: Equatable {
+        case handled
+        case rejected
+        case acknowledgementRequired(WebRTCStreamConfigurationIngressAcknowledgementAction)
+    }
+
+    enum WebRTCStreamConfigurationIngressRejection: Equatable {
+        case invalidTransaction(RemoteDesktopStreamConfigurationIngressDecision)
+        case missingAcknowledgement
+    }
+
+    /// Coordinates the pre-ACK control flow shared by both WebRTC ingress paths.
+    /// Exact stop commits synchronously here; every other applied configuration
+    /// must leave as an explicit acknowledgement action before callers may commit.
+    static func coordinateWebRTCStreamConfigurationIngress(
+        _ plan: WebRTCStreamConfigurationIngressPlan,
+        commitExactStop: () -> Void,
+        reject: (WebRTCStreamConfigurationIngressRejection) -> Void
+    ) -> WebRTCStreamConfigurationIngressCoordination {
+        switch plan.transactionDecision {
+        case .rejectMissingTransaction, .rejectConflictingDuplicate:
+            reject(.invalidTransaction(plan.transactionDecision))
+            return .rejected
+        case .acknowledgeDuplicate:
+            guard !plan.isExactStopRequest else {
+                return .handled
+            }
+            guard plan.shouldSendAcknowledgement,
+                  let acknowledgement = plan.acknowledgement else {
+                reject(.missingAcknowledgement)
+                return .rejected
+            }
+            return .acknowledgementRequired(
+                .init(
+                    acknowledgement: acknowledgement,
+                    purpose: .duplicate
+                )
+            )
+        case .apply:
+            switch plan.commitMode {
+            case .exactStopWithoutAcknowledgement:
+                guard plan.isExactStopRequest,
+                      plan.shouldStopScreenStreaming,
+                      !plan.shouldSendAcknowledgement,
+                      plan.acknowledgement == nil else {
+                    reject(.missingAcknowledgement)
+                    return .rejected
+                }
+                commitExactStop()
+                return .handled
+            case .afterAcknowledgement:
+                guard !plan.isExactStopRequest,
+                      plan.shouldSendAcknowledgement,
+                      let acknowledgement = plan.acknowledgement else {
+                    reject(.missingAcknowledgement)
+                    return .rejected
+                }
+                return .acknowledgementRequired(
+                    .init(
+                        acknowledgement: acknowledgement,
+                        purpose: .commitAfterAcknowledgement
+                    )
+                )
+            case .none:
+                reject(.missingAcknowledgement)
+                return .rejected
+            }
+        }
+    }
+
     static func planWebRTCStreamConfigurationIngress(
         _ config: RemoteDesktopStreamConfiguration,
         previousConfig: RemoteDesktopStreamConfiguration?,
@@ -67,6 +155,8 @@ extension CrossNetworkConnectionManager {
         advertisedFormats: Set<String>,
         hasSessionKeys: Bool
     ) -> WebRTCStreamConfigurationIngressPlan {
+        let isExactStopRequest = config.screenFrameTransport == "stopped"
+            && config.audioRedirectionEnabled == false
         let transactionDecision = RemoteDesktopStreamConfigurationTransactionPolicy
             .ingressDecision(
                 incoming: config.streamConfigurationTransaction,
@@ -76,7 +166,11 @@ extension CrossNetworkConnectionManager {
         if transactionDecision != .apply {
             let effectiveConfig = previousConfig ?? config
             let acknowledgement: WebRTCStreamConfigurationIngressPlan.Acknowledgement?
+            // The viewer retires its stream-configuration ACK owner before it
+            // sends exact stop. Replaying that already-committed stop remains a
+            // no-op and must not introduce an ACK the sender cannot correlate.
             if transactionDecision == .acknowledgeDuplicate,
+               !isExactStopRequest,
                hasSessionKeys,
                let transaction = effectiveConfig.streamConfigurationTransaction {
                 acknowledgement = .init(
@@ -91,6 +185,8 @@ extension CrossNetworkConnectionManager {
             return WebRTCStreamConfigurationIngressPlan(
                 effectiveConfig: effectiveConfig,
                 transactionDecision: transactionDecision,
+                commitMode: .none,
+                isExactStopRequest: isExactStopRequest,
                 remoteVideoFormats: [],
                 isStopRequest: effectiveConfig.isStopRequest,
                 shouldStopScreenStreaming: false,
@@ -106,12 +202,12 @@ extension CrossNetworkConnectionManager {
                 acknowledgement: acknowledgement
             )
         }
-        let shouldStopScreenStreaming = config.screenFrameTransport == "stopped"
-            && config.audioRedirectionEnabled == false
-        if shouldStopScreenStreaming {
+        if isExactStopRequest {
             return WebRTCStreamConfigurationIngressPlan(
                 effectiveConfig: config,
                 transactionDecision: .apply,
+                commitMode: .exactStopWithoutAcknowledgement,
+                isExactStopRequest: true,
                 remoteVideoFormats: [],
                 isStopRequest: config.isStopRequest,
                 shouldStopScreenStreaming: true,
@@ -147,6 +243,8 @@ extension CrossNetworkConnectionManager {
         return WebRTCStreamConfigurationIngressPlan(
             effectiveConfig: effectiveConfig,
             transactionDecision: .apply,
+            commitMode: .afterAcknowledgement,
+            isExactStopRequest: false,
             remoteVideoFormats: WebRTCRemoteDesktopVideoFormatPolicy.effectiveRemoteVideoFormats(
                 advertisedFormats: advertisedFormats,
                 streamConfiguration: effectiveConfig

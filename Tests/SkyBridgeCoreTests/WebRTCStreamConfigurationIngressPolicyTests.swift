@@ -120,6 +120,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(plan.effectiveConfig, stop)
+        XCTAssertEqual(plan.commitMode, .exactStopWithoutAcknowledgement)
         XCTAssertTrue(plan.isStopRequest)
         XCTAssertTrue(plan.shouldStopScreenStreaming)
         XCTAssertTrue(plan.shouldClearPendingStreamRefresh)
@@ -131,6 +132,201 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         XCTAssertFalse(plan.shouldMarkPendingStreamRefresh)
         XCTAssertFalse(plan.shouldStartScreenStreamingIfNeeded)
         XCTAssertNil(plan.acknowledgement)
+    }
+
+    @MainActor
+    func testWebRTCStopWireRoundTripCommitsExactStopWithoutAckAction() throws {
+        let transaction = RemoteDesktopStreamConfigurationTransaction(
+            id: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        )
+        let senderConfiguration = streamConfiguration(
+            targetFrameRate: 0,
+            screenFrameTransport: "stopped",
+            audioRedirectionEnabled: false,
+            streamConfigurationTransaction: transaction
+        )
+        let outboundMessage = RemoteMessageWire(
+            type: .streamConfiguration,
+            payload: try JSONEncoder().encode(senderConfiguration)
+        )
+
+        let inboundMessage = try JSONDecoder().decode(
+            RemoteMessageWire.self,
+            from: JSONEncoder().encode(outboundMessage)
+        )
+        let inboundConfiguration = try JSONDecoder().decode(
+            RemoteDesktopStreamConfiguration.self,
+            from: inboundMessage.payload
+        )
+        let hostPlan = CrossNetworkConnectionManager.planWebRTCStreamConfigurationIngress(
+            inboundConfiguration,
+            previousConfig: streamConfiguration(streamRefreshToken: 9),
+            advertisedFormats: ["h264", "hevc"],
+            hasSessionKeys: true
+        )
+        var events: [String] = []
+        var rejections: [CrossNetworkConnectionManager.WebRTCStreamConfigurationIngressRejection] = []
+        let coordination = CrossNetworkConnectionManager.coordinateWebRTCStreamConfigurationIngress(
+            hostPlan,
+            commitExactStop: {
+                events.append("commit-exact-stop")
+            },
+            reject: { rejection in
+                rejections.append(rejection)
+            }
+        )
+        if case .acknowledgementRequired = coordination {
+            events.append("acknowledgement-required")
+        }
+
+        XCTAssertEqual(inboundMessage.type.rawValue, RemoteMessageTypeWire.streamConfiguration.rawValue)
+        XCTAssertEqual(inboundConfiguration.streamConfigurationTransaction, transaction)
+        XCTAssertEqual(hostPlan.transactionDecision, .apply)
+        XCTAssertEqual(hostPlan.commitMode, .exactStopWithoutAcknowledgement)
+        XCTAssertTrue(hostPlan.shouldStopScreenStreaming)
+        XCTAssertTrue(hostPlan.shouldClearPendingStreamRefresh)
+        XCTAssertTrue(hostPlan.shouldClearAwaitingStreamConfiguration)
+        XCTAssertFalse(hostPlan.shouldSendAcknowledgement)
+        XCTAssertNil(hostPlan.acknowledgement)
+        XCTAssertEqual(coordination, .handled)
+        XCTAssertEqual(events, ["commit-exact-stop"])
+        XCTAssertTrue(rejections.isEmpty)
+    }
+
+    @MainActor
+    func testDuplicateExactStopIsIdempotentAndDoesNotIntroduceAckWireTraffic() {
+        let transaction = RemoteDesktopStreamConfigurationTransaction(
+            id: UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        )
+        let stopped = streamConfiguration(
+            targetFrameRate: 0,
+            screenFrameTransport: "stopped",
+            audioRedirectionEnabled: false,
+            streamConfigurationTransaction: transaction
+        )
+
+        let duplicatePlan = CrossNetworkConnectionManager.planWebRTCStreamConfigurationIngress(
+            stopped,
+            previousConfig: stopped,
+            previousRawConfig: stopped,
+            advertisedFormats: [],
+            hasSessionKeys: true
+        )
+        var events: [String] = []
+        var rejections: [CrossNetworkConnectionManager.WebRTCStreamConfigurationIngressRejection] = []
+        let coordination = CrossNetworkConnectionManager.coordinateWebRTCStreamConfigurationIngress(
+            duplicatePlan,
+            commitExactStop: {
+                events.append("commit-exact-stop")
+            },
+            reject: { rejection in
+                rejections.append(rejection)
+            }
+        )
+        if case .acknowledgementRequired = coordination {
+            events.append("acknowledgement-required")
+        }
+
+        XCTAssertEqual(duplicatePlan.transactionDecision, .acknowledgeDuplicate)
+        XCTAssertEqual(duplicatePlan.commitMode, .none)
+        XCTAssertFalse(duplicatePlan.shouldStopScreenStreaming)
+        XCTAssertFalse(duplicatePlan.shouldSendAcknowledgement)
+        XCTAssertNil(duplicatePlan.acknowledgement)
+        XCTAssertEqual(coordination, .handled)
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertTrue(rejections.isEmpty)
+    }
+
+    @MainActor
+    func testExactStopCoordinatorRejectsMissingAndConflictingTransactionsWithoutCommit() {
+        let transaction = RemoteDesktopStreamConfigurationTransaction(
+            id: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+        )
+        let accepted = streamConfiguration(
+            streamConfigurationTransaction: transaction
+        )
+        let missingTransactionStop = streamConfiguration(
+            targetFrameRate: 0,
+            screenFrameTransport: "stopped",
+            audioRedirectionEnabled: false,
+            streamConfigurationTransaction: nil
+        )
+        let conflictingStop = streamConfiguration(
+            targetFrameRate: 0,
+            screenFrameTransport: "stopped",
+            audioRedirectionEnabled: false,
+            streamConfigurationTransaction: transaction
+        )
+        let cases: [(
+            configuration: RemoteDesktopStreamConfiguration,
+            expectedDecision: RemoteDesktopStreamConfigurationIngressDecision
+        )] = [
+            (missingTransactionStop, .rejectMissingTransaction),
+            (conflictingStop, .rejectConflictingDuplicate)
+        ]
+
+        for testCase in cases {
+            let plan = CrossNetworkConnectionManager.planWebRTCStreamConfigurationIngress(
+                testCase.configuration,
+                previousConfig: accepted,
+                previousRawConfig: accepted,
+                advertisedFormats: ["h264"],
+                hasSessionKeys: true
+            )
+            var commitCount = 0
+            var rejections: [CrossNetworkConnectionManager.WebRTCStreamConfigurationIngressRejection] = []
+            let coordination = CrossNetworkConnectionManager.coordinateWebRTCStreamConfigurationIngress(
+                plan,
+                commitExactStop: {
+                    commitCount += 1
+                },
+                reject: { rejection in
+                    rejections.append(rejection)
+                }
+            )
+
+            XCTAssertEqual(plan.transactionDecision, testCase.expectedDecision)
+            XCTAssertEqual(coordination, .rejected)
+            XCTAssertEqual(commitCount, 0)
+            XCTAssertEqual(rejections, [.invalidTransaction(testCase.expectedDecision)])
+        }
+    }
+
+    @MainActor
+    func testNormalConfigurationCoordinatorRequiresAckBeforeCommitWithoutPrecommit() {
+        let incoming = streamConfiguration(streamRefreshToken: 21)
+        let plan = CrossNetworkConnectionManager.planWebRTCStreamConfigurationIngress(
+            incoming,
+            previousConfig: streamConfiguration(streamRefreshToken: 20),
+            advertisedFormats: ["h264"],
+            hasSessionKeys: true
+        )
+        var events: [String] = []
+        var rejections: [CrossNetworkConnectionManager.WebRTCStreamConfigurationIngressRejection] = []
+        let coordination = CrossNetworkConnectionManager.coordinateWebRTCStreamConfigurationIngress(
+            plan,
+            commitExactStop: {
+                events.append("precommit")
+            },
+            reject: { rejection in
+                rejections.append(rejection)
+            }
+        )
+
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertTrue(rejections.isEmpty)
+        switch coordination {
+        case .handled:
+            XCTFail("Normal configuration must require acknowledgement")
+        case .rejected:
+            XCTFail("Normal configuration must not be rejected")
+        case .acknowledgementRequired(let action):
+            XCTAssertEqual(action.purpose, .commitAfterAcknowledgement)
+            XCTAssertEqual(action.acknowledgement.transaction, incoming.streamConfigurationTransaction)
+            events.append("acknowledgement")
+            events.append("commit")
+        }
+        XCTAssertEqual(events, ["acknowledgement", "commit"])
     }
 
     @MainActor
@@ -150,6 +346,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         )
 
         XCTAssertTrue(plan.isStopRequest)
+        XCTAssertEqual(plan.commitMode, .afterAcknowledgement)
         XCTAssertFalse(plan.shouldStopScreenStreaming)
         XCTAssertFalse(plan.shouldClearPendingStreamRefresh)
         XCTAssertTrue(plan.shouldClearAwaitingStreamConfiguration)
@@ -175,6 +372,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(plan.effectiveConfig, incoming)
+        XCTAssertEqual(plan.commitMode, .afterAcknowledgement)
         XCTAssertEqual(plan.remoteVideoFormats, ["h264", "hevc", "jpeg"])
         XCTAssertFalse(plan.isStopRequest)
         XCTAssertFalse(plan.shouldStopScreenStreaming)
@@ -284,6 +482,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         )
 
         XCTAssertTrue(plan.shouldEnsureScreenDataChannel)
+        XCTAssertEqual(plan.commitMode, .afterAcknowledgement)
         XCTAssertFalse(plan.shouldSendAcknowledgement)
         XCTAssertFalse(plan.shouldStartScreenStreamingIfNeeded)
         XCTAssertNil(plan.acknowledgement)
@@ -310,9 +509,29 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
                 hasSessionKeys: true
             )
         XCTAssertEqual(duplicate.transactionDecision, .acknowledgeDuplicate)
+        XCTAssertEqual(duplicate.commitMode, .none)
         XCTAssertTrue(duplicate.shouldSendAcknowledgement)
         XCTAssertEqual(duplicate.acknowledgement?.transaction, transaction)
         XCTAssertFalse(duplicate.shouldStartScreenStreamingIfNeeded)
+        var duplicateCommitCount = 0
+        var duplicateRejections: [CrossNetworkConnectionManager.WebRTCStreamConfigurationIngressRejection] = []
+        let duplicateCoordination = CrossNetworkConnectionManager.coordinateWebRTCStreamConfigurationIngress(
+            duplicate,
+            commitExactStop: {
+                duplicateCommitCount += 1
+            },
+            reject: { rejection in
+                duplicateRejections.append(rejection)
+            }
+        )
+        guard case .acknowledgementRequired(let duplicateAction) = duplicateCoordination else {
+            XCTFail("An active duplicate must be acknowledged without recommitting")
+            return
+        }
+        XCTAssertEqual(duplicateAction.purpose, .duplicate)
+        XCTAssertEqual(duplicateAction.acknowledgement.transaction, transaction)
+        XCTAssertEqual(duplicateCommitCount, 0)
+        XCTAssertTrue(duplicateRejections.isEmpty)
 
         let conflicting = streamConfiguration(
             preferredCodec: "h264",
@@ -328,6 +547,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
                 hasSessionKeys: true
             )
         XCTAssertEqual(conflict.transactionDecision, .rejectConflictingDuplicate)
+        XCTAssertEqual(conflict.commitMode, .none)
         XCTAssertFalse(conflict.shouldSendAcknowledgement)
         XCTAssertFalse(conflict.shouldStartScreenStreamingIfNeeded)
 
@@ -343,6 +563,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
                 hasSessionKeys: true
             )
         XCTAssertEqual(missingPlan.transactionDecision, .rejectMissingTransaction)
+        XCTAssertEqual(missingPlan.commitMode, .none)
     }
 
     private func streamConfiguration(

@@ -1,3 +1,4 @@
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 import XCTest
 
@@ -18,6 +19,33 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
         XCTAssertEqual(payload.audioRedirectionEnabled, false)
         XCTAssertEqual(payload.audioTransport, "disabled")
         XCTAssertNil(payload.streamRefreshToken)
+    }
+
+    func testStopPayloadSenderWireCarriesFreshTransactionAndExactStopFields() throws {
+        let transaction = RemoteDesktopStreamConfigurationTransaction(
+            id: UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        )
+        var payload = RemoteDesktopViewerStreamConfigurationFactory.stopPayload()
+        payload.streamConfigurationTransaction = transaction
+        let outboundMessage = RemoteMessage(
+            type: .streamConfiguration,
+            payload: try JSONEncoder().encode(payload)
+        )
+
+        let inboundMessage = try JSONDecoder().decode(
+            RemoteMessage.self,
+            from: JSONEncoder().encode(outboundMessage)
+        )
+        let inboundPayload = try JSONDecoder().decode(
+            RemoteDesktopStreamConfigurationPayload.self,
+            from: inboundMessage.payload
+        )
+
+        XCTAssertEqual(inboundMessage.type.rawValue, RemoteMessageType.streamConfiguration.rawValue)
+        XCTAssertEqual(inboundPayload.streamConfigurationTransaction, transaction)
+        XCTAssertEqual(inboundPayload.screenFrameTransport, "stopped")
+        XCTAssertEqual(inboundPayload.audioRedirectionEnabled, false)
+        XCTAssertEqual(inboundPayload.targetFrameRate, 0)
     }
 
     func testLANPayloadKeepsChunkedScreenChannelAndAudioEndpoint() {

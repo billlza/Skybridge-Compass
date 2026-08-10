@@ -1213,6 +1213,48 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         }
     }
 
+    private func commitWebRTCStreamConfigurationIngressState(
+        _ rawConfiguration: RemoteDesktopStreamConfiguration,
+        plan: WebRTCStreamConfigurationIngressPlan,
+        sessionID: String
+    ) {
+        webrtcLastAcceptedRawStreamConfigurationBySessionId[sessionID] = rawConfiguration
+        webrtcRemoteStreamConfigurationBySessionId[sessionID] = plan.effectiveConfig
+        webrtcRemoteVideoFormatsBySessionId[sessionID] = plan.remoteVideoFormats
+        if plan.shouldClearPendingStreamRefresh {
+            webrtcPendingStreamRefreshSessionIds.remove(sessionID)
+        }
+        if plan.shouldClearAwaitingStreamConfiguration {
+            webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
+        }
+    }
+
+    /// Exact stop is the one WebRTC stream operation whose established wire
+    /// contract is fire-and-forget. Commit it before the normal ACK gate while
+    /// keeping transaction validation and session ownership in the callers.
+    private func commitExactWebRTCStreamStop(
+        _ rawConfiguration: RemoteDesktopStreamConfiguration,
+        plan: WebRTCStreamConfigurationIngressPlan,
+        previousConfiguration: RemoteDesktopStreamConfiguration?,
+        sessionID: String,
+        session: WebRTCSession
+    ) {
+        commitWebRTCStreamConfigurationIngressState(
+            rawConfiguration,
+            plan: plan,
+            sessionID: sessionID
+        )
+        stopWebRTCScreenStreaming(sessionID: sessionID)
+#if os(macOS)
+        if plan.shouldConfigureClipboard {
+            configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
+        }
+#endif
+        logger.info(
+            "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfiguration?.screenFrameTransport ?? "none", privacy: .public)"
+        )
+    }
+
     private func applyApprovedWebRTCStreamConfiguration(
         _ config: RemoteDesktopStreamConfiguration,
         sessionID: String,
@@ -1238,48 +1280,77 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             advertisedFormats: webrtcRemoteVideoFormatsBySessionId[sessionID] ?? [],
             hasSessionKeys: true
         )
-        switch plan.transactionDecision {
-        case .apply:
-            break
-        case .acknowledgeDuplicate:
-            if let acknowledgement = plan.acknowledgement {
-                let ack = acknowledgement.payload(acceptedAt: Date().timeIntervalSince1970)
-                do {
-                    try await sendWebRTCStreamConfigurationAcknowledgement(
-                        ack,
-                        sessionID: sessionID,
-                        session: session,
-                        keys: keys
-                    )
-                } catch is CancellationError {
+        let coordination = Self.coordinateWebRTCStreamConfigurationIngress(
+            plan,
+            commitExactStop: {
+                self.commitExactWebRTCStreamStop(
+                    config,
+                    plan: plan,
+                    previousConfiguration: previousConfig,
+                    sessionID: sessionID,
+                    session: session
+                )
+            },
+            reject: { rejection in
+                guard self.isCurrentWebRTCRemoteControlSession(
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                ) else {
                     return
-                } catch {
-                    guard isCurrentWebRTCRemoteControlSession(
-                        sessionID: sessionID,
-                        session: session,
-                        keys: keys
-                    ) else {
-                        return
-                    }
-                    logger.warning(
-                        "⚠️ WebRTC duplicate streamConfiguration ACK 发送失败"
-                    )
                 }
-            }
-            return
-        case .rejectMissingTransaction, .rejectConflictingDuplicate:
-            if isCurrentWebRTCRemoteControlSession(
-                sessionID: sessionID,
-                session: session,
-                keys: keys
-            ) {
-                cleanupWebRTCSession(
+                let reason: String
+                switch rejection {
+                case .invalidTransaction:
+                    reason = "invalid_stream_configuration_transaction"
+                case .missingAcknowledgement:
+                    reason = "missing_stream_configuration_acknowledgement"
+                }
+                self.cleanupWebRTCSession(
                     sessionID,
-                    reason: "invalid_stream_configuration_transaction",
+                    reason: reason,
                     disconnectKind: .explicit
                 )
             }
+        )
+        let acknowledgementAction: WebRTCStreamConfigurationIngressAcknowledgementAction
+        switch coordination {
+        case .handled:
             return
+        case .rejected:
+            return
+        case .acknowledgementRequired(let action):
+            acknowledgementAction = action
+        }
+        switch acknowledgementAction.purpose {
+        case .duplicate:
+            let ack = acknowledgementAction.acknowledgement.payload(
+                acceptedAt: Date().timeIntervalSince1970
+            )
+            do {
+                try await sendWebRTCStreamConfigurationAcknowledgement(
+                    ack,
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard isCurrentWebRTCRemoteControlSession(
+                    sessionID: sessionID,
+                    session: session,
+                    keys: keys
+                ) else {
+                    return
+                }
+                logger.warning(
+                    "⚠️ WebRTC duplicate streamConfiguration ACK 发送失败"
+                )
+            }
+            return
+        case .commitAfterAcknowledgement:
+            break
         }
         if plan.audioEndpointPreservedForVideoRefresh {
             appendWebRTCSessionDiagnostic(
@@ -1312,15 +1383,9 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             """,
             sessionID: sessionID
         )
-        guard let acknowledgement = plan.acknowledgement else {
-            cleanupWebRTCSession(
-                sessionID,
-                reason: "missing_stream_configuration_acknowledgement",
-                disconnectKind: .explicit
-            )
-            return
-        }
-        let ack = acknowledgement.payload(acceptedAt: Date().timeIntervalSince1970)
+        let ack = acknowledgementAction.acknowledgement.payload(
+            acceptedAt: Date().timeIntervalSince1970
+        )
         do {
             try await sendWebRTCStreamConfigurationAcknowledgement(
                 ack,
@@ -1358,25 +1423,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         ) else {
             return
         }
-        webrtcLastAcceptedRawStreamConfigurationBySessionId[sessionID] = config
-        webrtcRemoteStreamConfigurationBySessionId[sessionID] = effectiveConfig
-        webrtcRemoteVideoFormatsBySessionId[sessionID] = plan.remoteVideoFormats
-        if plan.shouldClearPendingStreamRefresh {
-            webrtcPendingStreamRefreshSessionIds.remove(sessionID)
-        }
-        if plan.shouldClearAwaitingStreamConfiguration {
-            webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
-        }
-        if plan.shouldStopScreenStreaming {
-            stopWebRTCScreenStreaming(sessionID: sessionID)
-#if os(macOS)
-            configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
-#endif
-            logger.info(
-                "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
-            )
-            return
-        }
+        commitWebRTCStreamConfigurationIngressState(
+            config,
+            plan: plan,
+            sessionID: sessionID
+        )
         if plan.shouldMarkPendingStreamRefresh {
             webrtcPendingStreamRefreshSessionIds.insert(sessionID)
         }
@@ -12058,57 +12109,86 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                        advertisedFormats: self.webrtcRemoteVideoFormatsBySessionId[sessionID] ?? [],
 	                                        hasSessionKeys: true
 	                                    )
-	                                    switch plan.transactionDecision {
-	                                    case .apply:
-	                                        break
-	                                    case .acknowledgeDuplicate:
-	                                        if let acknowledgement = plan.acknowledgement {
-	                                            let ack = acknowledgement.payload(
-	                                                acceptedAt: Date().timeIntervalSince1970
+	                                    let coordination = Self.coordinateWebRTCStreamConfigurationIngress(
+	                                        plan,
+	                                        commitExactStop: {
+	                                            self.commitExactWebRTCStreamStop(
+	                                                config,
+	                                                plan: plan,
+	                                                previousConfiguration: previousConfig,
+	                                                sessionID: sessionID,
+	                                                session: session
 	                                            )
-	                                            do {
-	                                                try await self.sendWebRTCStreamConfigurationAcknowledgement(
-	                                                    ack,
-	                                                    sessionID: sessionID,
-	                                                    session: session,
-	                                                    keys: activeKeysForAck
-	                                                )
-	                                            } catch is CancellationError {
+	                                        },
+	                                        reject: { rejection in
+	                                            guard self.isCurrentWebRTCRemoteControlSession(
+	                                                sessionID: sessionID,
+	                                                session: session,
+	                                                keys: activeKeysForAck
+	                                            ) else {
 	                                                return
-	                                            } catch {
-	                                                guard self.isCurrentWebRTCRemoteControlSession(
-	                                                    sessionID: sessionID,
-	                                                    session: session,
-	                                                    keys: activeKeysForAck
-	                                                ) else {
-	                                                    return
-	                                                }
-	                                                self.logger.warning(
-	                                                    "⚠️ WebRTC duplicate streamConfiguration ACK 发送失败"
+	                                            }
+	                                            switch rejection {
+	                                            case .invalidTransaction:
+	                                                failCurrentControlLoop(
+	                                                    reason: "invalid_stream_configuration_transaction",
+	                                                    disconnectKind: .explicit,
+	                                                    statusMessage: "Invalid stream configuration transaction"
+	                                                )
+	                                            case .missingAcknowledgement:
+	                                                failCurrentControlLoop(
+	                                                    reason: "missing_stream_configuration_acknowledgement",
+	                                                    disconnectKind: .explicit,
+	                                                    statusMessage: "Missing stream configuration acknowledgement"
 	                                                )
 	                                            }
 	                                        }
+	                                    )
+	                                    let acknowledgementAction: WebRTCStreamConfigurationIngressAcknowledgementAction
+	                                    switch coordination {
+	                                    case .handled:
 	                                        continue
-	                                    case .rejectMissingTransaction, .rejectConflictingDuplicate:
-	                                        if self.isCurrentWebRTCRemoteControlSession(
-	                                            sessionID: sessionID,
-	                                            session: session,
-	                                            keys: activeKeysForAck
-	                                        ) {
-	                                            failCurrentControlLoop(
-	                                                reason: "invalid_stream_configuration_transaction",
-	                                                disconnectKind: .explicit,
-	                                                statusMessage: "Invalid stream configuration transaction"
+	                                    case .rejected:
+	                                        return
+	                                    case .acknowledgementRequired(let action):
+	                                        acknowledgementAction = action
+	                                    }
+	                                    switch acknowledgementAction.purpose {
+	                                    case .duplicate:
+	                                        let ack = acknowledgementAction.acknowledgement.payload(
+	                                            acceptedAt: Date().timeIntervalSince1970
+	                                        )
+	                                        do {
+	                                            try await self.sendWebRTCStreamConfigurationAcknowledgement(
+	                                                ack,
+	                                                sessionID: sessionID,
+	                                                session: session,
+	                                                keys: activeKeysForAck
+	                                            )
+	                                        } catch is CancellationError {
+	                                            return
+	                                        } catch {
+	                                            guard self.isCurrentWebRTCRemoteControlSession(
+	                                                sessionID: sessionID,
+	                                                session: session,
+	                                                keys: activeKeysForAck
+	                                            ) else {
+	                                                return
+	                                            }
+	                                            self.logger.warning(
+	                                                "⚠️ WebRTC duplicate streamConfiguration ACK 发送失败"
 	                                            )
 	                                        }
-	                                        return
+	                                        continue
+	                                    case .commitAfterAcknowledgement:
+	                                        break
 	                                    }
                                     if plan.audioEndpointPreservedForVideoRefresh {
                                         self.appendWebRTCSessionDiagnostic(
                                             "audioEndpointPreservedForVideoRefresh session=\(sessionID) refreshTokenState=\(Self.streamRefreshTokenLogState(config.streamRefreshToken))",
                                             sessionID: sessionID
                                         )
-                                    }
+	                                    }
 	                                    let effectiveConfig = plan.effectiveConfig
 	                                    if plan.shouldEnsureScreenDataChannel {
 	                                        do {
@@ -12153,16 +12233,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         """,
                                         sessionID: sessionID
                                     )
-	                                    guard plan.shouldSendAcknowledgement,
-	                                          let acknowledgement = plan.acknowledgement else {
-	                                        failCurrentControlLoop(
-	                                            reason: "missing_stream_configuration_acknowledgement",
-	                                            disconnectKind: .explicit,
-	                                            statusMessage: "Missing stream configuration acknowledgement"
-	                                        )
-	                                        return
-	                                    }
-	                                    let ack = acknowledgement.payload(
+	                                    let ack = acknowledgementAction.acknowledgement.payload(
 	                                        acceptedAt: Date().timeIntervalSince1970
 	                                    )
 	                                    do {
@@ -12202,25 +12273,11 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 	                                    ) else {
 	                                        return
 	                                    }
-	                                    self.webrtcLastAcceptedRawStreamConfigurationBySessionId[sessionID] = config
-	                                    self.webrtcRemoteStreamConfigurationBySessionId[sessionID] = effectiveConfig
-	                                    self.webrtcRemoteVideoFormatsBySessionId[sessionID] = plan.remoteVideoFormats
-	                                    if plan.shouldClearPendingStreamRefresh {
-	                                        self.webrtcPendingStreamRefreshSessionIds.remove(sessionID)
-	                                    }
-	                                    if plan.shouldClearAwaitingStreamConfiguration {
-	                                        self.webrtcAwaitingStreamConfigurationSessionIds.remove(sessionID)
-	                                    }
-	                                    if plan.shouldStopScreenStreaming {
-	                                        self.stopWebRTCScreenStreaming(sessionID: sessionID)
-#if os(macOS)
-	                                        self.configureWebRTCClipboardSyncIfNeeded(for: sessionID, session: session)
-#endif
-	                                        self.logger.info(
-	                                            "⏹️ WebRTC viewer 请求停止远控推流: session=\(sessionID, privacy: .public) previousTransport=\(previousConfig?.screenFrameTransport ?? "none", privacy: .public)"
-	                                        )
-	                                        continue
-	                                    }
+	                                    self.commitWebRTCStreamConfigurationIngressState(
+	                                        config,
+	                                        plan: plan,
+	                                        sessionID: sessionID
+	                                    )
                                     if plan.shouldMarkPendingStreamRefresh {
                                         self.webrtcPendingStreamRefreshSessionIds.insert(sessionID)
                                         if effectiveConfig.streamRefreshToken != nil {
