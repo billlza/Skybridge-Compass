@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import OSLog
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferWireEncoder
 
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
@@ -296,7 +297,7 @@ extension CrossNetworkConnectionManager {
         message: CrossNetworkFileTransferMessage
     ) async throws {
         try requireCurrentWebRTCFileTransferOperationOwner(owner)
-        let plain = try JSONEncoder().encode(message)
+        let plain = try CrossNetworkFileTransferWireEncoder.encode(message)
         try requireCurrentWebRTCFileTransferOperationOwner(owner)
         let enc = try encryptAppPayload(
             plain,

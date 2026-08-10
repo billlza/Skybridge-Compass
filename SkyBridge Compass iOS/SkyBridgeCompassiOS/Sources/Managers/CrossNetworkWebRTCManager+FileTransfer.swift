@@ -4,6 +4,7 @@ import enum SkyBridgeProtocolCore.CrossNetworkFileTransferInboundAdmissionPolicy
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferOperationReservationLedger
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferWireEncoder
 import enum SkyBridgeProtocolCore.InboundFileTransferIOError
 import struct SkyBridgeProtocolCore.InboundFileTransferIOHandle
 
@@ -487,7 +488,7 @@ extension CrossNetworkWebRTCManager {
         owner: WebRTCFileTransferOperationOwner
     ) async throws {
         try requireCurrentWebRTCFileTransferOperationOwner(owner)
-        let data = try JSONEncoder().encode(message)
+        let data = try CrossNetworkFileTransferWireEncoder.encode(message)
         try requireCurrentWebRTCFileTransferOperationOwner(owner)
         let encrypted = try encrypt(
             plaintext: data,

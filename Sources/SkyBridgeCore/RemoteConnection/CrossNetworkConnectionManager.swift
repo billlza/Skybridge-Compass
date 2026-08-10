@@ -11719,7 +11719,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                         transferId: ft.transferId,
                                         message: "remote_desktop_file_transfer_disabled_by_settings"
                                     )
-                                    let outPlain = try JSONEncoder().encode(response)
+                                    let outPlain = try CrossNetworkFileTransferWireEncoder.encode(response)
                                     guard self.isCurrentWebRTCControlLoopSecureOwner(
                                         sessionID: sessionID,
                                         session: session,
@@ -11759,7 +11759,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                             ) else {
                                                 throw CancellationError()
                                             }
-		                                    let outPlain = try JSONEncoder().encode(response)
+		                                    let outPlain = try CrossNetworkFileTransferWireEncoder.encode(response)
 	                                    let outCipher = try encryptAppPayload(
                                         outPlain,
                                         with: keys,

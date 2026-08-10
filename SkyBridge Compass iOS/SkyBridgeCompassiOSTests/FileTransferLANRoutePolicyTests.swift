@@ -11,6 +11,8 @@ import enum SkyBridgeProtocolCore.ClassicTransferInboundPolicy
 import enum SkyBridgeProtocolCore.ClassicTransferMetadataContract
 import enum SkyBridgeProtocolCore.ClassicTransferZlibDecompressionError
 import struct SkyBridgeProtocolCore.ClassicTransferInboundAdmission
+import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
+import enum SkyBridgeProtocolCore.CrossNetworkFileTransferWireEncoder
 import XCTest
 @testable import SkyBridgeCompass_iOS
 
@@ -722,6 +724,47 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
 
     func testClassicFileTransferDefaultPortRemains8080() {
         XCTAssertEqual(FileTransferConstants.defaultPort, 8080)
+    }
+
+    func testIOSWebRTCFileTransferSendUsesCanonicalWireEncoder() throws {
+        let message = CrossNetworkFileTransferMessage(
+            op: .error,
+            transferId: "01234567-89AB-CDEF-0123-456789ABCDEF",
+            message: "path/segment"
+        )
+        XCTAssertEqual(
+            try CrossNetworkFileTransferWireEncoder.encode(message),
+            Data(
+                #"{"message":"path/segment","op":"error","transferId":"01234567-89AB-CDEF-0123-456789ABCDEF","version":1}"#.utf8
+            )
+        )
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try readRepositorySourceForSourceShapeTests(
+            at: root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager+FileTransfer.swift"
+            )
+        )
+        let sendStart = try XCTUnwrap(
+            source.range(of: "    func sendFileTransferMessage(")
+        )
+        let sendEnd = try XCTUnwrap(
+            source.range(
+                of: "    func waitForFileTransferAck(",
+                range: sendStart.upperBound..<source.endIndex
+            )
+        )
+        let sendBody = String(source[sendStart.lowerBound..<sendEnd.lowerBound])
+
+        XCTAssertTrue(
+            sendBody.contains(
+                "let data = try CrossNetworkFileTransferWireEncoder.encode(message)"
+            )
+        )
+        XCTAssertFalse(sendBody.contains("JSONEncoder().encode(message)"))
     }
 
     func testIOSWebRTCProductionPathTracksCompletionHashAndDispatchesThroughTransferLanes() throws {
