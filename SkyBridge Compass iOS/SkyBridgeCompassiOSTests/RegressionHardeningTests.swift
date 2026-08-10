@@ -6051,18 +6051,19 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   func testIOSPrimaryBonjourTXTContainsOnlyCanonicalVersion2IdentityFields() throws {
-    let fields = try DeviceDiscoveryManager.primaryBonjourInteropAdvertisementFields(
+    let wireData = try DeviceDiscoveryManager.primaryBonjourInteropAdvertisementWireData(
       validatedDeviceId: "id:canonical-ios-device",
       protocolIdentityFingerprint: String(repeating: "a", count: 64),
       platform: .iOS
     )
+    let fields = NetService.dictionary(fromTXTRecord: wireData)
 
     XCTAssertEqual(
       Set(fields.keys),
       Set(["version", "deviceId", "pubKeyFP", "platform", "hs_soa"])
     )
-    XCTAssertEqual(fields["version"], "2")
-    XCTAssertEqual(fields["hs_soa"], "1")
+    XCTAssertEqual(fields["version"], Data("2".utf8))
+    XCTAssertEqual(fields["hs_soa"], Data("1".utf8))
     XCTAssertNil(fields["port"])
     XCTAssertNil(fields["controlPort"])
     XCTAssertNil(fields["capabilities"])
@@ -6078,9 +6079,11 @@ final class RegressionHardeningTests: XCTestCase {
     let compactDiscoverySource = discoverySource.filter { !$0.isWhitespace }
 
     XCTAssertTrue(
-      fileTransferSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields(")
+      fileTransferSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementWireData(")
     )
     XCTAssertTrue(fileTransferSource.contains("role: .dedicatedService"))
+    XCTAssertFalse(fileTransferSource.contains("NetService.data(fromTXTRecord:"))
+    XCTAssertFalse(fileTransferSource.contains("fields.mapValues"))
     XCTAssertFalse(fileTransferSource.contains("\"capabilities\": Data("))
     XCTAssertFalse(fileTransferSource.contains("\"transferPort\": Data("))
     XCTAssertFalse(

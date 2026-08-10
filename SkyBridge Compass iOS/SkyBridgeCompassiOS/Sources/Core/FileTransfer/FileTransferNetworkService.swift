@@ -334,7 +334,7 @@ public actor FileTransferNetworkService {
             name: presentation.deviceName,
             type: BonjourInteropProtocolContract.fileTransferServiceType,
             domain: "local.",
-            txtRecord: NetService.data(fromTXTRecord: txtRecord)
+            txtRecord: txtRecord
         )
     }
 
@@ -343,14 +343,13 @@ public actor FileTransferNetworkService {
         protocolIdentityFingerprint: String,
         platform: BonjourInteropProtocolContract.AdvertisementPlatform,
         role: BonjourInteropProtocolContract.AdvertisementRole
-    ) throws -> [String: Data] {
-        let fields = try BonjourInteropProtocolContract.canonicalAdvertisementFields(
+    ) throws -> Data {
+        try BonjourInteropProtocolContract.canonicalAdvertisementWireData(
             deviceId: deviceId,
             pubKeyFingerprint: protocolIdentityFingerprint,
             platform: platform,
             role: role
         )
-        return fields.mapValues { Data($0.utf8) }
     }
 
     private func start(listener: NWListener, generation: UInt64) async throws {

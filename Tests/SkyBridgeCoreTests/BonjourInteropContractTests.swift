@@ -83,13 +83,105 @@ final class BonjourInteropContractTests: XCTestCase {
         )
         XCTAssertEqual(networkRecord.data.count, 154)
 
-        let dataRecord = try BonjourInteropContract.makeCanonicalAdvertisementData(
+        let coreWireData = try BonjourInteropProtocolContract.canonicalAdvertisementWireData(
             deviceId: deviceId,
             pubKeyFingerprint: fingerprint,
             platform: .macOS,
             role: .control
         )
-        XCTAssertEqual(NetService.data(fromTXTRecord: dataRecord).count, 154)
+        XCTAssertEqual(coreWireData.count, 154)
+
+        XCTAssertEqual(networkRecord.data, coreWireData)
+    }
+
+    func testAppleWritersUseUnsignedRawKeyOrderDeterministically() throws {
+        let deviceId = "a35d39f7-c551-4857-9c55-77026e860f28"
+        let fingerprint = String(repeating: "a", count: 64)
+        let cases: [(
+            role: BonjourInteropContract.AdvertisementRole,
+            entries: [(String, String)],
+            expectedWireByteCount: Int
+        )] = [
+            (
+                .control,
+                [
+                    ("deviceId", deviceId),
+                    ("hs_soa", "1"),
+                    ("platform", "macos"),
+                    ("pubKeyFP", fingerprint),
+                    ("version", "2")
+                ],
+                154
+            ),
+            (
+                .dedicatedService,
+                [
+                    ("deviceId", deviceId),
+                    ("platform", "macos"),
+                    ("pubKeyFP", fingerprint),
+                    ("version", "2")
+                ],
+                145
+            )
+        ]
+
+        for testCase in cases {
+            let expected = encodeTXT(testCase.entries)
+            XCTAssertEqual(expected.count, testCase.expectedWireByteCount)
+            XCTAssertLessThanOrEqual(
+                expected.count,
+                BonjourInteropContract.maximumRecommendedTXTRecordWireBytes
+            )
+
+            for _ in 0..<64 {
+                let coreRecord = try BonjourInteropProtocolContract
+                    .canonicalAdvertisementWireData(
+                        deviceId: deviceId,
+                        pubKeyFingerprint: fingerprint,
+                        platform: .macOS,
+                        role: testCase.role
+                    )
+                let networkRecord = try BonjourInteropContract.makeCanonicalAdvertisementTXT(
+                    deviceId: deviceId,
+                    pubKeyFingerprint: fingerprint,
+                    platform: .macOS,
+                    role: testCase.role
+                )
+                XCTAssertEqual(coreRecord, expected)
+                XCTAssertEqual(networkRecord.data, expected)
+            }
+        }
+    }
+
+    func testLegacyDecodeRemainsIndependentOfCanonicalWriterOrder() throws {
+        let fingerprint = String(repeating: "b", count: 64)
+        let legacy = encodeTXT([
+            ("pubKeyFP", fingerprint),
+            ("platform", "ios"),
+            ("deviceId", "legacy-device-id-0009"),
+            ("version", "1.0.0")
+        ])
+
+        let decoded = try BonjourInteropProtocolContract.decodeAdvertisement(
+            legacy,
+            role: .control
+        )
+
+        guard case .legacy(let fields) = decoded else {
+            return XCTFail("Expected shuffled legacy TXT input to remain compatible")
+        }
+        XCTAssertEqual(fields["deviceId"], "legacy-device-id-0009")
+        XCTAssertEqual(fields["pubKeyFP"], fingerprint)
+        XCTAssertEqual(
+            decoded.discoveryProjection,
+            BonjourInteropProtocolContract.DiscoveryProjection(
+                generation: .legacy,
+                deviceId: "legacy-device-id-0009",
+                protocolPublicKeyFingerprint: fingerprint,
+                platform: .iOS,
+                advertisesStrongOwnerAuthentication: false
+            )
+        )
     }
 
     func testDedicatedServiceTXTUsesIdentityOnlyAndSRVOwnsPort() throws {
@@ -366,11 +458,14 @@ final class BonjourInteropContractTests: XCTestCase {
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
         )
 
-        XCTAssertTrue(fileTransferSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields("))
+        XCTAssertTrue(fileTransferSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementWireData("))
+        XCTAssertFalse(fileTransferSource.contains("NetService.data(fromTXTRecord:"))
+        XCTAssertFalse(fileTransferSource.contains("fields.mapValues"))
         XCTAssertFalse(fileTransferSource.contains("\"transferPort\": Data("))
         XCTAssertFalse(fileTransferSource.contains("\"fileTransferPort\": Data("))
         XCTAssertFalse(fileTransferSource.contains("\"capabilities\": Data("))
-        XCTAssertTrue(discoverySource.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields("))
+        XCTAssertTrue(discoverySource.contains("BonjourInteropProtocolContract.canonicalAdvertisementWireData("))
+        XCTAssertTrue(discoverySource.contains("return NWTXTRecord(wireData)"))
         XCTAssertTrue(discoverySource.contains("let advertisedCaps: [String] = []"))
         XCTAssertFalse(discoverySource.contains("decodeAdvertisement(\n                    txtRecord.data,\n                    role: role\n                ).fields"))
         XCTAssertFalse(discoverySource.contains("parseCapabilities(from: txtRecord)"))

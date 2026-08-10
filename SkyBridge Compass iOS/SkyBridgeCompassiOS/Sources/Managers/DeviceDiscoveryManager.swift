@@ -3590,12 +3590,12 @@ public class DeviceDiscoveryManager: ObservableObject {
     
     /// Builds untrusted discovery metadata from values already validated against
     /// the committed protocol identity. Trust is established only by handshake.
-    nonisolated static func primaryBonjourInteropAdvertisementFields(
+    nonisolated static func primaryBonjourInteropAdvertisementWireData(
         validatedDeviceId: String,
         protocolIdentityFingerprint: String,
         platform: BonjourInteropProtocolContract.AdvertisementPlatform
-    ) throws -> [String: String] {
-        try BonjourInteropProtocolContract.canonicalAdvertisementFields(
+    ) throws -> Data {
+        try BonjourInteropProtocolContract.canonicalAdvertisementWireData(
             deviceId: validatedDeviceId,
             pubKeyFingerprint: protocolIdentityFingerprint,
             platform: platform,
@@ -3625,16 +3625,12 @@ public class DeviceDiscoveryManager: ObservableObject {
                 ]
             )
         }
-        let fields = try Self.primaryBonjourInteropAdvertisementFields(
+        let wireData = try Self.primaryBonjourInteropAdvertisementWireData(
             validatedDeviceId: validatedAuthority.deviceId,
             protocolIdentityFingerprint: validatedAuthority.protocolPublicKeyFingerprint,
             platform: localPlatform == .iPadOS ? .iPadOS : .iOS
         )
-        var record = NWTXTRecord()
-        for (key, value) in fields {
-            record[key] = value
-        }
-        return record
+        return NWTXTRecord(wireData)
     }
 
     // MARK: - Private Methods - Cleanup

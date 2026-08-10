@@ -99,69 +99,22 @@ enum BonjourInteropContract {
         try Core.decodeAdvertisement(record.data, role: role)
     }
 
-    static func canonicalAdvertisementFields(
-        deviceId: String,
-        pubKeyFingerprint: String,
-        platform: AdvertisementPlatform,
-        role: AdvertisementRole
-    ) throws -> [String: String] {
-        try Core.canonicalAdvertisementFields(
-            deviceId: deviceId,
-            pubKeyFingerprint: pubKeyFingerprint,
-            platform: platform,
-            role: role
-        )
-    }
-
     static func makeCanonicalAdvertisementTXT(
         deviceId: String,
         pubKeyFingerprint: String,
         platform: AdvertisementPlatform,
         role: AdvertisementRole
     ) throws -> NWTXTRecord {
-        var record = NWTXTRecord()
-        attach(
-            try canonicalAdvertisementFields(
+        NWTXTRecord(
+            try Core.canonicalAdvertisementWireData(
                 deviceId: deviceId,
                 pubKeyFingerprint: pubKeyFingerprint,
                 platform: platform,
                 role: role
-            ),
-            to: &record
+            )
         )
-        return record
     }
 
-    static func makeCanonicalAdvertisementData(
-        deviceId: String,
-        pubKeyFingerprint: String,
-        platform: AdvertisementPlatform,
-        role: AdvertisementRole
-    ) throws -> [String: Data] {
-        var record: [String: Data] = [:]
-        attach(
-            try canonicalAdvertisementFields(
-                deviceId: deviceId,
-                pubKeyFingerprint: pubKeyFingerprint,
-                platform: platform,
-                role: role
-            ),
-            to: &record
-        )
-        return record
-    }
-
-    private static func attach(_ fields: [String: String], to record: inout NWTXTRecord) {
-        for (key, value) in fields {
-            record[key] = value
-        }
-    }
-
-    private static func attach(_ fields: [String: String], to record: inout [String: Data]) {
-        for (key, value) in fields {
-            record[key] = Data(value.utf8)
-        }
-    }
 }
 
 struct CanonicalBonjourAdvertisementIdentity: Sendable, Equatable {

@@ -130,8 +130,9 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
                 "protocolIdentityFingerprint: validatedAuthority.protocolPublicKeyFingerprint"
             )
         )
-        XCTAssertTrue(discovery.contains("Self.primaryBonjourInteropAdvertisementFields("))
-        XCTAssertTrue(discovery.contains("record[key] = value"))
+        XCTAssertTrue(discovery.contains("Self.primaryBonjourInteropAdvertisementWireData("))
+        XCTAssertTrue(discovery.contains("return NWTXTRecord(wireData)"))
+        XCTAssertFalse(discovery.contains("record[key] = value"))
         XCTAssertFalse(discovery.contains("fields[\"protocolSigningAlgorithm\"]"))
         XCTAssertFalse(discovery.contains("record[\"identityFingerprint\"]"))
 
@@ -151,9 +152,11 @@ final class AppleMobileDeviceIdentityTests: XCTestCase {
         XCTAssertTrue(transfer.contains("committedActiveProtocolIdentitySnapshot()"))
         XCTAssertTrue(transfer.contains("protocolIdentityFingerprint:"))
         XCTAssertTrue(
-            transfer.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields(")
+            transfer.contains("BonjourInteropProtocolContract.canonicalAdvertisementWireData(")
         )
         XCTAssertTrue(transfer.contains("role: .dedicatedService"))
+        XCTAssertFalse(transfer.contains("NetService.data(fromTXTRecord:"))
+        XCTAssertFalse(transfer.contains("fields.mapValues"))
         let performStart = try XCTUnwrap(
             transfer.range(of: "private func performStart(")
         )

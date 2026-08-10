@@ -455,9 +455,11 @@ final class FileTransferLANRoutePolicyTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            networkSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementFields(")
+            networkSource.contains("BonjourInteropProtocolContract.canonicalAdvertisementWireData(")
         )
         XCTAssertTrue(networkSource.contains("role: .dedicatedService"))
+        XCTAssertFalse(networkSource.contains("NetService.data(fromTXTRecord:"))
+        XCTAssertFalse(networkSource.contains("fields.mapValues"))
         XCTAssertFalse(networkSource.contains("\"capabilities\": Data("))
         XCTAssertFalse(networkSource.contains("\"transferPort\": Data("))
         XCTAssertFalse(networkSource.contains("ClassicTransferCapability.classicResume)\".utf8"))

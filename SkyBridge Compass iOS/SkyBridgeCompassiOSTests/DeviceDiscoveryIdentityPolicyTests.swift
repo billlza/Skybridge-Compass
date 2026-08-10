@@ -1,4 +1,6 @@
+import Foundation
 import Network
+import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
 import XCTest
 
 @testable import SkyBridgeCompass_iOS
@@ -168,22 +170,40 @@ final class DeviceDiscoveryIdentityPolicyTests: XCTestCase {
     )
   }
 
-  func testPrimaryBonjourAdvertisementUsesCanonicalVersion2Identity() throws {
+  func testPrimaryBonjourWireUsesCanonicalRawKeyOrderDeterministically() throws {
+    let deviceId = "id:local-iphone-1"
     let fingerprint = String(repeating: "a", count: 64)
-    let fields = try DeviceDiscoveryManager.primaryBonjourInteropAdvertisementFields(
-      validatedDeviceId: "id:local-iphone-1",
-      protocolIdentityFingerprint: fingerprint,
-      platform: .iOS
-    )
-
-    XCTAssertEqual(fields, [
-      "version": "2",
-      "deviceId": "id:local-iphone-1",
-      "pubKeyFP": fingerprint,
-      "platform": "ios",
-      "hs_soa": "1",
+    let expected = encodeTXT([
+      ("deviceId", deviceId),
+      ("hs_soa", "1"),
+      ("platform", "ios"),
+      ("pubKeyFP", fingerprint),
+      ("version", "2"),
     ])
 
+    for _ in 0..<64 {
+      let wireData = try DeviceDiscoveryManager.primaryBonjourInteropAdvertisementWireData(
+        validatedDeviceId: deviceId,
+        protocolIdentityFingerprint: fingerprint,
+        platform: .iOS
+      )
+
+      XCTAssertEqual(wireData, expected)
+      XCTAssertEqual(NWTXTRecord(wireData).data, expected)
+    }
+
+    guard case .version2(let decoded) = try BonjourInteropProtocolContract.decodeAdvertisement(
+      expected,
+      role: .control
+    ) else {
+      return XCTFail("Expected the canonical iOS wire bytes to decode as version 2")
+    }
+    XCTAssertEqual(decoded.deviceId, deviceId)
+    XCTAssertEqual(decoded.protocolPublicKeyFingerprint, fingerprint)
+    XCTAssertEqual(decoded.platform, .iOS)
+
+    let fields = NetService.dictionary(fromTXTRecord: expected)
+    XCTAssertEqual(Set(fields.keys), Set(["version", "deviceId", "pubKeyFP", "platform", "hs_soa"]))
     for unsupportedKey in [
       "name",
       "capabilities",
@@ -204,19 +224,6 @@ final class DeviceDiscoveryIdentityPolicyTests: XCTestCase {
     ] {
       XCTAssertNil(fields[unsupportedKey], "must not advertise \(unsupportedKey)")
     }
-  }
-
-  func testPrimaryBonjourAdvertisementDoesNotEncodeRuntimeReadiness() throws {
-    let fields = try DeviceDiscoveryManager.primaryBonjourInteropAdvertisementFields(
-      validatedDeviceId: "id:local-iphone-1",
-      protocolIdentityFingerprint: String(repeating: "b", count: 64),
-      platform: .iOS
-    )
-
-    XCTAssertNil(fields["capabilities"])
-    XCTAssertNil(fields["transferPort"])
-    XCTAssertNil(fields["fileTransferPort"])
-    XCTAssertNil(fields["file_transfer_port"])
   }
 
   func testDiscoveryDiagnosticsDoNotPublishPeerControlledIdentityOrErrorDescriptions() throws {
@@ -240,5 +247,16 @@ final class DeviceDiscoveryIdentityPolicyTests: XCTestCase {
     XCTAssertFalse(source.contains("收到新连接: \\(endpointDescription)"))
     XCTAssertFalse(source.contains("入站连接就绪: \\(peerId)"))
     XCTAssertFalse(source.contains("入站连接失败: \\(error.localizedDescription)"))
+  }
+
+  private func encodeTXT(_ entries: [(String, String)]) -> Data {
+    var data = Data()
+    for (key, value) in entries {
+      let entry = Data("\(key)=\(value)".utf8)
+      precondition(entry.count <= Int(UInt8.max))
+      data.append(UInt8(entry.count))
+      data.append(entry)
+    }
+    return data
   }
 }

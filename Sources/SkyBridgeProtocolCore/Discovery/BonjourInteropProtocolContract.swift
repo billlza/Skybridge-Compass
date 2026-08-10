@@ -327,6 +327,44 @@ public enum BonjourInteropProtocolContract {
         return fields
     }
 
+    /// Encodes the canonical DNS-SD TXT wire representation shared by every
+    /// Apple publisher and the Android interoperability contract.
+    ///
+    /// TXT dictionaries are deliberately not exposed at this boundary because
+    /// their hash-table iteration order is process-randomized. Keys are sorted
+    /// by their unsigned raw UTF-8 bytes before length-prefixed fields are
+    /// appended, matching Android's canonical unsigned-key ordering.
+    public static func canonicalAdvertisementWireData(
+        deviceId: String,
+        pubKeyFingerprint: String,
+        platform: AdvertisementPlatform,
+        role: AdvertisementRole
+    ) throws -> Data {
+        let fields = try canonicalAdvertisementFields(
+            deviceId: deviceId,
+            pubKeyFingerprint: pubKeyFingerprint,
+            platform: platform,
+            role: role
+        )
+        var data = Data()
+        for (key, value) in fields.sorted(by: canonicalRawKeyOrder) {
+            let keyBytes = Array(key.utf8)
+            let valueBytes = Array(value.utf8)
+            let fieldByteCount = keyBytes.count + 1 + valueBytes.count
+            guard fieldByteCount <= Int(UInt8.max) else {
+                throw AdvertisementError.fieldExceedsDNSServiceLimit(
+                    key: key,
+                    bytes: fieldByteCount
+                )
+            }
+            data.append(UInt8(fieldByteCount))
+            data.append(contentsOf: keyBytes)
+            data.append(0x3D)
+            data.append(contentsOf: valueBytes)
+        }
+        return data
+    }
+
     /// Returns the DNS-SD TXT wire size, including the one-byte length prefix for
     /// every `key=value` entry. It intentionally does not depend on Network.framework.
     public static func txtRecordWireSize(_ fields: [String: String]) throws -> Int {
@@ -352,6 +390,13 @@ public enum BonjourInteropProtocolContract {
                 maximum: maximumRecommendedTXTRecordWireBytes
             )
         }
+    }
+
+    private static func canonicalRawKeyOrder(
+        _ lhs: Dictionary<String, String>.Element,
+        _ rhs: Dictionary<String, String>.Element
+    ) -> Bool {
+        lhs.key.utf8.lexicographicallyPrecedes(rhs.key.utf8)
     }
 
     /// Decodes raw DNS-SD TXT bytes without first collapsing them into a
