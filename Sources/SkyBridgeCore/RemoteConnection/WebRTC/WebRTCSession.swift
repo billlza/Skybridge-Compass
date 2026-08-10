@@ -2877,30 +2877,28 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             return false
         }
 
-        let selectedPair = statsById.values.first { stat in
-            guard stat.type.lowercased() == "candidate-pair" else { return false }
+        let candidatePairs = statsById.values.compactMap { stat -> WebRTCSelectedICETransportPathPolicy.CandidatePair? in
+            guard stat.type.lowercased() == "candidate-pair" else { return nil }
             let state = stringValue(stat, key: "state")?.lowercased()
             let selected = boolValue(stat, key: "selected")
             let nominated = boolValue(stat, key: "nominated")
-            return selected || (nominated && state == "succeeded")
+            return WebRTCSelectedICETransportPathPolicy.CandidatePair(
+                isAuthoritySelected: selected || (nominated && state == "succeeded"),
+                localCandidateID: stringValue(stat, key: "localCandidateId"),
+                remoteCandidateID: stringValue(stat, key: "remoteCandidateId")
+            )
         }
 
-        guard let selectedPair else { return .unknown }
-
-        let candidateIDs = [
-            stringValue(selectedPair, key: "localCandidateId"),
-            stringValue(selectedPair, key: "remoteCandidateId"),
-        ]
-        .compactMap { $0 }
-
-        for candidateId in candidateIDs {
-            guard let candidate = statsById[candidateId] else { continue }
-            if stringValue(candidate, key: "candidateType")?.lowercased() == "relay" {
-                return .relay
-            }
+        let candidatesByID = statsById.mapValues { stat in
+            WebRTCSelectedICETransportPathPolicy.Candidate(
+                candidateType: stringValue(stat, key: "candidateType")
+            )
         }
 
-        return .direct
+        return WebRTCSelectedICETransportPathPolicy.classify(
+            candidatePairs: candidatePairs,
+            candidatesByID: candidatesByID
+        )
     }
 
     private static func selectedRemoteCandidateAddress(from report: RTCStatisticsReport) -> String? {

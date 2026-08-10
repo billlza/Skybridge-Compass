@@ -21,56 +21,45 @@ struct RemoteDesktopDeviceResolutionCoordinator {
         self.crossNetworkCapability = crossNetworkCapability
     }
 
-    func makeEndpointCandidates(for device: DiscoveredDevice) async throws -> [NWEndpoint] {
-        let bonjour = bonjourServiceIdentity(for: device).map {
-            RemoteDesktopLANEndpointCandidateFactory.BonjourServiceIdentity(
-                name: $0.name,
-                domain: $0.domain
+    func makeEndpointCandidates(for device: DiscoveredDevice) async throws
+        -> [RemoteDesktopLANEndpointCandidate]
+    {
+        guard P2PConnectionEndpointPolicy.normalizedStrongDeviceId(for: device) != nil,
+              let preferredAdvertisement = discoveryManager.liveBonjourAdvertisement(
+                for: device,
+                serviceType: .skybridgeRemote
+              ),
+              let preferredRoute = BonjourRouteTuple(preferredAdvertisement),
+              preferredRoute.type == DiscoveredDevice.remoteControlServiceType else {
+            throw RemoteDesktopError.connectionFailed(
+                "设备缺少当前强身份绑定的远程桌面 Bonjour 路由"
             )
         }
-        let activePeerAddress = peerAddressBackedAddress(for: device)
-        let directIP = manager.bestIPAddress(for: device)
-        let resolvedIP = await resolveIPAddress(for: device)
-        let remoteControlPort = preferredRemoteControlPort(for: device)
         let liveBonjourEndpoints = discoveryManager.liveBonjourServiceEndpoints(
             for: device,
             serviceType: .skybridgeRemote
-        )
+        ).filter { endpoint in
+            guard case .service(let name, let type, let domain, _) = endpoint,
+                  let route = BonjourRouteTuple(name: name, type: type, domain: domain) else {
+                return false
+            }
+            return route == preferredRoute
+        }
         let plan = RemoteDesktopLANEndpointCandidateFactory.makePlan(
-            remoteControlPort: remoteControlPort,
-            directIP: directIP,
-            resolvedIP: resolvedIP,
             liveBonjourEndpoints: liveBonjourEndpoints,
-            bonjourService: bonjour,
-            activePeerAddress: activePeerAddress,
             remoteServiceType: DiscoveredDevice.remoteControlServiceType
         )
-        if let resolvedIP,
-           hasReachableLANEndpoint(device),
-           let port = remoteControlPort {
-            SkyBridgeLogger.shared.info(
-                "📡 远控已解析到主服务地址: name=\(device.name) ip=\(resolvedIP) port=\(port)"
-            )
-        }
-        for log in plan.hostCandidateLogs {
-            if log.reason == "active-peer-fallback" {
-                SkyBridgeLogger.shared.info(
-                    "📡 远控使用已建立 P2P 会话的对端地址末尾回退连接: host=\(log.host) port=\(log.port)"
-                )
-            }
-            SkyBridgeLogger.shared.info(log.message)
-        }
-        if let activePeerAddress, plan.missingActivePeerPortHost != nil {
-            SkyBridgeLogger.shared.warning(
-                "⚠️ 远控目标缺少显式端口，拒绝猜测默认端口: host=\(activePeerAddress)"
-            )
-        }
+        SkyBridgeLogger.shared.info(
+            "📡 远控 live route plan: eligible=\(plan.endpoints.count) ignored=\(plan.ignoredEndpointCount)"
+        )
 
         if !plan.endpoints.isEmpty {
             return plan.endpoints
         }
 
-        throw RemoteDesktopError.connectionFailed("设备缺少可连接地址（Bonjour/IP）")
+        throw RemoteDesktopError.connectionFailed(
+            "当前远程桌面 Bonjour 路由没有可验证的基础设施接口"
+        )
     }
 
     func resolveLatestDevice(from device: DiscoveredDevice) -> DiscoveredDevice {
@@ -102,34 +91,6 @@ struct RemoteDesktopDeviceResolutionCoordinator {
             original: device,
             endpointCandidate: best
         )
-    }
-
-    func canResolveLANEndpoint(for device: DiscoveredDevice) async -> Bool {
-        if hasReachableLANEndpoint(device) {
-            return true
-        }
-
-        if hasPeerAddressBackedFallback(for: device) {
-            return true
-        }
-
-        if preferredServiceName(for: device) != nil {
-            return true
-        }
-
-        if device.supportsRemoteControl {
-            if manager.bestIPAddress(for: device) != nil {
-                return true
-            }
-            if preferredServiceName(for: device) != nil {
-                return true
-            }
-            if await resolveIPAddress(for: device) != nil {
-                return true
-            }
-        }
-
-        return false
     }
 
     func preferredServiceName(for device: DiscoveredDevice) -> String? {
@@ -278,54 +239,6 @@ struct RemoteDesktopDeviceResolutionCoordinator {
             }
         }
         return nil
-    }
-
-    /// Prefer the `remoteControlPort` carried by a candidate that advertises the
-    /// explicit `_skybridge-rd._tcp` Bonjour service (the authoritative remote
-    /// endpoint), mirroring the file-transfer port-provenance fix. A
-    /// session/pairing-derived record can carry a non-advertised port in
-    /// `portMap[remoteControlServiceType]` (and gets the remote service appended to
-    /// its `services` list when merged via `mergePeerServiceMetadata`), so it must
-    /// not win over the real advertised remote-control port.
-    private func preferredRemoteControlPort(for device: DiscoveredDevice) -> UInt16? {
-        if let livePort = discoveryManager.liveBonjourAdvertisement(
-            for: device,
-            serviceType: .skybridgeRemote
-        )?.remoteControlPort,
-           livePort > 0 {
-            return livePort
-        }
-
-        let candidates = identityCandidates(for: device)
-
-        for candidate in candidates where advertisesExplicitRemoteControlService(candidate) {
-            if let port = candidate.remoteControlPort, port > 0 {
-                return port
-            }
-        }
-
-        for candidate in candidates {
-            if let port = candidate.remoteControlPort, port > 0 {
-                return port
-            }
-        }
-        return nil
-    }
-
-    /// True when the candidate carries an explicit `_skybridge-rd._tcp`
-    /// advertisement (Bonjour SRV/TXT provenance) rather than a session/pairing
-    /// heartbeat merge. `services` membership alone is not authoritative because
-    /// the pairing merge appends `remoteControlServiceType` to `services`.
-    private func advertisesExplicitRemoteControlService(_ candidate: DiscoveredDevice) -> Bool {
-        if candidate.bonjourServiceType == DiscoveredDevice.remoteControlServiceType {
-            return true
-        }
-        if candidate.id.hasPrefix("bonjour:"),
-           manager.parseBonjourIdentity(from: candidate.id) != nil,
-           candidate.remoteControlPort != nil {
-            return true
-        }
-        return false
     }
 
     private func identityCandidates(for device: DiscoveredDevice) -> [DiscoveredDevice] {

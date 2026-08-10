@@ -12,19 +12,52 @@ The contract below exists to stop that class of regressions from reappearing aft
 
 ## Contract
 
+### 0. Initiator/responder roles are symmetric; transport layers are not interchangeable
+
+macOS and iOS are both full P2P protocol peers. Either platform may initiate or
+respond to the primary `_skybridge._tcp` handshake, including when the remote
+peer is Android, Windows, or Linux. UI roles such as "viewer" and "host" must
+not become protocol-authority roles.
+
+The primary authenticated control session and the dedicated
+`_skybridge-rd._tcp` remote-media socket are separate layers:
+
+- the primary P2P handshake may use an exact authority-bound live Apple route,
+  including a peer-to-peer interface;
+- the current remote-media policy is infrastructure-only and is owned by the
+  shared `ApplePeerConnectivityPolicy` decision, not by an iOS-only adapter;
+- a scoped infrastructure address such as `fe80::...%en0` is not peer-to-peer
+  merely because it is IPv6 link-local;
+- the remote-media dialer must bind the exact live service endpoint to its
+  observed interface and verify the resolved IPv6 scope before application data;
+- the macOS remote-media listener must consume the same shared peer-to-peer
+  admission policy; changing that policy requires symmetric macOS/iOS tests;
+- a non-Apple host/port route must come from one atomic authenticated or signed
+  route claim. An active connection host must never be combined with a generic
+  cached/TXT/default port.
+
+Enabling peer-to-peer remote-media transport is a separate, versioned product
+decision. It must not be inferred from the primary P2P handshake's transport
+capabilities.
+
 ### 1. Trust resolution must be unique on both sides
 
-The iOS viewer and macOS host must resolve the same remote-control identity from the same alias surface:
+The iOS viewer and macOS host must resolve the same remote-control identity from the same stable authority surface:
 
 - persistent `id:<uuid>`
 - current-path `currentDeviceId`
 - `knownDeviceIds`
-- `bonjour:<name>@<domain>`
-- normalized host/IP aliases
+
+Bonjour instance names, display names, host names, IP addresses, interface
+names, and ports are route locators only. They must never select a trust record,
+protocol pin, or KEM key.
 
 Rules:
 
 - `first(where:)` is not acceptable for remote-control trust resolution.
+- If the selected device and authenticated peer both carry strong IDs, the IDs
+  must be equal; two different strong IDs are a hard conflict and must not be
+  unioned.
 - Multiple matching records are allowed only when they collapse to one effective identity:
   - exactly one canonical `currentDeviceId`
   - at most one `protocolPublicKeyFingerprint`
@@ -98,22 +131,19 @@ Rules:
 - a replaced session must not tear down the new one
 - receive loops must validate that the callback still belongs to the active connection/session
 
-### 7. Screen streaming startup must be viewer-driven and generation-safe
+### 7. Screen streaming startup must be ACK-committed and generation-safe
 
-On LAN remote control, the macOS host must not start `ScreenCaptureKit` push before the viewer has either:
-
-- delivered the first `streamConfiguration`, or
-- missed a long compatibility fallback window for legacy peers
+On LAN remote control, the macOS host must not start `ScreenCaptureKit`, publish stream state,
+enable the outbound frame/audio pump, or admit input until it has successfully sent the exact
+`streamConfigurationAck` for the viewer's current transaction.
 
 Rules:
 
 - the initial secure-channel wait is not permission to start video push immediately
 - a short grace wait may be used to catch the common fast path, but missing that grace window must leave the host idle rather than starting push optimistically
-- first `streamConfiguration` arrival must be able to trigger the initial push start
-- any delayed fallback start task must be cancelled on:
-  connection close
-  peer supersession
-  successful `streamConfiguration` arrival
+- a missing or malformed transaction, conflicting duplicate, or ACK send failure is fail-closed
+- an exact duplicate configuration may receive the same logical ACK again, but must not restart capture
+- there is no timer-based legacy start fallback; compatibility is an explicit protocol identity, not a timeout decision
 - screen-sharing start/restart attempts must carry a generation token so a stale async start cannot revive capture after the peer has already closed or been replaced
 
 ## Required Tests

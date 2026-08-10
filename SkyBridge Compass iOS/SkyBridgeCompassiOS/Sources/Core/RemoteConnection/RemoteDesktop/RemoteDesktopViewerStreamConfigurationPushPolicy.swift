@@ -1,7 +1,15 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 enum RemoteDesktopViewerStreamConfigurationPushPolicy {
+    struct AcknowledgementExpectation: Equatable {
+        let transaction: RemoteDesktopStreamConfigurationTransaction
+        let streamRefreshToken: UInt64?
+        let audioEndpointPresent: Bool
+        let screenFrameTransport: String?
+    }
+
     struct PreparationPlan: Equatable {
         let canSendOverWebRTC: Bool
         let canSendOverLAN: Bool
@@ -59,5 +67,29 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
             && isStreaming
             && !hasReceivedFrameInCurrentStream
             && !payloadIncludesAudioEndpoint
+    }
+
+    static func acknowledgementMatches(
+        _ acknowledgement: RemoteDesktopStreamConfigurationAcknowledgement,
+        expectation: AcknowledgementExpectation
+    ) -> Bool {
+        acknowledgement.transaction == expectation.transaction
+            && acknowledgement.streamRefreshToken == expectation.streamRefreshToken
+            && acknowledgement.audioEndpointPresent == expectation.audioEndpointPresent
+            && acknowledgement.screenFrameTransport == expectation.screenFrameTransport
+    }
+
+    static func allowsMediaAdmission(
+        isReadOnlyCameraSession: Bool,
+        activeTransaction: RemoteDesktopStreamConfigurationTransaction?,
+        acknowledgedTransaction: RemoteDesktopStreamConfigurationTransaction?
+    ) -> Bool {
+        if isReadOnlyCameraSession {
+            return true
+        }
+        guard let activeTransaction, let acknowledgedTransaction else {
+            return false
+        }
+        return activeTransaction == acknowledgedTransaction
     }
 }

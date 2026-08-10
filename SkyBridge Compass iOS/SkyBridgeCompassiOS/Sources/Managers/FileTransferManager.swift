@@ -39,6 +39,15 @@ import UIKit
 import UserNotifications
 #endif
 
+enum WebRTCOutboundPresentationOwnershipPolicy {
+    nonisolated static func owns(
+        currentToken: UUID?,
+        expectedToken: UUID
+    ) -> Bool {
+        currentToken == expectedToken
+    }
+}
+
 // MARK: - Local Device Info (best-effort, for sender metadata)
 
 private func SBFT_currentModelIdentifier() -> String {
@@ -125,6 +134,12 @@ public class FileTransferManager: ObservableObject {
         let endpointCandidates: [String]
     }
 
+    private struct WebRTCOutboundPresentationOwner {
+        let token: UUID
+        let transferID: String
+        let transportOwner: CrossNetworkWebRTCManager.WebRTCFileTransferOperationOwner
+    }
+
     private var transferSlotPolicy = ClassicTransferSlotQueuePolicy()
     private var transferSlotContinuations: [UUID: CheckedContinuation<Void, Error>] = [:]
     enum TransferSlotReleaseAction: Equatable {
@@ -168,11 +183,55 @@ public class FileTransferManager: ObservableObject {
     /// - Parameters:
     ///   - url: 文件 URL
     ///   - device: 目标设备
-    public func sendFile(at url: URL, to device: DiscoveredDevice) async throws {
+    ///   - routeIntent: 调用方显式选择的传输族；不会根据设备身份自动切换
+    public func sendFile(
+        at url: URL,
+        to device: DiscoveredDevice,
+        routeIntent: PeerTransportRouteIntent
+    ) async throws {
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }
 
+        let initialWebRTCTransportOwner: CrossNetworkWebRTCManager.WebRTCFileTransferOperationOwner?
+        switch fileTransferTransportDecision(for: device, routeIntent: routeIntent) {
+        case .directLAN:
+            initialWebRTCTransportOwner = nil
+
+        case .crossNetwork(let expectedSessionID):
+            guard let owner = crossNetwork.currentWebRTCFileTransferOperationOwner() else {
+                throw FileTransferError.networkStageFailed(
+                    stage: "cross_network_secure_session_unavailable",
+                    endpoint: nil,
+                    details: "所选跨网文件传输会话没有可用的已认证安全通道"
+                )
+            }
+            guard owner.sessionID == expectedSessionID else {
+                throw FileTransferError.networkStageFailed(
+                    stage: "cross_network_target_replaced",
+                    endpoint: nil,
+                    details: "所选跨网文件传输会话已被替换"
+                )
+            }
+            initialWebRTCTransportOwner = owner
+
+        case .rejectUnavailableCrossNetworkTarget:
+            throw FileTransferError.networkStageFailed(
+                stage: "cross_network_target_validation",
+                endpoint: nil,
+                details: "所选跨网文件传输目标已失效或不属于当前会话"
+            )
+        }
+        if let initialWebRTCTransportOwner {
+            try crossNetwork.requireCurrentWebRTCFileTransferOperationOwner(
+                initialWebRTCTransportOwner
+            )
+        }
         try await FileTransferRuntime.shared.ensureHealthy()
+        if let initialWebRTCTransportOwner {
+            try crossNetwork.requireCurrentWebRTCFileTransferOperationOwner(
+                initialWebRTCTransportOwner
+            )
+        }
 
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
@@ -195,11 +254,21 @@ public class FileTransferManager: ObservableObject {
         } catch ClassicTransferSourceFileInspectionError.invalidFileSize {
             throw FileTransferError.invalidMetadata
         }
+        if let initialWebRTCTransportOwner {
+            try crossNetwork.requireCurrentWebRTCFileTransferOperationOwner(
+                initialWebRTCTransportOwner
+            )
+        }
         let fileName = url.lastPathComponent
         let fileType = determineFileType(from: url)
         
         // 计算文件哈希（SHA256，流式处理）
         let fileHash = try await calculateFileHash(at: url)
+        if let initialWebRTCTransportOwner {
+            try crossNetwork.requireCurrentWebRTCFileTransferOperationOwner(
+                initialWebRTCTransportOwner
+            )
+        }
         
         let effectiveChunkSize = min(maxChunkSizeBytes, max(64 * 1024, chunkSize))
         
@@ -212,6 +281,11 @@ public class FileTransferManager: ObservableObject {
         let localIdentity = AppleMobileDeviceIdentity.currentSnapshot()
         let protocolIdentity = try await SkyBridgeiOSCore.shared
             .currentProtocolIdentitySnapshot()
+        if let initialWebRTCTransportOwner {
+            try crossNetwork.requireCurrentWebRTCFileTransferOperationOwner(
+                initialWebRTCTransportOwner
+            )
+        }
         let senderDeviceId = protocolIdentity.deviceId
         let senderDeviceName = localIdentity.deviceName
         let senderPlatform = localIdentity.platformName
@@ -255,11 +329,27 @@ public class FileTransferManager: ObservableObject {
             senderChip: senderChip
         )
         transferStates[transfer.id] = state
+        var webRTCOutboundOwner: WebRTCOutboundPresentationOwner?
 
         do {
             // Cross-network path (WebRTC DataChannel): zero-config, no ports required.
-            if shouldUseCrossNetworkTransport(for: device) {
-                try await sendFileOverWebRTC(from: url, transfer: transfer, metadata: state.metadata!, to: device)
+            if let transportOwner = initialWebRTCTransportOwner {
+                let presentationOwner = WebRTCOutboundPresentationOwner(
+                    token: UUID(),
+                    transferID: transfer.id,
+                    transportOwner: transportOwner
+                )
+                transferStates[transfer.id]?.webRTCOutboundOperationToken = presentationOwner.token
+                webRTCOutboundOwner = presentationOwner
+                try requireCurrentWebRTCOutboundPresentationOwner(presentationOwner)
+                try await sendFileOverWebRTC(
+                    from: url,
+                    transfer: transfer,
+                    metadata: state.metadata!,
+                    to: device,
+                    owner: presentationOwner
+                )
+                try requireCurrentWebRTCOutboundPresentationOwner(presentationOwner)
                 await completeTransfer(transfer.id, success: true)
                 SkyBridgeLogger.shared.info("✅ 文件发送完成(WebRTC)")
                 return
@@ -331,6 +421,11 @@ public class FileTransferManager: ObservableObject {
             SkyBridgeLogger.shared.info("✅ 文件发送完成")
             
         } catch {
+            if let webRTCOutboundOwner,
+               !isCurrentWebRTCOutboundPresentationOwner(webRTCOutboundOwner) {
+                abandonSupersededWebRTCOutboundTransferIfOwned(webRTCOutboundOwner)
+                throw CancellationError()
+            }
             if ClassicTransferDeliveryConfirmationPolicy.isUnknown(error),
                let index = activeTransfers.firstIndex(where: { $0.id == transfer.id }) {
                 activeTransfers[index].receiptDeliveryStatus = .unknown
@@ -341,6 +436,45 @@ public class FileTransferManager: ObservableObject {
     }
 
     // MARK: - Cross-network (WebRTC DataChannel) send
+
+    private func isCurrentWebRTCOutboundPresentationOwner(
+        _ owner: WebRTCOutboundPresentationOwner
+    ) -> Bool {
+        WebRTCOutboundPresentationOwnershipPolicy.owns(
+            currentToken: transferStates[owner.transferID]?.webRTCOutboundOperationToken,
+            expectedToken: owner.token
+        )
+            && crossNetwork.isCurrentWebRTCFileTransferOperationOwner(owner.transportOwner)
+    }
+
+    private func requireCurrentWebRTCOutboundPresentationOwner(
+        _ owner: WebRTCOutboundPresentationOwner
+    ) throws {
+        guard isCurrentWebRTCOutboundPresentationOwner(owner) else {
+            throw CancellationError()
+        }
+        try Task.checkCancellation()
+    }
+
+    private func abandonSupersededWebRTCOutboundTransferIfOwned(
+        _ owner: WebRTCOutboundPresentationOwner
+    ) {
+        guard WebRTCOutboundPresentationOwnershipPolicy.owns(
+            currentToken: transferStates[owner.transferID]?.webRTCOutboundOperationToken,
+            expectedToken: owner.token
+        ) else {
+            return
+        }
+        if let index = activeTransfers.firstIndex(where: { $0.id == owner.transferID }) {
+            activeTransfers.remove(at: index)
+        }
+        transferStates.removeValue(forKey: owner.transferID)
+        clearProgressEventState(for: owner.transferID)
+        updateTransferringState()
+        Task {
+            await LiveActivityManager.shared.transferCompleted()
+        }
+    }
 
     func preferredQuickSendDevice(for device: DiscoveredDevice) -> DiscoveredDevice {
         resolveLatestTransferDevice(from: device)
@@ -583,13 +717,23 @@ public class FileTransferManager: ObservableObject {
         }
     }
 
-    private func shouldUseCrossNetworkTransport(for device: DiscoveredDevice) -> Bool {
-        let localActiveConnectionDeviceIds = Set(connectionManager.activeConnections.map(\.device.id))
-        return Self.shouldPreferCrossNetworkTransfer(
-            targetDeviceId: device.id,
+    private func fileTransferTransportDecision(
+        for device: DiscoveredDevice,
+        routeIntent: PeerTransportRouteIntent
+    ) -> PeerTransportRouteDecision {
+        let activeSnapshotDeviceID: String?
+        if case .connected(let sessionID) = crossNetwork.state,
+           let snapshot = crossNetwork.activeSessionSnapshot,
+           snapshot.sessionId == sessionID {
+            activeSnapshotDeviceID = snapshot.deviceId
+        } else {
+            activeSnapshotDeviceID = nil
+        }
+        return Self.transportDecision(
+            for: device,
+            routeIntent: routeIntent,
             crossNetworkState: crossNetwork.state,
-            crossNetworkRemoteDeviceId: crossNetwork.remoteDeviceId,
-            localActiveConnectionDeviceIds: localActiveConnectionDeviceIds
+            remoteDeviceIDs: [crossNetwork.remoteDeviceId, activeSnapshotDeviceID]
         )
     }
 
@@ -867,20 +1011,25 @@ public class FileTransferManager: ObservableObject {
         from url: URL,
         transfer: FileTransfer,
         metadata: FileMetadata,
-        to device: DiscoveredDevice
+        to device: DiscoveredDevice,
+        owner: WebRTCOutboundPresentationOwner
     ) async throws {
+        try requireCurrentWebRTCOutboundPresentationOwner(owner)
         // Use a smaller chunk size for DataChannel to keep per-message size stable.
         let dcChunkSize = min(64 * 1024, max(8 * 1024, metadata.chunkSize))
         let totalChunks = Int(ceil(Double(metadata.fileSize) / Double(dcChunkSize)))
         let senderIdentity = AppleMobileDeviceIdentity.currentSnapshot()
+        try requireCurrentWebRTCOutboundPresentationOwner(owner)
         let senderDeviceId = try await SkyBridgeiOSCore.shared
             .currentProtocolIdentitySnapshot().deviceId
+        try requireCurrentWebRTCOutboundPresentationOwner(owner)
         let senderDeviceName: String? = senderIdentity.deviceName
         var didAttemptMetadata = false
         var didAttemptCompletion = false
         var fileReader: ClassicTransferOutboundFileReadSession?
 
         do {
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
             let meta = CrossNetworkFileTransferMessage(
                 op: .metadata,
@@ -896,21 +1045,26 @@ public class FileTransferManager: ObservableObject {
             didAttemptMetadata = true
             _ = try await crossNetwork.sendFileTransferMessageAwaitingAck(
                 meta,
+                owner: owner.transportOwner,
                 expectedOperation: .metadataAck,
                 timeoutSeconds: 15
             )
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
 
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             let reader = try await ClassicTransferOutboundFileReadSession.open(
                 url: url,
                 tracksSHA256: true
             )
             fileReader = reader
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
 
             var sentBytes: Int64 = 0
             var chunkIndex = 0
             while sentBytes < metadata.fileSize {
+                try requireCurrentWebRTCOutboundPresentationOwner(owner)
                 try ensureWebRTCTransferMayContinue(transferID: transfer.id)
                 let remainingBytes = metadata.fileSize - sentBytes
                 let currentChunkSize = min(Int64(dcChunkSize), remainingBytes)
@@ -918,6 +1072,7 @@ public class FileTransferManager: ObservableObject {
                     offset: UInt64(sentBytes),
                     length: Int(currentChunkSize)
                 )
+                try requireCurrentWebRTCOutboundPresentationOwner(owner)
                 try ensureWebRTCTransferMayContinue(transferID: transfer.id)
                 let rawSize = chunkData.count
                 let msg = CrossNetworkFileTransferMessage(
@@ -933,11 +1088,12 @@ public class FileTransferManager: ObservableObject {
                     () async throws -> CrossNetworkFileTransferMessage in
                     var lastError: Error?
                     for _ in 0..<3 {
-                        try Task.checkCancellation()
+                        try requireCurrentWebRTCOutboundPresentationOwner(owner)
                         try ensureWebRTCTransferMayContinue(transferID: transfer.id)
                         do {
                             return try await crossNetwork.sendFileTransferMessageAwaitingAck(
                                 msg,
+                                owner: owner.transportOwner,
                                 expectedOperation: .chunkAck,
                                 chunkIndex: chunkIndex,
                                 timeoutSeconds: 20
@@ -945,6 +1101,7 @@ public class FileTransferManager: ObservableObject {
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
+                            try requireCurrentWebRTCOutboundPresentationOwner(owner)
                             guard WebRTCChunkAcknowledgmentRetryPolicy
                                 .shouldRetry(after: error) else {
                                 throw error
@@ -959,6 +1116,7 @@ public class FileTransferManager: ObservableObject {
                         details: "chunkIndex=\(chunkIndex)"
                     )
                 }()
+                try requireCurrentWebRTCOutboundPresentationOwner(owner)
                 try ensureWebRTCTransferMayContinue(transferID: transfer.id)
 
                 let expectedReceivedBytes = sentBytes + Int64(rawSize)
@@ -969,16 +1127,20 @@ public class FileTransferManager: ObservableObject {
                 }
                 sentBytes = expectedReceivedBytes
                 chunkIndex += 1
+                try requireCurrentWebRTCOutboundPresentationOwner(owner)
                 await updateProgress(
                     transfer.id,
                     transferredBytes: sentBytes,
                     totalBytes: metadata.fileSize
                 )
+                try requireCurrentWebRTCOutboundPresentationOwner(owner)
                 try ensureWebRTCTransferMayContinue(transferID: transfer.id)
             }
 
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             let fileSha256 = try await reader.finalizeAndClose()
             fileReader = nil
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             try ensureWebRTCTransferMayContinue(transferID: transfer.id)
             let done = CrossNetworkFileTransferMessage(
                 op: .complete,
@@ -991,12 +1153,14 @@ public class FileTransferManager: ObservableObject {
                 didAttemptCompletion = true
                 completionAck = try await crossNetwork.sendFileTransferMessageAwaitingAck(
                     done,
+                    owner: owner.transportOwner,
                     expectedOperation: .completeAck,
                     timeoutSeconds: 20
                 )
             } catch {
                 throw WebRTCCompletionConfirmationPolicy.normalizedWaitError(error)
             }
+            try requireCurrentWebRTCOutboundPresentationOwner(owner)
             guard completionAck.receivedBytes == metadata.fileSize else {
                 throw FileTransferError.transferFailed(
                     "接收端落盘字节数不一致: \(completionAck.receivedBytes ?? -1)/\(metadata.fileSize)"
@@ -1024,6 +1188,9 @@ public class FileTransferManager: ObservableObject {
                     )
                 }
             }
+            guard isCurrentWebRTCOutboundPresentationOwner(owner) else {
+                throw CancellationError()
+            }
             if didAttemptMetadata, !didAttemptCompletion {
                 let cancellationNoticeTask = Task { @MainActor [crossNetwork] in
                     try await crossNetwork.sendFileTransferMessage(
@@ -1031,12 +1198,16 @@ public class FileTransferManager: ObservableObject {
                             op: .cancel,
                             transferId: transfer.id,
                             message: "sender terminated before commit request"
-                        )
+                        ),
+                        owner: owner.transportOwner
                     )
                 }
                 do {
                     try await cancellationNoticeTask.value
                 } catch {
+                    guard isCurrentWebRTCOutboundPresentationOwner(owner) else {
+                        throw CancellationError()
+                    }
                     let cancellationNoticeError = error as NSError
                     SkyBridgeLogger.shared.error(
                         "Cross-network cancellation notice failed: domain=\(cancellationNoticeError.domain) code=\(cancellationNoticeError.code)"

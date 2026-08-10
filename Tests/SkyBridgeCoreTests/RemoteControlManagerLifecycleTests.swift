@@ -21,7 +21,6 @@ final class RemoteControlManagerLifecycleTests: XCTestCase {
         manager.testingSeedBeingControlledResources(
             activeClipboardPeerId: "controller-peer",
             interactionTelemetryPeerIds: ["controller-peer"],
-            deferredFallbackPeerIds: ["controller-peer"],
             screenCaptureRetryPeerIds: ["controller-peer"]
         )
 
@@ -39,7 +38,6 @@ final class RemoteControlManagerLifecycleTests: XCTestCase {
         XCTAssertTrue(snapshot.hasScreenCaptureWatchdogTask)
         XCTAssertTrue(snapshot.screenCaptureRestartInProgress)
         XCTAssertEqual(snapshot.interactionTelemetryPeerIds, ["controller-peer"])
-        XCTAssertEqual(snapshot.deferredFallbackPeerIds, ["controller-peer"])
         XCTAssertEqual(snapshot.screenCaptureRetryPeerIds, ["controller-peer"])
     }
 
@@ -52,7 +50,6 @@ final class RemoteControlManagerLifecycleTests: XCTestCase {
         manager.testingSeedBeingControlledResources(
             activeClipboardPeerId: "controller-peer",
             interactionTelemetryPeerIds: ["controller-peer"],
-            deferredFallbackPeerIds: ["controller-peer"],
             screenCaptureRetryPeerIds: ["controller-peer"]
         )
 
@@ -70,7 +67,6 @@ final class RemoteControlManagerLifecycleTests: XCTestCase {
         XCTAssertFalse(snapshot.hasScreenCaptureWatchdogTask)
         XCTAssertFalse(snapshot.screenCaptureRestartInProgress)
         XCTAssertEqual(snapshot.interactionTelemetryPeerIds, [])
-        XCTAssertEqual(snapshot.deferredFallbackPeerIds, [])
         XCTAssertEqual(snapshot.screenCaptureRetryPeerIds, [])
     }
 

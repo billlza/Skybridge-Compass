@@ -6,6 +6,7 @@
 import Foundation
 import Network
 import OSLog
+import SkyBridgeProtocolCore
 
 final class RemoteControlInboundAdmission: @unchecked Sendable {
     struct Lease: @unchecked Sendable {
@@ -206,7 +207,8 @@ public final class RemoteControlServer: ObservableObject {
 
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
-        parameters.includePeerToPeer = true
+        parameters.includePeerToPeer =
+            ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer
         if let tcp = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.noDelay = true
             tcp.enableKeepalive = true

@@ -2,6 +2,7 @@ import XCTest
 import CryptoKit
 import Network
 import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
+import enum SkyBridgeProtocolCore.P2PProtocolIdentityBindingAdmissionPolicy
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
@@ -783,7 +784,9 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             keyId: "skr-chain-1",
             generation: 9,
             sentAt: now,
-            expiresAt: now.addingTimeInterval(300),
+            expiresAt: now.addingTimeInterval(
+                P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds
+            ),
             requestNonce: request.nonce,
             requestHashHex: request.canonicalRequestHashHex,
             signature: Data()
@@ -2541,44 +2544,52 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             return String(source[startRange.lowerBound..<endRange.lowerBound])
         }
 
-        let handleIncoming = try slice(
-            from: "private func handleIncomingConnection",
+        let inboundOwnerAndReceive = try slice(
+            from: "private func startInboundControlSession(",
             to: "/// 开始从连接接收消息"
         )
-        let receiveBody = try slice(
-            from: "private func startReceiving(",
+        let outboundReceiveBody = try slice(
+            from: "private func startReceivingOutboundFrames(",
             to: "private func promoteInboundConnectionForFirstFrame"
         )
         let promoteBody = try slice(
             from: "private func promoteInboundConnectionForFirstFrame",
-            to: "private func handleInboundReceiveFailure"
+            to: "private func handleControlReceiveFailure"
         )
         let receiveFailureBody = try slice(
-            from: "private func handleInboundReceiveFailure",
-            to: "private func looksLikeTLSRecordHeader"
+            from: "private func handleControlReceiveFailure",
+            to: "private func prepareProvisionalInboundHandshakeDriver"
         )
         let bootstrapControlBody = try slice(
             from: "private func handlePreHandshakeBootstrapControlMessage(",
             to: "private func makeInboundBootstrapControlResponse"
         )
 
-        XCTAssertTrue(handleIncoming.contains("startReceiving(from: connection, peerId: canonicalPeerId, promoteInboundDevice: canonicalDevice)"))
-        XCTAssertFalse(handleIncoming.contains("connections[canonicalPeerId] = connection"))
-        XCTAssertFalse(handleIncoming.contains("lastKnownDevices[canonicalPeerId] = canonicalDevice"))
-        XCTAssertFalse(handleIncoming.contains("connectionStatusByDeviceId[canonicalPeerId] = .connecting"))
-        XCTAssertFalse(handleIncoming.contains("await transport?.setConnection(connection, for: canonicalPeerId)"))
-        XCTAssertTrue(receiveBody.contains("handlePreHandshakeBootstrapControlMessage("))
-        XCTAssertTrue(receiveBody.contains("over: connection"))
-        XCTAssertTrue(receiveBody.contains("p2p-inbound provisional-bootstrap-control-consumed"))
-        XCTAssertTrue(receiveBody.contains("connection.cancel()"))
-        XCTAssertTrue(receiveBody.contains("prepareProvisionalInboundHandshakeDriver("))
-        XCTAssertTrue(receiveBody.contains("reason: \"入站连接首帧不是有效握手协议帧\""))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("inboundControlSessionTasks[identifier]"))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("token: token"))
         XCTAssertTrue(
-            receiveBody.contains(
-                "P2PControlFramePolicy.inboundBodyByteCount(from: length)"
+            inboundOwnerAndReceive.contains(
+                "inboundControlSessionTasks[identifier]?.token == token"
             )
         )
-        XCTAssertTrue(receiveBody.contains("handleInboundReceiveFailure("))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("Self.inboundFramedReader(for: connection)"))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("beginProcessingProvisionalInboundConnection("))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("stage: .initialHandshake"))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("handlePreHandshakeBootstrapControlMessage("))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("over: connection"))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("p2p-inbound provisional-bootstrap-control-consumed"))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("ifOwnedBy: processingLease"))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("prepareProvisionalInboundHandshakeDriver("))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("hasActiveAuthenticatedSession("))
+        XCTAssertTrue(inboundOwnerAndReceive.contains("reason: \"入站连接首帧不是有效握手协议帧\""))
+        XCTAssertTrue(
+            inboundOwnerAndReceive.contains("let payload = try await reader.receiveFrame()")
+        )
+        XCTAssertTrue(inboundOwnerAndReceive.contains("handleControlReceiveFailure("))
+        XCTAssertFalse(inboundOwnerAndReceive.contains("startReceivingOutboundFrames("))
+        XCTAssertFalse(outboundReceiveBody.contains("promoteInboundDevice"))
+        XCTAssertFalse(outboundReceiveBody.contains("prepareProvisionalInboundHandshakeDriver("))
+        XCTAssertFalse(outboundReceiveBody.contains("provisional-bootstrap-control-consumed"))
         XCTAssertTrue(promoteBody.contains("lastKnownDevices[canonicalPeerId] = canonicalDevice"))
         XCTAssertTrue(promoteBody.contains("connectionStatusByDeviceId[canonicalPeerId] = .connecting"))
         XCTAssertTrue(
@@ -2607,7 +2618,7 @@ final class P2PBootstrapPolicyTests: XCTestCase {
             promoteBody.contains("connections.isCurrent(connectionLease, for: canonicalPeerId)")
         )
         XCTAssertTrue(promoteBody.contains("p2p-inbound promoted-active"))
-        XCTAssertTrue(receiveFailureBody.contains("promoteInboundDevice != nil, !isTrackedConnection(connection)"))
+        XCTAssertTrue(receiveFailureBody.contains("if !isTrackedConnection(connection)"))
         XCTAssertTrue(receiveFailureBody.contains("p2p-inbound provisional-closed"))
         XCTAssertTrue(bootstrapControlBody.contains("over provisionalConnection: NWConnection? = nil"))
         XCTAssertTrue(bootstrapControlBody.contains("allowsPreHandshakeBootstrapControlRouting("))
@@ -2759,30 +2770,30 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         )
     }
 
-    func testIOSP2PRejectsShortBodyBeforeAnyBootstrapClassification() throws {
+    func testIOSP2PUsesSharedExactFramedReaderBeforeBootstrapClassification() throws {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
         )
         let receiveStart = try XCTUnwrap(
-            source.range(of: "private func startReceiving(")
+            source.range(of: "private func handleIncomingConnection(")
         )
         let receiveEnd = try XCTUnwrap(
             source.range(
-                of: "private func promoteInboundConnectionForFirstFrame(",
+                of: "/// 开始从连接接收消息",
                 range: receiveStart.upperBound..<source.endIndex
             )
         )
         let receive = String(source[receiveStart.lowerBound..<receiveEnd.lowerBound])
-        let exactBodyGuard = try XCTUnwrap(
-            receive.range(of: "guard let payload, payload.count == bodyLen else")
+        let framedRead = try XCTUnwrap(
+            receive.range(of: "let payload = try await reader.receiveFrame()")
         )
         let classification = try XCTUnwrap(
             receive.range(of: "let classification = await Task.detached")
         )
 
-        XCTAssertLessThan(exactBodyGuard.lowerBound, classification.lowerBound)
-        XCTAssertTrue(receive.contains("p2p-inbound rx-body-short"))
-        XCTAssertTrue(receive.contains("连接在完整消息体到达前关闭"))
+        XCTAssertLessThan(framedRead.lowerBound, classification.lowerBound)
+        XCTAssertTrue(receive.contains("Self.inboundFramedReader(for: connection)"))
+        XCTAssertFalse(receive.contains("minimumIncompleteLength: 4"))
     }
 
     func testIOSVersion2BonjourDecoderRejectsInjectedKEMMaterial() async throws {
@@ -2900,10 +2911,12 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
         requestedProtocolSigningAlgorithms: [String] = [
             ProtocolSigningAlgorithm.ed25519.rawValue
         ],
+        requesterKey suppliedRequesterKey: Curve25519.Signing.PrivateKey? = nil,
+        responderKey suppliedResponderKey: Curve25519.Signing.PrivateKey? = nil,
         now: Date = Date()
     ) throws -> Transcript {
-        let requesterKey = Curve25519.Signing.PrivateKey()
-        let responderKey = Curve25519.Signing.PrivateKey()
+        let requesterKey = suppliedRequesterKey ?? Curve25519.Signing.PrivateKey()
+        let responderKey = suppliedResponderKey ?? Curve25519.Signing.PrivateKey()
         let requesterPublicKey = requesterKey.publicKey.rawRepresentation
         let responderPublicKey = responderKey.publicKey.rawRepresentation
         let requesterFingerprint = try fingerprint(for: requesterPublicKey)
@@ -2988,7 +3001,10 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
             sasTranscriptHashHex: transcript.candidate.sasTranscriptHashHex(request: transcript.request),
             confirmationNonce: confirmationNonce,
             sentAt: now,
-            expiresAt: min(transcript.candidate.expiresAt, now.addingTimeInterval(120)),
+            expiresAt: P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
+                parentExpiry: transcript.candidate.expiresAt,
+                issuedAt: now
+            ),
             requesterSignature: Data()
         )
         return AppMessage.ProtocolIdentityBindingConfirmPayload(
@@ -3028,7 +3044,10 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
             sasTranscriptHashHex: transcript.candidate.sasTranscriptHashHex(request: transcript.request),
             accepted: accepted,
             sentAt: now,
-            expiresAt: min(confirm.expiresAt, now.addingTimeInterval(120)),
+            expiresAt: P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
+                parentExpiry: confirm.expiresAt,
+                issuedAt: now
+            ),
             responderSignature: Data()
         )
         return AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
@@ -3342,6 +3361,165 @@ final class ProtocolIdentityBindingV3Tests: XCTestCase {
         XCTAssertEqual(liveCount, 2)
         XCTAssertEqual(expiredCount, 0)
     }
+
+    func testResponderInFlightConfirmSuspendsExpiryCleanupUntilCompletion() async throws {
+        let now = Date()
+        let store = ProtocolIdentityBindingV3StateStore(ttl: 300, maximumEntries: 2)
+        let transcript = try makeTranscript(now: now)
+        let context = ProtocolIdentityBindingV3ResponderContext(
+            request: transcript.request,
+            candidate: transcript.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: transcript.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                transcript.responderKey.rawRepresentation
+            ),
+            peerId: "peer",
+            expiresAt: now.addingTimeInterval(300)
+        )
+        guard case .stored = await store.registerCandidate(context, now: now) else {
+            return XCTFail("Candidate must be stored")
+        }
+        let cleanupScheduledBeforeConfirm = await store.cleanupIsScheduledForTesting()
+        XCTAssertTrue(cleanupScheduledBeforeConfirm)
+
+        let confirm = try makeConfirm(transcript: transcript, now: now)
+        guard case .allowed = await store.beginConfirm(confirm, now: now) else {
+            return XCTFail("Matching confirm must enter the bounded in-flight state")
+        }
+        let cleanupScheduledDuringConfirm = await store.cleanupIsScheduledForTesting()
+        XCTAssertFalse(
+            cleanupScheduledDuringConfirm,
+            "An in-flight operator/crypto task owns expiry; a zero-delay cleanup task must not spin."
+        )
+        let retainedInFlightCount = await store.entryCountForTesting(
+            now: now.addingTimeInterval(301)
+        )
+        XCTAssertEqual(
+            retainedInFlightCount,
+            1,
+            "Expiry pruning must retain the exact in-flight transaction until its owner completes or aborts."
+        )
+
+        await store.abortConfirm(
+            transactionId: transcript.request.transactionId,
+            confirmHashHex: confirm.canonicalConfirmHashHex,
+            now: now.addingTimeInterval(301)
+        )
+        let countAfterAbort = await store.entryCountForTesting(
+            now: now.addingTimeInterval(301)
+        )
+        let cleanupScheduledAfterAbort = await store.cleanupIsScheduledForTesting()
+        XCTAssertEqual(countAfterAbort, 0)
+        XCTAssertFalse(cleanupScheduledAfterAbort)
+    }
+
+    func testResponderAdmissionAppliesSharedRequesterQuotaAndRateWindow() async throws {
+        let base = Date()
+        let requesterKey = Curve25519.Signing.PrivateKey()
+        let store = ProtocolIdentityBindingV3StateStore(
+            ttl: P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds,
+            maximumEntries: P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactions
+        )
+
+        for index in 0..<P2PProtocolIdentityBindingAdmissionPolicy
+            .maximumTransactionsPerRequester {
+            let transcript = try makeTranscript(
+                requesterKey: requesterKey,
+                now: base.addingTimeInterval(TimeInterval(index) / 100)
+            )
+            let context = ProtocolIdentityBindingV3ResponderContext(
+                request: transcript.request,
+                candidate: transcript.candidate,
+                requesterProtocolSigningAlgorithm: .ed25519,
+                requesterProtocolIdentityPublicKey: transcript.requesterKey.publicKey.rawRepresentation,
+                requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+                responderProtocolSigningKeyHandle: .softwareKey(
+                    transcript.responderKey.rawRepresentation
+                ),
+                peerId: "same-requester",
+                expiresAt: base.addingTimeInterval(30)
+            )
+            guard case .stored = await store.registerCandidate(context, now: base) else {
+                return XCTFail("Shared per-requester quota must admit its configured prefix")
+            }
+        }
+
+        let quotaTranscript = try makeTranscript(
+            requesterKey: requesterKey,
+            now: base
+        )
+        let quotaContext = ProtocolIdentityBindingV3ResponderContext(
+            request: quotaTranscript.request,
+            candidate: quotaTranscript.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: quotaTranscript.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: quotaTranscript.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                quotaTranscript.responderKey.rawRepresentation
+            ),
+            peerId: "same-requester",
+            expiresAt: base.addingTimeInterval(30)
+        )
+        guard case .requesterQuotaExceeded = await store.registerCandidate(
+            quotaContext,
+            now: base
+        ) else {
+            return XCTFail("The fifth active transaction from one authority must fail closed")
+        }
+
+        await store.clearForTesting()
+        for index in 0..<P2PProtocolIdentityBindingAdmissionPolicy
+            .maximumAdmissionsPerRequesterPerWindow {
+            let admissionNow = base.addingTimeInterval(TimeInterval(index))
+            let transcript = try makeTranscript(
+                requesterKey: requesterKey,
+                now: admissionNow
+            )
+            let context = ProtocolIdentityBindingV3ResponderContext(
+                request: transcript.request,
+                candidate: transcript.candidate,
+                requesterProtocolSigningAlgorithm: .ed25519,
+                requesterProtocolIdentityPublicKey: transcript.requesterKey.publicKey.rawRepresentation,
+                requesterProtocolIdentityFingerprint: transcript.requesterFingerprint,
+                responderProtocolSigningKeyHandle: .softwareKey(
+                    transcript.responderKey.rawRepresentation
+                ),
+                peerId: "same-requester",
+                expiresAt: admissionNow.addingTimeInterval(0.5)
+            )
+            guard case .stored = await store.registerCandidate(
+                context,
+                now: admissionNow
+            ) else {
+                return XCTFail("Short-lived transactions must admit up to the shared rate limit")
+            }
+        }
+        let limitedNow = base.addingTimeInterval(8)
+        let limitedTranscript = try makeTranscript(
+            requesterKey: requesterKey,
+            now: limitedNow
+        )
+        let limitedContext = ProtocolIdentityBindingV3ResponderContext(
+            request: limitedTranscript.request,
+            candidate: limitedTranscript.candidate,
+            requesterProtocolSigningAlgorithm: .ed25519,
+            requesterProtocolIdentityPublicKey: limitedTranscript.requesterKey.publicKey.rawRepresentation,
+            requesterProtocolIdentityFingerprint: limitedTranscript.requesterFingerprint,
+            responderProtocolSigningKeyHandle: .softwareKey(
+                limitedTranscript.responderKey.rawRepresentation
+            ),
+            peerId: "same-requester",
+            expiresAt: limitedNow.addingTimeInterval(0.5)
+        )
+        guard case .requesterRateLimited = await store.registerCandidate(
+            limitedContext,
+            now: limitedNow
+        ) else {
+            return XCTFail("The shared ten-second requester admission rate must fail closed")
+        }
+    }
 }
 
 @available(iOS 17.0, *)
@@ -3354,6 +3532,328 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
             .deletingLastPathComponent()
         return try readRepositorySourceForSourceShapeTests(
             at: repoRoot.appendingPathComponent(relativePath))
+    }
+
+    func testHandshakeFrameProcessorOnlyOwnsResponderTerminalCommit() {
+        XCTAssertFalse(
+            P2PHandshakeOperationCompletionAuthority
+                .initiatingTask
+                .frameProcessorOwnsTerminalCommit
+        )
+        XCTAssertTrue(
+            P2PHandshakeOperationCompletionAuthority
+                .inboundFrameProcessor
+                .frameProcessorOwnsTerminalCommit
+        )
+        XCTAssertEqual(
+            P2PHandshakeOperationCompletionAuthority.initiatingTask
+                .frameProcessorPostAwaitAction(isCurrent: true),
+            .returnWithoutDriverMutation
+        )
+        XCTAssertEqual(
+            P2PHandshakeOperationCompletionAuthority.initiatingTask
+                .frameProcessorPostAwaitAction(isCurrent: false),
+            .returnWithoutDriverMutation
+        )
+        XCTAssertEqual(
+            P2PHandshakeOperationCompletionAuthority.inboundFrameProcessor
+                .frameProcessorPostAwaitAction(isCurrent: true),
+            .continueResponderTerminalProcessing
+        )
+        XCTAssertEqual(
+            P2PHandshakeOperationCompletionAuthority.inboundFrameProcessor
+                .frameProcessorPostAwaitAction(isCurrent: false),
+            .returnWithoutDriverMutation
+        )
+    }
+
+    func testPairingIdentityBootstrapReadinessRequiresExactObservationAndTrustMaterial() {
+        XCTAssertFalse(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: false,
+                hasStrictPQCTrustMaterial: false
+            )
+        )
+        XCTAssertFalse(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: true,
+                hasStrictPQCTrustMaterial: false
+            )
+        )
+        XCTAssertFalse(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: false,
+                hasStrictPQCTrustMaterial: true
+            )
+        )
+        XCTAssertTrue(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: true,
+                hasStrictPQCTrustMaterial: true
+            )
+        )
+    }
+
+    func testPairingIdentityBootstrapReceiptSurvivesExactReplayAndRejectsAuthorityMutation() {
+        let generation = UUID()
+        let fingerprint = String(repeating: "a", count: 64)
+        let acceptedMaterialDigest = Data(repeating: 0x11, count: 32)
+        let receipt = P2PPairingIdentityBootstrapReadinessReceipt(
+            peerId: "id:remote-authority",
+            connectionGeneration: generation,
+            sessionId: "session-a",
+            declaredDeviceId: "id:remote-authority",
+            protocolPublicKeyFingerprint: fingerprint,
+            acceptedMaterialDigest: acceptedMaterialDigest
+        )
+
+        XCTAssertTrue(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: generation,
+                sessionId: "session-a",
+                declaredDeviceId: "id:remote-authority",
+                protocolPublicKeyFingerprint: fingerprint,
+                acceptedMaterialDigest: acceptedMaterialDigest
+            )
+        )
+        XCTAssertFalse(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: UUID(),
+                sessionId: "session-a",
+                declaredDeviceId: "id:remote-authority",
+                protocolPublicKeyFingerprint: fingerprint,
+                acceptedMaterialDigest: acceptedMaterialDigest
+            )
+        )
+        XCTAssertFalse(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: generation,
+                sessionId: "session-b",
+                declaredDeviceId: "id:remote-authority",
+                protocolPublicKeyFingerprint: fingerprint,
+                acceptedMaterialDigest: acceptedMaterialDigest
+            )
+        )
+        XCTAssertTrue(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: generation,
+                sessionId: "session-a",
+                declaredDeviceId: "id:remote-authority",
+                protocolPublicKeyFingerprint: fingerprint,
+                acceptedMaterialDigest: acceptedMaterialDigest
+            ),
+            "A repeated exact authority observation must not revoke a current-session receipt"
+        )
+        XCTAssertFalse(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: generation,
+                sessionId: "session-a",
+                declaredDeviceId: "id:other-authority",
+                protocolPublicKeyFingerprint: fingerprint,
+                acceptedMaterialDigest: acceptedMaterialDigest
+            )
+        )
+        XCTAssertFalse(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: generation,
+                sessionId: "session-a",
+                declaredDeviceId: "id:remote-authority",
+                protocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+                acceptedMaterialDigest: acceptedMaterialDigest
+            )
+        )
+        XCTAssertFalse(
+            receipt.matches(
+                peerId: "id:remote-authority",
+                connectionGeneration: generation,
+                sessionId: "session-a",
+                declaredDeviceId: "id:remote-authority",
+                protocolPublicKeyFingerprint: fingerprint,
+                acceptedMaterialDigest: Data(repeating: 0x22, count: 32)
+            )
+        )
+    }
+
+    func testPairingIdentityBootstrapEvidenceClassifierSeparatesReplayMissingAndConflict() {
+        let generation = UUID()
+        let fingerprint = String(repeating: "a", count: 64)
+        let acceptedMaterialDigest = Data(repeating: 0x11, count: 32)
+        let receipt = P2PPairingIdentityBootstrapReadinessReceipt(
+            peerId: "id:remote-authority",
+            connectionGeneration: generation,
+            sessionId: "session-a",
+            declaredDeviceId: "id:remote-authority",
+            protocolPublicKeyFingerprint: fingerprint,
+            acceptedMaterialDigest: acceptedMaterialDigest
+        )
+        let exactReplay = P2PPairingIdentityBootstrapEvidence(
+            connectionGeneration: generation,
+            sessionId: "session-a",
+            declaredDeviceId: "id:remote-authority",
+            protocolPublicKeyFingerprint: fingerprint,
+            acceptedMaterialDigest: acceptedMaterialDigest
+        )
+        let olderSession = P2PPairingIdentityBootstrapEvidence(
+            connectionGeneration: UUID(),
+            sessionId: "session-old",
+            declaredDeviceId: "id:remote-authority",
+            protocolPublicKeyFingerprint: fingerprint,
+            acceptedMaterialDigest: acceptedMaterialDigest
+        )
+        let changedAuthority = P2PPairingIdentityBootstrapEvidence(
+            connectionGeneration: generation,
+            sessionId: "session-a",
+            declaredDeviceId: "id:remote-authority",
+            protocolPublicKeyFingerprint: fingerprint,
+            acceptedMaterialDigest: Data(repeating: 0x22, count: 32)
+        )
+
+        XCTAssertEqual(receipt.evidenceState(for: [exactReplay]), .current)
+        XCTAssertEqual(
+            receipt.evidenceState(for: [olderSession, exactReplay]),
+            .current,
+            "An old connection alias must not pollute exact-session evidence"
+        )
+        XCTAssertEqual(receipt.evidenceState(for: []), .missing)
+        XCTAssertEqual(receipt.evidenceState(for: [olderSession]), .missing)
+        XCTAssertEqual(
+            receipt.evidenceState(for: [exactReplay, changedAuthority]),
+            .authorityConflict,
+            "One conflicting alias must invalidate the entire exact-session evidence set"
+        )
+    }
+
+    func testPairingIdentityBootstrapReadinessReusesExactCurrentObservationBeforeSending() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let start = try XCTUnwrap(
+            source.range(of: "func requestPairingIdentityExchangeBootstrapReadiness(")
+        )
+        let end = try XCTUnwrap(
+            source.range(
+                of: "private func pairingIdentityBootstrapReceipt(",
+                range: start.upperBound..<source.endIndex
+            )
+        )
+        let body = String(source[start.lowerBound..<end.lowerBound])
+        let existingObservation = try XCTUnwrap(body.range(of: "since: .distantPast"))
+        let strictTrust = try XCTUnwrap(
+            body.range(of: "await hasStrictPQCTrustBootstrapMaterial(for: observation)")
+        )
+        let send = try XCTUnwrap(
+            body.range(of: "let sendOutcome = try await sendPairingIdentityExchange(")
+        )
+
+        XCTAssertLessThan(existingObservation.lowerBound, strictTrust.lowerBound)
+        XCTAssertLessThan(strictTrust.lowerBound, send.lowerBound)
+        XCTAssertTrue(body.contains("case .journalBusy:"))
+        XCTAssertTrue(body.contains("case .current:"))
+    }
+
+    func testOutboundInitiatorRetainsExactHandshakeOwnerUntilItsCommitCompletes() throws {
+        let source = try readRepositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+        )
+        let inboundCreationStart = try XCTUnwrap(
+            source.range(of: "private func ensureInboundHandshakeDriverIfNeeded(")
+        )
+        let inboundCreationEnd = try XCTUnwrap(
+            source.range(
+                of: "private func processHandshakeFrame(",
+                range: inboundCreationStart.lowerBound..<source.endIndex
+            )
+        )
+        let inboundCreationBody = String(
+            source[inboundCreationStart.lowerBound..<inboundCreationEnd.lowerBound]
+        )
+        XCTAssertTrue(inboundCreationBody.contains("completionAuthority: .inboundFrameProcessor"))
+
+        let processStart = inboundCreationEnd
+        let processEnd = try XCTUnwrap(
+            source.range(
+                of: "private func ensureInboundRekeyDriverIfNeeded(",
+                range: processStart.lowerBound..<source.endIndex
+            )
+        )
+        let processBody = String(source[processStart.lowerBound..<processEnd.lowerBound])
+        let exactOwnerLookup = try XCTUnwrap(
+            processBody.range(of: "handshakeOperationOwnerByPeerId[peerId]")
+        )
+        let postAwaitAuthorityGate = try XCTUnwrap(
+            processBody.range(
+                of: "operationOwner.completionAuthority.frameProcessorPostAwaitAction"
+            )
+        )
+        let messageDelivery = try XCTUnwrap(
+            processBody.range(of: "await activeDriver.handleMessage(frame, from: peer)")
+        )
+        let stateRead = try XCTUnwrap(
+            processBody.range(of: "let state = await activeDriver.getCurrentState()")
+        )
+        let terminalSwitch = try XCTUnwrap(processBody.range(of: "switch state"))
+        let driverDetach = try XCTUnwrap(
+            processBody.range(of: "detachHandshakeDriverIfOwned(")
+        )
+        let ownerFinish = try XCTUnwrap(
+            processBody.range(of: "finishHandshakeOperation(operationOwner)")
+        )
+
+        XCTAssertLessThan(exactOwnerLookup.lowerBound, messageDelivery.lowerBound)
+        XCTAssertLessThan(messageDelivery.lowerBound, postAwaitAuthorityGate.lowerBound)
+        XCTAssertLessThan(postAwaitAuthorityGate.lowerBound, stateRead.lowerBound)
+        XCTAssertLessThan(stateRead.lowerBound, terminalSwitch.lowerBound)
+        XCTAssertGreaterThanOrEqual(
+            processBody.components(separatedBy: "frameProcessorPostAwaitAction").count - 1,
+            2,
+            "Both driver awaits must re-enter through the exact completion-authority decision."
+        )
+        XCTAssertLessThan(terminalSwitch.lowerBound, driverDetach.lowerBound)
+        XCTAssertLessThan(driverDetach.lowerBound, ownerFinish.lowerBound)
+        XCTAssertFalse(
+            processBody.contains(
+                "let operationOwner = HandshakeOperationOwner("
+            ),
+            "The receive path must preserve completion authority from the exact registry owner."
+        )
+
+        let performStart = try XCTUnwrap(
+            source.range(of: "private func performPQCHandshake(")
+        )
+        let performEnd = try XCTUnwrap(
+            source.range(
+                of: "/// 强制用 preferPQC=true",
+                range: performStart.lowerBound..<source.endIndex
+            )
+        )
+        let performBody = String(source[performStart.lowerBound..<performEnd.lowerBound])
+        XCTAssertTrue(performBody.contains("completionAuthority: .initiatingTask"))
+        XCTAssertTrue(performBody.contains("finishHandshakeOperation(operationOwner)"))
+        XCTAssertTrue(performBody.contains("try requireCurrentHandshakeOperation(operationOwner)"))
+
+        let rekeyStart = try XCTUnwrap(
+            source.range(of: "public func rekeyToPreferPQC(")
+        )
+        let rekeyBody = String(source[rekeyStart.lowerBound...])
+        XCTAssertTrue(rekeyBody.contains("completionAuthority: .initiatingTask"))
+
+        let inboundRekeyStart = processEnd
+        let inboundRekeyEnd = try XCTUnwrap(
+            source.range(
+                of: "private func isLikelyHandshakeControlPacket(",
+                range: inboundRekeyStart.lowerBound..<source.endIndex
+            )
+        )
+        let inboundRekeyBody = String(
+            source[inboundRekeyStart.lowerBound..<inboundRekeyEnd.lowerBound]
+        )
+        XCTAssertTrue(inboundRekeyBody.contains("completionAuthority: .inboundFrameProcessor"))
     }
 
     func testStrictPQCRecognizesCanonicalMLKEMAsSatisfyingForwardSecureTarget() {
@@ -3402,27 +3902,67 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         let source = try readRepositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
         )
-        let start = try XCTUnwrap(source.range(of: "private func processHandshakeFrame("))
-        let end = try XCTUnwrap(
-            source.range(of: "private func ensureInboundRekeyDriverIfNeeded(", range: start.lowerBound..<source.endIndex)
+        let processStart = try XCTUnwrap(source.range(of: "private func processHandshakeFrame("))
+        let processEnd = try XCTUnwrap(
+            source.range(
+                of: "private func ensureInboundRekeyDriverIfNeeded(",
+                range: processStart.lowerBound..<source.endIndex
+            )
         )
-        let body = String(source[start.lowerBound..<end.lowerBound])
+        let body = String(source[processStart.lowerBound..<processEnd.lowerBound])
         let commit = try XCTUnwrap(
             body.range(of: "persistedAuthority = try persistAuthenticatedRemoteAuthority(")
         )
-        let provisionalFinish = try XCTUnwrap(body.range(of: "finishProvisionalInboundConnection("))
         let sessionKeyPublish = try XCTUnwrap(body.range(of: "guard setSessionKeys("))
+        let sessionAuthorityInstall = try XCTUnwrap(
+            body.range(of: "try installSessionPairingAuthority(")
+        )
         let connectedPublish = try XCTUnwrap(body.range(of: "connectionStatusByDeviceId[peerId] = .connected"))
         let heartbeatStart = try XCTUnwrap(body.range(of: "startHeartbeatIfNeeded(deviceId: peerId)"))
 
-        XCTAssertLessThan(commit.lowerBound, provisionalFinish.lowerBound)
         XCTAssertLessThan(commit.lowerBound, sessionKeyPublish.lowerBound)
+        XCTAssertLessThan(sessionKeyPublish.lowerBound, sessionAuthorityInstall.lowerBound)
+        XCTAssertLessThan(sessionAuthorityInstall.lowerBound, connectedPublish.lowerBound)
         XCTAssertLessThan(commit.lowerBound, connectedPublish.lowerBound)
         XCTAssertLessThan(commit.lowerBound, heartbeatStart.lowerBound)
+        XCTAssertFalse(
+            body.contains("finishProvisionalInboundConnection("),
+            "The handshake worker must not release admission before its caller observes an active authenticated session."
+        )
         XCTAssertTrue(body.contains("cleanupBrokenInboundConnection("))
         XCTAssertFalse(
             body.contains("await transport?.removeConnection(for: peerId)"),
             "Late failure cleanup must not broadly remove a replacement transport connection."
+        )
+
+        let inboundStart = try XCTUnwrap(source.range(of: "private func handleIncomingConnection("))
+        let inboundEnd = try XCTUnwrap(
+            source.range(
+                of: "/// 开始从连接接收消息",
+                range: inboundStart.lowerBound..<source.endIndex
+            )
+        )
+        let inboundBody = String(source[inboundStart.lowerBound..<inboundEnd.lowerBound])
+        let messageHandling = try XCTUnwrap(
+            inboundBody.range(of: "await handleReceivedMessage(")
+        )
+        let authenticatedSessionGate = try XCTUnwrap(
+            inboundBody.range(
+                of: "hasActiveAuthenticatedSession(for: canonicalPeerId)",
+                range: messageHandling.upperBound..<inboundBody.endIndex
+            )
+        )
+        let exactAdmissionRelease = try XCTUnwrap(
+            inboundBody.range(
+                of: "finishProvisionalInboundConnection(",
+                range: authenticatedSessionGate.upperBound..<inboundBody.endIndex
+            )
+        )
+
+        XCTAssertLessThan(messageHandling.lowerBound, authenticatedSessionGate.lowerBound)
+        XCTAssertLessThan(authenticatedSessionGate.lowerBound, exactAdmissionRelease.lowerBound)
+        XCTAssertTrue(
+            inboundBody[exactAdmissionRelease.lowerBound...].contains("ifOwnedBy: processingLease")
         )
     }
 

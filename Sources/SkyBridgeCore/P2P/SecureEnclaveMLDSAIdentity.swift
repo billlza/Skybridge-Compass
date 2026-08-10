@@ -311,27 +311,41 @@ actor OQSProtocolMLDSASigningCallback: SigningCallback {
     private let identity: String
     private let expectedPublicKey: Data
     private let scopeSource: SkyBridgeSharedIdentityScopeSource
+    private let existingOnly: Bool
 
     init(
         algorithm: ProtocolSigningAlgorithm,
         identity: String,
         expectedPublicKey: Data,
-        scopeSource: SkyBridgeSharedIdentityScopeSource
+        scopeSource: SkyBridgeSharedIdentityScopeSource,
+        existingOnly: Bool = false
     ) {
         self.algorithm = algorithm
         self.identity = identity
         self.expectedPublicKey = expectedPublicKey
         self.scopeSource = scopeSource
+        self.existingOnly = existingOnly
     }
 
     func sign(data: Data) async throws -> Data {
-        let result = try await OQSBridge.sign(
-            data,
-            peerId: identity,
-            algorithm: try Self.oqsAlgorithm(for: algorithm),
-            authority: .active,
-            scopeSource: scopeSource
-        )
+        let result: OQSSignatureResult
+        if existingOnly {
+            result = try await OQSBridge.signExistingOnly(
+                data,
+                peerId: identity,
+                algorithm: try Self.oqsAlgorithm(for: algorithm),
+                authority: .active,
+                scopeSource: scopeSource
+            )
+        } else {
+            result = try await OQSBridge.sign(
+                data,
+                peerId: identity,
+                algorithm: try Self.oqsAlgorithm(for: algorithm),
+                authority: .active,
+                scopeSource: scopeSource
+            )
+        }
         guard result.publicKey == expectedPublicKey else {
             throw DeviceIdentityKeyError.authorityConflict(
                 "liboqs \(algorithm.rawValue) protocol identity changed during signing"
@@ -345,14 +359,52 @@ actor OQSProtocolMLDSASigningCallback: SigningCallback {
         identity: String,
         scopeSource: SkyBridgeSharedIdentityScopeSource
     ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
-        let challenge = Data("SkyBridge/OQS/protocol-identity/v1".utf8)
-        let result = try await OQSBridge.sign(
-            challenge,
-            peerId: identity,
-            algorithm: try oqsAlgorithm(for: algorithm),
-            authority: .active,
-            scopeSource: scopeSource
+        try await resolve(
+            algorithm: algorithm,
+            identity: identity,
+            scopeSource: scopeSource,
+            existingOnly: false
         )
+    }
+
+    static func resolveExistingOnly(
+        algorithm: ProtocolSigningAlgorithm,
+        identity: String,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        try await resolve(
+            algorithm: algorithm,
+            identity: identity,
+            scopeSource: scopeSource,
+            existingOnly: true
+        )
+    }
+
+    private static func resolve(
+        algorithm: ProtocolSigningAlgorithm,
+        identity: String,
+        scopeSource: SkyBridgeSharedIdentityScopeSource,
+        existingOnly: Bool
+    ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        let challenge = Data("SkyBridge/OQS/protocol-identity/v1".utf8)
+        let result: OQSSignatureResult
+        if existingOnly {
+            result = try await OQSBridge.signExistingOnly(
+                challenge,
+                peerId: identity,
+                algorithm: try oqsAlgorithm(for: algorithm),
+                authority: .active,
+                scopeSource: scopeSource
+            )
+        } else {
+            result = try await OQSBridge.sign(
+                challenge,
+                peerId: identity,
+                algorithm: try oqsAlgorithm(for: algorithm),
+                authority: .active,
+                scopeSource: scopeSource
+            )
+        }
         let expectedPublicKeyLength: Int
         let expectedSignatureLength: Int
         switch algorithm {
@@ -381,7 +433,8 @@ actor OQSProtocolMLDSASigningCallback: SigningCallback {
             algorithm: algorithm,
             identity: identity,
             expectedPublicKey: result.publicKey,
-            scopeSource: scopeSource
+            scopeSource: scopeSource,
+            existingOnly: existingOnly
         )
         return (result.publicKey, .callback(callback))
     }

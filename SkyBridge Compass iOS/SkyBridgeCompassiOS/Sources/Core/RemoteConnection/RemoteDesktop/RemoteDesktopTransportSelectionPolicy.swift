@@ -2,42 +2,24 @@ import Foundation
 
 @available(iOS 17.0, *)
 enum RemoteDesktopTransportSelectionPolicy {
-    static func shouldUseCrossNetworkTransport(
+    static func decision(
         for device: DiscoveredDevice,
+        routeIntent: PeerTransportRouteIntent,
         crossNetworkState: CrossNetworkWebRTCManager.State,
-        remoteDeviceId: String?,
-        remoteDeviceName: String?,
-        capability: String
-    ) -> Bool {
-        guard case .connected(let sessionId) = crossNetworkState else { return false }
-
-        if isCrossNetworkDevice(device, capability: capability) {
-            return true
+        remoteDeviceIDs: [String?]
+    ) -> PeerTransportRouteDecision {
+        let activeSessionID: String?
+        if case .connected(let sessionID) = crossNetworkState {
+            activeSessionID = sessionID
+        } else {
+            activeSessionID = nil
         }
-
-        if device.id == "webrtc-\(sessionId)" || device.id.hasPrefix("webrtc-") {
-            return true
-        }
-
-        if let remoteId = remoteDeviceId?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-           !remoteId.isEmpty,
-           remoteId == device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-            return true
-        }
-
-        if let remoteDeviceName {
-            let normalizedRemoteName = normalizedDeviceName(remoteDeviceName)
-            if !normalizedRemoteName.isEmpty,
-               normalizedDeviceName(device.name) == normalizedRemoteName,
-               device.services.isEmpty,
-               device.ipAddress == nil {
-                return true
-            }
-        }
-
-        return false
+        return PeerTransportRouteSelectionContract.evaluate(
+            targetDeviceID: device.id,
+            routeIntent: routeIntent,
+            activeCrossNetworkSessionID: activeSessionID,
+            activeCrossNetworkRemoteDeviceIDs: remoteDeviceIDs
+        )
     }
 
     static func isCrossNetworkDevice(_ device: DiscoveredDevice, capability: String) -> Bool {
@@ -45,10 +27,4 @@ enum RemoteDesktopTransportSelectionPolicy {
             || device.advertisedCapabilities.contains(capability)
     }
 
-    private static func normalizedDeviceName(_ raw: String) -> String {
-        raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .replacingOccurrences(of: " ", with: "")
-    }
 }

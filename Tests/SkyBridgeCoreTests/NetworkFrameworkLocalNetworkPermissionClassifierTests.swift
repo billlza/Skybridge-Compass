@@ -1,6 +1,7 @@
 import Network
 import XCTest
 @testable import SkyBridgeCore
+import dnssd
 
 final class NetworkFrameworkLocalNetworkPermissionClassifierTests: XCTestCase {
     func testLocalNetworkUnsatisfiedReasonIsClassifiedAsPermissionDenied() {
@@ -35,6 +36,21 @@ final class NetworkFrameworkLocalNetworkPermissionClassifierTests: XCTestCase {
         XCTAssertFalse(
             NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
                 errorDescriptions: ["The Internet connection appears to be offline"]
+            )
+        )
+    }
+
+    func testDNSServicePolicyDenialIsClassifiedWithoutLocalizedText() {
+        XCTAssertTrue(
+            NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                error: .dns(DNSServiceErrorType(kDNSServiceErr_PolicyDenied)),
+                path: nil
+            )
+        )
+        XCTAssertFalse(
+            NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(
+                error: .dns(DNSServiceErrorType(kDNSServiceErr_Timeout)),
+                path: nil
             )
         )
     }

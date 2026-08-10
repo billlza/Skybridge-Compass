@@ -240,6 +240,7 @@ signingFingerprint=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 boot role=ios-p2p-client target=$RAW_TARGET_UUID name=Personal MacBook Pro
 discovered count=1 peers=id:$RAW_TARGET_UUID_LOWER|Personal MacBook Pro
 target id=id:$RAW_TARGET_UUID_LOWER name=Personal MacBook Pro
+control-route evidence liveEndpointCount=2 eligibleEndpointCount=1 ignoredLiveEndpointCount=1 liveRoutes=service[Personal MacBook Pro|_skybridge._tcp|local.|awdl0] eligibleRoutes=service[Personal MacBook Pro (2)|_skybridge._tcp|local.|awdl0]
 refresh candidates=$RAW_TARGET_UUID,$RAW_TARGET_UUID_LOWER,Personal MacBook Pro clearedKEM=1
 file-transfer-route-ready requested=$RAW_PRIVATE_ENDPOINT resolved=$RAW_PRIVATE_ENDPOINT requestedAddressClass=lan-direct resolvedAddressClass=lan-direct resolvedPeerToPeer=false
 handshake-state established(sessionKeys: SessionKeys(sessionId: "$RAW_HANDSHAKE_SESSION_ID", negotiatedSuite: X-Wing))
@@ -441,6 +442,9 @@ assert_public_scanner_rejects_fixture \
   "identity-list" \
   "discovered peers=id:$RAW_TARGET_UUID_LOWER|Personal MacBook Pro"
 assert_public_scanner_rejects_fixture \
+  "route-summary-service-name" \
+  "control-route liveRoutes=service[Personal MacBook Pro|_skybridge._tcp|local.|awdl0]"
+assert_public_scanner_rejects_fixture \
   "shorthand-identity" \
   "target id=id:$RAW_TARGET_UUID_LOWER"
 assert_public_scanner_rejects_fixture \
@@ -510,6 +514,7 @@ assert_contains "teamIdentifier=<redacted-signing-metadata>" "$PUBLIC_STATUS"
 assert_contains "target=<redacted-identity> name=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
 assert_contains "peers=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
 assert_contains "id=<redacted-identity> name=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
+assert_contains "liveRoutes=<redacted-public-artifact-value> eligibleRoutes=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
 assert_contains "candidates=<redacted-public-artifact-value> clearedKEM=1" "$PUBLIC_STATUS"
 assert_contains "requested=<redacted-public-artifact-value> resolved=<redacted-public-artifact-value>" "$PUBLIC_STATUS"
 assert_contains 'sessionId: "<redacted-identity>"' "$PUBLIC_STATUS"

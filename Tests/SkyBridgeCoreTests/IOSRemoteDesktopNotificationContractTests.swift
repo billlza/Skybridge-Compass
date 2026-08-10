@@ -44,7 +44,8 @@ final class IOSRemoteDesktopNotificationContractTests: XCTestCase {
         XCTAssertTrue(remoteDesktop.contains("NotificationManager.beginRemoteDesktopSession(\n                sessionId: refreshedLANDevice.id,\n                transport: \"lan\",\n                role: \"viewer\""))
         XCTAssertTrue(remoteDesktop.contains("kind: .normal,\n                reason: \"viewer_disconnect_transport\""))
         XCTAssertTrue(remoteDesktop.contains("kind: .interrupted,\n                reason: errorMessage"))
-        XCTAssertTrue(remoteDesktop.contains("await crossNetwork.notifyRemoteDesktopInterruptedForActiveSession(reason: errorMessage)"))
+        XCTAssertTrue(remoteDesktop.contains("_ = await crossNetwork.notifyRemoteDesktopInterruptedIfCurrent("))
+        XCTAssertTrue(remoteDesktop.contains("crossNetworkOwner,\n                reason: errorMessage"))
     }
 
     func testIOSWebRTCTerminalSessionTerminationOwnsLifecycleBeforeNotifying() throws {

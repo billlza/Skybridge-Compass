@@ -62,6 +62,16 @@ extension CrossNetworkConnectionManager {
             switch transportError {
             case .udpConnectionReadyTimedOut:
                 return "udpConnectionReadyTimedOut"
+            case .udpLocalNetworkPermissionDenied:
+                return "udpLocalNetworkPermissionDenied"
+            case .udpListenerMissingBoundPort:
+                return "udpListenerMissingBoundPort"
+            case .udpListenerReadyTimedOut:
+                return "udpListenerReadyTimedOut"
+            case .udpReceiverAlreadyStarted:
+                return "udpReceiverAlreadyStarted"
+            case .udpReadyPathMismatch:
+                return "udpReadyPathMismatch"
             case .relayBindTimedOut:
                 return "relayBindTimedOut"
             case .relayBindRejected:

@@ -29,10 +29,11 @@ enum LANRemoteControlTrustResolver {
 
         let deviceIds = Array(
             Set(
-                matches
-                    .map(resolvedCurrentDeviceId(for:))
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
+                matches.compactMap {
+                    PeerIdentityAliasResolver.persistentDeviceId(
+                        from: resolvedCurrentDeviceId(for: $0)
+                    )
+                }
             )
         ).sorted()
         let fingerprints = Array(
@@ -44,6 +45,9 @@ enum LANRemoteControlTrustResolver {
             )
         ).sorted()
 
+        guard !deviceIds.isEmpty else {
+            return .missing
+        }
         guard deviceIds.count == 1 && fingerprints.count <= 1 else {
             return .ambiguous(deviceIds: deviceIds, fingerprints: fingerprints)
         }
@@ -82,29 +86,21 @@ enum LANRemoteControlTrustResolver {
         for device: DiscoveredDevice,
         trustedPeerId: String? = nil
     ) -> Set<String> {
-        var aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
-        aliases.formUnion(PeerIdentityAliasResolver.aliasKeys(for: device))
-        aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: trustedPeerId))
-        if let ipAddress = device.ipAddress {
-            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
+        let deviceStableId = PeerIdentityAliasResolver.persistentDeviceId(from: device.id)
+        let trustedStableId = PeerIdentityAliasResolver.persistentDeviceId(from: trustedPeerId)
+        if let deviceStableId, let trustedStableId,
+           deviceStableId != trustedStableId {
+            return []
         }
-        return Set(aliases.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        return stableAliases(for: [deviceStableId, trustedStableId])
     }
 
     static func recordAliases(
         for trustedRecord: TrustedDeviceStore.TrustedDevice
     ) -> Set<String> {
-        var aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: trustedRecord.id))
-        if let currentDeviceId = trustedRecord.currentDeviceId {
-            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: currentDeviceId))
-        }
-        for knownDeviceId in trustedRecord.knownDeviceIds ?? [] {
-            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: knownDeviceId))
-        }
-        if let ipAddress = trustedRecord.ipAddress {
-            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: ipAddress))
-        }
-        return aliases
+        var identifiers: [String?] = [trustedRecord.id, trustedRecord.currentDeviceId]
+        identifiers.append(contentsOf: (trustedRecord.knownDeviceIds ?? []).map(Optional.some))
+        return stableAliases(for: identifiers)
     }
 
     static func resolvedCurrentDeviceId(
@@ -115,5 +111,16 @@ enum LANRemoteControlTrustResolver {
 
     private static func isActive(_ trustedRecord: TrustedDeviceStore.TrustedDevice) -> Bool {
         (trustedRecord.currentPathLifecycleState ?? .active) == .active
+    }
+
+    private static func stableAliases(for identifiers: [String?]) -> Set<String> {
+        var aliases = Set<String>()
+        for identifier in identifiers {
+            guard let persistent = PeerIdentityAliasResolver.persistentDeviceId(from: identifier) else {
+                continue
+            }
+            aliases.formUnion(PeerIdentityAliasResolver.lookupCandidates(for: persistent))
+        }
+        return aliases
     }
 }

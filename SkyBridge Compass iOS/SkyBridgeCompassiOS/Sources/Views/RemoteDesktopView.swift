@@ -33,6 +33,12 @@ private enum RemoteDesktopIdleTimerCoordinator {
 }
 #endif
 
+@available(iOS 17.0, *)
+private struct RemoteDesktopConnectionSelection {
+    let connection: Connection
+    let routeIntent: PeerTransportRouteIntent
+}
+
 /// 远程桌面视图 - 支持触摸控制和手势操作
 @available(iOS 17.0, *)
 struct RemoteDesktopView: View {
@@ -192,7 +198,7 @@ struct RemoteDesktopView: View {
                 .font(.title2.bold())
                 .foregroundColor(.white)
             
-            if lanRemoteConnections.isEmpty && crossNetworkConnection == nil {
+            if lanRemoteConnections.isEmpty && crossNetworkSelection == nil {
                 Text(
                     "\(RuntimeLocalization.string("当前没有活动连接"))\n\(RuntimeLocalization.string("请先在发现页面连接设备"))"
                 )
@@ -203,19 +209,24 @@ struct RemoteDesktopView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        if let crossNetworkConnection {
+                        if let crossNetworkSelection {
                             Button {
-                                connectToDevice(crossNetworkConnection)
+                                connectToDevice(
+                                    crossNetworkSelection.connection,
+                                    routeIntent: crossNetworkSelection.routeIntent
+                                )
                             } label: {
-                                ConnectionCardView(connection: crossNetworkConnection)
+                                ConnectionCardView(connection: crossNetworkSelection.connection)
                             }
                             .buttonStyle(.plain)
-                            .accessibilityIdentifier("remote.connection.\(crossNetworkConnection.device.id)")
+                            .accessibilityIdentifier(
+                                "remote.connection.\(crossNetworkSelection.connection.device.id)"
+                            )
                             .accessibilityElement(children: .combine)
                         }
                         ForEach(lanRemoteConnections) { connection in
                             Button {
-                                connectToDevice(connection)
+                                connectToDevice(connection, routeIntent: .directLAN)
                             } label: {
                                 ConnectionCardView(connection: connection)
                             }
@@ -245,7 +256,7 @@ struct RemoteDesktopView: View {
         .accessibilityIdentifier("remote.selection")
     }
 
-    private var crossNetworkConnection: Connection? {
+    private var crossNetworkSelection: RemoteDesktopConnectionSelection? {
         guard let snapshot = crossNetworkManager.activeSessionSnapshot else { return nil }
         switch snapshot.phase {
         case .handshakeComplete:
@@ -275,11 +286,14 @@ struct RemoteDesktopView: View {
             advertisedCapabilities: ["remote_desktop", RemoteDesktopManager.crossNetworkDeviceCapability],
             capabilities: ["remote_desktop", RemoteDesktopManager.crossNetworkDeviceCapability]
         )
-        return Connection(
-            id: "webrtc-\(sessionId)",
-            device: pseudoDevice,
-            status: .connected,
-            encryptionType: .pqc
+        return RemoteDesktopConnectionSelection(
+            connection: Connection(
+                id: "webrtc-\(sessionId)",
+                device: pseudoDevice,
+                status: .connected,
+                encryptionType: .pqc
+            ),
+            routeIntent: .crossNetwork(sessionID: sessionId)
         )
     }
 
@@ -289,7 +303,10 @@ struct RemoteDesktopView: View {
         }
     }
 
-    private func connectToDevice(_ connection: Connection) {
+    private func connectToDevice(
+        _ connection: Connection,
+        routeIntent: PeerTransportRouteIntent
+    ) {
         selectedConnection = connection
 #if DEBUG || SKYBRIDGE_TESTING
         if shouldAutoConnectUITestFixture {
@@ -298,7 +315,10 @@ struct RemoteDesktopView: View {
 #endif
         Task {
             do {
-                try await remoteDesktopManager.startStreaming(from: connection)
+                try await remoteDesktopManager.startStreaming(
+                    from: connection,
+                    routeIntent: routeIntent
+                )
                 await MainActor.run {
                     if let activeConnection = remoteDesktopManager.currentConnection {
                         selectedConnection = activeConnection
@@ -328,13 +348,16 @@ struct RemoteDesktopView: View {
     }
 
     private func attemptAutoConnectCrossNetworkSession() {
-        guard let connection = crossNetworkConnection else { return }
+        guard let selection = crossNetworkSelection else { return }
         guard !remoteDesktopManager.isStreaming else { return }
         guard selectedConnection == nil else { return }
-        guard lastAutoConnectedCrossNetworkSessionID != connection.id else { return }
+        guard lastAutoConnectedCrossNetworkSessionID != selection.connection.id else { return }
 
-        lastAutoConnectedCrossNetworkSessionID = connection.id
-        connectToDevice(connection)
+        lastAutoConnectedCrossNetworkSessionID = selection.connection.id
+        connectToDevice(
+            selection.connection,
+            routeIntent: selection.routeIntent
+        )
     }
 
 #if DEBUG || SKYBRIDGE_TESTING
@@ -346,7 +369,7 @@ struct RemoteDesktopView: View {
         guard let firstConnection = connectionManager.activeConnections.first else { return }
 
         didAutoConnectUITestFixture = true
-        connectToDevice(firstConnection)
+        connectToDevice(firstConnection, routeIntent: .directLAN)
     }
 #endif
 
@@ -360,7 +383,7 @@ struct RemoteDesktopView: View {
 
         didAutoConnectP2PSmoke = true
         SkyBridgeLogger.shared.info("🧪 P2P smoke RemoteDesktopView auto-connect: \(connection.device.id)")
-        connectToDevice(connection)
+        connectToDevice(connection, routeIntent: .directLAN)
     }
 
     private func smokeTargetLANConnection() -> Connection? {
@@ -850,7 +873,10 @@ struct RemoteDesktopStreamView: View {
 
     private var nativeCrossNetworkVideoTrack: RTCVideoTrack? {
 #if canImport(WebRTC)
-        guard isUsingNativeCrossNetworkVideo else { return nil }
+        guard isUsingNativeCrossNetworkVideo,
+              crossNetworkManager.remoteVideoTrackIsAdmitted else {
+            return nil
+        }
         return crossNetworkManager.remoteVideoTrack
 #else
         return nil
@@ -860,6 +886,7 @@ struct RemoteDesktopStreamView: View {
     private var shouldUseNativeCrossNetworkVideo: Bool {
 #if canImport(WebRTC)
         return isUsingNativeCrossNetworkVideo
+            && crossNetworkManager.remoteVideoTrackIsAdmitted
             && crossNetworkManager.remoteVideoTrack != nil
             && crossNetworkManager.remoteVideoTrackHasRenderedFrame
 #else
@@ -1329,7 +1356,8 @@ private struct RemoteDesktopNativeVideoSurface: View {
                 RemoteDesktopRTCVideoView(
                     track: track,
                     acceptsRenderEvidence: acceptsRenderEvidence,
-                    uiSurface: "remoteDesktopView"
+                    uiSurface: "remoteDesktopView",
+                    requiresRemoteDesktopAdmission: true
                 )
                     .frame(width: canvasSize.width, height: canvasSize.height)
 

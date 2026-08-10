@@ -1,148 +1,82 @@
 import Foundation
 import Network
+import SkyBridgeProtocolCore
 
 enum RemoteDesktopLANEndpointCandidateFactory {
-    struct BonjourServiceIdentity: Equatable {
-        let name: String
-        let domain: String
-    }
-
-    struct HostCandidateLog: Equatable {
-        let reason: String
-        let host: String
-        let port: UInt16
-        let routeClass: String
-        let prefersPeerToPeer: Bool
-
-        var message: String {
-            "📡 远控候选地址: reason=\(reason) host=\(host) port=\(port) routeClass=\(routeClass) peerToPeer=\(prefersPeerToPeer)"
-        }
-    }
-
     struct Plan {
-        let endpoints: [NWEndpoint]
-        let hostCandidateLogs: [HostCandidateLog]
-        let missingActivePeerPortHost: String?
+        let endpoints: [RemoteDesktopLANEndpointCandidate]
+        let ignoredEndpointCount: Int
     }
 
     static func makePlan(
-        remoteControlPort port: UInt16?,
-        directIP: String?,
-        resolvedIP: String?,
-        liveBonjourEndpoints: [NWEndpoint] = [],
-        bonjourService: BonjourServiceIdentity?,
-        activePeerAddress: String?,
+        liveBonjourEndpoints: [NWEndpoint],
         remoteServiceType: String
     ) -> Plan {
-        var endpoints: [NWEndpoint] = []
+        var candidates: [RemoteDesktopLANEndpointCandidate] = []
         var seen = Set<String>()
-        var hostCandidateLogs: [HostCandidateLog] = []
+        var ignoredEndpointCount = 0
 
-        if let port {
-            for ip in [directIP, resolvedIP]
-                .compactMap({ $0 })
-                .filter({ ConnectableAddressCanonicalizer.isRoutableLANAddress($0) }) {
-                appendHostEndpoint(
-                    ip,
-                    port: port,
-                    reason: "lan-direct",
-                    to: &endpoints,
-                    seen: &seen,
-                    hostCandidateLogs: &hostCandidateLogs
-                )
-            }
+        let orderedEndpoints = liveBonjourEndpoints.sorted {
+            interfacePriority($0) < interfacePriority($1)
         }
-
-        for endpoint in liveBonjourEndpoints {
-            appendEndpoint(
-                endpoint,
-                to: &endpoints,
-                seen: &seen
+        for endpoint in orderedEndpoints {
+            guard case .service(_, let type, _, let observedInterface) = endpoint,
+                  type == remoteServiceType,
+                  let observedInterface else {
+                ignoredEndpointCount += 1
+                continue
+            }
+            let interfaceClass = RemoteDesktopLANRoutePolicy.interfaceClass(
+                interfaceName: observedInterface.name,
+                interfaceType: observedInterface.type
             )
-        }
+            guard interfaceClass != .unsupported,
+                  interfaceClass != .peerToPeer
+                    || ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer else {
+                ignoredEndpointCount += 1
+                continue
+            }
 
-        if let bonjourService {
-            appendEndpoint(
-                .service(
-                    name: bonjourService.name,
-                    type: remoteServiceType,
-                    domain: bonjourService.domain,
-                    interface: nil
-                ),
-                to: &endpoints,
-                seen: &seen
+            let key = String(describing: endpoint)
+            guard seen.insert(key).inserted else { continue }
+            candidates.append(
+                RemoteDesktopLANEndpointCandidate(
+                    endpoint: endpoint,
+                    provenance: .liveBrowser,
+                    observedInterface: observedInterface,
+                    interfaceClass: interfaceClass
+                )
             )
-        }
-
-        if let port {
-            for ip in [directIP, resolvedIP]
-                .compactMap({ $0 })
-                .filter({ ConnectableAddressCanonicalizer.isLinkLocal($0) }) {
-                appendHostEndpoint(
-                    ip,
-                    port: port,
-                    reason: "link-local-fallback",
-                    to: &endpoints,
-                    seen: &seen,
-                    hostCandidateLogs: &hostCandidateLogs
-                )
-            }
-        }
-
-        var missingActivePeerPortHost: String?
-        if let activePeerAddress {
-            if let port {
-                appendHostEndpoint(
-                    activePeerAddress,
-                    port: port,
-                    reason: "active-peer-fallback",
-                    to: &endpoints,
-                    seen: &seen,
-                    hostCandidateLogs: &hostCandidateLogs
-                )
-            } else {
-                missingActivePeerPortHost = activePeerAddress
-            }
         }
 
         return Plan(
-            endpoints: endpoints,
-            hostCandidateLogs: hostCandidateLogs,
-            missingActivePeerPortHost: missingActivePeerPortHost
+            endpoints: candidates,
+            ignoredEndpointCount: ignoredEndpointCount
         )
     }
 
-    private static func appendHostEndpoint(
-        _ ip: String,
-        port: UInt16,
-        reason: String,
-        to endpoints: inout [NWEndpoint],
-        seen: inout Set<String>,
-        hostCandidateLogs: inout [HostCandidateLog]
-    ) {
-        hostCandidateLogs.append(
-            HostCandidateLog(
-                reason: reason,
-                host: ip,
-                port: port,
-                routeClass: ConnectableAddressCanonicalizer.routeClass(ip),
-                prefersPeerToPeer: ConnectableAddressCanonicalizer.prefersPeerToPeer(for: ip)
-            )
-        )
-        appendEndpoint(
-            .hostPort(host: .init(ip), port: .init(integerLiteral: port)),
-            to: &endpoints,
-            seen: &seen
-        )
+    static func interfacePriority(
+        interfaceName: String,
+        interfaceType: NWInterface.InterfaceType
+    ) -> Int {
+        switch RemoteDesktopLANRoutePolicy.interfaceClass(
+            interfaceName: interfaceName,
+            interfaceType: interfaceType
+        ) {
+        case .infrastructure:
+            return 0
+        case .peerToPeer:
+            return 1
+        case .unsupported:
+            return 2
+        }
     }
 
-    private static func appendEndpoint(
-        _ endpoint: NWEndpoint,
-        to endpoints: inout [NWEndpoint],
-        seen: inout Set<String>
-    ) {
-        let key = String(describing: endpoint)
-        guard seen.insert(key).inserted else { return }
-        endpoints.append(endpoint)
+    private static func interfacePriority(_ endpoint: NWEndpoint) -> Int {
+        guard case .service(_, _, _, let interface) = endpoint,
+              let interface else {
+            return 3
+        }
+        return interfacePriority(interfaceName: interface.name, interfaceType: interface.type)
     }
 }

@@ -73,6 +73,17 @@ struct BonjourRouteTuple: Equatable, Sendable {
 }
 
 enum P2PConnectionEndpointPolicy {
+    enum ControlRouteHydrationMode: Sendable, Equatable {
+        /// Product callers infer a short wait only from a persisted primary route or a
+        /// currently visible sibling service. Historical identities otherwise fail fast.
+        case inferredPartialRoute
+
+        /// The caller has just selected this strong identity from the current discovery
+        /// result set. The aggregate row may precede its primary browser snapshot, so the
+        /// exact live control endpoint receives a longer bounded hydration window.
+        case selectedDiscoveryTarget
+    }
+
     static func parseBonjourPeerIdentifier(_ peerId: String) -> (name: String, domain: String)? {
         guard peerId.hasPrefix("bonjour:") else { return nil }
         let payload = String(peerId.dropFirst("bonjour:".count))
@@ -302,14 +313,21 @@ enum P2PConnectionEndpointPolicy {
 
     static func shouldAwaitSkyBridgeControlRoute(
         for device: DiscoveredDevice,
-        liveBonjourControlEndpoints: [NWEndpoint] = []
+        liveBonjourControlEndpoints: [NWEndpoint] = [],
+        mode: ControlRouteHydrationMode = .inferredPartialRoute
     ) -> Bool {
         guard connectionEndpointCandidates(
                 for: device,
                 liveBonjourControlEndpoints: liveBonjourControlEndpoints
               ).isEmpty,
-              normalizedStrongDeviceId(for: device) != nil,
-              isPlausibleSkyBridgeServiceInstanceName(device.bonjourServiceName) else {
+              normalizedStrongDeviceId(for: device) != nil else {
+            return false
+        }
+
+        if mode == .selectedDiscoveryTarget {
+            return true
+        }
+        guard isPlausibleSkyBridgeServiceInstanceName(device.bonjourServiceName) else {
             return false
         }
 

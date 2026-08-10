@@ -316,7 +316,6 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(source.contains("maxPendingPreSessionSignalingEnvelopes = 32"))
         XCTAssertTrue(source.contains("pendingPreSessionSignalingEnvelopesBySessionId"))
         XCTAssertTrue(source.contains("pending.count < Self.maxPendingPreSessionSignalingEnvelopes"))
-        XCTAssertTrue(source.contains("state = .failed(message)"))
         XCTAssertTrue(source.contains("pre-session-queued"))
         XCTAssertTrue(source.contains("pre-session-drain"))
         XCTAssertTrue(source.contains("case .offer, .answer, .iceCandidate:\n            return true"))
@@ -332,6 +331,9 @@ final class ConnectionCodeFormatTests: XCTestCase {
         XCTAssertTrue(source.contains("session.setRemoteAnswer(sdp)"))
         XCTAssertTrue(source.contains("session.addRemoteICECandidate"))
         XCTAssertTrue(source.contains("CrossNetworkSignalingEnvelopeDrain.run("))
+        XCTAssertTrue(source.contains("let sourceSignaling: WebSocketSignalingClient"))
+        XCTAssertTrue(source.contains("signalingShardKey == env.sessionId"))
+        XCTAssertTrue(source.contains("signaling === expectedSignaling"))
         XCTAssertFalse(source.contains("session?.setRemoteOffer"))
         XCTAssertFalse(source.contains("session?.setRemoteAnswer"))
         XCTAssertFalse(source.contains("session?.addRemoteICECandidate"))
@@ -347,6 +349,155 @@ final class ConnectionCodeFormatTests: XCTestCase {
 
         XCTAssertLessThan(sessionStart.lowerBound, drain.lowerBound)
         XCTAssertLessThan(drain.lowerBound, join.lowerBound)
+
+        let enqueueStart = try XCTUnwrap(
+            source.range(of: "private func enqueuePreSessionSignalingEnvelope(")
+        )
+        let enqueueEnd = try XCTUnwrap(
+            source.range(
+                of: "private func drainPendingPreSessionSignalingEnvelopes(",
+                range: enqueueStart.upperBound..<source.endIndex
+            )
+        )
+        let enqueue = String(source[enqueueStart.lowerBound..<enqueueEnd.lowerBound])
+        XCTAssertTrue(enqueue.contains(") async {"))
+        XCTAssertTrue(enqueue.contains("await failConnectingSessionIfNeeded("))
+        XCTAssertTrue(enqueue.contains("expectedSignaling: expectedSignaling"))
+        XCTAssertFalse(enqueue.contains("state = .failed"))
+        XCTAssertFalse(enqueue.contains("readiness = .idle"))
+    }
+
+    func testOutboundSignalingBindsLifecycleWitnessAndFrozenClient() throws {
+        let source = try Self.crossNetworkWebRTCManagerSource()
+
+        let authenticationStart = try XCTUnwrap(
+            source.range(of: "private func authenticatedEnvelope(")
+        )
+        let authenticationEnd = try XCTUnwrap(
+            source.range(
+                of: "private func requireCurrentSignalingClient(",
+                range: authenticationStart.upperBound..<source.endIndex
+            )
+        )
+        let authentication = String(
+            source[authenticationStart.lowerBound..<authenticationEnd.lowerBound]
+        )
+        XCTAssertFalse(authentication.contains("lastError ="))
+        XCTAssertFalse(authentication.contains("state ="))
+        XCTAssertFalse(authentication.contains("readiness ="))
+
+        let ordinaryStart = try XCTUnwrap(source.range(of: "private func sendEnvelope("))
+        let ordinaryEnd = try XCTUnwrap(
+            source.range(
+                of: "private func sendRequiredSetupEnvelope(",
+                range: ordinaryStart.upperBound..<source.endIndex
+            )
+        )
+        let ordinary = String(source[ordinaryStart.lowerBound..<ordinaryEnd.lowerBound])
+        XCTAssertTrue(ordinary.contains("expectedLifecycleWitness: SessionLifecycleWitness"))
+        XCTAssertTrue(ordinary.contains("let expectedSignaling: WebSocketSignalingClient"))
+        XCTAssertTrue(ordinary.contains("signaling === expectedSignaling"))
+        XCTAssertTrue(ordinary.contains("signalingShardKey == authorizedEnvelope.sessionId"))
+        XCTAssertTrue(ordinary.contains("validateCurrentAttempt:"))
+        XCTAssertTrue(ordinary.contains("shouldSupersedeCurrentAttempt:"))
+        XCTAssertGreaterThanOrEqual(
+            ordinary.components(separatedBy: "requireCurrentSignalingClient(").count - 1,
+            5
+        )
+        XCTAssertFalse(ordinary.contains("ensureSignalingConnected("))
+
+        let requiredStart = ordinaryEnd
+        let requiredEnd = try XCTUnwrap(
+            source.range(
+                of: "private func failConnectingSessionIfNeeded(",
+                range: requiredStart.upperBound..<source.endIndex
+            )
+        )
+        let required = String(source[requiredStart.lowerBound..<requiredEnd.lowerBound])
+        XCTAssertTrue(required.contains("expectedLifecycleWitness: SessionLifecycleWitness"))
+        XCTAssertTrue(required.contains("async throws -> RequiredSetupEnvelopeOutcome"))
+        XCTAssertTrue(required.contains("return .supersededByHandshakeCompletion"))
+        XCTAssertTrue(required.contains("let expectedSignaling = try currentSignalingClient("))
+        XCTAssertTrue(required.contains("validateCurrentAttempt:"))
+        XCTAssertTrue(required.contains("shouldSupersedeCurrentAttempt:"))
+        XCTAssertFalse(required.contains("ensureSignalingConnected("))
+
+        let terminalFailureStart = requiredEnd
+        let terminalFailureEnd = try XCTUnwrap(
+            source.range(
+                of: "private func handleServerFrame(",
+                range: terminalFailureStart.upperBound..<source.endIndex
+            )
+        )
+        let terminalFailure = String(
+            source[terminalFailureStart.lowerBound..<terminalFailureEnd.lowerBound]
+        )
+        XCTAssertTrue(terminalFailure.contains(") async {"))
+        XCTAssertTrue(terminalFailure.contains("expectedSignaling: WebSocketSignalingClient?"))
+        XCTAssertTrue(terminalFailure.contains("await disconnectInternal("))
+        XCTAssertTrue(terminalFailure.contains("expectedIncarnation: incarnation"))
+        XCTAssertTrue(terminalFailure.contains("expectedSetupAttempt: setupAttempt"))
+        XCTAssertFalse(terminalFailure.contains("applyActiveSessionDisconnect("))
+        XCTAssertFalse(terminalFailure.contains("state = .failed"))
+        XCTAssertFalse(terminalFailure.contains("readiness = .idle"))
+
+        let serverFrameStart = terminalFailureEnd
+        let serverFrameEnd = try XCTUnwrap(
+            source.range(
+                of: "private var isTransportEstablished:",
+                range: serverFrameStart.upperBound..<source.endIndex
+            )
+        )
+        let serverFrame = String(
+            source[serverFrameStart.lowerBound..<serverFrameEnd.lowerBound]
+        )
+        XCTAssertTrue(serverFrame.contains("sourceSignaling: WebSocketSignalingClient"))
+        XCTAssertTrue(serverFrame.contains("let sourceShard = signalingShardKey"))
+        XCTAssertTrue(serverFrame.contains("declaredSessionId != sourceShard"))
+        XCTAssertTrue(serverFrame.contains("currentSessionLifecycleWitness(sessionId: sessionId)"))
+        XCTAssertTrue(serverFrame.contains("await failConnectingSessionIfNeeded("))
+        XCTAssertFalse(serverFrame.contains("applyActiveSessionDisconnect("))
+
+        let lifecycleStart = try XCTUnwrap(
+            source.range(of: "private func handleSignalingLifecycleEvent(")
+        )
+        let lifecycleEnd = try XCTUnwrap(
+            source.range(
+                of: "private enum RequiredSetupEnvelopeOutcome:",
+                range: lifecycleStart.upperBound..<source.endIndex
+            )
+        )
+        let lifecycle = String(source[lifecycleStart.lowerBound..<lifecycleEnd.lowerBound])
+        XCTAssertTrue(lifecycle.contains("sourceSignaling: WebSocketSignalingClient"))
+        XCTAssertTrue(lifecycle.contains("signaling === sourceSignaling"))
+        XCTAssertTrue(lifecycle.contains("currentSessionLifecycleWitness("))
+        XCTAssertTrue(lifecycle.contains("await failConnectingSessionIfNeeded("))
+        XCTAssertFalse(lifecycle.contains("signalingHealth = .degradedFatal"))
+
+        let heartbeatStart = try XCTUnwrap(source.range(of: "private func startJoinHeartbeat("))
+        let heartbeatEnd = try XCTUnwrap(
+            source.range(
+                of: "private func stopOfferResendLoop(",
+                range: heartbeatStart.upperBound..<source.endIndex
+            )
+        )
+        let heartbeat = String(source[heartbeatStart.lowerBound..<heartbeatEnd.lowerBound])
+        XCTAssertTrue(heartbeat.contains("await self.failConnectingSessionIfNeeded("))
+        XCTAssertFalse(heartbeat.contains("self.applyActiveSessionDisconnect("))
+        XCTAssertFalse(heartbeat.contains("self.state = .failed"))
+        XCTAssertFalse(heartbeat.contains("self.readiness = .idle"))
+
+        XCTAssertTrue(source.contains("let joinOutcome = try await sendRequiredSetupEnvelope("))
+        XCTAssertTrue(source.contains("expectedLifecycleWitness: sessionLifecycleWitness"))
+        XCTAssertTrue(source.contains("joinOutcome == .sent"))
+        XCTAssertTrue(source.contains("completedHandshakeOwnsSession"))
+        XCTAssertTrue(source.contains("late-setup-failure-superseded"))
+        XCTAssertGreaterThanOrEqual(
+            source.components(
+                separatedBy: "Task { @MainActor [weak self, weak s] in"
+            ).count - 1,
+            3
+        )
     }
 
     func testConnectionCodeConnectIsSingleOwnerAndExplicitDisconnectInvalidatesQueuedCalls() throws {

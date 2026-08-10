@@ -3,6 +3,513 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
+    func testCompletedHandshakeSetupFailureDoesNotEnterRollback() {
+        let disposition = CrossNetworkConnectionManager.webRTCSetupFailureDisposition(
+            exactSessionIsCurrent: true,
+            isHandshakeComplete: true
+        )
+        var rollbackCount = 0
+        if disposition == .rollback {
+            rollbackCount += 1
+        }
+
+        XCTAssertEqual(disposition, .preserveCompletedSession)
+        XCTAssertEqual(rollbackCount, 0)
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.webRTCSetupFailureDisposition(
+                exactSessionIsCurrent: true,
+                isHandshakeComplete: false
+            ),
+            .rollback
+        )
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.webRTCSetupFailureDisposition(
+                exactSessionIsCurrent: false,
+                isHandshakeComplete: true
+            ),
+            .rollback
+        )
+    }
+
+    func testOfferStartGatePreventsStaleSameIDTaskFromClearingReplacement() {
+        var gate = WebRTCSessionStartGate()
+        let admission = gate.captureAdmissionWitness()
+        XCTAssertNotNil(admission)
+        let first = admission.flatMap {
+            gate.begin(sessionID: "same-session", admissionWitness: $0)
+        }
+        XCTAssertNotNil(first)
+        if let admission {
+            XCTAssertNil(
+                gate.begin(sessionID: "same-session", admissionWitness: admission)
+            )
+        }
+
+        gate.invalidate(sessionID: "same-session")
+        let replacement = admission.flatMap {
+            gate.begin(sessionID: "same-session", admissionWitness: $0)
+        }
+        XCTAssertNotNil(replacement)
+        if let first {
+            XCTAssertFalse(gate.isCurrent(first, sessionID: "same-session"))
+            XCTAssertFalse(gate.finish(first, sessionID: "same-session"))
+        }
+        if let replacement {
+            XCTAssertTrue(gate.isCurrent(replacement, sessionID: "same-session"))
+            XCTAssertTrue(gate.finish(replacement, sessionID: "same-session"))
+        }
+        XCTAssertFalse(gate.hasPendingStart(sessionID: "same-session"))
+    }
+
+    func testOfferStartGateInvalidateAllRetiresEveryPendingStartBeforeReplacement() {
+        var gate = WebRTCSessionStartGate()
+        let admission = gate.captureAdmissionWitness()
+        XCTAssertNotNil(admission)
+        let first = admission.flatMap {
+            gate.begin(sessionID: "session-a", admissionWitness: $0)
+        }
+        let second = admission.flatMap {
+            gate.begin(sessionID: "session-b", admissionWitness: $0)
+        }
+        XCTAssertNotNil(first)
+        XCTAssertNotNil(second)
+
+        let suspension = gate.suspendAndInvalidateAll()
+        XCTAssertNil(gate.captureAdmissionWitness())
+
+        if let first {
+            XCTAssertFalse(gate.isCurrent(first, sessionID: "session-a"))
+            XCTAssertFalse(gate.finish(first, sessionID: "session-a"))
+        }
+        if let second {
+            XCTAssertFalse(gate.isCurrent(second, sessionID: "session-b"))
+            XCTAssertFalse(gate.finish(second, sessionID: "session-b"))
+        }
+        if let admission {
+            XCTAssertNil(
+                gate.begin(sessionID: "session-a", admissionWitness: admission)
+            )
+        }
+
+        gate.resumeAdmission(ifOwnedBy: suspension)
+        if let admission {
+            XCTAssertFalse(gate.isCurrent(admission))
+        }
+        let replacementAdmission = gate.captureAdmissionWitness()
+        XCTAssertNotNil(replacementAdmission)
+        let replacement = replacementAdmission.flatMap {
+            gate.begin(sessionID: "session-a", admissionWitness: $0)
+        }
+        XCTAssertNotNil(replacement)
+        if let replacement {
+            XCTAssertTrue(gate.isCurrent(replacement, sessionID: "session-a"))
+        }
+    }
+
+    func testSessionStartAdmissionRemainsSuspendedUntilEveryDisconnectOwnerFinishes() {
+        var gate = WebRTCSessionStartGate()
+        let initialAdmission = gate.captureAdmissionWitness()
+        XCTAssertNotNil(initialAdmission)
+
+        let firstDisconnect = gate.suspendAndInvalidateAll()
+        let secondDisconnect = gate.suspendAndInvalidateAll()
+        gate.resumeAdmission(ifOwnedBy: firstDisconnect)
+
+        XCTAssertNil(gate.captureAdmissionWitness())
+        if let initialAdmission {
+            XCTAssertFalse(gate.isCurrent(initialAdmission))
+        }
+
+        gate.resumeAdmission(ifOwnedBy: secondDisconnect)
+        XCTAssertNotNil(gate.captureAdmissionWitness())
+    }
+
+    func testSessionStartTerminalClaimIsExactAndCannotClearReplacement() throws {
+        var gate = WebRTCSessionStartGate()
+        let admission = try XCTUnwrap(gate.captureAdmissionWitness())
+        let original = try XCTUnwrap(
+            gate.begin(sessionID: "same-session", admissionWitness: admission)
+        )
+
+        XCTAssertTrue(gate.finish(original, sessionID: "same-session"))
+        XCTAssertFalse(gate.finish(original, sessionID: "same-session"))
+
+        let replacement = try XCTUnwrap(
+            gate.begin(sessionID: "same-session", admissionWitness: admission)
+        )
+        XCTAssertFalse(gate.finish(original, sessionID: "same-session"))
+        XCTAssertTrue(gate.isCurrent(replacement, sessionID: "same-session"))
+    }
+
+    func testIssuedConnectionCodeValidationAcceptsCommittedRotationAndRejectsStaleReturn() {
+        let expiry = Date(timeIntervalSince1970: 1_800_000_000)
+        let issued = CrossNetworkConnectionManager.IssuedConnectionCode(
+            code: "87654321",
+            sessionID: "rotated-session",
+            expiresAt: expiry,
+            leaseMode: .dayStable
+        )
+
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.issuedConnectionCodeMatchesCurrentState(
+                issued,
+                admissionAvailable: true,
+                currentCode: issued.code,
+                currentExpiresAt: expiry,
+                currentLeaseMode: .dayStable,
+                currentSessionID: issued.sessionID,
+                hasCurrentSessionOwner: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.issuedConnectionCodeMatchesCurrentState(
+                issued,
+                admissionAvailable: false,
+                currentCode: issued.code,
+                currentExpiresAt: expiry,
+                currentLeaseMode: .dayStable,
+                currentSessionID: issued.sessionID,
+                hasCurrentSessionOwner: true
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.issuedConnectionCodeMatchesCurrentState(
+                issued,
+                admissionAvailable: true,
+                currentCode: nil,
+                currentExpiresAt: nil,
+                currentLeaseMode: nil,
+                currentSessionID: nil,
+                hasCurrentSessionOwner: false
+            )
+        )
+    }
+
+    func testConnectionCodeAnswerersKeepTerminalOwnershipThroughJoinAndRollback() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let codeAnswerer = try sourceSlice(
+            from: "private func performConnectWithCode(",
+            to: "private func scheduleConnectionCodeLeaseInvalidation(",
+            in: source
+        )
+        XCTAssertFalse(
+            codeAnswerer.contains(
+                "defer {\n                webRTCSessionStartGate.finish"
+            )
+        )
+        XCTAssertGreaterThanOrEqual(
+            codeAnswerer.components(separatedBy: "webRTCSessionStartGate.finish(").count - 1,
+            2
+        )
+        let codeCompletedSession = try XCTUnwrap(
+            codeAnswerer.range(of: "Self.webRTCSetupFailureDisposition(")
+        )
+        let codeRollback = try XCTUnwrap(
+            codeAnswerer.range(
+                of: "cleanupWebRTCSession(",
+                range: codeCompletedSession.upperBound..<codeAnswerer.endIndex
+            )
+        )
+        XCTAssertLessThan(codeCompletedSession.lowerBound, codeRollback.lowerBound)
+        XCTAssertTrue(
+            codeAnswerer[codeCompletedSession.lowerBound..<codeRollback.lowerBound]
+                .contains("return RemoteConnection(")
+        )
+
+        let offerer = try sourceSlice(
+            from: "private func startWebRTCOfferSessionWithDynamicCredentials(",
+            to: "private func establishWebRTCConnection(\n        sessionID: String,",
+            in: source
+        )
+        let offererCompletedSession = try XCTUnwrap(
+            offerer.range(of: "Self.webRTCSetupFailureDisposition(")
+        )
+        let offererRollback = try XCTUnwrap(
+            offerer.range(
+                of: "cleanupWebRTCSession(",
+                range: offererCompletedSession.upperBound..<offerer.endIndex
+            )
+        )
+        XCTAssertLessThan(offererCompletedSession.lowerBound, offererRollback.lowerBound)
+        XCTAssertTrue(
+            offerer[offererCompletedSession.lowerBound..<offererRollback.lowerBound]
+                .contains("return")
+        )
+
+        let qrAnswerer = try sourceSlice(
+            from: "private func establishWebRTCConnection(\n        sessionID: String,",
+            to: "private func authenticatedEnvelope(",
+            in: source
+        )
+        let join = try XCTUnwrap(
+            qrAnswerer.range(of: "try await sendWebRTCJoinSignal")
+        )
+        let rollback = try XCTUnwrap(
+            qrAnswerer.range(of: "reason: error is CancellationError")
+        )
+        let rollbackCatch = try XCTUnwrap(
+            qrAnswerer.range(of: "} catch {", options: .backwards)
+        )
+        XCTAssertLessThan(join.lowerBound, rollbackCatch.lowerBound)
+        XCTAssertLessThan(rollbackCatch.lowerBound, rollback.lowerBound)
+        XCTAssertTrue(
+            qrAnswerer[rollbackCatch.lowerBound..<rollback.lowerBound].contains(
+                "webRTCSessionStartGate.finish(sessionStartToken, sessionID: sessionID)"
+            )
+        )
+        let qrCompletedSession = try XCTUnwrap(
+            qrAnswerer.range(of: "Self.webRTCSetupFailureDisposition(")
+        )
+        XCTAssertLessThan(qrCompletedSession.lowerBound, rollback.lowerBound)
+        XCTAssertTrue(
+            qrAnswerer[qrCompletedSession.lowerBound..<rollback.lowerBound]
+                .contains("return RemoteConnection(")
+        )
+    }
+
+    func testOutboundSignalingBindsExactSessionAndClientAcrossSuspensions() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let joinBootstrap = try sourceSlice(
+            from: "private func webRTCJoinBootstrapPayload(",
+            to: "private func sendWebRTCJoinSignal(",
+            in: source
+        )
+        XCTAssertTrue(joinBootstrap.contains("for session: WebRTCSession"))
+        XCTAssertGreaterThanOrEqual(
+            joinBootstrap.components(separatedBy: "requireCurrentWebRTCSession(").count - 1,
+            3
+        )
+        let finalOwnerCheck = try XCTUnwrap(
+            joinBootstrap.range(of: "try requireCurrentWebRTCSession(", options: .backwards)
+        )
+        let cacheCommit = try XCTUnwrap(
+            joinBootstrap.range(of: "webrtcJoinBootstrapPayloadBySessionId[sessionID] = payload")
+        )
+        XCTAssertLessThan(finalOwnerCheck.lowerBound, cacheCommit.lowerBound)
+
+        let requiredSend = try sourceSlice(
+            from: "private func sendRequiredSetupSignal(",
+            to: "private func connectedSignalingClient(",
+            in: source
+        )
+        XCTAssertTrue(requiredSend.contains("ownerSession: WebRTCSession"))
+        XCTAssertTrue(requiredSend.contains("let client = try await connectedSignalingClient("))
+        XCTAssertTrue(requiredSend.contains("try await client.send(authorizedEnvelope)"))
+        XCTAssertGreaterThanOrEqual(
+            requiredSend.components(separatedBy: "requireCurrentWebRTCSession(").count - 1,
+            5
+        )
+        XCTAssertTrue(requiredSend.contains("requireCurrentSignalingClient("))
+        XCTAssertTrue(requiredSend.contains("shouldDeferCurrentSignalingSend("))
+        XCTAssertTrue(requiredSend.contains("return .supersededByHandshakeCompletion"))
+
+        let joinSend = try sourceSlice(
+            from: "private func sendWebRTCJoinSignal(",
+            to: "private func ingestWebRTCJoinBootstrapPayload(",
+            in: source
+        )
+        let bootstrapCatch = try XCTUnwrap(joinSend.range(of: "} catch {"))
+        let bootstrapSupersession = try XCTUnwrap(
+            joinSend.range(of: "return .supersededByHandshakeCompletion")
+        )
+        let strictPolicy = try XCTUnwrap(
+            joinSend.range(of: "if try strictPQCHandshakeRequested")
+        )
+        XCTAssertLessThan(bootstrapCatch.lowerBound, bootstrapSupersession.lowerBound)
+        XCTAssertLessThan(bootstrapSupersession.lowerBound, strictPolicy.lowerBound)
+
+        let ordinarySend = try sourceSlice(
+            from: "private func sendSignal(",
+            to: "private func handleSignalingServerFrame(",
+            in: source
+        )
+        XCTAssertTrue(ordinarySend.contains("ownerSession: WebRTCSession"))
+        XCTAssertTrue(ordinarySend.contains("connectedSignalingClient("))
+        XCTAssertTrue(ordinarySend.contains("signalingClient === client"))
+        XCTAssertGreaterThanOrEqual(
+            ordinarySend.components(separatedBy: "shouldDeferCurrentSignalingSend(").count - 1,
+            3
+        )
+        XCTAssertFalse(ordinarySend.contains("let handshakeComplete ="))
+        XCTAssertFalse(
+            ordinarySend.contains(
+                "if let signalingClient {\n                    try await signalingClient.connectOrThrow()"
+            )
+        )
+        let rejectionPolicy = try XCTUnwrap(
+            ordinarySend.range(of: "if error is SignalingOperationRejection")
+        )
+        let exactAttemptGate = try XCTUnwrap(
+            ordinarySend.range(of: "guard let attemptedClient,")
+        )
+        XCTAssertLessThan(rejectionPolicy.lowerBound, exactAttemptGate.lowerBound)
+        XCTAssertTrue(ordinarySend.contains("signalingClient === attemptedClient"))
+        XCTAssertFalse(ordinarySend.contains("signalingClient == nil, signalingShardKey == nil"))
+        XCTAssertFalse(ordinarySend.contains("signalingAttemptIsCurrent"))
+    }
+
+    func testSessionCleanupDetachesExactSignalingClientBeforeOtherTeardown() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let cleanup = try sourceSlice(
+            from: "private func cleanupWebRTCSession(",
+            to: "func sealWebRTCSecurePayload(",
+            in: source
+        )
+        let teardown = try XCTUnwrap(
+            cleanup.range(of: "signalingLifecycle.teardown(sessionID: sessionID)")
+        )
+        let detachClient = try XCTUnwrap(
+            cleanup.range(of: "signalingClient = nil")
+        )
+        let detachShard = try XCTUnwrap(
+            cleanup.range(of: "signalingShardKey = nil")
+        )
+        let notice = try XCTUnwrap(
+            cleanup.range(of: "notifyWebRTCTerminalSessionIfNeeded(")
+        )
+
+        XCTAssertLessThan(teardown.lowerBound, notice.lowerBound)
+        XCTAssertLessThan(detachClient.lowerBound, notice.lowerBound)
+        XCTAssertLessThan(detachShard.lowerBound, notice.lowerBound)
+        XCTAssertTrue(cleanup.contains("await signalingClientToClose.close()"))
+    }
+
+    func testSignalingFailuresCannotOverwriteAnotherSessionsGlobalState() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let serverFrame = try sourceSlice(
+            from: "private func handleSignalingServerFrame(",
+            to: "private func handleSignalingEnvelope(",
+            in: source
+        )
+        XCTAssertTrue(serverFrame.contains("let sourceSession = webrtcSessionsBySessionId[sourceShard]"))
+        XCTAssertTrue(serverFrame.contains("let sourceOwnsGlobalState = isCurrentGlobalWebRTCSetup("))
+        XCTAssertTrue(serverFrame.contains("declaredSessionID != sourceShard"))
+        XCTAssertTrue(serverFrame.contains("?? sourceShard"))
+        XCTAssertFalse(serverFrame.contains("webrtcSessionsBySessionId.keys.contains"))
+        XCTAssertGreaterThanOrEqual(
+            serverFrame.components(separatedBy: "if sourceOwnsGlobalState {").count - 1,
+            3
+        )
+        XCTAssertTrue(serverFrame.contains("let shouldCommitGlobalFailure = sourceOwnsGlobalState"))
+        XCTAssertTrue(serverFrame.contains("reason: \"signaling_server_error:\\(failureCode)\""))
+        XCTAssertTrue(serverFrame.contains("if shouldCommitGlobalFailure {"))
+
+        let codeAnswerer = try sourceSlice(
+            from: "private func performConnectWithCode(",
+            to: "private func scheduleConnectionCodeLeaseInvalidation(",
+            in: source
+        )
+        XCTAssertTrue(codeAnswerer.contains("shouldCommitGlobalFailure = isCurrentGlobalWebRTCSetup("))
+
+        let qrAnswerer = try sourceSlice(
+            from: "private func establishWebRTCConnection(\n        sessionID: String,",
+            to: "private func authenticatedEnvelope(",
+            in: source
+        )
+        XCTAssertTrue(qrAnswerer.contains("let shouldCommitGlobalFailure = isCurrentGlobalWebRTCSetup("))
+    }
+
+    func testDisconnectInvalidatesPendingOfferStartsBeforeItsFirstSuspension() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let disconnectBody = try sourceSlice(
+            from: "public func disconnect() async {",
+            to: "// MARK: - Route Attribution",
+            in: source
+        )
+        let invalidation = try XCTUnwrap(
+            disconnectBody.range(
+                of: "webRTCSessionStartGate.suspendAndInvalidateAll()"
+            )
+        )
+        let trackedTaskCancellation = try XCTUnwrap(
+            disconnectBody.range(of: "pendingConnectionCodeTasks.forEach { $0.cancel() }")
+        )
+        let firstSuspension = try XCTUnwrap(disconnectBody.range(of: "await "))
+
+        XCTAssertLessThan(invalidation.lowerBound, firstSuspension.lowerBound)
+        XCTAssertLessThan(trackedTaskCancellation.lowerBound, firstSuspension.lowerBound)
+        XCTAssertTrue(
+            source.contains(
+                "let admissionWitness = try captureWebRTCSessionStartAdmission()"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "var admissionWitness = try captureWebRTCSessionStartAdmission()"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "admissionWitness: WebRTCSessionStartGate.AdmissionWitness"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "guard let sessionStartToken = webRTCSessionStartGate.begin("
+            )
+        )
+        XCTAssertTrue(source.contains("[weak self, weak client] env in"))
+        XCTAssertTrue(source.contains("[weak self, weak client] frame in"))
+        XCTAssertTrue(source.contains("[weak self, weak client] event in"))
+        XCTAssertTrue(source.contains("guard signalingClient === sourceClient,"))
+
+        let signalingSetup = try sourceSlice(
+            from: "private func ensureSignalingConnected(shardKey: String) async throws {",
+            to: "private func requireCurrentPendingSignalingSetup(",
+            in: source
+        )
+        let envelopeRegistration = try XCTUnwrap(
+            signalingSetup.range(of: "await client.setOnEnvelope")
+        )
+        let serverFrameRegistration = try XCTUnwrap(
+            signalingSetup.range(of: "await client.setOnServerFrame")
+        )
+        let lifecycleRegistration = try XCTUnwrap(
+            signalingSetup.range(of: "await client.setOnLifecycleEvent")
+        )
+        let clientPublication = try XCTUnwrap(
+            signalingSetup.range(of: "signalingClient = client")
+        )
+        let clientConnect = try XCTUnwrap(
+            signalingSetup.range(
+                of: "try await client.connectOrThrow()",
+                range: clientPublication.upperBound..<signalingSetup.endIndex
+            )
+        )
+        XCTAssertLessThan(envelopeRegistration.lowerBound, clientPublication.lowerBound)
+        XCTAssertLessThan(serverFrameRegistration.lowerBound, clientPublication.lowerBound)
+        XCTAssertLessThan(lifecycleRegistration.lowerBound, clientPublication.lowerBound)
+        XCTAssertLessThan(clientPublication.lowerBound, clientConnect.lowerBound)
+        XCTAssertGreaterThanOrEqual(
+            signalingSetup.components(
+                separatedBy: "requireCurrentPendingSignalingSetup("
+            ).count - 1,
+            3
+        )
+
+        let connectWrapper = try sourceSlice(
+            from: "public func connectWithCode(_ code: String) async throws -> RemoteConnection {",
+            to: "private func performConnectWithCode(",
+            in: source
+        )
+        XCTAssertGreaterThanOrEqual(
+            connectWrapper.components(
+                separatedBy: "try requireCurrentWebRTCSessionStartAdmission(admissionWitness)"
+            ).count - 1,
+            3
+        )
+    }
+
     func testExactCurrentPathMLDSA87AuthorityRequiresRawKeyFingerprintMatch() {
         let publicKey = Data(repeating: 0x87, count: 2_592)
         let fingerprint = ProtocolIdentityBinding.computeFingerprint(
@@ -655,7 +1162,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         let source = try readSource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
         XCTAssertTrue(source.contains("join-bootstrap-resend session=\\(env.sessionId) reason=remote-join"))
         XCTAssertTrue(source.contains("try await sendWebRTCJoinSignal("))
-        XCTAssertTrue(source.contains("sessionID: env.sessionId"))
+        XCTAssertTrue(source.contains("session: session"))
         XCTAssertTrue(source.contains("catch is CancellationError"))
         XCTAssertTrue(source.contains("await resendOrRecoverLocalOfferForRemoteJoin(sessionID: env.sessionId, session: session)"))
     }
@@ -671,18 +1178,51 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("private func pendingPreSessionSignalingQueueMetrics() -> (count: Int, bytes: Int)?"))
         XCTAssertTrue(source.contains("pre_session_signaling_global_queue_overflow"))
         XCTAssertTrue(source.contains("pre_session_signaling_envelope_too_large"))
-        XCTAssertTrue(source.contains("private func enqueuePreSessionSignalingEnvelope(_ env: WebRTCSignalingEnvelope)"))
+        XCTAssertTrue(source.contains("private struct PendingPreSessionSignalingEnvelope"))
+        XCTAssertTrue(source.contains("let sourceClient: WebSocketSignalingClient"))
+        XCTAssertTrue(source.contains("let admissionWitness: WebRTCSessionStartGate.AdmissionWitness"))
+        XCTAssertTrue(source.contains("private func enqueuePreSessionSignalingEnvelope("))
         XCTAssertTrue(source.contains("pre-session signaling queue overflow"))
         XCTAssertTrue(source.contains("cleanupReason: \"pre_session_signaling_queue_overflow\""))
         XCTAssertTrue(source.contains("case .offer, .answer, .iceCandidate:"))
         XCTAssertTrue(source.contains("case .join, .leave:"))
-        XCTAssertTrue(source.contains("await drainPendingPreSessionSignalingEnvelopes(sessionID: sessionID)"))
+        XCTAssertTrue(source.contains("private func drainPendingPreSessionSignalingEnvelopes("))
+        XCTAssertTrue(source.contains("sourceClient: record.sourceClient"))
+        XCTAssertTrue(source.contains("admissionWitness: record.admissionWitness"))
+        XCTAssertTrue(source.contains("ownerSession: session"))
         XCTAssertTrue(source.contains("pendingPreSessionSignalingEnvelopesBySessionId.removeValue(forKey: sessionID)"))
-        XCTAssertFalse(
-            source.contains("drop signaling envelope without local session: type=\\(env.type.rawValue, privacy: .public) session=\\(env.sessionId, privacy: .public)\"") &&
-            !source.contains("enqueuePreSessionSignalingEnvelope(env)"),
-            "Offer/answer/ICE arriving before session start must be queued with a bounded fail-closed queue, not silently dropped."
+        XCTAssertTrue(
+            source.contains(
+                "enqueuePreSessionSignalingEnvelope(\n                    env,\n                    sourceClient: sourceClient,\n                    admissionWitness: admissionWitness\n                )"
+            ),
+            "Offer/answer/ICE arriving before session start must enter the bounded queue with the exact signaling client and admission witness."
         )
+    }
+
+    func testMacJoinBootstrapMutationIsAuthorityAndSignalingOwnerBound() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let ingest = try sourceSlice(
+            from: "private func ingestWebRTCJoinBootstrapPayload(",
+            to: "/// Stores an early-arriving join bootstrap",
+            in: source
+        )
+
+        XCTAssertTrue(ingest.contains("sourceClient: WebSocketSignalingClient"))
+        XCTAssertTrue(ingest.contains("admissionWitness: WebRTCSessionStartGate.AdmissionWitness"))
+        XCTAssertTrue(ingest.contains("ownerSession: WebRTCSession?"))
+        XCTAssertTrue(ingest.contains("upsertAuthorityBoundPairingKEM("))
+        XCTAssertTrue(ingest.contains("rollbackAuthorityBoundPairingKEMMutation(receipt)"))
+        XCTAssertTrue(ingest.contains("currentPathExpectedRemoteAuthorityBySessionId[sessionID] == authorityBeforeMutation"))
+        XCTAssertFalse(ingest.contains("PeerKEMBootstrapStore.shared.upsert("))
+        let receiptMutation = try XCTUnwrap(
+            ingest.range(of: "upsertAuthorityBoundPairingKEM(")
+        )
+        let authorityCommit = try XCTUnwrap(
+            ingest.range(of: "currentPathExpectedRemoteAuthorityBySessionId[sessionID] = authorityToCommit")
+        )
+        XCTAssertLessThan(receiptMutation.lowerBound, authorityCommit.lowerBound)
     }
 
     func testQRCodeBootstrapUsesLongerStartupWindowsThanRuntimeHeartbeat() {
@@ -729,7 +1269,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
     }
 
-    func testMacFileTransferSmokeRequiresSignedKEMRefreshInsteadOfQRCode() throws {
+    func testMacFileTransferSmokeKeepsSignedRefreshExplicitAndRejectsQRCode() throws {
         let scriptSource = try readSource("Scripts/run_real_device_file_transfer_smoke.sh")
         XCTAssertTrue(
             scriptSource.contains("SMOKE_BUILD_DIR=\"${SKYBRIDGE_FILE_TRANSFER_SMOKE_BUILD_DIR:-$ROOT_DIR/.build/real-device-file-transfer-smoke}\""),
@@ -747,8 +1287,12 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             "The real-device smoke script must require signed KEM refresh evidence instead of relying on QR bootstrap."
         )
         XCTAssertTrue(
-            scriptSource.contains("REQUIRE_SIGNED_KEM_REFRESH=\"${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}\""),
-            "File-transfer smoke must default to requiring signed KEM refresh evidence in lab and realistic modes."
+            scriptSource.contains("REQUIRE_SIGNED_KEM_REFRESH=\"${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-0}\""),
+            "File-transfer smoke must not clear or rewrite persistent KEM trust by default."
+        )
+        XCTAssertTrue(
+            scriptSource.contains("SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION"),
+            "Forced refresh must require an explicit persistent-trust mutation approval."
         )
         XCTAssertFalse(
             scriptSource.contains("SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING"),
@@ -1040,11 +1584,16 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(remoteSmokeSource.contains("! -d \"$source_core_resource_bundle\" || -L \"$source_core_resource_bundle\""))
         XCTAssertTrue(remoteSmokeSource.contains("scratch_debug_dir=\"$(cd \"$SMOKE_BUILD_DIR/debug\" && pwd -P)\""))
         XCTAssertTrue(remoteSmokeSource.contains("\"$scratch_debug_dir\" != \"$scratch_root_dir/\"*"))
-        XCTAssertTrue(remoteSmokeSource.contains("/usr/bin/find -P \"$source_core_resource_bundle\" -type l -print -quit"))
-        XCTAssertTrue(remoteSmokeSource.contains("/usr/bin/ditto --norsrc --noextattr --noqtn --noacl"))
-        XCTAssertTrue(remoteSmokeSource.contains("mv \"$embedded_core_resource_root/Info.plist\" \"$embedded_core_resource_contents/Info.plist\""))
-        XCTAssertTrue(remoteSmokeSource.contains("/usr/bin/diff -qr -x Info.plist \"$source_core_resource_bundle\" \"$embedded_core_resource_root\""))
-        XCTAssertTrue(remoteSmokeSource.contains("resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSealed=1"))
+        XCTAssertTrue(remoteSmokeSource.contains("source \"$ROOT_DIR/Scripts/skybridge_core_resource_bundle_helpers.sh\""))
+        XCTAssertTrue(remoteSmokeSource.contains("if source_resource_layout=\"$(skybridge_copy_normalized_core_resource_bundle"))
+        XCTAssertTrue(remoteSmokeSource.contains("source_resource_status=$?"))
+        XCTAssertTrue(remoteSmokeSource.contains("exit \"$source_resource_status\""))
+        XCTAssertTrue(remoteSmokeSource.contains("swiftpm-flat)"))
+        XCTAssertTrue(remoteSmokeSource.contains("swiftpm-macos-contents)"))
+        XCTAssertTrue(remoteSmokeSource.contains("SkyBridgeCore resource normalizer returned an unknown layout token."))
+        XCTAssertTrue(remoteSmokeSource.contains("validate_remote_control_security_notice_localizations \\\n    \"$source_resource_root\" \\\n    \"source-$source_resource_layout\""))
+        XCTAssertTrue(remoteSmokeSource.contains("\"$embedded_core_resource_root\" \\\n    \"pre-sign\""))
+        XCTAssertTrue(remoteSmokeSource.contains("resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSourceLayout=$source_resource_layout resourceBundleSealed=1"))
         XCTAssertTrue(remoteSmokeSource.contains("cp -R \"$source_webrtc_framework\" \"$macos_dir/WebRTC.framework\""))
         XCTAssertTrue(remoteSmokeSource.contains("cp \"$MAC_HOST_PRODUCT_PROFILE\" \"$embedded_profile\""))
         XCTAssertTrue(remoteSmokeSource.contains("-c \"Add :CFBundleIdentifier string $MAC_HOST_PRODUCT_BUNDLE_ID\""))
@@ -1109,7 +1658,11 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             "WebRTC must not emit protocol-identity pin status lines from untrusted pairing payload metadata."
         )
         XCTAssertTrue(
-            macWebRTCSource.contains("].insert(validatedAuthority.protocolPublicKeyFingerprint)"),
+            macWebRTCSource.contains(
+                "fingerprints.insert(validatedAuthority.protocolPublicKeyFingerprint)"
+            ) && macWebRTCSource.contains(
+                "currentPathAdditionalProtocolFingerprintsBySessionId[sessionID] = fingerprints"
+            ),
             "macOS compatibility fingerprints must come from the authority validated against the authenticated handshake."
         )
         XCTAssertTrue(
@@ -1233,7 +1786,12 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             .joined(separator: "\n")
 
         XCTAssertTrue(skrSource.contains("SKR-1 signed LAN KEM refresh"))
-        XCTAssertTrue(skrSource.contains("requester=%@ target=%@ keyId=%@"))
+        XCTAssertTrue(
+            skrSource.contains(
+                "requester=%@ target=%@ skr_ref=%@ payload_ref=%@ keyId=%@"
+            ),
+            "Served SKR evidence must keep redacted peer placeholders while exposing only typed correlation references."
+        )
         XCTAssertTrue(skrSource.contains("requester=%@ target=%@ reasonCode=%@ reason=%@"))
         XCTAssertGreaterThanOrEqual(
             skrSource.components(separatedBy: "Self.protocolIdentityLogRedaction").count - 1,
@@ -2238,6 +2796,69 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(loopBody.contains("lastRekey=\\(self.lastRekeyEvent ?? \"-\""))
     }
 
+    func testWebRTCPairingBootstrapReplyTaskIsOwnedCancelledAndErrorObservable() throws {
+        let source = try readSource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let pairingCase = try sourceSlice(
+            from: "guard decision != PairingTrustApprovalService.Decision.reject else",
+            to: "case .heartbeat(let payload):",
+            in: source
+        )
+        let sendHelper = try sourceSlice(
+            from: "func sendLocalPairingIdentityExchange(",
+            to: "func sendLocalAuthenticatedRouteBindings(",
+            in: source
+        )
+
+        XCTAssertTrue(source.contains("var pairingBootstrapTask: Task<Void, Never>?"))
+        XCTAssertTrue(source.contains("var pairingBootstrapTaskToken: UUID?"))
+        XCTAssertTrue(source.contains("func isCurrentPairingBootstrapTaskOwner(_ taskToken: UUID) -> Bool"))
+        XCTAssertTrue(source.contains("pairingBootstrapTask?.cancel()\n        }"))
+        XCTAssertTrue(pairingCase.contains("pairingBootstrapTaskToken = nil"))
+        XCTAssertTrue(pairingCase.contains("let pairingTaskToken = UUID()"))
+        XCTAssertTrue(pairingCase.contains("guard isCurrentPairingBootstrapTaskOwner(pairingTaskToken)"))
+        XCTAssertTrue(pairingCase.contains("pairingBootstrapTask?.cancel()"))
+        XCTAssertTrue(
+            pairingCase.contains(
+                "pairingBootstrapTask = Task { @MainActor [weak self] in"
+            )
+        )
+        XCTAssertTrue(pairingCase.contains("catch is CancellationError"))
+        XCTAssertTrue(pairingCase.contains("appendWebRTCSessionDiagnostic("))
+        XCTAssertTrue(pairingCase.contains("sendLocalPairingIdentityExchange("))
+        XCTAssertFalse(pairingCase.contains("SelfIdentityProvider.shared"))
+        XCTAssertFalse(pairingCase.contains("let sendPairingReply = sendFramed"))
+        XCTAssertFalse(pairingCase.contains("fingerprintsBeforeMutation"))
+        XCTAssertFalse(pairingCase.contains("fingerprintsAfterMutation"))
+
+        let sendRange = try XCTUnwrap(sendHelper.range(of: "try await sendFramed(outPadded)"))
+        let cancellationRange = try XCTUnwrap(
+            sendHelper.range(
+                of: "try Task.checkCancellation()",
+                range: sendRange.upperBound..<sendHelper.endIndex
+            )
+        )
+        let exactSessionRange = try XCTUnwrap(
+            sendHelper.range(
+                of: "guard self.isCurrentWebRTCControlLoopSecureOwner(",
+                range: cancellationRange.upperBound..<sendHelper.endIndex
+            )
+        )
+        XCTAssertTrue(
+            sendHelper[exactSessionRange.lowerBound...].contains("keys: keys")
+        )
+        let fingerprintRange = try XCTUnwrap(
+            sendHelper.range(
+                of: "self.webrtcBootstrapReplyFingerprintBySessionId[sessionID] = fingerprint",
+                range: exactSessionRange.upperBound..<sendHelper.endIndex
+            )
+        )
+        XCTAssertLessThan(sendRange.lowerBound, cancellationRange.lowerBound)
+        XCTAssertLessThan(cancellationRange.lowerBound, exactSessionRange.lowerBound)
+        XCTAssertLessThan(exactSessionRange.lowerBound, fingerprintRange.lowerBound)
+    }
+
     func testRealDeviceWebRTCSmokeSourceContractUsesVerifiedAppleXWingAndPrivateAuthBoundaries() throws {
         let source = try readSource("Scripts/run_real_device_webrtc_smoke.sh")
         let productAppSource = try readSource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
@@ -2255,8 +2876,14 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
         let iOSSigningHelpers = try readSource("Scripts/ios_distribution_signing_helpers.sh")
         let iOSSigningResolver = try readSource("Scripts/resolve_ios_distribution_signing.py")
+        let iOSIPAExtractor = try readSource("Scripts/extract_ios_ipa.py")
         let iOSProductVerifier = try readSource("Scripts/verify_ios_distribution_product.py")
         let releaseAcceptanceFinalizer = try readSource("Scripts/finalize_release_acceptance_manifests.py")
+        let iOSBuildSource = try sourceSlice(
+            from: "IOS_XCODEBUILD_SETTINGS=(",
+            to: "echo \"==> Starting macOS WebRTC host\"",
+            in: source
+        )
 
         XCTAssertTrue(source.contains("source \"$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh\""))
         XCTAssertTrue(source.contains("skybridge_configure_optional_apple_pqc_sdk_compile_gate macosx"))
@@ -2271,12 +2898,36 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("--scratch-path \"$SMOKE_BUILD_DIR\""))
         XCTAssertTrue(source.contains("-Xswiftc -warnings-as-errors"))
         XCTAssertTrue(source.contains(") >\"$MAC_BUILD_LOG\" 2>&1"))
-        XCTAssertTrue(source.contains("IOS_XCODEBUILD_ARGS+=(build)"))
         XCTAssertTrue(
             source.contains(
                 "skybridge_run_xcodebuild \"${IOS_XCODEBUILD_ARGS[@]}\" >\"$IOS_BUILD_LOG\" 2>&1"
             )
         )
+        XCTAssertTrue(iOSBuildSource.contains("skybridge_archive_ios_distribution_product"))
+        XCTAssertTrue(iOSBuildSource.contains("skybridge_export_ios_distribution_archive"))
+        XCTAssertTrue(iOSBuildSource.contains("skybridge_extract_single_ios_exported_app"))
+        XCTAssertTrue(iOSBuildSource.contains("installed-only"))
+        XCTAssertFalse(iOSBuildSource.contains("CODE_SIGN_STYLE=Manual"))
+        XCTAssertFalse(iOSBuildSource.contains("CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"))
+        let archiveRange = try XCTUnwrap(
+            iOSBuildSource.range(of: "skybridge_archive_ios_distribution_product")
+        )
+        let exportRange = try XCTUnwrap(
+            iOSBuildSource.range(of: "skybridge_export_ios_distribution_archive")
+        )
+        let extractRange = try XCTUnwrap(
+            iOSBuildSource.range(of: "skybridge_extract_single_ios_exported_app")
+        )
+        let proofRange = try XCTUnwrap(
+            iOSBuildSource.range(of: "verify_ios_product_app \"$IOS_APP_PATH\"")
+        )
+        let installRange = try XCTUnwrap(
+            iOSBuildSource.range(of: "device install app --device \"$IOS_DEVICE_ID\" \"$IOS_APP_PATH\"")
+        )
+        XCTAssertLessThan(archiveRange.lowerBound, exportRange.lowerBound)
+        XCTAssertLessThan(exportRange.lowerBound, extractRange.lowerBound)
+        XCTAssertLessThan(extractRange.lowerBound, proofRange.lowerBound)
+        XCTAssertLessThan(proofRange.lowerBound, installRange.lowerBound)
         XCTAssertTrue(source.contains("RejectAuthRedirects"))
         XCTAssertTrue(source.contains("minimum_remaining_seconds=MIN_FINAL_TOKEN_LIFETIME_SECONDS"))
         XCTAssertTrue(source.contains("MAC_TOKEN=\"$AUTH_PRIVATE_DIR/mac.token\""))
@@ -2313,9 +2964,20 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(source.contains("source \"$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh\""))
         XCTAssertTrue(source.contains("python3 \"$ROOT_DIR/Scripts/resolve_ios_distribution_signing.py\""))
         XCTAssertTrue(source.contains("skybridge_write_ios_distribution_product_proof"))
-        XCTAssertTrue(iOSSigningResolver.contains("Formal physical iOS acceptance requires exactly one installed matching"))
+        XCTAssertTrue(iOSSigningResolver.contains("Physical iOS Automatic export requires exactly one installed matching"))
         XCTAssertTrue(iOSSigningResolver.contains("entitlements.get(\"get-task-allow\") is False"))
+        XCTAssertTrue(iOSSigningResolver.contains("profile.get(\"IsXcodeManaged\") is True"))
+        XCTAssertTrue(iOSSigningResolver.contains("\"schemaVersion\": 2"))
+        XCTAssertTrue(iOSSigningResolver.contains("\"signingStyle\": expected_signing_style"))
+        XCTAssertTrue(iOSSigningHelpers.contains("\"CODE_SIGN_STYLE=Automatic\""))
+        XCTAssertTrue(iOSSigningHelpers.contains("\"SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=\""))
+        XCTAssertTrue(iOSSigningHelpers.contains("unset CODE_SIGN_IDENTITY"))
+        XCTAssertTrue(iOSSigningHelpers.contains("release-testing"))
         XCTAssertTrue(iOSSigningHelpers.contains("codesign --verify --deep --strict"))
+        XCTAssertTrue(iOSIPAExtractor.contains("IPA contains an unsafe path component"))
+        XCTAssertTrue(iOSIPAExtractor.contains("IPA contains a link or special file"))
+        XCTAssertTrue(iOSIPAExtractor.contains("IPA contains duplicate normalized paths"))
+        XCTAssertTrue(iOSIPAExtractor.contains("os.replace(staging_app, destination_app)"))
         XCTAssertTrue(iOSProductVerifier.contains("certificateMatch"))
         XCTAssertTrue(iOSProductVerifier.contains("nestedWidgetVerified"))
         XCTAssertTrue(iOSProductVerifier.contains("releaseProvenanceVerified"))
@@ -2339,6 +3001,12 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             XCTAssertTrue(pqcSmokeSource.contains("expectedByteCount: 1_216"))
             XCTAssertTrue(pqcSmokeSource.contains("expectedByteCount: 1_184"))
         }
+        XCTAssertTrue(
+            iOSWebRTCHarnessSource.contains(
+                "streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction()"
+            ),
+            "Each logical WebRTC smoke stream configuration must carry the shared transaction correlation required by the production ingress policy."
+        )
         XCTAssertTrue(localSmokeSource.contains("read_private_auth_session_field accessToken"))
         XCTAssertFalse(localSmokeSource.contains("read_private_auth_session_field nebulaId"))
         XCTAssertTrue(localSmokeSource.contains("resolve_signaling_tenant_from_access_token \"$ACCESS_TOKEN\""))

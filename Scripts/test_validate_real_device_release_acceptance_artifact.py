@@ -16,6 +16,7 @@ VALIDATOR = ROOT_DIR / "Scripts" / "validate_real_device_release_acceptance_arti
 SOURCE_REPOSITORY = "billlza/Skybridge-Compass"
 SOURCE_COMMIT = "a" * 40
 SOURCE_REVISION_REF = hashlib.sha256(SOURCE_COMMIT.encode("ascii")).hexdigest()[:24]
+NOTICE_EVIDENCE_REF = "ev1:" + "ab" * 16
 PRODUCTION_COMPILATION_CONDITIONS = ["HAS_APPLE_PQC_SDK"]
 
 
@@ -46,12 +47,11 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
             and isinstance(payload, dict)
             and payload.get("transport") == "p2p"
         ):
-            raw_notice_session = "peer:192.0.2.10"
             payload = {
                 "humanApproval": True,
                 "runtimeAutoApproval": False,
                 "finalizationOrder": "private-then-public-v1",
-                "approvalSessionRef": hashlib.sha256(raw_notice_session.encode()).hexdigest()[:24],
+                "approvalSessionRef": NOTICE_EVIDENCE_REF,
                 "approvalLifecycle": ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"],
                 "iosBuildConfiguration": "Release",
                 "iosReleaseConfiguration": True,
@@ -168,14 +168,14 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
 
     def write_valid_p2p_logs(self, directory: Path) -> None:
         raw_notice_session = "peer:192.0.2.10"
-        notice_session_ref = hashlib.sha256(raw_notice_session.encode()).hexdigest()[:24]
+        notice_session_ref = NOTICE_EVIDENCE_REF
         (directory / "mac.status.log").write_text(
             "identity legacyResidueInspectionComplete=1 conflicts=1 reason=none\n"
-            f"remoteControlNoticeShown session={raw_notice_session} transport=p2p\n"
-            f"remoteControlNoticePanelPresented session={raw_notice_session} transport=p2p phase=awaitingApproval buttons=collapse,close,reject,approve\n"
-            f"remoteControlNoticeHumanApproved session={raw_notice_session} transport=p2p\n"
-            f"remoteControlNoticeApproved session={raw_notice_session} transport=p2p\n"
-            f"remoteControlNoticeActive session={raw_notice_session} transport=p2p\n"
+            f"remoteControlNoticeShown session={raw_notice_session} session_ref={notice_session_ref} transport=p2p\n"
+            f"remoteControlNoticePanelPresented session={raw_notice_session} session_ref={notice_session_ref} transport=p2p phase=awaitingApproval buttons=collapse,close,reject,approve\n"
+            f"remoteControlNoticeHumanApproved session={raw_notice_session} session_ref={notice_session_ref} transport=p2p\n"
+            f"remoteControlNoticeApproved session={raw_notice_session} session_ref={notice_session_ref} transport=p2p\n"
+            f"remoteControlNoticeActive session={raw_notice_session} session_ref={notice_session_ref} transport=p2p\n"
             "success suite=X-Wing handshakeOnly=1\n"
             "smoke-final result=success validated=1 route=lan-main\n",
             encoding="utf-8",
@@ -183,7 +183,7 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
         self.write_json(
             directory / "p2p-approval-proof.json",
             {
-                "schemaVersion": 1,
+                "schemaVersion": 2,
                 "sessionRef": notice_session_ref,
                 "humanApproval": True,
                 "runtimeAutoApproval": False,
@@ -656,7 +656,7 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
             status = status_path.read_text(encoding="utf-8")
             status_path.write_text(
                 status.replace(
-                    "remoteControlNoticeHumanApproved session=peer:192.0.2.10 transport=p2p\n",
+                    f"remoteControlNoticeHumanApproved session=peer:192.0.2.10 session_ref={NOTICE_EVIDENCE_REF} transport=p2p\n",
                     "",
                 ),
                 encoding="utf-8",
@@ -675,8 +675,8 @@ class ReleaseAcceptanceArtifactTests(unittest.TestCase):
             status = status_path.read_text(encoding="utf-8")
             status_path.write_text(
                 status.replace(
-                    "remoteControlNoticeHumanApproved session=peer:192.0.2.10 transport=p2p",
-                    "remoteControlNoticeHumanApproved session=peer:192.0.2.11 transport=p2p",
+                    f"remoteControlNoticeHumanApproved session=peer:192.0.2.10 session_ref={NOTICE_EVIDENCE_REF} transport=p2p",
+                    f"remoteControlNoticeHumanApproved session=peer:192.0.2.11 session_ref={NOTICE_EVIDENCE_REF} transport=p2p",
                 ),
                 encoding="utf-8",
             )

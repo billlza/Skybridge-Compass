@@ -406,6 +406,45 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
         XCTAssertFalse(normalization.usedEvenPadding)
     }
 
+    func testNativeVideoRenderRequiresAdmissionAndExactTrackEpoch() {
+        XCTAssertFalse(
+            CrossNetworkWebRTCNativeVideoPolicy.allowsTrackRender(
+                isAdmitted: false,
+                currentTrackID: "track-a",
+                renderedTrackID: "track-a",
+                currentRenderEpoch: 7,
+                renderedEpoch: 7
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCNativeVideoPolicy.allowsTrackRender(
+                isAdmitted: true,
+                currentTrackID: "track-b",
+                renderedTrackID: "track-a",
+                currentRenderEpoch: 7,
+                renderedEpoch: 7
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkWebRTCNativeVideoPolicy.allowsTrackRender(
+                isAdmitted: true,
+                currentTrackID: "track-a",
+                renderedTrackID: "track-a",
+                currentRenderEpoch: 8,
+                renderedEpoch: 7
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkWebRTCNativeVideoPolicy.allowsTrackRender(
+                isAdmitted: true,
+                currentTrackID: "track-a",
+                renderedTrackID: "track-a",
+                currentRenderEpoch: 7,
+                renderedEpoch: 7
+            )
+        )
+    }
+
     func testNativeVideoPolicyReturnsCodedSizeWhenExpectedFrameIsMissingInvalidOrMismatched() {
         let codedSize = CGSize(width: 1280, height: 720)
 
@@ -889,7 +928,19 @@ final class CrossNetworkWebRTCManagerDirectProbeTests: XCTestCase {
             "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopViewerStreamConfigurationFactory.swift"
         )
         XCTAssertTrue(source.contains("screenDataChannelEnabled: activeTransportMode != .crossNetwork"))
-        XCTAssertTrue(source.contains("mediaFallbackPolicy: activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""))
+        XCTAssertTrue(source.contains("mediaFallbackPolicy: mediaFallbackPolicy(for: activeTransportMode)"))
+        XCTAssertEqual(
+            RemoteDesktopViewerStreamConfigurationFactory.mediaFallbackPolicy(for: .crossNetwork),
+            "forbidden"
+        )
+        XCTAssertEqual(
+            RemoteDesktopViewerStreamConfigurationFactory.mediaFallbackPolicy(for: .lan),
+            "fail-fast"
+        )
+        XCTAssertEqual(
+            RemoteDesktopViewerStreamConfigurationFactory.mediaFallbackPolicy(for: .none),
+            "fail-fast"
+        )
         XCTAssertTrue(source.contains("screenChannelWireFormat: activeTransportMode == .crossNetwork || activeTransportMode == .lan"))
         XCTAssertTrue(source.contains("\"sbc2-chunked-v1\""))
     }

@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 enum RemoteMessageTypeWire: String, Codable {
     case screenData
@@ -15,13 +16,6 @@ enum RemoteMessageTypeWire: String, Codable {
 struct RemoteMessageWire: Codable {
     let type: RemoteMessageTypeWire
     let payload: Data
-}
-
-struct RemoteDesktopStreamConfigurationAckWire: Codable, Sendable {
-    let acceptedAt: TimeInterval
-    let streamRefreshToken: UInt64?
-    let audioEndpointPresent: Bool
-    let screenFrameTransport: String?
 }
 
 enum MouseEventTypeWire: String, Codable {

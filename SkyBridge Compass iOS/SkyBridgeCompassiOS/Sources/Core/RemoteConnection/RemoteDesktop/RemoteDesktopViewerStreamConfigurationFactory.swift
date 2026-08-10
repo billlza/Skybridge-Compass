@@ -12,6 +12,7 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
         let hasRenderedCrossNetworkNativeFrame: Bool
         let nativeAudioReceiveEnabled: Bool
         let realtimeMediaAudioMode: SkyBridgeMediaAudioMode
+        let realtimeMediaAudioRequested: Bool
         let mediaAudioEndpoint: SkyBridgeMediaEndpoint?
         let mediaSessionId: String?
         let streamRefreshToken: UInt64?
@@ -71,8 +72,7 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             targetFrameRate: targetFrameRate
         )
         let realtimeMediaAudioReady = viewerSettings.audioRedirectionEnabled
-            && input.mediaAudioEndpoint != nil
-            && input.mediaSessionId != nil
+            && input.realtimeMediaAudioRequested
         let nativeAudioReady = viewerSettings.audioRedirectionEnabled
             && input.nativeAudioReceiveEnabled
         let effectiveAudioRedirectionEnabled = realtimeMediaAudioReady || nativeAudioReady
@@ -122,10 +122,16 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             audioSampleRate: effectiveAudioRedirectionEnabled ? 48_000 : nil,
             audioChannelCount: effectiveAudioRedirectionEnabled ? 2 : nil,
             performanceValidationMode: strictMediaValidationEnabled ? "extreme" : nil,
-            mediaFallbackPolicy: activeTransportMode == .crossNetwork ? "forbidden" : "fail-fast",
+            mediaFallbackPolicy: mediaFallbackPolicy(for: activeTransportMode),
             streamRefreshToken: input.streamRefreshToken,
             remoteControlSecurityIdentity: input.securityIdentity?.isEmpty == true ? nil : input.securityIdentity
         )
+    }
+
+    static func mediaFallbackPolicy(
+        for activeTransportMode: RemoteDesktopManager.ActiveTransportMode
+    ) -> String {
+        activeTransportMode == .crossNetwork ? "forbidden" : "fail-fast"
     }
 
     private static func keyFrameInterval(

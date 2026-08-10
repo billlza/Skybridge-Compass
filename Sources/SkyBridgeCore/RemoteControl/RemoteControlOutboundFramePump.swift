@@ -6,6 +6,7 @@
 import Foundation
 import Network
 import OSLog
+import SkyBridgeProtocolCore
 
 // MARK: - 基础模型：消息/事件
 
@@ -20,6 +21,7 @@ struct RemoteMessage: Codable, Sendable {
         case keyboardEvent
         case clipboard
         case streamConfiguration
+        case streamConfigurationAck
         case damageReport
         case cursorUpdate
         case overlayUpdate
@@ -121,7 +123,7 @@ actor RemoteControlOutboundFramePump {
     private var frameTransport: FrameTransport = .legacyJSON
     private var usesChunkedScreenFrameWire = false
     private var nextChunkedScreenFrameId: UInt64 = 1
-    private var streamingEnabled = true
+    private var streamingEnabled = false
     private var damageTrackingEnabled = true
     private var allowsInsecureLegacy = false
     private var sessionKeys: SessionKeys?
@@ -202,6 +204,8 @@ actor RemoteControlOutboundFramePump {
     private var lastVideoFrameScheduleTelemetryAt: Date?
     private var lastVideoFrameCompletionTelemetryAt: Date?
     private var lastVideoFrameContentProcessedCallbackAt: Date?
+    private var sessionEvidenceReference = "-"
+    private var streamOperationEvidenceReference = "-"
     private static let sendQueueOverflowSyncRefreshMinimumInterval: TimeInterval = 2.0
     private static let waitingForSyncFrameRefreshMinimumInterval: TimeInterval = 2.0
     private static let harmfulBackpressurePendingFrameThreshold = 6
@@ -328,7 +332,16 @@ actor RemoteControlOutboundFramePump {
         sessionKeys: SessionKeys?,
         allowsInsecureLegacy: Bool
     ) {
-        streamingEnabled = requestedStreamConfiguration?.isStopRequest != true
+        sessionEvidenceReference = sessionKeys.flatMap {
+            P2PEvidenceReference.sessionIncarnation(
+                sessionID: $0.sessionId,
+                transcriptHash: $0.transcriptHash
+            )
+        } ?? "-"
+        streamOperationEvidenceReference = requestedStreamConfiguration?
+            .streamConfigurationTransaction
+            .map { P2PEvidenceReference.transaction($0.id) } ?? "-"
+        streamingEnabled = requestedStreamConfiguration.map { !$0.isStopRequest } ?? false
         frameTransport = requestedStreamConfiguration?.screenFrameTransport == "sbrf-v1"
             ? .binaryWire
             : .legacyJSON
@@ -865,7 +878,7 @@ actor RemoteControlOutboundFramePump {
         )
         RemoteControlSmokeStatusWriter.append(
             """
-            mac-remote-frame-tx peer=\(peerId) transport=\(snapshot.transport) \
+            mac-remote-frame-tx peer=\(peerId) session_ref=\(sessionEvidenceReference) stream_ref=\(streamOperationEvidenceReference) transport=\(snapshot.transport) \
             source=encoded-direct-pump \
             sampleMs=\(sampleMs) submittedFPS=\(submittedFPS) sentFPS=\(sentFPS) submitted=\(snapshot.submittedFrames) sent=\(snapshot.sentFrames) \
             dropped=\(snapshot.droppedFrames) backpressure=\(snapshot.backpressureEvents) rawBackpressure=\(snapshot.rawBackpressureEvents) \

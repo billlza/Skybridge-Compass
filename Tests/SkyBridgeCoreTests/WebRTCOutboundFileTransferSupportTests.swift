@@ -323,7 +323,8 @@ final class WebRTCOutboundFileTransferSupportTests: XCTestCase {
 
         for source in [macWaiterSource, iosWaiterSource] {
             XCTAssertTrue(source.contains("withTaskCancellationHandler"))
-            XCTAssertTrue(source.contains("takeFileTransferWaiter(forKey: key, token: token)"))
+            XCTAssertTrue(source.contains("matching: owner"))
+            XCTAssertTrue(source.contains("owner: owner"))
             XCTAssertTrue(source.contains("pending.sendTask = sendTask"))
             XCTAssertTrue(source.contains("resume(throwing: CancellationError())"))
         }
@@ -360,6 +361,125 @@ final class WebRTCOutboundFileTransferSupportTests: XCTestCase {
         XCTAssertTrue(readerSource.contains("Darwin.pread"))
         XCTAssertTrue(readerSource.contains("try handle.close()\n        isClosed = true"))
         XCTAssertFalse(readerSource.contains("isClosed = true\n        try handle.close()"))
+    }
+
+    @MainActor
+    func testExactOwnerMatcherRejectsSameSessionIDReplacement() {
+        let sessionID = "file-owner-replacement"
+        let sessionA = makeWebRTCSession(sessionID: sessionID)
+        let sessionB = makeWebRTCSession(sessionID: sessionID)
+        let keys = makeSessionKeys(sessionID: sessionID, byte: 0x41)
+        let controlToken = UUID()
+        let ownerA = CrossNetworkConnectionManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: sessionA,
+            sessionObjectIdentifier: ObjectIdentifier(sessionA),
+            controlTaskToken: controlToken,
+            keys: keys
+        )
+        let ownerB = CrossNetworkConnectionManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: sessionB,
+            sessionObjectIdentifier: ObjectIdentifier(sessionB),
+            controlTaskToken: controlToken,
+            keys: keys
+        )
+
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.isSameWebRTCFileTransferOperationOwner(
+                ownerA,
+                ownerB
+            )
+        )
+    }
+
+    @MainActor
+    func testExactOwnerMatcherRejectsOldAcknowledgementAndFatalAfterRekeyButAcceptsB() {
+        let sessionID = "file-owner-rekey"
+        let session = makeWebRTCSession(sessionID: sessionID)
+        let controlToken = UUID()
+        let ownerBeforeRekey = CrossNetworkConnectionManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: session,
+            sessionObjectIdentifier: ObjectIdentifier(session),
+            controlTaskToken: controlToken,
+            keys: makeSessionKeys(sessionID: sessionID, byte: 0x41)
+        )
+        let ownerAfterRekey = CrossNetworkConnectionManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: session,
+            sessionObjectIdentifier: ObjectIdentifier(session),
+            controlTaskToken: controlToken,
+            keys: makeSessionKeys(sessionID: sessionID, byte: 0x42)
+        )
+
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.isSameWebRTCFileTransferOperationOwner(
+                ownerBeforeRekey,
+                ownerAfterRekey
+            )
+        )
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.isSameWebRTCFileTransferOperationOwner(
+                ownerAfterRekey,
+                ownerAfterRekey
+            )
+        )
+    }
+
+    func testExternalPresentationTokenCASRejectsStaleAWithoutOwningB() {
+        let lifecycle = UUID()
+        let transferID = "presentation-owner"
+        let tokenA = FileTransferManager.ExternalTransferToken(
+            identifier: UUID(),
+            transferID: transferID,
+            lifecycleGeneration: lifecycle,
+            direction: .outgoing
+        )
+        let tokenB = FileTransferManager.ExternalTransferToken(
+            identifier: UUID(),
+            transferID: transferID,
+            lifecycleGeneration: lifecycle,
+            direction: .outgoing
+        )
+
+        XCTAssertFalse(
+            FileTransferManager.externalTransferTokenOwnsCurrentSlot(
+                currentToken: tokenB,
+                expectedToken: tokenA
+            )
+        )
+        XCTAssertTrue(
+            FileTransferManager.externalTransferTokenOwnsCurrentSlot(
+                currentToken: tokenB,
+                expectedToken: tokenB
+            )
+        )
+    }
+
+    private func makeWebRTCSession(sessionID: String) -> WebRTCSession {
+        WebRTCSession(
+            sessionId: sessionID,
+            localDeviceId: "file-owner-local",
+            role: .answerer,
+            ice: .init(
+                stunURL: "stun:127.0.0.1:3478",
+                turnURLs: [],
+                turnUsername: "",
+                turnPassword: ""
+            )
+        )
+    }
+
+    private func makeSessionKeys(sessionID: String, byte: UInt8) -> SessionKeys {
+        SessionKeys(
+            sendKey: Data(repeating: byte, count: 32),
+            receiveKey: Data(repeating: byte &+ 1, count: 32),
+            negotiatedSuite: .x25519Ed25519,
+            role: .responder,
+            transcriptHash: Data(repeating: byte &+ 2, count: 32),
+            sessionId: sessionID
+        )
     }
 
     private func makeFileFixture(

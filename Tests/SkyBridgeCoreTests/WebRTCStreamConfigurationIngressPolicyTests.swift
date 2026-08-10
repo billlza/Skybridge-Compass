@@ -1,8 +1,103 @@
 import XCTest
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 @testable import SkyBridgeCore
 
 final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
+    @MainActor
+    func testRemoteEffectsRequireCommittedActiveConfiguration() {
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .input,
+                configuration: nil
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .clipboard,
+                configuration: nil
+            )
+        )
+
+        let stopped = streamConfiguration(
+            targetFrameRate: 0,
+            screenFrameTransport: "stopped",
+            clipboardSyncEnabled: true,
+            audioRedirectionEnabled: false
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .input,
+                configuration: stopped
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .clipboard,
+                configuration: stopped
+            )
+        )
+    }
+
+    @MainActor
+    func testCommittedConfigurationSeparatesInputAndClipboardAdmission() {
+        let clipboardDisabled = streamConfiguration(clipboardSyncEnabled: false)
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .input,
+                configuration: clipboardDisabled
+            )
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .clipboard,
+                configuration: clipboardDisabled
+            )
+        )
+
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.allowsWebRTCCommittedRemoteControlEffect(
+                .clipboard,
+                configuration: streamConfiguration(clipboardSyncEnabled: true)
+            )
+        )
+    }
+
+    @MainActor
+    func testWebRTCRemoteControlSessionOwnerRequiresFullKeySnapshot() {
+        let baseline = SessionKeys(
+            sendKey: Data(repeating: 0x11, count: 32),
+            receiveKey: Data(repeating: 0x22, count: 32),
+            negotiatedSuite: .xwingMLDSA,
+            role: .initiator,
+            transcriptHash: Data(repeating: 0x33, count: 32),
+            sessionId: "remote-config-session"
+        )
+        let exactCopy = SessionKeys(
+            sendKey: baseline.sendKey,
+            receiveKey: baseline.receiveKey,
+            negotiatedSuite: baseline.negotiatedSuite,
+            role: baseline.role,
+            transcriptHash: baseline.transcriptHash,
+            sessionId: baseline.sessionId
+        )
+        let rekeyed = SessionKeys(
+            sendKey: Data(repeating: 0x44, count: 32),
+            receiveKey: baseline.receiveKey,
+            negotiatedSuite: baseline.negotiatedSuite,
+            role: baseline.role,
+            transcriptHash: Data(repeating: 0x55, count: 32),
+            sessionId: baseline.sessionId
+        )
+
+        XCTAssertTrue(
+            CrossNetworkConnectionManager.isSameWebRTCSecureSession(baseline, exactCopy)
+        )
+        XCTAssertFalse(
+            CrossNetworkConnectionManager.isSameWebRTCSecureSession(baseline, rekeyed)
+        )
+    }
+
     @MainActor
     func testStopConfigurationPlansLocalShutdownWithoutAckOrRestart() {
         let previous = streamConfiguration(
@@ -94,6 +189,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
 
         let ack = plan.acknowledgement?.payload(acceptedAt: 1_770_000_000)
         XCTAssertEqual(ack?.acceptedAt, 1_770_000_000)
+        XCTAssertEqual(ack?.transaction, incoming.streamConfigurationTransaction)
         XCTAssertEqual(ack?.streamRefreshToken, 2)
         XCTAssertFalse(ack?.audioEndpointPresent ?? true)
         XCTAssertEqual(ack?.screenFrameTransport, incoming.screenFrameTransport)
@@ -194,18 +290,75 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
         XCTAssertTrue(plan.shouldMarkPendingStreamRefresh)
     }
 
+    @MainActor
+    func testLogicalTransactionMakesDuplicateIdempotentAndConflictFailClosed() {
+        let transaction = RemoteDesktopStreamConfigurationTransaction(
+            id: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        )
+        let accepted = streamConfiguration(
+            preferredCodec: "hevc",
+            streamRefreshToken: 12,
+            streamConfigurationTransaction: transaction
+        )
+
+        let duplicate = CrossNetworkConnectionManager
+            .planWebRTCStreamConfigurationIngress(
+                accepted,
+                previousConfig: accepted,
+                previousRawConfig: accepted,
+                advertisedFormats: ["hevc"],
+                hasSessionKeys: true
+            )
+        XCTAssertEqual(duplicate.transactionDecision, .acknowledgeDuplicate)
+        XCTAssertTrue(duplicate.shouldSendAcknowledgement)
+        XCTAssertEqual(duplicate.acknowledgement?.transaction, transaction)
+        XCTAssertFalse(duplicate.shouldStartScreenStreamingIfNeeded)
+
+        let conflicting = streamConfiguration(
+            preferredCodec: "h264",
+            streamRefreshToken: 13,
+            streamConfigurationTransaction: transaction
+        )
+        let conflict = CrossNetworkConnectionManager
+            .planWebRTCStreamConfigurationIngress(
+                conflicting,
+                previousConfig: accepted,
+                previousRawConfig: accepted,
+                advertisedFormats: ["h264"],
+                hasSessionKeys: true
+            )
+        XCTAssertEqual(conflict.transactionDecision, .rejectConflictingDuplicate)
+        XCTAssertFalse(conflict.shouldSendAcknowledgement)
+        XCTAssertFalse(conflict.shouldStartScreenStreamingIfNeeded)
+
+        let missing = streamConfiguration(
+            streamConfigurationTransaction: nil
+        )
+        let missingPlan = CrossNetworkConnectionManager
+            .planWebRTCStreamConfigurationIngress(
+                missing,
+                previousConfig: accepted,
+                previousRawConfig: accepted,
+                advertisedFormats: ["h264"],
+                hasSessionKeys: true
+            )
+        XCTAssertEqual(missingPlan.transactionDecision, .rejectMissingTransaction)
+    }
+
     private func streamConfiguration(
         preferredCodec: String? = "h264",
         supportedVideoFormats: [String] = ["h264"],
         targetFrameRate: Int = 60,
         screenFrameTransport: String? = "webrtc-native-main+sbrf-fallback",
         screenDataChannelEnabled: Bool? = false,
+        clipboardSyncEnabled: Bool = true,
         audioRedirectionEnabled: Bool? = nil,
         audioTransport: String? = nil,
         audioMode: String? = nil,
         mediaSessionId: String? = nil,
         mediaAudioEndpoint: SkyBridgeMediaEndpoint? = nil,
-        streamRefreshToken: UInt64? = nil
+        streamRefreshToken: UInt64? = nil,
+        streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction? = .init()
     ) -> RemoteDesktopStreamConfiguration {
         RemoteDesktopStreamConfiguration(
             preferredCodec: preferredCodec,
@@ -215,7 +368,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
             lowLatencyMode: false,
             enableHardwareAcceleration: true,
             enableAppleSiliconOptimization: true,
-            clipboardSyncEnabled: true,
+            clipboardSyncEnabled: clipboardSyncEnabled,
             screenFrameTransport: screenFrameTransport,
             screenDataChannelEnabled: screenDataChannelEnabled,
             audioRedirectionEnabled: audioRedirectionEnabled,
@@ -224,6 +377,7 @@ final class WebRTCStreamConfigurationIngressPolicyTests: XCTestCase {
             mediaSessionId: mediaSessionId,
             mediaAudioEndpoint: mediaAudioEndpoint,
             streamRefreshToken: streamRefreshToken,
+            streamConfigurationTransaction: streamConfigurationTransaction,
             sentAt: 1_770_000_000
         )
     }

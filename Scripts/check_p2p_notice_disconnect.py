@@ -19,7 +19,7 @@ PENDING = 1
 INVALID = 2
 _EVENT = re.compile(
     r"\bremoteControlNotice(?P<event>Active|Disconnected|Rejected|TimedOut)\s+"
-    r"session=(?P<session>[^\s]+)\s+transport=p2p\b"
+    r"session=(?P<session>[^\s]+)\b[^\n]*\btransport=p2p\b"
 )
 
 

@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 actor ProtocolIdentityBindingTransactionStore {
@@ -49,12 +50,6 @@ actor ProtocolIdentityBindingTransactionStore {
         let admittedAt: Date
     }
 
-    private static let maximumTransactions = 32
-    private static let maximumTransactionsPerRequester = 4
-    private static let admissionWindow: TimeInterval = 10
-    private static let maximumAdmissionsPerRequesterPerWindow = 8
-    private static let maximumGlobalAdmissionsPerWindow = 64
-    private static let maximumTTL: TimeInterval = 300
     private var entries: [UUID: Entry] = [:]
     private var recentAdmissions: [Admission] = []
 
@@ -64,13 +59,15 @@ actor ProtocolIdentityBindingTransactionStore {
         responderKeyHandle: SigningKeyHandle? = nil,
         now: Date = Date()
     ) throws -> AppMessage.SignedProtocolIdentityBindingPayload {
+        try Task.checkCancellation()
         purgeExpired(now: now)
         purgeAdmissions(now: now)
         guard request.version == AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion,
               candidate.version == AppMessage.SignedProtocolIdentityBindingPayload.currentVersion,
               request.transactionId == candidate.transactionId,
               candidate.expiresAt > now,
-              candidate.expiresAt.timeIntervalSince(now) <= Self.maximumTTL else {
+              candidate.expiresAt.timeIntervalSince(now)
+                <= P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds else {
             throw TransactionError.conflictingTransaction
         }
         if let existing = entries[request.transactionId] {
@@ -88,7 +85,8 @@ actor ProtocolIdentityBindingTransactionStore {
                 count += 1
             }
         }
-        guard activeRequesterTransactions < Self.maximumTransactionsPerRequester else {
+        guard activeRequesterTransactions
+                < P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionsPerRequester else {
             throw TransactionError.requesterQuotaReached
         }
         let recentRequesterAdmissions = recentAdmissions.reduce(into: 0) { count, admission in
@@ -96,15 +94,21 @@ actor ProtocolIdentityBindingTransactionStore {
                 count += 1
             }
         }
-        guard recentRequesterAdmissions < Self.maximumAdmissionsPerRequesterPerWindow else {
+        guard recentRequesterAdmissions
+                < P2PProtocolIdentityBindingAdmissionPolicy
+                    .maximumAdmissionsPerRequesterPerWindow else {
             throw TransactionError.requesterRateLimited
         }
-        guard recentAdmissions.count < Self.maximumGlobalAdmissionsPerWindow else {
+        guard recentAdmissions.count
+                < P2PProtocolIdentityBindingAdmissionPolicy
+                    .maximumGlobalAdmissionsPerWindow else {
             throw TransactionError.capacityReached
         }
-        guard entries.count < Self.maximumTransactions else {
+        guard entries.count
+                < P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactions else {
             throw TransactionError.capacityReached
         }
+        try Task.checkCancellation()
         entries[request.transactionId] = Entry(
             context: Context(
                 request: request,
@@ -112,7 +116,13 @@ actor ProtocolIdentityBindingTransactionStore {
                 responderKeyHandle: responderKeyHandle
             ),
             requesterFingerprint: requesterFingerprint,
-            expiresAt: min(candidate.expiresAt, now.addingTimeInterval(Self.maximumTTL)),
+            expiresAt: min(
+                candidate.expiresAt,
+                now.addingTimeInterval(
+                    P2PProtocolIdentityBindingAdmissionPolicy
+                        .maximumTransactionTTLSeconds
+                )
+            ),
             confirmationHashHex: nil,
             finalizationTask: nil,
             finalAck: nil
@@ -148,7 +158,11 @@ actor ProtocolIdentityBindingTransactionStore {
             return finalAck
         }
         if let task = entry.finalizationTask {
-            return try await task.value
+            return try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
         }
 
         let context = entry.context
@@ -160,7 +174,11 @@ actor ProtocolIdentityBindingTransactionStore {
         entries[confirm.transactionId] = entry
 
         do {
-            let ack = try await task.value
+            let ack = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
             guard var current = entries[confirm.transactionId],
                   current.confirmationHashHex == confirmationHash else {
                 throw TransactionError.conflictingConfirmation
@@ -200,7 +218,9 @@ actor ProtocolIdentityBindingTransactionStore {
     }
 
     private func purgeAdmissions(now: Date) {
-        let cutoff = now.addingTimeInterval(-Self.admissionWindow)
+        let cutoff = now.addingTimeInterval(
+            -P2PProtocolIdentityBindingAdmissionPolicy.admissionWindowSeconds
+        )
         recentAdmissions.removeAll { $0.admittedAt <= cutoff }
     }
 }

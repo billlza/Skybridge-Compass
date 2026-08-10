@@ -14,6 +14,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
     let track: RTCVideoTrack
     let acceptsRenderEvidence: Bool
     let uiSurface: String
+    let requiresRemoteDesktopAdmission: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -45,7 +46,11 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
             }
         }
-        context.coordinator.bind(track: track, to: view)
+        context.coordinator.bind(
+            track: track,
+            to: view,
+            requiresRemoteDesktopAdmission: requiresRemoteDesktopAdmission
+        )
         SkyBridgeDiagnosticTrace.appendStatus(
             "native-render-view-bound trackId=\(track.trackId) acceptsEvidence=\(acceptsRenderEvidence ? 1 : 0) epoch=\(renderEpoch) source=rtc-mtl-video-view"
         )
@@ -82,7 +87,11 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 RemoteDesktopManager.instance.updateCrossNetworkNativeVideoResolution(size)
             }
         }
-        context.coordinator.bind(track: track, to: uiView)
+        context.coordinator.bind(
+            track: track,
+            to: uiView,
+            requiresRemoteDesktopAdmission: requiresRemoteDesktopAdmission
+        )
         if acceptsRenderEvidence {
             SkyBridgeDiagnosticTrace.appendStatus(
                 "native-render-view-updated trackId=\(track.trackId) acceptsEvidence=1 epoch=\(renderEpoch) source=rtc-mtl-video-view"
@@ -102,17 +111,30 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
         private weak var boundTrack: RTCVideoTrack?
         private weak var boundView: ObservableRTCMTLVideoView?
         private var boundRenderer: VisibleRTCMTLVideoRenderer?
+        private var boundRequiresRemoteDesktopAdmission: Bool?
 
-        func bind(track: RTCVideoTrack, to view: ObservableRTCMTLVideoView) {
-            if boundTrack === track, boundView === view {
+        @MainActor
+        func bind(
+            track: RTCVideoTrack,
+            to view: ObservableRTCMTLVideoView,
+            requiresRemoteDesktopAdmission: Bool
+        ) {
+            if boundTrack === track,
+               boundView === view,
+               boundRequiresRemoteDesktopAdmission == requiresRemoteDesktopAdmission {
                 return
             }
             unbind()
-            track.isEnabled = true
-            let renderer = VisibleRTCMTLVideoRenderer(view: view)
+            let renderer = VisibleRTCMTLVideoRenderer(
+                view: view,
+                trackID: track.trackId,
+                renderEpoch: view.renderEpoch,
+                requiresRemoteDesktopAdmission: requiresRemoteDesktopAdmission
+            )
             boundTrack = track
             boundView = view
             boundRenderer = renderer
+            boundRequiresRemoteDesktopAdmission = requiresRemoteDesktopAdmission
             track.add(renderer)
             SkyBridgeDiagnosticTrace.appendStatus(
                 "native-render-track-bound trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0) source=rtc-mtl-video-view renderer=forwarder"
@@ -122,6 +144,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
             )
         }
 
+        @MainActor
         func unbind() {
             if let boundTrack, let boundRenderer {
                 boundTrack.remove(boundRenderer)
@@ -129,6 +152,7 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
             boundTrack = nil
             boundView = nil
             boundRenderer = nil
+            boundRequiresRemoteDesktopAdmission = nil
         }
 
         func videoView(_ videoView: any RTCVideoRenderer, didChangeVideoSize size: CGSize) {
@@ -142,18 +166,42 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
 
         private final class VisibleRTCMTLVideoRenderer: NSObject, RTCVideoRenderer {
             private weak var view: ObservableRTCMTLVideoView?
+            private let trackID: String
+            private let renderEpoch: UInt64
+            private let requiresRemoteDesktopAdmission: Bool
             private let logState = VisibleRenderForwarderLogState()
 
-            init(view: ObservableRTCMTLVideoView) {
+            init(
+                view: ObservableRTCMTLVideoView,
+                trackID: String,
+                renderEpoch: UInt64,
+                requiresRemoteDesktopAdmission: Bool
+            ) {
                 self.view = view
+                self.trackID = trackID
+                self.renderEpoch = renderEpoch
+                self.requiresRemoteDesktopAdmission = requiresRemoteDesktopAdmission
             }
 
             func setSize(_ size: CGSize) {
                 guard size.width > 0, size.height > 0 else { return }
                 guard let view else { return }
                 let logState = logState
+                let trackID = trackID
+                let renderEpoch = renderEpoch
+                let requiresRemoteDesktopAdmission = requiresRemoteDesktopAdmission
                 DispatchQueue.main.async { [weak view] in
                     guard let view else { return }
+                    guard CrossNetworkWebRTCManager.instance.canRenderAdmittedRemoteVideoTrack(
+                        trackID: trackID,
+                        renderEpoch: renderEpoch
+                    ) else {
+                        return
+                    }
+                    if requiresRemoteDesktopAdmission,
+                       !RemoteDesktopManager.instance.canAdmitCrossNetworkNativeVideoFrame() {
+                        return
+                    }
                     view.setSize(size)
                     view.noteVideoViewSizeEvidence(size)
                     if logState.markFirstSize() {
@@ -170,8 +218,21 @@ struct RemoteDesktopRTCVideoView: UIViewRepresentable {
                 guard size.width > 0, size.height > 0 else { return }
                 guard let view else { return }
                 let logState = logState
+                let trackID = trackID
+                let renderEpoch = renderEpoch
+                let requiresRemoteDesktopAdmission = requiresRemoteDesktopAdmission
                 DispatchQueue.main.async { [weak view] in
                     guard let view else { return }
+                    guard CrossNetworkWebRTCManager.instance.canRenderAdmittedRemoteVideoTrack(
+                        trackID: trackID,
+                        renderEpoch: renderEpoch
+                    ) else {
+                        return
+                    }
+                    if requiresRemoteDesktopAdmission,
+                       !RemoteDesktopManager.instance.canAdmitCrossNetworkNativeVideoFrame() {
+                        return
+                    }
                     view.renderFrame(frame)
                     if logState.markFirstFrame() {
                         SkyBridgeDiagnosticTrace.appendStatus(

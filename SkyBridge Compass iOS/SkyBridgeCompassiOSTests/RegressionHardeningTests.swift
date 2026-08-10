@@ -3,6 +3,7 @@ import Dispatch
 import Network
 import class SkyBridgeProtocolCore.InboundFileTransferIOActor
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
+import struct SkyBridgeProtocolCore.RemoteDesktopStreamConfigurationTransaction
 import SkyBridgeRealtimeMedia
 import UIKit
 import XCTest
@@ -1225,10 +1226,30 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(smokeScript.contains("SKYBRIDGE_SMOKE_TARGET_REMOTE_PORT"))
 
     XCTAssertTrue(harnessSource.contains("verifyDiscoveredControlRoute"))
+    XCTAssertTrue(harnessSource.contains(".resolveConnectableDeviceAwaitingControlRoute("))
+    XCTAssertTrue(harnessSource.contains("mode: .selectedDiscoveryTarget"))
+    XCTAssertTrue(harnessSource.contains("control-route hydration=finished elapsedMs="))
+    XCTAssertTrue(harnessSource.contains("hydratedStrongIdSame="))
+    XCTAssertTrue(harnessSource.contains("control-route evidence liveEndpointCount="))
+    XCTAssertTrue(harnessSource.contains("eligibleEndpointCount="))
+    XCTAssertTrue(harnessSource.contains("ignoredLiveEndpointCount="))
+    XCTAssertTrue(harnessSource.contains("strong_identity_changed_during_hydration"))
+    XCTAssertFalse(harnessSource.contains("endpoints.count == liveEndpoints.count"))
+    XCTAssertTrue(harnessSource.contains("guard verifyDiscoveredControlRoute(hydratedTarget"))
+    let routeHydrationRange = try XCTUnwrap(
+      harnessSource.range(of: ".resolveConnectableDeviceAwaitingControlRoute(")
+    )
+    let strictRouteVerificationRange = try XCTUnwrap(
+      harnessSource.range(of: "guard verifyDiscoveredControlRoute(hydratedTarget")
+    )
+    XCTAssertLessThan(routeHydrationRange.lowerBound, strictRouteVerificationRange.lowerBound)
     XCTAssertTrue(harnessSource.contains("liveBonjourServiceEndpoints("))
     XCTAssertTrue(harnessSource.contains("liveBonjourControlEndpoints: liveEndpoints"))
     XCTAssertTrue(harnessSource.contains("preferredInterface="))
     XCTAssertTrue(harnessSource.contains("source=bonjour-service"))
+    XCTAssertTrue(harnessSource.contains("cancelled stage=control-route"))
+    XCTAssertFalse(harnessSource.contains("let normalizedName = targetDeviceName"))
+    XCTAssertFalse(harnessSource.contains("deviceName.contains(normalizedName)"))
     XCTAssertFalse(harnessSource.contains("applySmokePinnedControlRoute"))
     XCTAssertFalse(harnessSource.contains("control-route-preflight"))
 
@@ -1427,7 +1448,11 @@ final class RegressionHardeningTests: XCTestCase {
     let source = try remoteDesktopManagerSource()
 
     XCTAssertTrue(
-      source.contains("let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable()"))
+      source.contains(
+        "let mediaAudioBinding = currentRealtimeMediaAudioBindingIfUsable(\n            expectedMode: mediaAudioMode\n        )"
+      ),
+      "A previously started receiver is reusable only when its negotiated audio mode still matches the next stream configuration."
+    )
     XCTAssertTrue(
       source.contains("ensureRealtimeMediaAudioReceiverStartedIfNeeded(mode: mediaAudioMode)"))
     XCTAssertFalse(
@@ -1604,8 +1629,12 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertTrue(
       renewalBody.contains(
-        "let strictRenewalRequiresRollover = strictCrossNetworkMediaValidationActive && sameRelayAddress"
+        "let strictRenewalRequiresRollover = strictRenewalRequired && sameRelayAddress"
       )
+    )
+    XCTAssertTrue(
+      renewalBody.contains("Self.shouldRequestExtremeMediaValidation("),
+      "Relay renewal must derive strictness from the current transport policy, not from a previously sent payload that may have been cleared."
     )
     XCTAssertTrue(
       renewalBody.contains("if !strictRenewalRequiresRollover,\n           sameRelayAddress,"),
@@ -1673,6 +1702,73 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
+  func testStrictRealtimeMediaAudioReceiverFailureClosesExactSession() throws {
+    let source = try remoteDesktopManagerSource()
+    let preparationBody = try sourceSlice(
+      from: "private func prepareRealtimeMediaAudioReceiverIfNeeded",
+      to: "private func isCurrentRealtimeMediaAudioReceiverStart",
+      in: source
+    )
+    let startupBody = try sourceSlice(
+      from: "private func ensureRealtimeMediaAudioReceiverStartedIfNeeded",
+      to: "private func activeTransportModeLabel",
+      in: source
+    )
+    let timeoutFailureBody = try sourceSlice(
+      from: "private func markRealtimeMediaAudioReceiverStartupFailed",
+      to: "private func ensureRealtimeMediaAudioReceiverStartedIfNeeded",
+      in: source
+    )
+    let factorySource = try remoteDesktopViewerStreamConfigurationFactorySource()
+
+    XCTAssertTrue(startupBody.contains("try await self.prepareRealtimeMediaAudioReceiverIfNeeded("))
+    XCTAssertTrue(
+      startupBody.contains("let failureAction = self.realtimeMediaAudioReceiverFailureAction()")
+    )
+    XCTAssertTrue(startupBody.contains("if failureAction == .failSession"))
+    XCTAssertTrue(startupBody.contains("await self.handleTransportFailure("))
+    XCTAssertTrue(startupBody.contains("strict-fail-closed"))
+    XCTAssertFalse(startupBody.contains("keeping video-only"))
+    XCTAssertTrue(preparationBody.contains("receiver.stop()"))
+    XCTAssertTrue(preparationBody.contains("await renderer.close("))
+    XCTAssertTrue(preparationBody.contains("receiver-start-failed-before-install"))
+    XCTAssertTrue(
+      preparationBody.contains(
+        "throw RemoteControlRealtimeMediaStartupError"
+      )
+    )
+    XCTAssertTrue(
+      preparationBody.contains(
+        ".missingAuthenticatedMediaSessionKeys"
+      )
+    )
+    XCTAssertTrue(
+      preparationBody.contains(
+        "throw RemoteControlRealtimeMediaStartupError.relayLeaseUnavailable"
+      )
+    )
+    XCTAssertTrue(
+      preparationBody.contains(
+        "throw RemoteControlRealtimeMediaStartupError.transportUnavailable"
+      )
+    )
+    XCTAssertFalse(preparationBody.contains("keeping WebRTC video-only"))
+    XCTAssertTrue(
+      timeoutFailureBody.contains("realtimeMediaAudioReceiverFailureAction()")
+    )
+    XCTAssertTrue(
+      timeoutFailureBody.contains("RemoteControlRealtimeMediaStartupPolicy.failureAction(")
+    )
+    XCTAssertTrue(timeoutFailureBody.contains("strict-fail-closed"))
+    XCTAssertTrue(timeoutFailureBody.contains("await handleTransportFailure("))
+    XCTAssertTrue(factorySource.contains("mediaFallbackPolicy(for: activeTransportMode)"))
+    XCTAssertTrue(
+      factorySource.contains(
+        "activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""
+      )
+    )
+  }
+
   func testStreamRefreshStormsAreThrottledDuringAudioPresentSessions() throws {
     let source = try remoteDesktopManagerSource()
 
@@ -1729,14 +1825,17 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(source.contains("state = .error(\"sessionAuthorityLost\")"))
   }
 
-  func testStreamConfigurationAckHookStaysCompileCompatibleUntilSharedProducerExists() throws {
+  func testStreamConfigurationAckUsesSharedCorrelatedContract() throws {
     let managerSource = try remoteDesktopManagerSource()
     let typesSource = try remoteDesktopTypesSource()
 
-    XCTAssertTrue(typesSource.contains("Compile-compatible future hook"))
+    XCTAssertTrue(typesSource.contains("shared, transaction-correlated acknowledgement"))
     XCTAssertTrue(typesSource.contains("case streamConfigurationAck = \"streamConfigurationAck\""))
     XCTAssertTrue(managerSource.contains("case .streamConfigurationAck:"))
+    XCTAssertTrue(managerSource.contains("RemoteDesktopStreamConfigurationAcknowledgement.self"))
     XCTAssertTrue(managerSource.contains("handleStreamConfigurationAck"))
+    XCTAssertTrue(managerSource.contains("RemoteDesktopViewerStreamConfigurationPushPolicy.acknowledgementMatches"))
+    XCTAssertTrue(managerSource.contains("acknowledgedStreamConfigurationTransaction = owner.transaction"))
     XCTAssertTrue(managerSource.contains("lastAcknowledgedMediaAudioEndpointPresent = ack.audioEndpointPresent"))
     XCTAssertTrue(managerSource.contains("audioEndpointAck=\\(lastAcknowledgedMediaAudioEndpointPresent)"))
   }
@@ -2157,6 +2256,9 @@ final class RegressionHardeningTests: XCTestCase {
     let authSource = try authenticationManagerSource()
     let remoteViewSource = try remoteDesktopViewSource()
     let scriptSource = try repositoryScriptSource("Scripts/run_real_device_p2p_remote_smoke.sh")
+    let identityEvidenceValidatorSource = try repositoryScriptSource(
+      "Scripts/validate_p2p_identity_refresh_evidence.py"
+    )
 
     XCTAssertTrue(authSource.contains("shouldAutoAuthenticateAsGuestForP2PSmoke"))
     XCTAssertTrue(
@@ -2251,28 +2353,77 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(scriptSource.contains("\"SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING\""))
     XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_OPEN_REMOTE_TAB\": \"1\""))
     XCTAssertTrue(scriptSource.contains("\"SKYBRIDGE_SMOKE_REQUIRE_VISIBLE_REMOTE_VIEW\": \"1\""))
+    XCTAssertTrue(scriptSource.contains("validate_protocol_identity_bootstrap_evidence()"))
     XCTAssertTrue(
-      scriptSource.contains("wait_for_ios_status_pattern 'PIB-1 protocol identity binding request:")
+      scriptSource.contains(
+        "IDENTITY_REFRESH_EVIDENCE_VALIDATOR=\"$ROOT_DIR/Scripts/validate_p2p_identity_refresh_evidence.py\""
+      ))
+    XCTAssertTrue(scriptSource.contains("--ios-status \"$IOS_STATUS_APP_CACHE_LOCAL\""))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "IOS_STATUS_CONSOLE_LIVE=\"$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.console-live.status.log\""
+      ))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "cp \"$IOS_STATUS_CONSOLE_LIVE\" \"$IOS_STATUS_CONSOLE_SNAPSHOT\""
+      ))
+    XCTAssertFalse(
+      scriptSource.contains(
+        "cp \"$IOS_STATUS_LOCAL\" \"$IOS_STATUS_CONSOLE_SNAPSHOT\""
+      ),
+      "A final merged artifact must never replace or recursively feed the live devicectl console stream."
     )
     XCTAssertTrue(
       scriptSource.contains(
-        "wait_for_file_pattern \"$HOST_STATUS\" 'PIB-1 protocol identity binding served:"))
+        "validate_remote_desktop_route_evidence() {\n  python3 - \"$HOST_STATUS\" \"$IOS_STATUS_APP_CACHE_LOCAL\""
+      ))
     XCTAssertTrue(
       scriptSource.contains(
-        "wait_for_ios_status_pattern 'PIB-1 protocol identity binding signature verified:"))
-    XCTAssertTrue(
-      scriptSource.contains("wait_for_ios_status_pattern 'PIB-1 protocol identity binding pinned:"))
-    XCTAssertTrue(
-      scriptSource.contains("wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh request:"))
+        "validate_remote_desktop_performance_window() {\n  python3 - \"$HOST_STATUS\" \"$IOS_STATUS_APP_CACHE_LOCAL\""
+      ))
     XCTAssertTrue(
       scriptSource.contains(
-        "wait_for_file_pattern \"$HOST_STATUS\" 'SKR-1 signed LAN KEM refresh served:"))
+        "authoritative on-device iOS status is unavailable for identity refresh validation"
+      ))
+    XCTAssertTrue(scriptSource.contains("identity-bootstrap mode=$identity_bootstrap_mode validated=1"))
+    XCTAssertTrue(scriptSource.contains("identity_bootstrap_mode\" != \"forced-pib-skr"))
     XCTAssertTrue(
       scriptSource.contains(
-        "wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence:"))
-    XCTAssertTrue(
-      scriptSource.contains(
-        "verified and imported: .*suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound"))
+        "acceptance lane requires a fresh signed KEM refresh proof"
+      ))
+    XCTAssertFalse(
+      scriptSource.contains("Waiting for PIB-1 protocol identity binding evidence"),
+      "Console-only status is not authoritative for the early PIB lifecycle; validate the merged app-cache evidence after the run."
+    )
+    XCTAssertFalse(scriptSource.contains("Waiting for SKR-1 signed KEM refresh evidence"))
+    let copyStatus = try XCTUnwrap(scriptSource.range(of: "copy_ios_status\nvalidate_protocol_identity_bootstrap_evidence"))
+    let mediaPass = try XCTUnwrap(
+      scriptSource.range(of: "remote-desktop-pass .*renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}")
+    )
+    XCTAssertLessThan(mediaPass.lowerBound, copyStatus.lowerBound)
+    let reverseSmoke = try XCTUnwrap(
+      scriptSource.range(of: "  run_mac_online_ipad_button_smoke", options: .backwards)
+    )
+    XCTAssertLessThan(copyStatus.lowerBound, reverseSmoke.lowerBound)
+    let launchBody = try sourceSlice(
+      from: "launch_ios_remote_smoke_app()",
+      to: "terminate_stale_smoke_scripts",
+      in: scriptSource
+    )
+    let launchCommand = try sourceSlice(
+      from: "skybridge_ios_start_console_launch",
+      to: "IOS_CONSOLE_HANDLE_STARTED=1",
+      in: launchBody
+    )
+    XCTAssertTrue(launchCommand.contains("\"$IOS_STATUS_CONSOLE_LIVE\""))
+    XCTAssertFalse(launchCommand.contains("\"$IOS_STATUS_LOCAL\""))
+    XCTAssertTrue(identityEvidenceValidatorSource.contains("FORCED_REFRESH_PATTERN"))
+    XCTAssertTrue(identityEvidenceValidatorSource.contains("clearedKEM=1"))
+    XCTAssertTrue(identityEvidenceValidatorSource.contains("preserveProtocolIdentity=1"))
+    XCTAssertTrue(identityEvidenceValidatorSource.contains("pib-final-ack"))
+    XCTAssertTrue(identityEvidenceValidatorSource.contains("host-pib-confirmed"))
+    XCTAssertTrue(identityEvidenceValidatorSource.contains("skr-smoke-proof"))
+    XCTAssertFalse(identityEvidenceValidatorSource.contains("existing-pin"))
     XCTAssertTrue(
       appSource.contains(
         "try await assertSignedKEMRefreshIfRequired(for: target, reporter: reporter)"))
@@ -2280,6 +2431,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       scriptSource.contains("failed stage=(identity|handshake|remote-desktop|remote-control|media)")
     )
+    XCTAssertTrue(scriptSource.contains("remoteControlNoticeTimedOut .*transport=p2p"))
     XCTAssertTrue(scriptSource.contains("suite_rejected_unknown"))
     XCTAssertTrue(scriptSource.contains("rollingDisplayCadencePass"))
     XCTAssertTrue(scriptSource.contains("iOS rolling display cadence did not pass"))
@@ -2451,15 +2603,21 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(scriptSource.contains("remote route validation failed"))
     XCTAssertTrue(
       scriptSource.contains(
-        "no routable LAN direct or Bonjour infrastructure route with peerToPeer=false"))
+        "no provenance-bound Bonjour infrastructure route candidate"))
     XCTAssertTrue(scriptSource.contains("no ios-lan-remote-route-ready evidence"))
     XCTAssertTrue(
       scriptSource.contains(
-        "no verified LAN hostPort route-ready evidence with resolvedAddressClass=lan-direct resolvedPeerToPeer=false"
+        "no provenance/interface-bound infrastructure route-ready evidence"
       ))
-    XCTAssertTrue(scriptSource.contains("iOS LAN ready route was not verified routable hostPort"))
-    XCTAssertTrue(scriptSource.contains("iOS LAN route used link-local/peer-to-peer path"))
-    XCTAssertTrue(scriptSource.contains("macOS remote tx peer was link-local/peer-to-peer"))
+    XCTAssertTrue(
+      scriptSource.contains("iOS remote media ready route lacked interface/scope proof"))
+    XCTAssertTrue(
+      scriptSource.contains("iOS remote media candidate lacked live infrastructure ownership"))
+    XCTAssertTrue(
+      scriptSource.contains("macOS remote tx peer used a disallowed peer-to-peer interface"))
+    XCTAssertTrue(scriptSource.contains("metric(line, \"interfaceBound\") == \"1\""))
+    XCTAssertTrue(scriptSource.contains("metric(line, \"interfaceTypeMatch\") == \"1\""))
+    XCTAssertTrue(scriptSource.contains("metric(line, \"interfaceScopeMatch\") == \"1\""))
     XCTAssertTrue(
       scriptSource.contains(
         "\"mac remote\" in line or \"mac-remote\" in line or \"mac-stream-config\" in line"))
@@ -2997,7 +3155,7 @@ final class RegressionHardeningTests: XCTestCase {
     let source = try remoteDesktopManagerSource()
     let preHandshakeBody = try sourceSlice(
       from: "currentConnection = Connection(device: refreshedLANDevice, status: .connected)",
-      to: "try await establishLANSecureChannel(for: refreshedLANDevice, over: connection)",
+      to: "try await establishLANSecureChannel(",
       in: source
     )
     let driverCreatedBody = try sourceSlice(
@@ -4612,6 +4770,88 @@ final class RegressionHardeningTests: XCTestCase {
     }
   }
 
+  func testLANRemoteControlTrustResolverNeverUsesSharedIPAddressAsAuthority() {
+    let victim = TrustedDeviceStore.TrustedDevice(
+      id: "id:victim-device",
+      name: "Victim",
+      platform: .macOS,
+      ipAddress: "192.168.1.20",
+      protocolSigningAlgorithm: "ML-DSA-65",
+      protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+      currentDeviceId: "id:victim-device",
+      knownDeviceIds: ["id:victim-device"]
+    )
+    let attacker = DiscoveredDevice(
+      id: "id:attacker-device",
+      name: "Attacker",
+      modelName: "Unknown",
+      platform: .macOS,
+      osVersion: "15.0",
+      ipAddress: "192.168.1.20"
+    )
+
+    XCTAssertEqual(
+      LANRemoteControlTrustResolver.resolve(
+        device: attacker,
+        trustedPeerId: "id:attacker-device",
+        trustedDevices: [victim]
+      ),
+      .missing
+    )
+    XCTAssertEqual(
+      LANRemoteControlTrustResolver.resolve(
+        device: attacker,
+        trustedPeerId: "id:victim-device",
+        trustedDevices: [victim]
+      ),
+      .missing,
+      "Two conflicting strong IDs must fail closed instead of being unioned."
+    )
+  }
+
+  func testLANRemoteControlTrustResolverPrefersExactStableIdentityOverAnotherRecordsRoute() {
+    let device = DiscoveredDevice(
+      id: "id:peer-alpha",
+      name: "Peer A",
+      modelName: "Mac",
+      platform: .macOS,
+      osVersion: "15.0",
+      ipAddress: "192.168.1.99"
+    )
+    let peerA = TrustedDeviceStore.TrustedDevice(
+      id: "id:peer-alpha",
+      name: "Peer A",
+      platform: .macOS,
+      ipAddress: "192.168.1.20",
+      protocolSigningAlgorithm: "ML-DSA-65",
+      protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+      currentDeviceId: "id:peer-alpha",
+      knownDeviceIds: ["id:peer-alpha"]
+    )
+    let peerB = TrustedDeviceStore.TrustedDevice(
+      id: "id:peer-beta",
+      name: "Peer B",
+      platform: .macOS,
+      ipAddress: "192.168.1.99",
+      protocolSigningAlgorithm: "ML-DSA-65",
+      protocolPublicKeyFingerprint: String(repeating: "b", count: 64),
+      currentDeviceId: "id:peer-beta",
+      knownDeviceIds: ["id:peer-beta"]
+    )
+
+    switch LANRemoteControlTrustResolver.resolve(
+      device: device,
+      trustedPeerId: "id:peer-alpha",
+      trustedDevices: [peerA, peerB]
+    ) {
+    case .resolved(let record, let canonicalPeerId):
+      XCTAssertEqual(record.id, "id:peer-alpha")
+      XCTAssertEqual(canonicalPeerId, "id:peer-alpha")
+    default:
+      XCTFail("The exact stable authority must win independently of route metadata.")
+    }
+  }
+
   func testBonjourPrivacyManifestDeclaresAllBrowsedServiceTypes() {
     XCTAssertTrue(DeviceDiscoveryManager.hasLocalNetworkUsageDescription())
 
@@ -5214,117 +5454,134 @@ final class RegressionHardeningTests: XCTestCase {
     )
   }
 
-  func testRemoteDesktopLANRoutePolicyRejectsUnverifiedAndPeerToPeerRoutes() {
-    let routableHost = NWEndpoint.hostPort(
-      host: NWEndpoint.Host("192.168.31.20"),
-      port: NWEndpoint.Port(integerLiteral: 9527)
+  func testRemoteDesktopLANRoutePolicyRequiresLiveInfrastructureBinding() {
+    let accepted = RemoteDesktopLANRoutePolicy.ResolvedRouteEvidence(
+      provenance: .liveBrowser,
+      requestedServiceType: DiscoveredDevice.remoteControlServiceType,
+      requestedInterfaceName: "en0",
+      requestedInterfaceClass: .infrastructure,
+      pathUsesRequestedInterfaceType: true,
+      resolvedAddressClass: .linkLocalIPv6,
+      resolvedInterfaceScope: "en0"
     )
-    let linkLocalHost = NWEndpoint.hostPort(
-      host: NWEndpoint.Host("fe80::468:f5a1:462b:29d3%lo0"),
-      port: NWEndpoint.Port(integerLiteral: 9527)
+    XCTAssertNil(RemoteDesktopLANRoutePolicy.rejectionReason(for: accepted))
+
+    let wrongScope = RemoteDesktopLANRoutePolicy.ResolvedRouteEvidence(
+      provenance: .liveBrowser,
+      requestedServiceType: DiscoveredDevice.remoteControlServiceType,
+      requestedInterfaceName: "en0",
+      requestedInterfaceClass: .infrastructure,
+      pathUsesRequestedInterfaceType: true,
+      resolvedAddressClass: .linkLocalIPv6,
+      resolvedInterfaceScope: "awdl0"
     )
-    let bonjour = NWEndpoint.service(
-      name: "Lza's MacBook Pro",
-      type: DiscoveredDevice.remoteControlServiceType,
-      domain: "local.",
-      interface: nil
+    XCTAssertEqual(
+      RemoteDesktopLANRoutePolicy.rejectionReason(for: wrongScope),
+      .resolvedScopeMismatch
     )
 
-    XCTAssertEqual(RemoteDesktopLANRoutePolicy.routeAddressClass(for: routableHost), "lan-direct")
-    XCTAssertEqual(RemoteDesktopLANRoutePolicy.routeAddressClass(for: bonjour), "bonjour-service")
-    XCTAssertEqual(RemoteDesktopLANRoutePolicy.routeAddressClass(for: nil), "unresolved")
-    XCTAssertFalse(RemoteDesktopLANRoutePolicy.shouldIncludePeerToPeer(for: routableHost))
-    XCTAssertTrue(RemoteDesktopLANRoutePolicy.shouldIncludePeerToPeer(for: linkLocalHost))
-    XCTAssertTrue(RemoteDesktopLANRoutePolicy.routePrefersPeerToPeer(for: linkLocalHost))
-    XCTAssertEqual(
-      RemoteDesktopLANRoutePolicy.statusToken("host 192.168.31.20"), "host_192.168.31.20")
-
-    XCTAssertNil(
-      RemoteDesktopLANRoutePolicy.resolvedRouteRejection(
-        requestedEndpoint: routableHost,
-        resolvedEndpoint: routableHost
-      )
+    let persisted = RemoteDesktopLANRoutePolicy.ResolvedRouteEvidence(
+      provenance: .persistedMetadata,
+      requestedServiceType: DiscoveredDevice.remoteControlServiceType,
+      requestedInterfaceName: "en0",
+      requestedInterfaceClass: .infrastructure,
+      pathUsesRequestedInterfaceType: true,
+      resolvedAddressClass: .routable,
+      resolvedInterfaceScope: nil
     )
     XCTAssertEqual(
-      RemoteDesktopLANRoutePolicy.resolvedRouteRejection(
-        requestedEndpoint: linkLocalHost,
-        resolvedEndpoint: nil
-      ),
-      "resolved peer-to-peer remote route rejected: requested=\(String(describing: linkLocalHost))"
-    )
-    XCTAssertEqual(
-      RemoteDesktopLANRoutePolicy.resolvedRouteRejection(
-        requestedEndpoint: bonjour,
-        resolvedEndpoint: nil
-      ),
-      "unverified Bonjour remote route rejected: requested=\(String(describing: bonjour))"
-    )
-    XCTAssertEqual(
-      RemoteDesktopLANRoutePolicy.resolvedRouteRejection(
-        requestedEndpoint: bonjour,
-        resolvedEndpoint: linkLocalHost
-      ),
-      "resolved peer-to-peer remote route rejected: requested=\(String(describing: bonjour)) resolved=\(String(describing: linkLocalHost))"
+      RemoteDesktopLANRoutePolicy.rejectionReason(for: persisted),
+      .untrustedProvenance
     )
   }
 
-  func testLANMediaRoutesPreferRoutableHostPortBeforePeerToPeerFallback() throws {
+  func testLANMediaRoutesRequireProvenanceBoundInfrastructureBonjourCandidates() throws {
     let remoteDesktopSource = try remoteDesktopManagerSource()
     let remoteDesktopRoutePolicySource = try remoteDesktopLANRoutePolicySource()
     let remoteDesktopEndpointFactorySource = try remoteDesktopLANEndpointCandidateFactorySource()
     let remoteDesktopDeviceResolverSource = try remoteDesktopDeviceResolutionCoordinatorSource()
+    let sharedApplePeerPolicySource = try repositoryScriptSource(
+      "Sources/SkyBridgeProtocolCore/Discovery/ApplePeerConnectivityPolicy.swift"
+    )
+    let macRemoteControlServerSource = try repositoryScriptSource(
+      "Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift"
+    )
     let remoteEndpointFactoryBody = try sourceSlice(
       from: "static func makePlan(",
-      to: "private static func appendHostEndpoint(",
+      to: "static func interfacePriority(",
       in: remoteDesktopEndpointFactorySource
     )
-    let remoteLanDirect = try XCTUnwrap(
-      remoteEndpointFactoryBody.range(of: "ConnectableAddressCanonicalizer.isRoutableLANAddress")?
-        .lowerBound
-    )
-    let remoteBonjour = try XCTUnwrap(
-      remoteEndpointFactoryBody.range(of: "if let bonjourService")?.lowerBound
-    )
-    let remoteLinkLocal = try XCTUnwrap(
-      remoteEndpointFactoryBody.range(of: "ConnectableAddressCanonicalizer.isLinkLocal")?.lowerBound
-    )
-    let remoteActivePeer = try XCTUnwrap(
-      remoteEndpointFactoryBody.range(of: "if let activePeerAddress")?.lowerBound
+    let remoteEndpointResolutionBody = try sourceSlice(
+      from: "func makeEndpointCandidates(",
+      to: "func resolveLatestDevice(",
+      in: remoteDesktopDeviceResolverSource
     )
 
-    XCTAssertLessThan(remoteLanDirect, remoteBonjour)
-    XCTAssertLessThan(remoteBonjour, remoteLinkLocal)
-    XCTAssertLessThan(remoteLinkLocal, remoteActivePeer)
+    XCTAssertTrue(remoteEndpointFactoryBody.contains("liveBonjourEndpoints"))
+    XCTAssertTrue(remoteEndpointFactoryBody.contains("provenance: .liveBrowser"))
+    XCTAssertTrue(remoteEndpointFactoryBody.contains("let observedInterface"))
+    XCTAssertTrue(
+      remoteEndpointFactoryBody.contains(
+        "ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer"))
+    XCTAssertFalse(remoteEndpointFactoryBody.contains("directIP"))
+    XCTAssertFalse(remoteEndpointFactoryBody.contains("resolvedIP"))
+    XCTAssertFalse(remoteEndpointFactoryBody.contains("activePeerAddress"))
+    XCTAssertFalse(remoteEndpointFactoryBody.contains("remoteControlPort"))
+    XCTAssertFalse(remoteEndpointFactoryBody.contains("interface: nil"))
+
+    XCTAssertTrue(
+      remoteEndpointResolutionBody.contains(
+        "P2PConnectionEndpointPolicy.normalizedStrongDeviceId(for: device)"))
+    XCTAssertTrue(remoteEndpointResolutionBody.contains("liveBonjourAdvertisement("))
+    XCTAssertTrue(remoteEndpointResolutionBody.contains("liveBonjourServiceEndpoints("))
+    XCTAssertTrue(remoteEndpointResolutionBody.contains("return route == preferredRoute"))
+    XCTAssertFalse(remoteEndpointResolutionBody.contains("bestIPAddress"))
+    XCTAssertFalse(remoteEndpointResolutionBody.contains("activeP2PBootstrapDevice"))
     XCTAssertTrue(remoteDesktopDeviceResolverSource.contains("RemoteDesktopLANEndpointCandidateFactory.makePlan"))
-    XCTAssertTrue(remoteDesktopDeviceResolverSource.contains("SkyBridgeLogger.shared.info(log.message)"))
-    XCTAssertTrue(remoteDesktopDeviceResolverSource.contains("plan.missingActivePeerPortHost"))
     XCTAssertTrue(
       remoteDesktopSource.contains(
-        "parameters.includePeerToPeer = RemoteDesktopLANRoutePolicy.shouldIncludePeerToPeer(for: endpoint)"
+        "parameters.includePeerToPeer = RemoteDesktopLANRoutePolicy.shouldIncludePeerToPeer(for: candidate)"
       ))
+    XCTAssertTrue(remoteDesktopSource.contains("parameters.requiredInterface = candidate.observedInterface"))
+    XCTAssertTrue(remoteDesktopSource.contains("withTaskCancellationHandler"))
+    XCTAssertTrue(remoteDesktopSource.contains("catch is CancellationError"))
+    XCTAssertTrue(remoteDesktopSource.contains("throw CancellationError()"))
     XCTAssertTrue(
       remoteDesktopRoutePolicySource.contains(
-        "guard case .hostPort(let host, _) = endpoint else { return false }"))
+        "ApplePeerConnectivityPolicy.remoteControlRouteRejectionReason(for: evidence)"))
     XCTAssertTrue(remoteDesktopRoutePolicySource.contains("static func resolvedRouteRejection("))
     XCTAssertTrue(
-      remoteDesktopRoutePolicySource.contains("unverified Bonjour remote route rejected"))
+      sharedApplePeerPolicySource.contains(
+        "case untrustedProvenance = \"untrusted_provenance\""))
     XCTAssertTrue(
-      remoteDesktopRoutePolicySource.contains("resolved peer-to-peer remote route rejected"))
+      sharedApplePeerPolicySource.contains(
+        "case resolvedScopeMismatch = \"resolved_scope_mismatch\""))
+    XCTAssertTrue(
+      sharedApplePeerPolicySource.contains("remoteControlMediaAllowsPeerToPeer = false"))
+    XCTAssertTrue(
+      macRemoteControlServerSource.contains(
+        "ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer"))
+    XCTAssertFalse(
+      macRemoteControlServerSource.contains("parameters.includePeerToPeer = true"))
     XCTAssertTrue(remoteDesktopSource.contains("ios-lan-remote-route candidate="))
-    XCTAssertTrue(remoteDesktopSource.contains("ios-lan-remote-route-ready requestedAddressClass="))
+    XCTAssertTrue(remoteDesktopSource.contains("ios-lan-remote-route-ready provenance="))
     XCTAssertTrue(
       remoteDesktopSource.contains(
         "resolvedAddressClass=\\(RemoteDesktopLANRoutePolicy.routeAddressClass(for: resolvedEndpoint))"
       ))
     XCTAssertTrue(
       remoteDesktopSource.contains(
-        "resolvedPeerToPeer=\\(RemoteDesktopLANRoutePolicy.routePrefersPeerToPeer(for: resolvedEndpoint))"
+        "interfaceScopeMatch=\\(RemoteDesktopLANRoutePolicy.interfaceScopeMatches(evidence) ? 1 : 0)"
       ))
     XCTAssertTrue(
-      remoteDesktopSource.contains("addressClass=\\(addressClass) peerToPeer=\\(peerToPeer)"))
+      remoteDesktopSource.contains("transportClass=\\(candidate.interfaceClass.rawValue)"))
     XCTAssertTrue(remoteDesktopSource.contains("let routeLine = \"ios-lan-remote-route candidate="))
     XCTAssertTrue(remoteDesktopSource.contains("SkyBridgeLogger.shared.info(routeLine)"))
     XCTAssertTrue(remoteDesktopSource.contains("SkyBridgeDiagnosticTrace.appendStatus(routeLine)"))
+    XCTAssertTrue(remoteDesktopSource.contains("requestedRef=\\(endpointReference)"))
+    XCTAssertTrue(remoteDesktopSource.contains("resolvedRef=\\(resolvedReference)"))
+    XCTAssertFalse(remoteDesktopSource.contains("requested=\\(endpointDescription)"))
+    XCTAssertFalse(remoteDesktopSource.contains("resolved=\\(resolvedDescription)"))
 
     let fileTransferSource = try iosFileTransferManagerSource()
     let fileTransferRoutePolicySource = try iosFileTransferLANRoutePolicySource()
@@ -6493,7 +6750,11 @@ final class RegressionHardeningTests: XCTestCase {
         "performanceValidationMode: strictMediaValidationEnabled ? \"extreme\" : nil"))
     XCTAssertTrue(
       configBody.contains(
-        "mediaFallbackPolicy: activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\"")
+        "mediaFallbackPolicy: mediaFallbackPolicy(for: activeTransportMode)"))
+    XCTAssertTrue(
+      source.contains(
+        "activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""),
+      "The centralized fallback policy must keep cross-network forbidden and LAN fail-fast."
     )
     XCTAssertFalse(configBody.contains("strictMediaValidationEnabled ? [\"hevc\", \"h264\"]"))
   }
@@ -6772,6 +7033,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(
       RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
         isStreaming: false,
+        ownerIsCurrent: true,
         subscribedSessionId: "session-1",
         expectedSessionId: "session-1",
         updateSessionId: "session-1"
@@ -7410,7 +7672,12 @@ final class RegressionHardeningTests: XCTestCase {
       pushBody.contains(
         "mediaSessionId: preparationPlan.includeAudioEndpointInStreamConfig ? mediaAudioBinding?.mediaSessionId : nil"
       ))
-    XCTAssertTrue(pushBody.contains("if preparationPlan.includeAudioEndpointInStreamConfig"))
+    XCTAssertTrue(
+      pushBody.contains(
+        "if preparationPlan.includeAudioEndpointInStreamConfig, payload.mediaAudioEndpoint != nil"
+      ),
+      "Endpoint acknowledgement state may change only after an endpoint was actually encoded into the payload."
+    )
     XCTAssertTrue(
       pushBody.contains("activeTransportMode: activeTransportMode,"),
       "Push policy preparation must receive the active transport mode."
@@ -7447,8 +7714,10 @@ final class RegressionHardeningTests: XCTestCase {
       payloadBody.contains("screenDataChannelEnabled: activeTransportMode != .crossNetwork"))
     XCTAssertTrue(
       payloadBody.contains(
-        "mediaFallbackPolicy: activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\"")
-    )
+        "mediaFallbackPolicy: mediaFallbackPolicy(for: activeTransportMode)"))
+    XCTAssertTrue(
+      factorySource.contains(
+        "activeTransportMode == .crossNetwork ? \"forbidden\" : \"fail-fast\""))
     XCTAssertTrue(
       payloadBody.contains("nativeVideoTrackReady: activeTransportMode == .crossNetwork")
     )
@@ -7458,6 +7727,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(
       RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
         isStreaming: true,
+        ownerIsCurrent: true,
         subscribedSessionId: "session-2",
         expectedSessionId: "session-1",
         updateSessionId: "session-1"
@@ -7466,6 +7736,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertFalse(
       RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
         isStreaming: true,
+        ownerIsCurrent: true,
         subscribedSessionId: "session-1",
         expectedSessionId: "session-1",
         updateSessionId: "session-2"
@@ -7474,10 +7745,21 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(
       RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
         isStreaming: true,
+        ownerIsCurrent: true,
         subscribedSessionId: "session-1",
         expectedSessionId: "session-1",
         updateSessionId: "session-1"
       )
+    )
+    XCTAssertFalse(
+      RemoteDesktopManager.shouldProcessCrossNetworkFrameNotification(
+        isStreaming: true,
+        ownerIsCurrent: false,
+        subscribedSessionId: "session-1",
+        expectedSessionId: "session-1",
+        updateSessionId: "session-1"
+      ),
+      "A frame queued by an older cross-network incarnation must not be accepted solely because the replacement reused the same session ID."
     )
   }
 
@@ -8507,28 +8789,45 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertEqual(TrafficPadding.unwrapIfNeeded(malformed, label: "unit"), malformed)
   }
 
-  @MainActor
-  func testFileTransferPrefersLocalP2POverStaleWebRTCForSamePeer() {
-    let shouldPreferCrossNetwork = FileTransferManager.shouldPreferCrossNetworkTransfer(
-      targetDeviceId: "id:peer-1",
-      crossNetworkState: .connected(sessionId: "ABC123"),
-      crossNetworkRemoteDeviceId: "id:peer-1",
-      localActiveConnectionDeviceIds: ["id:peer-1"]
+  func testFileTransferDirectLANIntentNeverUpgradesToMatchingWebRTCSession() {
+    let decision = PeerTransportRouteSelectionContract.evaluate(
+      targetDeviceID: "id:peer-1",
+      routeIntent: .directLAN,
+      activeCrossNetworkSessionID: "ABC123",
+      activeCrossNetworkRemoteDeviceIDs: ["id:peer-1"]
     )
 
-    XCTAssertFalse(shouldPreferCrossNetwork)
+    XCTAssertEqual(decision, .directLAN)
   }
 
-  @MainActor
-  func testFileTransferUsesCrossNetworkWhenNoLocalP2PExists() {
-    let shouldPreferCrossNetwork = FileTransferManager.shouldPreferCrossNetworkTransfer(
-      targetDeviceId: "id:peer-1",
-      crossNetworkState: .connected(sessionId: "ABC123"),
-      crossNetworkRemoteDeviceId: "id:peer-1",
-      localActiveConnectionDeviceIds: []
+  func testFileTransferCrossNetworkIntentBindsExactSessionAndTarget() {
+    XCTAssertEqual(
+      PeerTransportRouteSelectionContract.evaluate(
+        targetDeviceID: "id:peer-1",
+        routeIntent: .crossNetwork(sessionID: "ABC123"),
+        activeCrossNetworkSessionID: "ABC123",
+        activeCrossNetworkRemoteDeviceIDs: ["id:peer-1"]
+      ),
+      .crossNetwork(sessionID: "ABC123")
     )
-
-    XCTAssertTrue(shouldPreferCrossNetwork)
+    XCTAssertEqual(
+      PeerTransportRouteSelectionContract.evaluate(
+        targetDeviceID: "id:peer-1",
+        routeIntent: .crossNetwork(sessionID: "ABC123"),
+        activeCrossNetworkSessionID: "REPLACEMENT",
+        activeCrossNetworkRemoteDeviceIDs: ["id:peer-1"]
+      ),
+      .rejectUnavailableCrossNetworkTarget
+    )
+    XCTAssertEqual(
+      PeerTransportRouteSelectionContract.evaluate(
+        targetDeviceID: "id:peer-1",
+        routeIntent: .crossNetwork(sessionID: "ABC123"),
+        activeCrossNetworkSessionID: "ABC123",
+        activeCrossNetworkRemoteDeviceIDs: ["id:peer-2"]
+      ),
+      .rejectUnavailableCrossNetworkTarget
+    )
   }
 
   func testP2PPairingIdentityExchangeAdvertisesProtocolIdentityKeys() throws {
@@ -8568,7 +8867,195 @@ final class RegressionHardeningTests: XCTestCase {
       trustBootstrapSource.contains("if supplementalFingerprints.contains(primaryFingerprint)"),
       "Supplemental pins may only be used when the authenticated P2P exchange also includes the already trusted primary pin."
     )
+    XCTAssertTrue(
+      trustBootstrapSource.contains("KEMTrustStore.shared.signedRefreshKEMPublicKeys"),
+      "LAN remote desktop must consume only signed-refresh KEM material bound to the resolved protocol pin set."
+    )
+    XCTAssertTrue(trustBootstrapSource.contains("forAny: identityLookupCandidates"))
+    XCTAssertTrue(trustBootstrapSource.contains("pinnedProtocolFingerprints: [trustedFingerprint]"))
+    XCTAssertTrue(
+      trustBootstrapSource.contains("mergeAuthorityBoundSignedRefreshKEMPublicKeys")
+    )
+    XCTAssertFalse(
+      trustBootstrapSource.contains(
+        "LANRemoteControlTrustResolver.candidateAliases(for: device, trustedPeerId: trustedPeerId)"),
+      "Observed names, hosts, and route metadata must not become remote-control KEM identity selectors."
+    )
+    XCTAssertFalse(
+      trustBootstrapSource.contains("KEMTrustStore.shared.kemPublicKeys(for: deviceId)"),
+      "A single canonical identifier must not discard the authority record's proven aliases or admit unbound KEM material."
+    )
     XCTAssertFalse(source.contains("struct LANRemoteControlHandshakeTrustProvider"))
+  }
+
+  func testLANRemoteControlTrustProviderReturnsOnlyItsExactAuthorityBoundKEMSnapshot() async {
+    let expectedDeviceId = "id:remote-authority"
+    let expectedKey = Data(repeating: 0xA5, count: 1_216)
+    let authority = LANRemoteControlCurrentPathAuthority(
+      deviceId: expectedDeviceId,
+      trustedRecordId: expectedDeviceId,
+      lifecycleGeneration: 7,
+      protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+      protocolPublicKeyFingerprints: [String(repeating: "a", count: 64)],
+      mlDSA87PublicKey: nil,
+      signedRefreshKEMPublicKeys: [.xwing: expectedKey]
+    )
+    let provider = LANRemoteControlHandshakeTrustProvider(expectedRemoteAuthority: authority)
+
+    let exactKeys = await provider.trustedKEMPublicKeys(for: expectedDeviceId)
+    let unrelatedKeys = await provider.trustedKEMPublicKeys(for: "id:unrelated-authority")
+
+    XCTAssertEqual(exactKeys, [.xwing: expectedKey])
+    XCTAssertEqual(unrelatedKeys, [:])
+  }
+
+  func testLANRemoteControlAuthorityRejectsConflictingSignedKEMKeysForOneSuite() throws {
+    let keyA = Data(repeating: 0xA1, count: 1_216)
+    let keyB = Data(repeating: 0xB2, count: 1_216)
+
+    XCTAssertEqual(
+      try RemoteDesktopLANHandshakeTrust.mergeAuthorityBoundSignedRefreshKEMPublicKeys([
+        [.xwing: keyA],
+        [.xwing: keyA],
+      ]),
+      [.xwing: keyA]
+    )
+    XCTAssertThrowsError(
+      try RemoteDesktopLANHandshakeTrust.mergeAuthorityBoundSignedRefreshKEMPublicKeys([
+        [.xwing: keyA],
+        [.xwing: keyB],
+      ])
+    )
+  }
+
+  func testLANRemoteControlBootstrapReceiptMustMatchFrozenAuthority() throws {
+    let fingerprint = String(repeating: "a", count: 64)
+    let authority = LANRemoteControlCurrentPathAuthority(
+      deviceId: "id:peer-alpha",
+      trustedRecordId: "id:peer-alpha",
+      lifecycleGeneration: 1,
+      protocolPublicKeyFingerprint: fingerprint,
+      protocolPublicKeyFingerprints: [fingerprint],
+      mlDSA87PublicKey: nil,
+      signedRefreshKEMPublicKeys: [.xwing: Data(repeating: 0xA5, count: 1_216)]
+    )
+
+    XCTAssertNoThrow(
+      try RemoteDesktopLANHandshakeTrust.requireBootstrapAuthorityBinding(
+        authority,
+        declaredDeviceId: "id:peer-alpha",
+        protocolPublicKeyFingerprint: fingerprint
+      )
+    )
+    XCTAssertThrowsError(
+      try RemoteDesktopLANHandshakeTrust.requireBootstrapAuthorityBinding(
+        authority,
+        declaredDeviceId: "id:peer-beta",
+        protocolPublicKeyFingerprint: fingerprint
+      )
+    )
+    XCTAssertThrowsError(
+      try RemoteDesktopLANHandshakeTrust.requireBootstrapAuthorityBinding(
+        authority,
+        declaredDeviceId: "id:peer-alpha",
+        protocolPublicKeyFingerprint: String(repeating: "b", count: 64)
+      )
+    )
+  }
+
+  @MainActor
+  func testLANRemoteControlStableAuthorityCaptureRetriesOneReadableTransientAndRequiresTwoEqualReads() async throws {
+    let fingerprint = String(repeating: "a", count: 64)
+    let authority = LANRemoteControlCurrentPathAuthority(
+      deviceId: "id:peer-alpha",
+      trustedRecordId: "id:peer-alpha",
+      lifecycleGeneration: 1,
+      protocolPublicKeyFingerprint: fingerprint,
+      protocolPublicKeyFingerprints: [fingerprint],
+      mlDSA87PublicKey: nil,
+      signedRefreshKEMPublicKeys: [.xwing: Data(repeating: 0xA5, count: 1_216)]
+    )
+    var readCount = 0
+
+    let captured = try await RemoteDesktopLANHandshakeTrust.captureStableAuthoritySnapshot(
+      timeout: .seconds(1),
+      pollInterval: .milliseconds(1),
+      isRecoveryReady: { true },
+      readCurrent: {
+        readCount += 1
+        if readCount == 1 {
+          throw RemoteDesktopError.connectionFailed(
+            "远控目标当前 protocol identity 缺少已签名 KEM 公钥"
+          )
+        }
+        return authority
+      }
+    )
+
+    XCTAssertEqual(captured, authority)
+    XCTAssertEqual(readCount, 3, "One transient read plus two equal stable reads are required")
+  }
+
+  func testLANRemoteControlInitiatingTaskIsTheOnlySecureSessionPublisher() throws {
+    let source = try remoteDesktopManagerSource()
+    let syncBody = try sourceSlice(
+      from: "private func syncLANSecureChannelState(",
+      to: "private func resolvedLANEstablishedArbiterLease(",
+      in: source
+    )
+    let handshakeBody = try sourceSlice(
+      from: "private func establishLANSecureChannel(",
+      to: "private func installLANHandshakeDriver(",
+      in: source
+    )
+
+    XCTAssertFalse(syncBody.contains("installLANSecureSessionKeys("))
+    XCTAssertFalse(syncBody.contains("lanEstablishedArbiterLease ="))
+    XCTAssertTrue(syncBody.contains("receive path only delivers frames"))
+    XCTAssertTrue(syncBody.contains("guard lanSessionKeys == nil else"))
+    XCTAssertTrue(syncBody.contains("isLANReceivePausedForInitiatorCommit = true"))
+    XCTAssertEqual(
+      handshakeBody.components(separatedBy: "installLANSecureSessionKeys(").count - 1,
+      1
+    )
+    let finalAuthority = try XCTUnwrap(
+      handshakeBody.range(of: "try await RemoteDesktopLANHandshakeTrust.requireCurrentAuthoritySnapshot(", options: .backwards)
+    )
+    let finalReceipt = try XCTUnwrap(
+      handshakeBody.range(of: "connectionManager.pairingIdentityBootstrapReceiptState(", options: .backwards)
+    )
+    let install = try XCTUnwrap(handshakeBody.range(of: "try installLANSecureSessionKeys("))
+    XCTAssertLessThan(finalAuthority.lowerBound, finalReceipt.lowerBound)
+    XCTAssertLessThan(finalReceipt.lowerBound, install.lowerBound)
+    XCTAssertTrue(source.contains("guard !isLANReceivePausedForInitiatorCommit else"))
+    XCTAssertTrue(
+      source.contains(
+        "needsLANReceiveBufferDrain = shouldDrainAgain"
+      )
+    )
+    XCTAssertTrue(
+      source.contains(
+        "isLANReceivePausedForInitiatorCommit = false"
+      )
+    )
+    XCTAssertTrue(source.contains("let shouldResumeReceiveAfterCommit ="))
+    XCTAssertTrue(
+      source.contains(
+        "&& isLANReceiveResumePendingAfterInitiatorCommit"
+      )
+    )
+    XCTAssertTrue(
+      source.contains(
+        "isLANReceiveResumePendingAfterInitiatorCommit = true"
+      )
+    )
+    XCTAssertTrue(source.contains("if self.isLANReceivePausedForInitiatorCommit {"))
+    XCTAssertTrue(source.contains("maxLANBootstrapReceiveBufferBytes"))
+    XCTAssertTrue(
+      source.contains(
+        "LAN bootstrap receive buffer exceeded its bounded handoff capacity"
+      )
+    )
   }
 
   func testWebRTCFileTransferCompletionRequiresDurableReceipt() throws {
@@ -9288,10 +9775,13 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
 
-    XCTAssertTrue(sendAckBody.contains("try await sendFileTransferMessage(ack)"))
-    XCTAssertTrue(sendAckBody.contains("failInboundFileTransferControlChannel("))
-    XCTAssertTrue(sendAckBody.contains("inboundFileTransferLifecycleToken == expectedLifecycleToken"))
-    XCTAssertTrue(sendAckBody.contains("sessionKeys?.sessionId == sessionID"))
+    XCTAssertTrue(sendAckBody.contains("try await sendFileTransferMessage(ack, owner: owner)"))
+    XCTAssertTrue(sendAckBody.contains("await failInboundFileTransferControlChannel("))
+    XCTAssertTrue(sendAckBody.contains("owner: owner"))
+    XCTAssertTrue(sendAckBody.contains("origin: failureOrigin"))
+    XCTAssertTrue(sendAckBody.contains("isCurrentWebRTCFileTransferOperationOwner(owner)"))
+    XCTAssertTrue(source.contains("failureOrigin: .worker"))
+    XCTAssertTrue(source.contains("failureOrigin: .controlReceiveLoop"))
     XCTAssertTrue(
       sendAckBody.contains("WebRTC file-transfer acknowledgement delivery failed"),
       "A failed authenticated ACK must be surfaced as a session failure instead of being logged and ignored."
@@ -9398,6 +9888,12 @@ final class RegressionHardeningTests: XCTestCase {
   }
 
   func testRemoteDesktopStreamConfigurationPayloadEqualityIgnoresSentAtButTracksRefreshToken() {
+    let firstTransaction = RemoteDesktopStreamConfigurationTransaction(
+      id: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+    )
+    let secondTransaction = RemoteDesktopStreamConfigurationTransaction(
+      id: UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+    )
     let base = RemoteDesktopStreamConfigurationPayload(
       width: 1920,
       height: 1080,
@@ -9410,6 +9906,7 @@ final class RegressionHardeningTests: XCTestCase {
       enableAppleSiliconOptimization: true,
       clipboardSyncEnabled: true,
       streamRefreshToken: nil,
+      streamConfigurationTransaction: firstTransaction,
       sentAt: 1
     )
 
@@ -9425,6 +9922,7 @@ final class RegressionHardeningTests: XCTestCase {
       enableAppleSiliconOptimization: true,
       clipboardSyncEnabled: true,
       streamRefreshToken: nil,
+      streamConfigurationTransaction: secondTransaction,
       sentAt: 999
     )
 
@@ -11623,9 +12121,9 @@ final class RegressionHardeningTests: XCTestCase {
     )
     guard
       let leaseRange = crossNetworkBranch.range(
-        of: "crossNetwork.requestRealtimeMediaRelayEndpointForActiveSession()"),
+        of: "crossNetwork.requestRealtimeMediaRelayEndpoint(\n                        for: crossNetworkOwner"),
       let rendererRange = crossNetworkBranch.range(
-        of: "renderer = try IOSRealtimeMediaAudioReceiver(snapshot: snapshot, mode: mode)",
+        of: "renderer = try IOSRealtimeMediaAudioReceiver(",
         range: leaseRange.upperBound..<crossNetworkBranch.endIndex)
     else {
       XCTFail("Expected cross-network media lease preflight before receiver creation")
@@ -11633,6 +12131,11 @@ final class RegressionHardeningTests: XCTestCase {
     }
 
     XCTAssertLessThan(leaseRange.lowerBound, rendererRange.lowerBound)
+    XCTAssertTrue(
+      crossNetworkBranch.contains(
+        "guard let crossNetworkOwner = owner.transportFailureOwner.crossNetworkOwner"
+      )
+    )
     XCTAssertTrue(crossNetworkBranch.contains("event=leaseReady"))
     XCTAssertTrue(crossNetworkBranch.contains("event=audioEndpointPrepared"))
     XCTAssertTrue(crossNetworkBranch.contains("event=udpConnectionStarted"))
@@ -12691,7 +13194,7 @@ final class RegressionHardeningTests: XCTestCase {
         "private var lanEstablishedArbiterLease: PeerSessionArbiter.EstablishedLease?"
       )
     )
-    XCTAssertTrue(source.contains("try await captureLANEstablishedArbiterLease("))
+    XCTAssertTrue(source.contains("try await resolvedLANEstablishedArbiterLease("))
     XCTAssertTrue(
       source.contains(
         "PeerSessionArbiter.shared.clearEstablished(closingArbiterLease)"
@@ -12994,7 +13497,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(clearBody.contains("lanSOAPairKey = nil"))
     XCTAssertTrue(handshakeBody.contains("PeerSessionArbiter.pairKey"))
     XCTAssertTrue(handshakeBody.contains("lanSOAPairKey = pairKey"))
-    XCTAssertTrue(handshakeBody.contains("captureLANEstablishedArbiterLease("))
+    XCTAssertTrue(handshakeBody.contains("resolvedLANEstablishedArbiterLease("))
     XCTAssertTrue(connectBody.contains("pendingConnectionTarget"))
     XCTAssertTrue(connectBody.contains("areEquivalentRemoteDesktopDevices"))
     XCTAssertTrue(connectBody.contains("pushViewerStreamConfiguration(force: true)"))

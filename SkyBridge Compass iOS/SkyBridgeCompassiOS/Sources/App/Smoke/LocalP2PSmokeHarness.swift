@@ -2,6 +2,7 @@
 import CryptoKit
 import Foundation
 import Network
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 @MainActor
@@ -10,6 +11,7 @@ final class LocalP2PSmokeHarness {
     private static let xwingSuiteWireID: UInt16 = 0x0001
     private static let mlkem768SuiteWireID: UInt16 = 0x0101
     private static let mlkem768FSSuiteWireID: UInt16 = 0x0102
+    private static let controlRouteEvidenceKey = SymmetricKey(size: .bits256)
     private var didStart = false
     private let runStartedAt = Date()
 
@@ -85,6 +87,19 @@ final class LocalP2PSmokeHarness {
             || requiresSignedKEMRefresh
     }
 
+    private var allowsPersistentTrustMutation: Bool {
+        ProcessInfo.processInfo.environment[
+            "SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION"
+        ] == "1"
+    }
+
+    private var hasInjectedPeerKEMMaterial: Bool {
+        environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") != nil
+            || environmentValue("SKYBRIDGE_PQC_PEER_XWING_PUBLIC_KEY_BASE64") != nil
+            || environmentValue("SKYBRIDGE_PQC_PEER_MLKEM768_PUBLIC_KEY_BASE64") != nil
+            || environmentValue("SKYBRIDGE_PQC_PEER_MLKEM768FS_PUBLIC_KEY_BASE64") != nil
+    }
+
     private func environmentValue(_ name: String) -> String? {
         guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -139,7 +154,13 @@ final class LocalP2PSmokeHarness {
         guard rejectOOBQRBootstrapIfRequested(reporter: reporter) else {
             return
         }
-        if !requiresSignedKEMRefresh {
+        if hasInjectedPeerKEMMaterial && !allowsPersistentTrustMutation {
+            reporter.append(
+                "failed stage=trust-mutation error=injected_peer_kem_requires_explicit_persistent_trust_mutation_approval"
+            )
+            return
+        }
+        if !requiresSignedKEMRefresh && allowsPersistentTrustMutation {
             await preseedPeerKEMTrustIfNeeded(reporter: reporter)
         }
 
@@ -202,23 +223,68 @@ final class LocalP2PSmokeHarness {
 
             if selectedDevice == nil,
                let target = resolveTargetDevice(from: discoveryManager.discoveredDevices) {
-                guard verifyDiscoveredControlRoute(target, reporter: reporter) else {
+                let hydratedTarget: DiscoveredDevice
+                let hydrationStartedAt = Date()
+                let targetStrongID = P2PConnectionEndpointPolicy.normalizedStrongDeviceId(for: target)
+                reporter.append(
+                    "control-route hydration=started policy=selected-discovery-target timeoutSeconds=15"
+                )
+                do {
+                    hydratedTarget = try await connectionManager
+                        .resolveConnectableDeviceAwaitingControlRoute(
+                            from: target,
+                            mode: .selectedDiscoveryTarget
+                        )
+                } catch is CancellationError {
+                    reporter.append("cancelled stage=control-route")
+                    return
+                } catch {
+                    reporter.append(
+                        "failed stage=control-route error=route_hydration_wait_failed"
+                    )
                     return
                 }
-                selectedDevice = target
+                let hydrationElapsedMilliseconds = max(
+                    0,
+                    Int(Date().timeIntervalSince(hydrationStartedAt) * 1_000)
+                )
+                let hydratedStrongID = P2PConnectionEndpointPolicy.normalizedStrongDeviceId(
+                    for: hydratedTarget
+                )
+                let hydratedStrongIDMatches = targetStrongID != nil && targetStrongID == hydratedStrongID
                 reporter.append(
-                    "target id=\(Self.sanitize(target.id)) name=\(Self.sanitize(target.name))"
+                    "control-route hydration=finished elapsedMs=\(hydrationElapsedMilliseconds) " +
+                    "targetStrongIdPresent=\(targetStrongID == nil ? 0 : 1) " +
+                    "hydratedStrongIdSame=\(hydratedStrongIDMatches ? 1 : 0)"
+                )
+                guard hydratedStrongIDMatches else {
+                    reporter.append(
+                        "failed stage=control-route error=strong_identity_changed_during_hydration"
+                    )
+                    return
+                }
+                guard verifyDiscoveredControlRoute(hydratedTarget, reporter: reporter) else {
+                    return
+                }
+                selectedDevice = hydratedTarget
+                reporter.append(
+                    "target id=\(Self.sanitize(hydratedTarget.id)) name=\(Self.sanitize(hydratedTarget.name))"
                 )
             }
 
             if !didForceSignedKEMRefreshClear, let target = selectedDevice {
                 didForceSignedKEMRefreshClear = true
-                await forceSignedKEMRefreshBeforeConnectIfNeeded(target: target, reporter: reporter)
+                guard await forceSignedKEMRefreshBeforeConnectIfNeeded(
+                    target: target,
+                    reporter: reporter
+                ) else {
+                    return
+                }
             }
 
             if !didPreseedResolvedTarget, let target = selectedDevice {
                 didPreseedResolvedTarget = true
-                if !requiresSignedKEMRefresh {
+                if !requiresSignedKEMRefresh && allowsPersistentTrustMutation {
                     await preseedResolvedTargetKEMTrustIfNeeded(target: target, reporter: reporter)
                 }
             }
@@ -389,8 +455,14 @@ final class LocalP2PSmokeHarness {
     private func forceSignedKEMRefreshBeforeConnectIfNeeded(
         target: DiscoveredDevice,
         reporter: SmokeStatusReporter
-    ) async {
-        guard forcesSignedKEMRefresh else { return }
+    ) async -> Bool {
+        guard forcesSignedKEMRefresh else { return true }
+        guard allowsPersistentTrustMutation else {
+            reporter.append(
+                "failed stage=trust-mutation error=forced_signed_kem_refresh_requires_explicit_persistent_trust_mutation_approval"
+            )
+            return false
+        }
         let candidates = smokeKEMCandidates(for: target)
         for candidate in candidates {
             await KEMTrustStore.shared.clear(deviceId: candidate)
@@ -402,6 +474,7 @@ final class LocalP2PSmokeHarness {
             clearedKEM=1 preserveProtocolIdentity=1 lifecycle=force-missing-kem
             """
         )
+        return true
     }
 
     private func assertSignedKEMRefreshIfRequired(
@@ -429,6 +502,41 @@ final class LocalP2PSmokeHarness {
                 ]
             )
         }
+        guard let payloadHashHex = evidence.payloadHashHex,
+              let payloadReference = P2PEvidenceReference.payloadHash(payloadHashHex) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 4103,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "signed LAN KEM refresh evidence has no valid payload reference"
+                ]
+            )
+        }
+        guard let requestHashHex = evidence.requestHashHex,
+              let requestReference = P2PEvidenceReference.requestHash(requestHashHex),
+              let recoveryReference = evidence.recoveryEvidenceReference,
+              P2PEvidenceReference.isValid(recoveryReference) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 4104,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "signed LAN KEM refresh evidence is not linked to its PIB/SKR operation"
+                ]
+            )
+        }
+        guard let connectionEvidence = await P2PConnectionManager.instance
+            .authenticatedConnectionEvidence(for: target.id),
+              connectionEvidence.signedKEMRequestReference == requestReference,
+              connectionEvidence.signedKEMPayloadReference == payloadReference,
+              connectionEvidence.recoveryReference == recoveryReference else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 4105,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "current authenticated connection is not bound to the signed KEM refresh evidence"
+                ]
+            )
+        }
 
         let suites = evidence.suiteWireIds
             .map { String(format: "0x%04X", $0) }
@@ -437,6 +545,7 @@ final class LocalP2PSmokeHarness {
             """
             SKR-1 signed LAN KEM refresh smoke-evidence: peer=\(Self.sanitize(target.id)) \
             source=\(Self.sanitize(evidence.source ?? "-")) suites=\(Self.sanitize(suites)) \
+            payload_ref=\(payloadReference) \
             keyId=\(Self.sanitize(evidence.keyId ?? "-")) \
             generation=\(evidence.generation.map { String($0) } ?? "-") \
             signingFingerprint=\(Self.sanitize(evidence.signingFingerprint ?? "-")) \
@@ -444,6 +553,13 @@ final class LocalP2PSmokeHarness {
             strictXWingEstablished=1 \
             payloadHash=\(Self.sanitize(evidence.payloadHashHex ?? "-")) \
             lifecycle=verified>smoke-proof
+            """
+        )
+        reporter.append(
+            """
+            p2p-evidence-link session_ref=\(connectionEvidence.sessionReference) \
+            pib_ref=\(recoveryReference) skr_ref=\(requestReference) \
+            payload_ref=\(payloadReference) suite=\(Self.sanitize(connectionEvidence.negotiatedSuite))
             """
         )
     }
@@ -553,30 +669,16 @@ final class LocalP2PSmokeHarness {
 
     private func resolveTargetDevice(from devices: [DiscoveredDevice]) -> DiscoveredDevice? {
         let normalizedTarget = targetDeviceID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if !normalizedTarget.isEmpty {
-            for device in devices {
-                let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
-                    .union(PeerIdentityAliasResolver.aliasKeys(for: device))
-                    .union([device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()])
-                if aliases.contains(normalizedTarget) || aliases.contains("id:\(normalizedTarget)") {
-                    return device
-                }
+        guard !normalizedTarget.isEmpty else { return nil }
+        for device in devices {
+            let aliases = Set(PeerIdentityAliasResolver.lookupCandidates(for: device.id))
+                .union(PeerIdentityAliasResolver.aliasKeys(for: device))
+                .union([device.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()])
+            if aliases.contains(normalizedTarget) || aliases.contains("id:\(normalizedTarget)") {
+                return device
             }
         }
-
-        let normalizedName = targetDeviceName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalizedName.isEmpty else { return nil }
-
-        return devices.first { device in
-            let deviceName = device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let bonjourName = device.bonjourServiceName?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased() ?? ""
-            return deviceName == normalizedName
-                || bonjourName == normalizedName
-                || deviceName.contains(normalizedName)
-                || bonjourName.contains(normalizedName)
-        }
+        return nil
     }
 
     private func verifyDiscoveredControlRoute(
@@ -591,8 +693,14 @@ final class LocalP2PSmokeHarness {
             for: target,
             liveBonjourControlEndpoints: liveEndpoints
         )
+        reporter.append(
+            "control-route evidence liveEndpointCount=\(liveEndpoints.count) " +
+            "eligibleEndpointCount=\(endpoints.count) " +
+            "ignoredLiveEndpointCount=\(max(0, liveEndpoints.count - endpoints.count)) " +
+            "liveRoutes=\(Self.summarizeControlEndpoints(liveEndpoints)) " +
+            "eligibleRoutes=\(Self.summarizeControlEndpoints(endpoints))"
+        )
         guard !endpoints.isEmpty,
-              endpoints.count == liveEndpoints.count,
               case .service(let name, let type, let domain, let interface) = endpoints[0],
               type == DiscoveryServiceType.skybridge.rawValue else {
             reporter.append(
@@ -605,16 +713,59 @@ final class LocalP2PSmokeHarness {
             guard case .service(_, _, _, let interface) = endpoint else { return nil }
             return interface?.name
         }
+        let selectedRouteReference = Self.controlRouteEvidenceReference(
+            name: name,
+            type: type,
+            domain: domain,
+            interface: interface
+        )
 
         reporter.append(
             """
-            control-route source=bonjour-service name=\(Self.sanitize(name)) \
+            control-route source=bonjour-service serviceRef=\(selectedRouteReference) \
             type=\(Self.sanitize(type)) domain=\(Self.sanitize(domain)) includePeerToPeer=1 \
             routeCount=\(endpoints.count) preferredInterface=\(Self.sanitize(interface?.name ?? "unspecified")) \
             observedInterfaces=\(Self.sanitize(observedInterfaces.joined(separator: ",")))
             """
         )
         return true
+    }
+
+    private static func summarizeControlEndpoints(
+        _ endpoints: [NWEndpoint]
+    ) -> String {
+        let maximumReportedEndpoints = 8
+        let summaries = endpoints.prefix(maximumReportedEndpoints).map { endpoint -> String in
+            guard case .service(let name, let type, let domain, let interface) = endpoint else {
+                return "non-service"
+            }
+            let reference = controlRouteEvidenceReference(
+                name: name,
+                type: type,
+                domain: domain,
+                interface: interface
+            )
+            return "service[ref=\(reference)|\(sanitize(type))|\(sanitize(domain))|" +
+                "\(sanitize(interface?.name ?? "unspecified"))]"
+        }
+        let omitted = endpoints.count - summaries.count
+        let suffix = omitted > 0 ? ",more=\(omitted)" : ""
+        return sanitize(summaries.joined(separator: ";") + suffix)
+    }
+
+    private static func controlRouteEvidenceReference(
+        name: String,
+        type: String,
+        domain: String,
+        interface: NWInterface?
+    ) -> String {
+        let material = [name, type, domain, interface?.name ?? "unspecified"]
+            .joined(separator: "\u{0}")
+        let authenticationCode = HMAC<SHA256>.authenticationCode(
+            for: Data(material.utf8),
+            using: controlRouteEvidenceKey
+        )
+        return authenticationCode.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     private func decodeBase64Key(
@@ -776,6 +927,19 @@ final class LocalP2PSmokeHarness {
         reporter: SmokeStatusReporter
     ) async throws {
         let manager = RemoteDesktopManager.instance
+        guard let connectionEvidence = await P2PConnectionManager.instance
+            .authenticatedConnectionEvidence(for: target.id) else {
+            throw NSError(
+                domain: "SkyBridge.Smoke",
+                code: 4201,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "current authenticated P2P connection has no exact evidence receipt"
+                ]
+            )
+        }
+        reporter.append(
+            "p2p-session-link session_ref=\(connectionEvidence.sessionReference) suite=\(Self.sanitize(connectionEvidence.negotiatedSuite))"
+        )
         let minFPS = positiveEnvironmentDouble("SKYBRIDGE_SMOKE_MIN_FPS")
             ?? (requiresExtremeMediaValidation ? 59.0 : 30.0)
         let passSeconds = max(
@@ -810,7 +974,10 @@ final class LocalP2PSmokeHarness {
         if requiresVisibleRemoteView {
             reporter.append("remote-desktop ui-gate waiting-for-RemoteDesktopView")
         } else {
-            try await manager.connect(to: target)
+            try await manager.connect(
+                to: target,
+                routeIntent: .directLAN
+            )
         }
 
         let deadline = Date().addingTimeInterval(timeoutSeconds)
@@ -1094,7 +1261,11 @@ final class LocalP2PSmokeHarness {
         let outboundHash = try Self.sha256Hex(url: outboundURL)
 
         reporter.append("file-transfer outbound-start name=\(Self.sanitize(outboundName))")
-        try await FileTransferManager.instance.sendFile(at: outboundURL, to: target)
+        try await FileTransferManager.instance.sendFile(
+            at: outboundURL,
+            to: target,
+            routeIntent: .directLAN
+        )
         reporter.append("file-transfer outbound-complete name=\(Self.sanitize(outboundName)) sha256=\(outboundHash)")
 
         let inboundTransfer = try await waitForCompletedTransfer(

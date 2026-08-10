@@ -64,6 +64,8 @@ public actor KEMTrustStore {
         var protocolIdentityFingerprint: String? = nil
         var signingFingerprint: String? = nil
         var payloadHashHex: String? = nil
+        var requestHashHex: String? = nil
+        var recoveryEvidenceReference: String? = nil
         var signedSuiteWireIds: [UInt16]? = nil
         var signedRefreshDeviceId: String? = nil
         var authorityBoundBootstraps: [String: AuthorityBoundBootstrap]? = nil
@@ -115,7 +117,37 @@ public actor KEMTrustStore {
         public let protocolIdentityFingerprint: String?
         public let signingFingerprint: String?
         public let payloadHashHex: String?
+        public let requestHashHex: String?
+        public let recoveryEvidenceReference: String?
         public let updatedAt: Date
+
+        public init(
+            deviceId: String,
+            suiteWireIds: [UInt16],
+            source: String?,
+            keyId: String?,
+            generation: UInt64?,
+            expiresAt: Date?,
+            protocolIdentityFingerprint: String?,
+            signingFingerprint: String?,
+            payloadHashHex: String?,
+            requestHashHex: String? = nil,
+            recoveryEvidenceReference: String? = nil,
+            updatedAt: Date
+        ) {
+            self.deviceId = deviceId
+            self.suiteWireIds = suiteWireIds
+            self.source = source
+            self.keyId = keyId
+            self.generation = generation
+            self.expiresAt = expiresAt
+            self.protocolIdentityFingerprint = protocolIdentityFingerprint
+            self.signingFingerprint = signingFingerprint
+            self.payloadHashHex = payloadHashHex
+            self.requestHashHex = requestHashHex
+            self.recoveryEvidenceReference = recoveryEvidenceReference
+            self.updatedAt = updatedAt
+        }
     }
 
     private let storageKey: String
@@ -541,7 +573,8 @@ public actor KEMTrustStore {
         payload: AppMessage.SignedKEMRefreshPayload,
         request: AppMessage.KEMRefreshRequestPayload,
         pinnedProtocolFingerprints: Set<String>,
-        minimumGeneration: UInt64?
+        minimumGeneration: UInt64?,
+        recoveryEvidenceReference: String? = nil
     ) async throws {
         try requirePersistenceAvailable()
         let validPayload = try payload.validatedForStrictPQCImport(
@@ -576,6 +609,10 @@ public actor KEMTrustStore {
 
         let keyDict = Dictionary(uniqueKeysWithValues: validKeys.map { ($0.suiteWireId, $0.publicKey) })
         let payloadHash = Self.sha256Hex(validPayload.signaturePreimage)
+        let requestHash = request.canonicalRequestHashHex
+        let canonicalRecoveryReference = recoveryEvidenceReference.flatMap {
+            Self.canonicalEvidenceReference($0)
+        }
         let observedAt = Date()
         var candidateCache = cache
         for candidate in candidates {
@@ -589,6 +626,8 @@ public actor KEMTrustStore {
                 protocolIdentityFingerprint: validPayload.protocolIdentityFingerprint,
                 signingFingerprint: validPayload.protocolIdentityFingerprint,
                 payloadHashHex: payloadHash,
+                requestHashHex: requestHash,
+                recoveryEvidenceReference: canonicalRecoveryReference,
                 signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted(),
                 signedRefreshDeviceId: validPayload.deviceId
             )
@@ -741,6 +780,8 @@ public actor KEMTrustStore {
                 protocolIdentityFingerprint: stored.protocolIdentityFingerprint,
                 signingFingerprint: stored.signingFingerprint ?? stored.protocolIdentityFingerprint,
                 payloadHashHex: stored.payloadHashHex,
+                requestHashHex: stored.requestHashHex,
+                recoveryEvidenceReference: stored.recoveryEvidenceReference,
                 updatedAt: stored.updatedAt
             )
             if selected.map({ evidence.updatedAt > $0.updatedAt }) ?? true {
@@ -865,6 +906,8 @@ public actor KEMTrustStore {
             protocolIdentityFingerprint: selectedSignedEvidence?.protocolIdentityFingerprint,
             signingFingerprint: selectedSignedEvidence?.signingFingerprint,
             payloadHashHex: selectedSignedEvidence?.payloadHashHex,
+            requestHashHex: selectedSignedEvidence?.requestHashHex,
+            recoveryEvidenceReference: selectedSignedEvidence?.recoveryEvidenceReference,
             signedSuiteWireIds: reboundSignedSuiteWireIds,
             signedRefreshDeviceId: selectedSignedEvidence?.signedRefreshDeviceId,
             authorityBoundBootstraps: Self.prunedAuthorityBoundBootstraps(
@@ -959,6 +1002,10 @@ public actor KEMTrustStore {
                 .filter { sanitized.keys[$0] != nil }
                 .sorted()
         }
+        sanitized.payloadHashHex = normalizedFingerprint(peer.payloadHashHex)
+        sanitized.requestHashHex = normalizedFingerprint(peer.requestHashHex)
+        sanitized.recoveryEvidenceReference = peer.recoveryEvidenceReference
+            .flatMap(canonicalEvidenceReference)
         let bootstraps = sanitized.authorityBoundBootstraps
             ?? legacyAuthorityBoundBootstraps(from: sanitized)
         sanitized.authorityBoundBootstraps = prunedAuthorityBoundBootstraps(
@@ -1245,6 +1292,20 @@ public actor KEMTrustStore {
 
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func canonicalEvidenceReference(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.utf8.count == 36, value.hasPrefix("ev1:") else {
+            return nil
+        }
+        guard value.dropFirst(4).unicodeScalars.allSatisfy({ scalar in
+            (scalar.value >= 48 && scalar.value <= 57)
+                || (scalar.value >= 97 && scalar.value <= 102)
+        }) else {
+            return nil
+        }
+        return value
     }
 }
 

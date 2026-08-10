@@ -65,6 +65,41 @@ struct RemoteRealtimeMediaKeySnapshot: Sendable, Equatable {
     let mediaAdmissionToken: String?
 }
 
+/**
+ * Linearizable media-effect gate for one viewer stream-configuration operation.
+ *
+ * The UDP endpoint may be prepared before the host ACK arrives, but decoded audio must not reach
+ * the system output until that exact operation is acknowledged. Closing waits for an in-flight
+ * admitted output callback, so once it returns no older callback can publish more samples.
+ */
+final class IOSRealtimeMediaAudioAdmissionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open: Bool
+
+    init(open: Bool) {
+        self.open = open
+    }
+
+    func setOpen(_ open: Bool) {
+        lock.lock()
+        self.open = open
+        lock.unlock()
+    }
+
+    var isOpen: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return open
+    }
+
+    func withOpen<Result>(_ operation: () throws -> Result) rethrows -> Result? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard open else { return nil }
+        return try operation()
+    }
+}
+
 actor IOSRealtimeMediaAudioPlayer {
     static let shared = IOSRealtimeMediaAudioPlayer()
 
@@ -125,6 +160,8 @@ actor IOSRealtimeMediaAudioPlayer {
     private var engine: AVAudioEngine?
     private var sourceNode: AVAudioSourceNode?
     private var renderBuffer: RealtimePCMRenderBuffer?
+    private var activeAdmissionGate: IOSRealtimeMediaAudioAdmissionGate?
+    private let playbackOwnership = SkyBridgeRealtimeMediaPlaybackOwnership()
     private var activeProfileSignature: String?
     private var targetQueuedFrames: Int = 0
     private var rebufferResumeFrames: Int = 0
@@ -144,17 +181,35 @@ actor IOSRealtimeMediaAudioPlayer {
         sequence: UInt64,
         profile: SkyBridgeMediaAudioProfile,
         mode: SkyBridgeMediaAudioMode,
-        effectiveProfile: EffectivePlaybackProfile
+        effectiveProfile: EffectivePlaybackProfile,
+        owner: SkyBridgeRealtimeMediaReceiverLifecycle,
+        admissionGate: IOSRealtimeMediaAudioAdmissionGate
     ) -> Bool {
         guard frameCount > 0 else { return false }
+        guard admissionGate.isOpen else { return false }
+        let claim = playbackOwnership.claim(owner)
+        guard claim.isAccepted else { return false }
+        if claim.requiresPipelineReset {
+            stopPlaybackPipeline()
+        }
         do {
-            try ensureConfigured(profile: profile, mode: mode, effectiveProfile: effectiveProfile)
+            try ensureConfigured(
+                profile: profile,
+                mode: mode,
+                effectiveProfile: effectiveProfile,
+                admissionGate: admissionGate
+            )
         } catch {
             noteConfigurationFailure(error)
             return false
         }
         guard let renderBuffer else { return false }
-        switch renderBuffer.appendPCM16(data, frameCount: frameCount) {
+        guard let appendResult = admissionGate.withOpen({
+            renderBuffer.appendPCM16(data, frameCount: frameCount)
+        }) else {
+            return false
+        }
+        switch appendResult {
         case .appended(let queuedFrames):
             if playbackState != .running, queuedFrames >= targetQueuedFrames {
                 do {
@@ -176,11 +231,19 @@ actor IOSRealtimeMediaAudioPlayer {
         }
     }
 
-    func stop() {
+    @discardableResult
+    func stop(ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle) -> Bool {
+        guard playbackOwnership.release(ifOwnedBy: owner) else { return false }
+        stopPlaybackPipeline()
+        return true
+    }
+
+    private func stopPlaybackPipeline() {
         engine?.stop()
         sourceNode = nil
         engine = nil
         renderBuffer = nil
+        activeAdmissionGate = nil
         activeProfileSignature = nil
         targetQueuedFrames = 0
         rebufferResumeFrames = 0
@@ -189,7 +252,11 @@ actor IOSRealtimeMediaAudioPlayer {
         playbackState = .stopped
     }
 
-    func telemetrySnapshot(reset: Bool) -> PlaybackTelemetrySnapshot? {
+    func telemetrySnapshot(
+        for owner: SkyBridgeRealtimeMediaReceiverLifecycle,
+        reset: Bool
+    ) -> PlaybackTelemetrySnapshot? {
+        guard playbackOwnership.isOwned(by: owner) else { return nil }
         guard let snapshot = renderBuffer?.snapshot(reset: reset) else { return nil }
         return PlaybackTelemetrySnapshot(
             queuedMs: snapshot.queuedMs,
@@ -210,7 +277,11 @@ actor IOSRealtimeMediaAudioPlayer {
         )
     }
 
-    func renderQueueDeficitPacketCount(profile: SkyBridgeMediaAudioProfile) -> Int {
+    func renderQueueDeficitPacketCount(
+        for owner: SkyBridgeRealtimeMediaReceiverLifecycle,
+        profile: SkyBridgeMediaAudioProfile
+    ) -> Int {
+        guard playbackOwnership.isOwned(by: owner) else { return 0 }
         guard let snapshot = renderBuffer?.snapshot(reset: false) else { return 0 }
         let deficitFrames = max(0, snapshot.targetQueuedFrames - snapshot.queuedFrames)
         guard deficitFrames > 0 else { return 0 }
@@ -220,10 +291,14 @@ actor IOSRealtimeMediaAudioPlayer {
     private func ensureConfigured(
         profile: SkyBridgeMediaAudioProfile,
         mode: SkyBridgeMediaAudioMode,
-        effectiveProfile: EffectivePlaybackProfile
+        effectiveProfile: EffectivePlaybackProfile,
+        admissionGate: IOSRealtimeMediaAudioAdmissionGate
     ) throws {
         let signature = "\(profile.sampleRate)-\(profile.channels)-\(profile.frameDurationMs)-\(mode.rawValue)-adaptive-\(effectiveProfile.maxJitterTargetMs)-\(effectiveProfile.maxJitterMaxMs)"
-        if renderBuffer != nil, sourceNode != nil, activeProfileSignature == signature {
+        if renderBuffer != nil,
+           sourceNode != nil,
+           activeProfileSignature == signature,
+           activeAdmissionGate === admissionGate {
             renderBuffer?.updateTargets(
                 targetQueuedFrames: frames(for: effectiveProfile.targetQueuedMs, profile: profile),
                 rebufferResumeFrames: frames(for: effectiveProfile.rebufferResumeMs, profile: profile),
@@ -234,7 +309,7 @@ actor IOSRealtimeMediaAudioPlayer {
             self.softUnderflowBridgeFrames = frames(for: effectiveProfile.softUnderflowBridgeMs, profile: profile)
             return
         }
-        stop()
+        stopPlaybackPipeline()
         let session = AVAudioSession.sharedInstance()
         try configureAudioSession(session, profile: profile, mode: mode)
         lastConfigurationFailureDescription = nil
@@ -257,9 +332,19 @@ actor IOSRealtimeMediaAudioPlayer {
             softUnderflowBridgeFrames: softUnderflowBridgeFrames
         )
         let engine = AVAudioEngine()
-        let sourceNode = AVAudioSourceNode { [renderBuffer] isSilence, _, frameCount, outputData in
-            isSilence.pointee = false
-            return renderBuffer.render(into: outputData, frameCount: frameCount)
+        let sourceNode = AVAudioSourceNode {
+            [renderBuffer, admissionGate] isSilence, _, frameCount, outputData in
+            if let status = admissionGate.withOpen({
+                isSilence.pointee = false
+                return renderBuffer.render(into: outputData, frameCount: frameCount)
+            }) {
+                return status
+            }
+            isSilence.pointee = true
+            return renderBuffer.renderSilenceAndDiscard(
+                into: outputData,
+                frameCount: frameCount
+            )
         }
         engine.attach(sourceNode)
         engine.connect(sourceNode, to: engine.mainMixerNode, format: playbackFormat)
@@ -267,6 +352,7 @@ actor IOSRealtimeMediaAudioPlayer {
         self.engine = engine
         self.sourceNode = sourceNode
         self.renderBuffer = renderBuffer
+        activeAdmissionGate = admissionGate
         self.activeProfileSignature = signature
         self.targetQueuedFrames = targetFrames
         self.rebufferResumeFrames = rebufferResumeFrames
@@ -645,6 +731,25 @@ private final class RealtimePCMRenderBuffer: @unchecked Sendable {
         return noErr
     }
 
+    func renderSilenceAndDiscard(
+        into audioBufferList: UnsafeMutablePointer<AudioBufferList>,
+        frameCount: AVAudioFrameCount
+    ) -> OSStatus {
+        let requestedFrames = Int(frameCount)
+        guard requestedFrames > 0 else { return noErr }
+        let outputBuffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+        lock.lock()
+        defer { lock.unlock() }
+        readFrame = writeFrame
+        queuedFrames = 0
+        isPrimed = false
+        softUnderflowBridgeFramesRemaining = softUnderflowBridgeFrames
+        lastSamples = Array(repeating: 0, count: channels)
+        startupSilenceFrames &+= UInt64(requestedFrames)
+        fillSilence(outputBuffers, frameCount: requestedFrames)
+        return noErr
+    }
+
     private func fillSilence(
         _ outputBuffers: UnsafeMutableAudioBufferListPointer,
         frameCount: Int
@@ -764,7 +869,10 @@ actor IOSRealtimeMediaAudioReceiver {
     private let keys: SkyBridgeMediaDirectionKeys
     private let profile: SkyBridgeMediaAudioProfile
     private let mode: SkyBridgeMediaAudioMode
+    private let admissionGate: IOSRealtimeMediaAudioAdmissionGate
+    nonisolated private let lifecycle = SkyBridgeRealtimeMediaReceiverLifecycle()
     private var decoder: SkyBridgeOpusDecoder
+    private var didClose = false
     private var replayWindow = SkyBridgeMediaReplayWindow()
     private var jitterBuffer: SkyBridgeMediaJitterBuffer<SkyBridgeMediaOpenedPacket>
     private var playoutTask: Task<Void, Never>?
@@ -799,7 +907,11 @@ actor IOSRealtimeMediaAudioReceiver {
     private var arrivalIntervalStats = RollingMillisecondStats(maxSamples: 96)
     private var lastAcceptedPacketArrivalAt: TimeInterval?
 
-    init(snapshot: RemoteRealtimeMediaKeySnapshot, mode: SkyBridgeMediaAudioMode) throws {
+    init(
+        snapshot: RemoteRealtimeMediaKeySnapshot,
+        mode: SkyBridgeMediaAudioMode,
+        admissionGate: IOSRealtimeMediaAudioAdmissionGate
+    ) throws {
         let keyMaterial = SkyBridgeMediaKeyMaterial.derive(
             sendSecret: snapshot.sendKey,
             receiveSecret: snapshot.receiveKey,
@@ -811,6 +923,7 @@ actor IOSRealtimeMediaAudioReceiver {
         self.sessionId = snapshot.sessionId
         self.keys = keyMaterial.receive
         self.mode = mode
+        self.admissionGate = admissionGate
         self.profile = SkyBridgeMediaAudioProfile.profile(for: mode)
         let initialJitterTargetMs = Self.initialJitterTargetMs(for: self.profile, mode: mode)
         let initialJitterMaxMs = Self.initialJitterMaxMs(for: self.profile, mode: mode)
@@ -830,6 +943,7 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     func handle(datagram: SkyBridgeMediaReceivedDatagram) async {
+        guard lifecycle.isActive, admissionGate.isOpen else { return }
         datagramsSeen &+= 1
         do {
             let opened = try SkyBridgeMediaPacketCodec.open(
@@ -900,6 +1014,9 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     func close(reason: String = "unspecified") async {
+        guard !didClose else { return }
+        didClose = true
+        lifecycle.retire()
         playoutTask?.cancel()
         playoutTask = nil
         let sourceEndpoint = lockedRemoteEndpoint.map { "\($0.host):\($0.port)" } ?? "-"
@@ -914,7 +1031,11 @@ actor IOSRealtimeMediaAudioReceiver {
             "lateOrDuplicate=\(lateOrDuplicate) mode=\(mode.rawValue) source=\(sourceEndpoint)"
         SkyBridgeLogger.shared.info("🎧 \(line)")
         SkyBridgeDiagnosticTrace.appendStatus(line)
-        await IOSRealtimeMediaAudioPlayer.shared.stop()
+        await IOSRealtimeMediaAudioPlayer.shared.stop(ifOwnedBy: lifecycle)
+    }
+
+    nonisolated func retire() {
+        lifecycle.retire()
     }
 
     func receivedPacketCount() -> UInt64 {
@@ -937,7 +1058,10 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     func heartbeatDiagnosticSnapshot() async -> IOSRealtimeMediaAudioReceiverHeartbeatSnapshot {
-        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(reset: false)
+        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(
+            for: lifecycle,
+            reset: false
+        )
         return IOSRealtimeMediaAudioReceiverHeartbeatSnapshot(
             datagramsSeen: datagramsSeen,
             received: received,
@@ -958,7 +1082,10 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     func smokeDiagnosticSnapshot() async -> RemoteDesktopSmokeAudioDiagnosticSnapshot {
-        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(reset: false)
+        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(
+            for: lifecycle,
+            reset: false
+        )
         return RemoteDesktopSmokeAudioDiagnosticSnapshot(
             datagramsSeen: datagramsSeen,
             receivedPackets: received,
@@ -1023,12 +1150,12 @@ actor IOSRealtimeMediaAudioReceiver {
         ) {
             decoder = freshDecoder
         }
-        await IOSRealtimeMediaAudioPlayer.shared.stop()
+        await IOSRealtimeMediaAudioPlayer.shared.stop(ifOwnedBy: lifecycle)
         SkyBridgeLogger.shared.info("🎧 PQC media audio receive ordering reset: reason=\(reason)")
     }
 
     private func startPlayoutLoopIfNeeded() {
-        guard playoutTask == nil else { return }
+        guard lifecycle.isActive, admissionGate.isOpen, playoutTask == nil else { return }
         let tickMs = profile.frameDurationMs
         playoutTask = Task { [weak self] in
             let frameIntervalNanos = UInt64(max(1, tickMs)) * 1_000_000
@@ -1053,8 +1180,10 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     private func playoutTick(maxFrames dueFrames: Int) async {
+        guard lifecycle.isActive, admissionGate.isOpen else { return }
         var scheduledFrames = 0
         let renderDeficitFrames = await IOSRealtimeMediaAudioPlayer.shared.renderQueueDeficitPacketCount(
+            for: lifecycle,
             profile: profile
         )
         let bufferedFrameCount = jitterBuffer.bufferedFrameCount
@@ -1156,6 +1285,7 @@ actor IOSRealtimeMediaAudioReceiver {
     }
 
     private func schedule(samples: [Int16], sequence: UInt64) async {
+        guard lifecycle.isActive, admissionGate.isOpen else { return }
         let pcm = samples.withUnsafeBufferPointer { buffer in
             guard let baseAddress = buffer.baseAddress else { return Data() }
             return Data(bytes: baseAddress, count: samples.count * MemoryLayout<Int16>.size)
@@ -1166,8 +1296,11 @@ actor IOSRealtimeMediaAudioReceiver {
             sequence: sequence,
             profile: profile,
             mode: mode,
-            effectiveProfile: effectivePlaybackProfile
+            effectiveProfile: effectivePlaybackProfile,
+            owner: lifecycle,
+            admissionGate: admissionGate
         )
+        guard lifecycle.isActive, admissionGate.isOpen else { return }
         if didSchedule {
             played &+= 1
         } else {
@@ -1390,7 +1523,10 @@ actor IOSRealtimeMediaAudioReceiver {
         let counters = currentCounters()
         let window = counters - lastTelemetryCounters
         lastTelemetryCounters = counters
-        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(reset: true)
+        let playback = await IOSRealtimeMediaAudioPlayer.shared.telemetrySnapshot(
+            for: lifecycle,
+            reset: true
+        )
         let arrivalStats = arrivalIntervalStats.snapshot(reset: true)
         adaptJitterIfNeeded(window: window, playback: playback)
         let queuedMs = playback.map { String(format: "%.0f", $0.queuedMs) } ?? "-"

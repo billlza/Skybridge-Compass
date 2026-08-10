@@ -237,7 +237,7 @@ function sign_nested_code() {
   if [[ -d "${helpers_dir}" ]]; then
     while IFS= read -r -d '' helper_bin; do
       codesign_target "${helper_bin}"
-    done < <(find "${helpers_dir}" -type f -perm -111 -print0)
+    done < <(find "${helpers_dir}" -type f -perm -u+x -print0)
   fi
 
   if [[ -d "${plugins_dir}" ]]; then

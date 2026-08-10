@@ -92,6 +92,24 @@ run_check_strict_no_warnings \
   bash "${ROOT_DIR}/Scripts/test_real_device_smoke_performance_gate.sh"
 
 run_check_strict_no_warnings \
+  "ios-ipa-safe-extraction" \
+  "security" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_extract_ios_ipa.py"
+
+run_check_strict_no_warnings \
+  "ios-distribution-signing-helper" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_ios_distribution_signing_helpers.sh"
+
+run_check_strict_no_warnings \
+  "real-device-p2p-preflight" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_real_device_p2p_remote_smoke_preflight.sh"
+
+run_check_strict_no_warnings \
   "ios-runtime-diagnostic-validator" \
   "code" \
   "source-quality" \

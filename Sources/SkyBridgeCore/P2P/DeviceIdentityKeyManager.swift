@@ -415,6 +415,57 @@ public actor DeviceIdentityKeyManager {
     public nonisolated static var usesEphemeralIdentityStoreForCurrentProcess: Bool {
         useInMemoryKeychain
     }
+
+    #if SKYBRIDGE_RELEASE_EXCLUDES_SMOKE_IDENTITY_RUNTIME
+    nonisolated static let requiresExistingOnlyIdentityRuntime = false
+    #else
+    @_spi(SkyBridgeSmokeDiagnostics)
+    public nonisolated static let existingOnlySmokeEnvironmentKey =
+        "SKYBRIDGE_SMOKE_IDENTITY_EXISTING_ONLY"
+
+    private enum ProcessIdentityRuntimePolicy: Sendable {
+        case normal
+        case existingOnly
+    }
+
+    private nonisolated(unsafe) static var processIdentityRuntimePolicy:
+        ProcessIdentityRuntimePolicy = .normal
+    private nonisolated static let processIdentityRuntimePolicyLock = NSLock()
+
+    /// Activates the smoke host's one-way, process-wide identity mutation gate.
+    ///
+    /// The explicit environment opt-in and host role are both required so the
+    /// shipping applications retain their established provisioning behavior.
+    /// Activation must happen before any service singleton is initialized;
+    /// every create-capable identity entry point consults this state again so
+    /// asynchronous prewarm work cannot bypass the gate.
+    @_spi(SkyBridgeSmokeDiagnostics)
+    public nonisolated static func activateExistingOnlyIdentityRuntimeForSmokeDiagnostics()
+        throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment[existingOnlySmokeEnvironmentKey] == "1",
+              environment["SKYBRIDGE_SMOKE_ROLE"] == "mac-host" else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "Existing-only identity runtime requires the explicit mac-host smoke environment"
+            )
+        }
+        processIdentityRuntimePolicyLock.withLock {
+            processIdentityRuntimePolicy = .existingOnly
+        }
+    }
+
+    @_spi(SkyBridgeSmokeDiagnostics)
+    public nonisolated static var usesExistingOnlyIdentityRuntimeForCurrentProcess: Bool {
+        requiresExistingOnlyIdentityRuntime
+    }
+
+    nonisolated static var requiresExistingOnlyIdentityRuntime: Bool {
+        processIdentityRuntimePolicyLock.withLock {
+            processIdentityRuntimePolicy == .existingOnly
+        }
+    }
+    #endif
+
     private nonisolated(unsafe) static var inMemoryStore: [String: Data] = [:]
     private nonisolated static let inMemoryLock = NSLock()
     private nonisolated(unsafe) static var inMemoryKEMStore: [String: Data] = [:]
@@ -603,6 +654,15 @@ public actor DeviceIdentityKeyManager {
  /// 获取或创建设备身份密钥
  /// - Returns: 密钥信息
     public func getOrCreateIdentityKey() async throws -> DeviceIdentityKeyInfo {
+        if Self.requiresExistingOnlyIdentityRuntime {
+            guard let existing = try await existingIdentityKeyInfoStrict() else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only runtime requires a committed P-256 identity authority"
+                )
+            }
+            return existing
+        }
+
         // The P-256 device authority is add-only and immutable for the lifetime of
         // an installation (`deleteIdentityKey` refuses to remove it), so a resolved
         // authority is valid for the whole process. Re-resolving it per call forced
@@ -647,6 +707,15 @@ public actor DeviceIdentityKeyManager {
     }
 
     public func getOrCreateDeviceIdStrict() async throws -> String {
+        if Self.requiresExistingOnlyIdentityRuntime {
+            guard let existing = try await existingIdentityKeyInfoStrict() else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only runtime requires a committed P-256 identity authority"
+                )
+            }
+            return existing.deviceId
+        }
+
         if Self.useInMemoryKeychain, let deviceId = _deviceId {
             return deviceId
         }
@@ -687,6 +756,42 @@ public actor DeviceIdentityKeyManager {
             cachedKeyInfo = existing
             _deviceId = existing.deviceId
             return existing
+        } catch {
+            throw Self.publicIdentityError(for: error)
+        }
+    }
+
+    /// Returns the already-committed P-256 authority without creating,
+    /// migrating, mirroring, publishing, or caching identity state.
+    ///
+    /// This is the cold-cache resolver for unauthenticated inbound sockets. A
+    /// cached value is safe because the authority is immutable for the process
+    /// lifetime; a cache miss performs two stable reads of the canonical
+    /// authority and deliberately never promotes legacy residue to authority.
+    public func existingIdentityAuthoritySnapshotReadOnly() throws
+        -> DeviceIdentityKeyInfo? {
+        if let cachedKeyInfo {
+            return cachedKeyInfo
+        }
+
+        if Self.useInMemoryKeychain {
+            let key = KeychainConstants.service + "|" + "keyInfo"
+            guard let data = Self.inMemoryGet(key) else { return nil }
+            return try JSONDecoder().decode(DeviceIdentityKeyInfo.self, from: data)
+        }
+
+        do {
+            let store = try identityAuthorityStore()
+            let initialAuthority = try DeviceIdentityAuthorityTransaction.resolve(
+                using: store
+            )
+            let verifiedAuthority = try DeviceIdentityAuthorityTransaction.resolve(
+                using: store
+            )
+            guard initialAuthority == verifiedAuthority else {
+                throw DeviceIdentityAuthorityError.legacyIdentityChangedDuringAudit
+            }
+            return verifiedAuthority.map(keyInfo(from:))
         } catch {
             throw Self.publicIdentityError(for: error)
         }
@@ -867,6 +972,18 @@ public actor DeviceIdentityKeyManager {
  ///
  /// **Requirements: 2.1, 2.2, 2.4**
     public func getOrCreateProtocolSigningKey() async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        if Self.requiresExistingOnlyIdentityRuntime {
+            guard let existing = try await existingProtocolSigningIdentity(
+                for: .ed25519,
+                protection: .softwareKeychain
+            ) else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only runtime requires a committed Ed25519 protocol identity"
+                )
+            }
+            return existing
+        }
+
  // 检查缓存
         if let cached = cachedProtocolSigningKey {
             return (publicKey: cached.publicKey, keyHandle: .softwareKey(cached.privateKey))
@@ -925,6 +1042,18 @@ public actor DeviceIdentityKeyManager {
         for algorithm: ProtocolSigningAlgorithm,
         protection: ProtocolSigningKeyProtection
     ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        if Self.requiresExistingOnlyIdentityRuntime {
+            guard let existing = try await existingProtocolSigningIdentity(
+                for: algorithm,
+                protection: protection
+            ) else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only runtime requires the selected protocol identity to be committed"
+                )
+            }
+            return existing
+        }
+
         if protection == .secureEnclaveRequired {
             return try await getOrCreateSecureEnclaveMLDSAIdentity(for: algorithm)
         }
@@ -971,26 +1100,44 @@ public actor DeviceIdentityKeyManager {
         for algorithm: ProtocolSigningAlgorithm,
         protection: ProtocolSigningKeyProtection
     ) async throws -> Data? {
+        let existingOnly = Self.requiresExistingOnlyIdentityRuntime
         switch protection {
         case .secureEnclaveRequired:
-            return try loadSecureEnclaveMLDSARecord(for: algorithm)?.publicKey
+            return try loadSecureEnclaveMLDSARecord(
+                for: algorithm,
+                allowLegacyMigration: !existingOnly
+            )?.publicKey
         case .softwareKeychain:
             switch algorithm {
             case .ed25519:
-                guard let existing = try loadProtocolSigningKey() else { return nil }
+                guard let existing = try loadProtocolSigningKey(
+                    includeLegacyMigration: !existingOnly,
+                    publishMirror: !existingOnly
+                ) else { return nil }
                 cachedProtocolSigningKey = existing
                 return existing.publicKey
             case .mlDSA65:
-                guard let existing = try loadMLDSASigningKey() else { return nil }
+                guard let existing = try loadMLDSASigningKey(
+                    existingOnly: existingOnly
+                ) else { return nil }
                 cachedMLDSASigningKey = existing
                 return existing.publicKey
             case .mlDSA87:
-                let persistedPublicKey = try OQSBridge.existingSigningPublicKey(
-                    peerId: mldsa87StoreIdentity,
-                    algorithm: .mldsa87,
-                    authority: .active,
-                    scopeSource: effectiveSharedIdentityScopeSource
-                )
+                let persistedPublicKey = if existingOnly {
+                    try OQSBridge.existingSigningPublicKeyStrict(
+                        peerId: mldsa87StoreIdentity,
+                        algorithm: .mldsa87,
+                        authority: .active,
+                        scopeSource: effectiveSharedIdentityScopeSource
+                    )
+                } else {
+                    try OQSBridge.existingSigningPublicKey(
+                        peerId: mldsa87StoreIdentity,
+                        algorithm: .mldsa87,
+                        authority: .active,
+                        scopeSource: effectiveSharedIdentityScopeSource
+                    )
+                }
                 guard let persistedPublicKey else { return nil }
                 if let cachedMLDSA87SigningIdentity,
                    cachedMLDSA87SigningIdentity.publicKey != persistedPublicKey {
@@ -1009,9 +1156,13 @@ public actor DeviceIdentityKeyManager {
         for algorithm: ProtocolSigningAlgorithm,
         protection: ProtocolSigningKeyProtection
     ) async throws -> (publicKey: Data, keyHandle: SigningKeyHandle)? {
+        let existingOnly = Self.requiresExistingOnlyIdentityRuntime
         switch protection {
         case .secureEnclaveRequired:
-            guard let record = try loadSecureEnclaveMLDSARecord(for: algorithm) else {
+            guard let record = try loadSecureEnclaveMLDSARecord(
+                for: algorithm,
+                allowLegacyMigration: !existingOnly
+            ) else {
                 return nil
             }
             let material = try await restoreSecureEnclaveMLDSARecord(record)
@@ -1021,27 +1172,49 @@ public actor DeviceIdentityKeyManager {
         case .softwareKeychain:
             switch algorithm {
             case .ed25519:
-                guard let existing = try loadProtocolSigningKey() else { return nil }
+                guard let existing = try loadProtocolSigningKey(
+                    includeLegacyMigration: !existingOnly,
+                    publishMirror: !existingOnly
+                ) else { return nil }
                 cachedProtocolSigningKey = existing
                 return (existing.publicKey, .softwareKey(existing.privateKey))
             case .mlDSA65:
-                guard let existing = try loadMLDSASigningKey() else { return nil }
+                guard let existing = try loadMLDSASigningKey(
+                    existingOnly: existingOnly
+                ) else { return nil }
                 cachedMLDSASigningKey = existing
                 return (existing.publicKey, .softwareKey(existing.privateKey))
             case .mlDSA87:
-                guard let persistedPublicKey = try OQSBridge.existingSigningPublicKey(
-                    peerId: mldsa87StoreIdentity,
-                    algorithm: .mldsa87,
-                    authority: .active,
-                    scopeSource: effectiveSharedIdentityScopeSource
-                ) else {
-                    return nil
+                let resolved: (publicKey: Data, keyHandle: SigningKeyHandle)
+                let persistedPublicKey: Data
+                if existingOnly {
+                    guard let existing = try OQSBridge.existingSigningPublicKeyStrict(
+                        peerId: mldsa87StoreIdentity,
+                        algorithm: .mldsa87,
+                        authority: .active,
+                        scopeSource: effectiveSharedIdentityScopeSource
+                    ) else { return nil }
+                    persistedPublicKey = existing
+                    resolved = try await OQSProtocolMLDSASigningCallback
+                        .resolveExistingOnly(
+                            algorithm: .mlDSA87,
+                            identity: mldsa87StoreIdentity,
+                            scopeSource: effectiveSharedIdentityScopeSource
+                        )
+                } else {
+                    guard let existing = try OQSBridge.existingSigningPublicKey(
+                        peerId: mldsa87StoreIdentity,
+                        algorithm: .mldsa87,
+                        authority: .active,
+                        scopeSource: effectiveSharedIdentityScopeSource
+                    ) else { return nil }
+                    persistedPublicKey = existing
+                    resolved = try await OQSProtocolMLDSASigningCallback.resolve(
+                        algorithm: .mlDSA87,
+                        identity: mldsa87StoreIdentity,
+                        scopeSource: effectiveSharedIdentityScopeSource
+                    )
                 }
-                let resolved = try await OQSProtocolMLDSASigningCallback.resolve(
-                    algorithm: .mlDSA87,
-                    identity: mldsa87StoreIdentity,
-                    scopeSource: effectiveSharedIdentityScopeSource
-                )
                 guard resolved.publicKey == persistedPublicKey else {
                     throw DeviceIdentityKeyError.authorityConflict(
                         "Resolved ML-DSA-87 signer disagrees with its persisted authority"
@@ -1101,6 +1274,10 @@ public actor DeviceIdentityKeyManager {
     ///
     /// **Requirements: 5.4**
     public func migrateExistingIdentityKey() async throws {
+        guard !Self.requiresExistingOnlyIdentityRuntime else {
+            throw DeviceIdentityKeyError.identityMigrationRequired
+        }
+
         // Tests run with SKYBRIDGE_KEYCHAIN_IN_MEMORY=1 to avoid touching the system Keychain.
         // In this mode, identity-key migration is a no-op by design.
         if Self.useInMemoryKeychain { return }
@@ -1141,6 +1318,18 @@ public actor DeviceIdentityKeyManager {
         for suite: CryptoSuite,
         provider: any CryptoProvider
     ) async throws -> (publicKey: Data, privateKey: SecureBytes) {
+        if Self.requiresExistingOnlyIdentityRuntime {
+            guard let existing = try await existingKEMIdentityKeyStrict(
+                for: suite,
+                provider: provider
+            ) else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only runtime requires the selected KEM identity to be committed"
+                )
+            }
+            return existing
+        }
+
         let storageSuite = suite.canonicalKEMSuite
         guard provider.supportsSuite(storageSuite) else {
             throw CryptoProviderError.unsupportedAlgorithm(
@@ -1195,6 +1384,51 @@ public actor DeviceIdentityKeyManager {
         return (
             publicKey: winner.publicKey,
             privateKey: SecureBytes(data: winner.privateKey)
+        )
+    }
+
+    /// Loads one exact tiered KEM identity without provisioning or legacy
+    /// reconciliation. Untiered records and copies outside the authoritative
+    /// shared-group namespace require an explicit migration and are rejected.
+    @_spi(SkyBridgeSmokeDiagnostics)
+    public func existingKEMIdentityKeyStrict(
+        for suite: CryptoSuite,
+        provider: any CryptoProvider
+    ) async throws -> (publicKey: Data, privateKey: SecureBytes)? {
+        let storageSuite = suite.canonicalKEMSuite
+        guard provider.supportsSuite(storageSuite) else {
+            throw CryptoProviderError.unsupportedAlgorithm(
+                "\(provider.providerName) does not support \(storageSuite.rawValue)"
+            )
+        }
+
+        try rejectLegacyKEMIdentityState(
+            suiteWireId: storageSuite.wireId,
+            tier: provider.tier
+        )
+        let record = try loadKEMKeyRecord(
+            account: kemAccount(
+                suiteWireId: storageSuite.wireId,
+                tier: provider.tier
+            ),
+            suiteWireId: storageSuite.wireId,
+            validationPolicy: .providerTier(provider.tier),
+            includeLegacyMigration: false
+        )
+        try rejectLegacyKEMIdentityState(
+            suiteWireId: storageSuite.wireId,
+            tier: provider.tier
+        )
+        guard let record else { return nil }
+        cachedKEMPublicKeys[
+            KEMCacheKey(
+                suiteWireId: storageSuite.wireId,
+                tier: provider.tier
+            )
+        ] = record.publicKey
+        return (
+            publicKey: record.publicKey,
+            privateKey: SecureBytes(data: record.privateKey)
         )
     }
     
@@ -1321,7 +1555,8 @@ public actor DeviceIdentityKeyManager {
                 let publicKey = try await getKEMPublicKey(for: suite, provider: suiteProvider)
                 kemKeys.append(KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey))
             } catch {
-                if requiredWireIds.contains(suite.wireId) {
+                if Self.requiresExistingOnlyIdentityRuntime
+                    || requiredWireIds.contains(suite.wireId) {
                     throw error
                 }
                 SkyBridgeLogger.p2p.warning(
@@ -1670,7 +1905,10 @@ public actor DeviceIdentityKeyManager {
                 beside: authority,
                 using: store
             )
-            publishResolvedIdentity(authority)
+            if legacyMigrationPolicy == .allow
+                || !Self.requiresExistingOnlyIdentityRuntime {
+                publishResolvedIdentity(authority)
+            }
             return keyInfo(from: authority)
         }
 
@@ -2614,7 +2852,8 @@ public actor DeviceIdentityKeyManager {
     private func loadKEMKeyRecord(
         account: String,
         suiteWireId: UInt16,
-        validationPolicy: KEMRecordValidationPolicy
+        validationPolicy: KEMRecordValidationPolicy,
+        includeLegacyMigration: Bool = true
     ) throws -> KEMIdentityKeyRecord? {
         if Self.useInMemoryKeychain {
             let key = kemStorageService + "|" + account
@@ -2631,6 +2870,7 @@ public actor DeviceIdentityKeyManager {
         guard let data = try readGenericPasswordData(
             service: kemStorageService,
             account: account,
+            includeLegacyMigration: includeLegacyMigration,
             validate: { encoded in
                 _ = try self.decodeKEMRecord(
                     encoded,
@@ -2658,6 +2898,59 @@ public actor DeviceIdentityKeyManager {
             suiteWireId: suiteWireId,
             validationPolicy: validationPolicy
         )
+    }
+
+    private func rejectLegacyKEMIdentityState(
+        suiteWireId: UInt16,
+        tier: CryptoTier
+    ) throws {
+        let tieredAccount = kemAccount(suiteWireId: suiteWireId, tier: tier)
+        let untieredAccount = kemAccount(suiteWireId: suiteWireId, tier: nil)
+        if Self.useInMemoryKeychain {
+            let untieredKey = kemStorageService + "|" + untieredAccount
+            guard !Self.inMemoryKEMLock.withLock({
+                Self.inMemoryKEMStore[untieredKey] != nil
+            }) else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "Untiered KEM identity state requires explicit migration"
+                )
+            }
+            return
+        }
+
+        let scope = try resolvedSharedIdentityKeychainScope().authoritativeOnly()
+        guard let authoritativeAccessGroup = scope.writeAccessGroup else {
+            throw KeychainGenericPasswordScopeError
+                .missingAuthoritativeWriteAccessGroup
+        }
+        let tieredCandidates = try KeychainManager.shared
+            .legacyGenericPasswordMetadataCandidatesStrict(
+                service: kemStorageService,
+                account: tieredAccount,
+                includeLegacyKeychain: true
+            )
+        let hasNonAuthoritativeTieredCandidate = tieredCandidates.contains {
+            $0.location.actualAccessGroup != authoritativeAccessGroup
+                || $0.location.usesDataProtectionKeychain
+                    != scope.usesDataProtectionKeychain
+        }
+        guard !hasNonAuthoritativeTieredCandidate else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "Tiered KEM identity state exists outside the authoritative namespace"
+            )
+        }
+
+        let untieredCandidates = try KeychainManager.shared
+            .legacyGenericPasswordMetadataCandidatesStrict(
+                service: kemStorageService,
+                account: untieredAccount,
+                includeLegacyKeychain: true
+            )
+        guard untieredCandidates.isEmpty else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "Untiered KEM identity state requires explicit migration"
+            )
+        }
     }
 
     private func decodeKEMRecord(
@@ -3024,7 +3317,10 @@ public actor DeviceIdentityKeyManager {
     }
     
  /// 加载 Ed25519 协议签名密钥
-    private func loadProtocolSigningKey() throws -> (publicKey: Data, privateKey: Data)? {
+    private func loadProtocolSigningKey(
+        includeLegacyMigration: Bool = true,
+        publishMirror: Bool = true
+    ) throws -> (publicKey: Data, privateKey: Data)? {
         if Self.useInMemoryKeychain {
             let key = KeychainConstants.service + "|" + KeychainConstants.protocolSigningKeyTag
             Self.inMemoryLock.lock()
@@ -3038,6 +3334,7 @@ public actor DeviceIdentityKeyManager {
         guard let privateKeyData = try readGenericPasswordData(
             service: KeychainConstants.service,
             account: KeychainConstants.protocolSigningKeyTag,
+            includeLegacyMigration: includeLegacyMigration,
             validate: { encoded in
                 _ = try Curve25519.Signing.PrivateKey(rawRepresentation: encoded)
             }
@@ -3048,7 +3345,12 @@ public actor DeviceIdentityKeyManager {
  // 从私钥派生公钥
         let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData)
         let publicKeyData = privateKey.publicKey.rawRepresentation
-        saveMirroredData(publicKeyData, forKey: KeychainConstants.mirroredProtocolSigningPublicKeyDefaultsKey)
+        if publishMirror {
+            saveMirroredData(
+                publicKeyData,
+                forKey: KeychainConstants.mirroredProtocolSigningPublicKeyDefaultsKey
+            )
+        }
         
         return (publicKey: publicKeyData, privateKey: privateKeyData)
     }
@@ -3077,24 +3379,42 @@ public actor DeviceIdentityKeyManager {
     public func existingProtocolSigningKeyProtection(
         for algorithm: ProtocolSigningAlgorithm
     ) async throws -> ProtocolSigningKeyProtection? {
-        if try loadSecureEnclaveMLDSARecord(for: algorithm) != nil {
+        let existingOnly = Self.requiresExistingOnlyIdentityRuntime
+        if try loadSecureEnclaveMLDSARecord(
+            for: algorithm,
+            allowLegacyMigration: !existingOnly
+        ) != nil {
             return .secureEnclaveRequired
         }
         switch algorithm {
         case .ed25519:
-            return try loadProtocolSigningKey() == nil ? nil : .softwareKeychain
+            return try loadProtocolSigningKey(
+                includeLegacyMigration: !existingOnly,
+                publishMirror: !existingOnly
+            ) == nil ? nil : .softwareKeychain
         case .mlDSA65:
-            return try loadMLDSASigningKey() == nil ? nil : .softwareKeychain
+            return try loadMLDSASigningKey(
+                existingOnly: existingOnly
+            ) == nil ? nil : .softwareKeychain
         case .mlDSA87:
             if cachedMLDSA87SigningIdentity != nil {
                 return .softwareKeychain
             }
-            let publicKey = try OQSBridge.existingSigningPublicKey(
-                peerId: mldsa87StoreIdentity,
-                algorithm: .mldsa87,
-                authority: .active,
-                scopeSource: effectiveSharedIdentityScopeSource
-            )
+            let publicKey = if existingOnly {
+                try OQSBridge.existingSigningPublicKeyStrict(
+                    peerId: mldsa87StoreIdentity,
+                    algorithm: .mldsa87,
+                    authority: .active,
+                    scopeSource: effectiveSharedIdentityScopeSource
+                )
+            } else {
+                try OQSBridge.existingSigningPublicKey(
+                    peerId: mldsa87StoreIdentity,
+                    algorithm: .mldsa87,
+                    authority: .active,
+                    scopeSource: effectiveSharedIdentityScopeSource
+                )
+            }
             return publicKey == nil ? nil : .softwareKeychain
         }
     }
@@ -3154,7 +3474,8 @@ public actor DeviceIdentityKeyManager {
     }
 
     private func loadSecureEnclaveMLDSARecord(
-        for algorithm: ProtocolSigningAlgorithm
+        for algorithm: ProtocolSigningAlgorithm,
+        allowLegacyMigration: Bool = true
     ) throws -> SecureEnclaveMLDSAIdentityRecord? {
         let scope = try resolvedSharedIdentityKeychainScope().authoritativeOnly()
         let account = secureEnclaveMLDSAAccount(for: algorithm)
@@ -3165,6 +3486,8 @@ public actor DeviceIdentityKeyManager {
         ) {
             return preferred
         }
+
+        guard allowLegacyMigration else { return nil }
 
         // Pre-release builds used only the algorithm as the account. Copy that
         // immutable record into the versioned `(algorithm, protection)` slot;
@@ -3250,6 +3573,18 @@ public actor DeviceIdentityKeyManager {
  /// public/private items are accepted only as a complete, cryptographically
  /// matched migration input.
     public func getOrCreateMLDSASigningKey() async throws -> (publicKey: Data, keyHandle: SigningKeyHandle) {
+        if Self.requiresExistingOnlyIdentityRuntime {
+            guard let existing = try await existingProtocolSigningIdentity(
+                for: .mlDSA65,
+                protection: .softwareKeychain
+            ) else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only runtime requires a committed ML-DSA-65 protocol identity"
+                )
+            }
+            return existing
+        }
+
         if let cached = cachedMLDSASigningKey {
             return (publicKey: cached.publicKey, keyHandle: .softwareKey(cached.privateKey))
         }
@@ -3313,18 +3648,33 @@ public actor DeviceIdentityKeyManager {
         #endif
     }
 
-    private func loadMLDSASigningKey() throws -> (publicKey: Data, privateKey: Data)? {
+    private func loadMLDSASigningKey(
+        existingOnly: Bool = false
+    ) throws -> (publicKey: Data, privateKey: Data)? {
         do {
-            guard let record = try PQCKeyPairStore.loadOrMigrateLegacy(
-                descriptor: mldsaStoreDescriptor,
-                publicKeyLength: KeychainConstants.mldsaPublicKeyLength,
-                privateKeyLength: KeychainConstants.mldsaPrivateKeyLength,
-                legacyKeyPair: mldsaLegacyKeyPair,
-                validatePair: validateMLDSARecord
-            ) else {
+            let record: PQCKeyPairRecord?
+            if existingOnly {
+                record = try PQCKeyPairStore.loadExistingAuthoritativeOnly(
+                    descriptor: mldsaStoreDescriptor,
+                    publicKeyLength: KeychainConstants.mldsaPublicKeyLength,
+                    privateKeyLength: KeychainConstants.mldsaPrivateKeyLength,
+                    validatePair: validateMLDSARecord
+                )
+            } else {
+                record = try PQCKeyPairStore.loadOrMigrateLegacy(
+                    descriptor: mldsaStoreDescriptor,
+                    publicKeyLength: KeychainConstants.mldsaPublicKeyLength,
+                    privateKeyLength: KeychainConstants.mldsaPrivateKeyLength,
+                    legacyKeyPair: mldsaLegacyKeyPair,
+                    validatePair: validateMLDSARecord
+                )
+            }
+            guard let record else {
                 return nil
             }
-            saveMirroredData(record.publicKey, forKey: mldsaMirrorDefaultsKey)
+            if !existingOnly {
+                saveMirroredData(record.publicKey, forKey: mldsaMirrorDefaultsKey)
+            }
             return (publicKey: record.publicKey, privateKey: record.privateKey)
         } catch {
             throw translateMLDSAStorageError(error)

@@ -46,13 +46,28 @@ struct LocalWebRTCSmokeNativeRenderHost: View {
                         RemoteDesktopRTCVideoView(
                             track: track,
                             acceptsRenderEvidence: true,
-                            uiSurface: "smokeOverlay"
+                            uiSurface: "smokeOverlay",
+                            requiresRemoteDesktopAdmission: false
                         )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .onAppear {
+                        if let owner = manager.currentRemoteDesktopSessionOwner() {
+                            _ = manager.setRemoteDesktopNativeVideoAdmission(
+                                true,
+                                owner: owner
+                            )
+                        }
                         SkyBridgeDiagnosticTrace.appendStatus(
                             "native-render-host trackId=\(track.trackId) visible=1 size=\(Int(geometry.size.width))x\(Int(geometry.size.height)) source=smoke-overlay"
                         )
+                    }
+                    .onDisappear {
+                        if let owner = manager.currentRemoteDesktopSessionOwner() {
+                            _ = manager.setRemoteDesktopNativeVideoAdmission(
+                                false,
+                                owner: owner
+                            )
+                        }
                     }
                     .onChange(of: track.trackId) { _, newTrackId in
                         SkyBridgeDiagnosticTrace.appendStatus(

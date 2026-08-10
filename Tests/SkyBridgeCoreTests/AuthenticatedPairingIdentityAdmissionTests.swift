@@ -257,7 +257,7 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
         )
         for marker in [
             "updateCrossNetworkRemoteMetadata(",
-            "PeerKEMBootstrapStore.shared.upsert("
+            ".upsertAuthorityBoundPairingKEM("
         ] {
             let mutation = try XCTUnwrap(pairing.range(of: marker))
             XCTAssertLessThan(admission.lowerBound, mutation.lowerBound)

@@ -198,6 +198,201 @@ final class ApplePeerConnectivityPolicyTests: XCTestCase {
         )
     }
 
+    func testRemoteControlMediaRouteAcceptsBoundInfrastructureLinkLocalEvidence() {
+        let evidence = ApplePeerConnectivityPolicy.RemoteControlRouteEvidence(
+            provenance: .liveBrowser,
+            requestedServiceType: BonjourInteropProtocolContract.remoteControlServiceType,
+            requestedInterfaceName: "en0",
+            requestedInterfaceClass: .infrastructure,
+            pathUsesRequestedInterfaceType: true,
+            resolvedAddressClass: .linkLocalIPv6,
+            resolvedInterfaceScope: "en0"
+        )
+
+        XCTAssertNil(
+            ApplePeerConnectivityPolicy.remoteControlRouteRejectionReason(for: evidence)
+        )
+        XCTAssertTrue(
+            ApplePeerConnectivityPolicy.remoteControlInterfaceScopeMatches(evidence)
+        )
+    }
+
+    func testRemoteControlMediaRouteRejectsPeerToPeerAndMismatchedEvidence() {
+        XCTAssertFalse(ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer)
+        XCTAssertFalse(
+            ApplePeerConnectivityPolicy.remoteControlMediaIncludesPeerToPeer(
+                for: .peerToPeer
+            )
+        )
+
+        let peerToPeer = ApplePeerConnectivityPolicy.RemoteControlRouteEvidence(
+            provenance: .liveBrowser,
+            requestedServiceType: BonjourInteropProtocolContract.remoteControlServiceType,
+            requestedInterfaceName: "awdl0",
+            requestedInterfaceClass: .peerToPeer,
+            pathUsesRequestedInterfaceType: true,
+            resolvedAddressClass: .linkLocalIPv6,
+            resolvedInterfaceScope: "awdl0"
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlRouteRejectionReason(for: peerToPeer),
+            .peerToPeerMediaRouteDisallowed
+        )
+
+        let wrongScope = ApplePeerConnectivityPolicy.RemoteControlRouteEvidence(
+            provenance: .liveBrowser,
+            requestedServiceType: BonjourInteropProtocolContract.remoteControlServiceType,
+            requestedInterfaceName: "en0",
+            requestedInterfaceClass: .infrastructure,
+            pathUsesRequestedInterfaceType: true,
+            resolvedAddressClass: .linkLocalIPv6,
+            resolvedInterfaceScope: "awdl0"
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlRouteRejectionReason(for: wrongScope),
+            .resolvedScopeMismatch
+        )
+
+        let persisted = ApplePeerConnectivityPolicy.RemoteControlRouteEvidence(
+            provenance: .persistedMetadata,
+            requestedServiceType: BonjourInteropProtocolContract.remoteControlServiceType,
+            requestedInterfaceName: "en0",
+            requestedInterfaceClass: .infrastructure,
+            pathUsesRequestedInterfaceType: true,
+            resolvedAddressClass: .routable,
+            resolvedInterfaceScope: nil
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlRouteRejectionReason(for: persisted),
+            .untrustedProvenance
+        )
+    }
+
+    func testRemoteControlMediaInterfaceBindingSelectsExactInfrastructureScope() {
+        let evidence = ApplePeerConnectivityPolicy.RemoteControlMediaInterfaceBindingEvidence(
+            advertisedHostRelation: .unspecified,
+            authenticatedAddressClass: .linkLocalIPv6,
+            authenticatedInterfaceScope: "en0",
+            candidates: [
+                .init(
+                    name: "en1",
+                    index: 8,
+                    interfaceClass: .infrastructure,
+                    pathUsesInterfaceType: true
+                ),
+                .init(
+                    name: "en0",
+                    index: 7,
+                    interfaceClass: .infrastructure,
+                    pathUsesInterfaceType: true
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlMediaInterfaceBindingDecision(
+                for: evidence
+            ),
+            .use(interfaceName: "en0", interfaceIndex: 7)
+        )
+    }
+
+    func testRemoteControlMediaInterfaceBindingRejectsUnsafeOrAmbiguousRoutes() {
+        let baseCandidate = ApplePeerConnectivityPolicy.RemoteControlMediaInterfaceCandidate(
+            name: "en0",
+            index: 7,
+            interfaceClass: .infrastructure,
+            pathUsesInterfaceType: true
+        )
+
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlMediaInterfaceBindingDecision(
+                for: .init(
+                    advertisedHostRelation: .mismatch,
+                    authenticatedAddressClass: .routable,
+                    authenticatedInterfaceScope: nil,
+                    candidates: [baseCandidate]
+                )
+            ),
+            .reject(.advertisedHostMismatch)
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlMediaInterfaceBindingDecision(
+                for: .init(
+                    advertisedHostRelation: .exactAuthenticatedHost,
+                    authenticatedAddressClass: .linkLocalIPv6,
+                    authenticatedInterfaceScope: nil,
+                    candidates: [baseCandidate]
+                )
+            ),
+            .reject(.missingInterfaceScope)
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlMediaInterfaceBindingDecision(
+                for: .init(
+                    advertisedHostRelation: .unspecified,
+                    authenticatedAddressClass: .linkLocalIPv6,
+                    authenticatedInterfaceScope: "awdl0",
+                    candidates: [
+                        .init(
+                            name: "awdl0",
+                            index: 11,
+                            interfaceClass: .peerToPeer,
+                            pathUsesInterfaceType: true
+                        )
+                    ]
+                )
+            ),
+            .reject(.peerToPeerForbidden)
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlMediaInterfaceBindingDecision(
+                for: .init(
+                    advertisedHostRelation: .unspecified,
+                    authenticatedAddressClass: .routable,
+                    authenticatedInterfaceScope: nil,
+                    candidates: [
+                        baseCandidate,
+                        .init(
+                            name: "en1",
+                            index: 8,
+                            interfaceClass: .infrastructure,
+                            pathUsesInterfaceType: true
+                        )
+                    ]
+                )
+            ),
+            .reject(.ambiguousInterface)
+        )
+    }
+
+    func testRemoteControlInterfaceClassificationIsSharedAcrossAdapters() {
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlInterfaceClass(
+                interfaceName: "en0",
+                isWiFi: true,
+                isWiredEthernet: false
+            ),
+            .infrastructure
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlInterfaceClass(
+                interfaceName: "awdl0",
+                isWiFi: true,
+                isWiredEthernet: false
+            ),
+            .peerToPeer
+        )
+        XCTAssertEqual(
+            ApplePeerConnectivityPolicy.remoteControlInterfaceClass(
+                interfaceName: "utun9",
+                isWiFi: false,
+                isWiredEthernet: false
+            ),
+            .unsupported
+        )
+    }
+
     func testConnectionFailureClassificationIsStableAcrossAdapters() {
         XCTAssertEqual(
             ApplePeerConnectivityPolicy.connectionFailureCode(
@@ -247,7 +442,10 @@ final class ApplePeerConnectivityPolicyTests: XCTestCase {
         let macP2P = try repositorySource(
             "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
         )
-        let macPermission = try repositorySource(
+        let sharedPermission = try repositorySource(
+            "Sources/SkyBridgeAppleTransport/Network/NetworkFrameworkLocalNetworkPermissionClassifier.swift"
+        )
+        let macPermissionAdapter = try repositorySource(
             "Sources/SkyBridgeCore/Network/NetworkFrameworkLocalNetworkPermissionClassifier.swift"
         )
         let iosEndpointPolicy = try repositorySource(
@@ -265,10 +463,23 @@ final class ApplePeerConnectivityPolicyTests: XCTestCase {
         let iosDiscovery = try repositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
         )
+        let iosRemoteControlRoutePolicy = try repositorySource(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopLANRoutePolicy.swift"
+        )
+        let macRemoteControlServer = try repositorySource(
+            "Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift"
+        )
 
         XCTAssertTrue(macBonjourPolicy.contains("ApplePeerConnectivityPolicy.DialTarget"))
         XCTAssertTrue(macP2P.contains("ApplePeerConnectivityPolicy.match("))
-        XCTAssertTrue(macPermission.contains("ApplePeerConnectivityPolicy.isLocalNetworkPermissionDenied("))
+        XCTAssertTrue(
+            sharedPermission.contains("ApplePeerConnectivityPolicy.isLocalNetworkPermissionDenied(")
+        )
+        XCTAssertTrue(
+            macPermissionAdapter.contains(
+                "SkyBridgeAppleTransport.NetworkFrameworkLocalNetworkPermissionClassifier"
+            )
+        )
         XCTAssertTrue(iosEndpointPolicy.contains("ApplePeerConnectivityPolicy.orderedEligibleClaimIndices("))
         XCTAssertTrue(
             iosConnectionManager.contains("ApplePeerConnectivityPolicy")
@@ -276,6 +487,16 @@ final class ApplePeerConnectivityPolicyTests: XCTestCase {
         )
         XCTAssertTrue(iosP2PError.contains("case noLiveControlRoute"))
         XCTAssertTrue(macP2PError.contains("case noLiveControlRoute"))
+        XCTAssertTrue(
+            iosRemoteControlRoutePolicy.contains(
+                "ApplePeerConnectivityPolicy.remoteControlRouteRejectionReason(for: evidence)"
+            )
+        )
+        XCTAssertTrue(
+            macRemoteControlServer.contains(
+                "ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer"
+            )
+        )
         XCTAssertFalse(
             macP2P.contains("interface: nil"),
             "macOS must not reconstruct a Bonjour endpoint without its live browser route ownership."

@@ -66,7 +66,7 @@ final class StrictIdentityFailClosedSourceContractTests: XCTestCase {
         XCTAssertFalse(manager.contains("CrossNetworkConnectionRuntimeSupport.deviceFingerprint()"))
         XCTAssertFalse(manager.contains("?? deviceFingerprint"))
         XCTAssertFalse(manager.contains("?? self.deviceFingerprint"))
-        XCTAssertTrue(manager.contains("sessionBoundSignalingDeviceId("))
+        XCTAssertTrue(manager.contains("sessionBoundSignalingAuthority("))
         XCTAssertTrue(manager.contains("case .sent, .blocked:"))
         XCTAssertTrue(manager.contains("fromDevice: localAuthorityDeviceId"))
         XCTAssertTrue(manager.contains("skybridge.answer.\\(localAuthorityDeviceId)"))

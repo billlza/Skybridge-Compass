@@ -207,6 +207,21 @@ final class FramedReaderTests: XCTestCase {
         }
     }
 
+    func testReceiveExactlyRejectsPartialDataDeliveredWithTerminalFIN() async {
+        let reader = FramedReader { _ in
+            (Data([0xAA, 0xBB]), true)
+        }
+
+        do {
+            _ = try await reader.receiveExactly(4)
+            XCTFail("terminal partial data must not be treated as a complete frame")
+        } catch let error as FramedReaderError {
+            XCTAssertEqual(error, .peerClosed)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testBootstrapReceiveTimeoutCancelsUnderlyingReceiveBeforeReturning() async {
         let probe = CancellationProbe()
         let startedAt = ContinuousClock.now

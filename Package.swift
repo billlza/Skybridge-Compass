@@ -68,10 +68,21 @@ func shouldExcludeSmokeSupportFromRelease() -> Bool {
     }
 }
 
+let excludeSmokeSupportFromRelease = shouldExcludeSmokeSupportFromRelease()
+
 // Production library/app targets depend on the smoke-support module only when the
 // release exclusion is not requested. Smoke-host executables always keep it.
 let smokeSupportProductionDependencies: [Target.Dependency] =
-    shouldExcludeSmokeSupportFromRelease() ? [] : ["SkyBridgeSmokeSupport"]
+    excludeSmokeSupportFromRelease ? [] : ["SkyBridgeSmokeSupport"]
+
+// The same shipping policy also removes the existing-only smoke identity SPI from
+// SkyBridgeCore. Keeping dependency and source-surface exclusion behind one parsed
+// value prevents a release build from dropping the helper module while retaining
+// its activation environment strings in the linked application.
+let smokeIdentityRuntimeProductionSwiftSettings: [SwiftSetting] =
+    excludeSmokeSupportFromRelease
+        ? [.define("SKYBRIDGE_RELEASE_EXCLUDES_SMOKE_IDENTITY_RUNTIME")]
+        : []
 
 let swiftPMProductRootRPath = "@loader_path/../../.."
 
@@ -383,6 +394,8 @@ let package = Package(
         .target(
             name: "SkyBridgeRealtimeMedia",
             dependencies: [
+                "SkyBridgeProtocolCore",
+                "SkyBridgeAppleTransport",
                 "SkyBridgeOpus"
             ],
             path: "Sources/SkyBridgeRealtimeMedia",
@@ -443,7 +456,9 @@ let package = Package(
                 // Swift 6.3 严格并发控制
                 .enableUpcomingFeature("StrictConcurrency"),
                 .define("OQS_ENABLED"),
-            ] + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : [])),
+            ]
+                + (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : [])
+                + smokeIdentityRuntimeProductionSwiftSettings),
             linkerSettings: [
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
@@ -507,6 +522,7 @@ let package = Package(
                 "CQPeriapt",
                 "OQSRAII",
                 "SkyBridgeBenchmarkSupport",
+                "SkyBridgeSmokeSupport",
                 "PrivateSensorBridge"
             ],
             path: "Tests/SkyBridgeCoreTests",

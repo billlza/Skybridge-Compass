@@ -281,6 +281,100 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
     }
 
+    func testChannelCleanupSynchronouslyRevokesQueuedReceiverBeforeAsyncJoinCompletes() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let activeTransferID = UUID().uuidString
+        let rejectedTransferID = UUID().uuidString
+        let approvalStarted = expectation(description: "approval started")
+        var approvalContinuation: CheckedContinuation<WebRTCInboundFileTransferApprovalDecision, Never>?
+        var sentCount = 0
+        var failedWaiterCount = 0
+        var resumedWaiterCount = 0
+        var fatalErrorCount = 0
+        let receiver = WebRTCInboundFileTransferReceiver(
+            destinationBaseDirectory: { fixture.directory },
+            senderAuthorityProvider: { _ in Self.senderAuthority() },
+            approvalProvider: { _ in
+                approvalStarted.fulfill()
+                return await withCheckedContinuation { continuation in
+                    approvalContinuation = continuation
+                }
+            }
+        )
+        let sendMessage: WebRTCInboundFileTransferReceiver.SendMessage = { _, _ in
+            sentCount += 1
+        }
+        let failSenderWaiters: WebRTCInboundFileTransferReceiver.FailSenderWaiters = { _, _ in
+            failedWaiterCount += 1
+        }
+        let resumeSenderWaiter: WebRTCInboundFileTransferReceiver.ResumeSenderWaiter = { _ in
+            resumedWaiterCount += 1
+        }
+        let onFatalError: @MainActor (Error) -> Void = { _ in
+            fatalErrorCount += 1
+        }
+
+        try receiver.enqueueInboundRequest(
+            metadata(
+                transferId: activeTransferID,
+                fileSize: 4,
+                chunkSize: 4,
+                totalChunks: 1
+            ),
+            encodedPayloadByteCount: 256,
+            sessionID: "session",
+            endpointDescription: "peer",
+            keys: Self.sessionKeys(),
+            sendMessage: sendMessage,
+            failSenderWaiters: failSenderWaiters,
+            resumeSenderWaiter: resumeSenderWaiter,
+            onFatalError: onFatalError
+        )
+        await fulfillment(of: [approvalStarted], timeout: 1)
+
+        let cleanupTask = receiver.cleanupOnChannelClosed()
+        let retainedCountAfterSynchronousRevocation = receiver.retainedInboundOperationCount
+        XCTAssertThrowsError(
+            try receiver.enqueueInboundRequest(
+                metadata(
+                    transferId: rejectedTransferID,
+                    fileSize: 4,
+                    chunkSize: 4,
+                    totalChunks: 1
+                ),
+                encodedPayloadByteCount: 256,
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: sendMessage,
+                failSenderWaiters: failSenderWaiters,
+                resumeSenderWaiter: resumeSenderWaiter,
+                onFatalError: onFatalError
+            )
+        ) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertEqual(
+            receiver.retainedInboundOperationCount,
+            retainedCountAfterSynchronousRevocation,
+            "A receiver revoked by cleanup must reject new work without reserving queue capacity"
+        )
+
+        approvalContinuation?.resume(returning: .approved)
+        await cleanupTask.value
+
+        XCTAssertEqual(receiver.retainedInboundOperationCount, 0)
+        XCTAssertEqual(receiver.retainedInboundOperationByteCount, 0)
+        XCTAssertEqual(sentCount, 0)
+        XCTAssertEqual(failedWaiterCount, 0)
+        XCTAssertEqual(resumedWaiterCount, 0)
+        XCTAssertEqual(fatalErrorCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(activeTransferID).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(rejectedTransferID).path))
+    }
+
     func testQueuedTransferApprovalDoesNotBlockIndependentTransferLane() async throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
@@ -690,11 +784,85 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         XCTAssertTrue(
             source.contains("let inboundFileTransferReceiver = WebRTCInboundFileTransferReceiver(") &&
                 source.contains("senderAuthorityProvider: { [weak self] requestedSessionID in") &&
+                source.contains("isCurrentWebRTCControlLoopOwner(") &&
+                source.contains("controlTaskToken: controlTaskToken") &&
                 source.contains("currentPathExpectedRemoteAuthorityBySessionId[requestedSessionID]") &&
                 source.contains("approvalProvider: { request in") &&
                 source.contains("await FileTransferManager.shared.approveInboundWebRTCFileTransfer(request)"),
             "CrossNetworkConnectionManager must route WebRTC inbound metadata through the product approval provider instead of leaving the receiver on its default reject-only policy."
         )
+        XCTAssertTrue(source.contains("let inboundFileTransferReceiver: WebRTCInboundFileTransferReceiver"))
+        XCTAssertTrue(
+            source.contains(
+                "_ = controlTask.inboundFileTransferReceiver.cleanupOnChannelClosed()"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "currentRecord.inboundFileTransferReceiver === inboundFileTransferReceiver"
+            )
+        )
+        XCTAssertTrue(source.contains("cleanupWebRTCSessionIfCurrentControlLoopOwner("))
+        XCTAssertFalse(
+            source.contains(
+                "guard handshakeState.driver === outboundDriver,\n                    self.webrtcSessionsBySessionId[sessionID] != nil"
+            )
+        )
+
+        let controlLoopStart = try XCTUnwrap(
+            source.range(of: "private func consumeInboundHandshakeOrControlChannelWebRTC(")
+        )
+        let controlLoopSource = String(source[controlLoopStart.lowerBound...])
+        let encryptStart = try XCTUnwrap(
+            controlLoopSource.range(of: "func encryptAppPayload(")
+        )
+        let encryptEnd = try XCTUnwrap(
+            controlLoopSource.range(
+                of: "func makeLocalHeartbeatMessage()",
+                range: encryptStart.upperBound..<controlLoopSource.endIndex
+            )
+        )
+        let encryptSource = String(
+            controlLoopSource[encryptStart.lowerBound..<encryptEnd.lowerBound]
+        )
+        let encryptOwnerGuard = try XCTUnwrap(
+            encryptSource.range(of: "guard self.isCurrentWebRTCControlLoopSecureOwner(")
+        )
+        let reserveAndSeal = try XCTUnwrap(
+            encryptSource.range(of: "try sealWebRTCSecurePayload(")
+        )
+        XCTAssertLessThan(encryptOwnerGuard.lowerBound, reserveAndSeal.lowerBound)
+
+        let decryptStart = try XCTUnwrap(
+            controlLoopSource.range(of: "func decryptAppPayload(")
+        )
+        let decryptEnd = try XCTUnwrap(
+            controlLoopSource.range(
+                of: "func decodeCompatibilityAppMessage(",
+                range: decryptStart.upperBound..<controlLoopSource.endIndex
+            )
+        )
+        let decryptSource = String(
+            controlLoopSource[decryptStart.lowerBound..<decryptEnd.lowerBound]
+        )
+        let firstDecryptOwnerGuard = try XCTUnwrap(
+            decryptSource.range(of: "guard self.isCurrentWebRTCControlLoopSecureOwner(")
+        )
+        let cryptoAwait = try XCTUnwrap(
+            decryptSource.range(of: "let opened = try await withCheckedThrowingContinuation")
+        )
+        let secondDecryptOwnerGuard = try XCTUnwrap(
+            decryptSource.range(
+                of: "guard self.isCurrentWebRTCControlLoopSecureOwner(",
+                range: cryptoAwait.upperBound..<decryptSource.endIndex
+            )
+        )
+        let replayWindowValidation = try XCTUnwrap(
+            decryptSource.range(of: "return try validateWebRTCSecureOpenedPayload(")
+        )
+        XCTAssertLessThan(firstDecryptOwnerGuard.lowerBound, cryptoAwait.lowerBound)
+        XCTAssertLessThan(cryptoAwait.lowerBound, secondDecryptOwnerGuard.lowerBound)
+        XCTAssertLessThan(secondDecryptOwnerGuard.lowerBound, replayWindowValidation.lowerBound)
     }
 
     func testConcurrentMetadataLimitRejectsNewPartialFiles() async throws {

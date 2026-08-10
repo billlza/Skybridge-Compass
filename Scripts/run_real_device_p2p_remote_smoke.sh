@@ -5,6 +5,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/Scripts/signing_entitlements_helpers.sh"
 source "$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh"
+source "$ROOT_DIR/Scripts/skybridge_core_resource_bundle_helpers.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
 source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/framework_artifact_helpers.sh"
@@ -20,6 +21,9 @@ ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_p2
 PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-public-redacted}"
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
+IOS_EXPORT_OPTIONS="$ROOT_DIR/Scripts/ios_release_candidate_export_options.plist"
+IOS_IPA_EXTRACTOR="$ROOT_DIR/Scripts/extract_ios_ipa.py"
+IDENTITY_REFRESH_EVIDENCE_VALIDATOR="$ROOT_DIR/Scripts/validate_p2p_identity_refresh_evidence.py"
 IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
 IOS_RELEASE_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
 IOS_BUNDLE_ID="com.skybridge.compass.ios"
@@ -41,8 +45,9 @@ SMOKE_SOAK_SECONDS="${SKYBRIDGE_SMOKE_SOAK_SECONDS:-10}"
 SMOKE_VIDEO_WIDTH="${SKYBRIDGE_SMOKE_VIDEO_WIDTH:-2056}"
 SMOKE_VIDEO_HEIGHT="${SKYBRIDGE_SMOKE_VIDEO_HEIGHT:-1329}"
 SMOKE_EXPECT_RENDER_ORIENTATION="${SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION:-upright}"
-SMOKE_REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}"
+SMOKE_REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-0}"
 SMOKE_FORCE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH:-$SMOKE_REQUIRE_SIGNED_KEM_REFRESH}"
+ALLOW_PERSISTENT_TRUST_MUTATION="${SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION:-0}"
 RUN_MAC_ONLINE_IPAD_SMOKE="${SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD:-1}"
 RUN_ID="${SKYBRIDGE_SMOKE_P2P_REMOTE_RUN_ID:-$(date +%Y%m%d%H%M%S)}"
 skybridge_smoke_require_safe_run_id "$RUN_ID" "SKYBRIDGE_SMOKE_P2P_REMOTE_RUN_ID"
@@ -58,6 +63,8 @@ KEYCHAIN_MODE="${SKYBRIDGE_SMOKE_KEYCHAIN_MODE:-system}"
 LAB_RUN="${SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN:-0}"
 MAC_HOST_LAUNCH_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-packaged}"
 IDENTITY_AUDIT_ONLY="${SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY:-0}"
+MAC_HOST_ONLY="${SKYBRIDGE_SMOKE_MAC_HOST_ONLY:-0}"
+MAC_HOST_READY_FILE="$ARTIFACT_DIR/mac-host-ready.json"
 IDENTITY_AUDIT_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IDENTITY_AUDIT_TIMEOUT_SECONDS:-120}"
 SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE="${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-1}"
 SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME:-Mac Smoke Operator}"
@@ -149,6 +156,13 @@ case "$IDENTITY_AUDIT_ONLY" in
     exit 2
     ;;
 esac
+case "$MAC_HOST_ONLY" in
+  0|1) ;;
+  *)
+    echo "SKYBRIDGE_SMOKE_MAC_HOST_ONLY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 if [[ ! "$IDENTITY_AUDIT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] \
   || (( IDENTITY_AUDIT_TIMEOUT_SECONDS < 30 || IDENTITY_AUDIT_TIMEOUT_SECONDS > 300 )); then
   echo "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_TIMEOUT_SECONDS must be an integer from 30 through 300" >&2
@@ -164,6 +178,59 @@ if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
     exit 2
   fi
 fi
+
+case "$ALLOW_PERSISTENT_TRUST_MUTATION" in
+  0|1) ;;
+  *)
+    echo "SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+    echo "The signed macOS host-only mode cannot be combined with the identity-audit-only mode." >&2
+    exit 2
+  fi
+  if [[ "$LAB_RUN" != "1" || "$MAC_HOST_LAUNCH_MODE" != "packaged-lab" ]]; then
+    echo "The signed macOS host-only mode is diagnostic-only and requires LAB_RUN=1 with MAC_HOST_LAUNCH_MODE=packaged-lab." >&2
+    exit 2
+  fi
+  if [[ "$KEYCHAIN_MODE" != "system" ]]; then
+    echo "The signed macOS host-only mode requires the persistent system Keychain view." >&2
+    exit 2
+  fi
+  if [[ "$PQC_TRUST_MODE" != "actual" ]]; then
+    echo "The signed macOS host-only mode requires SKYBRIDGE_SMOKE_PQC_TRUST_MODE=actual." >&2
+    exit 2
+  fi
+  if [[ "$ALLOW_PERSISTENT_TRUST_MUTATION" != "0" ]]; then
+    echo "The signed macOS host-only mode forbids forced persistent trust mutation." >&2
+    exit 2
+  fi
+  if [[ "${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-0}" != "0" ]]; then
+    echo "The signed macOS host-only mode requires SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=0." >&2
+    exit 2
+  fi
+  if [[ "${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" != "0" ]]; then
+    echo "The signed macOS host-only mode requires SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=0." >&2
+    exit 2
+  fi
+fi
+
+case "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH:$SMOKE_FORCE_SIGNED_KEM_REFRESH" in
+  1:1)
+    if [[ "$ALLOW_PERSISTENT_TRUST_MUTATION" != "1" ]]; then
+      echo "Forced signed KEM refresh mutates persistent trust and requires explicit SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION=1." >&2
+      exit 2
+    fi
+    ;;
+  0:0) ;;
+  *)
+    echo "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH and SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH must both be 0 or both be 1." >&2
+    exit 2
+    ;;
+esac
 
 mac_host_uses_signed_app_bundle() {
   case "$MAC_HOST_LAUNCH_MODE" in
@@ -246,18 +313,18 @@ def load_devicectl_device_list(context):
             print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
             raise SystemExit(1)
 
-def connected_ipad_identifiers(payload):
+def eligible_ipad_identifiers(payload):
     result = payload.get("result", {}) if isinstance(payload, dict) else {}
     devices = result.get("devices", []) if isinstance(result, dict) else []
     identifiers = []
     for device in devices:
-        if not isinstance(device, dict) or not is_connected_devicectl_device(device):
+        if not isinstance(device, dict) or not is_pairable_devicectl_device(device):
             continue
         if not is_physical_devicectl_device(device):
             continue
         if not is_ipad_devicectl_device(device):
             continue
-        if not has_install_application_capability(device):
+        if not has_connect_or_install_capability(device):
             continue
         identifier = (
             string_value(nested_value(device, "hardwareProperties", "udid"))
@@ -268,14 +335,15 @@ def connected_ipad_identifiers(payload):
             identifiers.append(identifier)
     return identifiers
 
-def is_connected_devicectl_device(device):
+def is_pairable_devicectl_device(device):
     connection = device.get("connectionProperties", {})
     if not isinstance(connection, dict):
         return False
     tunnel_state = string_value(connection.get("tunnelState")).lower()
     pairing_state = string_value(connection.get("pairingState")).lower()
-    # CoreDevice 隧道按需建立："disconnected" 仅表示当前无活跃隧道，
-    # 已配对设备在 install/launch 时会自动建立隧道；真正不可达会在后续步骤 fail-fast。
+    # CoreDevice tunnels are demand-driven. A paired device can advertise only
+    # connectdevice while idle; the details preflight below must establish the
+    # tunnel and prove installapp before any build or install side effect.
     return tunnel_state == "connected" or pairing_state == "paired"
 
 def is_physical_devicectl_device(device):
@@ -300,13 +368,17 @@ def is_ipad_devicectl_device(device):
     ]
     return any(string_value(value).lower().startswith("ipad") for value in evidence)
 
-def has_install_application_capability(device):
+def has_connect_or_install_capability(device):
     capabilities = device.get("capabilities", [])
     if not isinstance(capabilities, list):
         return False
+    allowed_features = {
+        "com.apple.coredevice.feature.connectdevice",
+        "com.apple.coredevice.feature.installapp",
+    }
     return any(
         isinstance(capability, dict)
-        and capability.get("featureIdentifier") == "com.apple.coredevice.feature.installapp"
+        and capability.get("featureIdentifier") in allowed_features
         for capability in capabilities
     )
 
@@ -327,14 +399,19 @@ def print_selected_candidate(candidates):
     return False
 
 payload = load_devicectl_device_list("selecting the real iPad target")
-if print_selected_candidate(connected_ipad_identifiers(payload)):
+if print_selected_candidate(eligible_ipad_identifiers(payload)):
     raise SystemExit(0)
-raise SystemExit("No connected real iPad found. Set SKYBRIDGE_REAL_DEVICE_ID explicitly to the iPad target UDID if automatic discovery cannot see it.")
+raise SystemExit("No paired physical iPad with CoreDevice connection capability found. Set SKYBRIDGE_REAL_DEVICE_ID explicitly if automatic discovery cannot see it.")
 PY
 }
 
-IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"
-IOS_DEVICE_LABEL="$(skybridge_smoke_hash_label "$IOS_DEVICE_ID")"
+IOS_DEVICE_ID=""
+IOS_DEVICE_LABEL="mac-host-only"
+IOS_PROVISIONING_DEVICE_ID=""
+if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then
+  IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"
+  IOS_DEVICE_LABEL="$(skybridge_smoke_hash_label "$IOS_DEVICE_ID")"
+fi
 validate_real_ipad_device_id() {
   python3 - "$IOS_DEVICE_ID" <<'PY'
 import json
@@ -344,54 +421,39 @@ import tempfile
 
 target = sys.argv[1].strip()
 
-def load_devicectl_device_list(context):
-    with tempfile.NamedTemporaryFile(prefix="skybridge-devicectl-devices-", suffix=".json") as handle:
+def load_devicectl_device_details():
+    with tempfile.NamedTemporaryFile(prefix="skybridge-devicectl-details-", suffix=".json") as handle:
         try:
             result = subprocess.run(
-                ["xcrun", "devicectl", "list", "devices", "--json-output", handle.name],
+                [
+                    "xcrun",
+                    "devicectl",
+                    "device",
+                    "info",
+                    "details",
+                    "--device",
+                    target,
+                    "--timeout",
+                    "60",
+                    "--json-output",
+                    handle.name,
+                ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=30,
+                timeout=75,
             )
             if result.returncode != 0:
-                print(f"devicectl JSON device list failed while {context}.", file=sys.stderr)
+                print("devicectl could not establish a CoreDevice details session with the selected iPad.", file=sys.stderr)
                 raise SystemExit(1)
             handle.seek(0)
             return json.load(handle)
         except subprocess.TimeoutExpired as exc:
-            print(f"devicectl JSON device list timed out while {context}.", file=sys.stderr)
+            print("devicectl timed out establishing a CoreDevice details session with the selected iPad.", file=sys.stderr)
             raise SystemExit(1)
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"devicectl JSON device list could not be read while {context}: {exc}", file=sys.stderr)
+            print(f"devicectl details JSON could not be read: {exc}", file=sys.stderr)
             raise SystemExit(1)
-
-def connected_ipad_records(payload):
-    result = payload.get("result", {}) if isinstance(payload, dict) else {}
-    devices = result.get("devices", []) if isinstance(result, dict) else []
-    records = []
-    for device in devices:
-        if not isinstance(device, dict) or not is_connected_devicectl_device(device):
-            continue
-        if not is_physical_devicectl_device(device):
-            continue
-        if not is_ipad_devicectl_device(device):
-            continue
-        if not has_install_application_capability(device):
-            continue
-        hardware_udid = (
-            string_value(nested_value(device, "hardwareProperties", "udid"))
-            or string_value(nested_value(device, "deviceProperties", "udid"))
-        )
-        candidates = {
-            string_value(device.get("identifier")),
-            string_value(nested_value(device, "hardwareProperties", "udid")),
-            string_value(nested_value(device, "deviceProperties", "udid")),
-        }
-        candidates.discard("")
-        if hardware_udid and candidates:
-            records.append((candidates, hardware_udid))
-    return records
 
 def is_connected_devicectl_device(device):
     connection = device.get("connectionProperties", {})
@@ -399,9 +461,7 @@ def is_connected_devicectl_device(device):
         return False
     tunnel_state = string_value(connection.get("tunnelState")).lower()
     pairing_state = string_value(connection.get("pairingState")).lower()
-    # CoreDevice 隧道按需建立："disconnected" 仅表示当前无活跃隧道，
-    # 已配对设备在 install/launch 时会自动建立隧道；真正不可达会在后续步骤 fail-fast。
-    return tunnel_state == "connected" or pairing_state == "paired"
+    return tunnel_state == "connected" and pairing_state == "paired"
 
 def is_physical_devicectl_device(device):
     hardware_reality = string_value(nested_value(device, "hardwareProperties", "reality")).lower()
@@ -448,18 +508,37 @@ def string_value(value):
 if not target:
     raise SystemExit("No real iPad target UDID was selected.")
 
-payload = load_devicectl_device_list("validating the real iPad target UDID")
-matches = [
-    hardware_udid
-    for identifiers, hardware_udid in connected_ipad_records(payload)
-    if target in identifiers
-]
-if len(matches) != 1:
-    raise SystemExit(f"Selected real-device target is not a connected iPad according to devicectl JSON: {target}")
-print(matches[0])
+payload = load_devicectl_device_details()
+device = payload.get("result", {}) if isinstance(payload, dict) else {}
+if not isinstance(device, dict):
+    raise SystemExit("devicectl details did not return a device record.")
+
+hardware_udid = (
+    string_value(nested_value(device, "hardwareProperties", "udid"))
+    or string_value(nested_value(device, "deviceProperties", "udid"))
+)
+identifiers = {
+    string_value(device.get("identifier")),
+    hardware_udid,
+    string_value(nested_value(device, "deviceProperties", "udid")),
+}
+identifiers.discard("")
+if target not in identifiers:
+    raise SystemExit("devicectl details returned a different device than the selected target.")
+if not is_connected_devicectl_device(device):
+    raise SystemExit("Selected iPad did not establish a paired CoreDevice tunnel.")
+if not is_physical_devicectl_device(device) or not is_ipad_devicectl_device(device):
+    raise SystemExit("Selected CoreDevice target is not a physical iPad.")
+if not has_install_application_capability(device):
+    raise SystemExit("Connected physical iPad does not advertise installapp capability.")
+if not hardware_udid:
+    raise SystemExit("Connected physical iPad did not expose a hardware UDID for profile validation.")
+print(hardware_udid)
 PY
 }
-IOS_PROVISIONING_DEVICE_ID="$(validate_real_ipad_device_id)"
+if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then
+  IOS_PROVISIONING_DEVICE_ID="$(validate_real_ipad_device_id)"
+fi
 MAC_TARGET_NAME="${SKYBRIDGE_SMOKE_MAC_TARGET_NAME:-$(scutil --get ComputerName 2>/dev/null || hostname)}"
 HOST_STATUS_ARTIFACT="$ARTIFACT_DIR/mac.status.log"
 HOST_PQC_REPORT_ARTIFACT="$ARTIFACT_DIR/mac.pqc.json"
@@ -529,6 +608,7 @@ MAC_SMOKE_SOURCE_FRAME_A="$ARTIFACT_DIR/mac-smoke-source-a.png"
 MAC_SMOKE_SOURCE_FRAME_B="$ARTIFACT_DIR/mac-smoke-source-b.png"
 IOS_STATUS_NAME="ios-p2p-remote-${RUN_ID}.status.log"
 IOS_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME"
+IOS_STATUS_CONSOLE_LIVE="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.console-live.status.log"
 IOS_STATUS_APP_CACHE_LOCAL="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.app-cache.status.log"
 IOS_STATUS_CONSOLE_SNAPSHOT="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.console.status.log"
 IOS_TRACE_NAME="${IOS_STATUS_NAME}.trace.log"
@@ -540,6 +620,12 @@ IOS_COPY_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_TIMEOUT_SECONDS:-15}"
 IOS_COPY_HARD_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_HARD_TIMEOUT_SECONDS:-25}"
 IOS_COPY_STATUS_APP_CACHE="${SKYBRIDGE_IOS_COPY_STATUS_APP_CACHE:-1}"
 IOS_BUILD_LOG="$ARTIFACT_DIR/ios-build.log"
+IOS_ARCHIVE_PATH="$ARTIFACT_DIR/SkyBridgeCompass-iOS.xcarchive"
+IOS_ARCHIVE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-ios-archive"
+IOS_ARCHIVE_LOG="$ARTIFACT_DIR/ios-archive.log"
+IOS_EXPORT_DIR="$ARTIFACT_DIR/ios-export"
+IOS_EXPORT_LOG="$ARTIFACT_DIR/ios-export.log"
+IOS_EXPORTED_APP="$ARTIFACT_DIR/SkyBridgeCompass-iOS-exported.app"
 IOS_PRODUCT_PROOF="$ARTIFACT_DIR/ios-product-proof.json"
 P2P_APPROVAL_PROOF="$ARTIFACT_DIR/p2p-approval-proof.json"
 IOS_DISTRIBUTION_PREFLIGHT="$MAC_ONLINE_RUNTIME_DIR/ios-distribution-signing-preflight.json"
@@ -548,9 +634,11 @@ IOS_SOURCE_CLEAN=0
 IOS_SOURCE_DIRTY_STATE="unknown"
 IOS_APP_DISTRIBUTION_PROFILE=""
 IOS_WIDGET_DISTRIBUTION_PROFILE=""
-IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=""
-IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=""
 IOS_DISTRIBUTION_IDENTITY_HASH=""
+IOS_DISTRIBUTION_PREFLIGHT_SCHEMA=""
+IOS_DISTRIBUTION_SIGNING_STYLE=""
+IOS_APP_PROFILE_IS_XCODE_MANAGED=""
+IOS_WIDGET_PROFILE_IS_XCODE_MANAGED=""
 LAUNCH_RESULT_JSON="$ARTIFACT_DIR/ios-launch.json"
 IOS_PROCESS_CLEANUP_RECEIPT="$ARTIFACT_DIR/ios-process-cleanup.json"
 IOS_PROCESS_LIST_JSON="$ARTIFACT_DIR/ios-processes.json"
@@ -572,7 +660,7 @@ IOS_CONSOLE_CAPTURE_DIAGNOSTIC=""
 P2P_NOTICE_SESSION=""
 COMMON_REMOTE_SMOKE_FAILURE_PATTERN='classic fallback|compatibility fallback|fallback=true|legacyFallback=true|pipeline=stillImageFallback|orientation=verticalFlip|orientation=horizontalFlip|orientation=inverted|renderOrientation=verticalFlip|renderOrientation=horizontalFlip|renderOrientation=inverted|已立即回退|已回退到|fallback producer|perf=extreme.*h264|h264.*perf=extreme|suite_rejected_unknown|wireId=0x0000|wireId=0X0000|unknown suite|unknown-suite|signed LAN KEM refresh rejected|signed LAN KEM refresh failed|PIB-1 protocol identity binding failed|PIB-1 protocol identity binding rejected|PIB-1 protocol identity binding timed out|lifecycle=request>rejected|lifecycle=missing-kem>failed|lifecycle=identity-oob>failed|lifecycle=identity-oob>timeout|remoteControlNoticeRejected .*missing_required_notice_metadata|render-main-path-failed|strict-media-failed|already_connected|rejectAlreadyConnected|对端拒绝连接：already_connected|Peer rejected handshake: already_connected'
 IOS_REMOTE_SMOKE_FAILURE_PATTERN="failed stage=|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|crossNetwork=1|audioRxPlaybackDrop=[1-9][0-9]*|audioRxJitterEvicted=[1-9][0-9]*|audioRxUnderflow=[1-9][0-9]*|audioRxRebuffer=[1-9][0-9]*|jitterEvicted=[1-9][0-9]*|playbackDrop=[1-9][0-9]*|datagrams=[1-9][0-9][0-9]+ .*probable=rx-decode-stalled|HEVC 连续失败|临时降级 H\\.264|codec=h264"
-HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=mac-host|failed stage=mac-smoke-source|failed stage=(identity|handshake|remote-desktop|remote-control|media)|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
+HOST_REMOTE_SMOKE_FAILURE_PATTERN="${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}|failed stage=mac-host|failed stage=mac-smoke-source|failed stage=(identity|handshake|remote-desktop|remote-control|media)|remoteControlNoticeTimedOut .*transport=p2p|mac-sck-start .*codec=h264|mac-sck-first-frame codec=h264|mac-sck-tx .*codec=h264 .*capturesAudio=false|mac-sck-encode-failed .*capturesAudio=false|mac-sck-tx .*encodeFailures=[1-9][0-9]*|mac-stream-config .*damage=true .*perf=extreme"
 MAC_ONLINE_WAIT_FAILURE_PATTERN="failed stage=|mac-online-connect-result .*result=failure|mac-online-connect-app .*result=failure|${COMMON_REMOTE_SMOKE_FAILURE_PATTERN}"
 REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS=(
   "remoteControl.securityNotice.account"
@@ -602,7 +690,7 @@ validate_remote_control_security_notice_localizations() {
   local phase="$2"
   local locale
   local strings_path
-  local locales=("en" "ja" "zh-hans")
+  local locales=("en" "ja" "zh-Hans")
 
   if [[ "${#REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS[@]}" -ne 20 ]]; then
     echo "Remote-control security notice localization contract must contain exactly 20 keys." >&2
@@ -912,17 +1000,22 @@ resolve_ios_distribution_signing_inputs() {
     "$IOS_TEAM_IDENTIFIER" \
     "$IOS_BUNDLE_ID" \
     "$IOS_WIDGET_BUNDLE_ID" \
-    "$IOS_PROVISIONING_DEVICE_ID"
+    "$IOS_PROVISIONING_DEVICE_ID" \
+    automatic
 
   IOS_APP_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
   IOS_WIDGET_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
-  IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfileSpecifier"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
-  IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfileSpecifier"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
   IOS_DISTRIBUTION_IDENTITY_HASH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["identityHash"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_DISTRIBUTION_PREFLIGHT_SCHEMA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["schemaVersion"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_DISTRIBUTION_SIGNING_STYLE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["signingStyle"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_APP_PROFILE_IS_XCODE_MANAGED="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8"))["appProfileIsXcodeManaged"]).lower())' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_WIDGET_PROFILE_IS_XCODE_MANAGED="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfileIsXcodeManaged"]).lower())' "$IOS_DISTRIBUTION_PREFLIGHT")"
 
-  if [[ ! "$IOS_DISTRIBUTION_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ ]] || \
-     [[ -z "$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER" ]] || \
-     [[ -z "$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER" ]]; then
+  if [[ "$IOS_DISTRIBUTION_PREFLIGHT_SCHEMA" != "2" || \
+        ! "$IOS_DISTRIBUTION_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ || \
+        "$IOS_DISTRIBUTION_SIGNING_STYLE" != "automatic" || \
+        "$IOS_APP_PROFILE_IS_XCODE_MANAGED" != "true" || \
+        "$IOS_WIDGET_PROFILE_IS_XCODE_MANAGED" != "true" ]]; then
     echo "Resolved iOS distribution signing inputs violate the strict preflight contract." >&2
     return 1
   fi
@@ -1221,17 +1314,13 @@ cleanup() {
   local cleanup_status=0
   local ios_cleanup_status=0
   local launch_services_was_mutated=0
-  trap - EXIT
+  trap - EXIT INT TERM
 
   if [[ "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" || \
         "${MAC_HOST_HELPER_REGISTERED:-0}" == "1" ]]; then
     launch_services_was_mutated=1
   fi
 
-  if [[ -n "${IOS_DEVICE_ID:-}" && ( -s "${IOS_STATUS_LOCAL:-}" || -n "${IOS_CONSOLE_PID:-}" ) ]]; then
-    copy_ios_status || true
-    copy_ios_trace || true
-  fi
   if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]]; then
     if ! terminate_ios_remote_smoke_app_exact "trap-cleanup"; then
       ios_cleanup_status=1
@@ -1242,6 +1331,10 @@ cleanup() {
     ios_cleanup_status=1
     cleanup_status=1
     echo "failed stage=cleanup phase=ios-process reason=inconsistent-console-handle-state" >&2
+  fi
+  if [[ -n "${IOS_DEVICE_ID:-}" && ( -s "${IOS_STATUS_CONSOLE_LIVE:-}" || -n "${IOS_CONSOLE_PID:-}" ) ]]; then
+    copy_ios_status || true
+    copy_ios_trace || true
   fi
   if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
     if (( ios_cleanup_status == 0 )); then
@@ -1320,19 +1413,32 @@ cleanup() {
     fi
   fi
 
-  if (( original_status == 0 && cleanup_status == 0 )); then
+  if (( original_status == 0 && cleanup_status == 0 )) \
+    && [[ "$MAC_HOST_ONLY" != "1" ]]; then
     if ! finalize_release_acceptance_manifests_after_cleanup; then
       cleanup_status=1
       echo "failed stage=cleanup phase=release-acceptance reason=manifest-finalization-failed" >&2
     fi
   fi
 
-  if (( original_status == 0 && cleanup_status != 0 )); then
+  if (( cleanup_status != 0 )) \
+    && { (( original_status == 0 )) || [[ "$MAC_HOST_ONLY" == "1" ]]; }; then
     exit "$cleanup_status"
   fi
   exit "$original_status"
 }
+
+exit_mac_host_only_on_signal() {
+  local signal_status="$1"
+  trap - INT TERM
+  exit "$signal_status"
+}
+
 trap cleanup EXIT
+if [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  trap 'exit_mac_host_only_on_signal 130' INT
+  trap 'exit_mac_host_only_on_signal 143' TERM
+fi
 
 require_remote_control_notice_identity_env() {
   if [[ "${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" != "1" ]]; then
@@ -1364,6 +1470,173 @@ append_host_status() {
   printf '%s %s\n' "$(timestamp_utc)" "$*" >>"$HOST_STATUS"
 }
 
+write_mac_host_ready_file() {
+  local executable_sha256
+
+  if [[ "$MAC_HOST_ONLY" != "1" ]]; then
+    echo "Refusing to write a macOS host-only readiness record outside host-only mode." >&2
+    return 2
+  fi
+  if [[ ! -f "$MAC_APP_BIN" || ! -x "$MAC_APP_BIN" || -L "$MAC_APP_BIN" ]]; then
+    echo "Signed macOS host-only executable is missing or unsafe." >&2
+    return 1
+  fi
+  executable_sha256="$(shasum -a 256 "$MAC_APP_BIN" | awk '{print $1}')"
+  if [[ ! "$executable_sha256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Unable to bind the signed macOS host-only executable bytes." >&2
+    return 1
+  fi
+
+  python3 - \
+    "$MAC_HOST_READY_FILE" \
+    "$ARTIFACT_DIR" \
+    "$HOST_STATUS" \
+    "$HOST_PQC_REPORT" \
+    "$HOST_PID" \
+    "$$" \
+    "$MAC_CONTROL_PORT" \
+    "$MAC_REMOTE_PORT" \
+    "$IOS_SOURCE_INPUT_DIGEST" \
+    "$executable_sha256" <<'PY'
+import json
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+(
+    output_raw,
+    artifact_raw,
+    status_raw,
+    pqc_raw,
+    host_pid_raw,
+    runner_pid_raw,
+    control_port_raw,
+    remote_port_raw,
+    source_digest,
+    executable_digest,
+) = sys.argv[1:]
+
+output = pathlib.Path(output_raw)
+artifact = pathlib.Path(artifact_raw)
+if output.parent.resolve() != artifact.resolve() or output.name != "mac-host-ready.json":
+    raise SystemExit("macOS host-only readiness path escaped its private artifact directory")
+if output.exists() and (output.is_symlink() or not output.is_file()):
+    raise SystemExit("macOS host-only readiness target is not a regular file")
+if not stat.S_ISDIR(os.lstat(artifact).st_mode):
+    raise SystemExit("macOS host-only artifact directory is not a directory")
+
+def bounded_positive(raw: str, label: str, maximum: int) -> int:
+    if not raw.isdigit():
+        raise SystemExit(f"{label} is not a positive integer")
+    value = int(raw)
+    if value < 1 or value > maximum:
+        raise SystemExit(f"{label} is outside its bounded range")
+    return value
+
+if len(source_digest) != 64 or any(character not in "0123456789abcdef" for character in source_digest):
+    raise SystemExit("source input digest is malformed")
+if len(executable_digest) != 64 or any(character not in "0123456789abcdef" for character in executable_digest):
+    raise SystemExit("signed host executable digest is malformed")
+
+payload = {
+    "acceptanceEligible": False,
+    "artifactDirectory": str(artifact),
+    "autoApprovePairing": False,
+    "diagnosticOnly": True,
+    "hostExecutableSHA256": executable_digest,
+    "hostPID": bounded_positive(host_pid_raw, "host PID", 2**31 - 1),
+    "hostPersistentIdentityMutationDenied": True,
+    "identityAccessPolicy": "existing-only",
+    "keychainMode": "system",
+    "launchMode": "packaged-lab",
+    "mode": "current-source-signed-packaged-host",
+    "forcedPersistentTrustMutationAllowed": False,
+    "pqcReportFile": pqc_raw,
+    "remoteControlNoticeAutoApprove": False,
+    "remotePort": bounded_positive(remote_port_raw, "remote port", 65535),
+    "runnerPID": bounded_positive(runner_pid_raw, "runner PID", 2**31 - 1),
+    "schemaVersion": 1,
+    "sourceInputDigest": source_digest,
+    "statusFile": status_raw,
+    "controlPort": bounded_positive(control_port_raw, "control port", 65535),
+}
+
+descriptor, temporary_raw = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+temporary = pathlib.Path(temporary_raw)
+try:
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", closefd=True) as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+    os.chmod(output, 0o600)
+    directory_descriptor = os.open(output.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+finally:
+    if temporary.exists():
+        temporary.unlink()
+
+metadata = os.lstat(output)
+if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+    raise SystemExit("macOS host-only readiness permissions are not exactly 0600")
+PY
+}
+
+validate_mac_host_only_pqc_report() {
+  python3 - "$HOST_PQC_REPORT" <<'PY'
+import base64
+import json
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+metadata = os.lstat(path)
+if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
+    raise SystemExit("macOS host-only PQC report is not a private regular file")
+if metadata.st_size < 2 or metadata.st_size > 1024 * 1024:
+    raise SystemExit("macOS host-only PQC report size is outside the bounded contract")
+with open(path, "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+device_id = payload.get("deviceId")
+if not isinstance(device_id, str) or not device_id.strip():
+    raise SystemExit("macOS host-only PQC report is missing its existing device identity")
+keys = payload.get("keys")
+if not isinstance(keys, list):
+    raise SystemExit("macOS host-only PQC report keys are malformed")
+xwing_entries = [entry for entry in keys if isinstance(entry, dict) and entry.get("suiteWireId") == 0x0001]
+if len(xwing_entries) != 1:
+    raise SystemExit("macOS host-only PQC report must contain exactly one existing X-Wing identity")
+encoded = xwing_entries[0].get("publicKeyBase64")
+if not isinstance(encoded, str) or not encoded:
+    raise SystemExit("macOS host-only X-Wing identity is empty")
+try:
+    decoded = base64.b64decode(encoded, validate=True)
+except (ValueError, TypeError) as error:
+    raise SystemExit("macOS host-only X-Wing identity is not valid base64") from error
+if not decoded:
+    raise SystemExit("macOS host-only X-Wing identity decoded to empty bytes")
+PY
+}
+
+wait_for_mac_host_only_shutdown() {
+  append_host_status "mac-host-only ready=1 diagnosticOnly=1 currentSourceHelper=1 hostPersistentIdentityMutationDenied=1 acceptanceEligible=0"
+  echo "==> Signed current-source macOS host is ready (diagnostic-only): $MAC_HOST_READY_FILE"
+  while kill -0 "$HOST_PID" >/dev/null 2>&1; do
+    sleep 0.5
+  done
+  append_host_status "failed stage=mac-host phase=host-only-lifecycle reason=host-exited-before-runner-shutdown"
+  echo "Signed macOS host exited before the host-only runner was asked to stop." >&2
+  return 1
+}
+
 reset_smoke_artifacts() {
   # Rust smoke profiles intentionally reuse stable artifact dirs for follow-up checks.
   # Clear per-run evidence so waits cannot match a stale ready/notice line.
@@ -1374,11 +1647,13 @@ reset_smoke_artifacts() {
     "$HOST_STATUS_ARTIFACT" \
     "$HOST_PQC_REPORT_ARTIFACT" \
     "$HOST_STDOUT_ARTIFACT" \
+    "$MAC_HOST_READY_FILE" \
     "$MAC_SOURCE_STDOUT" \
     "$ARTIFACT_DIR/mac-control-port-probe.stderr.log" \
     "$ARTIFACT_DIR/mac-remote-port-probe.stderr.log" \
     "$IOS_PQC_REPORT" \
     "$IOS_STATUS_LOCAL" \
+    "$IOS_STATUS_CONSOLE_LIVE" \
     "$IOS_STATUS_APP_CACHE_LOCAL" \
     "$IOS_STATUS_CONSOLE_SNAPSHOT" \
     "$IOS_TRACE_LOCAL" \
@@ -1396,6 +1671,7 @@ reset_smoke_artifacts() {
     "$MAC_ONLINE_APP_STDERR" \
     "$MAC_ONLINE_OPEN_STDERR" \
     "$MAC_ONLINE_BUILD_LOG" \
+    "$P2P_APPROVAL_PROOF" \
     "$DEVICE_INFO_TXT" \
     "$MAC_ONLINE_LAUNCH_STDOUT" \
     "$MAC_ONLINE_LAUNCH_STDERR" \
@@ -1404,6 +1680,7 @@ reset_smoke_artifacts() {
   rm -f -- \
     "$ARTIFACT_DIR"/ios-p2p-remote-*.status.log \
     "$ARTIFACT_DIR"/ios-p2p-remote-*.app-cache.status.log \
+    "$ARTIFACT_DIR"/ios-p2p-remote-*.console-live.status.log \
     "$ARTIFACT_DIR"/ios-p2p-remote-*.console.status.log \
     "$ARTIFACT_DIR"/ios-copy-*.json \
     "$ARTIFACT_DIR"/ios-copy-*.log \
@@ -2055,8 +2332,9 @@ prepare_macos_smoke_host_app_bundle() {
   local scratch_root_dir
   local scratch_debug_dir
   local source_resource_dir
-  local source_resource_symlink
-  local embedded_resource_symlink
+  local source_resource_root
+  local source_resource_layout
+  local source_resource_status
   local helper_metadata
   local helper_identifier
   local helper_team_identifier
@@ -2105,17 +2383,6 @@ prepare_macos_smoke_host_app_bundle() {
     echo "SkyBridgeCore resource bundle did not resolve directly inside the dedicated smoke scratch." >&2
     exit 1
   fi
-  source_resource_symlink="$(/usr/bin/find -P "$source_core_resource_bundle" -type l -print -quit)"
-  if [[ -n "$source_resource_symlink" ]]; then
-    echo "SkyBridgeCore resource bundle contains a symlink and cannot be sealed into the smoke host: $source_resource_symlink" >&2
-    exit 1
-  fi
-  if [[ ! -f "$source_core_resource_bundle/en.lproj/Localizable.strings" ]] || \
-     ! /usr/bin/grep -Fq '"remoteControl.securityNotice.windowTitle"' \
-       "$source_core_resource_bundle/en.lproj/Localizable.strings"; then
-    echo "SkyBridgeCore smoke resource bundle does not contain the remote-control approval localization." >&2
-    exit 1
-  fi
   if [[ ! -x /usr/libexec/PlistBuddy ]]; then
     echo "PlistBuddy is unavailable; cannot build the temporary macOS smoke host app bundle." >&2
     exit 1
@@ -2132,46 +2399,44 @@ prepare_macos_smoke_host_app_bundle() {
   fi
 
   rm -rf "$MAC_APP_BUNDLE"
-  mkdir -p "$macos_dir" "$resources_dir" "$embedded_core_resource_root"
-  cp "$source_bin" "$macos_dir/LocalLanInteropHost"
-  cp -R "$source_webrtc_framework" "$macos_dir/WebRTC.framework"
-  /usr/bin/ditto --norsrc --noextattr --noqtn --noacl \
+  mkdir -p "$macos_dir" "$resources_dir"
+  if source_resource_layout="$(skybridge_copy_normalized_core_resource_bundle \
     "$source_core_resource_bundle" \
-    "$embedded_core_resource_root"
-  if [[ ! -f "$embedded_core_resource_root/Info.plist" || \
-        -L "$embedded_core_resource_root/Info.plist" ]]; then
-    echo "Copied SkyBridgeCore resource bundle is missing its regular Info.plist." >&2
-    exit 1
+    "$embedded_core_resource_bundle")"; then
+    :
+  else
+    source_resource_status=$?
+    exit "$source_resource_status"
   fi
-  mv "$embedded_core_resource_root/Info.plist" "$embedded_core_resource_contents/Info.plist"
-  cp "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"
-  chmod +x "$macos_dir/LocalLanInteropHost"
-  embedded_profile_sha256="$(shasum -a 256 "$embedded_profile" | awk '{print $1}')"
-  if [[ "$embedded_profile_sha256" != "$MAC_HOST_PRODUCT_PROFILE_SHA256" ]]; then
-    echo "Copied smoke-host profile does not match the verified identity-source profile hash." >&2
-    exit 1
-  fi
-
-  if [[ ! -d "$embedded_core_resource_bundle" || -L "$embedded_core_resource_bundle" ]]; then
-    echo "Embedded SkyBridgeCore resource bundle is missing or symlinked after the explicit copy." >&2
-    exit 1
-  fi
-  embedded_resource_symlink="$(/usr/bin/find -P "$embedded_core_resource_bundle" -type l -print -quit)"
-  if [[ -n "$embedded_resource_symlink" ]]; then
-    echo "Embedded SkyBridgeCore resource bundle contains an unexpected symlink: $embedded_resource_symlink" >&2
-    exit 1
-  fi
-  if ! cmp -s "$source_core_resource_bundle/Info.plist" "$embedded_core_resource_contents/Info.plist"; then
-    echo "Embedded SkyBridgeCore bundle Info.plist differs from the dedicated SwiftPM build output." >&2
-    exit 1
-  fi
-  if ! /usr/bin/diff -qr -x Info.plist "$source_core_resource_bundle" "$embedded_core_resource_root" >/dev/null; then
-    echo "Embedded SkyBridgeCore resource bundle differs from the dedicated SwiftPM smoke build output." >&2
+  case "$source_resource_layout" in
+    swiftpm-flat)
+      source_resource_root="$source_core_resource_bundle"
+      ;;
+    swiftpm-macos-contents)
+      source_resource_root="$source_core_resource_bundle/Contents/Resources"
+      ;;
+    *)
+      echo "SkyBridgeCore resource normalizer returned an unknown layout token." >&2
+      exit 1
+      ;;
+  esac
+  if ! validate_remote_control_security_notice_localizations \
+    "$source_resource_root" \
+    "source-$source_resource_layout"; then
     exit 1
   fi
   if ! validate_remote_control_security_notice_localizations \
     "$embedded_core_resource_root" \
     "pre-sign"; then
+    exit 1
+  fi
+  cp "$source_bin" "$macos_dir/LocalLanInteropHost"
+  cp -R "$source_webrtc_framework" "$macos_dir/WebRTC.framework"
+  cp "$MAC_HOST_PRODUCT_PROFILE" "$embedded_profile"
+  chmod +x "$macos_dir/LocalLanInteropHost"
+  embedded_profile_sha256="$(shasum -a 256 "$embedded_profile" | awk '{print $1}')"
+  if [[ "$embedded_profile_sha256" != "$MAC_HOST_PRODUCT_PROFILE_SHA256" ]]; then
+    echo "Copied smoke-host profile does not match the verified identity-source profile hash." >&2
     exit 1
   fi
 
@@ -2263,7 +2528,7 @@ PY
   clear_runtime_bundle_quarantine_if_present "$MAC_APP_BUNDLE" "product-identity smoke host"
   MAC_APP_BIN="$macos_dir/LocalLanInteropHost"
   register_macos_smoke_host_app_bundle
-  append_host_status "mac-host-signing source=packaged-product mode=$MAC_HOST_LAUNCH_MODE signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSealed=1 identitySourceStaplerValid=$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID identitySourceGatekeeperAccepted=$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED diagnosticOnly=$([[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" ]] && echo 1 || echo 0)"
+  append_host_status "mac-host-signing source=packaged-product mode=$MAC_HOST_LAUNCH_MODE signature=developer-id bundleIdentifier=product team=matched profile=verified entitlements=exact keychainAccess=product resourceBundle=SkyBridgeCompassApp_SkyBridgeCore.bundle resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSourceLayout=$source_resource_layout resourceBundleSealed=1 identitySourceStaplerValid=$MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID identitySourceGatekeeperAccepted=$MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED diagnosticOnly=$([[ "$MAC_HOST_LAUNCH_MODE" == "packaged-lab" ]] && echo 1 || echo 0)"
 }
 
 register_launch_services_app_bundle() {
@@ -2524,8 +2789,12 @@ open_macos_smoke_host_app_bundle() {
     --env "SB_PQC_PREFERRED_SUITE=$HOST_PREFERRED_SUITE" \
     --env "SKYBRIDGE_SMOKE_ROLE=mac-host" \
     --env "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY=$IDENTITY_AUDIT_ONLY" \
+    --env "SKYBRIDGE_SMOKE_IDENTITY_EXISTING_ONLY=$MAC_HOST_ONLY" \
     --env "SKYBRIDGE_SMOKE_STATUS_FILE=$HOST_STATUS" \
     --env "SKYBRIDGE_SMOKE_PQC_REPORT_FILE=$HOST_PQC_REPORT" \
+    --env "SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION=$ALLOW_PERSISTENT_TRUST_MUTATION" \
+    --env "SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=${SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING:-0}" \
+    --env "SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}" \
     --env "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE=$EXPECTED_TARGET_SUITE" \
     --env "SKYBRIDGE_SMOKE_REQUIRE_EMBEDDED_CORE_RESOURCES=1" \
     --env "SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-0}" \
@@ -2543,6 +2812,7 @@ start_macos_smoke_host_directly() {
   SKYBRIDGE_KEYCHAIN_IN_MEMORY="$KEYCHAIN_IN_MEMORY" \
   SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
   SKYBRIDGE_SMOKE_ROLE=mac-host \
+  SKYBRIDGE_SMOKE_IDENTITY_EXISTING_ONLY=0 \
   SKYBRIDGE_SMOKE_STATUS_FILE="$HOST_STATUS" \
   SKYBRIDGE_SMOKE_PQC_REPORT_FILE="$HOST_PQC_REPORT" \
   SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
@@ -2812,7 +3082,7 @@ record_macos_smoke_host_launch_evidence() {
 }
 
 append_ios_status() {
-  printf '%s %s\n' "$(timestamp_utc)" "$*" >>"$IOS_STATUS_LOCAL"
+  printf '%s %s\n' "$(timestamp_utc)" "$*" >>"$IOS_STATUS_CONSOLE_LIVE"
 }
 
 print_smoke_tail_for_operator() {
@@ -4762,7 +5032,7 @@ verify_ipad_control_port_reachable_from_mac() {
         printf '%s failed stage=mac-online-ipad phase=ipad-control-port-probe reason=tcp-unreachable targetDeviceId=%s port=%s detail=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" "${port:-unknown}" "${detail:-no_endpoint_or_timeout}" >>"$MAC_ONLINE_STATUS"
       fi
       print_smoke_tail_for_operator 80 "$MAC_ONLINE_STATUS"
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       return 1
     fi
     sleep 1
@@ -5069,28 +5339,29 @@ wait_for_file_pattern() {
     fail_if_host_exited "$label" || return 1
     fail_if_smoke_source_exited "$label" || return 1
     if [[ -n "$IOS_CONSOLE_PID" ]] \
-      && [[ -f "$IOS_STATUS_LOCAL" ]] \
-      && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_LOCAL"; then
-      echo "Detected iOS failure while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      && [[ -f "$IOS_STATUS_CONSOLE_LIVE" ]] \
+      && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_CONSOLE_LIVE"; then
+      echo "Detected iOS failure while waiting for ${label}: ${IOS_STATUS_CONSOLE_LIVE}" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
       return 1
     fi
-    fail_if_forbidden_fallback_evidence "$IOS_STATUS_LOCAL" "$label" || return 1
+    fail_if_forbidden_fallback_evidence "$IOS_STATUS_CONSOLE_LIVE" "$label" || return 1
     if [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] \
       && ! ios_console_handle_is_exact_and_running; then
-      echo "The exact iOS console launch handle exited or became unverifiable while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      echo "The exact iOS console launch handle exited or became unverifiable while waiting for ${label}: ${IOS_STATUS_CONSOLE_LIVE}" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       print_smoke_tail_for_operator 80 "$IOS_CONSOLE_STDERR"
       return 1
     fi
+    fail_if_host_udp_local_network_permission_denied "$label" || return 1
     if [[ -f "$HOST_STATUS" ]] && grep -qE "$HOST_REMOTE_SMOKE_FAILURE_PATTERN" "$HOST_STATUS"; then
       echo "Detected macOS host media failure while waiting for ${label}: ${HOST_STATUS}" >&2
       copy_ios_status
       echo "---- macOS status tail ($HOST_STATUS) ----" >&2
       print_smoke_tail_for_operator 80 "$HOST_STATUS"
-      echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      echo "---- iOS live console tail ($IOS_STATUS_CONSOLE_LIVE) ----" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       return 1
     fi
     fail_if_forbidden_fallback_evidence "$HOST_STATUS" "$label" || return 1
@@ -5100,13 +5371,29 @@ wait_for_file_pattern() {
     if (( "$(date +%s)" - started_at >= timeout_seconds )); then
       echo "Timed out waiting for ${label}: ${path}" >&2
       copy_ios_status
-      echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      echo "---- iOS live console tail ($IOS_STATUS_CONSOLE_LIVE) ----" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       print_smoke_tail_for_operator 40 "$path"
       return 1
     fi
     sleep 1
   done
+}
+
+fail_if_host_udp_local_network_permission_denied() {
+  local label="$1"
+  local denial_pattern='audioTxSenderStartFailed .*reason=udp_local_network_permission_denied .*strict=1 .*action=strict-fail-closed'
+  local failure_line='failed stage=mac-host phase=udp-local-network-privacy reason=local-network-permission-denied source=current-udp-path'
+
+  if [[ ! -f "$HOST_STATUS" ]] || ! grep -qE "$denial_pattern" "$HOST_STATUS"; then
+    return 0
+  fi
+  if ! grep -Fq "$failure_line" "$HOST_STATUS"; then
+    append_host_status "$failure_line"
+  fi
+  echo "macOS denied Local Network access while waiting for ${label}. Enable SkyBridge Compass Pro in System Settings → Privacy & Security → Local Network, fully restart the app, and rerun." >&2
+  print_smoke_tail_for_operator 80 "$HOST_STATUS"
+  return 1
 }
 
 run_with_hard_timeout() {
@@ -5201,8 +5488,10 @@ copy_ios_trace() {
 }
 
 copy_ios_status() {
-  if [[ -f "$IOS_STATUS_LOCAL" ]]; then
-    cp "$IOS_STATUS_LOCAL" "$IOS_STATUS_CONSOLE_SNAPSHOT" 2>/dev/null || true
+  local merged_tmp="${IOS_STATUS_LOCAL}.tmp.${BASHPID:-$$}"
+
+  if [[ -f "$IOS_STATUS_CONSOLE_LIVE" ]]; then
+    cp "$IOS_STATUS_CONSOLE_LIVE" "$IOS_STATUS_CONSOLE_SNAPSHOT" 2>/dev/null || true
   else
     rm -f "$IOS_STATUS_CONSOLE_SNAPSHOT"
   fi
@@ -5218,17 +5507,26 @@ copy_ios_status() {
       printf '\n'
       printf '%s\n' "# source=app-cache"
       sed -n 'p' "$IOS_STATUS_APP_CACHE_LOCAL"
-    } >"$IOS_STATUS_LOCAL.merged"
-    mv "$IOS_STATUS_LOCAL.merged" "$IOS_STATUS_LOCAL"
+    } >"$merged_tmp"
+    mv "$merged_tmp" "$IOS_STATUS_LOCAL"
   elif [[ -s "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
     cp "$IOS_STATUS_APP_CACHE_LOCAL" "$IOS_STATUS_LOCAL" 2>/dev/null || true
+  elif [[ -s "$IOS_STATUS_CONSOLE_SNAPSHOT" ]]; then
+    cp "$IOS_STATUS_CONSOLE_SNAPSHOT" "$IOS_STATUS_LOCAL" 2>/dev/null || true
+  else
+    rm -f "$merged_tmp"
+    return 1
   fi
 }
 
 materialize_ios_pqc_report_from_app_authored_status() {
-  [[ -s "$IOS_STATUS_LOCAL" ]] || return 1
+  local status_source="$IOS_STATUS_APP_CACHE_LOCAL"
+  if [[ ! -s "$status_source" ]]; then
+    status_source="$IOS_STATUS_CONSOLE_LIVE"
+  fi
+  [[ -s "$status_source" ]] || return 1
 
-  python3 - "$IOS_STATUS_LOCAL" "$IOS_PQC_REPORT" <<'PY'
+  python3 - "$status_source" "$IOS_PQC_REPORT" <<'PY'
 import base64
 import json
 import re
@@ -5306,8 +5604,8 @@ load_ios_pqc_report_for_mac_online() {
     echo "---- iOS PQC report copy log ----" >&2
     print_smoke_tail_for_operator 80 "$ARTIFACT_DIR/ios-copy-pqc-report.log"
     print_smoke_tail_for_operator 80 "$ARTIFACT_DIR/ios-copy-pqc-report.stderr.log"
-    echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-    print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+    echo "---- iOS authoritative app-cache tail ($IOS_STATUS_APP_CACHE_LOCAL) ----" >&2
+    print_smoke_tail_for_operator 80 "$IOS_STATUS_APP_CACHE_LOCAL"
     return 1
   fi
 
@@ -5540,44 +5838,45 @@ wait_for_ios_status_pattern() {
     fail_if_smoke_source_stale "$label" 15 || return 1
     local now
     now="$(date +%s)"
-    if [[ -f "$IOS_STATUS_LOCAL" ]]; then
+    if [[ -f "$IOS_STATUS_CONSOLE_LIVE" ]]; then
       local current_status_mtime
-      current_status_mtime="$(stat -f %m "$IOS_STATUS_LOCAL" 2>/dev/null || echo 0)"
+      current_status_mtime="$(stat -f %m "$IOS_STATUS_CONSOLE_LIVE" 2>/dev/null || echo 0)"
       if (( current_status_mtime > last_status_mtime )); then
         last_status_mtime="$current_status_mtime"
         last_status_update_at="$now"
       elif (( now - last_status_update_at >= 60 )); then
-        echo "Timed out waiting for fresh iOS status while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-        print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+        echo "Timed out waiting for fresh iOS status while waiting for ${label}: ${IOS_STATUS_CONSOLE_LIVE}" >&2
+        print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
         print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
         return 1
       fi
     fi
-    if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_LOCAL"; then
-      echo "Detected failure while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+    if [[ -f "$IOS_STATUS_CONSOLE_LIVE" ]] && grep -qE "$IOS_REMOTE_SMOKE_FAILURE_PATTERN" "$IOS_STATUS_CONSOLE_LIVE"; then
+      echo "Detected failure while waiting for ${label}: ${IOS_STATUS_CONSOLE_LIVE}" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
       return 1
     fi
+    fail_if_host_udp_local_network_permission_denied "$label" || return 1
     if [[ -f "$HOST_STATUS" ]] && grep -qE "$HOST_REMOTE_SMOKE_FAILURE_PATTERN" "$HOST_STATUS"; then
       echo "Detected macOS host media failure while waiting for ${label}: ${HOST_STATUS}" >&2
       print_smoke_tail_for_operator 80 "$HOST_STATUS"
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       return 1
     fi
-    if [[ -f "$IOS_STATUS_LOCAL" ]] && grep -qE "$pattern" "$IOS_STATUS_LOCAL"; then
+    if [[ -f "$IOS_STATUS_CONSOLE_LIVE" ]] && grep -qE "$pattern" "$IOS_STATUS_CONSOLE_LIVE"; then
       return 0
     fi
     if [[ "$IOS_CONSOLE_HANDLE_CAPTURED" == "1" ]] \
       && ! ios_console_handle_is_exact_and_running; then
-      echo "The exact iOS console launch handle exited or became unverifiable while waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      echo "The exact iOS console launch handle exited or became unverifiable while waiting for ${label}: ${IOS_STATUS_CONSOLE_LIVE}" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       print_smoke_tail_for_operator 80 "$IOS_CONSOLE_STDERR"
       return 1
     fi
     if (( now - started_at >= timeout_seconds )); then
-      echo "Timed out waiting for ${label}: ${IOS_STATUS_LOCAL}" >&2
-      print_smoke_tail_for_operator 80 "$IOS_STATUS_LOCAL"
+      echo "Timed out waiting for ${label}: ${IOS_STATUS_CONSOLE_LIVE}" >&2
+      print_smoke_tail_for_operator 80 "$IOS_STATUS_CONSOLE_LIVE"
       print_smoke_tail_for_operator 40 "$IOS_CONSOLE_STDERR"
       return 1
     fi
@@ -5585,8 +5884,29 @@ wait_for_ios_status_pattern() {
   done
 }
 
+validate_protocol_identity_bootstrap_evidence() {
+  local identity_bootstrap_mode
+  if [[ ! -s "$IOS_STATUS_APP_CACHE_LOCAL" || -L "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
+    echo "The authoritative on-device iOS status is unavailable for identity refresh validation: $IOS_STATUS_APP_CACHE_LOCAL" >&2
+    return 1
+  fi
+  if ! identity_bootstrap_mode="$(python3 "$IDENTITY_REFRESH_EVIDENCE_VALIDATOR" \
+    --host-status "$HOST_STATUS" \
+    --ios-status "$IOS_STATUS_APP_CACHE_LOCAL" \
+    --expected-suite "$EXPECTED_TARGET_SUITE")"; then
+    echo "Protocol identity bootstrap evidence is incomplete." >&2
+    return 1
+  fi
+  if [[ "$identity_bootstrap_mode" != "forced-pib-skr" ]]; then
+    echo "Unexpected protocol identity bootstrap mode: $identity_bootstrap_mode" >&2
+    return 1
+  fi
+  append_host_status "identity-bootstrap mode=$identity_bootstrap_mode validated=1"
+  append_ios_status "identity-bootstrap mode=$identity_bootstrap_mode validated=1"
+}
+
 validate_remote_desktop_route_evidence() {
-  python3 - "$HOST_STATUS" "$IOS_STATUS_LOCAL" <<'PY'
+  python3 - "$HOST_STATUS" "$IOS_STATUS_APP_CACHE_LOCAL" <<'PY'
 import re
 import sys
 
@@ -5611,52 +5931,80 @@ route_ready_lines = [line for line in ios_lines if "ios-lan-remote-route-ready "
 if not route_ready_lines:
     fail(f"no ios-lan-remote-route-ready evidence in {ios_path}")
 
-lan_main_route = [
-    line for line in route_lines
-    if metric(line, "addressClass") in ("lan-direct", "bonjour-service") and metric(line, "peerToPeer") == "false"
-]
-if not lan_main_route:
-    fail("no routable LAN direct or Bonjour infrastructure route with peerToPeer=false")
-lan_ready_route = [
-    line for line in route_ready_lines
-    if metric(line, "resolvedAddressClass") == "lan-direct" and metric(line, "resolvedPeerToPeer") == "false"
-]
-if not lan_ready_route:
-    fail("no verified LAN hostPort route-ready evidence with resolvedAddressClass=lan-direct resolvedPeerToPeer=false")
+def is_infrastructure_candidate(line):
+    requested_interface = metric(line, "requestedInterface")
+    return (
+        metric(line, "provenance") == "liveBrowser"
+        and metric(line, "addressClass") == "bonjour-service"
+        and metric(line, "transportClass") == "infrastructure"
+        and metric(line, "peerToPeer") == "false"
+        and metric(line, "interfaceBound") == "1"
+        and requested_interface not in (None, "-")
+        and not requested_interface.lower().startswith(("awdl", "p2p"))
+    )
 
-bad_ios_routes = [
-    line.strip()
-    for line in route_lines
-    if metric(line, "addressClass") == "link-local" or metric(line, "peerToPeer") == "true"
-]
+def is_infrastructure_ready(line):
+    requested_interface = metric(line, "requestedInterface")
+    resolved_address_class = metric(line, "resolvedAddressClass")
+    if resolved_address_class not in ("lan-direct", "link-local"):
+        return False
+    if not (
+        metric(line, "provenance") == "liveBrowser"
+        and metric(line, "requestedAddressClass") == "bonjour-service"
+        and metric(line, "transportClass") == "infrastructure"
+        and metric(line, "peerToPeer") == "false"
+        and metric(line, "interfaceBound") == "1"
+        and metric(line, "interfaceTypeMatch") == "1"
+        and metric(line, "interfaceScopeMatch") == "1"
+        and requested_interface not in (None, "-")
+        and not requested_interface.lower().startswith(("awdl", "p2p"))
+    ):
+        return False
+    if resolved_address_class == "link-local":
+        return metric(line, "resolvedScope") == requested_interface.lower()
+    return True
+
+lan_main_route = [line for line in route_lines if is_infrastructure_candidate(line)]
+if not lan_main_route:
+    fail("no provenance-bound Bonjour infrastructure route candidate")
+lan_ready_route = [line for line in route_ready_lines if is_infrastructure_ready(line)]
+if not lan_ready_route:
+    fail("no provenance/interface-bound infrastructure route-ready evidence")
+
+bad_ios_routes = [line.strip() for line in route_lines if not is_infrastructure_candidate(line)]
 if bad_ios_routes:
-    fail("iOS LAN route used link-local/peer-to-peer path: " + bad_ios_routes[-1])
-bad_ios_ready_routes = [
-    line.strip()
-    for line in route_ready_lines
-    if metric(line, "resolvedAddressClass") != "lan-direct" or metric(line, "resolvedPeerToPeer") != "false"
-]
+    fail("iOS remote media candidate lacked live infrastructure ownership: " + bad_ios_routes[-1])
+bad_ios_ready_routes = [line.strip() for line in route_ready_lines if not is_infrastructure_ready(line)]
 if bad_ios_ready_routes:
-    fail("iOS LAN ready route was not verified routable hostPort: " + bad_ios_ready_routes[-1])
+    fail("iOS remote media ready route lacked interface/scope proof: " + bad_ios_ready_routes[-1])
 
 bad_mac_peer = [
     line.strip()
     for line in host_lines
     if ("mac remote" in line or "mac-remote" in line or "mac-stream-config" in line)
-    and re.search(r"(?:^|\s)peer=(?:peer:|host:|ip:)?\[?(?:fe80:|169\.254\.)", line.lower())
+    and re.search(r"(?:^|\s)peer=[^\s]*(?:%25|%)(?:awdl|p2p)[a-z0-9]*", line.lower())
 ]
 if bad_mac_peer:
-    fail("macOS remote tx peer was link-local/peer-to-peer: " + bad_mac_peer[-1])
+    fail("macOS remote tx peer used a disallowed peer-to-peer interface: " + bad_mac_peer[-1])
 
 print(
     "remote route validation passed: "
-    f"routeSamples={len(route_lines)} readySamples={len(route_ready_lines)} lanMain={len(lan_main_route)} peerToPeer=0 linkLocal=0"
+    f"routeSamples={len(route_lines)} readySamples={len(route_ready_lines)} "
+    f"infrastructureCandidates={len(lan_main_route)} infrastructureReady={len(lan_ready_route)} peerToPeer=0"
 )
 PY
 }
 
+validate_remote_desktop_operation_evidence() {
+  python3 "$ROOT_DIR/Scripts/validate_p2p_remote_operation_evidence.py" \
+    --host-status "$HOST_STATUS" \
+    --ios-status "$IOS_STATUS_APP_CACHE_LOCAL" \
+    --approval-proof "$P2P_APPROVAL_PROOF" \
+    --require-identity-link "$(if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then echo true; else echo false; fi)"
+}
+
 validate_remote_desktop_performance_window() {
-  python3 - "$HOST_STATUS" "$IOS_STATUS_LOCAL" "$SMOKE_MIN_FPS" "$SMOKE_TARGET_FPS" "$SMOKE_SOAK_SECONDS" "$SMOKE_VIDEO_WIDTH" "$SMOKE_VIDEO_HEIGHT" "$SMOKE_EXPECT_RENDER_ORIENTATION" <<'PY'
+  python3 - "$HOST_STATUS" "$IOS_STATUS_APP_CACHE_LOCAL" "$SMOKE_MIN_FPS" "$SMOKE_TARGET_FPS" "$SMOKE_SOAK_SECONDS" "$SMOKE_VIDEO_WIDTH" "$SMOKE_VIDEO_HEIGHT" "$SMOKE_EXPECT_RENDER_ORIENTATION" <<'PY'
 import datetime as dt
 import math
 import re
@@ -6641,8 +6989,8 @@ report_ios_launch_failure() {
   skybridge_smoke_cat_redacted "$IOS_DEVICE_LABEL" "$LAUNCH_RESULT_JSON" "$IOS_DEVICE_ID" >&2 || true
   echo "---- iOS console stderr ($IOS_CONSOLE_STDERR) ----" >&2
   skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_CONSOLE_STDERR" "$IOS_DEVICE_ID" >&2 || true
-  echo "---- iOS status tail ($IOS_STATUS_LOCAL) ----" >&2
-  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_STATUS_LOCAL" "$IOS_DEVICE_ID" >&2 || true
+  echo "---- iOS live console tail ($IOS_STATUS_CONSOLE_LIVE) ----" >&2
+  skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$IOS_STATUS_CONSOLE_LIVE" "$IOS_DEVICE_ID" >&2 || true
 }
 
 validate_ios_launch_notice_identity_env() {
@@ -6714,10 +7062,10 @@ terminate_ios_remote_smoke_app_for_notice_disconnect() {
   copy_ios_status
 }
 
-write_p2p_remote_control_approval_proof() {
-  local approved_session
-  if ! approved_session="$(python3 - "$HOST_STATUS" "$P2P_APPROVAL_PROOF" <<'PY'
-import hashlib
+generate_p2p_remote_control_approval_proof() {
+  local status_path="${1:?missing P2P approval status path}"
+  local output_path="${2:?missing P2P approval proof path}"
+  python3 - "$status_path" "$output_path" <<'PY'
 import json
 import os
 import re
@@ -6736,56 +7084,61 @@ status = status_path.read_text(encoding="utf-8", errors="strict")
 
 event_pattern = re.compile(
     r"\bremoteControlNotice(?P<event>Shown|PanelPresented|HumanApproved|Approved|Active)\s+"
-    r"session=(?P<session>[^\s]+)\s+transport=p2p\b(?P<tail>[^\n]*)"
+    r"session=(?P<session>[^\s]+)\s+"
+    r"session_ref=(?P<session_ref>ev1:[0-9a-f]{32})\s+"
+    r"transport=p2p\b(?P<tail>[^\n]*)"
 )
-events_by_session: dict[str, list[tuple[str, int]]] = defaultdict(list)
-active_sessions: set[str] = set()
-panel_contract_by_session: dict[str, bool] = {}
+events_by_session: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+active_sessions: set[tuple[str, str]] = set()
+panel_contract_by_session: dict[tuple[str, str], bool] = {}
 for match in event_pattern.finditer(status):
     event = match.group("event")
     session = match.group("session")
+    session_ref = match.group("session_ref")
+    key = (session, session_ref)
     tail = match.group("tail")
     if event == "PanelPresented":
         if re.search(r"\bphase=awaitingApproval\b", tail) is None:
             continue
         buttons_match = re.search(r"\bbuttons=([^\s]+)", tail)
         buttons = set(buttons_match.group(1).split(",")) if buttons_match else set()
-        panel_contract_by_session[session] = {"approve", "reject"}.issubset(buttons)
+        panel_contract_by_session[key] = {"approve", "reject"}.issubset(buttons)
     if event == "Active":
-        active_sessions.add(session)
-    events_by_session[session].append((event, match.start()))
+        active_sessions.add(key)
+    events_by_session[key].append((event, match.start()))
 
 expected_lifecycle = ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"]
 valid_sessions = []
-for session, events in events_by_session.items():
+for key, events in events_by_session.items():
     lifecycle = [event for event, _ in events]
-    if lifecycle == expected_lifecycle and panel_contract_by_session.get(session) is True:
-        valid_sessions.append(session)
+    if lifecycle == expected_lifecycle and panel_contract_by_session.get(key) is True:
+        valid_sessions.append(key)
 
 if len(valid_sessions) != 1:
     raise SystemExit("P2P approval proof requires exactly one strict same-session human lifecycle")
-session = valid_sessions[0]
-if active_sessions != {session}:
+approved_key = valid_sessions[0]
+session, session_ref = approved_key
+if active_sessions != {approved_key}:
     raise SystemExit("P2P approval proof contains an active notice outside the strict human-approved session")
 
 escaped_session = re.escape(session)
 auto_patterns = (
-    rf"\bremoteControlNoticeAutoApproved\s+session={escaped_session}\s+transport=p2p\b",
-    rf"\bremoteControlNoticeApproved\s+session={escaped_session}\s+transport=p2p\b[^\n]*\bapprovalSource=(?:auto|runtime)\b",
-    rf"(?m)^(?=[^\n]*\bsession={escaped_session}\b)(?=[^\n]*\b(?:runtimeAutoApproval|autoApprove)=true\b)[^\n]*$",
+    rf"\bremoteControlNoticeAutoApproved\s+session={escaped_session}(?=\s)[^\n]*\btransport=p2p\b",
+    rf"\bremoteControlNoticeApproved\s+session={escaped_session}(?=\s)[^\n]*\btransport=p2p\b[^\n]*\bapprovalSource=(?:auto|runtime)\b",
+    rf"(?m)^(?=[^\n]*\bsession={escaped_session}(?=\s))(?=[^\n]*\b(?:runtimeAutoApproval|autoApprove)=true\b)[^\n]*$",
 )
 runtime_auto_approval = any(re.search(pattern, status, re.IGNORECASE) for pattern in auto_patterns)
-human_approval = "HumanApproved" in [event for event, _ in events_by_session[session]]
+human_approval = "HumanApproved" in [event for event, _ in events_by_session[approved_key]]
 if not human_approval or runtime_auto_approval:
     raise SystemExit("P2P approval proof did not establish exclusive human approval")
 
 proof = {
-    "schemaVersion": 1,
-    "sessionRef": hashlib.sha256(session.encode("utf-8")).hexdigest()[:24],
+    "schemaVersion": 2,
+    "sessionRef": session_ref,
     "humanApproval": human_approval,
     "runtimeAutoApproval": runtime_auto_approval,
     "lifecycle": expected_lifecycle,
-    "panelActionsVerified": panel_contract_by_session[session],
+    "panelActionsVerified": panel_contract_by_session[approved_key],
 }
 output_path.parent.mkdir(parents=True, exist_ok=True)
 descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output_path.name}.", dir=output_path.parent)
@@ -6803,7 +7156,13 @@ finally:
         temporary_path.unlink()
 print(session)
 PY
-)"; then
+}
+
+write_p2p_remote_control_approval_proof() {
+  local approved_session
+  if ! approved_session="$(
+    generate_p2p_remote_control_approval_proof "$HOST_STATUS" "$P2P_APPROVAL_PROOF"
+  )"; then
     return 1
   fi
   if [[ -z "$approved_session" || "$approved_session" =~ [[:space:]] ]] \
@@ -6882,14 +7241,14 @@ launch_ios_remote_smoke_app() {
       echo "Refusing iOS smoke launch because pre-install app absence was not proven." >&2
       return 1
     fi
-    rm -f "$LAUNCH_RESULT_JSON" "$IOS_STATUS_LOCAL" "$IOS_STATUS_APP_CACHE_LOCAL" "$IOS_STATUS_CONSOLE_SNAPSHOT" "$IOS_LISTENER_STATUS_LOCAL" "$IOS_CONSOLE_STDERR"
+    rm -f "$LAUNCH_RESULT_JSON" "$IOS_STATUS_LOCAL" "$IOS_STATUS_CONSOLE_LIVE" "$IOS_STATUS_APP_CACHE_LOCAL" "$IOS_STATUS_CONSOLE_SNAPSHOT" "$IOS_LISTENER_STATUS_LOCAL" "$IOS_CONSOLE_STDERR"
     skybridge_ios_start_console_launch \
       "$IOS_DEVICE_ID" \
       "$IOS_BUNDLE_ID" \
       "$IOS_ENV_JSON" \
       "$IOS_CONSOLE_TOTAL_TIMEOUT_SECONDS" \
       "$LAUNCH_RESULT_JSON" \
-      "$IOS_STATUS_LOCAL" \
+      "$IOS_STATUS_CONSOLE_LIVE" \
       "$IOS_CONSOLE_STDERR" \
       IOS_CONSOLE_PID \
       1
@@ -6993,21 +7352,35 @@ terminate_stale_macos_smoke_hosts
 reset_smoke_artifacts
 
 echo "==> Artifacts: $ARTIFACT_DIR"
-echo "==> Real device: $IOS_DEVICE_LABEL"
-echo "==> Build destination: $IOS_BUILD_DESTINATION"
-echo "==> Target: ${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}@${SMOKE_TARGET_FPS} minFps=${SMOKE_MIN_FPS}"
-echo "==> Expected render orientation: $SMOKE_EXPECT_RENDER_ORIENTATION"
-echo "==> Expected suite: $EXPECTED_TARGET_SUITE"
+if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+  echo "==> Scope: signed macOS identity audit (no iOS target)"
+elif [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  echo "==> Scope: signed current-source macOS host (diagnostic-only; no iOS target)"
+else
+  echo "==> Real device: $IOS_DEVICE_LABEL"
+  echo "==> Build destination: $IOS_BUILD_DESTINATION"
+  echo "==> Target: ${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}@${SMOKE_TARGET_FPS} minFps=${SMOKE_MIN_FPS}"
+  echo "==> Expected render orientation: $SMOKE_EXPECT_RENDER_ORIENTATION"
+  echo "==> Expected suite: $EXPECTED_TARGET_SUITE"
 
-require_remote_control_notice_identity_env
+  require_remote_control_notice_identity_env
 
-echo "==> Checking macOS visible desktop preflight"
-detect_macos_loginwindow_occlusion
+  echo "==> Checking macOS visible desktop preflight"
+  detect_macos_loginwindow_occlusion
+fi
 
-echo "==> Verifying iOS source provenance"
-capture_ios_release_source_provenance
+if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+  echo "==> Capturing macOS identity-audit source-input binding"
+  capture_source_input_binding
+elif [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  echo "==> Capturing signed current-source macOS host input binding"
+  capture_source_input_binding
+else
+  echo "==> Verifying iOS source provenance"
+  capture_ios_release_source_provenance
+fi
 
-if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
   echo "==> Resolving installed iOS app and Widget distribution profiles"
   resolve_ios_distribution_signing_inputs
 fi
@@ -7026,9 +7399,11 @@ if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]]; then
 fi
 echo "==> Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
 
-xcrun devicectl list devices 2>&1 \
-  | skybridge_smoke_redact_stream "$IOS_DEVICE_LABEL" "$IOS_DEVICE_ID" \
-    >"$DEVICE_INFO_TXT" || true
+if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then
+  xcrun devicectl list devices 2>&1 \
+    | skybridge_smoke_redact_stream "$IOS_DEVICE_LABEL" "$IOS_DEVICE_ID" \
+      >"$DEVICE_INFO_TXT" || true
+fi
 
 echo "==> Building macOS LAN host"
 (
@@ -7037,19 +7412,27 @@ echo "==> Building macOS LAN host"
   CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
   "$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost
-  SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
-  CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-  SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
-  "$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost
+  if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then
+    SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR" \
+    CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
+    SWIFT_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE_DIR" \
+    "$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost
+  fi
 ) >"$ARTIFACT_DIR/macos-build.log"
 
-verify_source_input_binding_unchanged "mac-build"
+if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
+  verify_source_input_binding_unchanged "mac-identity-audit-build"
+elif [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  verify_source_input_binding_unchanged "mac-host-only-build"
+else
+  verify_source_input_binding_unchanged "mac-build"
+fi
 
 if [[ ! -x "$MAC_DIRECT_BIN" ]]; then
   echo "macOS LAN host executable not found: $MAC_DIRECT_BIN" >&2
   exit 1
 fi
-if [[ ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then
+if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then
   echo "macOS smoke source helper executable not found: $MAC_SOURCE_DIRECT_BIN" >&2
   exit 1
 fi
@@ -7072,6 +7455,13 @@ if mac_host_uses_signed_app_bundle; then
     'remote-control-localization requiredKeys=20 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
     30 \
     "embedded signed SkyBridgeCore localization contract"
+fi
+if [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  wait_for_file_pattern \
+    "$HOST_STATUS" \
+    'identity-policy mode=existing-only mutation=denied source=explicit-smoke-environment' \
+    30 \
+    "existing-only macOS identity policy"
 fi
 wait_for_file_pattern "$HOST_STATUS" 'ready discovery=_skybridge._tcp' 60 "macOS host ready"
 record_macos_smoke_host_launch_evidence
@@ -7115,6 +7505,14 @@ if [[ -z "$MAC_CONTROL_PORT" ]]; then
 fi
 verify_host_pid_owns_listener_port "$MAC_CONTROL_PORT" "control"
 verify_host_pid_owns_listener_port "$MAC_REMOTE_PORT" "remote-control"
+if [[ "$MAC_HOST_ONLY" == "1" ]]; then
+  wait_for_file_pattern "$HOST_PQC_REPORT" '"deviceId"' 30 "existing-only macOS PQC report"
+  validate_mac_host_only_pqc_report
+  verify_source_input_binding_unchanged "mac-host-only-ready"
+  write_mac_host_ready_file
+  wait_for_mac_host_only_shutdown
+  exit 1
+fi
 MAC_CONTROL_HOST="${SKYBRIDGE_SMOKE_MAC_CONTROL_HOST:-$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || hostname)}"
 if [[ -z "$MAC_CONTROL_HOST" ]]; then
   echo "macOS host LAN address could not be determined for real-device smoke." >&2
@@ -7164,43 +7562,64 @@ if ! skybridge_apple_pqc_sdk_probe_succeeded; then
   exit 1
 fi
 echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-IOS_XCODEBUILD_ARGS=(
-  -project "$IOS_PROJECT"
-  -scheme "$IOS_SCHEME"
-  -configuration "$IOS_BUILD_CONFIGURATION"
-  -destination "$IOS_BUILD_DESTINATION"
-  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios"
+IOS_XCODEBUILD_SETTINGS=(
   "SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION=$IOS_BUILD_CONFIGURATION"
   "SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE=$IOS_SOURCE_DIRTY_STATE"
   "SKYBRIDGE_PACKAGING_GIT_COMMIT=$IOS_SOURCE_REVISION"
   "SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST=$IOS_SOURCE_INPUT_DIGEST"
-  "SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"
+  "SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-billlza/Skybridge-Compass}}"
   "SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"
   "SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
   "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"
 )
 if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
-  # The project default is Automatic (Xcode-managed) signing. This direct
-  # testing-surface device build must instead be signed by the resolver-selected
-  # installed distribution profile so the measured signing/profile proof matches,
-  # so it forces Manual signing on the command line. Per-target profiles come from
-  # the project's PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_*_...)" indirection,
-  # fed by the two environment build settings below.
-  IOS_XCODEBUILD_ARGS+=(
-    "CODE_SIGN_STYLE=Manual"
-    "CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"
-    "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"
-    "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"
+  echo "==> Archiving iOS testing product with installed-only Automatic signing"
+  skybridge_archive_ios_distribution_product \
+    "$IOS_PROJECT" \
+    "$IOS_SCHEME" \
+    "$IOS_ARCHIVE_PATH" \
+    "$IOS_ARCHIVE_DERIVED_DATA" \
+    "$IOS_ARCHIVE_LOG" \
+    installed-only \
+    -- \
+    "${IOS_XCODEBUILD_SETTINGS[@]}" \
+    "DEVELOPMENT_TEAM=$IOS_TEAM_IDENTIFIER"
+  verify_source_input_binding_unchanged "ios-archive"
+
+  echo "==> Exporting the distribution-signed iOS testing product"
+  skybridge_export_ios_distribution_archive \
+    "$IOS_ARCHIVE_PATH" \
+    "$IOS_EXPORT_OPTIONS" \
+    "$IOS_EXPORT_DIR" \
+    "$IOS_EXPORT_LOG" \
+    "$IOS_TEAM_IDENTIFIER" \
+    installed-only
+  verify_source_input_binding_unchanged "ios-export"
+
+  IOS_APP_PATH="$(
+    skybridge_extract_single_ios_exported_app \
+      "$IOS_IPA_EXTRACTOR" \
+      "$IOS_EXPORT_DIR" \
+      "$IOS_EXPORTED_APP"
+  )"
+  verify_source_input_binding_unchanged "ios-exported-product"
+else
+  IOS_XCODEBUILD_ARGS=(
+    -project "$IOS_PROJECT"
+    -scheme "$IOS_SCHEME"
+    -configuration "$IOS_BUILD_CONFIGURATION"
+    -destination "$IOS_BUILD_DESTINATION"
+    -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios"
+    "${IOS_XCODEBUILD_SETTINGS[@]}"
+    build
   )
+  SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
+    skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG"
+  verify_source_input_binding_unchanged "ios-build"
+
+  IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 fi
-IOS_XCODEBUILD_ARGS+=(build)
-SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
-  skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG"
-
-verify_source_input_binding_unchanged "ios-build"
-
-IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
   exit 1
@@ -7243,6 +7662,13 @@ else
 fi
 xcrun devicectl device install app --device "$IOS_DEVICE_ID" "$IOS_APP_PATH" >/dev/null
 
+echo "==> Revalidating macOS listeners immediately before iOS launch"
+verify_host_pid_owns_listener_port "$MAC_CONTROL_PORT" "control"
+verify_host_pid_owns_listener_port "$MAC_REMOTE_PORT" "remote-control"
+verify_mac_control_port_reachable "$MAC_CONTROL_HOST" "$MAC_CONTROL_PORT"
+verify_mac_remote_port_listening "$MAC_CONTROL_HOST" "$MAC_REMOTE_PORT"
+append_host_status "host-listener-prelaunch verified=1 pid=$HOST_PID controlPort=$MAC_CONTROL_PORT remoteControlPort=$MAC_REMOTE_PORT"
+
 echo "==> Launching iOS P2P remote smoke"
 IOS_PQC_PEER_DEVICE_ID=""
 IOS_PQC_PEER_XWING_PUBLIC_KEY_BASE64=""
@@ -7276,6 +7702,7 @@ IOS_ENV_JSON="$(
   SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION="$SMOKE_EXPECT_RENDER_ORIENTATION" \
   SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH="$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" \
   SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH="$SMOKE_FORCE_SIGNED_KEM_REFRESH" \
+  SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION="$ALLOW_PERSISTENT_TRUST_MUTATION" \
   SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE="$EXPECTED_TARGET_SUITE" \
   SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME="${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-}" \
   SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-}" \
@@ -7305,6 +7732,7 @@ keys = [
     "SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION",
     "SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH",
     "SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH",
+    "SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION",
     "SKYBRIDGE_SMOKE_EXPECT_TARGET_SUITE",
     "SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME",
     "SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID",
@@ -7338,26 +7766,20 @@ validate_ios_launch_notice_identity_env
 
 echo "==> Waiting for P2P handshake"
 wait_for_file_pattern "$HOST_STATUS" "$HOST_HANDSHAKE_PATTERN" "$SMOKE_TIMEOUT_SECONDS" "macOS P2P handshake"
-if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
-  echo "==> Waiting for PIB-1 protocol identity binding evidence"
-  wait_for_ios_status_pattern 'PIB-1 protocol identity binding request: .*lifecycle=identity-oob>request' "$SMOKE_TIMEOUT_SECONDS" "iOS PIB-1 request"
-  wait_for_file_pattern "$HOST_STATUS" 'PIB-1 protocol identity binding served: .*lifecycle=identity-oob>served' "$SMOKE_TIMEOUT_SECONDS" "macOS PIB-1 served"
-  wait_for_ios_status_pattern 'PIB-1 protocol identity binding signature verified: .*lifecycle=identity-oob>verified' "$SMOKE_TIMEOUT_SECONDS" "iOS PIB-1 verified"
-  wait_for_ios_status_pattern 'PIB-1 protocol identity binding pinned: .*lifecycle=identity-oob>pinned' "$SMOKE_TIMEOUT_SECONDS" "iOS PIB-1 pinned"
-  echo "==> Waiting for SKR-1 signed KEM refresh evidence"
-  wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh request: .*lifecycle=missing-kem>request' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 request"
-  wait_for_file_pattern "$HOST_STATUS" 'SKR-1 signed LAN KEM refresh served: .*lifecycle=request>served' "$SMOKE_TIMEOUT_SECONDS" "macOS SKR-1 served"
-  wait_for_ios_status_pattern "SKR-1 signed LAN KEM refresh verified and imported: .*suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1 .*signature=verified .*requestHash=bound .*lifecycle=served>verified" "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 verified ${EXPECTED_TARGET_SUITE} import"
-  if [[ "$EXPECTED_TARGET_SUITE" == "X-Wing" ]]; then
-    wait_for_ios_status_pattern 'SKR-1 signed LAN KEM refresh (smoke-evidence: .*source=signed_lan_kem_refresh .*signature=verified .*requestHash=bound .*strictXWingEstablished=1)' "$SMOKE_TIMEOUT_SECONDS" "iOS SKR-1 X-Wing smoke evidence"
-  fi
-fi
+echo "==> PIB-1 and SKR-1 evidence will be validated from the merged on-device status after the media run"
 wait_for_ios_status_pattern "streamConfigSent .*preferred=hevc, formats=hevc, fps=${SMOKE_TARGET_FPS}.*perf=extreme" "$SMOKE_TIMEOUT_SECONDS" "strict HEVC-only stream configuration"
 wait_for_remote_control_notice_lifecycle
 wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*handshakeOnly=1 .*remoteDesktop=1" "$SMOKE_TIMEOUT_SECONDS" "iOS P2P remote desktop success"
 wait_for_ios_status_pattern "remote-desktop-pass .*renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}" "$SMOKE_TIMEOUT_SECONDS" "P2P remote desktop pass window"
 copy_ios_status
+if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
+  validate_protocol_identity_bootstrap_evidence
+else
+  append_host_status "identity-refresh evidence=not-requested persistentTrustMutation=0"
+  append_ios_status "identity-refresh evidence=not-requested persistentTrustMutation=0"
+fi
 validate_remote_desktop_route_evidence
+validate_remote_desktop_operation_evidence
 validate_remote_desktop_performance_window
 if [[ "$RUN_MAC_ONLINE_IPAD_SMOKE" == "1" ]]; then
   run_mac_online_ipad_button_smoke
@@ -7368,6 +7790,7 @@ fi
 wait_for_remote_control_notice_disconnected
 append_host_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
 append_ios_status "smoke-final result=success validated=1 route=lan-main fps=${SMOKE_MIN_FPS} frame=${SMOKE_VIDEO_WIDTH}x${SMOKE_VIDEO_HEIGHT}"
+copy_ios_status
 
 sync_macos_smoke_host_artifacts
 echo "==> Running Rust CLI P2P remote performance artifact gate"
@@ -7395,6 +7818,7 @@ python3 - \
   "$IOS_PRODUCT_PROOF" <<'PY'
 import json
 import pathlib
+import re
 import stat
 import sys
 
@@ -7434,11 +7858,11 @@ approval_lifecycle = approval_proof.get("lifecycle")
 approval_session_ref = approval_proof.get("sessionRef")
 expected_approval_lifecycle = ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"]
 if (
-    approval_proof.get("schemaVersion") != 1
+    approval_proof.get("schemaVersion") != 2
     or approval_lifecycle != expected_approval_lifecycle
     or approval_proof.get("panelActionsVerified") is not True
     or not isinstance(approval_session_ref, str)
-    or len(approval_session_ref) != 24
+    or re.fullmatch(r"ev1:[0-9a-f]{32}", approval_session_ref) is None
 ):
     raise SystemExit("P2P approval proof contract is invalid")
 

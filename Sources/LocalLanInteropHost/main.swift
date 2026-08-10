@@ -40,6 +40,13 @@ private final class LocalLanInteropHostCoordinator {
 
     func start() async throws {
         reporter.reset()
+        let existingOnlyIdentityRuntime = DeviceIdentityKeyManager
+            .usesExistingOnlyIdentityRuntimeForCurrentProcess
+        if existingOnlyIdentityRuntime {
+            reporter.append(
+                "identity-policy mode=existing-only mutation=denied source=explicit-smoke-environment"
+            )
+        }
         do {
             if let localization = try validateEmbeddedRemoteControlLocalizationIfRequired() {
                 reporter.append(
@@ -65,9 +72,20 @@ private final class LocalLanInteropHostCoordinator {
             ? "ephemeral-process"
             : "persistent-keychain"
         reporter.append("identity start storage=\(identityStorage)")
+        let identityManager = DeviceIdentityKeyManager.shared
+        let identity: DeviceIdentityKeyInfo
         do {
-            let identityManager = DeviceIdentityKeyManager.shared
-            _ = try await identityManager.getOrCreateIdentityKey()
+            if existingOnlyIdentityRuntime {
+                guard let existing = try await identityManager
+                    .existingIdentityKeyInfoStrict() else {
+                    throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                        "The existing-only host requires a committed P-256 identity authority"
+                    )
+                }
+                identity = existing
+            } else {
+                identity = try await identityManager.getOrCreateIdentityKey()
+            }
             guard let residueStatus = await identityManager
                 .lastLegacyResidueInspectionStatus() else {
                 reporter.append(
@@ -90,6 +108,23 @@ private final class LocalLanInteropHostCoordinator {
                 reporter.append("failed stage=identity code=\(code)")
                 throw HostStartupError.identityUnavailable(code)
             }
+
+            if existingOnlyIdentityRuntime {
+                _ = try await CommittedLocalProtocolIdentitySnapshot.loadActive(
+                    keyManager: identityManager
+                )
+                let provider = CryptoProviderFactory.make(policy: .preferPQC)
+                let kemKeys = try await identityManager
+                    .pairingIdentityKEMPublicKeys(using: provider)
+                guard !kemKeys.isEmpty else {
+                    throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                        "The existing-only host requires committed KEM identity material"
+                    )
+                }
+                reporter.append(
+                    "identity existing-only-ready protocol=committed kemKeys=\(kemKeys.count)"
+                )
+            }
         } catch {
             if let startupError = error as? HostStartupError {
                 throw startupError
@@ -98,8 +133,13 @@ private final class LocalLanInteropHostCoordinator {
             reporter.append("failed stage=identity code=\(code)")
             throw HostStartupError.identityUnavailable(code)
         }
-        let protocolDeviceId = try await SelfIdentityProvider.shared
-            .protocolIdentityDeviceId(allowCreate: true)
+        let protocolDeviceId: String
+        if existingOnlyIdentityRuntime {
+            protocolDeviceId = identity.deviceId
+        } else {
+            protocolDeviceId = try await SelfIdentityProvider.shared
+                .protocolIdentityDeviceId(allowCreate: true)
+        }
         reporter.append("identity ready device=\(sanitize(protocolDeviceId))")
         configureRemoteControlNoticeIdentity(protocolDeviceId: protocolDeviceId)
         guard await p2pDiscoveryService.waitUntilInitialized(timeout: 5.0) else {
@@ -400,8 +440,19 @@ private final class LocalLanInteropHostCoordinator {
         guard let reportURL = pqcReportURL() else { return }
 
         let provider = CryptoProviderFactory.make(policy: .preferPQC)
-        let deviceId = try await DeviceIdentityKeyManager.shared.getDeviceId()
-        let keys = try await DeviceIdentityKeyManager.shared.pairingIdentityKEMPublicKeys(
+        let identityManager = DeviceIdentityKeyManager.shared
+        let deviceId: String
+        if DeviceIdentityKeyManager.usesExistingOnlyIdentityRuntimeForCurrentProcess {
+            guard let existing = try await identityManager.existingDeviceIdStrict() else {
+                throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                    "The existing-only host requires a committed P-256 identity authority"
+                )
+            }
+            deviceId = existing
+        } else {
+            deviceId = try await identityManager.getDeviceId()
+        }
+        let keys = try await identityManager.pairingIdentityKEMPublicKeys(
             using: provider
         )
         let report = LocalPQCReport(
@@ -417,7 +468,11 @@ private final class LocalLanInteropHostCoordinator {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(report)
-        try writeProtectedData(data, to: reportURL)
+        try SmokeStatusFileAppender.replacePrivateData(
+            data,
+            at: reportURL,
+            protection: .completeUntilFirstUserAuthentication
+        )
         reporter.append(
             "pqc-report device=\(sanitize(deviceId)) keys=\(report.keys.count) file=\(sanitize(reportURL.lastPathComponent))"
         )
@@ -1483,6 +1538,29 @@ struct LocalLanInteropHostMain {
     static func main() {
         setenv("SKYBRIDGE_SMOKE_ROLE", "mac-host", 1)
         switch ProcessInfo.processInfo.environment[
+            DeviceIdentityKeyManager.existingOnlySmokeEnvironmentKey
+        ] {
+        case nil, "0":
+            break
+        case "1":
+            do {
+                try DeviceIdentityKeyManager
+                    .activateExistingOnlyIdentityRuntimeForSmokeDiagnostics()
+            } catch {
+                fputs(
+                    "LocalLanInteropHost failed: unable to activate existing-only identity runtime.\n",
+                    stderr
+                )
+                Foundation.exit(2)
+            }
+        default:
+            fputs(
+                "LocalLanInteropHost failed: invalid existing-only identity mode.\n",
+                stderr
+            )
+            Foundation.exit(2)
+        }
+        switch ProcessInfo.processInfo.environment[
             "SKYBRIDGE_SMOKE_IDENTITY_AUDIT_ONLY"
         ] {
         case nil, "0":
@@ -1597,23 +1675,6 @@ private struct SmokeStatusReporter {
             data,
             to: statusURL,
             protection: .completeUntilFirstUserAuthentication
-        )
-    }
-}
-
-private func writeProtectedData(_ data: Data, to url: URL) throws {
-    try FileManager.default.createDirectory(
-        at: url.deletingLastPathComponent(),
-        withIntermediateDirectories: true
-    )
-
-    if FileManager.default.fileExists(atPath: url.path) {
-        try data.write(to: url, options: .completeFileProtectionUntilFirstUserAuthentication)
-    } else {
-        FileManager.default.createFile(atPath: url.path, contents: data)
-        try FileManager.default.setAttributes(
-            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: url.path
         )
     }
 }

@@ -465,8 +465,18 @@ public class P2PDiscoveryService: BaseManager {
         var task: Task<Void, Never>?
         var aliases: Set<String>
     }
-    private static let maximumProvisionalInboundConnections = 32
-    private static let provisionalInboundTimeoutSeconds: TimeInterval = 12
+    private static let maximumProvisionalInboundConnections =
+        P2PInboundAdmissionPolicy.maximumConcurrentConnections
+    private static let provisionalInboundTimeoutSeconds =
+        P2PInboundAdmissionPolicy.deadlineSeconds(for: .awaitingFirstFrame)
+    private struct ProvisionalInboundTimeoutOwner {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+    private struct ProvisionalInboundProcessingLease: Sendable, Equatable {
+        let connectionIdentifier: ObjectIdentifier
+        let token: UUID
+    }
     nonisolated static let maximumDiscoveredDevices = 128
     nonisolated static let maximumHydrationTaskOwners = 128
     nonisolated static let maximumRouteIdentifiersPerDevice = 32
@@ -476,7 +486,7 @@ public class P2PDiscoveryService: BaseManager {
     private static let unprotectedAdmissionBackoffSeconds: TimeInterval = 1
     private var inboundControlSessions: [UUID: InboundControlSession] = [:]
     private var provisionalInboundConnections: [ObjectIdentifier: NWConnection] = [:]
-    private var provisionalInboundTimeoutTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    private var provisionalInboundTimeoutTasks: [ObjectIdentifier: ProvisionalInboundTimeoutOwner] = [:]
     struct DiscoveryHydrationRoute: Hashable, Sendable {
         let serviceName: String
         let serviceType: String
@@ -828,48 +838,178 @@ public class P2PDiscoveryService: BaseManager {
         if provisionalInboundConnections[identifier] != nil {
             return true
         }
-        guard provisionalInboundConnections.count < Self.maximumProvisionalInboundConnections else {
+        let endpointKey = Self.inboundAdmissionEndpointKey(connection.endpoint)
+        let endpointCount = provisionalInboundConnections.values.reduce(into: 0) {
+            count,
+            existing in
+            if Self.inboundAdmissionEndpointKey(existing.endpoint) == endpointKey {
+                count += 1
+            }
+        }
+        guard provisionalInboundConnections.count < Self.maximumProvisionalInboundConnections,
+              endpointCount
+                < P2PInboundAdmissionPolicy.maximumConcurrentConnectionsPerRemoteEndpoint else {
             logger.error(
-                "❌ 拒绝过量入站 P2P 控制连接: limit=\(Self.maximumProvisionalInboundConnections, privacy: .public)"
+                "❌ 拒绝过量入站 P2P 控制连接: globalLimit=\(Self.maximumProvisionalInboundConnections, privacy: .public) endpointLimit=\(P2PInboundAdmissionPolicy.maximumConcurrentConnectionsPerRemoteEndpoint, privacy: .public)"
             )
             connection.cancel()
             return false
         }
 
+        provisionalInboundConnections[identifier] = connection
+        _ = armProvisionalInboundTimeout(
+            for: connection,
+            stage: .awaitingFirstFrame,
+            timeoutSeconds: Self.provisionalInboundTimeoutSeconds
+        )
+        return true
+    }
+
+    nonisolated private static func inboundAdmissionEndpointKey(
+        _ endpoint: NWEndpoint
+    ) -> String {
+        switch endpoint {
+        case .hostPort(let host, _):
+            var value = String(describing: host)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if value.hasPrefix("[") && value.hasSuffix("]") {
+                value = String(value.dropFirst().dropLast())
+            }
+            if let scope = value.firstIndex(of: "%") {
+                value = String(value[..<scope])
+            }
+            return "host:\(value)"
+        case .service(let name, let type, let domain, _):
+            return "service:\(name.lowercased())|\(type.lowercased())|\(domain.lowercased())"
+        default:
+            return "endpoint:\(endpoint.debugDescription.lowercased())"
+        }
+    }
+
+    private func armProvisionalInboundTimeout(
+        for connection: NWConnection,
+        stage: P2PInboundAdmissionStage,
+        timeoutSeconds: TimeInterval
+    ) -> ProvisionalInboundProcessingLease {
+        let identifier = ObjectIdentifier(connection)
+        let token = UUID()
         let timeoutTask = Task { @MainActor [weak self, weak connection] in
             do {
-                try await Task.sleep(for: .seconds(Self.provisionalInboundTimeoutSeconds))
+                try await Task.sleep(for: .seconds(timeoutSeconds))
             } catch {
                 return
             }
             guard let self,
                   let connection,
-                  self.provisionalInboundConnections.removeValue(forKey: identifier) != nil else {
+                  self.provisionalInboundTimeoutTasks[identifier]?.token == token,
+                  self.provisionalInboundConnections[identifier] != nil else {
                 return
             }
+            // Keep the admission slot until the exact handler exits. Removing
+            // it here would bound sockets but allow cancelled Keychain/PQC/UI
+            // tasks to accumulate outside the 32-connection limit.
             self.provisionalInboundTimeoutTasks.removeValue(forKey: identifier)
-            self.logger.error(
-                "❌ 入站 P2P 控制连接首个有效协议帧超时: seconds=\(Int(Self.provisionalInboundTimeoutSeconds), privacy: .public)"
-            )
+            switch stage {
+            case .awaitingFirstFrame:
+                self.logger.error(
+                    "❌ 入站 P2P 控制连接首个有效协议帧超时: seconds=\(Int(timeoutSeconds), privacy: .public)"
+                )
+            case .bootstrapCrypto:
+                self.logger.error(
+                    "❌ 入站 P2P 控制连接 bootstrap 加密处理超时: seconds=\(Int(timeoutSeconds), privacy: .public)"
+                )
+            case .protocolIdentityConfirmation:
+                self.logger.error(
+                    "❌ 入站 P2P 控制连接 PIB 确认处理超时: seconds=\(Int(timeoutSeconds), privacy: .public)"
+                )
+            case .initialHandshake:
+                self.logger.error(
+                    "❌ 入站 P2P 控制连接初始握手处理超时: seconds=\(Int(timeoutSeconds), privacy: .public)"
+                )
+            }
+            self.inboundControlSessions.first(where: {
+                ObjectIdentifier($0.value.connection) == identifier
+            })?.value.task?.cancel()
             connection.cancel()
         }
-        provisionalInboundConnections[identifier] = connection
-        provisionalInboundTimeoutTasks[identifier] = timeoutTask
+        provisionalInboundTimeoutTasks[identifier] = ProvisionalInboundTimeoutOwner(
+            token: token,
+            task: timeoutTask
+        )
+        return ProvisionalInboundProcessingLease(
+            connectionIdentifier: identifier,
+            token: token
+        )
+    }
+
+    /// A recognized bootstrap request or MessageA no longer consumes the
+    /// peer-first-frame budget, but it must retain the bounded admission slot
+    /// while local signing or handshake initialization is in progress.
+    private func beginProcessingProvisionalInboundConnection(
+        _ connection: NWConnection,
+        stage: P2PInboundAdmissionStage,
+        protocolIdentityConfirmationResponseBudgetSeconds: TimeInterval =
+            P2PInboundAdmissionPolicy.defaultProtocolIdentityConfirmationResponseBudgetSeconds
+    ) -> ProvisionalInboundProcessingLease? {
+        let identifier = ObjectIdentifier(connection)
+        guard provisionalInboundConnections[identifier] != nil,
+              provisionalInboundTimeoutTasks[identifier] != nil else {
+            return nil
+        }
+        provisionalInboundTimeoutTasks.removeValue(forKey: identifier)?.task.cancel()
+        return armProvisionalInboundTimeout(
+            for: connection,
+            stage: stage,
+            timeoutSeconds: P2PInboundAdmissionPolicy.deadlineSeconds(
+                for: stage,
+                protocolIdentityConfirmationResponseBudgetSeconds:
+                    protocolIdentityConfirmationResponseBudgetSeconds
+            )
+        )
+    }
+
+    private func isCurrentProvisionalInboundProcessingLease(
+        _ lease: ProvisionalInboundProcessingLease,
+        for connection: NWConnection
+    ) -> Bool {
+        let identifier = ObjectIdentifier(connection)
+        return identifier == lease.connectionIdentifier
+            && provisionalInboundConnections[identifier] != nil
+            && provisionalInboundTimeoutTasks[identifier]?.token == lease.token
+    }
+
+    @discardableResult
+    private func finishProvisionalInboundConnection(
+        _ connection: NWConnection,
+        ifOwnedBy lease: ProvisionalInboundProcessingLease
+    ) -> Bool {
+        guard isCurrentProvisionalInboundProcessingLease(lease, for: connection) else {
+            return false
+        }
+        finishProvisionalInboundConnection(connection)
         return true
     }
 
     private func finishProvisionalInboundConnection(_ connection: NWConnection) {
         let identifier = ObjectIdentifier(connection)
         provisionalInboundConnections.removeValue(forKey: identifier)
-        provisionalInboundTimeoutTasks.removeValue(forKey: identifier)?.cancel()
+        provisionalInboundTimeoutTasks.removeValue(forKey: identifier)?.task.cancel()
     }
 
     private func cancelAllProvisionalInboundConnections() {
         let connections = Array(provisionalInboundConnections.values)
-        let tasks = Array(provisionalInboundTimeoutTasks.values)
+        let connectionIdentifiers = Set(connections.map(ObjectIdentifier.init))
+        let tasks = provisionalInboundTimeoutTasks.values.map(\.task)
+        let handlerTasks = inboundControlSessions.values.compactMap { session in
+            connectionIdentifiers.contains(ObjectIdentifier(session.connection))
+                ? session.task
+                : nil
+        }
         provisionalInboundConnections.removeAll(keepingCapacity: false)
         provisionalInboundTimeoutTasks.removeAll(keepingCapacity: false)
         tasks.forEach { $0.cancel() }
+        handlerTasks.forEach { $0.cancel() }
         connections.forEach { $0.cancel() }
     }
 
@@ -2675,6 +2815,12 @@ public class P2PDiscoveryService: BaseManager {
         let fingerprint: String
     }
 
+    private struct OutboundProtocolIdentityBindingResult: Sendable {
+        let fingerprint: String
+        let endpoint: NWEndpoint
+        let transactionReference: String
+    }
+
     private func ensureStrictPQCOutboundPreflightReady(
         for device: DiscoveredDevice,
         endpointAttempts: [NWEndpoint],
@@ -2766,7 +2912,8 @@ public class P2PDiscoveryService: BaseManager {
                 candidates: candidates,
                 endpoints: refreshEndpoints,
                 pinnedProtocolFingerprints: pinnedFingerprints,
-                preferredTargetSuite: preferredTargetSuite
+                preferredTargetSuite: preferredTargetSuite,
+                recoveryReference: identityBinding.transactionReference
             )
         } catch {
             if let discoveryError = error as? P2PDiscoveryError,
@@ -2793,7 +2940,7 @@ public class P2PDiscoveryService: BaseManager {
         targetDeviceId: String,
         candidates: [String],
         endpoints: [NWEndpoint]
-    ) async throws -> (fingerprint: String, endpoint: NWEndpoint) {
+    ) async throws -> OutboundProtocolIdentityBindingResult {
         let requesterIdentity = try await localProtocolIdentityProofForOutboundPIB()
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
         let nonce = Self.secureRandomNonce()
@@ -2836,19 +2983,22 @@ public class P2PDiscoveryService: BaseManager {
             nonce: unsignedRequest.nonce,
             sentAt: unsignedRequest.sentAt
         )
+        let transactionReference = P2PEvidenceReference.transaction(request.transactionId)
 
         let connectStartLine = "🔐 PIB-1 protocol identity binding connect-start: peer=\(Self.protocolIdentityLogRedaction) endpoints=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>connect"
         logger.info("\(connectStartLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(connectStartLine)
 
-        let responseTimeoutSeconds = Self.protocolIdentityBindingResponseTimeoutSeconds()
-        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) lifecycle=identity-oob>request"
+        let candidateResponseTimeoutSeconds =
+            P2PProtocolIdentityBindingAdmissionPolicy.candidateResponseTimeoutSeconds
+        let finalAckResponseTimeoutSeconds = Self.protocolIdentityBindingResponseTimeoutSeconds()
+        let requestLine = "🔐 PIB-1 protocol identity binding request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) pib_ref=\(transactionReference) algorithms=\(request.requestedProtocolSigningAlgorithms.joined(separator: ",")) responseTimeoutSeconds=\(Int(candidateResponseTimeoutSeconds)) lifecycle=identity-oob>request"
         logger.info("\(requestLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(requestLine)
         let exchange = try await exchangeBootstrapControlMessage(
             .protocolIdentityBindingRequest(request),
             endpoints: endpoints,
-            timeoutSeconds: responseTimeoutSeconds,
+            timeoutSeconds: candidateResponseTimeoutSeconds,
             targetHasStrongAuthority: true
         )
 
@@ -2873,7 +3023,7 @@ public class P2PDiscoveryService: BaseManager {
             throw Self.protocolIdentityBindingFailure("signature verification failed")
         }
 
-        let verifiedLine = "🔐 PIB-1 protocol identity binding signature verified: peer=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>verified"
+        let verifiedLine = "🔐 PIB-1 protocol identity binding signature verified: peer=\(Self.protocolIdentityLogRedaction) pib_ref=\(transactionReference) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>verified"
         logger.info("\(verifiedLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(verifiedLine)
 
@@ -2920,7 +3070,10 @@ public class P2PDiscoveryService: BaseManager {
             sasTranscriptHashHex: validated.sasTranscriptHashHex(request: request),
             confirmationNonce: Self.secureRandomNonce(),
             sentAt: confirmNow,
-            expiresAt: confirmNow.addingTimeInterval(300),
+            expiresAt: P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
+                parentExpiry: validated.expiresAt,
+                issuedAt: confirmNow
+            ),
             requesterSignature: Data()
         )
         let confirmSignature = try await requesterSignatureProvider.sign(
@@ -2946,10 +3099,13 @@ public class P2PDiscoveryService: BaseManager {
             exchange.endpoint,
             in: endpoints
         )
+        let confirmLine = "🔐 PIB-1 protocol identity binding confirm sent: peer=\(Self.protocolIdentityLogRedaction) pib_ref=\(transactionReference) transaction=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>confirm"
+        logger.info("\(confirmLine, privacy: .public)")
+        RemoteControlSmokeStatusWriter.append(confirmLine)
         let confirmationExchange = try await exchangeBootstrapControlMessage(
             .protocolIdentityBindingConfirm(confirm),
             endpoints: confirmationEndpoints,
-            timeoutSeconds: responseTimeoutSeconds,
+            timeoutSeconds: finalAckResponseTimeoutSeconds,
             targetHasStrongAuthority: true
         )
         if case .kemRefreshFailure(let failure) = confirmationExchange.response {
@@ -2972,7 +3128,6 @@ public class P2PDiscoveryService: BaseManager {
         ) else {
             throw Self.protocolIdentityBindingFailure("PIB-1 final acknowledgement signature invalid")
         }
-
         let promoted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
             deviceId: validated.deviceId,
             displayName: validated.deviceName ?? device.name,
@@ -2996,12 +3151,16 @@ public class P2PDiscoveryService: BaseManager {
             RemoteControlSmokeStatusWriter.append(cacheLine)
         }
 
-        let pinnedLine = "🔐 PIB-1 protocol identity binding pinned: peer=\(Self.protocolIdentityLogRedaction) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(approval.rawValue) lifecycle=identity-oob>pinned"
+        let pinnedLine = "🔐 PIB-1 protocol identity binding pinned: peer=\(Self.protocolIdentityLogRedaction) pib_ref=\(transactionReference) deviceId=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) operator=\(approval.rawValue) lifecycle=identity-oob>pinned"
         logger.info("\(pinnedLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(pinnedLine)
-        return (
-            validated.protocolIdentityFingerprint.lowercased(),
-            confirmationExchange.endpoint
+        let completedLine = "🔐 PIB-1 v3 protocol identity binding final acknowledgement verified and pinned: peer=\(Self.protocolIdentityLogRedaction) pib_ref=\(transactionReference) transaction=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>final-ack>pinned"
+        logger.info("\(completedLine, privacy: .public)")
+        RemoteControlSmokeStatusWriter.append(completedLine)
+        return OutboundProtocolIdentityBindingResult(
+            fingerprint: validated.protocolIdentityFingerprint.lowercased(),
+            endpoint: confirmationExchange.endpoint,
+            transactionReference: transactionReference
         )
     }
 
@@ -3011,7 +3170,8 @@ public class P2PDiscoveryService: BaseManager {
         candidates: [String],
         endpoints: [NWEndpoint],
         pinnedProtocolFingerprints: Set<String>,
-        preferredTargetSuite: CryptoSuite?
+        preferredTargetSuite: CryptoSuite?,
+        recoveryReference: String? = nil
     ) async throws -> NWEndpoint {
         let requestedSuites = await Self.signedLANRefreshRequestedSuites(preferredTargetSuite: preferredTargetSuite)
         let requesterDeviceId = try await localOutboundProtocolIdentityDeviceId()
@@ -3035,7 +3195,11 @@ public class P2PDiscoveryService: BaseManager {
         RemoteControlSmokeStatusWriter.append(connectStartLine)
         let startedAt = Date()
         let responseTimeoutSeconds = Self.signedLANRefreshResponseTimeoutSeconds()
-        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
+        guard let requestReference = P2PEvidenceReference.requestHash(request.canonicalRequestHashHex) else {
+            throw Self.signedLANRefreshFailure("canonical SKR request hash is invalid")
+        }
+        let recoveryLabel = recoveryReference ?? "-"
+        let requestLine = "🔐 SKR-1 signed LAN KEM refresh request: peer=\(Self.protocolIdentityLogRedaction) endpoint=\(Self.protocolIdentityLogRedaction) skr_ref=\(requestReference) recovery_ref=\(recoveryLabel) requesterProtocolIdentity=\(Self.protocolIdentityLogRedaction) suites=\(requestedSuites.map(\.rawValue).joined(separator: ",")) suiteWireIds=\(requestedSuites.map { String(format: "0x%04X", $0.wireId) }.joined(separator: ",")) responseTimeoutSeconds=\(Int(responseTimeoutSeconds)) pinnedProtocolIdentity=\(pinnedProtocolFingerprints.isEmpty ? 0 : 1) missingPeerKEM=1 lifecycle=missing-kem>request"
         logger.info("\(requestLine, privacy: .public)")
         RemoteControlSmokeStatusWriter.append(requestLine)
         let exchange = try await exchangeBootstrapControlMessage(
@@ -3058,6 +3222,12 @@ public class P2PDiscoveryService: BaseManager {
             pinnedProtocolFingerprints: pinnedProtocolFingerprints,
             minimumGeneration: minimumGeneration
         )
+        let payloadHashHex = SHA256.hash(data: validated.signaturePreimage)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        guard let payloadReference = P2PEvidenceReference.payloadHash(payloadHashHex) else {
+            throw Self.signedLANRefreshFailure("canonical SKR payload hash is invalid")
+        }
         try await PeerKEMBootstrapStore.shared.upsertSignedKEMRefresh(
             deviceIds: candidates + [targetDeviceId, validated.deviceId] + validated.aliases,
             payload: validated,
@@ -3075,8 +3245,11 @@ public class P2PDiscoveryService: BaseManager {
             .joined(separator: ",")
         let totalLatencyMs = Date().timeIntervalSince(startedAt) * 1_000.0
 	        let verifiedLine = String(
-	            format: "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=%@ suites=%@ wireId=%@ pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=%.1f connectLatencyMs=%.1f retryCount=%d lifecycle=served>verified metricScope=application-control-channel",
+	            format: "🔐 SKR-1 signed LAN KEM refresh verified and imported: peer=%@ skr_ref=%@ payload_ref=%@ recovery_ref=%@ suites=%@ wireId=%@ pinnedProtocolIdentity=1 signature=verified requestHash=bound latencyMs=%.1f connectLatencyMs=%.1f retryCount=%d lifecycle=served>verified metricScope=application-control-channel",
 	            Self.protocolIdentityLogRedaction,
+	            requestReference,
+	            payloadReference,
+	            recoveryLabel,
 	            importedSuites,
 	            validated.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.sorted().joined(separator: ","),
             totalLatencyMs,
@@ -3656,7 +3829,8 @@ public class P2PDiscoveryService: BaseManager {
     private static func protocolIdentityBindingResponseTimeoutSeconds() -> Double {
         guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_PIB_APPROVAL_TIMEOUT_SECONDS"],
               let value = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return 195
+            return P2PProtocolIdentityBindingAdmissionPolicy
+                .defaultFinalAckResponseTimeoutSeconds
         }
         return Double(min(max(value + 15, 45), 315))
     }
@@ -4236,6 +4410,18 @@ public class P2PDiscoveryService: BaseManager {
 
     private func performStopAdvertising() async {
         logger.info("📡 停止广播服务")
+        acceptingInboundControlConnections = false
+        let provisionalIdentifiers = Set(
+            provisionalInboundConnections.keys
+        )
+        let provisionalSessionIDs = Set(
+            inboundControlSessions.compactMap { sessionID, session in
+                provisionalIdentifiers.contains(ObjectIdentifier(session.connection))
+                    ? sessionID
+                    : nil
+            }
+        )
+        await cancelInboundControlSessions(matching: provisionalSessionIDs)
         cancelAllProvisionalInboundConnections()
         listener?.cancel()
         listener = nil
@@ -5379,7 +5565,7 @@ public class P2PDiscoveryService: BaseManager {
     @available(macOS 14.0, iOS 17.0, *)
     private nonisolated static func localSOAPeerIdBytes() async throws -> Data {
         let deviceId = try await SelfIdentityProvider.shared
-            .protocolIdentityDeviceId(allowCreate: true)
+            .existingProtocolIdentityDeviceIdReadOnly()
         return soaPeerIdBytes(from: deviceId)
     }
 
@@ -5442,16 +5628,12 @@ public class P2PDiscoveryService: BaseManager {
         let resolvedPeerId = await MainActor.run { [weak self] in
             self?.resolveInboundPeerIdentifier(for: connection.endpoint) ?? Self.fallbackPeerIdentifier(for: connection.endpoint)
         }
-        let localSOAPeerId: Data
-        do {
-            localSOAPeerId = try await Self.localSOAPeerIdBytes()
-        } catch {
-            logger.error(
-                "❌ inbound control channel local identity unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
-            )
-            connection.cancel()
-            return
-        }
+        // SOA is a MessageA concern. Bootstrap PIB/SKR frames must be read and
+        // classified without entering Keychain or identity-creation paths.
+        // Cache the committed identity for this socket so rekey reuses the same
+        // listener-generation authority.
+        var localSOAPeerId: Data?
+        var initialHandshakeProcessingLease: ProvisionalInboundProcessingLease?
         var expectedRemoteSOAPeerId: Data?
         // Protocol-grade gate:
         // Only .established promotes keys to the active business-traffic channel.
@@ -5915,24 +6097,63 @@ public class P2PDiscoveryService: BaseManager {
             while true {
                 if case .failed = connection.state { break }
                 if case .cancelled = connection.state { break }
+                let receiveTimeoutSeconds = didMarkEstablished
+                    || initialHandshakeProcessingLease != nil
+                    ? P2PInboundAdmissionPolicy.deadlineSeconds(for: .initialHandshake)
+                    : P2PInboundAdmissionPolicy.deadlineSeconds(for: .awaitingFirstFrame)
                 let payload = try await Self.receiveBootstrapFrame(
                     over: connection,
-                    timeoutSeconds: didMarkEstablished ? 45 : Self.provisionalInboundTimeoutSeconds
+                    timeoutSeconds: receiveTimeoutSeconds
                 )
                 let frame = Self.normalizeInboundControlFrame(payload)
 
                 if let plaintextControl = try? AppMessage.decodeWireMessage(from: frame),
                    Self.isInboundBootstrapControlRequest(plaintextControl) {
-                    // Clear the provisional first-frame timer before SKR/PIB signing.
-                    // Keychain + PQC sign can exceed provisionalInboundTimeoutSeconds and
-                    // otherwise cancel the socket mid-serve, leaving the requester without
-                    // a candidate and with no SAS UI.
-                    await MainActor.run {
-                        self.finishProvisionalInboundConnection(connection)
+                    // The peer supplied a valid bounded frame. Replace the
+                    // first-frame deadline with a longer processing deadline,
+                    // but retain the admission slot until signing and response
+                    // delivery complete.
+                    let processingStage: P2PInboundAdmissionStage
+                    if case .protocolIdentityBindingConfirm = plaintextControl {
+                        processingStage = .protocolIdentityConfirmation
+                    } else {
+                        processingStage = .bootstrapCrypto
+                    }
+                    let processingLease = await MainActor.run {
+                        self.beginProcessingProvisionalInboundConnection(
+                            connection,
+                            stage: processingStage,
+                            protocolIdentityConfirmationResponseBudgetSeconds:
+                                Self.protocolIdentityBindingResponseTimeoutSeconds()
+                        )
+                    }
+                    guard let processingLease else {
+                        connection.cancel()
+                        return
                     }
                     if let controlResponse = await Self.makeBootstrapControlResponse(for: plaintextControl) {
+                        try Task.checkCancellation()
+                        guard await MainActor.run(body: {
+                            self.isCurrentProvisionalInboundProcessingLease(
+                                processingLease,
+                                for: connection
+                            )
+                        }) else {
+                            connection.cancel()
+                            return
+                        }
                         let encoded = try JSONEncoder().encode(controlResponse.message)
                         try await sendFramed(encoded)
+                        try Task.checkCancellation()
+                        guard await MainActor.run(body: {
+                            self.isCurrentProvisionalInboundProcessingLease(
+                                processingLease,
+                                for: connection
+                            )
+                        }) else {
+                            connection.cancel()
+                            return
+                        }
                         if let binding = controlResponse.protocolIdentityBindingPayload,
                            let code = controlResponse.protocolIdentityBindingCode {
                             await MainActor.run {
@@ -5959,6 +6180,12 @@ public class P2PDiscoveryService: BaseManager {
                             logger.info("\(controlResponse.statusLine, privacy: .public)")
                         }
                         RemoteControlSmokeStatusWriter.append(controlResponse.statusLine)
+                        _ = await MainActor.run {
+                            self.finishProvisionalInboundConnection(
+                                connection,
+                                ifOwnedBy: processingLease
+                            )
+                        }
                         connection.cancel()
                         return
                     }
@@ -6259,13 +6486,50 @@ public class P2PDiscoveryService: BaseManager {
                 // 延迟初始化：必须先看到 MessageA 才知道对端 offeredSuites 分组，
                 // 从而选择本机可用的 (sigAAlgorithm / provider / offeredSuites) 组合。
                 if driver == nil {
-                    if let messageA = try? HandshakeMessageA.decode(from: frame) {
-                        await MainActor.run {
-                            self.finishProvisionalInboundConnection(connection)
+                    if (try? HandshakeMessageA.decode(from: frame)) != nil {
+                        let isInitialInboundHandshake = localSOAPeerId == nil
+                            && previousSessionKeysBeforeRekey == nil
+                        if isInitialInboundHandshake {
+                            let processingLease = await MainActor.run {
+                                self.beginProcessingProvisionalInboundConnection(
+                                    connection,
+                                    stage: .initialHandshake
+                                )
+                            }
+                            guard let processingLease else {
+                                connection.cancel()
+                                return
+                            }
+                            initialHandshakeProcessingLease = processingLease
                         }
+
+                        let preparedHandshakeFrame: PreparedInboundHandshakeFrame
+                        do {
+                            guard let prepared = try await Self.prepareInboundHandshakeFrame(
+                                frame,
+                                cachedLocalSOAPeerId: localSOAPeerId,
+                                loadLocalSOAPeerId: {
+                                    try await Self.localSOAPeerIdBytes()
+                                }
+                            ) else {
+                                connection.cancel()
+                                return
+                            }
+                            preparedHandshakeFrame = prepared
+                            localSOAPeerId = prepared.localSOAPeerId
+                            try Task.checkCancellation()
+                        } catch {
+                            logger.error(
+                                "❌ inbound control channel local identity unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                            )
+                            connection.cancel()
+                            return
+                        }
+                        let messageA = preparedHandshakeFrame.messageA
+                        let activeLocalSOAPeerId = preparedHandshakeFrame.localSOAPeerId
                         let soaBinding = InboundHandshakeAdapter.bindSOAState(
                             from: messageA,
-                            localPeerId: localSOAPeerId
+                            localPeerId: activeLocalSOAPeerId
                         )
                         expectedRemoteSOAPeerId = soaBinding.expectedRemotePeerId
                         inboundPairKey = soaBinding.pairKey
@@ -6278,6 +6542,7 @@ public class P2PDiscoveryService: BaseManager {
                                 messageA: messageA,
                                 candidateDeviceIds: [peer.deviceId]
                             )
+                            try Task.checkCancellation()
                         } catch {
                             logger.error(
                                 "❌ 入站协议身份选择失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public). peer=\(peerDiagnosticLabel, privacy: .public)"
@@ -6362,7 +6627,7 @@ public class P2PDiscoveryService: BaseManager {
                                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
                                 cryptoPolicy: cryptoPolicy,
-                                localSOAPeerId: localSOAPeerId,
+                                localSOAPeerId: activeLocalSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
                                 authenticatedIncomingEstablishedPolicy: effectivePolicy.requirePQC
                                     ? .replaceAuthenticated
@@ -6380,8 +6645,32 @@ public class P2PDiscoveryService: BaseManager {
                 }
 
                 guard let activeDriver = driver else { continue }
+                if let processingLease = initialHandshakeProcessingLease {
+                    try Task.checkCancellation()
+                    guard await MainActor.run(body: {
+                        self.isCurrentProvisionalInboundProcessingLease(
+                            processingLease,
+                            for: connection
+                        )
+                    }) else {
+                        connection.cancel()
+                        return
+                    }
+                }
                 await activeDriver.handleMessage(frame, from: peer)
                 let st = await activeDriver.getCurrentState()
+                if let processingLease = initialHandshakeProcessingLease {
+                    try Task.checkCancellation()
+                    guard await MainActor.run(body: {
+                        self.isCurrentProvisionalInboundProcessingLease(
+                            processingLease,
+                            for: connection
+                        )
+                    }) else {
+                        connection.cancel()
+                        return
+                    }
+                }
                 logger.debug("🤝 HandshakeDriver state: \(st.diagnosticSummary, privacy: .public)")
 
                 if case .failed(let reason) = st {
@@ -6432,7 +6721,15 @@ public class P2PDiscoveryService: BaseManager {
                         }
                     }
                 case .established(let keys):
-                    authenticatedRemoteAuthority = await activeDriver.getAuthenticatedRemoteAuthority()
+                    guard let resolvedRemoteAuthority = await activeDriver
+                        .getAuthenticatedRemoteAuthority() else {
+                        logger.error(
+                            "⛔️ inbound established without authenticated protocol authority; closing session peer=\(peerDiagnosticLabel, privacy: .public)"
+                        )
+                        connection.cancel()
+                        return
+                    }
+                    authenticatedRemoteAuthority = resolvedRemoteAuthority
                     let newArbiterLease = await activeDriver.getEstablishedArbiterLease()
                     if let inboundPairKey {
                         guard let newArbiterLease,
@@ -6449,6 +6746,19 @@ public class P2PDiscoveryService: BaseManager {
                     previousEstablishedArbiterLeaseBeforeRekey = nil
                     sessionKeys = keys
                     previousSessionKeysBeforeRekey = nil
+                    if let processingLease = initialHandshakeProcessingLease {
+                        try Task.checkCancellation()
+                        guard await MainActor.run(body: {
+                            self.finishProvisionalInboundConnection(
+                                connection,
+                                ifOwnedBy: processingLease
+                            )
+                        }) else {
+                            connection.cancel()
+                            return
+                        }
+                        initialHandshakeProcessingLease = nil
+                    }
                     do {
                         try await sendInboundPostAuthPairingIdentityExchange(keys: keys)
                     } catch {
@@ -6508,11 +6818,15 @@ public class P2PDiscoveryService: BaseManager {
         // protection has been removed.
         connection.cancel()
         if let driver {
-            switch await driver.getCurrentState() {
-            case .idle, .established, .failed:
-                break
-            default:
+            if !didMarkEstablished {
                 await driver.cancel()
+            } else {
+                switch await driver.getCurrentState() {
+                case .idle, .established, .failed:
+                    break
+                default:
+                    await driver.cancel()
+                }
             }
         }
         if let classicTransferSessionLease {

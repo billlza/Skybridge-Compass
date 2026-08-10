@@ -1,6 +1,20 @@
 import Foundation
 
 extension CrossNetworkConnectionManager {
+    internal enum WebRTCSetupFailureDisposition: Sendable, Equatable {
+        case rollback
+        case preserveCompletedSession
+    }
+
+    nonisolated static func webRTCSetupFailureDisposition(
+        exactSessionIsCurrent: Bool,
+        isHandshakeComplete: Bool
+    ) -> WebRTCSetupFailureDisposition {
+        exactSessionIsCurrent && isHandshakeComplete
+            ? .preserveCompletedSession
+            : .rollback
+    }
+
     internal struct WebRTCOutboundProtocolIdentitySelection: Sendable, Equatable {
         enum Mode: String, Sendable {
             case configuredAuthority

@@ -260,6 +260,7 @@ actor RemoteRealtimeMediaAudioSender {
     private let keys: SkyBridgeMediaDirectionKeys
     private let profile: SkyBridgeMediaAudioProfile
     private let mode: SkyBridgeMediaAudioMode
+    private let interfaceBindingIdentity: SkyBridgeRealtimeMediaInterfaceBinding.Identity?
     private let transportEventHandler: (@Sendable (SkyBridgeRealtimeMediaTransportEvent) -> Void)?
     private let transport: SkyBridgeRealtimeMediaTransport
     private let encoder: SkyBridgeOpusEncoder
@@ -300,10 +301,12 @@ actor RemoteRealtimeMediaAudioSender {
         endpoint: SkyBridgeMediaEndpoint,
         keys: SkyBridgeMediaDirectionKeys,
         mode: SkyBridgeMediaAudioMode,
+        interfaceBinding: SkyBridgeRealtimeMediaInterfaceBinding? = nil,
         relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy = .requireAcknowledgement,
         continuityState: ContinuityState? = nil,
         transport: SkyBridgeRealtimeMediaTransport? = nil,
-        transportEventHandler: (@Sendable (SkyBridgeRealtimeMediaTransportEvent) -> Void)? = nil
+        transportEventHandler: (@Sendable (SkyBridgeRealtimeMediaTransportEvent) -> Void)? = nil,
+        transportTerminalFailureHandler: (@Sendable (Error) -> Void)? = nil
     ) throws {
         self.sessionId = sessionId
         self.diagnosticSessionId = diagnosticSessionId ?? sessionId
@@ -311,12 +314,15 @@ actor RemoteRealtimeMediaAudioSender {
         self.endpoint = endpoint
         self.keys = keys
         self.mode = mode
+        self.interfaceBindingIdentity = interfaceBinding?.identity
         self.profile = SkyBridgeMediaAudioProfile.profile(for: mode)
         self.transportEventHandler = transportEventHandler
         self.transport = transport ?? SkyBridgeUDPRealtimeMediaTransport(
             endpoint: endpoint,
+            interfaceBinding: interfaceBinding,
             relayBindPolicy: relayBindPolicy,
-            startEventHandler: transportEventHandler
+            startEventHandler: transportEventHandler,
+            terminalFailureHandler: transportTerminalFailureHandler
         )
         self.currentRelayToken = Self.normalizedRelayToken(endpoint.relayToken)
         self.encoder = try SkyBridgeOpusEncoder(
@@ -378,8 +384,17 @@ actor RemoteRealtimeMediaAudioSender {
         startRelayBindingRefreshLoopIfNeeded()
     }
 
-    func matches(sessionId: String, endpoint: SkyBridgeMediaEndpoint, mode: SkyBridgeMediaAudioMode) -> Bool {
-        self.sessionId == sessionId && self.endpoint == endpoint && self.mode == mode && !closed
+    func matches(
+        sessionId: String,
+        endpoint: SkyBridgeMediaEndpoint,
+        mode: SkyBridgeMediaAudioMode,
+        interfaceBindingIdentity: SkyBridgeRealtimeMediaInterfaceBinding.Identity? = nil
+    ) -> Bool {
+        self.sessionId == sessionId
+            && self.endpoint == endpoint
+            && self.mode == mode
+            && self.interfaceBindingIdentity == interfaceBindingIdentity
+            && !closed
     }
 
     func telemetryTotals() -> (captured: UInt64, encoded: UInt64, sent: UInt64, dropped: UInt64) {
@@ -852,7 +867,8 @@ actor RemoteRealtimeMediaAudioReceiver {
     private let keys: SkyBridgeMediaDirectionKeys
     private let profile: SkyBridgeMediaAudioProfile
     private let mode: SkyBridgeMediaAudioMode
-    private let audioSessionId: UUID
+    nonisolated private let lifecycle = SkyBridgeRealtimeMediaReceiverLifecycle()
+    private var didClose = false
     private let decoder: SkyBridgeOpusDecoder
     private var replayWindow = SkyBridgeMediaReplayWindow()
     private var receivedPackets: UInt64 = 0
@@ -870,15 +886,13 @@ actor RemoteRealtimeMediaAudioReceiver {
     init(
         sessionId: String,
         keys: SkyBridgeMediaDirectionKeys,
-        mode: SkyBridgeMediaAudioMode,
-        audioSessionId: UUID
+        mode: SkyBridgeMediaAudioMode
     ) throws {
         self.diagnosticSessionId = sessionId
         self.sessionIdHash = SkyBridgeMediaPacketCodec.sessionIdHash(sessionId)
         self.keys = keys
         self.mode = mode
         self.profile = SkyBridgeMediaAudioProfile.profile(for: mode)
-        self.audioSessionId = audioSessionId
         self.decoder = try SkyBridgeOpusDecoder(
             sampleRate: profile.sampleRate,
             channels: profile.channels,
@@ -894,6 +908,7 @@ actor RemoteRealtimeMediaAudioReceiver {
     }
 
     func handle(datagram: SkyBridgeMediaReceivedDatagram, latestVideoTimestamp: TimeInterval?) async {
+        guard lifecycle.isActive else { return }
         do {
             let opened = try SkyBridgeMediaPacketCodec.open(
                 packet: datagram.packet,
@@ -934,12 +949,24 @@ actor RemoteRealtimeMediaAudioReceiver {
                 sentAt: Date().timeIntervalSince1970,
                 data: Self.data(from: samples)
             )
+            let lifecycle = self.lifecycle
+            guard lifecycle.isActive else { return }
             let didPlay = await MainActor.run { () -> Bool in
+                guard lifecycle.isActive else { return false }
                 do {
-                    try AudioRedirectionManager.shared.enable(for: audioSessionId)
-                    AudioRedirectionManager.shared.updateRemoteVideoTimestamp(latestVideoTimestamp)
-                    AudioRedirectionManager.shared.playRemoteAudioChunk(payload)
-                    return true
+                    guard try AudioRedirectionManager.shared.enable(for: lifecycle) else {
+                        return false
+                    }
+                    guard AudioRedirectionManager.shared.updateRemoteVideoTimestamp(
+                        latestVideoTimestamp,
+                        ifOwnedBy: lifecycle
+                    ) else {
+                        return false
+                    }
+                    return AudioRedirectionManager.shared.playRemoteAudioChunk(
+                        payload,
+                        ifOwnedBy: lifecycle
+                    )
                 } catch {
                     logger.debug("PQC media audio playback unavailable: \(error.localizedDescription, privacy: .public)")
                     return false
@@ -958,8 +985,11 @@ actor RemoteRealtimeMediaAudioReceiver {
     }
 
     func close(reason: String = "unspecified") async {
-        await MainActor.run {
-            AudioRedirectionManager.shared.disable()
+        guard !didClose else { return }
+        didClose = true
+        lifecycle.retire()
+        _ = await MainActor.run {
+            AudioRedirectionManager.shared.disable(ifOwnedBy: lifecycle)
         }
         logger.info(
             """
@@ -980,6 +1010,10 @@ actor RemoteRealtimeMediaAudioReceiver {
             failureReason: reason
         )
         WebRTCMediaDiagnosticWriter.append(diagnosticEvent)
+    }
+
+    nonisolated func retire() {
+        lifecycle.retire()
     }
 
     func diagnosticSnapshot() -> RealtimeMediaAudioReceiverDiagnosticSnapshot {

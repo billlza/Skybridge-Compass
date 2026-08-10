@@ -104,6 +104,7 @@ actor SignedKEMRefreshRequestAdmissionGate {
         requesterFingerprint: String,
         now: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) {
+        guard !Task.isCancelled else { return }
         prune(now: now)
         let key = replayKey(
             requestHashHex: requestHashHex,

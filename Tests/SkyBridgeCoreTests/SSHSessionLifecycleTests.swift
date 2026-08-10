@@ -423,6 +423,9 @@ final class SSHSessionLifecycleTests: XCTestCase {
         XCTAssertLessThan(staleClose.lowerBound, staleFailure.lowerBound)
         XCTAssertLessThan(staleFailure.lowerBound, directReturn.lowerBound)
         XCTAssertTrue(
+            source.contains("createChannel(promise, channelType: .session) { [weak self] child, type in")
+        )
+        XCTAssertTrue(
             source.contains("SSHTerminalHandler { [weak self] buffer, eventLoop in")
         )
         XCTAssertTrue(source.contains("await cleanupTerminalTransport("))

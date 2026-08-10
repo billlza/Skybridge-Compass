@@ -452,7 +452,7 @@ public final class SSHSession: ObservableObject {
         let sshHandler = try mainChannel.pipeline.syncOperations.handler(type: NIOSSHHandler.self)
         let outputBuffer = terminalOutputBuffer
         let presentationPipeline = terminalPresentationPipeline
-        sshHandler.createChannel(promise, channelType: .session) { child, type in
+        sshHandler.createChannel(promise, channelType: .session) { [weak self] child, type in
             guard case .session = type else {
                 return mainChannel.eventLoop.makeFailedFuture(SSHClientError.invalidChannelType)
             }

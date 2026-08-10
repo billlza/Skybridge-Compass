@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 /// 远程桌面常量
 public enum RemoteDesktopConstants {
@@ -28,8 +29,8 @@ public enum RemoteMessageType: String, Codable, Sendable {
     case keyboardEvent = "keyboardEvent"
     case clipboard = "clipboard"
     case streamConfiguration = "streamConfiguration"
-    // Compile-compatible future hook. The shared Mac/core wire enums do not
-    // define this yet; once they do, iOS LAN receive can consume it below.
+    // The payload is the shared, transaction-correlated acknowledgement from
+    // SkyBridgeProtocolCore; LAN and WebRTC both consume the same contract.
     case streamConfigurationAck = "streamConfigurationAck"
     case damageReport = "damageReport"
     case cursorUpdate = "cursorUpdate"
@@ -44,25 +45,6 @@ public struct RemoteMessage: Codable, Sendable {
     public init(type: RemoteMessageType, payload: Data) {
         self.type = type
         self.payload = payload
-    }
-}
-
-public struct RemoteDesktopStreamConfigurationAckPayload: Codable, Sendable {
-    public let acceptedAt: TimeInterval
-    public let streamRefreshToken: UInt64?
-    public let audioEndpointPresent: Bool
-    public let screenFrameTransport: String?
-
-    public init(
-        acceptedAt: TimeInterval,
-        streamRefreshToken: UInt64?,
-        audioEndpointPresent: Bool,
-        screenFrameTransport: String?
-    ) {
-        self.acceptedAt = acceptedAt
-        self.streamRefreshToken = streamRefreshToken
-        self.audioEndpointPresent = audioEndpointPresent
-        self.screenFrameTransport = screenFrameTransport
     }
 }
 

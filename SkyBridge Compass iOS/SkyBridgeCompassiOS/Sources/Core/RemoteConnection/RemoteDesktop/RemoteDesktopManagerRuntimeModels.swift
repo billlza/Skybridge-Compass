@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 
 actor RemoteDesktopViewerSettingsPersistenceCoordinator {
@@ -280,6 +281,142 @@ extension RemoteDesktopManager {
         case none
         case lan
         case crossNetwork
+    }
+
+    struct RealtimeMediaAudioBindingAvailabilityPolicy {
+        static func isUsable(
+            transportMode: ActiveTransportMode,
+            hasRenderer: Bool,
+            hasLANReceiver: Bool,
+            hasRelayTransport: Bool,
+            installedMode: SkyBridgeMediaAudioMode?,
+            expectedMode: SkyBridgeMediaAudioMode
+        ) -> Bool {
+            guard hasRenderer, installedMode == expectedMode else { return false }
+            switch transportMode {
+            case .none:
+                return false
+            case .lan:
+                return hasLANReceiver
+            case .crossNetwork:
+                return hasRelayTransport
+            }
+        }
+    }
+
+    /// Single mutation authority for viewer transport lifecycle changes.
+    ///
+    /// A teardown invalidates an in-flight connection attempt before its first
+    /// await and blocks a new attempt until cleanup has completed. The
+    /// monotonic generation also lets start-stream work prove that it did not
+    /// resume after a stop/disconnect or replacement.
+    final class RemoteDesktopSessionMutationGate {
+        struct ConnectionAttempt: Equatable {
+            fileprivate let id: UUID
+            fileprivate let generation: UInt64
+        }
+
+        struct ExclusiveMutation: Equatable {
+            fileprivate let id: UUID
+            fileprivate let generation: UInt64
+        }
+
+        struct OperationWitness: Equatable {
+            fileprivate let generation: UInt64
+        }
+
+        private var generation: UInt64 = 0
+        private var activeConnectionAttempt: ConnectionAttempt?
+        private var activeExclusiveMutation: ExclusiveMutation?
+
+        var hasActiveExclusiveMutation: Bool {
+            activeExclusiveMutation != nil
+        }
+
+        func beginConnectionAttempt() -> ConnectionAttempt? {
+            guard activeConnectionAttempt == nil,
+                  activeExclusiveMutation == nil else {
+                return nil
+            }
+            generation &+= 1
+            let attempt = ConnectionAttempt(id: UUID(), generation: generation)
+            activeConnectionAttempt = attempt
+            return attempt
+        }
+
+        func isCurrent(_ attempt: ConnectionAttempt) -> Bool {
+            activeConnectionAttempt == attempt
+                && activeExclusiveMutation == nil
+                && generation == attempt.generation
+        }
+
+        func finish(_ attempt: ConnectionAttempt) {
+            guard activeConnectionAttempt == attempt else { return }
+            activeConnectionAttempt = nil
+        }
+
+        func beginExclusiveMutation(ifCurrent ownerIsCurrent: Bool = true)
+            -> ExclusiveMutation? {
+            guard ownerIsCurrent, activeExclusiveMutation == nil else { return nil }
+            generation &+= 1
+            activeConnectionAttempt = nil
+            let mutation = ExclusiveMutation(id: UUID(), generation: generation)
+            activeExclusiveMutation = mutation
+            return mutation
+        }
+
+        func isCurrent(_ mutation: ExclusiveMutation) -> Bool {
+            activeExclusiveMutation == mutation
+                && generation == mutation.generation
+        }
+
+        func canCommit(
+            _ mutation: ExclusiveMutation,
+            ownerIsCurrent: Bool = true
+        ) -> Bool {
+            isCurrent(mutation) && ownerIsCurrent
+        }
+
+        func finish(_ mutation: ExclusiveMutation) {
+            guard activeExclusiveMutation == mutation else { return }
+            activeExclusiveMutation = nil
+        }
+
+        func captureOperationWitness() -> OperationWitness? {
+            guard activeExclusiveMutation == nil else { return nil }
+            return OperationWitness(generation: generation)
+        }
+
+        func isCurrent(_ witness: OperationWitness) -> Bool {
+            activeExclusiveMutation == nil && generation == witness.generation
+        }
+    }
+
+    /// Latest-wins authority for logical stream-configuration sends inside an
+    /// already authenticated session. The wire transaction is also echoed by
+    /// the receiver, so send completion and acknowledgement cannot be claimed
+    /// by an older operation.
+    final class RemoteDesktopStreamConfigurationOperationGate {
+        private var currentTransaction: RemoteDesktopStreamConfigurationTransaction?
+
+        func begin() -> RemoteDesktopStreamConfigurationTransaction {
+            let transaction = RemoteDesktopStreamConfigurationTransaction()
+            currentTransaction = transaction
+            return transaction
+        }
+
+        func isCurrent(_ transaction: RemoteDesktopStreamConfigurationTransaction) -> Bool {
+            currentTransaction == transaction
+        }
+
+        func invalidate(_ transaction: RemoteDesktopStreamConfigurationTransaction) {
+            guard currentTransaction == transaction else { return }
+            currentTransaction = nil
+        }
+
+        func invalidateCurrent() {
+            currentTransaction = nil
+        }
     }
 
     struct PendingDecodeCompletion {

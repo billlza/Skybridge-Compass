@@ -13,6 +13,7 @@
 		0738F8013C52A20FD9AE961B /* ApplePQCProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDB697072B181F5CE4F84C7A /* ApplePQCProvider.swift */; };
 		08B9B70755911B1C1726E073 /* RuntimeEnvironmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A27339A25B886372FA064100 /* RuntimeEnvironmentTests.swift */; };
 		09CD4FD9BD65179DA37FA28B /* RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 630AE4B941EE9F5852640087 /* RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift */; };
+		34008B7EE4FB400A89831DA4 /* RemoteDesktopTransportSelectionPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF9083EB004A4F84B7E45EFE /* RemoteDesktopTransportSelectionPolicyTests.swift */; };
 		0BD15FB4EF9DF9CBF81527F5 /* CrossNetworkWebRTCPQCHandshakePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF934D9BAC78C00AEA063B40 /* CrossNetworkWebRTCPQCHandshakePolicy.swift */; };
 		0BD313C4C5139FFF7F6DE35D /* QuickActionButtonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56BC016A1595D3C5E14E5591 /* QuickActionButtonView.swift */; };
 		0DE9AEC41B80EF9BA6D6A92E /* PolicyDecisionSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 828E67B857C238E15711B76B /* PolicyDecisionSnapshot.swift */; };
@@ -368,6 +369,7 @@
 		61CE938D6222EAEDF491F6CC /* RemoteVideoFrameFeedTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVideoFrameFeedTests.swift; sourceTree = "<group>"; };
 		625612618E7302D401035FAB /* P2PError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P2PError.swift; sourceTree = "<group>"; };
 		630AE4B941EE9F5852640087 /* RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift; sourceTree = "<group>"; };
+		DF9083EB004A4F84B7E45EFE /* RemoteDesktopTransportSelectionPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopTransportSelectionPolicyTests.swift; sourceTree = "<group>"; };
 		64B4B8B97D2AD19F1A9A3684 /* DeviceDiscoveryIdentityPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryIdentityPolicyTests.swift; sourceTree = "<group>"; };
 		659727828D97800AA64D41C4 /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
 		65C90057705D92FEF526C65C /* HandshakeCryptoPolicyParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeCryptoPolicyParityTests.swift; sourceTree = "<group>"; };
@@ -679,6 +681,7 @@
 				2465DF9A606FE86C87570AB8 /* RemoteDesktopLANEndpointCandidateFactoryTests.swift */,
 				C72BEF3ABEC76220637A5BA4 /* RemoteDesktopViewerStreamConfigurationFactoryTests.swift */,
 				630AE4B941EE9F5852640087 /* RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift */,
+				DF9083EB004A4F84B7E45EFE /* RemoteDesktopTransportSelectionPolicyTests.swift */,
 				61CE938D6222EAEDF491F6CC /* RemoteVideoFrameFeedTests.swift */,
 				A27339A25B886372FA064100 /* RuntimeEnvironmentTests.swift */,
 				4D65FD439EE7832BF8C9D16D /* SettingsManagerContractTests.swift */,
@@ -1338,6 +1341,7 @@
 				5BEAA97DABA98682075F69B4 /* RemoteDesktopLANEndpointCandidateFactoryTests.swift in Sources */,
 				45C96EA5B948179A62025C37 /* RemoteDesktopViewerStreamConfigurationFactoryTests.swift in Sources */,
 				09CD4FD9BD65179DA37FA28B /* RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift in Sources */,
+				34008B7EE4FB400A89831DA4 /* RemoteDesktopTransportSelectionPolicyTests.swift in Sources */,
 				B927E56A771624F1BD9C8454 /* RemoteVideoFrameFeedTests.swift in Sources */,
 				08B9B70755911B1C1726E073 /* RuntimeEnvironmentTests.swift in Sources */,
 				7D0BA0FCF9772741DB449EF9 /* STUNClientSecurityTests.swift in Sources */,

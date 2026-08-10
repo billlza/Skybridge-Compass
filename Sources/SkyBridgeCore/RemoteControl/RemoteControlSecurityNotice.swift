@@ -177,6 +177,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
     private enum CodingKeys: String, CodingKey {
         case id
         case sessionId
+        case sessionEvidenceReference
         case transportKind
         case remoteIPAddress
         case remoteDeviceId
@@ -193,6 +194,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
     private struct DecodedFields {
         let id: UUID
         let sessionId: String
+        let sessionEvidenceReference: String?
         let transportKind: RemoteControlTransportKind
         let remoteIPAddress: String?
         let remoteDeviceId: String?
@@ -213,6 +215,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
 
     public let id: UUID
     public let sessionId: String
+    public let sessionEvidenceReference: String?
     public let transportKind: RemoteControlTransportKind
     public let remoteIPAddress: String?
     public let remoteDeviceId: String?
@@ -228,6 +231,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
     public init(
         id: UUID = UUID(),
         sessionId: String,
+        sessionEvidenceReference: String? = nil,
         transportKind: RemoteControlTransportKind,
         remoteIPAddress: String?,
         remoteDeviceId: String?,
@@ -242,6 +246,9 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
     ) {
         self.id = id
         self.sessionId = Self.normalized(sessionId, maximumLength: 256) ?? ""
+        self.sessionEvidenceReference = sessionEvidenceReference.flatMap {
+            P2PEvidenceReference.isValid($0) ? $0 : nil
+        }
         self.transportKind = transportKind
         self.remoteIPAddress = Self.normalized(remoteIPAddress, maximumLength: 256)
         self.remoteDeviceId = Self.normalized(remoteDeviceId, maximumLength: 256)
@@ -273,6 +280,10 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
         let fields = DecodedFields(
             id: try container.decode(UUID.self, forKey: .id),
             sessionId: try container.decode(String.self, forKey: .sessionId),
+            sessionEvidenceReference: try container.decodeIfPresent(
+                String.self,
+                forKey: .sessionEvidenceReference
+            ),
             transportKind: try container.decode(
                 RemoteControlTransportKind.self,
                 forKey: .transportKind
@@ -309,6 +320,7 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
         .init(
             id: id,
             sessionId: sessionId,
+            sessionEvidenceReference: sessionEvidenceReference,
             transportKind: transportKind,
             remoteIPAddress: remoteIPAddress,
             remoteDeviceId: remoteDeviceId,
@@ -362,6 +374,9 @@ public struct RemoteControlSecurityDescriptor: Identifiable, Codable, Sendable, 
             throw ValidationFailure(field: .sessionId, maximumLength: 256)
         }
         sessionId = validatedSessionId
+        sessionEvidenceReference = fields.sessionEvidenceReference.flatMap {
+            P2PEvidenceReference.isValid($0) ? $0 : nil
+        }
         transportKind = fields.transportKind
         remoteIPAddress = try Self.validated(
             fields.remoteIPAddress,
@@ -887,7 +902,7 @@ enum RemoteControlSecurityAdmissionPolicy {
     ) -> Bool {
         guard !isApproved else { return true }
         switch type {
-        case .streamConfiguration, .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
+        case .streamConfiguration, .streamConfigurationAck, .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
              .mouseEvent, .keyboardEvent, .clipboard:
             return false
         }
@@ -1277,6 +1292,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         RemoteControlSmokeStatusWriter.append(
             """
             remoteControlNotice\(event) session=\(Self.statusValue(descriptor.sessionId)) \
+            session_ref=\(descriptor.sessionEvidenceReference ?? "-") \
             transport=\(descriptor.transportKind.evidenceValue) \
             remoteIP=\(Self.statusValue(descriptor.remoteIPAddress)) \
             remoteDeviceId=\(Self.statusValue(descriptor.remoteDeviceId)) \

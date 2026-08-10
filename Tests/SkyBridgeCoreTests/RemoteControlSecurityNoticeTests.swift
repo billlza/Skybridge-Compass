@@ -1191,7 +1191,9 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         let source = try repositorySource("Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift")
 
         XCTAssertTrue(
-            source.contains("guard webrtcRemoteControlNoticeApprovedSessionIds.contains(sessionID) else") &&
+            source.contains("guard isWebRTCRemoteControlSecurityApproved(") &&
+            source.contains("webrtcRemoteControlNoticeApprovedSessionOwners[sessionID]") &&
+            source.contains("== ObjectIdentifier(session)") &&
             source.contains("stopWebRTCClipboardSyncIfNeeded(for: sessionID)") &&
             source.contains("remoteControlClipboardSendBlocked session=\\(sessionID) transport=webrtc reason=awaiting_security_notice"),
             "WebRTC local pasteboard forwarding must fail closed even if a stale clipboard callback fires before notice approval."
@@ -1203,6 +1205,30 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
                 source.contains("remoteControlStreamConfigDeferred session=\\(sessionID) transport=webrtc reason=awaiting_security_notice"),
             "WebRTC streamConfiguration may be staged before approval, but must not be applied or acknowledged until the security notice is approved."
         )
+    }
+
+    func testWebRTCActiveNoticeDisconnectBindsSessionObjectNotRekeyableKeys() throws {
+        let source = try repositorySource(
+            "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+        )
+        let handlerStart = try XCTUnwrap(
+            source.range(
+                of: "let disconnectHandler: RemoteControlSecurityNoticeCenter.DisconnectHandler"
+            )
+        )
+        let handlerEnd = try XCTUnwrap(
+            source.range(
+                of: "noticeCenter.setDisconnectHandler(",
+                range: handlerStart.upperBound..<source.endIndex
+            )
+        )
+        let handlerBody = source[handlerStart.lowerBound..<handlerEnd.lowerBound]
+
+        XCTAssertTrue(
+            handlerBody.contains("self.webrtcSessionsBySessionId[sessionID] === session")
+        )
+        XCTAssertFalse(handlerBody.contains("isCurrentWebRTCRemoteControlSession("))
+        XCTAssertTrue(source.contains("handler: disconnectHandler"))
     }
 
     func testSecurityNoticePanelDoesNotFallbackToLocalIdentity() throws {

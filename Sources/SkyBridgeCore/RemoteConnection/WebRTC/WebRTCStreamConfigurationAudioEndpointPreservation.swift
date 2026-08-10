@@ -63,6 +63,7 @@ extension CrossNetworkConnectionManager {
             performanceValidationMode: config.performanceValidationMode ?? previousConfig.performanceValidationMode,
             mediaFallbackPolicy: config.mediaFallbackPolicy ?? previousConfig.mediaFallbackPolicy,
             streamRefreshToken: config.streamRefreshToken,
+            streamConfigurationTransaction: config.streamConfigurationTransaction,
             sentAt: config.sentAt
         )
     }

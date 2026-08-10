@@ -6,10 +6,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)sharedDevice;
 
+- (void)activateRecordedAudioOwnerWithToken:(NSUUID *)ownerToken;
+- (void)retireRecordedAudioOwnerWithToken:(NSUUID *)ownerToken;
+
 - (void)pushRecordedPCM16InterleavedData:(NSData *)data
                               sampleRate:(NSInteger)sampleRate
                             channelCount:(NSInteger)channelCount
-                              frameCount:(NSInteger)frameCount;
+                              frameCount:(NSInteger)frameCount
+                              ownerToken:(NSUUID *)ownerToken;
 
 @end
 

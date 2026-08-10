@@ -12,6 +12,340 @@ fail() {
   exit 1
 }
 
+test_package_output_policy() {
+  (
+    set -euo pipefail
+
+    policy_sandbox="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-package-output-policy.XXXXXX")"
+    trap '/bin/rm -rf -- "${policy_sandbox}"' EXIT
+
+    policy_project_root="${policy_sandbox}/project"
+    policy_defaultless_root="${policy_sandbox}/default project"
+    policy_custom_output="${policy_sandbox}/output with spaces"
+    policy_wrong_mode_output="${policy_sandbox}/wrong-mode-output"
+    policy_output_link="${policy_sandbox}/output-link"
+    policy_victim_dir="${policy_sandbox}/must-survive"
+    mkdir -p \
+      "${policy_project_root}/dist" \
+      "${policy_defaultless_root}" \
+      "${policy_custom_output}" \
+      "${policy_wrong_mode_output}" \
+      "${policy_victim_dir}"
+    chmod 0700 \
+      "${policy_project_root}" \
+      "${policy_project_root}/dist" \
+      "${policy_defaultless_root}" \
+      "${policy_custom_output}" \
+      "${policy_victim_dir}"
+    chmod 0755 "${policy_wrong_mode_output}"
+    ln -s "${policy_custom_output}" "${policy_output_link}"
+
+    canonical_defaultless_root="$(cd "${policy_defaultless_root}" && pwd -P)"
+    expected_default_path="${canonical_defaultless_root}/dist/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+    resolved_default_path="$(skybridge_resolve_package_app_path \
+      "${policy_defaultless_root}" \
+      "app" \
+      "")"
+    [[ "${resolved_default_path}" == "${expected_default_path}" ]] \
+      || fail "default app packaging path must remain project dist even before dist exists"
+    skybridge_remove_package_app_bundle_for_replacement \
+      "${policy_defaultless_root}" \
+      "app" \
+      "" \
+      "${resolved_default_path}" \
+      || fail "missing default dist should require no replacement removal"
+    [[ ! -e "${canonical_defaultless_root}/dist" && ! -L "${canonical_defaultless_root}/dist" ]] \
+      || fail "replacement policy must not create a missing default dist"
+
+    canonical_custom_output="$(cd "${policy_custom_output}" && pwd -P)"
+    expected_custom_path="${canonical_custom_output}/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+    resolved_custom_path="$(skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_custom_output}")"
+    [[ "${resolved_custom_path}" == "${expected_custom_path}" ]] \
+      || fail "custom app output with spaces must resolve to the fixed bundle child"
+
+    mkdir -p "${expected_custom_path}"
+    printf 'sibling-must-survive\n' > "${canonical_custom_output}/sibling.txt"
+    skybridge_remove_package_app_bundle_for_replacement \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_custom_output}" \
+      "${resolved_custom_path}" \
+      || fail "validated custom App Bundle should be replaceable"
+    [[ ! -e "${expected_custom_path}" && ! -L "${expected_custom_path}" ]] \
+      || fail "replacement must remove only the fixed App Bundle target"
+    [[ "$(<"${canonical_custom_output}/sibling.txt")" == "sibling-must-survive" ]] \
+      || fail "replacement must not modify an output-directory sibling"
+
+    mkdir -p "${expected_custom_path}"
+    chmod 0755 "${canonical_custom_output}"
+    if skybridge_remove_package_app_bundle_for_replacement \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_custom_output}" \
+      "${resolved_custom_path}" >/dev/null 2>&1; then
+      fail "replacement must revalidate output permissions immediately before removal"
+    fi
+    [[ -d "${expected_custom_path}" ]] \
+      || fail "failed permission revalidation must preserve the existing App Bundle"
+    chmod 0700 "${canonical_custom_output}"
+    /bin/rm -rf -- "${expected_custom_path}"
+
+    printf 'victim-must-survive\n' > "${policy_victim_dir}/marker.txt"
+    ln -s "${policy_victim_dir}" "${expected_custom_path}"
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_custom_output}" >/dev/null 2>&1; then
+      fail "custom packaging must reject a symlink final App Bundle target"
+    fi
+    if skybridge_remove_package_app_bundle_for_replacement \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_custom_output}" \
+      "${resolved_custom_path}" >/dev/null 2>&1; then
+      fail "replacement revalidation must reject a symlink target introduced after resolution"
+    fi
+    [[ -L "${expected_custom_path}" ]] \
+      || fail "failed target revalidation must leave the symlink in place"
+    [[ "$(<"${policy_victim_dir}/marker.txt")" == "victim-must-survive" ]] \
+      || fail "failed target revalidation must not touch the symlink destination"
+    /bin/rm -- "${expected_custom_path}"
+
+    (
+      set -euo pipefail
+
+      policy_race_original_output="${policy_sandbox}/output-before-parent-swap"
+      policy_race_ready_fifo="${policy_sandbox}/parent-swap-ready.fifo"
+      policy_race_swapped_fifo="${policy_sandbox}/parent-swap-complete.fifo"
+      policy_race_victim_app="${policy_victim_dir}/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+      policy_race_expected_status="swapped"
+      mkdir -p "${expected_custom_path}" "${policy_race_victim_app}"
+      printf 'original-app-must-survive\n' > "${expected_custom_path}/marker.txt"
+      printf 'victim-app-must-survive\n' > "${policy_race_victim_app}/marker.txt"
+      mkfifo "${policy_race_ready_fifo}" "${policy_race_swapped_fifo}"
+
+      eval "$(declare -f skybridge_resolve_package_app_path | \
+        sed '1s/^skybridge_resolve_package_app_path /skybridge_resolve_package_app_path_without_parent_swap /')"
+      skybridge_resolve_package_app_path() {
+        local resolver_status=0
+        local swap_status
+
+        skybridge_resolve_package_app_path_without_parent_swap "$@" || resolver_status=$?
+        if [[ "${resolver_status}" != "0" ]]; then
+          return "${resolver_status}"
+        fi
+
+        printf 'ready\n' > "${policy_race_ready_fifo}"
+        IFS= read -r swap_status < "${policy_race_swapped_fifo}"
+        [[ "${swap_status}" == "${policy_race_expected_status}" ]]
+      }
+
+      (
+        swap_status="failed"
+        trap 'printf "%s\n" "${swap_status}" > "${policy_race_swapped_fifo}"' EXIT
+        IFS= read -r ready_status < "${policy_race_ready_fifo}"
+        [[ "${ready_status}" == "ready" ]]
+        mv "${policy_custom_output}" "${policy_race_original_output}"
+        ln -s "${policy_victim_dir}" "${policy_custom_output}"
+        swap_status="swapped"
+      ) &
+      policy_race_pid=$!
+
+      if skybridge_remove_package_app_bundle_for_replacement \
+        "${policy_project_root}" \
+        "app" \
+        "${policy_custom_output}" \
+        "${resolved_custom_path}" >/dev/null 2>&1; then
+        fail "replacement must fail closed when the validated parent is swapped for a symlink"
+      fi
+      wait "${policy_race_pid}"
+
+      [[ -L "${policy_custom_output}" ]] \
+        || fail "parent-swap rejection must leave the replacement symlink in place"
+      [[ "$(<"${policy_race_victim_app}/marker.txt")" == "victim-app-must-survive" ]] \
+        || fail "parent-swap rejection must not delete the victim's fixed bundle child"
+      [[ "$(<"${policy_race_original_output}/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}/marker.txt")" == "original-app-must-survive" ]] \
+        || fail "parent-swap rejection must preserve the originally validated bundle"
+
+      /bin/rm -- "${policy_custom_output}"
+      mv "${policy_race_original_output}" "${policy_custom_output}"
+      /bin/rm -rf -- "${expected_custom_path}"
+
+      policy_race_disappeared_output="${policy_sandbox}/output-before-disappear"
+      policy_race_expected_status="disappeared"
+      mkdir -p "${expected_custom_path}"
+      printf 'disappeared-parent-app-must-survive\n' > "${expected_custom_path}/marker.txt"
+      (
+        swap_status="failed"
+        trap 'printf "%s\n" "${swap_status}" > "${policy_race_swapped_fifo}"' EXIT
+        IFS= read -r ready_status < "${policy_race_ready_fifo}"
+        [[ "${ready_status}" == "ready" ]]
+        mv "${policy_custom_output}" "${policy_race_disappeared_output}"
+        swap_status="disappeared"
+      ) &
+      policy_race_pid=$!
+
+      if skybridge_remove_package_app_bundle_for_replacement \
+        "${policy_project_root}" \
+        "app" \
+        "${policy_custom_output}" \
+        "${resolved_custom_path}" >/dev/null 2>&1; then
+        fail "replacement must fail closed when an explicit output disappears after validation"
+      fi
+      wait "${policy_race_pid}"
+
+      [[ ! -e "${policy_custom_output}" && ! -L "${policy_custom_output}" ]] \
+        || fail "disappear-after-resolve regression must leave the original output path absent"
+      [[ "$(<"${policy_race_disappeared_output}/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}/marker.txt")" == "disappeared-parent-app-must-survive" ]] \
+        || fail "disappear-after-resolve rejection must preserve the validated bundle"
+
+      mv "${policy_race_disappeared_output}" "${policy_custom_output}"
+      /bin/rm -rf -- "${expected_custom_path}"
+      /bin/rm -- "${policy_race_ready_fifo}" "${policy_race_swapped_fifo}"
+    )
+
+    printf 'not-a-directory\n' > "${expected_custom_path}"
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_custom_output}" >/dev/null 2>&1; then
+      fail "custom packaging must reject a non-directory final target"
+    fi
+    /bin/rm -- "${expected_custom_path}"
+
+    canonical_project_root="$(cd "${policy_project_root}" && pwd -P)"
+    canonical_dist="$(cd "${policy_project_root}/dist" && pwd -P)"
+    resolved_release_path="$(skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "release_dmg" \
+      "${canonical_dist}")"
+    [[ "${resolved_release_path}" == "${canonical_dist}/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}" ]] \
+      || fail "release_dmg must accept build_dmg's explicit pin to project dist"
+
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "release_dmg" \
+      "${policy_custom_output}" >/dev/null 2>&1; then
+      fail "release_dmg must reject a redirected output directory"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${canonical_dist}" >/dev/null 2>&1; then
+      fail "app context must not treat explicit project dist as a custom output"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${canonical_project_root}" >/dev/null 2>&1; then
+      fail "custom app output must reject the project root"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${HOME}" >/dev/null 2>&1; then
+      fail "custom app output must reject HOME"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "/" >/dev/null 2>&1; then
+      fail "custom app output must reject the filesystem root"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "relative-output" >/dev/null 2>&1; then
+      fail "custom app output must reject relative paths"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_sandbox}/missing-output" >/dev/null 2>&1; then
+      fail "custom app output must already exist"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_wrong_mode_output}" >/dev/null 2>&1; then
+      fail "custom app output must have exact 0700 permissions"
+    fi
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_output_link}" >/dev/null 2>&1; then
+      fail "custom app output must reject a symlink directory"
+    fi
+
+    policy_newline_output="${policy_sandbox}/newline"$'\n'"output"
+    mkdir -p "${policy_newline_output}"
+    chmod 0700 "${policy_newline_output}"
+    if skybridge_resolve_package_app_path \
+      "${policy_project_root}" \
+      "app" \
+      "${policy_newline_output}" >/dev/null 2>&1; then
+      fail "custom app output must reject newline control characters"
+    fi
+  )
+}
+
+test_package_output_policy \
+  || fail "package output policy regression suite failed"
+
+package_app_script="${SCRIPT_DIR}/package_app.sh"
+sign_app_script="${SCRIPT_DIR}/sign_app.sh"
+build_dmg_script="${SCRIPT_DIR}/build_dmg.sh"
+[[ "$(grep -c 'skybridge_resolve_package_app_path' "${package_app_script}")" == "1" ]] \
+  || fail "package_app must resolve its App Bundle output through package build policy exactly once"
+[[ "$(grep -c 'skybridge_remove_package_app_bundle_for_replacement' "${package_app_script}")" == "1" ]] \
+  || fail "package_app must replace its App Bundle through the revalidating policy helper"
+if grep -F 'rm -rf "${APP_DIR}"' "${package_app_script}" >/dev/null 2>&1; then
+  fail "package_app must not bypass output-policy revalidation with direct App Bundle removal"
+fi
+[[ "$(grep -Fc 'SKYBRIDGE_PACKAGE_OUTPUT_DIR="$DIST_DIR"' "${build_dmg_script}")" == "2" ]] \
+  || fail "both build_dmg package_app invocations must pin output to project dist"
+
+test_owner_executable_signing_policy() {
+  (
+    set -euo pipefail
+
+    executable_sandbox="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-owner-executable.XXXXXX")"
+    trap '/bin/rm -rf -- "${executable_sandbox}"' EXIT
+    owner_executable="${executable_sandbox}/owner-executable"
+    other_executable="${executable_sandbox}/other-executable"
+    printf 'owner\n' > "${owner_executable}"
+    printf 'other\n' > "${other_executable}"
+    chmod 0700 "${owner_executable}"
+    chmod 0001 "${other_executable}"
+
+    matched_executables="$(find "${executable_sandbox}" -type f -perm -u+x -print)"
+    [[ "${matched_executables}" == "${owner_executable}" ]] \
+      || fail "owner-executable signing predicate must select 0700 files and reject files without owner execute"
+  )
+}
+
+test_owner_executable_signing_policy \
+  || fail "owner-executable signing predicate regression suite failed"
+
+grep -Fq -- 'find "${bundle}/Contents/MacOS" -type f -perm -u+x' "${package_app_script}" \
+  || fail "package_app resource-bundle signing must include 0700 owner-executable files"
+grep -Fq -- '-name "*.so" -o -perm -u+x' "${package_app_script}" \
+  || fail "package_app framework signing must include 0700 owner-executable files"
+grep -Fq -- 'find "${CONTENTS_DIR}/Library/LaunchDaemons" -type f -perm -u+x' "${package_app_script}" \
+  || fail "package_app helper signing must include 0700 owner-executable files"
+grep -Fq -- 'find "${MACOS_DIR}" -type f -perm -u+x' "${package_app_script}" \
+  || fail "package_app main-executable signing must include 0700 owner-executable files"
+grep -Fq -- 'find "${helpers_dir}" -type f -perm -u+x' "${sign_app_script}" \
+  || fail "sign_app helper signing must include 0700 owner-executable files"
+if grep -Fq -- '-perm -111' "${package_app_script}" "${sign_app_script}"; then
+  fail "packaging signers must not require group/other execute bits when selecting owner-executable files"
+fi
+grep -Fq -- 'codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${HELPER_DST_DIR}"' "${package_app_script}" \
+  || fail "package_app must apply hardened runtime when explicitly signing PowerMetricsHelper"
+
 write_release_platform_metadata_plist() {
   local plist_path="$1"
   local sdk_name="${2:-macosx26.5}"

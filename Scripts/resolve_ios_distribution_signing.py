@@ -13,6 +13,11 @@ from pathlib import Path
 
 from apple_provisioning_profile import load_verified_profile
 
+if len(sys.argv) != 9:
+    raise SystemExit(
+        "resolve_ios_distribution_signing.py requires 8 arguments, including signing style"
+    )
+
 (
     output_arg,
     explicit_app_arg,
@@ -21,7 +26,10 @@ from apple_provisioning_profile import load_verified_profile
     app_bundle_identifier,
     widget_bundle_identifier,
     device_identifier,
+    expected_signing_style,
 ) = sys.argv[1:]
+if expected_signing_style != "automatic":
+    raise SystemExit("Physical iOS distribution export requires signing style automatic")
 output_path = Path(output_arg)
 profile_roots = tuple(
     path.resolve()
@@ -150,6 +158,7 @@ def validate_profile(path: Path, bundle_identifier: str, *, is_app: bool) -> dic
             profile_covers_keychain,
             bool(certificate_hashes),
             safe_specifier,
+            profile.get("IsXcodeManaged") is True,
         )
     )
     if is_app:
@@ -162,6 +171,7 @@ def validate_profile(path: Path, bundle_identifier: str, *, is_app: bool) -> dic
         "path": str(path),
         "specifier": specifier,
         "certificateHashes": certificate_hashes,
+        "isXcodeManaged": True,
     }
 
 
@@ -200,8 +210,8 @@ def select_profile(explicit: str, bundle_identifier: str, *, is_app: bool, label
     ]
     if len(matches) != 1:
         raise SystemExit(
-            f"Formal physical iOS acceptance requires exactly one installed matching {label} "
-            f"distribution profile (found {len(matches)})"
+            f"Physical iOS Automatic export requires exactly one installed matching {label} "
+            f"Xcode-managed distribution profile (found {len(matches)})"
         )
     return matches[0]
 
@@ -240,11 +250,14 @@ if len(matching_identity_hashes) != 1:
     )
 
 proof = {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
+    "signingStyle": expected_signing_style,
     "appProfilePath": app_profile["path"],
     "appProfileSpecifier": app_profile["specifier"],
+    "appProfileIsXcodeManaged": app_profile["isXcodeManaged"],
     "widgetProfilePath": widget_profile["path"],
     "widgetProfileSpecifier": widget_profile["specifier"],
+    "widgetProfileIsXcodeManaged": widget_profile["isXcodeManaged"],
     "identityHash": next(iter(matching_identity_hashes)),
 }
 output_path.parent.mkdir(parents=True, exist_ok=True)

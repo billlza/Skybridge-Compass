@@ -119,11 +119,13 @@ extension RemoteDesktopManager {
 
     nonisolated static func shouldProcessCrossNetworkFrameNotification(
         isStreaming: Bool,
+        ownerIsCurrent: Bool,
         subscribedSessionId: String?,
         expectedSessionId: String,
         updateSessionId: String
     ) -> Bool {
         guard isStreaming else { return false }
+        guard ownerIsCurrent else { return false }
         guard subscribedSessionId == expectedSessionId else { return false }
         return updateSessionId == expectedSessionId
     }

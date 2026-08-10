@@ -4,6 +4,18 @@ import XCTest
 
 @available(macOS 14.0, iOS 17.0, *)
 final class PeerKEMBootstrapStoreTests: XCTestCase {
+    private func makeIsolatedStore(suiteName: String) throws -> PeerKEMBootstrapStore {
+        let defaults = try XCTUnwrap(
+            UserDefaults(suiteName: suiteName),
+            "Unable to create isolated UserDefaults suite"
+        )
+        return PeerKEMBootstrapStore(defaults: defaults)
+    }
+
+    private func clearIsolatedDefaultsSuite(_ suiteName: String) {
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
+    }
+
     func testLookupAcrossAliasCandidates() async throws {
         let store = PeerKEMBootstrapStore.shared
         await store.clearForTesting()
@@ -130,6 +142,206 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         XCTAssertEqual(accepted[CryptoSuite.mlkem768MLDSA65.wireId], validMLKEM)
         XCTAssertEqual(accepted[CryptoSuite.mlkem768MLDSA65FS.wireId], validMLKEMFS)
         await store.clearForTesting()
+    }
+
+    func testAuthorityBoundMutationRollbackRestoresExactPriorMultiSuiteEntry() async throws {
+        let suiteName = "PeerKEMBootstrapStoreReceiptRestoreTests.\(UUID().uuidString)"
+        clearIsolatedDefaultsSuite(suiteName)
+        defer { clearIsolatedDefaultsSuite(suiteName) }
+
+        let store = try makeIsolatedStore(suiteName: suiteName)
+        let deviceId = "id:receipt-restore-\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "a", count: 64)
+        let priorMLKEM = Data(repeating: 0x11, count: 1_184)
+        let replacementMLKEM = Data(repeating: 0x22, count: 1_184)
+        let addedXWing = Data(repeating: 0x33, count: 1_216)
+
+        await store.upsert(
+            deviceIds: [deviceId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: priorMLKEM
+                )
+            ],
+            verifiedProtocolFingerprint: fingerprint
+        )
+
+        let receipt = try await store.upsertAuthorityBoundPairingKEM(
+            deviceIds: [deviceId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: replacementMLKEM
+                ),
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: addedXWing
+                )
+            ],
+            verifiedProtocolFingerprint: fingerprint.uppercased()
+        )
+
+        let mutated = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        XCTAssertEqual(mutated[CryptoSuite.mlkem768MLDSA65.wireId], replacementMLKEM)
+        XCTAssertEqual(mutated[CryptoSuite.xwingMLDSA.wireId], addedXWing)
+
+        let didRollback = await store.rollbackAuthorityBoundPairingKEMMutation(receipt)
+        XCTAssertTrue(didRollback)
+
+        let restored = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        XCTAssertEqual(restored[CryptoSuite.mlkem768MLDSA65.wireId], priorMLKEM)
+        XCTAssertNil(restored[CryptoSuite.xwingMLDSA.wireId])
+
+        let reloaded = try makeIsolatedStore(suiteName: suiteName)
+        let persisted = await reloaded.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        XCTAssertEqual(persisted[CryptoSuite.mlkem768MLDSA65.wireId], priorMLKEM)
+        XCTAssertNil(persisted[CryptoSuite.xwingMLDSA.wireId])
+    }
+
+    func testAuthorityBoundMutationRollbackDoesNotOverrideLaterDifferentWrite() async throws {
+        let suiteName = "PeerKEMBootstrapStoreReceiptSupersededTests.\(UUID().uuidString)"
+        clearIsolatedDefaultsSuite(suiteName)
+        defer { clearIsolatedDefaultsSuite(suiteName) }
+
+        let store = try makeIsolatedStore(suiteName: suiteName)
+        let deviceId = "id:receipt-superseded-\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "b", count: 64)
+        let firstKey = Data(repeating: 0x41, count: 1_216)
+        let laterKey = Data(repeating: 0x42, count: 1_216)
+
+        let firstReceipt = try await store.upsertAuthorityBoundPairingKEM(
+            deviceIds: [deviceId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: firstKey
+                )
+            ],
+            verifiedProtocolFingerprint: fingerprint
+        )
+        _ = try await store.upsertAuthorityBoundPairingKEM(
+            deviceIds: [deviceId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: laterKey
+                )
+            ],
+            verifiedProtocolFingerprint: fingerprint
+        )
+
+        let didRollback = await store.rollbackAuthorityBoundPairingKEMMutation(firstReceipt)
+        XCTAssertFalse(didRollback)
+
+        let stored = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        XCTAssertEqual(stored[CryptoSuite.xwingMLDSA.wireId], laterKey)
+    }
+
+    func testAuthorityBoundMutationRollbackDoesNotOverrideLaterEquivalentWrite() async throws {
+        let suiteName = "PeerKEMBootstrapStoreReceiptEquivalentTests.\(UUID().uuidString)"
+        clearIsolatedDefaultsSuite(suiteName)
+        defer { clearIsolatedDefaultsSuite(suiteName) }
+
+        let store = try makeIsolatedStore(suiteName: suiteName)
+        let deviceId = "id:receipt-equivalent-\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "c", count: 64)
+        let key = Data(repeating: 0x51, count: 1_216)
+        let keyInfo = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+            publicKey: key
+        )
+
+        let firstReceipt = try await store.upsertAuthorityBoundPairingKEM(
+            deviceIds: [deviceId],
+            kemPublicKeys: [keyInfo],
+            verifiedProtocolFingerprint: fingerprint
+        )
+        _ = try await store.upsertAuthorityBoundPairingKEM(
+            deviceIds: [deviceId],
+            kemPublicKeys: [keyInfo],
+            verifiedProtocolFingerprint: fingerprint
+        )
+
+        let didRollback = await store.rollbackAuthorityBoundPairingKEMMutation(firstReceipt)
+        XCTAssertFalse(didRollback)
+
+        let stored = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [deviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        XCTAssertEqual(stored[CryptoSuite.xwingMLDSA.wireId], key)
+    }
+
+    func testAuthorityBoundMutationFailsClosedAtCapacityWithoutEviction() async throws {
+        let suiteName = "PeerKEMBootstrapStoreReceiptCapacityTests.\(UUID().uuidString)"
+        clearIsolatedDefaultsSuite(suiteName)
+        defer { clearIsolatedDefaultsSuite(suiteName) }
+
+        let store = try makeIsolatedStore(suiteName: suiteName)
+        let fingerprint = String(repeating: "d", count: 64)
+        let existingKey = Data(repeating: 0x61, count: 1_184)
+        let existingDeviceIds = (0..<512).map {
+            "id:capacity-peer-\(String(format: "%04d", $0))"
+        }
+        await store.upsert(
+            deviceIds: existingDeviceIds,
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: existingKey
+                )
+            ],
+            verifiedProtocolFingerprint: fingerprint
+        )
+
+        let overflowDeviceId = "id:capacity-overflow-peer"
+        do {
+            _ = try await store.upsertAuthorityBoundPairingKEM(
+                deviceIds: [overflowDeviceId],
+                kemPublicKeys: [
+                    KEMPublicKeyInfo(
+                        suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                        publicKey: Data(repeating: 0x62, count: 1_216)
+                    )
+                ],
+                verifiedProtocolFingerprint: fingerprint
+            )
+            XCTFail("Expected the authority-bound mutation to fail at capacity")
+        } catch {
+            XCTAssertEqual(
+                error as? PeerKEMBootstrapStore.AuthorityBoundPairingKEMMutationError,
+                .capacityExceeded(limit: 1024)
+            )
+        }
+
+        let firstExisting = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [existingDeviceIds[0]],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        let lastExisting = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [existingDeviceIds[511]],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        let rejected = await store.authorityBoundPairingKEMPublicKeys(
+            forCandidates: [overflowDeviceId],
+            pinnedProtocolFingerprints: [fingerprint]
+        )
+        XCTAssertEqual(firstExisting[CryptoSuite.mlkem768MLDSA65.wireId], existingKey)
+        XCTAssertEqual(lastExisting[CryptoSuite.mlkem768MLDSA65.wireId], existingKey)
+        XCTAssertTrue(rejected.isEmpty)
     }
 
     func testLoadPurgesLegacyPersistedInvalidKEMMaterial() async throws {

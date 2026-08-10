@@ -19,7 +19,7 @@ public actor PeerKEMBootstrapStore {
         }
     }
 
-    private struct Entry: Codable, Sendable {
+    struct Entry: Codable, Sendable, Equatable {
         var kemPublicKeys: [UInt16: Data]
         var updatedAt: Date
         var source: String? = nil
@@ -59,8 +59,42 @@ public actor PeerKEMBootstrapStore {
         public let updatedAt: Date
     }
 
+    struct AuthorityBoundPairingKEMMutationReceipt: Sendable {
+        fileprivate struct TargetMutation: Sendable {
+            let deviceId: String
+            let before: Entry?
+            let after: Entry
+        }
+
+        fileprivate let storeIdentifier: UUID
+        fileprivate let authorityFingerprint: String
+        fileprivate let targetMutations: [TargetMutation]
+    }
+
+    enum AuthorityBoundPairingKEMMutationError: Error, LocalizedError, Sendable, Equatable {
+        case noTrustMaterialDeviceIds
+        case noValidKEMPublicKeys
+        case invalidProtocolFingerprint
+        case capacityExceeded(limit: Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .noTrustMaterialDeviceIds:
+                return "Authority-bound peer KEM mutation requires a stable trust-material device identifier"
+            case .noValidKEMPublicKeys:
+                return "Authority-bound peer KEM mutation requires at least one valid strict-PQC public key"
+            case .invalidProtocolFingerprint:
+                return "Authority-bound peer KEM mutation requires a canonical protocol identity fingerprint"
+            case .capacityExceeded(let limit):
+                return "Authority-bound peer KEM store capacity exceeded (limit: \(limit))"
+            }
+        }
+    }
+
     private static let defaultsKey = "com.skybridge.p2p.bootstrap_kem_store.v1"
+    private static let maximumEntryCount = 1024
     private let defaults: UserDefaults
+    private let storeIdentifier = UUID()
     private var entries: [String: Entry]
 
     public init(defaults: UserDefaults = .standard) {
@@ -143,9 +177,133 @@ public actor PeerKEMBootstrapStore {
         }
 
         if changed {
-            trimIfNeeded(maxEntries: 1024)
+            trimIfNeeded(maxEntries: Self.maximumEntryCount)
             persist()
         }
+    }
+
+    /// Atomically stores pairing bootstrap KEM material bound to one verified protocol authority.
+    ///
+    /// Unlike the legacy best-effort `upsert`, this transaction never evicts unrelated entries. It
+    /// fails before mutation when adding its normalized targets would exceed the bounded store. The
+    /// returned opaque receipt captures the exact before/after entry values for conditional rollback.
+    func upsertAuthorityBoundPairingKEM(
+        deviceIds: [String],
+        kemPublicKeys: [KEMPublicKeyInfo],
+        platform: String? = nil,
+        osVersion: String? = nil,
+        verifiedProtocolFingerprint: String
+    ) throws -> AuthorityBoundPairingKEMMutationReceipt {
+        let normalizedIds = trustMaterialIds(deviceIds)
+        guard !normalizedIds.isEmpty else {
+            throw AuthorityBoundPairingKEMMutationError.noTrustMaterialDeviceIds
+        }
+
+        let incoming = incomingKEMMap(kemPublicKeys, platform: platform, osVersion: osVersion)
+        guard !incoming.isEmpty else {
+            throw AuthorityBoundPairingKEMMutationError.noValidKEMPublicKeys
+        }
+
+        guard let normalizedFingerprint = Self.normalizedProtocolFingerprint(
+            verifiedProtocolFingerprint
+        ) else {
+            throw AuthorityBoundPairingKEMMutationError.invalidProtocolFingerprint
+        }
+
+        let observedAt = Date()
+        var targetMutations: [AuthorityBoundPairingKEMMutationReceipt.TargetMutation] = []
+        targetMutations.reserveCapacity(normalizedIds.count)
+
+        for deviceId in normalizedIds {
+            let existingEntry = entries[deviceId]
+            if let existingEntry,
+               existingEntry.source == "signed_lan_kem_refresh",
+               existingEntry.expiresAt.map({ $0 > observedAt }) ?? true {
+                continue
+            }
+
+            let existingKeys: [UInt16: Data]
+            if existingEntry?.source == "signed_lan_kem_refresh",
+               existingEntry?.expiresAt.map({ $0 <= observedAt }) == true {
+                existingKeys = [:]
+            } else {
+                existingKeys = existingEntry?.kemPublicKeys ?? [:]
+            }
+            var merged = existingKeys
+            for (suiteWireId, publicKey) in incoming {
+                merged[suiteWireId] = publicKey
+            }
+
+            let after = Entry(
+                kemPublicKeys: merged,
+                updatedAt: Self.mutationTimestamp(
+                    observedAt: observedAt,
+                    after: existingEntry?.updatedAt
+                ),
+                source: "pairing_identity_exchange",
+                protocolIdentityFingerprint: normalizedFingerprint,
+                platform: platform ?? existingEntry?.platform,
+                osVersion: osVersion ?? existingEntry?.osVersion
+            )
+            targetMutations.append(.init(
+                deviceId: deviceId,
+                before: existingEntry,
+                after: after
+            ))
+        }
+
+        let addedEntryCount = targetMutations.reduce(into: 0) { count, mutation in
+            if mutation.before == nil {
+                count += 1
+            }
+        }
+        guard addedEntryCount <= Self.maximumEntryCount,
+              entries.count <= Self.maximumEntryCount - addedEntryCount else {
+            throw AuthorityBoundPairingKEMMutationError.capacityExceeded(
+                limit: Self.maximumEntryCount
+            )
+        }
+
+        for mutation in targetMutations {
+            entries[mutation.deviceId] = mutation.after
+        }
+        if !targetMutations.isEmpty {
+            persist()
+        }
+
+        return AuthorityBoundPairingKEMMutationReceipt(
+            storeIdentifier: storeIdentifier,
+            authorityFingerprint: normalizedFingerprint,
+            targetMutations: targetMutations
+        )
+    }
+
+    /// Restores an authority-bound mutation only while every target still equals the receipt's
+    /// exact `after` value. A later write to any target supersedes the whole rollback transaction.
+    @discardableResult
+    func rollbackAuthorityBoundPairingKEMMutation(
+        _ receipt: AuthorityBoundPairingKEMMutationReceipt
+    ) -> Bool {
+        guard receipt.storeIdentifier == storeIdentifier else { return false }
+        guard receipt.targetMutations.allSatisfy({ mutation in
+            entries[mutation.deviceId] == mutation.after
+                && Self.normalizedProtocolFingerprint(mutation.after.protocolIdentityFingerprint)
+                    == receipt.authorityFingerprint
+        }) else {
+            return false
+        }
+
+        for mutation in receipt.targetMutations {
+            entries[mutation.deviceId] = mutation.before
+        }
+        if !receipt.targetMutations.isEmpty {
+            if entries.isEmpty {
+                defaults.removeObject(forKey: Self.defaultsKey)
+            } else {
+                persist()
+            }
+        }
+        return true
     }
 
     public func upsertSignedKEMRefresh(
@@ -207,7 +365,7 @@ public actor PeerKEMBootstrapStore {
                 signedRefreshDeviceId: validPayload.deviceId
             )
         }
-        trimIfNeeded(maxEntries: 1024)
+        trimIfNeeded(maxEntries: Self.maximumEntryCount)
         persist()
     }
 
@@ -463,6 +621,13 @@ public actor PeerKEMBootstrapStore {
         for (deviceId, _) in sortedByAge.prefix(toRemove) {
             entries.removeValue(forKey: deviceId)
         }
+    }
+
+    private static func mutationTimestamp(observedAt: Date, after previous: Date?) -> Date {
+        guard let previous, observedAt <= previous else { return observedAt }
+        return Date(
+            timeIntervalSinceReferenceDate: previous.timeIntervalSinceReferenceDate.nextUp
+        )
     }
 
     private static func shouldPrefer(_ candidate: SelectedKey, over existing: SelectedKey?) -> Bool {

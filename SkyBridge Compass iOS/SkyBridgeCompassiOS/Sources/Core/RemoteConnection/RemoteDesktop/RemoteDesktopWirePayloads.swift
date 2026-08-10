@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 
 struct RemoteClipboardMessagePayload: Codable, Sendable, Equatable {
@@ -324,6 +325,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
     let mediaFallbackPolicy: String?
     let streamRefreshToken: UInt64?
     let remoteControlSecurityIdentity: RemoteDesktopSecurityIdentityPayload?
+    var streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction?
     let sentAt: TimeInterval
 
     init(
@@ -363,6 +365,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         mediaFallbackPolicy: String? = nil,
         streamRefreshToken: UInt64? = nil,
         remoteControlSecurityIdentity: RemoteDesktopSecurityIdentityPayload? = nil,
+        streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
     ) {
         self.width = width
@@ -401,6 +404,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
         self.mediaFallbackPolicy = mediaFallbackPolicy
         self.streamRefreshToken = streamRefreshToken
         self.remoteControlSecurityIdentity = remoteControlSecurityIdentity
+        self.streamConfigurationTransaction = streamConfigurationTransaction
         self.sentAt = sentAt
     }
 
@@ -441,5 +445,7 @@ struct RemoteDesktopStreamConfigurationPayload: Codable, Sendable, Equatable {
             && lhs.mediaFallbackPolicy == rhs.mediaFallbackPolicy
             && lhs.streamRefreshToken == rhs.streamRefreshToken
             && lhs.remoteControlSecurityIdentity == rhs.remoteControlSecurityIdentity
+        // Transaction and timestamp identify a send attempt, not semantic
+        // viewer settings. They intentionally do not affect coalescing.
     }
 }

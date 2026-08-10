@@ -1,6 +1,7 @@
 #if DEBUG || SKYBRIDGE_TESTING
 import Foundation
 import Darwin
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 #if canImport(WebRTC)
 @preconcurrency import WebRTC
@@ -1238,7 +1239,8 @@ final class LocalWebRTCSmokeHarness {
             audioChannelCount: 2,
             performanceValidationMode: requiresExtremeMediaValidation ? "extreme" : nil,
             mediaFallbackPolicy: "forbidden",
-            streamRefreshToken: UInt64(Date().timeIntervalSince1970 * 1_000)
+            streamRefreshToken: UInt64(Date().timeIntervalSince1970 * 1_000),
+            streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction()
         )
     }
 
@@ -1618,7 +1620,11 @@ final class LocalWebRTCSmokeHarness {
                 return false
             }
             do {
-                let receiver = try IOSRealtimeMediaAudioReceiver(snapshot: snapshot, mode: .lowLatency)
+                let receiver = try IOSRealtimeMediaAudioReceiver(
+                    snapshot: snapshot,
+                    mode: .lowLatency,
+                    admissionGate: IOSRealtimeMediaAudioAdmissionGate(open: true)
+                )
                 let relayTransport = SkyBridgeUDPRealtimeMediaTransport(
                     endpoint: localEndpoint,
                     receiveHandler: { [receiver] datagram in

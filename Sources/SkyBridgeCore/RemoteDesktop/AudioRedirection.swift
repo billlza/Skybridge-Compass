@@ -10,6 +10,7 @@ import Foundation
 import AudioToolbox
 import OSLog
 import Combine
+import SkyBridgeRealtimeMedia
 
 private struct DecodedRemoteAudioBuffer: @unchecked Sendable {
     let buffer: AVAudioPCMBuffer
@@ -191,6 +192,7 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
     @Published public private(set) var isEnabled: Bool = false
 
     private var activeSessionId: UUID?
+    private let realtimePlaybackOwnership = SkyBridgeRealtimeMediaPlaybackOwnership()
     private var audioEngine: AVAudioEngine?
     private var playerNode: AVAudioPlayerNode?
     private var queuedFrameCount: AVAudioFrameCount = 0
@@ -216,7 +218,42 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
             return
         }
 
+        realtimePlaybackOwnership.retireCurrentOwnerAndClear()
         teardownAudioPipeline()
+
+        try startAudioPipeline(activeSessionId: sessionId)
+
+        log.info("✅ 远控音频播放已启用: sessionId=\(sessionId.uuidString, privacy: .public)")
+    }
+
+    @discardableResult
+    public func enable(
+        for owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) throws -> Bool {
+        let claim = realtimePlaybackOwnership.claim(owner)
+        guard claim.isAccepted else { return false }
+        if claim == .alreadyOwned,
+           isEnabled,
+           activeSessionId == nil,
+           let engine = audioEngine,
+           engine.isRunning {
+            return true
+        }
+
+        // A newly acquired owner must never inherit queued PCM/decoder state
+        // from a retired realtime receiver or the legacy playback path.
+        teardownAudioPipeline()
+        guard realtimePlaybackOwnership.isOwned(by: owner) else { return false }
+        do {
+            try startAudioPipeline(activeSessionId: nil)
+            return true
+        } catch {
+            realtimePlaybackOwnership.release(ifOwnedBy: owner)
+            throw error
+        }
+    }
+
+    private func startAudioPipeline(activeSessionId: UUID?) throws {
 
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
@@ -227,7 +264,7 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
 
         audioEngine = engine
         self.playerNode = playerNode
-        activeSessionId = sessionId
+        self.activeSessionId = activeSessionId
         queuedFrameCount = 0
         audioDecodeGeneration &+= 1
         pendingDecodeCount = 0
@@ -236,12 +273,12 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         }
         resetBufferedAudioState()
         isEnabled = true
-
-        log.info("✅ 远控音频播放已启用: sessionId=\(sessionId.uuidString, privacy: .public)")
     }
 
     public func disable() {
-        guard isEnabled || audioEngine != nil || playerNode != nil || activeSessionId != nil else {
+        let retiredRealtimeOwner = realtimePlaybackOwnership.retireCurrentOwnerAndClear()
+        guard isEnabled || audioEngine != nil || playerNode != nil || activeSessionId != nil
+                || retiredRealtimeOwner else {
             return
         }
 
@@ -249,11 +286,57 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         log.info("🛑 远控音频播放已禁用")
     }
 
+    /// Tears down playback only when the caller still owns the active audio
+    /// session. A delayed close from a superseded realtime-media receiver must
+    /// never stop its replacement.
+    @discardableResult
+    public func disable(for sessionId: UUID) -> Bool {
+        guard activeSessionId == sessionId else { return false }
+        disable()
+        return true
+    }
+
+    @discardableResult
+    public func disable(
+        ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) -> Bool {
+        guard realtimePlaybackOwnership.release(ifOwnedBy: owner) else { return false }
+        teardownAudioPipeline()
+        return true
+    }
+
     public func updateRemoteVideoTimestamp(_ timestamp: TimeInterval?) {
         lastRemoteVideoTimestamp = timestamp
     }
 
+    @discardableResult
+    public func updateRemoteVideoTimestamp(
+        _ timestamp: TimeInterval?,
+        ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) -> Bool {
+        guard realtimePlaybackOwnership.isOwned(by: owner) else { return false }
+        lastRemoteVideoTimestamp = timestamp
+        return true
+    }
+
     public func playRemoteAudioChunk(_ chunk: RemoteDesktopAudioChunkPayload) {
+        enqueueRemoteAudioChunk(chunk, owner: nil)
+    }
+
+    @discardableResult
+    public func playRemoteAudioChunk(
+        _ chunk: RemoteDesktopAudioChunkPayload,
+        ifOwnedBy owner: SkyBridgeRealtimeMediaReceiverLifecycle
+    ) -> Bool {
+        guard realtimePlaybackOwnership.isOwned(by: owner) else { return false }
+        enqueueRemoteAudioChunk(chunk, owner: owner)
+        return true
+    }
+
+    private func enqueueRemoteAudioChunk(
+        _ chunk: RemoteDesktopAudioChunkPayload,
+        owner: SkyBridgeRealtimeMediaReceiverLifecycle?
+    ) {
         guard isEnabled, let engine = audioEngine, engine.isRunning else { return }
         guard playerNode != nil else { return }
 
@@ -269,11 +352,15 @@ public final class AudioRedirectionManager: ObservableObject, @unchecked Sendabl
         }
         pendingDecodeCount += 1
         let generation = audioDecodeGeneration
-        Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation] in
+        Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation, owner] in
             let decoded = await decodeWorker.decode(chunk)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.pendingDecodeCount = max(0, self.pendingDecodeCount - 1)
+                if let owner,
+                   !self.realtimePlaybackOwnership.isOwned(by: owner) {
+                    return
+                }
                 guard self.audioDecodeGeneration == generation,
                       self.isEnabled,
                       let engine = self.audioEngine,

@@ -10,14 +10,18 @@ extension CrossNetworkConnectionManager {
         category: "WebRTCOutbound"
     )
 
-    func resumeFileTransferWaiter(sessionID: String, message: CrossNetworkFileTransferMessage) {
+    func resumeFileTransferWaiter(
+        owner: WebRTCFileTransferOperationOwner,
+        message: CrossNetworkFileTransferMessage
+    ) {
+        guard isCurrentWebRTCFileTransferOperationOwner(owner) else { return }
         let key = WebRTCOutboundFileTransferSupport.waiterKey(
-            sessionID: sessionID,
+            sessionID: owner.sessionID,
             transferId: message.transferId,
             op: message.op,
             chunkIndex: message.chunkIndex
         )
-        if let waiter = webrtcFileTransferWaiters.removeValue(forKey: key) {
+        if let waiter = takeFileTransferWaiter(forKey: key, matching: owner) {
             waiter.timeoutTask.cancel()
             waiter.continuation.resume(returning: message)
             return
@@ -25,24 +29,29 @@ extension CrossNetworkConnectionManager {
 
         // Also allow awaiting without chunkIndex.
         let keyNoIdx = WebRTCOutboundFileTransferSupport.waiterKey(
-            sessionID: sessionID,
+            sessionID: owner.sessionID,
             transferId: message.transferId,
             op: message.op,
             chunkIndex: nil
         )
-        if let waiter = webrtcFileTransferWaiters.removeValue(forKey: keyNoIdx) {
+        if let waiter = takeFileTransferWaiter(forKey: keyNoIdx, matching: owner) {
             waiter.timeoutTask.cancel()
             waiter.continuation.resume(returning: message)
             return
         }
     }
 
-    func failFileTransferWaiters(sessionID: String, transferId: String, message: String) {
+    func failFileTransferWaiters(
+        owner: WebRTCFileTransferOperationOwner,
+        transferId: String,
+        message: String
+    ) {
+        guard isCurrentWebRTCFileTransferOperationOwner(owner) else { return }
         let keys = webrtcFileTransferWaiters.keys.filter {
-            $0.sessionID == sessionID && $0.transferID == transferId
+            $0.sessionID == owner.sessionID && $0.transferID == transferId
         }
         for k in keys {
-            if let w = webrtcFileTransferWaiters.removeValue(forKey: k) {
+            if let w = takeFileTransferWaiter(forKey: k, matching: owner) {
                 w.timeoutTask.cancel()
                 w.continuation.resume(throwing: WebRTCFileTransferWaitError.remoteRejected(message))
             }
@@ -60,12 +69,15 @@ extension CrossNetworkConnectionManager {
         }
     }
 
-    private func cancelFileTransferWaiters(sessionID: String, transferId: String) {
+    private func cancelFileTransferWaiters(
+        owner: WebRTCFileTransferOperationOwner,
+        transferId: String
+    ) {
         let keys = webrtcFileTransferWaiters.keys.filter {
-            $0.sessionID == sessionID && $0.transferID == transferId
+            $0.sessionID == owner.sessionID && $0.transferID == transferId
         }
         for key in keys {
-            if let waiter = webrtcFileTransferWaiters.removeValue(forKey: key) {
+            if let waiter = takeFileTransferWaiter(forKey: key, matching: owner) {
                 waiter.timeoutTask.cancel()
                 waiter.continuation.resume(throwing: CancellationError())
             }
@@ -74,9 +86,12 @@ extension CrossNetworkConnectionManager {
 
     private func takeFileTransferWaiter(
         forKey key: WebRTCOutboundFileTransferWaiterKey,
-        token: UUID
+        token: UUID,
+        matching owner: WebRTCFileTransferOperationOwner
     ) -> WebRTCFileTransferWaiter? {
-        guard let waiter = webrtcFileTransferWaiters[key], waiter.token == token else {
+        guard let waiter = webrtcFileTransferWaiters[key],
+              waiter.token == token,
+              Self.isSameWebRTCFileTransferOperationOwner(waiter.owner, owner) else {
             return nil
         }
         webrtcFileTransferWaiters.removeValue(forKey: key)
@@ -86,32 +101,54 @@ extension CrossNetworkConnectionManager {
 
     private func cancelFileTransferWaiter(
         forKey key: WebRTCOutboundFileTransferWaiterKey,
-        token: UUID
+        token: UUID,
+        owner: WebRTCFileTransferOperationOwner
     ) {
-        guard let waiter = takeFileTransferWaiter(forKey: key, token: token) else { return }
+        guard let waiter = takeFileTransferWaiter(
+            forKey: key,
+            token: token,
+            matching: owner
+        ) else { return }
         waiter.continuation.resume(throwing: CancellationError())
     }
 
+    private func takeFileTransferWaiter(
+        forKey key: WebRTCOutboundFileTransferWaiterKey,
+        matching owner: WebRTCFileTransferOperationOwner
+    ) -> WebRTCFileTransferWaiter? {
+        guard let waiter = webrtcFileTransferWaiters[key],
+              Self.isSameWebRTCFileTransferOperationOwner(waiter.owner, owner) else {
+            return nil
+        }
+        webrtcFileTransferWaiters.removeValue(forKey: key)
+        waiter.timeoutTask.cancel()
+        return waiter
+    }
+
     private func sendFileTransferMessageAndWait(
-        sessionID: String,
-        session: WebRTCSession,
-        keys: SessionKeys,
+        owner: WebRTCFileTransferOperationOwner,
         message: CrossNetworkFileTransferMessage,
         expectedOperation: CrossNetworkFileTransferOp,
         cancellationFlag: WebRTCOutboundFileTransferCancellationFlag,
         chunkIndex: Int? = nil,
         timeoutSeconds: TimeInterval
     ) async throws -> CrossNetworkFileTransferMessage {
-        try Task.checkCancellation()
+        try requireCurrentWebRTCFileTransferOperationOwner(owner)
         try cancellationFlag.check()
         let key = WebRTCOutboundFileTransferSupport.waiterKey(
-            sessionID: sessionID,
+            sessionID: owner.sessionID,
             transferId: message.transferId,
             op: expectedOperation,
             chunkIndex: chunkIndex
         )
-        guard webrtcFileTransferWaiters[key] == nil else {
-            throw WebRTCFileTransferWaitError.cancelled
+        if let existing = webrtcFileTransferWaiters[key] {
+            guard !Self.isSameWebRTCFileTransferOperationOwner(existing.owner, owner) else {
+                throw WebRTCFileTransferWaitError.cancelled
+            }
+            webrtcFileTransferWaiters.removeValue(forKey: key)
+            existing.timeoutTask.cancel()
+            existing.sendTask?.cancel()
+            existing.continuation.resume(throwing: CancellationError())
         }
 
         let token = UUID()
@@ -126,13 +163,30 @@ extension CrossNetworkConnectionManager {
                     } catch is CancellationError {
                         return
                     } catch {
-                        guard let pending = self.takeFileTransferWaiter(forKey: key, token: token) else {
+                        guard let pending = self.takeFileTransferWaiter(
+                            forKey: key,
+                            token: token,
+                            matching: owner
+                        ) else {
                             return
                         }
                         pending.continuation.resume(throwing: error)
                         return
                     }
-                    guard let pending = self.takeFileTransferWaiter(forKey: key, token: token) else {
+                    guard self.isCurrentWebRTCFileTransferOperationOwner(owner) else {
+                        guard let pending = self.takeFileTransferWaiter(
+                            forKey: key,
+                            token: token,
+                            matching: owner
+                        ) else { return }
+                        pending.continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    guard let pending = self.takeFileTransferWaiter(
+                        forKey: key,
+                        token: token,
+                        matching: owner
+                    ) else {
                         return
                     }
                     pending.continuation.resume(throwing: WebRTCFileTransferWaitError.timeout)
@@ -140,6 +194,7 @@ extension CrossNetworkConnectionManager {
 
                 webrtcFileTransferWaiters[key] = WebRTCFileTransferWaiter(
                     token: token,
+                    owner: owner,
                     continuation: continuation,
                     timeoutTask: timeoutTask,
                     sendTask: nil
@@ -153,13 +208,15 @@ extension CrossNetworkConnectionManager {
                         }
                         do {
                             try await self.sendFileTransferMessage(
-                                sessionID: sessionID,
-                                session: session,
-                                keys: keys,
+                                owner: owner,
                                 message: message
                             )
                         } catch {
-                            guard let pending = self.takeFileTransferWaiter(forKey: key, token: token) else {
+                            guard let pending = self.takeFileTransferWaiter(
+                                forKey: key,
+                                token: token,
+                                matching: owner
+                            ) else {
                                 throw error
                             }
                             pending.continuation.resume(throwing: error)
@@ -176,7 +233,11 @@ extension CrossNetworkConnectionManager {
                 }
             } onCancel: {
                 Task { @MainActor [weak self] in
-                    self?.cancelFileTransferWaiter(forKey: key, token: token)
+                    self?.cancelFileTransferWaiter(
+                        forKey: key,
+                        token: token,
+                        owner: owner
+                    )
                 }
             }
             // ACK success cannot publish before the frame reaches the peer, but
@@ -188,7 +249,7 @@ extension CrossNetworkConnectionManager {
                 )
             }
             try await ownedSendTask.value
-            try Task.checkCancellation()
+            try requireCurrentWebRTCFileTransferOperationOwner(owner)
             return response
         } catch let responseError {
             // Cancellation is safe at any point: the frame gate removes a queued
@@ -197,12 +258,16 @@ extension CrossNetworkConnectionManager {
             if let ownedSendTask {
                 ownedSendTask.cancel()
                 if case .failure(let sendError) = await ownedSendTask.result,
+                   isCurrentWebRTCFileTransferOperationOwner(owner),
                    !(sendError is CancellationError),
                    sendError.localizedDescription != responseError.localizedDescription {
                     Self.fileTransferLogger.error(
                         "WebRTC file-transfer waiter and frame send both failed: response=\(responseError.localizedDescription, privacy: .public) send=\(sendError.localizedDescription, privacy: .public)"
                     )
                 }
+            }
+            guard isCurrentWebRTCFileTransferOperationOwner(owner) else {
+                throw CancellationError()
             }
             throw responseError
         }
@@ -226,16 +291,24 @@ extension CrossNetworkConnectionManager {
         try await session.sendFramedPayloadAsync(payload)
     }
 
-    private func sendFileTransferMessage(sessionID: String, session: WebRTCSession, keys: SessionKeys, message: CrossNetworkFileTransferMessage) async throws {
+    private func sendFileTransferMessage(
+        owner: WebRTCFileTransferOperationOwner,
+        message: CrossNetworkFileTransferMessage
+    ) async throws {
+        try requireCurrentWebRTCFileTransferOperationOwner(owner)
         let plain = try JSONEncoder().encode(message)
+        try requireCurrentWebRTCFileTransferOperationOwner(owner)
         let enc = try encryptAppPayload(
             plain,
-            with: keys,
-            sessionID: sessionID,
+            with: owner.keys,
+            sessionID: owner.sessionID,
             packetType: .fileTransfer
         )
+        try requireCurrentWebRTCFileTransferOperationOwner(owner)
         let padded = try TrafficPadding.wrapIfEnabled(enc, label: "tx/webrtc-file")
-        try await sendFramed(padded, over: session)
+        try requireCurrentWebRTCFileTransferOperationOwner(owner)
+        try await sendFramed(padded, over: owner.session)
+        try requireCurrentWebRTCFileTransferOperationOwner(owner)
     }
 
     /// Send a local file to the currently connected iOS peer over WebRTC DataChannel (zero-config cross-network).
@@ -255,9 +328,18 @@ extension CrossNetworkConnectionManager {
         guard let keys = webrtcSessionKeysBySessionId[sessionID] else {
             throw WebRTCFileTransferWaitError.failed("握手未完成（会话密钥不可用）")
         }
+        guard let operationOwner = currentWebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: session,
+            keys: keys
+        ) else {
+            throw CancellationError()
+        }
 
+        try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
         let senderDeviceId = try await SelfIdentityProvider.shared
             .protocolIdentityDeviceId(allowCreate: false)
+        try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
         guard senderDeviceId == session.localDeviceId else {
             throw DeviceIdentityKeyError.corruptIdentityAuthority(
                 "WebRTC file-transfer session is not bound to the current local authority"
@@ -274,11 +356,18 @@ extension CrossNetworkConnectionManager {
         var didAttemptCompletion = false
         var presentationToken: FileTransferManager.ExternalTransferToken?
         let cancellationFlag = WebRTCOutboundFileTransferCancellationFlag()
+        func terminalizeStalePresentationIfNeeded() {
+            guard didBeginTransfer, let presentationToken else { return }
+            FileTransferManager.shared.cancelExternalOutboundTransfer(
+                token: presentationToken
+            )
+        }
+        try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
         guard let transportOperationToken = FileTransferManager.shared.beginExternalTransportOperation(
             cancellationHandler: { [weak self, cancellationFlag] in
                 cancellationFlag.cancel()
                 self?.cancelFileTransferWaiters(
-                    sessionID: sessionID,
+                    owner: operationOwner,
                     transferId: transferId
                 )
             }
@@ -291,11 +380,13 @@ extension CrossNetworkConnectionManager {
             )
         }
         do {
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             let reader = try await WebRTCOutboundFileReader.open(url: url)
             fileReader = reader
-            try Task.checkCancellation()
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             let fileSize = reader.fileSize
 
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             guard let token = FileTransferManager.shared.beginExternalOutboundTransfer(
                 transferId: transferId,
                 fileURL: url,
@@ -305,7 +396,7 @@ extension CrossNetworkConnectionManager {
                 cancellationHandler: { [weak self, cancellationFlag] in
                     cancellationFlag.cancel()
                     self?.cancelFileTransferWaiters(
-                        sessionID: sessionID,
+                        owner: operationOwner,
                         transferId: transferId
                     )
                 }
@@ -316,6 +407,7 @@ extension CrossNetworkConnectionManager {
             }
             presentationToken = token
             didBeginTransfer = true
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             try cancellationFlag.check()
 
             // DataChannel payload should stay conservative to avoid SCTP message-size rejection on mixed endpoints.
@@ -340,6 +432,7 @@ extension CrossNetworkConnectionManager {
             }
 
             try cancellationFlag.check()
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             let meta = CrossNetworkFileTransferMessage(
                 op: .metadata,
                 transferId: transferId,
@@ -353,20 +446,20 @@ extension CrossNetworkConnectionManager {
             )
             didAttemptMetadata = true
             _ = try await sendFileTransferMessageAndWait(
-                sessionID: sessionID,
-                session: session,
-                keys: keys,
+                owner: operationOwner,
                 message: meta,
                 expectedOperation: .metadataAck,
                 cancellationFlag: cancellationFlag,
                 timeoutSeconds: 15
             )
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             try cancellationFlag.check()
 
             var sentBytes: Int64 = 0
             var chunkIndex = 0
 
             while sentBytes < fileSize {
+                try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
                 try cancellationFlag.check()
                 let remaining = Int(fileSize - sentBytes)
                 let readLen = min(chunkSize, max(0, remaining))
@@ -376,6 +469,7 @@ extension CrossNetworkConnectionManager {
                     offset: UInt64(sentBytes),
                     length: readLen
                 )
+                try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
                 try cancellationFlag.check()
                 let msg = CrossNetworkFileTransferMessage(
                     op: .chunk,
@@ -389,12 +483,10 @@ extension CrossNetworkConnectionManager {
                     () async throws -> CrossNetworkFileTransferMessage in
                     var lastError: Error?
                     for _ in 0..<3 {
-                        try Task.checkCancellation()
+                        try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
                         do {
                             return try await sendFileTransferMessageAndWait(
-                                sessionID: sessionID,
-                                session: session,
-                                keys: keys,
+                                owner: operationOwner,
                                 message: msg,
                                 expectedOperation: .chunkAck,
                                 cancellationFlag: cancellationFlag,
@@ -404,6 +496,7 @@ extension CrossNetworkConnectionManager {
                         } catch is CancellationError {
                             throw CancellationError()
                         } catch {
+                            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
                             guard WebRTCOutboundFileTransferSupport
                                 .shouldRetryChunkAcknowledgment(after: error) else {
                                 throw error
@@ -413,6 +506,7 @@ extension CrossNetworkConnectionManager {
                     }
                     throw lastError ?? WebRTCFileTransferWaitError.timeout
                 }()
+                try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
                 try cancellationFlag.check()
 
                 if ack.op == .error {
@@ -427,14 +521,17 @@ extension CrossNetworkConnectionManager {
                 sentBytes = expectedReceivedBytes
                 chunkIndex += 1
 
+                try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
                 FileTransferManager.shared.updateExternalOutboundProgress(
                     token: token,
                     transferredBytes: sentBytes
                 )
             }
 
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             let fileSha = try await reader.finalizeAndClose()
             fileReader = nil
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             try cancellationFlag.check()
             let done = CrossNetworkFileTransferMessage(
                 op: .complete,
@@ -446,9 +543,7 @@ extension CrossNetworkConnectionManager {
             do {
                 didAttemptCompletion = true
                 completionAck = try await sendFileTransferMessageAndWait(
-                    sessionID: sessionID,
-                    session: session,
-                    keys: keys,
+                    owner: operationOwner,
                     message: done,
                     expectedOperation: .completeAck,
                     cancellationFlag: cancellationFlag,
@@ -463,6 +558,7 @@ extension CrossNetworkConnectionManager {
                 expectedFileSha256: fileSha
             )
 
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             FileTransferManager.shared.completeExternalOutboundTransfer(token: token)
         } catch {
             let operationError = error
@@ -476,12 +572,18 @@ extension CrossNetworkConnectionManager {
                     )
                 }
             }
+            guard isCurrentWebRTCFileTransferOperationOwner(operationOwner) else {
+                cancelFileTransferWaiters(
+                    owner: operationOwner,
+                    transferId: transferId
+                )
+                terminalizeStalePresentationIfNeeded()
+                throw CancellationError()
+            }
             if didAttemptMetadata, !didAttemptCompletion {
                 let cancellationNoticeTask = Task { @MainActor in
                     try await self.sendFileTransferMessage(
-                        sessionID: sessionID,
-                        session: session,
-                        keys: keys,
+                        owner: operationOwner,
                         message: CrossNetworkFileTransferMessage(
                             op: .cancel,
                             transferId: transferId,
@@ -492,11 +594,20 @@ extension CrossNetworkConnectionManager {
                 do {
                     try await cancellationNoticeTask.value
                 } catch {
+                    guard isCurrentWebRTCFileTransferOperationOwner(operationOwner) else {
+                        cancelFileTransferWaiters(
+                            owner: operationOwner,
+                            transferId: transferId
+                        )
+                        terminalizeStalePresentationIfNeeded()
+                        throw CancellationError()
+                    }
                     Self.fileTransferLogger.error(
                         "WebRTC outbound cancellation notice failed after pre-commit termination: \(error.localizedDescription, privacy: .public)"
                     )
                 }
             }
+            try requireCurrentWebRTCFileTransferOperationOwner(operationOwner)
             if didBeginTransfer, let presentationToken {
                 if !didAttemptCompletion,
                    operationError is CancellationError || cancellationFlag.isCancelled {

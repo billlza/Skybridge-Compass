@@ -2,22 +2,24 @@ import Foundation
 
 @available(iOS 17.0, *)
 extension FileTransferManager {
-    static func shouldPreferCrossNetworkTransfer(
-        targetDeviceId: String,
+    static func transportDecision(
+        for device: DiscoveredDevice,
+        routeIntent: PeerTransportRouteIntent,
         crossNetworkState: CrossNetworkWebRTCManager.State,
-        crossNetworkRemoteDeviceId: String?,
-        localActiveConnectionDeviceIds: Set<String>
-    ) -> Bool {
-        guard case .connected = crossNetworkState else { return false }
-
-        let normalizedTarget = normalizedTransferIdentity(targetDeviceId)
-        guard !normalizedTarget.isEmpty else { return false }
-
-        let normalizedRemote = normalizedTransferIdentity(crossNetworkRemoteDeviceId)
-        guard normalizedRemote == normalizedTarget else { return false }
-
-        let normalizedLocalActiveIds = Set(localActiveConnectionDeviceIds.map(normalizedTransferIdentity))
-        return !normalizedLocalActiveIds.contains(normalizedTarget)
+        remoteDeviceIDs: [String?]
+    ) -> PeerTransportRouteDecision {
+        let activeSessionID: String?
+        if case .connected(let sessionID) = crossNetworkState {
+            activeSessionID = sessionID
+        } else {
+            activeSessionID = nil
+        }
+        return PeerTransportRouteSelectionContract.evaluate(
+            targetDeviceID: device.id,
+            routeIntent: routeIntent,
+            activeCrossNetworkSessionID: activeSessionID,
+            activeCrossNetworkRemoteDeviceIDs: remoteDeviceIDs
+        )
     }
 
     static func resolveBestTransferDevice(

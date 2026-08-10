@@ -321,9 +321,9 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             remoteSmokeScript.contains("cp -f \"$MAC_ONLINE_STATUS\" \"$MAC_ONLINE_STATUS_ARTIFACT\"") &&
             remoteSmokeScript.contains("SKYBRIDGE_SMOKE_STATUS_FILE=\"$MAC_ONLINE_STATUS\"") &&
             remoteSmokeScript.contains("SKYBRIDGE_TARGET_IPAD_IDENTITY=\"$IOS_PQC_DEVICE_ID\"") &&
-            remoteSmokeScript.contains("No connected real iPad found") &&
+            remoteSmokeScript.contains("No paired physical iPad with CoreDevice connection capability found") &&
             remoteSmokeScript.contains("validate_real_ipad_device_id") &&
-            remoteSmokeScript.contains("Selected real-device target is not a connected iPad according to devicectl JSON") &&
+            remoteSmokeScript.contains("Selected CoreDevice target is not a physical iPad") &&
             !remoteSmokeScript.contains("SKYBRIDGE_SMOKE_ALLOW_NON_IPAD_DEVICE") &&
             remoteSmokeScript.contains("require_remote_control_notice_identity_env") &&
             remoteSmokeScript.contains("SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME") &&

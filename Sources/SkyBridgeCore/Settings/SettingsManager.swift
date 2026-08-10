@@ -401,25 +401,99 @@ public class SettingsManager: ObservableObject, Sendable {
     @Published public var enableZeroCopyBGRA: Bool = false
 
  // MARK: - 私有属性
-    private let userDefaults = UserDefaults.standard
+    private let userDefaults: UserDefaults
+    private let existingOnlyIdentityRuntimeOverride: Bool?
+    private let qPeriaptRuntimeSupportPreparer:
+        @MainActor @Sendable () async -> Bool
+    private let qPeriaptEnvironmentPreferenceApplier:
+        @MainActor @Sendable (Bool) -> Void
+    private let runtimeSideEffectsEnabled: Bool
     private var settingsCancellables = Set<AnyCancellable>()
     private var fileTransferSettingsApplyTask: Task<Void, Never>?
     private var protocolIdentityConfigurationRequestGate = ProtocolIdentityConfigurationRequestGate()
+    private var qPeriaptRuntimePreparationTask: Task<Void, Never>?
     private var protocolIdentityRestorationTask: Task<Void, Never>?
     private var hasCommittedProtocolIdentityConfiguration = false
 
+    private var requiresExistingOnlyIdentityRuntime: Bool {
+        existingOnlyIdentityRuntimeOverride
+            ?? DeviceIdentityKeyManager.requiresExistingOnlyIdentityRuntime
+    }
+
  // MARK: - 初始化
-    private init() {
+    private convenience init() {
+        self.init(
+            userDefaults: .standard,
+            existingOnlyIdentityRuntimeOverride: nil,
+            qPeriaptRuntimeSupportPreparer: {
+                await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+            },
+            qPeriaptEnvironmentPreferenceApplier: {
+                Self.applyQPeriaptEnvironmentPreference($0)
+            },
+            runtimeSideEffectsEnabled: true,
+            startsProtocolIdentityRestoration: true
+        )
+    }
+
+    private init(
+        userDefaults: UserDefaults,
+        existingOnlyIdentityRuntimeOverride: Bool?,
+        qPeriaptRuntimeSupportPreparer:
+            @escaping @MainActor @Sendable () async -> Bool,
+        qPeriaptEnvironmentPreferenceApplier:
+            @escaping @MainActor @Sendable (Bool) -> Void,
+        runtimeSideEffectsEnabled: Bool,
+        startsProtocolIdentityRestoration: Bool
+    ) {
+        self.userDefaults = userDefaults
+        self.existingOnlyIdentityRuntimeOverride = existingOnlyIdentityRuntimeOverride
+        self.qPeriaptRuntimeSupportPreparer = qPeriaptRuntimeSupportPreparer
+        self.qPeriaptEnvironmentPreferenceApplier =
+            qPeriaptEnvironmentPreferenceApplier
+        self.runtimeSideEffectsEnabled = runtimeSideEffectsEnabled
         loadSettings()
-        setupObservers()
-        applyRuntimeSettingsSnapshot()
-        Task { @MainActor [weak self] in
+        if runtimeSideEffectsEnabled {
+            setupObservers()
+            applyRuntimeSettingsSnapshot()
+        } else {
+            setupPQCSignatureAlgorithmObserver()
+        }
+        qPeriaptRuntimePreparationTask = Task { @MainActor [weak self] in
             await self?.prepareQPeriaptRuntimeSupport()
         }
-        protocolIdentityRestorationTask = Task { @MainActor [weak self] in
-            await self?.restoreProtocolIdentityConfiguration()
+        if startsProtocolIdentityRestoration {
+            protocolIdentityRestorationTask = Task { @MainActor [weak self] in
+                await self?.restoreProtocolIdentityConfiguration()
+            }
         }
     }
+
+    #if DEBUG || SKYBRIDGE_TESTING
+    convenience init(
+        testingUserDefaults: UserDefaults,
+        existingOnlyIdentityRuntime: Bool,
+        qPeriaptRuntimeSupportPreparer:
+            @escaping @MainActor @Sendable () async -> Bool,
+        qPeriaptEnvironmentPreferenceApplier:
+            @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        self.init(
+            userDefaults: testingUserDefaults,
+            existingOnlyIdentityRuntimeOverride: existingOnlyIdentityRuntime,
+            qPeriaptRuntimeSupportPreparer: qPeriaptRuntimeSupportPreparer,
+            qPeriaptEnvironmentPreferenceApplier:
+                qPeriaptEnvironmentPreferenceApplier,
+            runtimeSideEffectsEnabled: false,
+            startsProtocolIdentityRestoration: true
+        )
+    }
+
+    func waitForStartupTasksForTesting() async {
+        await qPeriaptRuntimePreparationTask?.value
+        await protocolIdentityRestorationTask?.value
+    }
+    #endif
 
  // MARK: - 生命周期管理方法
 
@@ -703,6 +777,11 @@ public class SettingsManager: ObservableObject, Sendable {
         }
     }
 
+    private func clearCryptoProviderCacheForSettingsChangeIfEnabled() {
+        guard runtimeSideEffectsEnabled else { return }
+        clearCryptoProviderCacheForSettingsChange()
+    }
+
     private func applyLoggingRuntimeSettings() {
         SkyBridgeLogger.minimumLogLevel = enableVerboseLogging
             ? .debug
@@ -745,6 +824,11 @@ public class SettingsManager: ObservableObject, Sendable {
         protection: ProtocolSigningKeyProtection
     ) async throws -> PreparedProtocolIdentityConfiguration {
         await protocolIdentityRestorationTask?.value
+        guard !requiresExistingOnlyIdentityRuntime else {
+            throw SettingsError.validationFailed(
+                "Protocol identity provisioning is disabled in the existing-only runtime"
+            )
+        }
         let requestGeneration = protocolIdentityConfigurationRequestGate.begin()
         guard algorithm != .ed25519 else {
             throw SettingsError.validationFailed(
@@ -791,6 +875,11 @@ public class SettingsManager: ObservableObject, Sendable {
     func commitPreparedProtocolIdentityConfiguration(
         _ prepared: PreparedProtocolIdentityConfiguration
     ) throws {
+        guard !requiresExistingOnlyIdentityRuntime else {
+            throw SettingsError.validationFailed(
+                "Protocol identity configuration persistence is disabled in the existing-only runtime"
+            )
+        }
         guard protocolIdentityConfigurationRequestGate.accepts(
             prepared.requestGeneration
         ) else {
@@ -851,6 +940,7 @@ public class SettingsManager: ObservableObject, Sendable {
 
     private func restoreProtocolIdentityConfiguration() async {
         let requestGeneration = protocolIdentityConfigurationRequestGate.begin()
+        let existingOnly = requiresExistingOnlyIdentityRuntime
         let storedRecord: ProtocolIdentityConfigurationRecord
         let shouldProvisionDefault: Bool
 
@@ -872,6 +962,15 @@ public class SettingsManager: ObservableObject, Sendable {
                 return
             }
         } else {
+            guard !existingOnly else {
+                guard protocolIdentityConfigurationRequestGate.accepts(
+                    requestGeneration
+                ) else { return }
+                protocolIdentityConfigurationState = .requiresExplicitConfirmation
+                protocolIdentityConfigurationError =
+                    "Existing-only runtime requires a committed v2 protocol identity configuration"
+                return
+            }
             let legacyAlgorithmRaw = userDefaults.string(
                 forKey: SettingsStorageKeys.protocolSigningAlgorithmV1
             )
@@ -909,11 +1008,16 @@ public class SettingsManager: ObservableObject, Sendable {
 
         do {
             let restoredIdentity: (publicKey: Data, keyHandle: SigningKeyHandle)
-            let restorationAction = ProtocolIdentityAuthorityRestorationPolicy.action(
-                shouldProvisionDefault: shouldProvisionDefault,
-                usesEphemeralIdentityStore: DeviceIdentityKeyManager
-                    .usesEphemeralIdentityStoreForCurrentProcess
-            )
+            let restorationAction: ProtocolIdentityAuthorityRestorationAction
+            if existingOnly {
+                restorationAction = .requireExisting
+            } else {
+                restorationAction = ProtocolIdentityAuthorityRestorationPolicy.action(
+                    shouldProvisionDefault: shouldProvisionDefault,
+                    usesEphemeralIdentityStore: DeviceIdentityKeyManager
+                        .usesEphemeralIdentityStoreForCurrentProcess
+                )
+            }
             if restorationAction == .provision {
                 restoredIdentity = try await DeviceIdentityKeyManager.shared.getProtocolSigningIdentity(
                     for: storedRecord.algorithm,
@@ -938,7 +1042,9 @@ public class SettingsManager: ObservableObject, Sendable {
                 protection: storedRecord.protection
             )
             guard protocolIdentityConfigurationRequestGate.accepts(requestGeneration) else { return }
-            try persistProtocolIdentityConfiguration(storedRecord)
+            if !existingOnly {
+                try persistProtocolIdentityConfiguration(storedRecord)
+            }
             activateProtocolIdentityConfiguration(
                 algorithm: storedRecord.algorithm,
                 protection: storedRecord.protection
@@ -978,6 +1084,11 @@ public class SettingsManager: ObservableObject, Sendable {
     private func persistProtocolIdentityConfiguration(
         _ record: ProtocolIdentityConfigurationRecord
     ) throws {
+        guard !requiresExistingOnlyIdentityRuntime else {
+            throw SettingsError.validationFailed(
+                "Protocol identity configuration persistence is disabled in the existing-only runtime"
+            )
+        }
         guard record.isValidAuthoritySelection else {
             throw SettingsError.validationFailed("Protocol identity configuration is invalid")
         }
@@ -1024,26 +1135,36 @@ public class SettingsManager: ObservableObject, Sendable {
     }
 
     private func prepareQPeriaptRuntimeSupport() async {
-        let supported = await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+        guard !requiresExistingOnlyIdentityRuntime else {
+            // The smoke host may inspect existing local identity authorities,
+            // but it is not an enrollment authority. Keep Q-Periapt dark
+            // without entering its durable Keychain CAS provisioning chain.
+            qPeriaptRuntimeSupported = false
+            qPeriaptEnvironmentPreferenceApplier(false)
+            clearCryptoProviderCacheForSettingsChangeIfEnabled()
+            return
+        }
+
+        let supported = await qPeriaptRuntimeSupportPreparer()
         guard !Task.isCancelled else { return }
         qPeriaptRuntimeSupported = supported
 
         guard preferQPeriaptBeta else {
-            Self.applyQPeriaptEnvironmentPreference(false)
-            clearCryptoProviderCacheForSettingsChange()
+            qPeriaptEnvironmentPreferenceApplier(false)
+            clearCryptoProviderCacheForSettingsChangeIfEnabled()
             return
         }
         guard supported else {
             userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-            Self.applyQPeriaptEnvironmentPreference(false)
-            clearCryptoProviderCacheForSettingsChange()
+            qPeriaptEnvironmentPreferenceApplier(false)
+            clearCryptoProviderCacheForSettingsChangeIfEnabled()
             preferQPeriaptBeta = false
             return
         }
 
         userDefaults.set(true, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-        Self.applyQPeriaptEnvironmentPreference(true)
-        clearCryptoProviderCacheForSettingsChange()
+        qPeriaptEnvironmentPreferenceApplier(true)
+        clearCryptoProviderCacheForSettingsChangeIfEnabled()
     }
 
     private func applyWeatherRuntimeSetting(_ enabled: Bool) {
@@ -1985,7 +2106,7 @@ public class SettingsManager: ObservableObject, Sendable {
         preferQPeriaptBeta = userDefaults.bool(forKey: SettingsStorageKeys.preferQPeriaptBeta, defaultValue: false)
         // The expensive KEM round-trip probe runs off the main actor. Routing
         // remains disabled until it completes, without erasing user intent.
-        Self.applyQPeriaptEnvironmentPreference(false)
+        qPeriaptEnvironmentPreferenceApplier(false)
         strictModeForSensitiveGroups = userDefaults.bool(forKey: "Settings.StrictModeForSensitiveGroups", defaultValue: false)
         aqiThresholdCautionUrban = userDefaults.integer(forKey: "Settings.AQIThresholdCautionUrban", defaultValue: 100)
         aqiThresholdSensitiveUrban = userDefaults.integer(forKey: "Settings.AQIThresholdSensitiveUrban", defaultValue: 150)
@@ -2079,6 +2200,23 @@ public class SettingsManager: ObservableObject, Sendable {
         scanLevel = FileScanLevel(rawValue: userDefaults.string(forKey: "Settings.ScanLevel") ?? "") ?? .standard
         enableZeroCopyBGRA = userDefaults.bool(forKey: "Settings.EnableZeroCopyBGRA", defaultValue: false)
         preferNearestNeighborScaling = userDefaults.bool(forKey: "Settings.PreferNearestNeighborScaling", defaultValue: false)
+    }
+
+    private func setupPQCSignatureAlgorithmObserver() {
+        $pqcSignatureAlgorithm.sink { [weak self] value in
+            guard let self else { return }
+            let normalized = Self.normalizedPQCSignatureAlgorithm(value)
+            guard normalized == value else {
+                self.pqcSignatureAlgorithm = normalized
+                return
+            }
+            guard !self.requiresExistingOnlyIdentityRuntime else { return }
+            self.userDefaults.set(
+                normalized,
+                forKey: "Settings.PQCSignatureAlgorithm"
+            )
+            self.clearCryptoProviderCacheForSettingsChangeIfEnabled()
+        }.store(in: &settingsCancellables)
     }
 
  /// 设置观察者
@@ -2484,16 +2622,7 @@ public class SettingsManager: ObservableObject, Sendable {
             self.userDefaults.set(true, forKey: "Settings.EnablePQC")
             self.clearCryptoProviderCacheForSettingsChange()
         }.store(in: &settingsCancellables)
-        $pqcSignatureAlgorithm.sink { [weak self] value in
-            guard let self else { return }
-            let normalized = Self.normalizedPQCSignatureAlgorithm(value)
-            guard normalized == value else {
-                self.pqcSignatureAlgorithm = normalized
-                return
-            }
-            self.userDefaults.set(normalized, forKey: "Settings.PQCSignatureAlgorithm")
-            self.clearCryptoProviderCacheForSettingsChange()
-        }.store(in: &settingsCancellables)
+        setupPQCSignatureAlgorithmObserver()
         $enablePQCHybridTLS.sink { [weak self] value in
             self?.userDefaults.set(value, forKey: "Settings.EnablePQCHybridTLS")
             self?.clearCryptoProviderCacheForSettingsChange()
@@ -2506,7 +2635,7 @@ public class SettingsManager: ObservableObject, Sendable {
             guard let self else { return }
             guard value else {
                 self.userDefaults.set(false, forKey: SettingsStorageKeys.preferQPeriaptBeta)
-                Self.applyQPeriaptEnvironmentPreference(false)
+                self.qPeriaptEnvironmentPreferenceApplier(false)
                 self.clearCryptoProviderCacheForSettingsChange()
                 return
             }

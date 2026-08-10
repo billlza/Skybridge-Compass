@@ -238,12 +238,15 @@ final class MacWebRTCScreenFrameWorkerTests: XCTestCase {
         }
 
         let sendSignalBody = try sourceSlice(
-            from: "private func sendSignal(_ env: WebRTCSignalingEnvelope",
+            from: "private func sendSignal(",
             to: "private func handleSignalingServerFrame(",
             in: managerSource
         )
         XCTAssertTrue(sendSignalBody.contains("try Task.checkCancellation()"))
-        XCTAssertTrue(sendSignalBody.contains("error is CancellationError || Task.isCancelled"))
+        XCTAssertTrue(sendSignalBody.contains("ownerSession: WebRTCSession"))
+        XCTAssertTrue(sendSignalBody.contains("connectedSignalingClient("))
+        XCTAssertTrue(sendSignalBody.contains("requireCurrentSignalingClient("))
+        XCTAssertTrue(sendSignalBody.contains("requireCurrentWebRTCSession("))
         XCTAssertFalse(sendSignalBody.contains("try? await Task.sleep(for: .milliseconds(350))"))
     }
 

@@ -14,6 +14,7 @@
 @property(nonatomic, assign) BOOL recordingInitializedState;
 @property(nonatomic, assign) BOOL recordingState;
 @property(nonatomic, assign) uint64_t sampleCursor;
+@property(nonatomic, copy, nullable) NSUUID *recordedAudioOwnerToken;
 
 @end
 
@@ -112,8 +113,33 @@
     self.recordingInitializedState = NO;
     self.recordingState = NO;
     self.sampleCursor = 0;
+    self.recordedAudioOwnerToken = nil;
     [self.stateLock unlock];
     return YES;
+}
+
+- (void)activateRecordedAudioOwnerWithToken:(NSUUID *)ownerToken {
+    if (ownerToken == nil) {
+        return;
+    }
+    [self.stateLock lock];
+    if (![self.recordedAudioOwnerToken isEqual:ownerToken]) {
+        self.recordedAudioOwnerToken = [ownerToken copy];
+        self.sampleCursor = 0;
+    }
+    [self.stateLock unlock];
+}
+
+- (void)retireRecordedAudioOwnerWithToken:(NSUUID *)ownerToken {
+    if (ownerToken == nil) {
+        return;
+    }
+    [self.stateLock lock];
+    if ([self.recordedAudioOwnerToken isEqual:ownerToken]) {
+        self.recordedAudioOwnerToken = nil;
+        self.sampleCursor = 0;
+    }
+    [self.stateLock unlock];
 }
 
 - (BOOL)initializePlayout {
@@ -163,14 +189,18 @@
 - (void)pushRecordedPCM16InterleavedData:(NSData *)data
                               sampleRate:(NSInteger)sampleRate
                             channelCount:(NSInteger)channelCount
-                              frameCount:(NSInteger)frameCount {
+                              frameCount:(NSInteger)frameCount
+                              ownerToken:(NSUUID *)ownerToken {
     if (sampleRate != 48000 || channelCount != 2 || frameCount <= 0 || data.length == 0) {
         return;
     }
 
     [self.stateLock lock];
     id<RTCAudioDeviceDelegate> delegate = self.delegate;
-    BOOL shouldDeliver = self.initializedState && self.recordingState && delegate != nil;
+    BOOL shouldDeliver = self.initializedState &&
+                         self.recordingState &&
+                         delegate != nil &&
+                         [self.recordedAudioOwnerToken isEqual:ownerToken];
     uint64_t sampleTime = self.sampleCursor;
     if (shouldDeliver) {
         self.sampleCursor += (uint64_t)frameCount;
@@ -185,6 +215,16 @@
     [delegate dispatchAsync:^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf == nil) {
+            return;
+        }
+
+        [strongSelf.stateLock lock];
+        BOOL stillAuthorized = strongSelf.initializedState &&
+                               strongSelf.recordingState &&
+                               strongSelf.delegate == delegate &&
+                               [strongSelf.recordedAudioOwnerToken isEqual:ownerToken];
+        if (!stillAuthorized) {
+            [strongSelf.stateLock unlock];
             return;
         }
 
@@ -215,6 +255,7 @@
                                      &bufferList,
                                      NULL,
                                      nil);
+        [strongSelf.stateLock unlock];
     }];
 }
 

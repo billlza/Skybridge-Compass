@@ -683,8 +683,17 @@ grep -Fxq "GCC_TREAT_WARNINGS_AS_ERRORS=YES" "$TMP_DIR/xcodebuild.args"
 # Source contracts tie the exercised policies to both production build invocations and the private boundary.
 grep -Fq -- '-Xswiftc -warnings-as-errors' "$SMOKE_SCRIPT"
 grep -Fq -- ") >\"\$MAC_BUILD_LOG\" 2>&1" "$SMOKE_SCRIPT"
-grep -Fq -- "build >\"\$IOS_BUILD_LOG\" 2>&1" "$SMOKE_SCRIPT"
-grep -Fq -- 'SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild' "$SMOKE_SCRIPT"
+grep -Fq -- 'skybridge_archive_ios_distribution_product' "$SMOKE_SCRIPT"
+grep -Fq -- 'skybridge_export_ios_distribution_archive' "$SMOKE_SCRIPT"
+grep -Fq -- 'skybridge_extract_single_ios_exported_app' "$SMOKE_SCRIPT"
+grep -Fq -- 'installed-only' "$SMOKE_SCRIPT"
+grep -Fq -- 'SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \' "$SMOKE_SCRIPT"
+grep -Fq -- 'skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG" 2>&1' "$SMOKE_SCRIPT"
+if grep -Fq -- 'CODE_SIGN_STYLE=Manual' "$SMOKE_SCRIPT" \
+  || grep -Fq -- 'CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH' "$SMOKE_SCRIPT"; then
+  echo "The WebRTC Release lane must not inject Manual signing inputs" >&2
+  exit 1
+fi
 grep -Fq -- 'skybridge_configure_optional_apple_pqc_sdk_compile_gate iphoneos' "$SMOKE_SCRIPT"
 grep -Fq -- "MAC_CODE=\"\$ARTIFACT_DIR/mac.code\"" "$SMOKE_SCRIPT"
 grep -Fq -- "MAC_TOKEN=\"\$AUTH_PRIVATE_DIR/mac.token\"" "$SMOKE_SCRIPT"

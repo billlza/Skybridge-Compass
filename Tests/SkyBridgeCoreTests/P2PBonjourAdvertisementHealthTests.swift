@@ -463,7 +463,7 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertFalse(networkManager.contains("discoveryService.startScanning()"))
     }
 
-    func testIOSInboundBonjourConnectionBreaksStateHandlerCycleAndTimesOut() throws {
+    func testIOSInboundBonjourConnectionTransfersOneBoundedAdmissionLease() throws {
         let source = try readSource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
         )
@@ -472,8 +472,26 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
         XCTAssertTrue(source.contains("[weak self, weak connection] state in"))
         XCTAssertTrue(source.contains("connection.stateUpdateHandler = nil"))
         XCTAssertTrue(source.contains("p2p-listener inbound-timeout"))
-        XCTAssertTrue(source.contains("maximumPreReadyInboundConnections = 32"))
-        XCTAssertTrue(source.contains("maximumPreReadyInboundConnectionsPerEndpoint = 4"))
+        XCTAssertTrue(
+            source.contains(
+                "P2PInboundAdmissionPolicy.maximumConcurrentConnections"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "P2PInboundAdmissionPolicy.maximumConcurrentConnectionsPerRemoteEndpoint"
+            )
+        )
+        XCTAssertTrue(source.contains("claimProtocolInboundAdmission("))
+        XCTAssertTrue(source.contains("entry.phase = .protocolReady"))
+        XCTAssertTrue(
+            source.contains(
+                "P2PInboundAdmissionPolicy.remainingSeconds("
+            )
+        )
+        XCTAssertFalse(
+            source.contains("finishPreReadyInboundConnection(connection)")
+        )
     }
 
     func testIOSLiveBonjourRoutesPreserveBrowserReportedInterfaceOwnership() throws {
@@ -1362,6 +1380,24 @@ final class P2PBonjourAdvertisementHealthTests: XCTestCase {
 
         XCTAssertFalse(harness.contains("remoteControlRoutePreflightProbePayload"))
         XCTAssertFalse(harness.contains("control-route-preflight"))
+        XCTAssertTrue(harness.contains(".resolveConnectableDeviceAwaitingControlRoute("))
+        XCTAssertTrue(harness.contains("mode: .selectedDiscoveryTarget"))
+        XCTAssertTrue(harness.contains("control-route hydration=finished elapsedMs="))
+        XCTAssertTrue(harness.contains("hydratedStrongIdSame="))
+        XCTAssertTrue(harness.contains("control-route evidence liveEndpointCount="))
+        XCTAssertTrue(harness.contains("eligibleEndpointCount="))
+        XCTAssertTrue(harness.contains("ignoredLiveEndpointCount="))
+        XCTAssertTrue(harness.contains("private static let controlRouteEvidenceKey = SymmetricKey(size: .bits256)"))
+        XCTAssertTrue(harness.contains("HMAC<SHA256>.authenticationCode("))
+        XCTAssertTrue(harness.contains("serviceRef=\\(selectedRouteReference)"))
+        XCTAssertTrue(harness.contains("service[ref=\\(reference)"))
+        XCTAssertFalse(harness.contains("control-route source=bonjour-service name="))
+        XCTAssertFalse(harness.contains("service[\\(sanitize(name))"))
+        XCTAssertFalse(harness.contains("endpoints.count == liveEndpoints.count"))
+        XCTAssertTrue(harness.contains("guard verifyDiscoveredControlRoute(hydratedTarget"))
+        XCTAssertTrue(harness.contains("cancelled stage=control-route"))
+        XCTAssertFalse(harness.contains("let normalizedName = targetDeviceName"))
+        XCTAssertFalse(harness.contains("deviceName.contains(normalizedName)"))
         XCTAssertTrue(harness.contains("liveBonjourServiceEndpoints("))
         XCTAssertTrue(harness.contains("liveBonjourControlEndpoints: liveEndpoints"))
         XCTAssertTrue(harness.contains("preferredInterface="))

@@ -1,9 +1,32 @@
 import Network
 import XCTest
 @testable import SkyBridgeCore
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 final class P2PDiscoveryBootstrapControlTests: XCTestCase {
+    private actor SOAPeerIDLoaderProbe {
+        enum Failure: Error {
+            case unavailable
+        }
+
+        private var calls = 0
+
+        func fail() throws -> Data {
+            calls += 1
+            throw Failure.unavailable
+        }
+
+        func load(_ value: Data) -> Data {
+            calls += 1
+            return value
+        }
+
+        func invocationCount() -> Int {
+            calls
+        }
+    }
+
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
     private let protocolPublicKey = Data(repeating: 0x33, count: 1184)
     private var fingerprint: String {
@@ -11,6 +34,365 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             protocolPublicKey: protocolPublicKey,
             protocolAlgorithm: .mlDSA65
         ).authoritativeFingerprint
+    }
+
+    func testSharedInboundAdmissionPolicyDefinesAppleRoleParity() {
+        XCTAssertEqual(P2PInboundAdmissionPolicy.maximumConcurrentConnections, 32)
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.maximumConcurrentConnectionsPerRemoteEndpoint,
+            4
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(for: .awaitingFirstFrame),
+            12
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(for: .bootstrapCrypto),
+            45
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(for: .initialHandshake),
+            45
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(
+                for: .protocolIdentityConfirmation
+            ),
+            195
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.releaseMilestone(for: .awaitingFirstFrame),
+            .transitionWithoutRelease
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.releaseMilestone(for: .bootstrapCrypto),
+            .responseSubmitted
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.releaseMilestone(
+                for: .protocolIdentityConfirmation
+            ),
+            .responseSubmitted
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.releaseMilestone(for: .initialHandshake),
+            .authenticatedSessionEstablished
+        )
+
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactions,
+            32
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionsPerRequester,
+            4
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.admissionWindowSeconds,
+            10
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy
+                .maximumAdmissionsPerRequesterPerWindow,
+            8
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.maximumRequestAgeSeconds,
+            120
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.maximumRequestFutureSkewSeconds,
+            30
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.candidateResponseTimeoutSeconds,
+            30
+        )
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.defaultFinalAckResponseTimeoutSeconds,
+            195
+        )
+        let issuedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertEqual(
+            P2PProtocolIdentityBindingAdmissionPolicy.boundedChildExpiry(
+                parentExpiry: issuedAt.addingTimeInterval(20),
+                issuedAt: issuedAt
+            ),
+            issuedAt.addingTimeInterval(20)
+        )
+    }
+
+    func testProtocolIdentityConfirmationBudgetIsFiniteAndBounded() {
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(
+                for: .protocolIdentityConfirmation,
+                protocolIdentityConfirmationResponseBudgetSeconds: .infinity
+            ),
+            195
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(
+                for: .protocolIdentityConfirmation,
+                protocolIdentityConfirmationResponseBudgetSeconds: 1
+            ),
+            45
+        )
+        XCTAssertEqual(
+            P2PInboundAdmissionPolicy.deadlineSeconds(
+                for: .protocolIdentityConfirmation,
+                protocolIdentityConfirmationResponseBudgetSeconds: 10_000
+            ),
+            315
+        )
+    }
+
+    func testFirstFrameBudgetUsesMonotonicDeadlineWithoutReset() throws {
+        let now = ContinuousClock.now
+        let deadline = now.advanced(by: .seconds(12))
+        let remaining = try XCTUnwrap(
+            P2PInboundAdmissionPolicy.remainingSeconds(
+                until: deadline,
+                now: now.advanced(by: .seconds(5))
+            )
+        )
+        XCTAssertEqual(remaining, 7, accuracy: 0.000_001)
+        XCTAssertNil(
+            P2PInboundAdmissionPolicy.remainingSeconds(
+                until: deadline,
+                now: deadline
+            )
+        )
+        XCTAssertNil(
+            P2PInboundAdmissionPolicy.remainingSeconds(
+                until: deadline,
+                now: deadline.advanced(by: .milliseconds(1))
+            )
+        )
+    }
+
+    func testMacAndIOSInboundAdaptersUseSharedStagedAdmissionContract() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let mac = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift"
+            ),
+            encoding: .utf8
+        )
+        let ios = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+            ),
+            encoding: .utf8
+        )
+
+        for (platform, source) in [("macOS", mac), ("iOS", ios)] {
+            XCTAssertTrue(
+                source.contains(
+                    "P2PInboundAdmissionPolicy.maximumConcurrentConnections"
+                ),
+                platform
+            )
+            XCTAssertTrue(
+                source.contains("stage: .awaitingFirstFrame"),
+                platform
+            )
+            XCTAssertTrue(source.contains("stage: .initialHandshake"), platform)
+            XCTAssertTrue(
+                source.contains("stage = .protocolIdentityConfirmation")
+                    || source.contains("processingStage = .protocolIdentityConfirmation")
+                    || source.contains("return .protocolIdentityConfirmation"),
+                platform
+            )
+            XCTAssertTrue(
+                source.contains("ifOwnedBy: processingLease"),
+                platform
+            )
+        }
+
+        let macTimeout = try sourceSlice(
+            mac,
+            from: "private func armProvisionalInboundTimeout(",
+            to: "private func beginProcessingProvisionalInboundConnection("
+        )
+        XCTAssertTrue(macTimeout.contains("inboundControlSessions.first(where:"))
+        XCTAssertTrue(
+            macTimeout.contains(
+                "ObjectIdentifier($0.value.connection) == identifier"
+            )
+        )
+        XCTAssertTrue(macTimeout.contains("?.value.task?.cancel()"))
+        XCTAssertTrue(
+            macTimeout.contains(
+                "provisionalInboundTimeoutTasks[identifier]?.token == token"
+            )
+        )
+        XCTAssertFalse(
+            macTimeout.contains("provisionalInboundConnections.removeValue")
+        )
+
+        let iosTimeout = try sourceSlice(
+            ios,
+            from: "private func armProvisionalInboundTimeout(",
+            to: "private func beginProcessingProvisionalInboundConnection("
+        )
+        XCTAssertTrue(
+            iosTimeout.contains("inboundControlSessionTasks[identifier]?.task.cancel()")
+        )
+        XCTAssertTrue(
+            iosTimeout.contains(
+                "provisionalInboundTimeoutTasks[identifier]?.token == token"
+            )
+        )
+        XCTAssertFalse(
+            iosTimeout.contains("provisionalInboundConnections.removeValue")
+        )
+
+        let iosInbound = try sourceSlice(
+            ios,
+            from: "private func handleIncomingConnection(",
+            to: "/// 开始从连接接收消息"
+        )
+        XCTAssertTrue(iosInbound.contains("Self.inboundFramedReader(for: connection)"))
+        XCTAssertTrue(iosInbound.contains("hasActiveAuthenticatedSession("))
+        XCTAssertFalse(iosInbound.contains("startReceivingOutboundFrames("))
+        XCTAssertFalse(ios.contains("private static let provisionalInboundTimeoutSeconds: TimeInterval = 10"))
+
+        let iosSessionOwner = try sourceSlice(
+            ios,
+            from: "private func startInboundControlSession(",
+            to: "private nonisolated static func inboundFramedReader("
+        )
+        XCTAssertTrue(iosSessionOwner.contains("Task { @MainActor [weak self] in"))
+        XCTAssertFalse(iosSessionOwner.contains("weak connection"))
+        let iosOwnerDefer = try XCTUnwrap(iosSessionOwner.range(of: "defer {"))
+        let iosOwnerReceive = try XCTUnwrap(
+            iosSessionOwner.range(of: "await self.handleIncomingConnection(")
+        )
+        XCTAssertLessThan(iosOwnerDefer.lowerBound, iosOwnerReceive.lowerBound)
+        XCTAssertTrue(
+            iosSessionOwner[iosOwnerDefer.lowerBound..<iosOwnerReceive.lowerBound]
+                .contains("self.finishProvisionalInboundConnection(connection)")
+        )
+        XCTAssertTrue(
+            iosSessionOwner[iosOwnerDefer.lowerBound..<iosOwnerReceive.lowerBound]
+                .contains("inboundControlSessionTasks[identifier]?.token == token")
+        )
+
+        let macInbound = try sourceSlice(
+            mac,
+            from: "nonisolated private func handleInboundControlChannel(",
+            to: "private static func localProtocolIdentityPublicKeysForPairing()"
+        )
+        let driverHandle = try XCTUnwrap(
+            macInbound.range(of: "await activeDriver.handleMessage(frame, from: peer)")
+        )
+        let driverState = try XCTUnwrap(
+            macInbound.range(
+                of: "let st = await activeDriver.getCurrentState()",
+                range: driverHandle.upperBound..<macInbound.endIndex
+            )
+        )
+        let established = try XCTUnwrap(
+            macInbound.range(
+                of: "case .established(let keys):",
+                range: driverState.upperBound..<macInbound.endIndex
+            )
+        )
+        let authenticatedAuthority = try XCTUnwrap(
+            macInbound.range(
+                of: ".getAuthenticatedRemoteAuthority()",
+                range: established.upperBound..<macInbound.endIndex
+            )
+        )
+        let arbiterLease = try XCTUnwrap(
+            macInbound.range(
+                of: "getEstablishedArbiterLease()",
+                range: authenticatedAuthority.upperBound..<macInbound.endIndex
+            )
+        )
+        let pairKeyBinding = try XCTUnwrap(
+            macInbound.range(
+                of: "newArbiterLease.pairKey == inboundPairKey",
+                range: arbiterLease.upperBound..<macInbound.endIndex
+            )
+        )
+        let sessionBinding = try XCTUnwrap(
+            macInbound.range(
+                of: "newArbiterLease.sessionId == keys.sessionId",
+                range: pairKeyBinding.upperBound..<macInbound.endIndex
+            )
+        )
+        let sessionPublish = try XCTUnwrap(
+            macInbound.range(
+                of: "sessionKeys = keys",
+                range: sessionBinding.upperBound..<macInbound.endIndex
+            )
+        )
+        let exactRelease = try XCTUnwrap(
+            macInbound.range(
+                of: "finishProvisionalInboundConnection(",
+                range: sessionPublish.upperBound..<macInbound.endIndex
+            )
+        )
+        for earlier in [
+            driverHandle,
+            driverState,
+            established,
+            authenticatedAuthority,
+            arbiterLease,
+            pairKeyBinding,
+            sessionBinding,
+            sessionPublish,
+        ] {
+            XCTAssertLessThan(earlier.lowerBound, exactRelease.lowerBound)
+        }
+        XCTAssertTrue(
+            macInbound[exactRelease.lowerBound...].contains("ifOwnedBy: processingLease")
+        )
+
+        let failedBranch = try XCTUnwrap(macInbound.range(of: "if case .failed(let reason) = st"))
+        let stateSwitch = try XCTUnwrap(
+            macInbound.range(
+                of: "switch st {",
+                range: failedBranch.upperBound..<macInbound.endIndex
+            )
+        )
+        XCTAssertFalse(
+            macInbound[failedBranch.lowerBound..<stateSwitch.lowerBound]
+                .contains("finishProvisionalInboundConnection(")
+        )
+        XCTAssertFalse(
+            macInbound[driverState.upperBound..<established.lowerBound]
+                .contains("finishProvisionalInboundConnection(")
+        )
+
+        let iosDiscovery = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/DeviceDiscoveryManager.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(iosDiscovery.contains("claimProtocolInboundAdmission("))
+        XCTAssertTrue(
+            iosDiscovery.contains(
+                "P2PInboundAdmissionPolicy.remainingSeconds("
+            )
+        )
+    }
+
+    private func sourceSlice(
+        _ source: String,
+        from start: String,
+        to end: String
+    ) throws -> String {
+        let startRange = try XCTUnwrap(source.range(of: start))
+        let endRange = try XCTUnwrap(
+            source.range(of: end, range: startRange.upperBound..<source.endIndex)
+        )
+        return String(source[startRange.lowerBound..<endRange.lowerBound])
     }
 
     func testProvenBootstrapEndpointIsPromotedWithoutChangingCandidateSet() {
@@ -572,7 +954,7 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         XCTAssertNil(response)
     }
 
-    func testInboundBootstrapPathClearsProvisionalTimeoutBeforeSigning() throws {
+    func testInboundBootstrapPathTransitionsDeadlineBeforeSigning() throws {
         let source = try String(
             contentsOfFile: URL(fileURLWithPath: #filePath)
                 .deletingLastPathComponent()
@@ -586,18 +968,168 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
         guard let markerRange = source.range(of: marker) else {
             return XCTFail("Missing inbound bootstrap control request classifier")
         }
-        let window = String(source[markerRange.lowerBound...].prefix(900))
-        let finishIndex = window.range(of: "finishProvisionalInboundConnection(connection)")?.lowerBound
+        let branchEnd = try XCTUnwrap(
+            source.range(
+                of: "if let currentDriver = driver,",
+                range: markerRange.upperBound..<source.endIndex
+            )
+        )
+        let window = String(
+            source[markerRange.lowerBound..<branchEnd.lowerBound]
+        )
+        let transitionIndex = window.range(
+            of: "beginProcessingProvisionalInboundConnection("
+        )?.lowerBound
         let responseIndex = window.range(of: "makeBootstrapControlResponse(for: plaintextControl)")?.lowerBound
-        XCTAssertNotNil(finishIndex)
+        let sendIndex = window.range(of: "try await sendFramed(encoded)")?.lowerBound
+        let finishIndex = window.range(
+            of: "finishProvisionalInboundConnection("
+        )?.lowerBound
+        XCTAssertNotNil(transitionIndex)
         XCTAssertNotNil(responseIndex)
-        if let finishIndex, let responseIndex {
+        XCTAssertNotNil(sendIndex)
+        XCTAssertNotNil(finishIndex)
+        if let transitionIndex, let responseIndex, let sendIndex, let finishIndex {
             XCTAssertLessThan(
-                finishIndex,
+                transitionIndex,
                 responseIndex,
-                "Provisional inbound timeout must clear before SKR/PIB signing"
+                "The first-frame deadline must transition before SKR/PIB signing"
+            )
+            XCTAssertLessThan(responseIndex, sendIndex)
+            XCTAssertLessThan(
+                sendIndex,
+                finishIndex,
+                "The bounded admission slot must remain owned until response submission"
             )
         }
+    }
+
+    func testPIBFirstFrameDoesNotInvokeSOAPeerIDLoader() async throws {
+        let probe = SOAPeerIDLoaderProbe()
+        let frame = try JSONEncoder().encode(
+            AppMessage.protocolIdentityBindingRequest(protocolIdentityBindingRequest())
+        )
+
+        let prepared = try await P2PDiscoveryService.prepareInboundHandshakeFrame(
+            frame,
+            cachedLocalSOAPeerId: nil,
+            loadLocalSOAPeerId: {
+                try await probe.fail()
+            }
+        )
+
+        XCTAssertNil(prepared)
+        let invocationCount = await probe.invocationCount()
+        XCTAssertEqual(invocationCount, 0)
+        let decoded = try AppMessage.decodeWireMessage(from: frame)
+        XCTAssertTrue(P2PDiscoveryService.isInboundBootstrapControlRequest(decoded))
+    }
+
+    func testInboundControlReadsFirstFrameBeforeLoadingCommittedSOAIdentity() throws {
+        let source = try String(
+            contentsOfFile: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift")
+                .path,
+            encoding: .utf8
+        )
+        let handlerStart = try XCTUnwrap(
+            source.range(of: "nonisolated private func handleInboundControlChannel(")
+        )
+        let handlerEnd = try XCTUnwrap(
+            source.range(
+                of: "nonisolated private static func stableEndpointLabel(",
+                range: handlerStart.upperBound..<source.endIndex
+            )
+        )
+        let handler = String(source[handlerStart.lowerBound..<handlerEnd.lowerBound])
+        let receiveIndex = try XCTUnwrap(
+            handler.range(of: "Self.receiveBootstrapFrame(")?.lowerBound
+        )
+        let classifierIndex = try XCTUnwrap(
+            handler.range(of: "Self.isInboundBootstrapControlRequest(plaintextControl)")?.lowerBound
+        )
+        let soaLoadIndex = try XCTUnwrap(
+            handler.range(of: "Self.localSOAPeerIdBytes()")?.lowerBound
+        )
+
+        XCTAssertLessThan(receiveIndex, soaLoadIndex)
+        XCTAssertLessThan(classifierIndex, soaLoadIndex)
+        XCTAssertTrue(handler.contains("cachedLocalSOAPeerId: localSOAPeerId"))
+        XCTAssertTrue(source.contains("existingProtocolIdentityDeviceIdReadOnly()"))
+    }
+
+    func testMessageARequiresSOAPeerIDAndFailsClosedWhenLoaderFails() async {
+        let probe = SOAPeerIDLoaderProbe()
+        let frame = makeHandshakeMessageA().encoded
+
+        do {
+            _ = try await P2PDiscoveryService.prepareInboundHandshakeFrame(
+                frame,
+                cachedLocalSOAPeerId: nil,
+                loadLocalSOAPeerId: {
+                    try await probe.fail()
+                }
+            )
+            XCTFail("MessageA preparation must fail when committed SOA identity is unavailable")
+        } catch SOAPeerIDLoaderProbe.Failure.unavailable {
+            // Expected fail-closed result.
+        } catch {
+            XCTFail("Unexpected MessageA preparation error: \(error)")
+        }
+
+        let invocationCount = await probe.invocationCount()
+        XCTAssertEqual(invocationCount, 1)
+    }
+
+    func testMessageAReusesOneSOAPeerIDAndBindsAuthenticatedInitiator() async throws {
+        let probe = SOAPeerIDLoaderProbe()
+        let localPeerID = Data(repeating: 0xA1, count: 32)
+        let initiatorPeerID = Data(repeating: 0xB2, count: 32)
+        let targetPeerID = Data(repeating: 0xC3, count: 32)
+        let attemptID = Data(repeating: 0xD4, count: 16)
+        let soa = try HandshakeSOAExtension(
+            initiatorPeerId: initiatorPeerID,
+            targetPeerId: targetPeerID,
+            attemptId: attemptID
+        )
+        let frame = makeHandshakeMessageA(extensionsRaw: soa.encodedTLV).encoded
+
+        let firstPreparation = try await P2PDiscoveryService.prepareInboundHandshakeFrame(
+            frame,
+            cachedLocalSOAPeerId: nil,
+            loadLocalSOAPeerId: {
+                await probe.load(localPeerID)
+            }
+        )
+        let first = try XCTUnwrap(firstPreparation)
+        let secondPreparation = try await P2PDiscoveryService.prepareInboundHandshakeFrame(
+            frame,
+            cachedLocalSOAPeerId: first.localSOAPeerId,
+            loadLocalSOAPeerId: {
+                await probe.load(Data(repeating: 0xEE, count: 32))
+            }
+        )
+        let second = try XCTUnwrap(secondPreparation)
+
+        let invocationCount = await probe.invocationCount()
+        XCTAssertEqual(invocationCount, 1)
+        XCTAssertEqual(second.localSOAPeerId, localPeerID)
+        let binding = InboundHandshakeAdapter.bindSOAState(
+            from: second.messageA,
+            localPeerId: second.localSOAPeerId
+        )
+        XCTAssertEqual(binding.expectedRemotePeerId, initiatorPeerID)
+        XCTAssertEqual(
+            binding.pairKey,
+            PeerSessionArbiter.pairKey(
+                localPeerId: localPeerID,
+                remotePeerId: initiatorPeerID
+            )
+        )
+        XCTAssertTrue(binding.usedAuthenticatedInitiator)
     }
 
     func testMacSignedLANRefreshUsesCryptographicResponseBudget() throws {
@@ -829,6 +1361,43 @@ final class P2PDiscoveryBootstrapControlTests: XCTestCase {
             routeScope: "lan",
             bonjourEndpointDigest: request.bonjourEndpointDigest,
             signature: Data(repeating: 0x99, count: 64)
+        )
+    }
+
+    private func makeHandshakeMessageA(extensionsRaw: Data = Data()) -> HandshakeMessageA {
+        let capabilities = CryptoCapabilities(
+            supportedKEM: ["X25519"],
+            supportedSignature: ["Ed25519"],
+            supportedAuthProfiles: ["classic"],
+            supportedAEAD: ["AES-GCM"],
+            pqcAvailable: false,
+            platformVersion: "test",
+            providerType: .classic
+        )
+        let policy = HandshakePolicy(
+            requirePQC: false,
+            allowClassicFallback: false,
+            minimumTier: .classic,
+            requireSecureEnclavePoP: false
+        )
+        let identity = IdentityPublicKeys(
+            protocolPublicKey: Data(repeating: 0x22, count: 32),
+            protocolAlgorithm: .ed25519,
+            secureEnclavePublicKey: nil
+        )
+        let keyShare = HandshakeKeyShare(
+            suite: .x25519Ed25519,
+            shareBytes: Data(repeating: 0x33, count: 32)
+        )
+        return HandshakeMessageA(
+            supportedSuites: [.x25519Ed25519],
+            keyShares: [keyShare],
+            clientNonce: Data(repeating: 0x11, count: 32),
+            policy: policy,
+            capabilities: capabilities,
+            signature: Data(repeating: 0x44, count: 64),
+            identityPublicKeys: identity,
+            extensionsRaw: extensionsRaw
         )
     }
 

@@ -64,6 +64,38 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
         )
     }
 
+    func testExactAggregateRouteRemainsEligibleAlongsideSameIdentityNameCollision() throws {
+        var collisionSelectedDevice = skybridgeDevice(ipAddress: nil)
+        collisionSelectedDevice.bonjourServiceName = "Studio MacBook Pro (2)"
+        let liveEndpoints: [NWEndpoint] = [
+            .service(
+                name: "Studio MacBook Pro",
+                type: DiscoveryServiceType.skybridge.rawValue,
+                domain: "local.",
+                interface: nil
+            ),
+            .service(
+                name: "Studio MacBook Pro (2)",
+                type: DiscoveryServiceType.skybridge.rawValue,
+                domain: "local.",
+                interface: nil
+            )
+        ]
+
+        let eligible = P2PConnectionEndpointPolicy.connectionEndpointCandidates(
+            for: collisionSelectedDevice,
+            liveBonjourControlEndpoints: liveEndpoints
+        )
+
+        XCTAssertEqual(eligible.count, 1)
+        XCTAssertLessThan(eligible.count, liveEndpoints.count)
+        try assertServiceEndpoint(
+            eligible[0],
+            name: "Studio MacBook Pro (2)",
+            domain: "local."
+        )
+    }
+
     func testLiveBonjourRoutePreferenceTriesAWDLBeforeInfrastructureWiFi() {
         XCTAssertLessThan(
             DeviceDiscoveryManager.liveBonjourInterfacePriority(interfaceName: "awdl0"),
@@ -293,6 +325,13 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
         XCTAssertFalse(
             P2PConnectionEndpointPolicy.shouldAwaitSkyBridgeControlRoute(for: offlineIdentity),
             "A historical identity with no live Bonjour sibling route should still fail fast."
+        )
+        XCTAssertTrue(
+            P2PConnectionEndpointPolicy.shouldAwaitSkyBridgeControlRoute(
+                for: offlineIdentity,
+                mode: .selectedDiscoveryTarget
+            ),
+            "A caller that just selected the strong identity from live discovery must tolerate aggregate-row hydration."
         )
     }
 
@@ -847,6 +886,7 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
                 .testResolveConnectableDeviceAwaitingControlRoute(for: partial)
         }
         defer { waitTask.cancel() }
+        let waitStartedAt = Date()
         try await Task.sleep(for: .milliseconds(100))
 
         let primary = DiscoveredDevice(
@@ -861,41 +901,109 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
             services: [DiscoveryServiceType.skybridge.rawValue],
             portMap: [DiscoveryServiceType.skybridge.rawValue: 9527]
         )
-        discoveryManager.debugSeedDiscoveryState(
-            devices: [primary],
-            lastActivity: Date(),
-            endpointToDeviceId: ["control-endpoint": primary.id],
-            liveBrowseEndpointKeysByServiceType: [
-                .skybridge: ["control-endpoint"]
-            ]
+        _ = discoveryManager.debugReplaceAdvertisementSnapshot(
+            primary,
+            endpointKey: "control-endpoint",
+            serviceType: .skybridge
         )
 
         let resolved = try await waitTask.value
+        XCTAssertLessThan(Date().timeIntervalSince(waitStartedAt), 2.0)
         XCTAssertEqual(resolved.bonjourServiceName, controlServiceName)
         XCTAssertEqual(resolved.bonjourServiceType, DiscoveryServiceType.skybridge.rawValue)
         XCTAssertFalse(
-            P2PConnectionEndpointPolicy.connectionEndpointCandidates(for: resolved).isEmpty
+            P2PConnectionEndpointPolicy.connectionEndpointCandidates(
+                for: resolved,
+                liveBonjourControlEndpoints: discoveryManager.liveBonjourServiceEndpoints(
+                    for: resolved,
+                    serviceType: .skybridge
+                )
+            ).isEmpty
+        )
+    }
+
+    @MainActor
+    func testSelectedStrongDiscoveryTargetWaitsWithoutPartialBonjourMetadata() async throws {
+        let discoveryManager = DeviceDiscoveryManager.instance
+        let originalState = discoveryManager.debugCaptureState()
+        defer { discoveryManager.debugRestoreState(originalState) }
+        let routeToken = UUID().uuidString.lowercased()
+        let deviceId = "id:\(routeToken)"
+        let aggregateOnly = DiscoveredDevice(
+            id: deviceId,
+            name: "Aggregate Route \(routeToken.prefix(8))",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "27.0"
+        )
+        discoveryManager.debugSeedDiscoveryState(
+            devices: [aggregateOnly],
+            lastActivity: Date(),
+            endpointToDeviceId: [:],
+            liveBrowseEndpointKeysByServiceType: [:]
+        )
+
+        let waitTask = Task { @MainActor in
+            try await P2PConnectionManager.instance
+                .testResolveConnectableDeviceAwaitingControlRoute(
+                    for: aggregateOnly,
+                    mode: .selectedDiscoveryTarget
+                )
+        }
+        defer { waitTask.cancel() }
+        let waitStartedAt = Date()
+        try await Task.sleep(for: .milliseconds(100))
+
+        let controlServiceName = "Aggregate Route \(routeToken.prefix(8)) Control"
+        let primary = DiscoveredDevice(
+            id: deviceId,
+            name: aggregateOnly.name,
+            bonjourServiceName: controlServiceName,
+            modelName: aggregateOnly.modelName,
+            platform: aggregateOnly.platform,
+            osVersion: aggregateOnly.osVersion,
+            bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveryServiceType.skybridge.rawValue],
+            portMap: [DiscoveryServiceType.skybridge.rawValue: 9527]
+        )
+        _ = discoveryManager.debugReplaceAdvertisementSnapshot(
+            primary,
+            endpointKey: "control-endpoint",
+            serviceType: .skybridge
+        )
+
+        let resolved = try await waitTask.value
+        XCTAssertLessThan(Date().timeIntervalSince(waitStartedAt), 2.0)
+        XCTAssertEqual(resolved.id, primary.id)
+        XCTAssertEqual(resolved.bonjourServiceName, controlServiceName)
+        XCTAssertFalse(
+            P2PConnectionEndpointPolicy.connectionEndpointCandidates(
+                for: resolved,
+                liveBonjourControlEndpoints: discoveryManager.liveBonjourServiceEndpoints(
+                    for: resolved,
+                    serviceType: .skybridge
+                )
+            ).isEmpty
         )
     }
 
     @MainActor
     func testControlRouteWaitPropagatesCancellation() async {
         let routeToken = UUID().uuidString.lowercased()
-        let partial = DiscoveredDevice(
+        let selectedDiscoveryTarget = DiscoveredDevice(
             id: "id:\(routeToken)",
             name: "Route Cancel \(routeToken.prefix(8))",
-            bonjourServiceName: "Route Cancel \(routeToken.prefix(8)) Transfer",
             modelName: "MacBook Pro",
             platform: .macOS,
-            osVersion: "26.5",
-            bonjourServiceType: DiscoveredDevice.fileTransferServiceType,
-            bonjourServiceDomain: "local.",
-            services: [DiscoveredDevice.fileTransferServiceType],
-            portMap: [DiscoveredDevice.fileTransferServiceType: 8080]
+            osVersion: "27.0"
         )
         let waitTask = Task { @MainActor in
             try await P2PConnectionManager.instance
-                .testResolveConnectableDeviceAwaitingControlRoute(for: partial)
+                .testResolveConnectableDeviceAwaitingControlRoute(
+                    for: selectedDiscoveryTarget,
+                    mode: .selectedDiscoveryTarget
+                )
         }
         await Task.yield()
         waitTask.cancel()
@@ -908,6 +1016,106 @@ final class P2PConnectionEndpointPolicyTests: XCTestCase {
         } catch {
             XCTFail("Expected CancellationError, got \(error)")
         }
+    }
+
+    @MainActor
+    func testStrongTargetResolutionNeverCrossesToSameNameDifferentIdentity() {
+        let discoveryManager = DeviceDiscoveryManager.instance
+        let originalState = discoveryManager.debugCaptureState()
+        defer { discoveryManager.debugRestoreState(originalState) }
+
+        let target = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: "Shared Studio Mac",
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "27.0"
+        )
+        let differentStrongIdentity = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: target.name,
+            bonjourServiceName: "Shared Studio Mac",
+            modelName: target.modelName,
+            platform: target.platform,
+            osVersion: target.osVersion,
+            bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveryServiceType.skybridge.rawValue],
+            portMap: [DiscoveryServiceType.skybridge.rawValue: 9527]
+        )
+        discoveryManager.debugSeedDiscoveryState(
+            devices: [differentStrongIdentity],
+            lastActivity: Date(),
+            endpointToDeviceId: ["different-strong-identity": differentStrongIdentity.id],
+            liveBrowseEndpointKeysByServiceType: [
+                .skybridge: ["different-strong-identity"]
+            ]
+        )
+
+        let resolved = P2PConnectionManager.instance
+            .testResolveLatestConnectableDevice(for: target)
+
+        XCTAssertEqual(resolved.id, target.id)
+        XCTAssertEqual(
+            P2PConnectionEndpointPolicy.normalizedStrongDeviceId(for: resolved),
+            P2PConnectionEndpointPolicy.normalizedStrongDeviceId(for: target)
+        )
+    }
+
+    @MainActor
+    func testLiveBonjourSnapshotNeverCrossesSharedServiceAliasToDifferentStrongIdentity() throws {
+        let discoveryManager = DeviceDiscoveryManager.debugMakeIsolatedInstance()
+        let sharedServiceName = "Shared Strong Identity Route"
+        let target = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: sharedServiceName,
+            bonjourServiceName: sharedServiceName,
+            modelName: "MacBook Pro",
+            platform: .macOS,
+            osVersion: "27.0",
+            bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveryServiceType.skybridge.rawValue],
+            portMap: [DiscoveryServiceType.skybridge.rawValue: 9527]
+        )
+        let differentStrongIdentity = DiscoveredDevice(
+            id: "id:\(UUID().uuidString.lowercased())",
+            name: sharedServiceName,
+            bonjourServiceName: sharedServiceName,
+            modelName: target.modelName,
+            platform: target.platform,
+            osVersion: target.osVersion,
+            bonjourServiceType: DiscoveryServiceType.skybridge.rawValue,
+            bonjourServiceDomain: "local.",
+            services: [DiscoveryServiceType.skybridge.rawValue],
+            portMap: [DiscoveryServiceType.skybridge.rawValue: 9527]
+        )
+        let differentEndpoint = NWEndpoint.service(
+            name: sharedServiceName,
+            type: DiscoveryServiceType.skybridge.rawValue,
+            domain: "local.",
+            interface: nil
+        )
+
+        _ = discoveryManager.debugReplaceAdvertisementSnapshot(
+            differentStrongIdentity,
+            endpoint: differentEndpoint,
+            endpointKey: "different-strong-identity-live-route",
+            serviceType: .skybridge
+        )
+
+        XCTAssertEqual(
+            try XCTUnwrap(discoveryManager.canonicalDiscoveredDevice(for: target)).id,
+            differentStrongIdentity.id,
+            "The fixture must reproduce weak Bonjour alias ownership by another strong identity."
+        )
+        XCTAssertTrue(
+            discoveryManager.liveBonjourServiceEndpoints(
+                for: target,
+                serviceType: .skybridge
+            ).isEmpty,
+            "A weak shared service alias must never substitute another strong identity's live route."
+        )
     }
 
     func testPeerToPeerPolicyMatchesEndpointClass() {

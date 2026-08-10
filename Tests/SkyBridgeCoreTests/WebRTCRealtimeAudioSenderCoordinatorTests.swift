@@ -36,7 +36,8 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
                 sessionID: "session-1",
                 keys: Self.sessionKeys(),
                 config: config,
-                relayBindPolicy: .requireAcknowledgement
+                relayBindPolicy: .requireAcknowledgement,
+                validateOperationOwner: Self.alwaysCurrentOperationOwner
             )
             XCTFail("Expected cancellation to propagate")
         } catch {
@@ -64,7 +65,10 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
             appendSessionDiagnostic: { line, _ in diagnostics.append(line) }
         )
 
-        let endpoint = try await coordinator.requestSenderEndpoint(sessionID: "session-1")
+        let endpoint = try await coordinator.requestSenderEndpoint(
+            sessionID: "session-1",
+            validateOperationOwner: Self.alwaysCurrentOperationOwner
+        )
 
         XCTAssertEqual(endpoint.host, "relay.test")
         XCTAssertEqual(endpoint.port, 44_000)
@@ -104,7 +108,10 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
             appendSessionDiagnostic: { line, _ in diagnostics.append(line) }
         )
 
-        let endpoint = try await coordinator.requestSenderEndpoint(sessionID: "session-1")
+        let endpoint = try await coordinator.requestSenderEndpoint(
+            sessionID: "session-1",
+            validateOperationOwner: Self.alwaysCurrentOperationOwner
+        )
 
         XCTAssertEqual(endpoint.relayToken, "relay-token-2")
         XCTAssertEqual(refreshedTokens, ["fresh-1", "fresh-2"])
@@ -140,7 +147,10 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
         )
 
         do {
-            _ = try await coordinator.requestSenderEndpoint(sessionID: "session-1")
+            _ = try await coordinator.requestSenderEndpoint(
+                sessionID: "session-1",
+                validateOperationOwner: Self.alwaysCurrentOperationOwner
+            )
             XCTFail("Expected authority-lost relay rejection to fail without refresh")
         } catch SignalServerClient.ClientError.serverRejected(let status, _) {
             XCTAssertEqual(status, 401)
@@ -182,6 +192,15 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
         )
     }
 
+    func testLocalNetworkPermissionFailureIsNotCollapsedIntoRelayUnavailable() {
+        XCTAssertEqual(
+            CrossNetworkConnectionManager.mediaAdmissionFailureReason(
+                for: SkyBridgeRealtimeMediaTransportError.udpLocalNetworkPermissionDenied
+            ),
+            "udpLocalNetworkPermissionDenied"
+        )
+    }
+
     @available(macOS 14.0, *)
     func testRelayFailureAfterRefreshMapsSupersededToServerStateMismatch() async throws {
         var refreshedTokens: [String] = []
@@ -217,7 +236,10 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
         )
 
         do {
-            _ = try await coordinator.requestSenderEndpoint(sessionID: "session-1")
+            _ = try await coordinator.requestSenderEndpoint(
+                sessionID: "session-1",
+                validateOperationOwner: Self.alwaysCurrentOperationOwner
+            )
             XCTFail("Expected refreshed relay superseded rejection to fail")
         } catch let failure as WebRTCMediaAdmissionClassifiedFailure {
             XCTAssertEqual(failure.reason, "serverStateMismatch")
@@ -248,7 +270,10 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
             }
         )
 
-        let missingTokenLease = try await missingTokenCoordinator.refreshAdmissionLease(sessionID: "session-1")
+        let missingTokenLease = try await missingTokenCoordinator.refreshAdmissionLease(
+            sessionID: "session-1",
+            validateOperationOwner: Self.alwaysCurrentOperationOwner
+        )
         XCTAssertNil(missingTokenLease)
 
         let missingRoleCoordinator = makeCoordinator(
@@ -264,10 +289,165 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
             }
         )
 
-        let missingRoleLease = try await missingRoleCoordinator.refreshAdmissionLease(sessionID: "session-1")
+        let missingRoleLease = try await missingRoleCoordinator.refreshAdmissionLease(
+            sessionID: "session-1",
+            validateOperationOwner: Self.alwaysCurrentOperationOwner
+        )
         XCTAssertNil(missingRoleLease)
         XCTAssertEqual(refreshCalls, 0)
         XCTAssertEqual(relayRequests, 0)
+    }
+
+    @available(macOS 14.0, *)
+    func testOwnerReplacementDuringAdmissionRefreshDoesNotStoreOrCreateSender() async throws {
+        let ownerA = UUID()
+        let ownerState = WebRTCRealtimeAudioOperationOwnerState(currentOwner: ownerA)
+        let refreshGate = WebRTCRealtimeAudioSuspensionGate()
+        let startCounter = WebRTCRealtimeAudioCallCounter()
+        let closeCounter = WebRTCRealtimeAudioCallCounter()
+        var storedTokens: [String] = []
+        let coordinator = makeCoordinator(
+            storeAdmissionLease: { lease, _ in
+                if let lease {
+                    storedTokens.append(lease.token)
+                }
+            },
+            refreshMediaAdmissionLease: { _, _, _ in
+                await refreshGate.suspend()
+                return .init(token: "owner-a-token", expiresIn: 60)
+            },
+            startSender: { _ in await startCounter.increment() },
+            closeSender: { _, _ in await closeCounter.increment() }
+        )
+
+        let refreshTask = Task { @MainActor in
+            try await coordinator.makeSenderIfNeeded(
+                sessionID: "session-1",
+                keys: Self.sessionKeys(),
+                config: Self.realtimeAudioConfiguration(),
+                relayBindPolicy: .requireAcknowledgement,
+                validateOperationOwner: ownerState.validator(for: ownerA)
+            )
+        }
+        await refreshGate.waitUntilSuspended()
+        ownerState.replaceCurrentOwner(with: UUID())
+        await refreshGate.release()
+
+        do {
+            _ = try await refreshTask.value
+            XCTFail("Expected replaced operation owner to cancel the refresh")
+        } catch is CancellationError {
+            // Expected exact-owner rejection.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        XCTAssertEqual(storedTokens, [])
+        let startCount = await startCounter.value()
+        let closeCount = await closeCounter.value()
+        XCTAssertEqual(startCount, 0)
+        XCTAssertEqual(closeCount, 0)
+    }
+
+    @available(macOS 14.0, *)
+    func testCurrentOwnerStoresRefreshedAdmissionLeaseExactlyOnce() async throws {
+        let ownerA = UUID()
+        let ownerState = WebRTCRealtimeAudioOperationOwnerState(currentOwner: ownerA)
+        var storedTokens: [String] = []
+        let coordinator = makeCoordinator(
+            storeAdmissionLease: { lease, _ in
+                if let lease {
+                    storedTokens.append(lease.token)
+                }
+            },
+            refreshMediaAdmissionLease: { _, _, _ in
+                .init(token: "owner-a-token", expiresIn: 60)
+            }
+        )
+
+        let lease = try await coordinator.refreshAdmissionLease(
+            sessionID: "session-1",
+            validateOperationOwner: ownerState.validator(for: ownerA)
+        )
+
+        XCTAssertEqual(lease?.token, "owner-a-token")
+        XCTAssertEqual(storedTokens, ["owner-a-token"])
+    }
+
+    @available(macOS 14.0, *)
+    func testCancellationDuringAdmissionRefreshDoesNotStoreLease() async throws {
+        let ownerA = UUID()
+        let ownerState = WebRTCRealtimeAudioOperationOwnerState(currentOwner: ownerA)
+        let refreshGate = WebRTCRealtimeAudioSuspensionGate()
+        var storedTokens: [String] = []
+        let coordinator = makeCoordinator(
+            storeAdmissionLease: { lease, _ in
+                if let lease {
+                    storedTokens.append(lease.token)
+                }
+            },
+            refreshMediaAdmissionLease: { _, _, _ in
+                await refreshGate.suspend()
+                return .init(token: "cancelled-token", expiresIn: 60)
+            }
+        )
+
+        let refreshTask = Task { @MainActor in
+            try await coordinator.refreshAdmissionLease(
+                sessionID: "session-1",
+                validateOperationOwner: ownerState.validator(for: ownerA)
+            )
+        }
+        await refreshGate.waitUntilSuspended()
+        refreshTask.cancel()
+        await refreshGate.release()
+
+        do {
+            _ = try await refreshTask.value
+            XCTFail("Expected task cancellation to abort the refresh")
+        } catch is CancellationError {
+            // Expected task cancellation.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        XCTAssertEqual(storedTokens, [])
+    }
+
+    @available(macOS 14.0, *)
+    func testOwnerReplacementAfterSenderStartClosesLocalSenderExactlyOnce() async throws {
+        let ownerA = UUID()
+        let ownerState = WebRTCRealtimeAudioOperationOwnerState(currentOwner: ownerA)
+        let startGate = WebRTCRealtimeAudioSuspensionGate()
+        let closeCounter = WebRTCRealtimeAudioCallCounter()
+        let coordinator = makeCoordinator(
+            reusableAdmissionLease: { _ in .init(token: "cached-token", expiresIn: 60) },
+            requestMediaRelayLease: { _ in Self.mediaRelayLease() },
+            startSender: { _ in await startGate.suspend() },
+            closeSender: { _, _ in await closeCounter.increment() }
+        )
+
+        let senderTask = Task { @MainActor in
+            try await coordinator.makeSenderIfNeeded(
+                sessionID: "session-1",
+                keys: Self.sessionKeys(),
+                config: Self.realtimeAudioConfiguration(),
+                relayBindPolicy: .requireAcknowledgement,
+                validateOperationOwner: ownerState.validator(for: ownerA)
+            )
+        }
+        await startGate.waitUntilSuspended()
+        ownerState.replaceCurrentOwner(with: UUID())
+        await startGate.release()
+
+        do {
+            _ = try await senderTask.value
+            XCTFail("Expected stale sender operation to be cancelled")
+        } catch is CancellationError {
+            // Expected exact-owner rejection after sender startup suspension.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        let closeCount = await closeCounter.value()
+        XCTAssertEqual(closeCount, 1)
     }
 
     @available(macOS 14.0, *)
@@ -284,7 +464,13 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
         ) async throws -> SignalServerClient.MediaAdmissionLease = { _, _, _ in
             .init(token: "fresh-token", expiresIn: 60)
         },
-        appendSessionDiagnostic: @escaping @MainActor (String, String) -> Void = { _, _ in }
+        appendSessionDiagnostic: @escaping @MainActor (String, String) -> Void = { _, _ in },
+        startSender: @escaping @Sendable (RemoteRealtimeMediaAudioSender) async throws -> Void = { sender in
+            try await sender.start()
+        },
+        closeSender: @escaping @Sendable (RemoteRealtimeMediaAudioSender, String) async -> Void = { sender, reason in
+            await sender.close(reason: reason)
+        }
     ) -> WebRTCRealtimeAudioSenderCoordinator {
         let resolvedRequestMediaRelayLease = requestMediaRelayLease ?? { _ in
             WebRTCRealtimeAudioSenderCoordinatorTests.mediaRelayLease()
@@ -298,8 +484,32 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
                 storeAdmissionLease: storeAdmissionLease,
                 requestMediaRelayLease: resolvedRequestMediaRelayLease,
                 refreshMediaAdmissionLease: refreshMediaAdmissionLease,
-                appendSessionDiagnostic: appendSessionDiagnostic
+                appendSessionDiagnostic: appendSessionDiagnostic,
+                startSender: startSender,
+                closeSender: closeSender
             )
+        )
+    }
+
+    @available(macOS 14.0, *)
+    private static var alwaysCurrentOperationOwner:
+        WebRTCRealtimeAudioSenderCoordinator.OperationOwnerValidator {
+        { }
+    }
+
+    private static func realtimeAudioConfiguration() -> RemoteDesktopStreamConfiguration {
+        RemoteDesktopStreamConfiguration(
+            targetFrameRate: 60,
+            keyFrameInterval: 120,
+            lowLatencyMode: true,
+            enableHardwareAcceleration: true,
+            enableAppleSiliconOptimization: true,
+            clipboardSyncEnabled: false,
+            audioRedirectionEnabled: true,
+            audioTransport: SkyBridgeRealtimeMediaConstants.audioTransportPQCv1,
+            mediaSessionId: "media-session",
+            mediaAudioEndpoint: SkyBridgeMediaEndpoint(host: "127.0.0.1", port: 55_560),
+            compatibilityAudioFallbackEnabled: false
         )
     }
 
@@ -329,5 +539,73 @@ final class WebRTCRealtimeAudioSenderCoordinatorTests: XCTestCase {
             sessionId: "session-1",
             createdAt: Date()
         )
+    }
+}
+
+@MainActor
+private final class WebRTCRealtimeAudioOperationOwnerState {
+    private var currentOwner: UUID
+
+    init(currentOwner: UUID) {
+        self.currentOwner = currentOwner
+    }
+
+    func replaceCurrentOwner(with owner: UUID) {
+        currentOwner = owner
+    }
+
+    @available(macOS 14.0, *)
+    func validator(
+        for expectedOwner: UUID
+    ) -> WebRTCRealtimeAudioSenderCoordinator.OperationOwnerValidator {
+        { [weak self] () throws(CancellationError) in
+            guard self?.currentOwner == expectedOwner else {
+                throw CancellationError()
+            }
+        }
+    }
+}
+
+private actor WebRTCRealtimeAudioSuspensionGate {
+    private var suspendedContinuation: CheckedContinuation<Void, Never>?
+    private var observationContinuations: [CheckedContinuation<Void, Never>] = []
+
+    func suspend() async {
+        await withCheckedContinuation { continuation in
+            precondition(suspendedContinuation == nil)
+            suspendedContinuation = continuation
+            let observations = observationContinuations
+            observationContinuations.removeAll(keepingCapacity: false)
+            for observation in observations {
+                observation.resume()
+            }
+        }
+    }
+
+    func waitUntilSuspended() async {
+        if suspendedContinuation != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            observationContinuations.append(continuation)
+        }
+    }
+
+    func release() {
+        let continuation = suspendedContinuation
+        suspendedContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private actor WebRTCRealtimeAudioCallCounter {
+    private var count = 0
+
+    func increment() {
+        count += 1
+    }
+
+    func value() -> Int {
+        count
     }
 }

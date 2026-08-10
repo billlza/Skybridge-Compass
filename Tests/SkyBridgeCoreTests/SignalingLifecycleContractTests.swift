@@ -6,6 +6,74 @@ import Network
 
 @MainActor
 final class SignalingLifecycleContractTests: XCTestCase {
+    func testSignalingSetupOwnerPreventsStaleFinishFromClearingReplacement() {
+        let lifecycle = CrossNetworkSignalingLifecycleCoordinator()
+        let first = lifecycle.beginSetup(for: "SESSION-A")
+        XCTAssertNotNil(first)
+        XCTAssertNil(lifecycle.beginSetup(for: "SESSION-B"))
+
+        lifecycle.invalidateSetup()
+        let replacement = lifecycle.beginSetup(for: "SESSION-B")
+        XCTAssertNotNil(replacement)
+
+        if let first {
+            XCTAssertFalse(lifecycle.isCurrentSetup(first))
+            lifecycle.finishSetup(first)
+        }
+        if let replacement {
+            XCTAssertTrue(lifecycle.isCurrentSetup(replacement))
+            lifecycle.finishSetup(replacement)
+            XCTAssertFalse(lifecycle.isCurrentSetup(replacement))
+        }
+    }
+
+    func testSessionTeardownInvalidatesOnlyItsSignalingSetupOwner() {
+        let lifecycle = CrossNetworkSignalingLifecycleCoordinator()
+        let owner = lifecycle.beginSetup(for: "SESSION-B")
+        XCTAssertNotNil(owner)
+
+        lifecycle.teardown(sessionID: "SESSION-A")
+        if let owner {
+            XCTAssertTrue(lifecycle.isCurrentSetup(owner))
+        }
+
+        lifecycle.teardown(sessionID: "SESSION-B")
+        if let owner {
+            XCTAssertFalse(lifecycle.isCurrentSetup(owner))
+        }
+    }
+
+    func testFatalPreTransportLifecycleEventInvokesExactFailureCallback() {
+        let sessionID = "SESSION-FATAL"
+        let handle = WebSocketSignalingClient.SignalingHandleID(
+            sessionId: sessionID,
+            backend: .urlSession,
+            generation: 3
+        )
+        let lifecycle = CrossNetworkSignalingLifecycleCoordinator()
+        lifecycle.seed(sessionID: sessionID, generation: 3, handle: handle)
+        var failures: [(String, WebSocketSignalingClient.SignalingFailureClass)] = []
+
+        lifecycle.handleLifecycleEvent(
+            .init(
+                handleId: handle,
+                phase: .failed,
+                failureClass: .protocolViolation,
+                errorDescription: "malformed frame"
+            ),
+            activeShardKey: sessionID,
+            isHandshakeComplete: { _ in false },
+            setPhase: { _ in },
+            setHealth: { _ in },
+            noteDetached: { _, _, _, _ in },
+            failPreTransport: { failures.append(($0, $1)) }
+        )
+
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.first?.0, sessionID)
+        XCTAssertEqual(failures.first?.1, .protocolViolation)
+    }
+
     func testOlderGenerationOpenAndBoundCannotOverrideCurrentHandle() {
         let manager = CrossNetworkConnectionManager()
         let currentHandle = WebSocketSignalingClient.SignalingHandleID(
@@ -292,7 +360,10 @@ final class SignalingLifecycleContractTests: XCTestCase {
         ))
         XCTAssertTrue(signaling.contains("await onEnvelope?(env)"))
         XCTAssertTrue(manager.contains(
-            "await client.setOnEnvelope { [weak self] env in\n            await self?.handleSignalingEnvelope(env)"
+            "await client.setOnEnvelope { [weak self, weak client] env in"
+        ))
+        XCTAssertTrue(manager.contains(
+            "await self?.handleSignalingEnvelope(env, sourceClient: client)"
         ))
     }
 

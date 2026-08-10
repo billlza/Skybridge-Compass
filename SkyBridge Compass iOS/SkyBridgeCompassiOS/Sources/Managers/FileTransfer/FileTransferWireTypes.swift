@@ -391,4 +391,5 @@ public struct TransferState: Sendable {
     public var startTime: Date?
     public var lastUpdateTime: Date?
     public var isCancelled: Bool = false
+    var webRTCOutboundOperationToken: UUID?
 }

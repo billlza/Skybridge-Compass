@@ -638,6 +638,17 @@ public enum ConnectionStatus: String, Codable, Sendable {
     }
 }
 
+/// The transport family explicitly selected by the caller for one peer operation.
+///
+/// A cross-network intent carries the exact WebRTC session selected by the UI so a
+/// delayed file picker, task, or callback cannot silently migrate the operation to a
+/// replacement session. Device identity is validated separately and never chooses
+/// the transport family.
+public enum PeerTransportRouteIntent: Sendable, Equatable {
+    case directLAN
+    case crossNetwork(sessionID: String)
+}
+
 public enum ConnectionPresentationPhase: String, Sendable, Equatable {
     case disconnected
     case connecting

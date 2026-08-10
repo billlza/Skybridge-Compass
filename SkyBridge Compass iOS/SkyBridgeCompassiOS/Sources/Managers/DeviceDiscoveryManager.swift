@@ -18,6 +18,7 @@ import Network
 
 import class SkyBridgeProtocolCore.BonjourRegistrationReadinessGate
 import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
+import enum SkyBridgeProtocolCore.P2PInboundAdmissionPolicy
 
 #if canImport(UIKit)
 import UIKit
@@ -791,13 +792,23 @@ public class DeviceDiscoveryManager: ObservableObject {
     /// apply. Extending it once keeps the listener alive so it can reach `.ready` the
     /// moment permission is granted.
     private static let advertisingAuthorizationWaitTimeoutSeconds: TimeInterval = 45
-    private static let maximumPreReadyInboundConnections = 32
-    private static let maximumPreReadyInboundConnectionsPerEndpoint = 4
-    private struct PreReadyInboundConnection {
+    private static let maximumInboundAdmissionConnections =
+        P2PInboundAdmissionPolicy.maximumConcurrentConnections
+    private static let maximumInboundAdmissionConnectionsPerEndpoint =
+        P2PInboundAdmissionPolicy.maximumConcurrentConnectionsPerRemoteEndpoint
+    private enum InboundAdmissionPhase {
+        case preReady
+        case protocolReady
+    }
+    private struct InboundAdmissionConnection {
         let connection: NWConnection
         let endpointKey: String
+        let firstFrameDeadline: ContinuousClock.Instant
+        var phase: InboundAdmissionPhase
     }
-    private var preReadyInboundConnections: [ObjectIdentifier: PreReadyInboundConnection] = [:]
+    private var inboundAdmissionConnections: [
+        ObjectIdentifier: InboundAdmissionConnection
+    ] = [:]
     private var advertisingStartupTask: Task<Void, Error>?
     private var advertisingStartupTaskPort: UInt16?
     private var advertisingStartupTaskAuthority: ProtocolIdentitySnapshot?
@@ -1344,7 +1355,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             finishAdvertisingStartup(.failure(AdvertisingStartupError.superseded))
             listener = nil
             Self.cancelListener(staleListener)
-            cancelAllPreReadyInboundConnections()
+            cancelAllInboundAdmissionConnections()
         }
 
         resetAdvertisingReadiness(requestedPort: port)
@@ -1499,7 +1510,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             listenerGeneration &+= 1
             listener = nil
             Self.cancelListener(activeListener)
-            cancelAllPreReadyInboundConnections()
+            cancelAllInboundAdmissionConnections()
             isAdvertising = false
             resetAdvertisingReadiness(requestedPort: requestedPort)
 
@@ -1551,7 +1562,7 @@ public class DeviceDiscoveryManager: ObservableObject {
         listener = nil
         finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
         if let activeListener { Self.cancelListener(activeListener) }
-        cancelAllPreReadyInboundConnections()
+        cancelAllInboundAdmissionConnections()
         isAdvertising = false
         resetAdvertisingReadiness()
         
@@ -3010,7 +3021,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             appendListenerStatus("failed \(Self.diagnosticErrorSummary(error))")
             finishAdvertisingStartup(.failure(error))
             Self.cancelListener(activeListener)
-            cancelAllPreReadyInboundConnections()
+            cancelAllInboundAdmissionConnections()
 
         case .cancelled:
             _ = advertisingReadinessGate?.observeTerminal()
@@ -3021,7 +3032,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             appendListenerStatus("cancelled")
             finishAdvertisingStartup(.failure(AdvertisingStartupError.cancelledBeforeReady))
             Self.clearListenerHandlers(activeListener)
-            cancelAllPreReadyInboundConnections()
+            cancelAllInboundAdmissionConnections()
             
         case .waiting(let waitError):
             _ = advertisingReadinessGate?.observeSocketUnavailable()
@@ -3173,10 +3184,10 @@ public class DeviceDiscoveryManager: ObservableObject {
             return
         }
 
-        guard registerPreReadyInboundConnection(connection) else {
+        guard registerInboundAdmissionConnection(connection) else {
             SkyBridgeLogger.shared.error("❌ 已拒绝超过入站连接容量的 P2P 连接")
             SkyBridgeDiagnosticTrace.appendStatus(
-                "p2p-listener inbound-ignored reason=pre-ready-capacity"
+                "p2p-listener inbound-ignored reason=admission-capacity"
             )
             connection.cancel()
             return
@@ -3184,7 +3195,13 @@ public class DeviceDiscoveryManager: ObservableObject {
 
         let readinessTimeoutTask = Task { @MainActor [weak self, weak connection] in
             do {
-                try await Task.sleep(for: .seconds(10))
+                try await Task.sleep(
+                    for: .seconds(
+                        P2PInboundAdmissionPolicy.deadlineSeconds(
+                            for: .awaitingFirstFrame
+                        )
+                    )
+                )
             } catch {
                 return
             }
@@ -3193,7 +3210,7 @@ public class DeviceDiscoveryManager: ObservableObject {
             SkyBridgeDiagnosticTrace.appendStatus(
                 "p2p-listener inbound-timeout peer_ref=\(peerReference)"
             )
-            self?.finishPreReadyInboundConnection(connection)
+            self?.finishInboundAdmissionConnection(connection)
             connection.cancel()
         }
 
@@ -3203,17 +3220,21 @@ public class DeviceDiscoveryManager: ObservableObject {
                 switch state {
                 case .ready:
                     readinessTimeoutTask.cancel()
-                    self?.finishPreReadyInboundConnection(connection)
                     connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.info("✅ 入站连接就绪: peer_ref=\(peerReference)")
                     SkyBridgeDiagnosticTrace.appendStatus(
                         "p2p-listener inbound-ready peer_ref=\(peerReference)"
                     )
-                    self?.onNewConnection?(connection, peerId)
+                    guard let onNewConnection = self?.onNewConnection else {
+                        self?.finishInboundAdmissionConnection(connection)
+                        connection.cancel()
+                        return
+                    }
+                    onNewConnection(connection, peerId)
 
                 case .failed(let error):
                     readinessTimeoutTask.cancel()
-                    self?.finishPreReadyInboundConnection(connection)
+                    self?.finishInboundAdmissionConnection(connection)
                     connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.error(
                         "❌ 入站连接失败: peer_ref=\(peerReference) \(Self.diagnosticErrorSummary(error))"
@@ -3224,7 +3245,7 @@ public class DeviceDiscoveryManager: ObservableObject {
 
                 case .cancelled:
                     readinessTimeoutTask.cancel()
-                    self?.finishPreReadyInboundConnection(connection)
+                    self?.finishInboundAdmissionConnection(connection)
                     connection.stateUpdateHandler = nil
                     SkyBridgeLogger.shared.info("⏹️ 入站连接已取消")
                     SkyBridgeDiagnosticTrace.appendStatus(
@@ -3240,36 +3261,72 @@ public class DeviceDiscoveryManager: ObservableObject {
         connection.start(queue: queue)
     }
 
-    private func registerPreReadyInboundConnection(_ connection: NWConnection) -> Bool {
+    private func registerInboundAdmissionConnection(_ connection: NWConnection) -> Bool {
         let identifier = ObjectIdentifier(connection)
-        if preReadyInboundConnections[identifier] != nil {
+        if inboundAdmissionConnections[identifier] != nil {
             return true
         }
         let endpointKey = Self.preReadyEndpointKey(connection.endpoint)
-        let endpointCount = preReadyInboundConnections.values.reduce(into: 0) { count, entry in
+        let endpointCount = inboundAdmissionConnections.values.reduce(into: 0) { count, entry in
             if entry.endpointKey == endpointKey {
                 count += 1
             }
         }
-        guard preReadyInboundConnections.count < Self.maximumPreReadyInboundConnections,
-            endpointCount < Self.maximumPreReadyInboundConnectionsPerEndpoint
+        guard inboundAdmissionConnections.count < Self.maximumInboundAdmissionConnections,
+            endpointCount < Self.maximumInboundAdmissionConnectionsPerEndpoint
         else {
             return false
         }
-        preReadyInboundConnections[identifier] = PreReadyInboundConnection(
+        inboundAdmissionConnections[identifier] = InboundAdmissionConnection(
             connection: connection,
-            endpointKey: endpointKey
+            endpointKey: endpointKey,
+            firstFrameDeadline: ContinuousClock.now.advanced(
+                by: .seconds(
+                    P2PInboundAdmissionPolicy.deadlineSeconds(
+                        for: .awaitingFirstFrame
+                    )
+                )
+            ),
+            phase: .preReady
         )
         return true
     }
 
-    private func finishPreReadyInboundConnection(_ connection: NWConnection) {
-        preReadyInboundConnections.removeValue(forKey: ObjectIdentifier(connection))
+    /// Transfers the listener-owned slot into the protocol adapter without
+    /// changing total occupancy or resetting the absolute first-frame budget.
+    func claimProtocolInboundAdmission(
+        _ connection: NWConnection,
+        now: ContinuousClock.Instant = ContinuousClock.now
+    ) -> TimeInterval? {
+        let identifier = ObjectIdentifier(connection)
+        guard var entry = inboundAdmissionConnections[identifier],
+              entry.connection === connection,
+              entry.phase == .preReady else {
+            return nil
+        }
+        guard let remaining = P2PInboundAdmissionPolicy.remainingSeconds(
+            until: entry.firstFrameDeadline,
+            now: now
+        ) else {
+            inboundAdmissionConnections.removeValue(forKey: identifier)
+            return nil
+        }
+        entry.phase = .protocolReady
+        inboundAdmissionConnections[identifier] = entry
+        return remaining
     }
 
-    private func cancelAllPreReadyInboundConnections() {
-        let connections = preReadyInboundConnections.values.map(\.connection)
-        preReadyInboundConnections.removeAll(keepingCapacity: false)
+    func finishInboundAdmissionConnection(_ connection: NWConnection) {
+        let identifier = ObjectIdentifier(connection)
+        guard inboundAdmissionConnections[identifier]?.connection === connection else {
+            return
+        }
+        inboundAdmissionConnections.removeValue(forKey: identifier)
+    }
+
+    private func cancelAllInboundAdmissionConnections() {
+        let connections = inboundAdmissionConnections.values.map(\.connection)
+        inboundAdmissionConnections.removeAll(keepingCapacity: false)
         for connection in connections {
             connection.stateUpdateHandler = nil
             connection.cancel()
@@ -3395,10 +3452,16 @@ public class DeviceDiscoveryManager: ObservableObject {
         for device: DiscoveredDevice,
         serviceType: DiscoveryServiceType
     ) -> [BonjourAdvertisementSnapshot] {
+        let requestedID = device.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requestedPersistentID = PeerIdentityAliasResolver.persistentDeviceId(from: requestedID)
         let canonical = canonicalDiscoveredDevice(for: device) ?? device
         let canonicalID = canonical.id.trimmingCharacters(in: .whitespacesAndNewlines)
-        let persistentID = PeerIdentityAliasResolver.persistentDeviceId(from: canonicalID)
-            ?? PeerIdentityAliasResolver.persistentDeviceId(from: device.id)
+        // A caller that already holds a strong identity must never let a weak Bonjour alias
+        // replace that authority with another cached strong identity. Canonical alias lookup is
+        // only an enrichment path for callers whose original identifier is non-authoritative.
+        let persistentID = requestedPersistentID
+            ?? PeerIdentityAliasResolver.persistentDeviceId(from: canonicalID)
+        let exactFallbackID = requestedPersistentID == nil ? canonicalID : requestedID
         let snapshots = advertisementSnapshotsByServiceType[serviceType]
             .map { Array($0.values) } ?? []
 
@@ -3411,7 +3474,7 @@ public class DeviceDiscoveryManager: ObservableObject {
                     return PeerIdentityAliasResolver.persistentDeviceId(from: snapshot.deviceId)
                         == persistentID
                 }
-                return snapshot.deviceId.caseInsensitiveCompare(canonicalID) == .orderedSame
+                return snapshot.deviceId.caseInsensitiveCompare(exactFallbackID) == .orderedSame
             }
             .sorted { lhs, rhs in
                 let lhsInterfacePriority = Self.liveBonjourInterfacePriority(lhs.endpoint)

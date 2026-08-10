@@ -474,7 +474,36 @@ final class P2PFailurePathHardeningTests: XCTestCase {
             XCTAssertLessThan(tokenPublication.lowerBound, ownershipTransfer.lowerBound)
         }
 
-        XCTAssertTrue(processInboundFrame.contains("let operationOwner = HandshakeOperationOwner("))
+        let exactOwnerLookup = try XCTUnwrap(
+            processInboundFrame.range(
+                of: "let operationOwner = handshakeOperationOwnerByPeerId[peerId]"
+            )
+        )
+        let postAwaitAuthorityGate = try XCTUnwrap(
+            processInboundFrame.range(
+                of: "operationOwner.completionAuthority.frameProcessorPostAwaitAction"
+            )
+        )
+        let messageDelivery = try XCTUnwrap(
+            processInboundFrame.range(of: "await activeDriver.handleMessage(frame, from: peer)")
+        )
+        let stateRead = try XCTUnwrap(
+            processInboundFrame.range(of: "let state = await activeDriver.getCurrentState()")
+        )
+        let terminalSwitch = try XCTUnwrap(processInboundFrame.range(of: "switch state"))
+        XCTAssertLessThan(exactOwnerLookup.lowerBound, messageDelivery.lowerBound)
+        XCTAssertLessThan(messageDelivery.lowerBound, postAwaitAuthorityGate.lowerBound)
+        XCTAssertLessThan(postAwaitAuthorityGate.lowerBound, stateRead.lowerBound)
+        XCTAssertLessThan(stateRead.lowerBound, terminalSwitch.lowerBound)
+        XCTAssertGreaterThanOrEqual(
+            processInboundFrame.components(separatedBy: "frameProcessorPostAwaitAction").count - 1,
+            2,
+            "Both driver awaits must preserve the exact completion owner before further mutation."
+        )
+        XCTAssertFalse(
+            processInboundFrame.contains("let operationOwner = HandshakeOperationOwner("),
+            "The frame processor must preserve completion authority from the exact registry owner."
+        )
         XCTAssertGreaterThanOrEqual(
             processInboundFrame.components(separatedBy: "isCurrentHandshakeOperation(operationOwner)").count - 1,
             2,
@@ -710,7 +739,10 @@ final class P2PFailurePathHardeningTests: XCTestCase {
 
     func testP2PFramingUsesSharedCompatibilityPolicyOnBothApplePlatforms() throws {
         let macConnection = try repositorySource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
-        let framedReader = try repositorySource("Sources/SkyBridgeCore/P2P/FramedReader.swift")
+        let framedReaderAdapter = try repositorySource("Sources/SkyBridgeCore/P2P/FramedReader.swift")
+        let sharedFramedReader = try repositorySource(
+            "Sources/SkyBridgeProtocolCore/P2P/FramedReader.swift"
+        )
         let discoveryTransport = try repositorySource(
             "Sources/SkyBridgeCore/P2P/DiscoveryTransport.swift"
         )
@@ -725,7 +757,15 @@ final class P2PFailurePathHardeningTests: XCTestCase {
         }
         XCTAssertTrue(macConnection.contains("FramedReader.nwConnection("))
         XCTAssertTrue(macConnection.contains("reader.receiveFrame()"))
-        XCTAssertTrue(framedReader.contains("P2PControlFramePolicy.inboundBodyByteCount("))
+        XCTAssertTrue(
+            framedReaderAdapter.contains(
+                "public typealias FramedReader = SkyBridgeProtocolCore.FramedReader"
+            )
+        )
+        XCTAssertTrue(framedReaderAdapter.contains("static func nwConnection("))
+        XCTAssertTrue(sharedFramedReader.contains("P2PControlFramePolicy"))
+        XCTAssertTrue(sharedFramedReader.contains(".inboundBodyByteCount(from: totalLen)"))
+        XCTAssertTrue(sharedFramedReader.contains("if isComplete {"))
         XCTAssertTrue(discoveryTransport.contains("P2PControlFramePolicy.inboundBodyByteCount("))
         XCTAssertTrue(iosManager.contains("P2PControlFramePolicy.inboundBodyByteCount("))
         XCTAssertFalse(macConnection.contains("private let maxFrameBytes: UInt32 = 2_000_000"))

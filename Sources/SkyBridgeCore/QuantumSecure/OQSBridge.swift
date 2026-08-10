@@ -220,6 +220,55 @@ public final class OQSBridge {
         pointer.deallocate()
     }
 
+    private static func signWithLoadedKeyPair(
+        _ data: Data,
+        keyPair: PQCKeyPairRecord,
+        signatureAlgorithm: UnsafeMutablePointer<OQS_SIG>,
+        algorithmName: String
+    ) throws -> OQSSignatureResult {
+        let signatureLength = Int(signatureAlgorithm.pointee.length_signature)
+        let signature = UnsafeMutablePointer<UInt8>.allocate(
+            capacity: signatureLength
+        )
+        defer { signature.deallocate() }
+        var actualSignatureLength = 0
+        let messageBacking = data.isEmpty ? Data([0]) : data
+        let status = messageBacking.withUnsafeBytes { messageRaw -> OQS_STATUS in
+            guard let message = messageRaw.bindMemory(to: UInt8.self).baseAddress else {
+                return OQS_ERROR
+            }
+            return keyPair.privateKey.withUnsafeBytes { privateRaw in
+                guard let privateKey = privateRaw.bindMemory(to: UInt8.self).baseAddress else {
+                    return OQS_ERROR
+                }
+                return OQS_SIG_sign(
+                    signatureAlgorithm,
+                    signature,
+                    &actualSignatureLength,
+                    message,
+                    data.count,
+                    privateKey
+                )
+            }
+        }
+        guard status == OQS_SUCCESS else {
+            throw pqcError(
+                code: -304,
+                description: "OQS_SIG_sign 失败: \(algorithmName)"
+            )
+        }
+        guard actualSignatureLength == signatureLength else {
+            throw pqcError(
+                code: -305,
+                description: "OQS_SIG_sign 返回签名长度无效 (expected=\(signatureLength), actual=\(actualSignatureLength))"
+            )
+        }
+        return OQSSignatureResult(
+            signature: Data(bytes: signature, count: actualSignatureLength),
+            publicKey: keyPair.publicKey
+        )
+    }
+
     public static func sign(
         _ data: Data,
         peerId: String,
@@ -309,34 +358,12 @@ public final class OQSBridge {
             )
         })
         defer { PQCKeyPairRecordCodec.wipe(&keyPair.privateKey) }
-
-        let sigBuf = UnsafeMutablePointer<UInt8>.allocate(capacity: sigLen)
-        defer { sigBuf.deallocate() }
-        var outLen = Int(0)
-        let messageBacking = data.isEmpty ? Data([0]) : data
-
-        let ok = messageBacking.withUnsafeBytes { (msgPtr: UnsafeRawBufferPointer) -> OQS_STATUS in
-            guard let m = msgPtr.bindMemory(to: UInt8.self).baseAddress else {
-                return OQS_ERROR
-            }
-            return keyPair.privateKey.withUnsafeBytes { skPtr in
-                guard let s = skPtr.bindMemory(to: UInt8.self).baseAddress else {
-                    return OQS_ERROR
-                }
-                return OQS_SIG_sign(sig, sigBuf, &outLen, m, data.count, s)
-            }
-        }
-        if ok != OQS_SUCCESS {
-            throw pqcError(code: -304, description: "OQS_SIG_sign 失败: \(name)")
-        }
-        guard outLen == sigLen else {
-            throw pqcError(
-                code: -305,
-                description: "OQS_SIG_sign 返回签名长度无效 (expected=\(sigLen), actual=\(outLen))"
-            )
-        }
-        let sigData = Data(bytes: sigBuf, count: outLen)
-        return OQSSignatureResult(signature: sigData, publicKey: keyPair.publicKey)
+        return try signWithLoadedKeyPair(
+            data,
+            keyPair: keyPair,
+            signatureAlgorithm: sig,
+            algorithmName: name
+        )
     }
 
     /// Loads and validates an existing canonical signing identity without
@@ -384,6 +411,108 @@ public final class OQSBridge {
         }
         defer { PQCKeyPairRecordCodec.wipe(&record.privateKey) }
         return record.publicKey
+    }
+
+    /// Canonical-only counterpart used by the existing-only smoke runtime.
+    /// No backend claim or legacy key-pair migration is allowed on this path.
+    static func existingSigningPublicKeyStrict(
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) throws -> Data? {
+        let parameters = try signingParameters(for: algorithm)
+        guard let signatureAlgorithm = OQS_SIG_new(parameters.name) else {
+            throw pqcError(
+                code: -301,
+                description: "OQS_SIG_new failed: \(parameters.name)"
+            )
+        }
+        defer { OQS_SIG_free(signatureAlgorithm) }
+        let publicKeyLength = Int(signatureAlgorithm.pointee.length_public_key)
+        let privateKeyLength = Int(signatureAlgorithm.pointee.length_secret_key)
+        let signatureLength = Int(signatureAlgorithm.pointee.length_signature)
+        try requirePositiveLengths(
+            [publicKeyLength, privateKeyLength, signatureLength],
+            errorCode: -301,
+            description: "OQS 签名算法返回无效的固定长度"
+        )
+        let descriptor = descriptor(
+            peerId: peerId,
+            algorithm: parameters.name,
+            purpose: .signature,
+            authority: authority,
+            scopeSource: scopeSource
+        )
+        guard var record = try PQCKeyPairStore.loadExistingAuthoritativeOnly(
+            descriptor: descriptor,
+            publicKeyLength: publicKeyLength,
+            privateKeyLength: privateKeyLength,
+            validatePair: { record in
+                try validateSignatureKeyPair(
+                    record,
+                    signatureAlgorithm: signatureAlgorithm
+                )
+            }
+        ) else {
+            return nil
+        }
+        defer { PQCKeyPairRecordCodec.wipe(&record.privateKey) }
+        return record.publicKey
+    }
+
+    static func signExistingOnly(
+        _ data: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> OQSSignatureResult {
+        let parameters = try signingParameters(for: algorithm)
+        guard let signatureAlgorithm = OQS_SIG_new(parameters.name) else {
+            throw pqcError(
+                code: -301,
+                description: "OQS_SIG_new failed: \(parameters.name)"
+            )
+        }
+        defer { OQS_SIG_free(signatureAlgorithm) }
+        let publicKeyLength = Int(signatureAlgorithm.pointee.length_public_key)
+        let privateKeyLength = Int(signatureAlgorithm.pointee.length_secret_key)
+        let signatureLength = Int(signatureAlgorithm.pointee.length_signature)
+        try requirePositiveLengths(
+            [publicKeyLength, privateKeyLength, signatureLength],
+            errorCode: -301,
+            description: "OQS 签名算法返回无效的固定长度"
+        )
+        let descriptor = descriptor(
+            peerId: peerId,
+            algorithm: parameters.name,
+            purpose: .signature,
+            authority: authority,
+            scopeSource: scopeSource
+        )
+        guard var record = try PQCKeyPairStore.loadExistingAuthoritativeOnly(
+            descriptor: descriptor,
+            publicKeyLength: publicKeyLength,
+            privateKeyLength: privateKeyLength,
+            validatePair: { record in
+                try validateSignatureKeyPair(
+                    record,
+                    signatureAlgorithm: signatureAlgorithm
+                )
+            }
+        ) else {
+            throw DeviceIdentityKeyError.incompleteKeyMaterial(
+                "The canonical liboqs protocol identity is missing"
+            )
+        }
+        defer { PQCKeyPairRecordCodec.wipe(&record.privateKey) }
+        return try signWithLoadedKeyPair(
+            data,
+            keyPair: record,
+            signatureAlgorithm: signatureAlgorithm,
+            algorithmName: parameters.name
+        )
     }
 
     public static func verify(
@@ -666,6 +795,36 @@ public final class OQSBridge {
         _ = authority
         _ = scopeSource
         return nil
+    }
+    static func existingSigningPublicKeyStrict(
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) throws -> Data? {
+        _ = peerId
+        _ = algorithm
+        _ = authority
+        _ = scopeSource
+        return nil
+    }
+    static func signExistingOnly(
+        _ data: Data,
+        peerId: String,
+        algorithm: OQSAlgorithm,
+        authority: PQCKeyPairStoreAuthority,
+        scopeSource: SkyBridgeSharedIdentityScopeSource
+    ) async throws -> OQSSignatureResult {
+        _ = data
+        _ = peerId
+        _ = algorithm
+        _ = authority
+        _ = scopeSource
+        throw NSError(
+            domain: "PQC",
+            code: -201,
+            userInfo: [NSLocalizedDescriptionKey: "liboqs is unavailable"]
+        )
     }
     public static func verify(
         _ data: Data,

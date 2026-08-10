@@ -61,7 +61,7 @@ function bundle_contains_executable_code() {
   local bundle="$1"
 
   if [[ -d "${bundle}/Contents/MacOS" ]] && \
-     find "${bundle}/Contents/MacOS" -type f -perm -111 -print -quit 2>/dev/null | grep -q .; then
+     find "${bundle}/Contents/MacOS" -type f -perm -u+x -print -quit 2>/dev/null | grep -q .; then
     return 0
   fi
 
@@ -74,7 +74,7 @@ function resign_embedded_code() {
   if [[ -d "${FW_DIR}" ]]; then
     while IFS= read -r -d '' bin; do
       codesign_target_or_fail "${bin}"
-    done < <(find "${FW_DIR}" -type f \( -name "*.dylib" -o -name "*.so" -o -perm -111 \) -print0)
+    done < <(find "${FW_DIR}" -type f \( -name "*.dylib" -o -name "*.so" -o -perm -u+x \) -print0)
 
     while IFS= read -r -d '' framework; do
       codesign_target_or_fail "${framework}"
@@ -92,7 +92,7 @@ function resign_embedded_code() {
   if [[ -d "${CONTENTS_DIR}/Library/LaunchDaemons" ]]; then
     while IFS= read -r -d '' helper_bin; do
       codesign_target_or_fail "${helper_bin}"
-    done < <(find "${CONTENTS_DIR}/Library/LaunchDaemons" -type f -perm -111 -print0)
+    done < <(find "${CONTENTS_DIR}/Library/LaunchDaemons" -type f -perm -u+x -print0)
   fi
 
   if [[ -d "${PLUGINS_DIR}" ]]; then
@@ -116,7 +116,7 @@ function resign_embedded_code() {
   if [[ -d "${MACOS_DIR}" ]]; then
     while IFS= read -r -d '' app_bin; do
       codesign_target_or_fail "${app_bin}"
-    done < <(find "${MACOS_DIR}" -type f -perm -111 -print0)
+    done < <(find "${MACOS_DIR}" -type f -perm -u+x -print0)
   fi
 }
 
@@ -991,8 +991,13 @@ MAIN_BUILD_SYSTEM="${SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM:-swiftpm}"
 if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" && -z "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
   export SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH="/tmp/skybridge-swiftpm-release-${BUILD_ARCH}"
 fi
-APP_NAME="SkyBridge Compass Pro.app"
-APP_DIR="${ROOT_DIR}/dist/${APP_NAME}"
+APP_NAME="${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+PACKAGE_CONTEXT="${SKYBRIDGE_PACKAGE_CONTEXT:-app}"
+PACKAGE_OUTPUT_DIR_OVERRIDE="${SKYBRIDGE_PACKAGE_OUTPUT_DIR:-}"
+APP_DIR="$(skybridge_resolve_package_app_path \
+  "${ROOT_DIR}" \
+  "${PACKAGE_CONTEXT}" \
+  "${PACKAGE_OUTPUT_DIR_OVERRIDE}")"
 XCODE_PROJECT="${ROOT_DIR}/SkyBridgeWidgets.xcodeproj"
 XCODE_MAC_SCHEME="${SKYBRIDGE_MACOS_APP_SCHEME:-SkyBridgeCompassMac}"
 XCODE_APP_BUNDLE="${SKYBRIDGE_XCODE_APP_BUNDLE:-${XCODE_BUILD_DIR}/${APP_NAME}}"
@@ -1011,7 +1016,6 @@ WIDGET_PROVISION_PROFILE_PATH="${SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH:-}"
 PACKAGING_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-package.XXXXXX")"
 ACTIVE_APP_PACKAGING_ENTITLEMENTS="${PACKAGING_TMP_DIR}/SkyBridgeCompassApp.packaging.entitlements"
 SKIP_BUILD="${SKIP_BUILD:-0}"
-PACKAGE_CONTEXT="${SKYBRIDGE_PACKAGE_CONTEXT:-app}"
 BUILD_DESTINATION="${BUILD_DESTINATION:-$(skybridge_default_macos_build_destination)}"
 XCODE_WORKSPACE="${ROOT_DIR}/.swiftpm/xcode/package.xcworkspace"
 USE_XCODE_WORKSPACE=0
@@ -1152,8 +1156,12 @@ fi
 
 log "本次打包使用构建目录: ${BUILD_DIR}"
 
-log "清理旧的 dist 目录并创建 .app 结构"
-rm -rf "${APP_DIR}"
+log "复验并清理既有 App Bundle，然后创建输出结构"
+skybridge_remove_package_app_bundle_for_replacement \
+  "${ROOT_DIR}" \
+  "${PACKAGE_CONTEXT}" \
+  "${PACKAGE_OUTPUT_DIR_OVERRIDE}" \
+  "${APP_DIR}"
 mkdir -p "${MACOS_DIR}" "${RES_DIR}" "${FW_DIR}"
 
 log "拷贝 Info.plist 到 .app/Contents/"
@@ -1606,7 +1614,7 @@ if [[ -x "${HELPER_BIN_PATH}" ]]; then
 
   # Helper bundle 在 LaunchDaemons 目录，需显式签名，否则主 App 深度签名可能不会覆盖到它
   if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
-    codesign --force --sign "${SIGN_IDENTITY}" --timestamp "${HELPER_DST_DIR}" >/dev/null 2>&1 || {
+    codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${HELPER_DST_DIR}" >/dev/null 2>&1 || {
       if is_release_distribution_context; then
         echo "错误：release_dmg 打包中 Helper 显式签名失败：${HELPER_DST_DIR}" >&2
         exit 1

@@ -1033,11 +1033,11 @@ final class RemoteControlAudioSchedulingTests: XCTestCase {
             "The soft cap must be checked before scheduling more audio into an already full player queue."
         )
         XCTAssertTrue(
-            source.contains("Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation] in"),
+            source.contains("Task.detached(priority: .utility) { [weak self, decodeWorker, chunk, generation, owner] in"),
             "Remote audio decoding should stay below video/render priority to avoid starving the display path."
         )
         XCTAssertFalse(
-            source.contains("Task.detached(priority: .userInitiated) { [weak self, decodeWorker, chunk, generation] in"),
+            source.contains("Task.detached(priority: .userInitiated) { [weak self, decodeWorker, chunk, generation, owner] in"),
             "Audio decoding must not run at userInitiated priority while the screen pipeline is active."
         )
     }

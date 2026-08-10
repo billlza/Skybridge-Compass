@@ -1544,6 +1544,13 @@ public class FileTransferManager: BaseManager {
         let lifecycleGeneration: UUID
     }
 
+    nonisolated static func externalTransferTokenOwnsCurrentSlot(
+        currentToken: ExternalTransferToken?,
+        expectedToken: ExternalTransferToken
+    ) -> Bool {
+        currentToken == expectedToken
+    }
+
     private static let transferHistoryStore = CodablePersistenceStore<[PersistedFileTransferHistoryEntry]>(
         location: .protectedApplicationSupport(
             path: "FileTransfer/manager-history.json",
@@ -6053,7 +6060,10 @@ public class FileTransferManager: BaseManager {
         direction: TransferDirection
     ) -> FileTransfer? {
         guard token.direction == direction,
-              externalTransferTokensByTransferID[token.transferID] == token,
+              Self.externalTransferTokenOwnsCurrentSlot(
+                currentToken: externalTransferTokensByTransferID[token.transferID],
+                expectedToken: token
+              ),
               let transfer = activeTransfers[token.transferID],
               transfer.direction == direction,
               transfer.status == .preparing || transfer.status == .transferring else {

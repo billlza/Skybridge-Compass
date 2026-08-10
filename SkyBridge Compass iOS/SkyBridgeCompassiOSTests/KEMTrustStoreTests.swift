@@ -39,6 +39,23 @@ private final class NetworkContentProcessedSubmissionProbe: @unchecked Sendable 
     }
 }
 
+private final class PairingJournalReadinessProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+
+    func setActive(_ value: Bool) {
+        lock.lock()
+        active = value
+        lock.unlock()
+    }
+
+    var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+}
+
 @available(iOS 17.0, *)
 final class KEMTrustStoreTests: XCTestCase {
     func testDefaultPQCSuitesExcludeQPeriaptBeta() {
@@ -287,6 +304,7 @@ final class KEMTrustStoreTests: XCTestCase {
             generation: 1_000
         )
         let payload = exchange.payload
+        let recoveryReference = "ev1:11111111111111111111111111111111"
 
         let store = KEMTrustStore(storageKey: storageKey, userDefaults: defaults)
         try await store.upsertSignedKEMRefresh(
@@ -294,7 +312,8 @@ final class KEMTrustStoreTests: XCTestCase {
             payload: payload,
             request: exchange.request,
             pinnedProtocolFingerprints: [payload.protocolIdentityFingerprint],
-            minimumGeneration: nil
+            minimumGeneration: nil,
+            recoveryEvidenceReference: recoveryReference
         )
 
         let byCanonical = await store.kemPublicKeys(for: canonicalId)
@@ -317,6 +336,8 @@ final class KEMTrustStoreTests: XCTestCase {
         let evidenceExpiresAt = try XCTUnwrap(evidence?.expiresAt)
         XCTAssertEqual(evidenceExpiresAt.timeIntervalSince1970, payload.expiresAt.timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(evidence?.payloadHashHex, Self.sha256Hex(payload.signaturePreimage))
+        XCTAssertEqual(evidence?.requestHashHex, exchange.request.canonicalRequestHashHex)
+        XCTAssertEqual(evidence?.recoveryEvidenceReference, recoveryReference)
 
         let aliasFirstEvidence = await store.signedRefreshEvidence(forAny: [endpointAlias, canonicalId])
         XCTAssertEqual(aliasFirstEvidence?.deviceId, canonicalId)
@@ -325,6 +346,8 @@ final class KEMTrustStoreTests: XCTestCase {
         let preservedEvidence = await store.signedRefreshEvidence(forAny: [canonicalId, endpointAlias])
         XCTAssertEqual(preservedEvidence?.source, "signed_lan_kem_refresh")
         XCTAssertEqual(preservedEvidence?.payloadHashHex, Self.sha256Hex(payload.signaturePreimage))
+        XCTAssertEqual(preservedEvidence?.requestHashHex, exchange.request.canonicalRequestHashHex)
+        XCTAssertEqual(preservedEvidence?.recoveryEvidenceReference, recoveryReference)
 
         let unsignedLegacyKey = KEMPublicKeyInfo(
             suiteWireId: CryptoSuite.mlkem768.wireId,
@@ -337,6 +360,8 @@ final class KEMTrustStoreTests: XCTestCase {
         XCTAssertEqual(reboundEvidence?.source, "signed_lan_kem_refresh")
         XCTAssertEqual(reboundEvidence?.suiteWireIds, [CryptoSuite.xwing.wireId])
         XCTAssertEqual(reboundEvidence?.payloadHashHex, Self.sha256Hex(payload.signaturePreimage))
+        XCTAssertEqual(reboundEvidence?.requestHashHex, exchange.request.canonicalRequestHashHex)
+        XCTAssertEqual(reboundEvidence?.recoveryEvidenceReference, recoveryReference)
     }
 
     func testSignedRefreshKEMLookupRequiresSignedSourceAndPinnedProtocolFingerprint() async throws {
@@ -454,6 +479,73 @@ final class KEMTrustStoreTests: XCTestCase {
         XCTAssertEqual(reboundEvidence?.keyId, payload.keyId)
         XCTAssertEqual(reboundEvidence?.generation, payload.generation)
         XCTAssertEqual(reboundEvidence?.payloadHashHex, Self.sha256Hex(payload.signaturePreimage))
+    }
+
+    func testSignedRefreshReadinessRemainsFalseWhilePairingJournalQuarantinesTrust() async throws {
+        let suiteName = "KEMTrustStorePairingJournalReadinessTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName) }
+
+        let journal = PairingJournalReadinessProbe()
+        let store = KEMTrustStore(
+            storageKey: "kem_trust_store.pairing.journal.readiness.tests.v1",
+            userDefaults: defaults,
+            authorityJournalExists: { false },
+            pairingAcceptanceJournalExists: { journal.isActive }
+        )
+        let deviceId = "id:\(UUID().uuidString.lowercased())"
+        let key = Data(repeating: 0x6A, count: 1_216)
+        let exchange = try makeSignedKEMRefreshExchange(
+            deviceId: deviceId,
+            kemPublicKey: key,
+            generation: 4_242
+        )
+        try await store.upsertSignedKEMRefresh(
+            deviceIds: [deviceId],
+            payload: exchange.payload,
+            request: exchange.request,
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint],
+            minimumGeneration: nil
+        )
+
+        let beforeJournal = await store.signedRefreshKEMPublicKeys(
+            forAny: [deviceId],
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint]
+        )
+        XCTAssertEqual(beforeJournal[.xwing], key)
+        XCTAssertTrue(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: true,
+                hasStrictPQCTrustMaterial: beforeJournal[.xwing] == key
+            )
+        )
+
+        journal.setActive(true)
+        let quarantined = await store.signedRefreshKEMPublicKeys(
+            forAny: [deviceId],
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint]
+        )
+        XCTAssertTrue(quarantined.isEmpty)
+        XCTAssertFalse(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: true,
+                hasStrictPQCTrustMaterial: !quarantined.isEmpty
+            )
+        )
+
+        journal.setActive(false)
+        let afterJournal = await store.signedRefreshKEMPublicKeys(
+            forAny: [deviceId],
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint]
+        )
+        XCTAssertEqual(afterJournal[.xwing], key)
+        XCTAssertTrue(
+            P2PConnectionManager.isPairingIdentityBootstrapReady(
+                hasCurrentSessionObservation: true,
+                hasStrictPQCTrustMaterial: afterJournal[.xwing] == key
+            )
+        )
     }
 
     func testRawUpsertRejectsUnknownClassicAndWrongLengthKEM() async throws {

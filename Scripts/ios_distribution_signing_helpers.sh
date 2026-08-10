@@ -3,6 +3,211 @@
 # Shared iOS App + Widget distribution signing proof used by every physical release lane.
 # The caller must source signing_entitlements_helpers.sh first.
 
+skybridge_archive_ios_distribution_product() {
+  if (( $# < 7 )); then
+    echo "skybridge_archive_ios_distribution_product requires at least 7 arguments" >&2
+    return 2
+  fi
+
+  local project_path="$1"
+  local scheme="$2"
+  local archive_path="$3"
+  local derived_data_path="$4"
+  local archive_log="$5"
+  local provisioning_policy="$6"
+  local separator="$7"
+  shift 7
+
+  if [[ "$provisioning_policy" != "installed-only" || "$separator" != "--" ]]; then
+    echo "iOS archive provisioning policy must be installed-only and followed by --" >&2
+    return 2
+  fi
+  if [[ "$project_path" != /* || ! -d "$project_path" || -L "$project_path" ]]; then
+    echo "iOS archive project must be an absolute, non-symlink directory" >&2
+    return 1
+  fi
+  if [[ -z "$scheme" || "$archive_path" != /* || "$derived_data_path" != /* || "$archive_log" != /* ]]; then
+    echo "iOS archive inputs must use a named scheme and absolute output paths" >&2
+    return 2
+  fi
+  if [[ -e "$archive_path" || -L "$archive_path" || \
+        -e "$derived_data_path" || -L "$derived_data_path" || \
+        -e "$archive_log" || -L "$archive_log" ]]; then
+    echo "iOS archive outputs must be fresh" >&2
+    return 1
+  fi
+  if ! declare -F skybridge_run_xcodebuild >/dev/null; then
+    echo "skybridge_run_xcodebuild must be loaded before archiving an iOS product" >&2
+    return 2
+  fi
+
+  local setting
+  for setting in "$@"; do
+    case "$setting" in
+      -allowProvisioningUpdates|-allowProvisioningDeviceRegistration|\
+      CODE_SIGN_STYLE=*|CODE_SIGN_IDENTITY=*|PROVISIONING_PROFILE=*|\
+      PROVISIONING_PROFILE_SPECIFIER=*|\
+      SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=*|\
+      SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=*)
+        echo "Caller attempted to override the installed-only Automatic signing boundary" >&2
+        return 2
+        ;;
+      *=*) ;;
+      *)
+        echo "iOS archive extras must be explicit build-setting assignments" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  local archive_parent
+  local derived_parent
+  local log_parent
+  local output_parent
+  archive_parent="$(dirname "$archive_path")"
+  derived_parent="$(dirname "$derived_data_path")"
+  log_parent="$(dirname "$archive_log")"
+  for output_parent in "$archive_parent" "$derived_parent" "$log_parent"; do
+    if [[ ! -d "$output_parent" || -L "$output_parent" ]]; then
+      echo "iOS archive output parents must already exist and must not be symlinks" >&2
+      return 1
+    fi
+  done
+
+  if ! (
+    unset CODE_SIGN_IDENTITY
+    unset PROVISIONING_PROFILE
+    unset PROVISIONING_PROFILE_SPECIFIER
+    SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
+      skybridge_run_xcodebuild archive \
+        -project "$project_path" \
+        -scheme "$scheme" \
+        -configuration Release \
+        -destination 'generic/platform=iOS' \
+        -archivePath "$archive_path" \
+        -derivedDataPath "$derived_data_path" \
+        "$@" \
+        "CODE_SIGN_STYLE=Automatic" \
+        "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=" \
+        "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER="
+  ) >"$archive_log" 2>&1; then
+    echo "Automatic iOS archive failed; retained log: $archive_log" >&2
+    return 1
+  fi
+  if LC_ALL=C grep -Eiq \
+    '(^|[^[:alpha:]])(warning|error):|ARCHIVE FAILED|BUILD FAILED' \
+    "$archive_log"; then
+    echo "Automatic iOS archive log contains a warning or error" >&2
+    return 1
+  fi
+  if [[ ! -d "$archive_path" || -L "$archive_path" || ! -f "$archive_path/Info.plist" ]]; then
+    echo "Automatic iOS archive did not produce the expected archive" >&2
+    return 1
+  fi
+}
+
+skybridge_export_ios_distribution_archive() {
+  if (( $# != 6 )); then
+    echo "skybridge_export_ios_distribution_archive requires 6 arguments" >&2
+    return 2
+  fi
+
+  local archive_path="$1"
+  local export_options="$2"
+  local export_dir="$3"
+  local export_log="$4"
+  local expected_team="$5"
+  local provisioning_policy="$6"
+  local export_method
+  local signing_style
+  local export_team
+  local manage_build_number
+
+  if [[ "$provisioning_policy" != "installed-only" ]]; then
+    echo "iOS export provisioning policy must be installed-only" >&2
+    return 2
+  fi
+  if [[ "$archive_path" != /* || ! -d "$archive_path" || -L "$archive_path" || \
+        ! -f "$archive_path/Info.plist" ]]; then
+    echo "iOS export requires an absolute, non-symlink archive" >&2
+    return 1
+  fi
+  if [[ "$export_options" != /* || ! -f "$export_options" || -L "$export_options" || \
+        "$export_dir" != /* || "$export_log" != /* || -z "$expected_team" ]]; then
+    echo "iOS export requires absolute, non-symlink inputs and outputs" >&2
+    return 2
+  fi
+  if [[ -e "$export_dir" || -L "$export_dir" || -e "$export_log" || -L "$export_log" ]]; then
+    echo "iOS export outputs must be fresh" >&2
+    return 1
+  fi
+  export_method="$(/usr/libexec/PlistBuddy -c 'Print :method' "$export_options" 2>/dev/null || true)"
+  signing_style="$(/usr/libexec/PlistBuddy -c 'Print :signingStyle' "$export_options" 2>/dev/null || true)"
+  export_team="$(/usr/libexec/PlistBuddy -c 'Print :teamID' "$export_options" 2>/dev/null || true)"
+  manage_build_number="$(/usr/libexec/PlistBuddy -c 'Print :manageAppVersionAndBuildNumber' "$export_options" 2>/dev/null || true)"
+  if [[ "$export_method" != "release-testing" || "$signing_style" != "automatic" || \
+        "$export_team" != "$expected_team" || "$manage_build_number" != "false" ]]; then
+    echo "iOS export options violate the release-testing Automatic signing contract" >&2
+    return 1
+  fi
+  if [[ ! -d "$(dirname "$export_dir")" || -L "$(dirname "$export_dir")" || \
+        ! -d "$(dirname "$export_log")" || -L "$(dirname "$export_log")" ]]; then
+    echo "iOS export output parents must already exist and must not be symlinks" >&2
+    return 1
+  fi
+
+  if ! (
+    unset CODE_SIGN_IDENTITY
+    unset PROVISIONING_PROFILE
+    unset PROVISIONING_PROFILE_SPECIFIER
+    xcodebuild -exportArchive \
+      -archivePath "$archive_path" \
+      -exportOptionsPlist "$export_options" \
+      -exportPath "$export_dir"
+  ) >"$export_log" 2>&1; then
+    echo "Automatic iOS archive export failed; retained log: $export_log" >&2
+    return 1
+  fi
+  if LC_ALL=C grep -Eiq \
+    '(^|[^[:alpha:]])(warning|error):|EXPORT FAILED|BUILD FAILED' \
+    "$export_log"; then
+    echo "Automatic iOS export log contains a warning or error" >&2
+    return 1
+  fi
+  if [[ ! -d "$export_dir" || -L "$export_dir" ]]; then
+    echo "Automatic iOS export did not produce the expected directory" >&2
+    return 1
+  fi
+}
+
+skybridge_extract_single_ios_exported_app() {
+  if (( $# != 3 )); then
+    echo "skybridge_extract_single_ios_exported_app requires 3 arguments" >&2
+    return 2
+  fi
+  local extractor="$1"
+  local export_dir="$2"
+  local destination_app="$3"
+  local extracted_app
+
+  if [[ ! -f "$extractor" || -L "$extractor" || ! -x "$extractor" ]]; then
+    echo "The iOS IPA extractor is missing, linked, or not executable" >&2
+    return 1
+  fi
+  if ! extracted_app="$(
+    python3 "$extractor" \
+      --export-dir "$export_dir" \
+      --destination-app "$destination_app"
+  )"; then
+    return 1
+  fi
+  if [[ "$extracted_app" != "$destination_app" || ! -d "$extracted_app" || -L "$extracted_app" ]]; then
+    echo "The iOS IPA extractor returned an unexpected application path" >&2
+    return 1
+  fi
+  printf '%s\n' "$extracted_app"
+}
+
 skybridge_write_ios_distribution_product_proof() {
   if (( $# != 18 )); then
     echo "skybridge_write_ios_distribution_product_proof requires 18 arguments" >&2

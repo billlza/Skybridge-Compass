@@ -345,7 +345,7 @@ def redact_text(value: str) -> str:
     # begin at a line boundary or after whitespace. This deliberately avoids
     # compiler flags such as `-fmodule-name=CQPeriapt`.
     value = re.sub(
-        r"(^|[ \t])(name|candidates|peers)=.*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
+        r"(^|[ \t])(name|candidates|peers|liveRoutes|eligibleRoutes)=.*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
         r"\1\2=<redacted-public-artifact-value>",
         value,
         flags=re.IGNORECASE | re.MULTILINE,
@@ -983,7 +983,7 @@ patterns = [
     (
         "raw human name or identity-list assignment",
         re.compile(
-            r"(^|[ \t])(?:name|candidates|peers)=(?!<redacted\b|<redacted>).*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
+            r"(^|[ \t])(?:name|candidates|peers|liveRoutes|eligibleRoutes)=(?!<redacted\b|<redacted>).*?(?=\s+[A-Za-z][A-Za-z0-9_-]*=|$)",
             re.IGNORECASE | re.MULTILINE,
         ),
     ),

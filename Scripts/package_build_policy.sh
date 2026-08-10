@@ -24,6 +24,208 @@ skybridge_package_build_source() {
   echo "unknown"
 }
 
+SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME="SkyBridge Compass Pro.app"
+
+skybridge_package_canonical_existing_directory() {
+  local directory_path="$1"
+
+  if [[ "${directory_path}" != /* ]]; then
+    echo "错误：打包输出目录必须是绝对路径：${directory_path}" >&2
+    return 1
+  fi
+  if [[ ! -d "${directory_path}" ]]; then
+    echo "错误：打包输出目录必须预先存在且为目录：${directory_path}" >&2
+    return 1
+  fi
+  if [[ -L "${directory_path%/}" ]]; then
+    echo "错误：打包输出目录不得是符号链接：${directory_path}" >&2
+    return 1
+  fi
+
+  (
+    cd "${directory_path}" && pwd -P
+  )
+}
+
+skybridge_assert_package_app_target_safe() {
+  local app_path="$1"
+  local current_uid
+  local target_uid
+
+  if [[ -L "${app_path}" ]]; then
+    echo "错误：App Bundle 最终目标不得是符号链接：${app_path}" >&2
+    return 1
+  fi
+  if [[ ! -e "${app_path}" ]]; then
+    return 0
+  fi
+  if [[ ! -d "${app_path}" ]]; then
+    echo "错误：既有 App Bundle 最终目标必须是目录：${app_path}" >&2
+    return 1
+  fi
+
+  current_uid="$(/usr/bin/id -u)" || return 1
+  target_uid="$(/usr/bin/stat -f '%u' "${app_path}")" || {
+    echo "错误：无法读取既有 App Bundle 所有者：${app_path}" >&2
+    return 1
+  }
+  if [[ "${target_uid}" != "${current_uid}" ]]; then
+    echo "错误：既有 App Bundle 必须属于当前用户：${app_path}" >&2
+    return 1
+  fi
+}
+
+skybridge_assert_private_package_output_directory() {
+  local directory_path="$1"
+  local diagnostic_path="${2:-${directory_path}}"
+  local current_uid
+  local output_mode
+  local output_uid
+
+  current_uid="$(/usr/bin/id -u)" || return 1
+  output_uid="$(/usr/bin/stat -f '%u' "${directory_path}")" || {
+    echo "错误：无法读取自定义打包输出目录所有者：${diagnostic_path}" >&2
+    return 1
+  }
+  output_mode="$(/usr/bin/stat -f '%Lp' "${directory_path}")" || {
+    echo "错误：无法读取自定义打包输出目录权限：${diagnostic_path}" >&2
+    return 1
+  }
+  if [[ "${output_uid}" != "${current_uid}" ]]; then
+    echo "错误：自定义打包输出目录必须属于当前用户：${diagnostic_path}" >&2
+    return 1
+  fi
+  if [[ "${output_mode}" != "700" ]]; then
+    echo "错误：自定义打包输出目录权限必须严格为 0700：${diagnostic_path}" >&2
+    return 1
+  fi
+}
+
+skybridge_resolve_package_app_path() {
+  local project_root="$1"
+  local package_context="$2"
+  local configured_output_dir="${3:-}"
+  local canonical_project_root
+  local canonical_default_output_dir
+  local canonical_output_dir
+  local canonical_home=""
+  local app_path
+
+  case "${package_context}" in
+    app|release_dmg)
+      ;;
+    *)
+      echo "错误：未知打包上下文，无法解析 App Bundle 输出：${package_context}" >&2
+      return 1
+      ;;
+  esac
+
+  canonical_project_root="$(skybridge_package_canonical_existing_directory "${project_root}")" || return 1
+  canonical_default_output_dir="${canonical_project_root}/dist"
+
+  if [[ -z "${configured_output_dir}" ]]; then
+    canonical_output_dir="${canonical_default_output_dir}"
+    if [[ -e "${canonical_output_dir}" || -L "${canonical_output_dir}" ]]; then
+      canonical_output_dir="$(skybridge_package_canonical_existing_directory "${canonical_output_dir}")" || return 1
+    fi
+  else
+    case "${configured_output_dir}" in
+      *$'\n'*|*$'\r'*)
+        echo "错误：打包输出目录不得包含换行控制字符。" >&2
+        return 1
+        ;;
+    esac
+    canonical_output_dir="$(skybridge_package_canonical_existing_directory "${configured_output_dir}")" || return 1
+
+    if [[ "${package_context}" == "release_dmg" ]]; then
+      if [[ "${canonical_output_dir}" != "${canonical_default_output_dir}" ]]; then
+        echo "错误：release_dmg 禁止重定向 App Bundle 输出，必须使用项目 dist。" >&2
+        return 1
+      fi
+    else
+      if [[ -z "${HOME:-}" ]]; then
+        echo "错误：HOME 未定义，无法验证自定义打包输出目录。" >&2
+        return 1
+      fi
+      canonical_home="$(skybridge_package_canonical_existing_directory "${HOME}")" || return 1
+      case "${canonical_output_dir}" in
+        /|"${canonical_home}"|"${canonical_project_root}"|"${canonical_default_output_dir}")
+          echo "错误：自定义打包输出目录不得是根目录、HOME、项目根目录或项目 dist：${canonical_output_dir}" >&2
+          return 1
+          ;;
+      esac
+
+      skybridge_assert_private_package_output_directory "${canonical_output_dir}" || return 1
+    fi
+  fi
+
+  app_path="${canonical_output_dir}/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+  skybridge_assert_package_app_target_safe "${app_path}" || return 1
+  printf '%s\n' "${app_path}"
+}
+
+skybridge_remove_package_app_bundle_for_replacement() {
+  local project_root="$1"
+  local package_context="$2"
+  local configured_output_dir="${3:-}"
+  local expected_app_path="$4"
+  local revalidated_app_path
+  local revalidated_output_dir
+  local app_path_suffix="/${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+
+  revalidated_app_path="$(skybridge_resolve_package_app_path \
+    "${project_root}" \
+    "${package_context}" \
+    "${configured_output_dir}")" || return 1
+  if [[ "${revalidated_app_path}" != "${expected_app_path}" ]]; then
+    echo "错误：App Bundle 输出在替换前发生变化，拒绝删除：${expected_app_path}" >&2
+    return 1
+  fi
+
+  case "${revalidated_app_path}" in
+    *"${app_path_suffix}")
+      revalidated_output_dir="${revalidated_app_path%"${app_path_suffix}"}"
+      ;;
+    *)
+      echo "错误：App Bundle 输出不是固定 bundle 子项，拒绝删除：${revalidated_app_path}" >&2
+      return 1
+      ;;
+  esac
+
+  if [[ ! -e "${revalidated_output_dir}" && ! -L "${revalidated_output_dir}" ]]; then
+    if [[ -n "${configured_output_dir}" ]]; then
+      echo "错误：复验后的显式打包输出目录已不存在，拒绝删除：${revalidated_output_dir}" >&2
+      return 1
+    fi
+    return 0
+  fi
+
+  (
+    local physical_output_dir
+    local relative_app_path="./${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
+
+    if ! cd -- "${revalidated_output_dir}"; then
+      echo "错误：无法进入复验后的打包输出目录，拒绝删除：${revalidated_output_dir}" >&2
+      exit 1
+    fi
+    physical_output_dir="$(pwd -P)" || {
+      echo "错误：无法读取打包输出目录的物理路径，拒绝删除：${revalidated_output_dir}" >&2
+      exit 1
+    }
+    if [[ "${physical_output_dir}" != "${revalidated_output_dir}" ]]; then
+      echo "错误：打包输出目录在替换前发生变化，拒绝删除：${revalidated_output_dir}" >&2
+      exit 1
+    fi
+
+    if [[ "${package_context}" == "app" && -n "${configured_output_dir}" ]]; then
+      skybridge_assert_private_package_output_directory "." "${revalidated_output_dir}" || exit 1
+    fi
+    skybridge_assert_package_app_target_safe "${relative_app_path}" || exit 1
+
+    /bin/rm -rf -- "${relative_app_path}"
+  )
+}
+
 skybridge_sanitize_log_value() {
   local value="$1"
   value="${value//$'\n'/ }"

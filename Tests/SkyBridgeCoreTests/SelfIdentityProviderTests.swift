@@ -6,6 +6,24 @@ import CryptoKit
 /// 验证本机强身份生成、持久化和判定逻辑
 @available(macOS 14.0, *)
 final class SelfIdentityProviderTests: XCTestCase {
+    private final class MirrorProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+
+        func record(_: String) -> Bool {
+            lock.lock()
+            calls += 1
+            lock.unlock()
+            return true
+        }
+
+        func invocationCount() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return calls
+        }
+    }
+
     private enum FixtureError: Error {
         case authorityUnavailable
     }
@@ -143,6 +161,30 @@ final class SelfIdentityProviderTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
 
+        let snapshot = await provider.presentationSnapshot()
+        XCTAssertTrue(snapshot.deviceId.isEmpty)
+        XCTAssertTrue(snapshot.pubKeyFP.isEmpty)
+    }
+
+    func testReadOnlyExistingIdentityDoesNotMirrorOrPublishState() async throws {
+        let identity = makeIdentityInfo(
+            deviceID: "55555555-5555-4555-8555-555555555555"
+        )
+        let mirrorProbe = MirrorProbe()
+        let provider = SelfIdentityProvider(
+            identityLoader: { allowCreate in
+                XCTAssertFalse(allowCreate)
+                return identity
+            },
+            deviceIDMirror: { deviceID in
+                mirrorProbe.record(deviceID)
+            }
+        )
+
+        let deviceID = try await provider.existingProtocolIdentityDeviceIdReadOnly()
+
+        XCTAssertEqual(deviceID, identity.deviceId)
+        XCTAssertEqual(mirrorProbe.invocationCount(), 0)
         let snapshot = await provider.presentationSnapshot()
         XCTAssertTrue(snapshot.deviceId.isEmpty)
         XCTAssertTrue(snapshot.pubKeyFP.isEmpty)

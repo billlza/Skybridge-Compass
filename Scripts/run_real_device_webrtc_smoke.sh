@@ -18,6 +18,8 @@ PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-publ
 
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
+IOS_EXPORT_OPTIONS="$ROOT_DIR/Scripts/ios_release_candidate_export_options.plist"
+IOS_IPA_EXTRACTOR="$ROOT_DIR/Scripts/extract_ios_ipa.py"
 IOS_BUNDLE_ID="com.skybridge.compass.ios"
 IOS_WIDGET_BUNDLE_ID="com.skybridge.compass.ios.widgets"
 IOS_TEAM_IDENTIFIER="YKUPL7Z869"
@@ -141,6 +143,12 @@ MAC_PQC_REPORT="$ARTIFACT_DIR/mac.pqc.json"
 MAC_STDOUT="$ARTIFACT_DIR/mac.stdout.log"
 MAC_BUILD_LOG="$ARTIFACT_DIR/macos-build.log"
 IOS_BUILD_LOG="$ARTIFACT_DIR/ios-build.log"
+IOS_ARCHIVE_PATH="$ARTIFACT_DIR/SkyBridgeCompass-iOS.xcarchive"
+IOS_ARCHIVE_DERIVED_DATA="$ARTIFACT_DIR/DerivedData-ios-archive"
+IOS_ARCHIVE_LOG="$ARTIFACT_DIR/ios-archive.log"
+IOS_EXPORT_DIR="$ARTIFACT_DIR/ios-export"
+IOS_EXPORT_LOG="$ARTIFACT_DIR/ios-export.log"
+IOS_EXPORTED_APP="$ARTIFACT_DIR/SkyBridgeCompass-iOS-exported.app"
 IOS_STATUS_NAME="ios-real-webrtc-${RUN_ID}.status.log"
 IOS_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME"
 IOS_TRACE_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME.trace.log"
@@ -181,9 +189,11 @@ IOS_EXPECTED_ENTITLEMENTS=""
 IOS_DISTRIBUTION_PREFLIGHT=""
 IOS_APP_DISTRIBUTION_PROFILE=""
 IOS_WIDGET_DISTRIBUTION_PROFILE=""
-IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=""
-IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=""
 IOS_DISTRIBUTION_IDENTITY_HASH=""
+IOS_DISTRIBUTION_PREFLIGHT_SCHEMA=""
+IOS_DISTRIBUTION_SIGNING_STYLE=""
+IOS_APP_PROFILE_IS_XCODE_MANAGED=""
+IOS_WIDGET_PROFILE_IS_XCODE_MANAGED=""
 ACCEPTANCE_CANDIDATE_READY=0
 
 cleanup() {
@@ -2456,16 +2466,21 @@ resolve_ios_distribution_signing_inputs() {
     "$IOS_TEAM_IDENTIFIER" \
     "$IOS_BUNDLE_ID" \
     "$IOS_WIDGET_BUNDLE_ID" \
-    "$IOS_DEVICE_ID"
+    "$IOS_DEVICE_ID" \
+    automatic
 
   IOS_APP_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
   IOS_WIDGET_DISTRIBUTION_PROFILE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfilePath"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
-  IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["appProfileSpecifier"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
-  IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfileSpecifier"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
   IOS_DISTRIBUTION_IDENTITY_HASH="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["identityHash"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
-  if [[ ! "$IOS_DISTRIBUTION_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ || \
-        -z "$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER" || \
-        -z "$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER" ]]; then
+  IOS_DISTRIBUTION_PREFLIGHT_SCHEMA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["schemaVersion"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_DISTRIBUTION_SIGNING_STYLE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["signingStyle"])' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_APP_PROFILE_IS_XCODE_MANAGED="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8"))["appProfileIsXcodeManaged"]).lower())' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  IOS_WIDGET_PROFILE_IS_XCODE_MANAGED="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1], encoding="utf-8"))["widgetProfileIsXcodeManaged"]).lower())' "$IOS_DISTRIBUTION_PREFLIGHT")"
+  if [[ "$IOS_DISTRIBUTION_PREFLIGHT_SCHEMA" != "2" || \
+        ! "$IOS_DISTRIBUTION_IDENTITY_HASH" =~ ^[0-9A-F]{40}$ || \
+        "$IOS_DISTRIBUTION_SIGNING_STYLE" != "automatic" || \
+        "$IOS_APP_PROFILE_IS_XCODE_MANAGED" != "true" || \
+        "$IOS_WIDGET_PROFILE_IS_XCODE_MANAGED" != "true" ]]; then
     echo "Resolved iOS distribution signing inputs violate the strict WebRTC preflight contract." >&2
     return 1
   fi
@@ -2674,39 +2689,56 @@ if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]] || ! skybridge_apple_pqc_
   exit 1
 fi
 echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-IOS_XCODEBUILD_ARGS=(
-  -project "$IOS_PROJECT"
-  -scheme "$IOS_SCHEME"
-  -configuration "$IOS_BUILD_CONFIGURATION"
-  -destination "$IOS_BUILD_DESTINATION"
-  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios"
+IOS_XCODEBUILD_SETTINGS=(
   "SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION=$IOS_BUILD_CONFIGURATION"
   "SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE=$IOS_SOURCE_DIRTY_STATE"
   "SKYBRIDGE_PACKAGING_GIT_COMMIT=$IOS_SOURCE_COMMIT"
-  "SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"
+  "SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-billlza/Skybridge-Compass}}"
   "SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"
   "SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
   "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"
 )
 if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
-  # The project default is Automatic (Xcode-managed) signing. This direct
-  # testing-surface device build forces Manual signing on the command line so it is
-  # signed by the resolver-selected installed distribution profile (per-target
-  # profiles come from the project's PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_*_...)"
-  # indirection, fed by the two environment build settings below).
-  IOS_XCODEBUILD_ARGS+=(
-    "CODE_SIGN_STYLE=Manual"
-    "CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"
-    "SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"
-    "SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"
+  echo "==> Archiving iOS WebRTC testing product with installed-only Automatic signing"
+  skybridge_archive_ios_distribution_product \
+    "$IOS_PROJECT" \
+    "$IOS_SCHEME" \
+    "$IOS_ARCHIVE_PATH" \
+    "$IOS_ARCHIVE_DERIVED_DATA" \
+    "$IOS_ARCHIVE_LOG" \
+    installed-only \
+    -- \
+    "${IOS_XCODEBUILD_SETTINGS[@]}" \
+    "DEVELOPMENT_TEAM=$IOS_TEAM_IDENTIFIER"
+  echo "==> Exporting the distribution-signed iOS WebRTC testing product"
+  skybridge_export_ios_distribution_archive \
+    "$IOS_ARCHIVE_PATH" \
+    "$IOS_EXPORT_OPTIONS" \
+    "$IOS_EXPORT_DIR" \
+    "$IOS_EXPORT_LOG" \
+    "$IOS_TEAM_IDENTIFIER" \
+    installed-only
+  IOS_APP_PATH="$(
+    skybridge_extract_single_ios_exported_app \
+      "$IOS_IPA_EXTRACTOR" \
+      "$IOS_EXPORT_DIR" \
+      "$IOS_EXPORTED_APP"
+  )"
+else
+  IOS_XCODEBUILD_ARGS=(
+    -project "$IOS_PROJECT"
+    -scheme "$IOS_SCHEME"
+    -configuration "$IOS_BUILD_CONFIGURATION"
+    -destination "$IOS_BUILD_DESTINATION"
+    -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios"
+    "${IOS_XCODEBUILD_SETTINGS[@]}"
+    build
   )
+  SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
+    skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG" 2>&1
+  IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 fi
-IOS_XCODEBUILD_ARGS+=(build)
-SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
-  skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG" 2>&1
-
-IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
   exit 1

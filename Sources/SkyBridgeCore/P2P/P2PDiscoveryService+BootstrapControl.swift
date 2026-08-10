@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 extension P2PDiscoveryService {
     nonisolated static var protocolIdentityLogRedaction: String { "<redacted>" }
@@ -7,6 +8,34 @@ extension P2PDiscoveryService {
     nonisolated static func normalizeInboundControlFrame(_ payload: Data) -> Data {
         let trafficUnwrapped = TrafficPadding.unwrapIfNeeded(payload, label: "rx")
         return HandshakePadding.unwrapIfNeeded(trafficUnwrapped, label: "rx")
+    }
+
+    struct PreparedInboundHandshakeFrame {
+        let messageA: HandshakeMessageA
+        let localSOAPeerId: Data
+    }
+
+    /// Bootstrap control frames are intentionally rejected by this preparer
+    /// without invoking the SOA loader. Only a successfully decoded MessageA
+    /// may require the committed local SOA identity.
+    nonisolated static func prepareInboundHandshakeFrame(
+        _ frame: Data,
+        cachedLocalSOAPeerId: Data?,
+        loadLocalSOAPeerId: () async throws -> Data
+    ) async throws -> PreparedInboundHandshakeFrame? {
+        guard let messageA = try? HandshakeMessageA.decode(from: frame) else {
+            return nil
+        }
+        let localSOAPeerId: Data
+        if let cachedLocalSOAPeerId {
+            localSOAPeerId = cachedLocalSOAPeerId
+        } else {
+            localSOAPeerId = try await loadLocalSOAPeerId()
+        }
+        return PreparedInboundHandshakeFrame(
+            messageA: messageA,
+            localSOAPeerId: localSOAPeerId
+        )
     }
 
     nonisolated static func isLikelyHandshakeControlFrame(_ data: Data) -> Bool {
@@ -82,11 +111,24 @@ extension P2PDiscoveryService {
             let responseStartedAt = Date()
             do {
                 let refresh = try await makeSignedKEMRefreshPayload(request)
+                guard let requestReference = P2PEvidenceReference.requestHash(
+                    request.canonicalRequestHashHex
+                ) else {
+                    throw AppMessage.KEMRefreshValidationError.requestHashMismatch
+                }
+                let payloadHashHex = SHA256.hash(data: refresh.signaturePreimage)
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+                guard let payloadReference = P2PEvidenceReference.payloadHash(payloadHashHex) else {
+                    throw AppMessage.KEMRefreshValidationError.requestHashMismatch
+                }
                 let responderLatencyMs = Date().timeIntervalSince(responseStartedAt) * 1_000.0
                 let statusLine = String(
-                    format: "🔐 SKR-1 signed LAN KEM refresh served: requester=%@ target=%@ keyId=%@ generation=%llu suites=%@ wireId=%@ responderLatencyMs=%.1f lifecycle=request>served",
+                    format: "🔐 SKR-1 signed LAN KEM refresh served: requester=%@ target=%@ skr_ref=%@ payload_ref=%@ keyId=%@ generation=%llu suites=%@ wireId=%@ responderLatencyMs=%.1f lifecycle=request>served",
                     Self.protocolIdentityLogRedaction,
                     Self.protocolIdentityLogRedaction,
+                    requestReference,
+                    payloadReference,
                     Self.protocolIdentityLogRedaction,
                     refresh.generation,
                     refresh.kemPublicKeys.map { String(format: "0x%04X", $0.suiteWireId) }.joined(separator: ","),
@@ -134,7 +176,8 @@ extension P2PDiscoveryService {
             do {
                 let binding = try await makeSignedProtocolIdentityBindingPayload(request)
                 let code = binding.shortAuthenticationCode(request: request)
-                let statusLine = "🔐 PIB-1 protocol identity binding served: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>served"
+                let transactionReference = P2PEvidenceReference.transaction(request.transactionId)
+                let statusLine = "🔐 PIB-1 protocol identity binding served: requester=\(Self.protocolIdentityLogRedaction) target=\(Self.protocolIdentityLogRedaction) pib_ref=\(transactionReference) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) lifecycle=identity-oob>served"
                 return BootstrapControlResponse(
                     kind: .protocolIdentityBindingServed,
                     message: .signedProtocolIdentityBinding(binding),
@@ -167,10 +210,11 @@ extension P2PDiscoveryService {
         case .protocolIdentityBindingConfirm(let confirm):
             do {
                 let ack = try await finalizeProtocolIdentityBinding(confirm)
+                let transactionReference = P2PEvidenceReference.transaction(confirm.transactionId)
                 return BootstrapControlResponse(
                     kind: .protocolIdentityBindingConfirmed,
                     message: .signedProtocolIdentityBindingFinalAck(ack),
-                    statusLine: "🔐 PIB-1 v3 confirmation committed and acknowledged lifecycle=identity-oob>confirmed",
+                    statusLine: "🔐 PIB-1 v3 confirmation committed and acknowledged pib_ref=\(transactionReference) lifecycle=identity-oob>confirmed",
                     protocolIdentityBindingRequest: nil,
                     protocolIdentityBindingPayload: nil,
                     protocolIdentityBindingCode: nil
@@ -240,6 +284,7 @@ extension P2PDiscoveryService {
         keyManager: DeviceIdentityKeyManager,
         loadLocalIdentities: @Sendable () async throws -> [CommittedLocalProtocolIdentitySnapshot]
     ) async throws -> AppMessage.SignedKEMRefreshPayload {
+        try Task.checkCancellation()
         let requestedSuites: [CryptoSuite]
         do {
             requestedSuites = try request.validatedStrictResponderSuites()
@@ -260,6 +305,7 @@ extension P2PDiscoveryService {
         let requesterPins = await PeerProtocolIdentityBootstrapStore.shared.trustedFingerprints(
             forCandidates: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId)
         )
+        try Task.checkCancellation()
         guard requesterPins.contains(requesterFingerprint) else {
             throw makeSKRFailure("requester protocol identity fingerprint not pinned")
         }
@@ -289,6 +335,8 @@ extension P2PDiscoveryService {
         let localIdentities: [CommittedLocalProtocolIdentitySnapshot]
         do {
             localIdentities = try await loadLocalIdentities()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             SkyBridgeLogger.p2p.error(
                 "SKR-1 responder local identity load failed: code=local_protocol_identity_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
@@ -313,6 +361,8 @@ extension P2PDiscoveryService {
                 using: provider,
                 limitingTo: requestedSuites
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             SkyBridgeLogger.p2p.error(
                 "SKR-1 responder KEM material load failed: code=local_pqc_kem_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
@@ -330,7 +380,9 @@ extension P2PDiscoveryService {
         let localIdRaw: String
         do {
             localIdRaw = try await SelfIdentityProvider.shared
-                .protocolIdentityDeviceId(allowCreate: true)
+                .existingProtocolIdentityDeviceIdReadOnly()
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             SkyBridgeLogger.p2p.error(
                 "SKR-1 responder local device identity load failed: code=local_device_id_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
@@ -375,12 +427,15 @@ extension P2PDiscoveryService {
                 unsigned.signaturePreimage,
                 key: selectedIdentity.keyHandle
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             SkyBridgeLogger.p2p.error(
                 "SKR-1 responder signing failed: code=local_protocol_identity_signing_unavailable errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)"
             )
             throw makeSKRFailure("local protocol identity signing unavailable")
         }
+        try Task.checkCancellation()
         let response = AppMessage.SignedKEMRefreshPayload(
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
@@ -406,6 +461,7 @@ extension P2PDiscoveryService {
             requesterDeviceId: request.requesterDeviceId,
             requesterFingerprint: requesterFingerprint
         )
+        try Task.checkCancellation()
         return response
     }
 
@@ -420,6 +476,7 @@ extension P2PDiscoveryService {
     nonisolated static func makeSignedProtocolIdentityBindingPayload(
         for request: AppMessage.ProtocolIdentityBindingRequestPayload
     ) async throws -> AppMessage.SignedProtocolIdentityBindingPayload {
+        try Task.checkCancellation()
         let requestValidationNow = Date()
         guard request.version == AppMessage.ProtocolIdentityBindingRequestPayload.currentVersion else {
             throw makePIBFailure("invalid request version")
@@ -433,10 +490,13 @@ extension P2PDiscoveryService {
         guard request.nonce.count >= 16 else {
             throw makePIBFailure("invalid request nonce")
         }
-        guard request.sentAt.timeIntervalSince(requestValidationNow) <= 30 else {
+        guard request.sentAt.timeIntervalSince(requestValidationNow)
+                <= P2PProtocolIdentityBindingAdmissionPolicy
+                    .maximumRequestFutureSkewSeconds else {
             throw makePIBFailure("request timestamp is too far in the future")
         }
-        guard requestValidationNow.timeIntervalSince(request.sentAt) <= 300 else {
+        guard requestValidationNow.timeIntervalSince(request.sentAt)
+                <= P2PProtocolIdentityBindingAdmissionPolicy.maximumRequestAgeSeconds else {
             throw makePIBFailure("request timestamp is expired")
         }
         let requestedAlgorithms: Set<ProtocolSigningAlgorithm>
@@ -458,6 +518,7 @@ extension P2PDiscoveryService {
             signature: requesterSignature,
             publicKey: requesterIdentity.publicKey
         )
+        try Task.checkCancellation()
         guard requesterSignatureVerified else {
             throw makePIBFailure("requester protocol identity signature invalid")
         }
@@ -465,12 +526,14 @@ extension P2PDiscoveryService {
         let selectedIdentity = try await CommittedLocalProtocolIdentitySnapshot.loadPreferred(
             matching: requestedAlgorithms
         )
+        try Task.checkCancellation()
         guard let selectedIdentity else {
             throw makePIBFailure("local protocol identity unavailable")
         }
 
         let localIdRaw = try await SelfIdentityProvider.shared
-            .protocolIdentityDeviceId(allowCreate: true)
+            .existingProtocolIdentityDeviceIdReadOnly()
+        try Task.checkCancellation()
         let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !localId.isEmpty else {
             throw makePIBFailure("local device id unavailable")
@@ -495,7 +558,9 @@ extension P2PDiscoveryService {
             protocolIdentityFingerprint: selectedIdentity.authoritativeFingerprint,
             deviceName: localPresentation.deviceName,
             sentAt: now,
-            expiresAt: now.addingTimeInterval(300),
+            expiresAt: now.addingTimeInterval(
+                P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds
+            ),
             requestNonce: request.nonce,
             requestHashHex: request.canonicalRequestHashHex,
             policyRequirePQC: true,
@@ -506,6 +571,7 @@ extension P2PDiscoveryService {
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
         let signature = try await signatureProvider.sign(unsigned.signaturePreimage, key: selectedIdentity.keyHandle)
+        try Task.checkCancellation()
         let signed = AppMessage.SignedProtocolIdentityBindingPayload(
             transactionId: unsigned.transactionId,
             deviceId: unsigned.deviceId,
@@ -524,17 +590,21 @@ extension P2PDiscoveryService {
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
             signature: signature
         )
-        return try await ProtocolIdentityBindingTransactionStore.shared.register(
+        let registered = try await ProtocolIdentityBindingTransactionStore.shared.register(
             request: request,
             candidate: signed,
             responderKeyHandle: selectedIdentity.keyHandle
         )
+        try Task.checkCancellation()
+        return registered
     }
 
     nonisolated static func finalizeProtocolIdentityBinding(
         _ confirm: AppMessage.ProtocolIdentityBindingConfirmPayload
     ) async throws -> AppMessage.SignedProtocolIdentityBindingFinalAckPayload {
-        try await ProtocolIdentityBindingTransactionStore.shared.resolveConfirmation(confirm) { context in
+        try Task.checkCancellation()
+        return try await ProtocolIdentityBindingTransactionStore.shared.resolveConfirmation(confirm) { context in
+            try Task.checkCancellation()
             let request = context.request
             let candidate = context.candidate
             let validatedConfirm = try confirm.validatedForCandidate(request: request, candidate: candidate)
@@ -551,6 +621,7 @@ extension P2PDiscoveryService {
             ) else {
                 throw makePIBFailure("requester confirmation signature invalid")
             }
+            try Task.checkCancellation()
 
             guard let responderAlgorithm = ProtocolSigningAlgorithm(rawValue: candidate.protocolSigningAlgorithm) else {
                 throw makePIBFailure("invalid responder signature algorithm")
@@ -560,7 +631,7 @@ extension P2PDiscoveryService {
                 requesterDeviceIds: signedKEMRefreshDeviceIdCandidates(request.requesterDeviceId),
                 displayName: request.requesterDeviceId,
                 model: nil,
-                platform: "iOS",
+                platform: nil,
                 osVersion: nil,
                 verificationCode: candidate.shortAuthenticationCode(request: request),
                 requesterProtocolSigningAlgorithm: requesterAlgorithm,
@@ -571,6 +642,7 @@ extension P2PDiscoveryService {
                 candidateHashHex: candidate.canonicalCandidateHashHex,
                 sasTranscriptHashHex: candidate.sasTranscriptHashHex(request: request)
             )
+            try Task.checkCancellation()
             guard approval != .reject else {
                 throw makePIBFailure("operator rejected requester protocol identity confirmation")
             }
@@ -602,7 +674,11 @@ extension P2PDiscoveryService {
                 confirmHashHex: validatedConfirm.canonicalConfirmHashHex,
                 accepted: true,
                 sentAt: postApprovalNow,
-                expiresAt: postApprovalNow.addingTimeInterval(300),
+                expiresAt: P2PProtocolIdentityBindingAdmissionPolicy
+                    .boundedChildExpiry(
+                        parentExpiry: validatedConfirm.expiresAt,
+                        issuedAt: postApprovalNow
+                ),
                 responderSignature: Data()
             )
             let responderSigner = ProtocolSignatureProviderSelector.select(for: responderAlgorithm)
@@ -610,6 +686,7 @@ extension P2PDiscoveryService {
                 unsignedAck.signaturePreimage,
                 key: responderKey
             )
+            try Task.checkCancellation()
             let signedAck = AppMessage.SignedProtocolIdentityBindingFinalAckPayload(
                 transactionId: unsignedAck.transactionId,
                 requesterDeviceId: unsignedAck.requesterDeviceId,
@@ -644,6 +721,7 @@ extension P2PDiscoveryService {
                 confirm: validatedConfirm,
                 now: commitNow
             )
+            try Task.checkCancellation()
             let committedDecision = await PairingTrustApprovalService.shared
                 .commitProtocolIdentityBindingRequesterApproval(
                     decision: approval,

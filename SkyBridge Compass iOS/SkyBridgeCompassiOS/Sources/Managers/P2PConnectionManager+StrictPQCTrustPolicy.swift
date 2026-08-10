@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 struct ProtocolIdentityBindingV3ResponderContext: Sendable {
@@ -17,7 +18,10 @@ enum ProtocolIdentityBindingV3CandidateRegistration: Sendable {
     case stored(ProtocolIdentityBindingV3ResponderContext)
     case replay(ProtocolIdentityBindingV3ResponderContext)
     case transactionConflict
+    case requesterQuotaExceeded
+    case requesterRateLimited
     case capacityExceeded
+    case cancelled
 }
 
 @available(iOS 17.0, *)
@@ -44,14 +48,31 @@ actor ProtocolIdentityBindingV3StateStore {
         var finalAck: AppMessage.SignedProtocolIdentityBindingFinalAckPayload?
     }
 
+    private struct Admission: Sendable {
+        let requesterFingerprint: String
+        let admittedAt: Date
+    }
+
     private let ttl: TimeInterval
     private let maximumEntries: Int
     private var entries: [UUID: Entry] = [:]
+    private var recentAdmissions: [Admission] = []
     private var cleanupTask: Task<Void, Never>?
 
-    init(ttl: TimeInterval = 300, maximumEntries: Int = 32) {
-        self.ttl = min(max(ttl, 1), 300)
-        self.maximumEntries = min(max(maximumEntries, 1), 32)
+    init(
+        ttl: TimeInterval = P2PProtocolIdentityBindingAdmissionPolicy
+            .maximumTransactionTTLSeconds,
+        maximumEntries: Int = P2PProtocolIdentityBindingAdmissionPolicy
+            .maximumTransactions
+    ) {
+        self.ttl = min(
+            max(ttl, 1),
+            P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactionTTLSeconds
+        )
+        self.maximumEntries = min(
+            max(maximumEntries, 1),
+            P2PProtocolIdentityBindingAdmissionPolicy.maximumTransactions
+        )
     }
 
     deinit {
@@ -62,7 +83,9 @@ actor ProtocolIdentityBindingV3StateStore {
         _ context: ProtocolIdentityBindingV3ResponderContext,
         now: Date = Date()
     ) -> ProtocolIdentityBindingV3CandidateRegistration {
+        guard !Task.isCancelled else { return .cancelled }
         prune(now: now)
+        pruneAdmissions(now: now)
         let transactionId = context.request.transactionId
         let requestHashHex = context.request.canonicalRequestHashHex
         guard context.candidate.transactionId == transactionId,
@@ -82,9 +105,42 @@ actor ProtocolIdentityBindingV3StateStore {
             }
             return .replay(existing.context)
         }
+        let requesterFingerprint = context.requesterProtocolIdentityFingerprint
+            .lowercased()
+        let activeRequesterTransactions = entries.values.reduce(into: 0) {
+            count,
+            entry in
+            if entry.context.requesterProtocolIdentityFingerprint.lowercased()
+                == requesterFingerprint {
+                count += 1
+            }
+        }
+        guard activeRequesterTransactions
+                < P2PProtocolIdentityBindingAdmissionPolicy
+                    .maximumTransactionsPerRequester else {
+            return .requesterQuotaExceeded
+        }
+        let requesterAdmissions = recentAdmissions.reduce(into: 0) {
+            count,
+            admission in
+            if admission.requesterFingerprint == requesterFingerprint {
+                count += 1
+            }
+        }
+        guard requesterAdmissions
+                < P2PProtocolIdentityBindingAdmissionPolicy
+                    .maximumAdmissionsPerRequesterPerWindow else {
+            return .requesterRateLimited
+        }
+        guard recentAdmissions.count
+                < P2PProtocolIdentityBindingAdmissionPolicy
+                    .maximumGlobalAdmissionsPerWindow else {
+            return .capacityExceeded
+        }
         guard entries.count < maximumEntries else {
             return .capacityExceeded
         }
+        guard !Task.isCancelled else { return .cancelled }
         let effectiveExpiry = min(
             min(context.expiresAt, context.candidate.expiresAt),
             now.addingTimeInterval(ttl)
@@ -110,6 +166,12 @@ actor ProtocolIdentityBindingV3StateStore {
             inFlightConfirmHashHex: nil,
             completedConfirmHashHex: nil,
             finalAck: nil
+        )
+        recentAdmissions.append(
+            Admission(
+                requesterFingerprint: requesterFingerprint,
+                admittedAt: now
+            )
         )
         scheduleCleanup()
         return .stored(boundedContext)
@@ -143,13 +205,19 @@ actor ProtocolIdentityBindingV3StateStore {
         }
         entry.inFlightConfirmHashHex = confirmHashHex
         entries[confirm.transactionId] = entry
+        // An in-flight confirmation is owned by the bounded protocol task and
+        // may intentionally cross the candidate expiry while the operator is
+        // comparing SAS. Do not leave an expiry task armed against that entry:
+        // repeatedly scheduling an already-expired deadline would busy-loop.
+        scheduleCleanup()
         return .allowed(entry.context)
     }
 
     func completeConfirm(
         transactionId: UUID,
         confirmHashHex: String,
-        finalAck: AppMessage.SignedProtocolIdentityBindingFinalAckPayload
+        finalAck: AppMessage.SignedProtocolIdentityBindingFinalAckPayload,
+        now: Date = Date()
     ) -> Bool {
         guard var entry = entries[transactionId],
               entry.inFlightConfirmHashHex == confirmHashHex else {
@@ -159,16 +227,24 @@ actor ProtocolIdentityBindingV3StateStore {
         entry.completedConfirmHashHex = confirmHashHex
         entry.finalAck = finalAck
         entries[transactionId] = entry
+        prune(now: now)
+        scheduleCleanup()
         return true
     }
 
-    func abortConfirm(transactionId: UUID, confirmHashHex: String) {
+    func abortConfirm(
+        transactionId: UUID,
+        confirmHashHex: String,
+        now: Date = Date()
+    ) {
         guard var entry = entries[transactionId],
               entry.inFlightConfirmHashHex == confirmHashHex else {
             return
         }
         entry.inFlightConfirmHashHex = nil
         entries[transactionId] = entry
+        prune(now: now)
+        scheduleCleanup()
     }
 
 #if DEBUG || SKYBRIDGE_TESTING
@@ -176,21 +252,47 @@ actor ProtocolIdentityBindingV3StateStore {
         cleanupTask?.cancel()
         cleanupTask = nil
         entries.removeAll(keepingCapacity: false)
+        recentAdmissions.removeAll(keepingCapacity: false)
     }
 
     func entryCountForTesting(now: Date = Date()) -> Int {
         prune(now: now)
         return entries.count
     }
+
+    func cleanupIsScheduledForTesting() -> Bool {
+        cleanupTask != nil
+    }
 #endif
 
     private func prune(now: Date) {
-        entries = entries.filter { $0.value.context.expiresAt > now }
+        entries = entries.filter {
+            let entry = $0.value
+            if entry.inFlightConfirmHashHex != nil {
+                return true
+            }
+            guard entry.context.expiresAt > now else { return false }
+            return (entry.finalAck?.expiresAt ?? .distantFuture) > now
+        }
+    }
+
+    private func pruneAdmissions(now: Date) {
+        let cutoff = now.addingTimeInterval(
+            -P2PProtocolIdentityBindingAdmissionPolicy.admissionWindowSeconds
+        )
+        recentAdmissions.removeAll { $0.admittedAt <= cutoff }
     }
 
     private func scheduleCleanup() {
         cleanupTask?.cancel()
-        guard let nextExpiry = entries.values.map(\.context.expiresAt).min() else {
+        let nextExpiry = entries.values.compactMap { entry -> Date? in
+            guard entry.inFlightConfirmHashHex == nil else { return nil }
+            if let finalAck = entry.finalAck {
+                return min(entry.context.expiresAt, finalAck.expiresAt)
+            }
+            return entry.context.expiresAt
+        }.min()
+        guard let nextExpiry else {
             cleanupTask = nil
             return
         }
@@ -341,7 +443,7 @@ extension P2PConnectionManager {
     }
 
     static func protocolIdentityBindingCandidateResponseTimeoutSeconds() -> Double {
-        30
+        P2PProtocolIdentityBindingAdmissionPolicy.candidateResponseTimeoutSeconds
     }
 
     static func signedLANRefreshResponseTimeoutSeconds() -> Double {

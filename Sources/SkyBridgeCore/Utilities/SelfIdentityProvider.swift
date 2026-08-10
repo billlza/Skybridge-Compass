@@ -14,6 +14,7 @@ public actor SelfIdentityProvider {
     public static let shared = SelfIdentityProvider()
 
     private typealias IdentityLoader = @Sendable (Bool) async throws -> DeviceIdentityKeyInfo?
+    private typealias ReadOnlyIdentityLoader = @Sendable () async throws -> DeviceIdentityKeyInfo?
     private typealias DeviceIDMirror = @Sendable (String) -> Bool
     private typealias MACAddressLoader = @Sendable () async -> Set<String>
     
@@ -26,6 +27,7 @@ public actor SelfIdentityProvider {
     private(set) var macSet: Set<String> = []
 
     private let identityLoader: IdentityLoader
+    private let readOnlyIdentityLoader: ReadOnlyIdentityLoader
     private let deviceIDMirror: DeviceIDMirror
     private let macAddressLoader: MACAddressLoader
 
@@ -36,6 +38,10 @@ public actor SelfIdentityProvider {
                 return try await manager.getOrCreateIdentityKey()
             }
             return try await manager.existingIdentityKeyInfoStrict()
+        }
+        readOnlyIdentityLoader = {
+            try await DeviceIdentityKeyManager.shared
+                .existingIdentityAuthoritySnapshotReadOnly()
         }
         deviceIDMirror = { deviceID in
             guard let data = deviceID.data(using: .utf8) else { return false }
@@ -53,10 +59,14 @@ public actor SelfIdentityProvider {
     /// Deterministic persistence seam for strict identity/error-path tests.
     init(
         identityLoader: @escaping @Sendable (Bool) async throws -> DeviceIdentityKeyInfo?,
+        readOnlyIdentityLoader: (@Sendable () async throws -> DeviceIdentityKeyInfo?)? = nil,
         deviceIDMirror: @escaping @Sendable (String) -> Bool = { _ in true },
         macAddressLoader: @escaping @Sendable () async -> Set<String> = { [] }
     ) {
         self.identityLoader = identityLoader
+        self.readOnlyIdentityLoader = readOnlyIdentityLoader ?? {
+            try await identityLoader(false)
+        }
         self.deviceIDMirror = deviceIDMirror
         self.macAddressLoader = macAddressLoader
     }
@@ -100,6 +110,16 @@ public actor SelfIdentityProvider {
     /// peers can cache it as a successful bootstrap with no stable authority.
     public func protocolIdentityDeviceId(allowCreate: Bool) async throws -> String {
         try await loadAuthoritativeIdentity(allowCreate: allowCreate).deviceId
+    }
+
+    /// Reads and validates the existing authority without creating, migrating,
+    /// mirroring, or publishing identity state. Unauthenticated inbound sockets
+    /// must use this accessor instead of a mutating startup/presentation path.
+    public func existingProtocolIdentityDeviceIdReadOnly() async throws -> String {
+        guard let identity = try await readOnlyIdentityLoader() else {
+            throw DeviceIdentityKeyError.keyNotFound
+        }
+        return try Self.validatedAuthoritativeIdentity(identity).deviceId
     }
 
     public func snapshotEnsuringProtocolDeviceId(
@@ -199,9 +219,28 @@ public actor SelfIdentityProvider {
     private func loadAuthoritativeIdentity(
         allowCreate: Bool
     ) async throws -> DeviceIdentityKeyInfo {
-        guard let identity = try await identityLoader(allowCreate) else {
+        guard let loadedIdentity = try await identityLoader(allowCreate) else {
             throw DeviceIdentityKeyError.keyNotFound
         }
+        let identity = try Self.validatedAuthoritativeIdentity(loadedIdentity)
+
+        // Publish both fields together only after the complete authority tuple
+        // has passed validation. The historical store is write-only here and can
+        // never become an identity source.
+        deviceId = identity.deviceId
+        pubKeyFP = identity.pubKeyFP
+        if !DeviceIdentityKeyManager.requiresExistingOnlyIdentityRuntime,
+           !deviceIDMirror(identity.deviceId) {
+            logger.warning(
+                "⚠️ Failed to update the non-authoritative device ID mirror"
+            )
+        }
+        return identity
+    }
+
+    nonisolated private static func validatedAuthoritativeIdentity(
+        _ identity: DeviceIdentityKeyInfo
+    ) throws -> DeviceIdentityKeyInfo {
         let normalizedDeviceID = identity.deviceId.trimmingCharacters(
             in: .whitespacesAndNewlines
         )
@@ -226,17 +265,6 @@ public actor SelfIdentityProvider {
         ) else {
             throw DeviceIdentityKeyError.corruptIdentityAuthority(
                 "Self identity fingerprint does not match its authority public key"
-            )
-        }
-
-        // Publish both fields together only after the complete authority tuple
-        // has passed validation. The historical store is write-only here and can
-        // never become an identity source.
-        deviceId = identity.deviceId
-        pubKeyFP = identity.pubKeyFP
-        if !deviceIDMirror(identity.deviceId) {
-            logger.warning(
-                "⚠️ Failed to update the non-authoritative device ID mirror"
             )
         }
         return identity

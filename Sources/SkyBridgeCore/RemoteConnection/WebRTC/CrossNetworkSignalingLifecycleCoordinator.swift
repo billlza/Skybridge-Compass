@@ -5,11 +5,40 @@ final class CrossNetworkSignalingLifecycleCoordinator {
     typealias Phase = WebSocketSignalingClient.SignalingLifecyclePhase
     typealias HandleID = WebSocketSignalingClient.SignalingHandleID
     typealias LifecycleEvent = WebSocketSignalingClient.SignalingLifecycleEvent
+    typealias FailureClass = WebSocketSignalingClient.SignalingFailureClass
+
+    struct SetupOwner: Equatable, Sendable {
+        let sessionID: String
+        let token: UUID
+    }
 
     private var generationBySessionId: [String: Int] = [:]
     private var activeHandle: HandleID?
     private var recoveryTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var recoveryTaskTokensBySessionId: [String: UUID] = [:]
+    private var setupOwner: SetupOwner?
+
+    func beginSetup(for sessionID: String) -> SetupOwner? {
+        guard setupOwner == nil else { return nil }
+        let owner = SetupOwner(sessionID: sessionID, token: UUID())
+        setupOwner = owner
+        return owner
+    }
+
+    func isCurrentSetup(_ owner: SetupOwner) -> Bool {
+        setupOwner == owner
+    }
+
+    func finishSetup(_ owner: SetupOwner) {
+        guard setupOwner == owner else { return }
+        setupOwner = nil
+    }
+
+    func invalidateSetup(sessionID: String? = nil) {
+        guard let current = setupOwner else { return }
+        guard sessionID == nil || current.sessionID == sessionID else { return }
+        setupOwner = nil
+    }
 
     func generation(for sessionID: String) -> Int {
         generationBySessionId[sessionID] ?? 0
@@ -27,6 +56,7 @@ final class CrossNetworkSignalingLifecycleCoordinator {
 
     func resetAll() {
         cancelAllRecovery()
+        invalidateSetup()
         generationBySessionId.removeAll()
         activeHandle = nil
     }
@@ -41,6 +71,7 @@ final class CrossNetworkSignalingLifecycleCoordinator {
     /// session reusing the identifier would otherwise inherit stale ordering.
     func teardown(sessionID: String) {
         cancelRecovery(for: sessionID)
+        invalidateSetup(sessionID: sessionID)
         generationBySessionId.removeValue(forKey: sessionID)
         if activeHandle?.sessionId == sessionID {
             activeHandle = nil
@@ -136,7 +167,8 @@ final class CrossNetworkSignalingLifecycleCoordinator {
         isHandshakeComplete: (String) -> Bool,
         setPhase: (Phase) -> Void,
         setHealth: (SignalingSessionHealth) -> Void,
-        noteDetached: (_ sessionID: String, _ source: String, _ failure: String?, _ fatal: Bool) -> Void
+        noteDetached: (_ sessionID: String, _ source: String, _ failure: String?, _ fatal: Bool) -> Void,
+        failPreTransport: (_ sessionID: String, _ failureClass: FailureClass) -> Void
     ) {
         guard event.handleId.sessionId == activeShardKey else { return }
 
@@ -177,6 +209,8 @@ final class CrossNetworkSignalingLifecycleCoordinator {
                     failureClass.rawValue,
                     CrossNetworkConnectionManager.isFatalPostTransportFailure(failureClass)
                 )
+            } else if CrossNetworkConnectionManager.isFatalPreTransportFailure(failureClass) {
+                failPreTransport(sessionID, failureClass)
             }
         default:
             break

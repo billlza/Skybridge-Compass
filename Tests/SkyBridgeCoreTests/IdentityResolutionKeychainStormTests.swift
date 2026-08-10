@@ -133,6 +133,36 @@ final class IdentityResolutionKeychainStormTests: XCTestCase {
         )
     }
 
+    func testColdReadOnlyAuthoritySnapshotDoesNotPublishDeviceIDMirror() async throws {
+        let context = try DeviceIdentityKeychainTestContext()
+        defer { try? context.reset() }
+        let identity = try await context.manager.getOrCreateIdentityKey()
+        let freshManager = try DeviceIdentityKeyManager(
+            testingStorageNamespace: context.namespace,
+            keychainScope: context.scope
+        )
+        let defaultsKey = "SkyBridge.P2P.DeviceIdentity.DeviceID"
+        let defaults = UserDefaults.standard
+        let priorValue = defaults.object(forKey: defaultsKey)
+        defer {
+            if let priorValue {
+                defaults.set(priorValue, forKey: defaultsKey)
+            } else {
+                defaults.removeObject(forKey: defaultsKey)
+            }
+        }
+        defaults.removeObject(forKey: defaultsKey)
+
+        let snapshot = try await freshManager.existingIdentityAuthoritySnapshotReadOnly()
+
+        XCTAssertEqual(snapshot?.deviceId, identity.deviceId)
+        XCTAssertEqual(snapshot?.publicKey, identity.publicKey)
+        XCTAssertNil(
+            defaults.object(forKey: defaultsKey),
+            "A cold read-only authority lookup must not publish the legacy device-ID mirror"
+        )
+    }
+
     func testIdentityAuthorityDeletionRemainsRefused() async throws {
         let before = try await DeviceIdentityKeyManager.shared.getOrCreateIdentityKey()
 

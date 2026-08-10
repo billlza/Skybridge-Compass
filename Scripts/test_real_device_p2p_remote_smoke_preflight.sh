@@ -5,8 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SMOKE_SCRIPT="${SCRIPT_DIR}/run_real_device_p2p_remote_smoke.sh"
 SIGNING_HELPERS="${SCRIPT_DIR}/signing_entitlements_helpers.sh"
 IOS_DISTRIBUTION_SIGNING_HELPERS="${SCRIPT_DIR}/ios_distribution_signing_helpers.sh"
+CORE_RESOURCE_BUNDLE_HELPERS="${SCRIPT_DIR}/skybridge_core_resource_bundle_helpers.sh"
+CORE_RESOURCE_BUNDLE_HELPER_TEST="${SCRIPT_DIR}/test_skybridge_core_resource_bundle_helpers.sh"
 IOS_DISTRIBUTION_SIGNING_RESOLVER="${SCRIPT_DIR}/resolve_ios_distribution_signing.py"
 IOS_DISTRIBUTION_PRODUCT_VERIFIER="${SCRIPT_DIR}/verify_ios_distribution_product.py"
+IOS_IPA_EXTRACTOR="${SCRIPT_DIR}/extract_ios_ipa.py"
+IDENTITY_REFRESH_EVIDENCE_VALIDATOR="${SCRIPT_DIR}/validate_p2p_identity_refresh_evidence.py"
+IDENTITY_REFRESH_EVIDENCE_TEST="${SCRIPT_DIR}/test_validate_p2p_identity_refresh_evidence.py"
 AUTHENTICATED_ROUTE_EXTRACTOR="${SCRIPT_DIR}/extract_authenticated_p2p_route.py"
 RELEASE_ACCEPTANCE_FINALIZER="${SCRIPT_DIR}/finalize_release_acceptance_manifests.py"
 RELEASE_ACCEPTANCE_VALIDATOR="${SCRIPT_DIR}/validate_real_device_release_acceptance_artifact.py"
@@ -21,6 +26,11 @@ fail() {
   echo "[test-real-device-smoke-preflight] $1" >&2
   exit 1
 }
+
+bash "$CORE_RESOURCE_BUNDLE_HELPER_TEST" >/dev/null \
+  || fail "shared Core resource bundle normalizer dynamic tests failed"
+python3 "$IDENTITY_REFRESH_EVIDENCE_TEST" >/dev/null \
+  || fail "forced PIB-1 to SKR-1 evidence validator dynamic tests failed"
 
 contains_literal() {
   local haystack="$1"
@@ -58,6 +68,20 @@ host_start_body="$(
   awk '
     /^start_macos_smoke_host\(\)/ { in_function = 1 }
     /^append_ios_status\(\)/ { in_function = 0 }
+    in_function { print }
+  ' "$SMOKE_SCRIPT"
+)"
+mac_online_connect_button_body="$(
+  awk '
+    /^press_mac_online_ipad_connect_button\(\)/ { in_function = 1 }
+    /^observe_mac_online_ipad_connected_row\(\)/ { in_function = 0 }
+    in_function { print }
+  ' "$SMOKE_SCRIPT"
+)"
+mac_online_connected_row_body="$(
+  awk '
+    /^observe_mac_online_ipad_connected_row\(\)/ { in_function = 1 }
+    /^wait_for_mac_online_connected_row\(\)/ { in_function = 0 }
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
@@ -103,6 +127,13 @@ tracked_process_termination_body="$(
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
+artifact_reset_body="$(
+  awk '
+    /^reset_smoke_artifacts\(\)/ { in_function = 1 }
+    /^terminate_stale_smoke_scripts\(\)/ { in_function = 0 }
+    in_function { print }
+  ' "$SMOKE_SCRIPT"
+)"
 mac_online_build_body="$(
   awk '
     /^build_macos_online_ipad_app\(\)/ { in_function = 1 }
@@ -140,7 +171,7 @@ remote_control_notice_lifecycle_body="$(
 )"
 approval_proof_body="$(
   awk '
-    /^write_p2p_remote_control_approval_proof\(\)/ { in_function = 1 }
+    /^generate_p2p_remote_control_approval_proof\(\)/ { in_function = 1 }
     /^wait_for_remote_control_notice_lifecycle\(\)/ { in_function = 0 }
     in_function { print }
   ' "$SMOKE_SCRIPT"
@@ -154,15 +185,16 @@ source_provenance_body="$(
 )"
 ios_build_invocation_body="$(
   awk '
-    /^IOS_XCODEBUILD_ARGS=\(/ { in_block = 1 }
-    /^IOS_APP_PATH=/ { in_block = 0 }
+    /^IOS_XCODEBUILD_SETTINGS=\(/ { in_block = 1 }
+    /^if \[\[ ! -d "\$IOS_APP_PATH"/ { in_block = 0 }
     in_block { print }
   ' "$SMOKE_SCRIPT"
 )"
 for shared_ios_signing_file in \
   "$IOS_DISTRIBUTION_SIGNING_HELPERS" \
   "$IOS_DISTRIBUTION_SIGNING_RESOLVER" \
-  "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"; do
+  "$IOS_DISTRIBUTION_PRODUCT_VERIFIER" \
+  "$IOS_IPA_EXTRACTOR"; do
   [[ -f "$shared_ios_signing_file" && ! -L "$shared_ios_signing_file" ]] \
     || fail "shared iOS distribution signing source is missing or symlinked: $shared_ios_signing_file"
 done
@@ -183,7 +215,7 @@ contains_literal "$detect_body" "status=\$?" \
   || fail "loginwindow preflight must emit a structured locked-screen failure"
 
 preflight_line="$(grep -n 'Checking macOS visible desktop preflight' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
-source_provenance_line="$(grep -n '^capture_ios_release_source_provenance$' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+source_provenance_line="$(grep -n '^[[:space:]]*capture_ios_release_source_provenance$' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
 pqc_gate_line="$(grep -n 'Checking Apple PQC SDK gate for macOS host' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
 build_line="$(grep -n 'Building macOS LAN host' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
 verify_call_line="$(grep -n '^verify_mac_smoke_capture_source_visible$' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
@@ -191,6 +223,13 @@ performance_line="$(grep -n '^validate_remote_desktop_performance_window$' "$SMO
 mac_online_line="$(grep -n '^[[:space:]]*run_mac_online_ipad_button_smoke$' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
 host_final_line="$(grep -n 'append_host_status "smoke-final result=success' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
 ios_final_line="$(grep -n 'append_ios_status "smoke-final result=success' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+ios_archive_line="$(grep -n '^[[:space:]]*skybridge_archive_ios_distribution_product \\' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+ios_export_line="$(grep -n '^[[:space:]]*skybridge_export_ios_distribution_archive \\' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+ios_extract_line="$(grep -n '^[[:space:]]*skybridge_extract_single_ios_exported_app \\' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+ios_product_proof_line="$(grep -n '^write_ios_p2p_product_proof "' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+ios_install_line="$(grep -n 'device install app --device "\$IOS_DEVICE_ID" "\$IOS_APP_PATH"' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+host_prelaunch_line="$(grep -n 'host-listener-prelaunch verified=1' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
+ios_launch_line="$(grep -n '^[[:space:]]*launch_ios_remote_smoke_app$' "$SMOKE_SCRIPT" | head -n 1 | cut -d: -f1)"
 
 [[ -n "$preflight_line" && -n "$source_provenance_line" && -n "$pqc_gate_line" && -n "$build_line" ]] \
   || fail "smoke script should contain desktop/source preflight, Apple PQC SDK gate, and build markers"
@@ -198,6 +237,20 @@ ios_final_line="$(grep -n 'append_ios_status "smoke-final result=success' "$SMOK
   || fail "clean iOS source provenance must be proven after desktop preflight and before expensive builds"
 (( preflight_line < pqc_gate_line && pqc_gate_line < build_line )) \
   || fail "Apple PQC SDK gate should run after desktop preflight and before the macOS host build"
+[[ -n "$ios_install_line" && -n "$host_prelaunch_line" && -n "$ios_launch_line" ]] \
+  || fail "smoke script must install iOS, revalidate the Mac host, and then launch iOS"
+(( ios_install_line < host_prelaunch_line && host_prelaunch_line < ios_launch_line )) \
+  || fail "Mac listener ownership and reachability must be revalidated after install and immediately before iOS launch"
+
+prelaunch_listener_slice="$(sed -n "${ios_install_line},${ios_launch_line}p" "$SMOKE_SCRIPT")"
+[[ "$prelaunch_listener_slice" == *'verify_host_pid_owns_listener_port "$MAC_CONTROL_PORT" "control"'* ]] \
+  || fail "prelaunch revalidation must bind the control listener to the tracked host PID"
+[[ "$prelaunch_listener_slice" == *'verify_host_pid_owns_listener_port "$MAC_REMOTE_PORT" "remote-control"'* ]] \
+  || fail "prelaunch revalidation must bind the remote listener to the tracked host PID"
+[[ "$prelaunch_listener_slice" == *'verify_mac_control_port_reachable "$MAC_CONTROL_HOST" "$MAC_CONTROL_PORT"'* ]] \
+  || fail "prelaunch revalidation must probe the current control listener"
+[[ "$prelaunch_listener_slice" == *'verify_mac_remote_port_listening "$MAC_CONTROL_HOST" "$MAC_REMOTE_PORT"'* ]] \
+  || fail "prelaunch revalidation must probe the current remote listener"
 
 script_has_literal 'source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"' \
   || fail "real-device X-Wing smoke must source the Apple PQC SDK symbol probe"
@@ -224,13 +277,23 @@ script_has_literal '"$IOS_PROVISIONING_DEVICE_ID"' \
 script_has_literal '-configuration "$IOS_BUILD_CONFIGURATION"' \
   || fail "the iOS build must consume the validated Release-or-lab-Debug configuration"
 contains_literal "$ios_build_invocation_body" 'IOS_XCODEBUILD_ARGS=(' \
-  || fail "the iOS build must start from a non-empty common argument array"
-contains_literal "$ios_build_invocation_body" 'IOS_XCODEBUILD_ARGS+=(' \
-  || fail "Release-only signing arguments must append to the common iOS build array"
+  || fail "the diagnostic Debug path must retain an explicit xcodebuild argument array"
+contains_literal "$ios_build_invocation_body" 'IOS_XCODEBUILD_SETTINGS=(' \
+  || fail "Release archive and diagnostic build paths must share explicit product settings"
 contains_literal "$ios_build_invocation_body" 'skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}"' \
-  || fail "the iOS build must expand the always-non-empty common argument array"
-! contains_literal "$ios_build_invocation_body" 'IOS_XCODE_SIGNING_SETTINGS' \
-  || fail "the iOS build must not expand an empty Release-only array under Bash nounset"
+  || fail "the diagnostic Debug path must use the warning-strict xcodebuild wrapper"
+contains_literal "$ios_build_invocation_body" 'skybridge_archive_ios_distribution_product' \
+  || fail "the Release path must use the shared Automatic archive producer"
+contains_literal "$ios_build_invocation_body" 'skybridge_export_ios_distribution_archive' \
+  || fail "the Release path must export the archive through the shared distribution helper"
+contains_literal "$ios_build_invocation_body" 'skybridge_extract_single_ios_exported_app' \
+  || fail "the Release path must safely extract the single exported application"
+contains_literal "$ios_build_invocation_body" 'installed-only' \
+  || fail "the Release archive and export paths must use installed-only provisioning"
+[[ -n "$ios_archive_line" && -n "$ios_export_line" && -n "$ios_extract_line" && -n "$ios_product_proof_line" && -n "$ios_install_line" ]] \
+  || fail "the Release path must contain archive, export, extraction, product-proof, and install stages"
+(( ios_archive_line < ios_export_line && ios_export_line < ios_extract_line && ios_extract_line < ios_product_proof_line && ios_product_proof_line < ios_install_line )) \
+  || fail "the Release path must prove archive -> export -> safe extraction -> product proof before installation"
 script_has_literal 'Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app' \
   || fail "iOS product selection must bind to the actual requested build configuration"
 contains_literal "$source_provenance_body" 'git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all' \
@@ -242,7 +305,13 @@ contains_literal "$source_provenance_body" 'capture_source_input_binding' \
 script_has_literal 'verify_source_input_binding_unchanged "mac-build"' \
   || fail "macOS smoke products must be followed by a source-input stability check"
 script_has_literal 'verify_source_input_binding_unchanged "ios-build"' \
-  || fail "iOS smoke products must be followed by a source-input stability check"
+  || fail "diagnostic Debug iOS products must be followed by a source-input stability check"
+script_has_literal 'verify_source_input_binding_unchanged "ios-archive"' \
+  || fail "the Release archive must be followed by a source-input stability check"
+script_has_literal 'verify_source_input_binding_unchanged "ios-export"' \
+  || fail "the distribution export must be followed by a source-input stability check"
+script_has_literal 'verify_source_input_binding_unchanged "ios-exported-product"' \
+  || fail "the extracted distribution product must retain the measured source binding"
 script_has_literal '"SKYBRIDGE_PACKAGING_SOURCE_INPUT_DIGEST=$IOS_SOURCE_INPUT_DIGEST"' \
   || fail "the iOS product must embed the exact measured source-input digest"
 script_has_literal 'verify_ios_product_source_input_binding' \
@@ -281,8 +350,14 @@ grep -Fq 'PROVISIONING_PROFILE_SPECIFIER = "$(SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_
   || fail "generated Widget Release configuration must retain the resolved profile specifier indirection"
 contains_literal "$distribution_profile_resolver_body" 'Library/MobileDevice/Provisioning Profiles' \
   || fail "Release signing must resolve only already-installed provisioning profiles"
-contains_literal "$distribution_profile_resolver_body" 'Formal physical iOS acceptance requires exactly one installed matching' \
+contains_literal "$distribution_profile_resolver_body" 'Physical iOS Automatic export requires exactly one installed matching' \
   || fail "missing or ambiguous app/Widget distribution profiles must fail closed"
+contains_literal "$distribution_profile_resolver_body" 'profile.get("IsXcodeManaged") is True' \
+  || fail "Automatic export must select only Xcode-managed distribution profiles"
+contains_literal "$distribution_profile_resolver_body" '"schemaVersion": 2' \
+  || fail "distribution profile resolution must emit the managed-signing schema"
+contains_literal "$distribution_profile_resolver_body" '"signingStyle": expected_signing_style' \
+  || fail "distribution profile resolution must bind the expected signing style"
 contains_literal "$distribution_profile_resolver_body" 'entitlements.get("get-task-allow") is False' \
   || fail "installed distribution profiles must explicitly disable get-task-allow"
 contains_literal "$distribution_profile_resolver_body" 'device_identifier in provisioned_devices' \
@@ -291,14 +366,22 @@ contains_literal "$distribution_profile_resolver_body" 'app_profile["certificate
   || fail "app and Widget profiles must share a profile-bound distribution identity"
 contains_literal "$distribution_profile_resolver_body" 'security", "find-identity", "-v", "-p", "codesigning"' \
   || fail "the profile-bound distribution certificate must have a local private-key identity"
-script_has_literal '"CODE_SIGN_STYLE=Manual"' \
-  || fail "the testing-surface device build must force Manual signing to bind the resolved distribution profile under the Automatic project default"
-script_has_literal '"CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"' \
-  || fail "xcodebuild must use the uniquely profile-bound distribution identity"
-script_has_literal '"SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER"' \
-  || fail "xcodebuild must receive the resolved app distribution profile"
-script_has_literal '"SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER=$IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER"' \
-  || fail "xcodebuild must receive the resolved Widget distribution profile"
+! script_has_literal '"CODE_SIGN_STYLE=Manual"' \
+  || fail "Xcode-managed profiles must never be forced through Manual signing"
+! script_has_literal '"CODE_SIGN_IDENTITY=$IOS_DISTRIBUTION_IDENTITY_HASH"' \
+  || fail "the resolver identity proof must never be injected into Automatic xcodebuild"
+contains_literal "$ios_product_proof_body" '"CODE_SIGN_STYLE=Automatic"' \
+  || fail "the shared archive helper must explicitly use Automatic signing"
+contains_literal "$ios_product_proof_body" '"SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER="' \
+  || fail "the Automatic archive must clear inherited App profile selection"
+contains_literal "$ios_product_proof_body" '"SKYBRIDGE_IOS_WIDGET_DISTRIBUTION_PROFILE_SPECIFIER="' \
+  || fail "the Automatic archive must clear inherited Widget profile selection"
+contains_literal "$ios_product_proof_body" 'unset CODE_SIGN_IDENTITY' \
+  || fail "the Automatic archive/export boundary must clear inherited identity overrides"
+contains_literal "$ios_product_proof_body" 'release-testing' \
+  || fail "the shared export helper must require a release-testing export"
+contains_literal "$ios_product_proof_body" 'signing_style" != "automatic"' \
+  || fail "the shared export helper must require Automatic export signing"
 contains_literal "$ios_product_proof_body" '/usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path"' \
   || fail "the iOS product proof must strictly verify the nested code signature"
 contains_literal "$ios_product_proof_body" '/usr/bin/codesign --verify --strict --verbose=2 "$widget_path"' \
@@ -347,8 +430,8 @@ contains_literal "$ios_product_proof_body" 'Print :SkyBridgePackagingSourceRepos
   || fail "formal product proof must measure source repository metadata from the signed app"
 contains_literal "$ios_product_proof_body" '"$product_source_repository" == "$expected_source_repository"' \
   || fail "formal product proof must match signed repository metadata to the release environment"
-script_has_literal '"SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-}}"' \
-  || fail "the diagnostic P2P product must embed its source-repository provenance when available"
+script_has_literal '"SKYBRIDGE_PACKAGING_SOURCE_REPOSITORY=${GITHUB_REPOSITORY:-${SKYBRIDGE_SOURCE_REPOSITORY:-billlza/Skybridge-Compass}}"' \
+  || fail "the diagnostic P2P product must embed a non-empty source-repository provenance"
 script_has_literal '"SKYBRIDGE_PACKAGING_PRODUCT_SURFACE=testing"' \
   || fail "the diagnostic P2P harness must truthfully label its signed iOS product as testing"
 script_has_literal '"SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"' \
@@ -441,7 +524,7 @@ for required in (
         raise SystemExit(f"release-acceptance finalizer is missing strict contract: {required}")
 PY
 
-script_has_literal "fail_if_forbidden_fallback_evidence \"\$IOS_STATUS_LOCAL\" \"\$label\"" \
+script_has_literal "fail_if_forbidden_fallback_evidence \"\$IOS_STATUS_CONSOLE_LIVE\" \"\$label\"" \
   || fail "iOS wait loop must reject forbidden attemptedFallback/fallbackResult evidence"
 script_has_literal "fail_if_forbidden_fallback_evidence \"\$HOST_STATUS\" \"\$label\"" \
   || fail "macOS host wait loop must reject forbidden attemptedFallback/fallbackResult evidence"
@@ -457,8 +540,16 @@ grep -q '"fallbackResult": {"none", "not-attempted"}' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must not make the production coordinator write artifact diagnostics"
 grep -q 'observe_mac_online_ipad_connected_row' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must prove the clicked row reaches connected state from external Accessibility"
-grep -q 'run_stdin_command_with_hard_timeout 20 swift -' "$SMOKE_SCRIPT" \
-  || fail "Mac online iPad connected-row Accessibility probe must be bounded by a hard timeout"
+for accessibility_probe_body in \
+  "$mac_online_connect_button_body" \
+  "$mac_online_connected_row_body"; do
+  contains_literal "$accessibility_probe_body" 'run_stdin_command_with_hard_timeout 20 "$XCODE_SWIFT_BIN" -' \
+    || fail "each Mac online iPad Accessibility probe must use the selected Xcode Swift binary under a hard timeout"
+  ! contains_literal "$accessibility_probe_body" 'run_stdin_command_with_hard_timeout 20 swift -' \
+    || fail "Mac online iPad Accessibility probes must not drift back to an unqualified PATH Swift binary"
+  ! contains_literal "$accessibility_probe_body" 'xcrun swift -' \
+    || fail "Mac online iPad Accessibility probes must not bypass the selected Xcode Swift binary"
+done
 grep -q 'subprocess.Popen(command, stdin=subprocess.PIPE)' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad Swift Accessibility probes must be supervised without shell job-termination noise"
 grep -q 'start_macos_online_ipad_client' "$SMOKE_SCRIPT" \
@@ -515,8 +606,28 @@ grep -q 'grep -qE "$MAC_ONLINE_WAIT_FAILURE_PATTERN"' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad wait loops must consume bootstrap and app failure evidence"
 grep -q 'mac remote established .*suite=${EXPECTED_TARGET_SUITE}' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad handshake evidence must follow the configured strict PQC suite"
-grep -q 'suites=.*${EXPECTED_TARGET_SUITE}.*pinnedProtocolIdentity=1' "$SMOKE_SCRIPT" \
-  || fail "SKR-1 import evidence must accept the configured strict PQC suite, including ML-KEM-768"
+grep -q 'IDENTITY_REFRESH_EVIDENCE_VALIDATOR=' "$SMOKE_SCRIPT" \
+  || fail "P2P remote smoke must use the shared forced PIB-1 to SKR-1 evidence validator"
+grep -q 'IOS_STATUS_CONSOLE_LIVE=' "$SMOKE_SCRIPT" \
+  || fail "P2P remote smoke must keep the active devicectl console on a dedicated path"
+grep -q 'cp "$IOS_STATUS_CONSOLE_LIVE" "$IOS_STATUS_CONSOLE_SNAPSHOT"' "$SMOKE_SCRIPT" \
+  || fail "Final status materialization must snapshot the dedicated live console"
+! grep -q 'cp "$IOS_STATUS_LOCAL" "$IOS_STATUS_CONSOLE_SNAPSHOT"' "$SMOKE_SCRIPT" \
+  || fail "Final merged status must never recursively feed the live console snapshot"
+grep -q 'validate_remote_desktop_route_evidence() {' "$SMOKE_SCRIPT" \
+  || fail "P2P remote smoke must retain strict route evidence validation"
+grep -q 'python3 - "$HOST_STATUS" "$IOS_STATUS_APP_CACHE_LOCAL"' "$SMOKE_SCRIPT" \
+  || fail "Route and performance validation must consume authoritative app-cache status"
+grep -q -- '--ios-status "$IOS_STATUS_APP_CACHE_LOCAL"' "$SMOKE_SCRIPT" \
+  || fail "Identity refresh validation must consume the authoritative on-device status"
+grep -q 'rf"suites=.*{escaped_suite}.*pinnedProtocolIdentity=1' "$IDENTITY_REFRESH_EVIDENCE_VALIDATOR" \
+  || fail "SKR-1 import evidence must require the configured strict PQC suite"
+grep -q 'FORCED_REFRESH_PATTERN' "$IDENTITY_REFRESH_EVIDENCE_VALIDATOR" \
+  || fail "Identity refresh validation must prove the forced KEM clear event"
+grep -q 'pib-final-ack' "$IDENTITY_REFRESH_EVIDENCE_VALIDATOR" \
+  || fail "Identity refresh validation must prove the PIB-1 v3 final acknowledgement"
+! grep -q 'existing-pin' "$IDENTITY_REFRESH_EVIDENCE_VALIDATOR" \
+  || fail "The forced-refresh acceptance profile must not infer a PIB bypass from an existing pin"
 grep -q 'mac-online-connect-result .*targetFamily=ipad .*result=success' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must verify that the synchronized artifact contains connected-row success before the CLI gate"
 grep -q 'failed stage=mac-online-ipad phase=status-sync reason=status-sync-missing-success' "$SMOKE_SCRIPT" \
@@ -587,12 +698,181 @@ contains_literal "$remote_control_notice_lifecycle_body" 'write_p2p_remote_contr
   || fail "the lifecycle wait must materialize measured approval proof"
 contains_literal "$approval_proof_body" 'expected_lifecycle = ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"]' \
   || fail "approval proof must bind all events to the strict human lifecycle"
-contains_literal "$approval_proof_body" 'if lifecycle == expected_lifecycle and panel_contract_by_session.get(session) is True' \
+contains_literal "$approval_proof_body" 'if lifecycle == expected_lifecycle and panel_contract_by_session.get(key) is True' \
   || fail "approval proof must enforce same-session order and visible panel actions"
+contains_literal "$approval_proof_body" 'session_ref=(?P<session_ref>ev1:[0-9a-f]{32})' \
+  || fail "approval proof must bind the visible lifecycle to an authenticated session evidence reference"
 contains_literal "$approval_proof_body" 'runtime_auto_approval = any' \
   || fail "runtime auto-approval must be measured from status evidence"
+contains_literal "$approval_proof_body" 'session={escaped_session}(?=\s)' \
+  || fail "auto-approval rejection must bind the exact session token without requiring a session evidence reference"
+! contains_literal "$approval_proof_body" 'session_ref={escaped_session_ref}' \
+  || fail "unknown or conflicting auto-approval session references must fail closed at the same-session boundary"
 contains_literal "$approval_proof_body" '"humanApproval": human_approval' \
   || fail "humanApproval must be derived from measured lifecycle evidence"
+contains_literal "$approval_proof_body" 'approved_key = valid_sessions[0]' \
+  || fail "approval proof must retain the selected session and evidence reference as one tuple key"
+contains_literal "$approval_proof_body" 'events_by_session[approved_key]' \
+  || fail "human approval must be queried with the selected tuple key"
+contains_literal "$approval_proof_body" 'panel_contract_by_session[approved_key]' \
+  || fail "panel actions must be queried with the selected tuple key"
+! contains_literal "$approval_proof_body" 'events_by_session[session]' \
+  || fail "approval proof must not query tuple-keyed events with a bare session"
+! contains_literal "$approval_proof_body" 'panel_contract_by_session[session]' \
+  || fail "approval proof must not query tuple-keyed panel state with a bare session"
+contains_literal "$approval_proof_body" "generate_p2p_remote_control_approval_proof \"\$HOST_STATUS\" \"\$P2P_APPROVAL_PROOF\"" \
+  || fail "the runtime wrapper must call the executable approval-proof seam with exact paths"
+contains_literal "$artifact_reset_body" "\"\$P2P_APPROVAL_PROOF\"" \
+  || fail "reused smoke artifact directories must clear stale approval proof before a new attempt"
+
+approval_proof_test_root="$(mktemp -d)"
+cleanup_approval_proof_test_root() {
+  /bin/rm -r "$approval_proof_test_root"
+}
+trap cleanup_approval_proof_test_root EXIT
+approval_proof_helper="$approval_proof_test_root/approval-proof-functions.sh"
+printf '%s\n' "$approval_proof_body" >"$approval_proof_helper"
+
+write_approval_proof_status() {
+  local path="$1"
+  shift
+  printf '%s\n' "$@" >"$path"
+}
+
+run_approval_proof_generator() {
+  local status_path="$1"
+  local output_path="$2"
+  bash -c '
+    set -euo pipefail
+    source "$1"
+    generate_p2p_remote_control_approval_proof "$2" "$3"
+  ' approval-proof-test "$approval_proof_helper" "$status_path" "$output_path"
+}
+
+approval_ref_a='ev1:11111111111111111111111111111111'
+approval_ref_b='ev1:22222222222222222222222222222222'
+
+approval_positive_status="$approval_proof_test_root/positive.status.log"
+approval_positive_output="$approval_proof_test_root/positive.proof.json"
+write_approval_proof_status "$approval_positive_status" \
+  "remoteControlNoticeShown session=notice-positive session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticePanelPresented session=notice-positive session_ref=$approval_ref_a transport=p2p phase=awaitingApproval buttons=reject,approve" \
+  "remoteControlNoticeHumanApproved session=notice-positive session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeApproved session=notice-positive session_ref=$approval_ref_a transport=p2p approvalSource=human" \
+  "remoteControlNoticeActive session=notice-positive session_ref=$approval_ref_a transport=p2p"
+approval_positive_session="$(
+  run_approval_proof_generator "$approval_positive_status" "$approval_positive_output"
+)" || fail "strict same-tuple human approval proof generation failed"
+[[ "$approval_positive_session" == "notice-positive" ]] \
+  || fail "approval proof generator returned the wrong approved session"
+[[ "$(stat -f '%Lp' "$approval_positive_output")" == "600" ]] \
+  || fail "approval proof output must be private"
+python3 - "$approval_positive_output" "$approval_ref_a" <<'PY' \
+  || fail "strict same-tuple approval proof payload validation failed"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    proof = json.load(handle)
+
+expected = {
+    "schemaVersion": 2,
+    "sessionRef": sys.argv[2],
+    "humanApproval": True,
+    "runtimeAutoApproval": False,
+    "lifecycle": ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"],
+    "panelActionsVerified": True,
+}
+if proof != expected:
+    raise SystemExit(f"unexpected approval proof: {proof!r}")
+PY
+
+approval_cross_session_status="$approval_proof_test_root/cross-session.status.log"
+approval_cross_session_output="$approval_proof_test_root/cross-session.proof.json"
+write_approval_proof_status "$approval_cross_session_status" \
+  "remoteControlNoticeShown session=notice-cross session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticePanelPresented session=notice-cross session_ref=$approval_ref_a transport=p2p phase=awaitingApproval buttons=approve,reject" \
+  "remoteControlNoticeHumanApproved session=notice-cross session_ref=$approval_ref_b transport=p2p" \
+  "remoteControlNoticeApproved session=notice-cross session_ref=$approval_ref_b transport=p2p approvalSource=human" \
+  "remoteControlNoticeActive session=notice-cross session_ref=$approval_ref_b transport=p2p"
+if run_approval_proof_generator "$approval_cross_session_status" "$approval_cross_session_output" \
+  >"$approval_proof_test_root/cross-session.stdout" \
+  2>"$approval_proof_test_root/cross-session.stderr"; then
+  fail "approval proof accepted a lifecycle split across session evidence references"
+fi
+[[ ! -e "$approval_cross_session_output" ]] \
+  || fail "cross-session approval rejection must not publish a proof"
+
+approval_auto_status="$approval_proof_test_root/auto.status.log"
+approval_auto_output="$approval_proof_test_root/auto.proof.json"
+write_approval_proof_status "$approval_auto_status" \
+  "remoteControlNoticeShown session=notice-auto session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticePanelPresented session=notice-auto session_ref=$approval_ref_a transport=p2p phase=awaitingApproval buttons=approve,reject" \
+  "remoteControlNoticeHumanApproved session=notice-auto session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeApproved session=notice-auto session_ref=$approval_ref_a transport=p2p approvalSource=human" \
+  "remoteControlNoticeActive session=notice-auto session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeAutoApproved session=notice-auto session_ref=$approval_ref_a transport=p2p approvalSource=auto"
+if run_approval_proof_generator "$approval_auto_status" "$approval_auto_output" \
+  >"$approval_proof_test_root/auto.stdout" \
+  2>"$approval_proof_test_root/auto.stderr"; then
+  fail "approval proof accepted runtime auto-approval for the selected tuple"
+fi
+[[ ! -e "$approval_auto_output" ]] \
+  || fail "auto-approval rejection must not publish a proof"
+
+approval_auto_missing_ref_status="$approval_proof_test_root/auto-missing-ref.status.log"
+approval_auto_missing_ref_output="$approval_proof_test_root/auto-missing-ref.proof.json"
+write_approval_proof_status "$approval_auto_missing_ref_status" \
+  "remoteControlNoticeShown session=notice-auto-missing-ref session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticePanelPresented session=notice-auto-missing-ref session_ref=$approval_ref_a transport=p2p phase=awaitingApproval buttons=approve,reject" \
+  "remoteControlNoticeHumanApproved session=notice-auto-missing-ref session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeApproved session=notice-auto-missing-ref session_ref=$approval_ref_a transport=p2p approvalSource=human" \
+  "remoteControlNoticeActive session=notice-auto-missing-ref session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeAutoApproved session=notice-auto-missing-ref transport=p2p approvalSource=auto"
+if run_approval_proof_generator "$approval_auto_missing_ref_status" "$approval_auto_missing_ref_output" \
+  >"$approval_proof_test_root/auto-missing-ref.stdout" \
+  2>"$approval_proof_test_root/auto-missing-ref.stderr"; then
+  fail "approval proof accepted same-session auto-approval without a session evidence reference"
+fi
+[[ ! -e "$approval_auto_missing_ref_output" ]] \
+  || fail "missing-ref auto-approval rejection must not publish a proof"
+
+approval_auto_different_ref_status="$approval_proof_test_root/auto-different-ref.status.log"
+approval_auto_different_ref_output="$approval_proof_test_root/auto-different-ref.proof.json"
+write_approval_proof_status "$approval_auto_different_ref_status" \
+  "remoteControlNoticeShown session=notice-auto-different-ref session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticePanelPresented session=notice-auto-different-ref session_ref=$approval_ref_a transport=p2p phase=awaitingApproval buttons=approve,reject" \
+  "remoteControlNoticeHumanApproved session=notice-auto-different-ref session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeApproved session=notice-auto-different-ref session_ref=$approval_ref_a transport=p2p approvalSource=human" \
+  "remoteControlNoticeActive session=notice-auto-different-ref session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeAutoApproved session=notice-auto-different-ref session_ref=$approval_ref_b transport=p2p approvalSource=auto"
+if run_approval_proof_generator "$approval_auto_different_ref_status" "$approval_auto_different_ref_output" \
+  >"$approval_proof_test_root/auto-different-ref.stdout" \
+  2>"$approval_proof_test_root/auto-different-ref.stderr"; then
+  fail "approval proof accepted same-session auto-approval with a conflicting session evidence reference"
+fi
+[[ ! -e "$approval_auto_different_ref_output" ]] \
+  || fail "different-ref auto-approval rejection must not publish a proof"
+
+approval_duplicate_status="$approval_proof_test_root/duplicate.status.log"
+approval_duplicate_output="$approval_proof_test_root/duplicate.proof.json"
+write_approval_proof_status "$approval_duplicate_status" \
+  "remoteControlNoticeShown session=notice-duplicate session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticePanelPresented session=notice-duplicate session_ref=$approval_ref_a transport=p2p phase=awaitingApproval buttons=approve,reject" \
+  "remoteControlNoticeHumanApproved session=notice-duplicate session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeHumanApproved session=notice-duplicate session_ref=$approval_ref_a transport=p2p" \
+  "remoteControlNoticeApproved session=notice-duplicate session_ref=$approval_ref_a transport=p2p approvalSource=human" \
+  "remoteControlNoticeActive session=notice-duplicate session_ref=$approval_ref_a transport=p2p"
+if run_approval_proof_generator "$approval_duplicate_status" "$approval_duplicate_output" \
+  >"$approval_proof_test_root/duplicate.stdout" \
+  2>"$approval_proof_test_root/duplicate.stderr"; then
+  fail "approval proof accepted a duplicate lifecycle event"
+fi
+[[ ! -e "$approval_duplicate_output" ]] \
+  || fail "duplicate-event rejection must not publish a proof"
+
+cleanup_approval_proof_test_root
+trap - EXIT
 grep -q 'MAC_ONLINE_STDERR=' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must keep app stderr separate from stdout"
 grep -q 'MAC_ONLINE_OPEN_STDERR=' "$SMOKE_SCRIPT" \
@@ -721,12 +1001,16 @@ grep -q 'launch requested role=mac-online-ipad-client' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must not use open -W as the app process handle"
 script_has_literal "SKYBRIDGE_TARGET_IPAD_IDENTITY=\"\$IOS_PQC_DEVICE_ID\"" \
   || fail "Accessibility click evidence must be identity-bound to the real iPad PQC report"
-grep -q 'No connected real iPad found' "$SMOKE_SCRIPT" \
-  || fail "real-device P2P smoke must fail closed instead of silently selecting a non-iPad device"
+grep -q 'No paired physical iPad with CoreDevice connection capability found' "$SMOKE_SCRIPT" \
+  || fail "real-device P2P smoke must fail closed instead of silently selecting an unpaired or non-iPad device"
 grep -q 'validate_real_ipad_device_id' "$SMOKE_SCRIPT" \
-  || fail "explicit real-device target UDID must be validated as a connected iPad"
-grep -q 'Selected real-device target is not a connected iPad according to devicectl JSON' "$SMOKE_SCRIPT" \
-  || fail "explicit real-device target validation must fail closed for non-iPad devices"
+  || fail "explicit real-device target UDID must establish and validate a connected iPad details session"
+grep -q '"device",' "$SMOKE_SCRIPT" && grep -q '"info",' "$SMOKE_SCRIPT" && grep -q '"details",' "$SMOKE_SCRIPT" \
+  || fail "selected iPad validation must establish an on-demand CoreDevice details tunnel"
+grep -q 'devicectl details returned a different device than the selected target' "$SMOKE_SCRIPT" \
+  || fail "CoreDevice details validation must reject target substitution"
+grep -q 'Selected iPad did not establish a paired CoreDevice tunnel' "$SMOKE_SCRIPT" \
+  || fail "CoreDevice details validation must require a paired active tunnel"
 grep -q 'is_physical_devicectl_device' "$SMOKE_SCRIPT" \
   || fail "real-device P2P smoke must reject CoreSimulator devices when selecting an iPad"
 grep -q 'visibility_class != "simulators"' "$SMOKE_SCRIPT" \
@@ -734,7 +1018,9 @@ grep -q 'visibility_class != "simulators"' "$SMOKE_SCRIPT" \
 grep -q 'com.apple.CoreSimulator.SimulatorCoreDevicePlugin' "$SMOKE_SCRIPT" \
   || fail "real-device P2P smoke must reject CoreSimulator provider records"
 grep -q 'has_install_application_capability' "$SMOKE_SCRIPT" \
-  || fail "real-device P2P smoke must only select iPads that support app installation"
+  || fail "connected real-device P2P smoke must prove app installation capability"
+grep -q 'com.apple.coredevice.feature.connectdevice' "$SMOKE_SCRIPT" \
+  || fail "idle paired iPads must be eligible for the explicit CoreDevice details connection step"
 ! grep -q 'SKYBRIDGE_SMOKE_ALLOW_NON_IPAD_DEVICE' "$SMOKE_SCRIPT" \
   || fail "real-device P2P remote smoke must not provide a non-iPad opt-in for iPad verification"
 script_has_literal "MAC_HOST_LAUNCH_MODE=\"\${SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE:-packaged}\"" \
@@ -765,6 +1051,87 @@ script_has_literal 'Identity audit output must contain exactly one JSON record' 
   || fail "identity audit stdout must reject appended or ambiguous records"
 script_has_literal 'Signed read-only identity audit completed; this diagnostic is never release-acceptance evidence.' \
   || fail "identity audit must remain explicitly outside release acceptance"
+script_has_literal 'MAC_HOST_ONLY="${SKYBRIDGE_SMOKE_MAC_HOST_ONLY:-0}"' \
+  || fail "the current-source signed macOS host must be an explicit default-off mode"
+script_has_literal 'MAC_HOST_READY_FILE="$ARTIFACT_DIR/mac-host-ready.json"' \
+  || fail "host-only readiness must stay inside the private source-bound artifact directory"
+script_has_literal 'The signed macOS host-only mode is diagnostic-only and requires LAB_RUN=1 with MAC_HOST_LAUNCH_MODE=packaged-lab.' \
+  || fail "host-only launch must fail closed outside the signed lab profile"
+script_has_literal 'The signed macOS host-only mode requires the persistent system Keychain view.' \
+  || fail "host-only launch must reject the in-memory Keychain"
+script_has_literal 'The signed macOS host-only mode forbids forced persistent trust mutation.' \
+  || fail "host-only launch must reject forced persistent-trust mutation"
+script_has_literal 'The signed macOS host-only mode requires SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=0.' \
+  || fail "host-only launch must require manual product pairing"
+script_has_literal 'The signed macOS host-only mode requires SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=0.' \
+  || fail "host-only launch must require manual remote-control approval"
+script_has_literal '--env "SKYBRIDGE_SMOKE_IDENTITY_EXISTING_ONLY=$MAC_HOST_ONLY"' \
+  || fail "LaunchServices must receive the exact host-only existing-identity policy"
+script_has_literal 'identity-policy mode=existing-only mutation=denied source=explicit-smoke-environment' \
+  || fail "host-only readiness must require the core existing-only policy marker"
+script_has_literal 'os.fchmod(descriptor, 0o600)' \
+  || fail "host-only readiness must be created privately"
+script_has_literal 'os.replace(temporary, output)' \
+  || fail "host-only readiness must be published atomically"
+script_has_literal 'stat.S_IMODE(metadata.st_mode) != 0o600' \
+  || fail "host-only readiness must verify exact 0600 permissions"
+contains_literal "$cleanup_body" 'trap - EXIT INT TERM' \
+  || fail "host-only INT/TERM shutdown must pass through the exact EXIT cleanup once"
+contains_literal "$cleanup_body" '[[ "$MAC_HOST_ONLY" == "1" ]]' \
+  || fail "host-only cleanup failures must override the requested shutdown status"
+python3 - "$SMOKE_SCRIPT" <<'PY'
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+target_contracts = (
+    'IOS_DEVICE_ID=""\nIOS_DEVICE_LABEL="mac-host-only"\nIOS_PROVISIONING_DEVICE_ID=""',
+    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then\n'
+    '  IOS_DEVICE_ID="${SKYBRIDGE_REAL_DEVICE_ID:-$(pick_real_device_id)}"\n'
+    '  IOS_DEVICE_LABEL="$(skybridge_smoke_hash_label "$IOS_DEVICE_ID")"\n'
+    'fi',
+    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then\n'
+    '  IOS_PROVISIONING_DEVICE_ID="$(validate_real_ipad_device_id)"\n'
+    'fi',
+    'if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then\n'
+    '  echo "==> Scope: signed macOS identity audit (no iOS target)"\n'
+    'elif [[ "$MAC_HOST_ONLY" == "1" ]]; then\n'
+    '  echo "==> Scope: signed current-source macOS host (diagnostic-only; no iOS target)"\n'
+    'else\n'
+    '  echo "==> Real device: $IOS_DEVICE_LABEL"',
+    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then',
+    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then\n'
+    '  xcrun devicectl list devices',
+    'if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then\n'
+    '  echo "==> Capturing macOS identity-audit source-input binding"\n'
+    '  capture_source_input_binding\n'
+    'elif [[ "$MAC_HOST_ONLY" == "1" ]]; then\n'
+    '  echo "==> Capturing signed current-source macOS host input binding"\n'
+    '  capture_source_input_binding\n'
+    'else\n'
+    '  echo "==> Verifying iOS source provenance"\n'
+    '  capture_ios_release_source_provenance\n'
+    'fi',
+    'if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then\n'
+    '  verify_source_input_binding_unchanged "mac-identity-audit-build"\n'
+    'elif [[ "$MAC_HOST_ONLY" == "1" ]]; then\n'
+    '  verify_source_input_binding_unchanged "mac-host-only-build"\n'
+    'else\n'
+    '  verify_source_input_binding_unchanged "mac-build"\n'
+    'fi',
+    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then\n'
+    '    SWIFTPM_CACHE_PATH="$SWIFTPM_CACHE_DIR"',
+    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && ! -x "$MAC_SOURCE_DIRECT_BIN" ]]; then',
+)
+for contract in target_contracts:
+    if contract not in source:
+        raise SystemExit(f"identity-audit host-only contract missing: {contract.splitlines()[0]}")
+
+if source.index('if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then\n  IOS_DEVICE_ID=') \
+        > source.index('IOS_PROVISIONING_DEVICE_ID="$(validate_real_ipad_device_id)"'):
+    raise SystemExit("identity-audit target guard must precede every real-device validation")
+PY
 script_has_literal 'mac_host_uses_signed_app_bundle()' \
   || fail "product-identity host modes must share one closed signed-app routing policy"
 grep -Fq 'payload.get("macHostLaunchMode") != "packaged"' "$RELEASE_ACCEPTANCE_FINALIZER" \
@@ -841,13 +1208,13 @@ contains_literal "$minimal_entitlements_body" '"com.apple.security.network.serve
   || fail "least-privilege helper policy must not inherit cloud, app-group, location, or debug entitlements"
 script_has_literal 'SMOKE_BUILD_DIR="${SKYBRIDGE_P2P_SMOKE_BUILD_DIR:-$ROOT_DIR/.build/real-device-p2p-smoke}"' \
   || fail "real-device remote smoke should isolate Apple-PQC SwiftPM products from the default build directory"
-script_has_literal 'swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost' \
+script_has_literal '"$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanInteropHost' \
   || fail "real-device remote smoke should build the LAN host in its dedicated SwiftPM scratch path"
 script_has_literal 'MAC_DIRECT_BIN="$SMOKE_BUILD_DIR/debug/LocalLanInteropHost"' \
   || fail "explicit diagnostic direct macOS host launch should use the isolated SwiftPM build product"
 script_has_literal 'MAC_SOURCE_DIRECT_BIN="$SMOKE_BUILD_DIR/debug/LocalLanSmokeSourceHost"' \
   || fail "real-device remote smoke should launch the isolated macOS smoke source helper"
-script_has_literal 'swift build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost' \
+script_has_literal '"$XCODE_SWIFT_BIN" build --scratch-path "$SMOKE_BUILD_DIR" --product LocalLanSmokeSourceHost' \
   || fail "real-device remote smoke should build the independent macOS smoke source helper"
 ! grep -Fq '$ROOT_DIR/.build/debug/' "$SMOKE_SCRIPT" \
   || fail "Apple-PQC smoke products must never be read from the default SwiftPM build directory"
@@ -901,6 +1268,10 @@ contains_literal "$host_bundle_prepare_body" '[[ ! -d "$SMOKE_BUILD_DIR" || ! -d
   || fail "product-identity helper must require a populated dedicated SwiftPM scratch"
 contains_literal "$host_bundle_prepare_body" '[[ ! -d "$source_core_resource_bundle" || -L "$source_core_resource_bundle" ]]' \
   || fail "product-identity helper must reject a missing or symlinked SkyBridgeCore resource bundle"
+script_has_literal 'source "$ROOT_DIR/Scripts/skybridge_core_resource_bundle_helpers.sh"' \
+  || fail "product-identity helper must source the shared Core resource bundle normalizer"
+[[ -r "$CORE_RESOURCE_BUNDLE_HELPERS" ]] \
+  || fail "shared Core resource bundle normalizer is missing"
 contains_literal "$host_bundle_prepare_body" 'scratch_root_dir="$(cd "$SMOKE_BUILD_DIR" && pwd -P)"' \
   || fail "product-identity helper must canonicalize its dedicated SwiftPM scratch"
 contains_literal "$host_bundle_prepare_body" 'scratch_debug_dir="$(cd "$SMOKE_BUILD_DIR/debug" && pwd -P)"' \
@@ -909,27 +1280,36 @@ contains_literal "$host_bundle_prepare_body" '[[ "$scratch_debug_dir" != "$scrat
   || fail "product-identity helper must reject a debug product directory outside its dedicated scratch"
 contains_literal "$host_bundle_prepare_body" '[[ "$source_resource_dir" != "$scratch_debug_dir/SkyBridgeCompassApp_SkyBridgeCore.bundle" ]]' \
   || fail "product-identity helper must require the exact Core bundle as a direct canonical debug product"
-contains_literal "$host_bundle_prepare_body" '/usr/bin/find -P "$source_core_resource_bundle" -type l -print -quit' \
-  || fail "product-identity helper must reject symlinks inside the SkyBridgeCore resource bundle"
-contains_literal "$host_bundle_prepare_body" '/usr/bin/ditto --norsrc --noextattr --noqtn --noacl' \
-  || fail "product-identity helper must explicitly copy the exact resource bundle without source metadata"
 contains_literal "$host_bundle_prepare_body" 'local embedded_core_resource_root="$embedded_core_resource_contents/Resources"' \
   || fail "product-identity helper must normalize the flat SwiftPM bundle into a standard Contents/Resources layout"
-contains_literal "$host_bundle_prepare_body" 'mv "$embedded_core_resource_root/Info.plist" "$embedded_core_resource_contents/Info.plist"' \
-  || fail "product-identity helper must place the copied bundle Info.plist under its normalized Contents directory"
-contains_literal "$host_bundle_prepare_body" 'cmp -s "$source_core_resource_bundle/Info.plist" "$embedded_core_resource_contents/Info.plist"' \
-  || fail "product-identity helper must verify the normalized bundle Info.plist byte-for-byte"
-contains_literal "$host_bundle_prepare_body" '/usr/bin/diff -qr -x Info.plist "$source_core_resource_bundle" "$embedded_core_resource_root"' \
-  || fail "product-identity helper must verify the copied resource bundle before code signing seals it"
+contains_literal "$host_bundle_prepare_body" 'if source_resource_layout="$(skybridge_copy_normalized_core_resource_bundle \
+    "$source_core_resource_bundle" \
+    "$embedded_core_resource_bundle")"; then' \
+  || fail "product-identity helper must normalize the exact Core bundle through the shared fail-closed helper"
+contains_literal "$host_bundle_prepare_body" 'source_resource_status=$?' \
+  || fail "product-identity helper must retain the normalizer failure class"
+contains_literal "$host_bundle_prepare_body" 'exit "$source_resource_status"' \
+  || fail "product-identity helper must propagate normalizer caller and trust failures"
+contains_literal "$host_bundle_prepare_body" 'swiftpm-flat)' \
+  || fail "product-identity helper must consume the classic SwiftPM layout token"
+contains_literal "$host_bundle_prepare_body" 'swiftpm-macos-contents)' \
+  || fail "product-identity helper must consume the Xcode 27 SwiftPM layout token"
+contains_literal "$host_bundle_prepare_body" 'SkyBridgeCore resource normalizer returned an unknown layout token.' \
+  || fail "unknown Core resource layout tokens must fail closed"
+contains_literal "$host_bundle_prepare_body" '"$source_resource_root" \
+    "source-$source_resource_layout"' \
+  || fail "both accepted SwiftPM source layouts must pass the complete 20-key localization validator"
 contains_literal "$host_bundle_prepare_body" '"$embedded_core_resource_root" \
     "pre-sign"' \
   || fail "product-identity helper must validate all security-notice localizations before signing"
+! contains_literal "$host_bundle_prepare_body" '/usr/bin/ditto --norsrc --noextattr --noqtn --noacl' \
+  || fail "product-identity helper must not duplicate the shared resource layout normalizer"
 contains_literal "$host_bundle_prepare_body" '"$embedded_core_resource_root" \
     "post-sign"' \
   || fail "product-identity helper must revalidate all security-notice localizations after strict signature verification"
-[[ "$host_bundle_prepare_body" == *'/usr/bin/ditto --norsrc --noextattr --noqtn --noacl'*'/usr/bin/codesign --force --timestamp=none --options runtime --sign'* ]] \
-  || fail "product-identity helper must embed the resource bundle before signing the app bundle"
-contains_literal "$host_bundle_prepare_body" 'resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSealed=1' \
+[[ "$host_bundle_prepare_body" == *'skybridge_copy_normalized_core_resource_bundle'*'/usr/bin/codesign --force --timestamp=none --options runtime --sign'* ]] \
+  || fail "product-identity helper must normalize and prove the resource bundle before signing the app bundle"
+contains_literal "$host_bundle_prepare_body" 'resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSourceLayout=$source_resource_layout resourceBundleSealed=1' \
   || fail "product-identity helper status must record the signed dedicated resource-bundle provenance"
 script_has_literal '--env "SKYBRIDGE_SMOKE_REQUIRE_EMBEDDED_CORE_RESOURCES=1"' \
   || fail "packaged-product helper launch must require the embedded signed localization bundle"
@@ -1021,8 +1401,10 @@ script_has_literal 'terminate_macos_smoke_host_bundle_processes' \
   || fail "cleanup must terminate helper processes by the exact runtime executable path"
 script_has_literal 'failed stage=cleanup phase=launch-services-restore reason=canonical-app-or-runtime-absence-proof-missing runtime=preserved-private' \
   || fail "LaunchServices restoration failure must preserve the private runtime and affect a successful run"
-script_has_literal 'if (( original_status == 0 && cleanup_status == 0 )); then' \
+contains_literal "$cleanup_body" 'if (( original_status == 0 && cleanup_status == 0 ))' \
   || fail "release-acceptance manifests may only finalize after a successful run and successful cleanup"
+contains_literal "$cleanup_body" '[[ "$MAC_HOST_ONLY" != "1" ]]' \
+  || fail "diagnostic host-only cleanup must never attempt release-acceptance finalization"
 script_has_literal 'failed stage=cleanup phase=release-acceptance reason=manifest-finalization-failed' \
   || fail "acceptance manifest finalization failure must turn an otherwise green run red"
 script_has_literal "verify_mac_control_port_reachable \"\$MAC_CONTROL_HOST\" \"\$MAC_CONTROL_PORT\"" \
@@ -1047,6 +1429,10 @@ grep -q 'failed stage=mac-online-ipad phase=ipad-control-port-probe reason=liste
   || fail "Mac online iPad control-port probe should fail fast when listener readiness is missing"
 grep -q 'failed stage=mac-online-ipad phase=app-local-network-privacy reason=local-network-permission-denied' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad control flow should distinguish packaged-app Local Network denial from connected-row timeout"
+grep -q 'failed stage=mac-host phase=udp-local-network-privacy reason=local-network-permission-denied source=current-udp-path' "$SMOKE_SCRIPT" \
+  || fail "Mac remote audio must preserve exact UDP Local Network privacy denial instead of reporting a generic timeout"
+grep -q 'reason=udp_local_network_permission_denied .*strict=1 .*action=strict-fail-closed' "$SMOKE_SCRIPT" \
+  || fail "Mac remote audio privacy gate must consume the strict typed sender failure"
 grep -q 'latest_mac_online_ipad_control_route' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad probe must derive host-or-Bonjour route evidence from the app-authored OnlineDeviceCard row"
 grep -q 'minimum_source_samples' "$SMOKE_SCRIPT" \
@@ -1159,5 +1545,71 @@ set -e
 [[ ! -e "$audit_timeout_guard_artifact" ]] \
   || fail "invalid identity audit timeout must be rejected before artifact side effects"
 /bin/rm -r "$audit_timeout_guard_root"
+
+run_host_only_guard_rejection() {
+  local label="$1"
+  local expected_message="$2"
+  shift 2
+  local guard_root
+  local guard_artifact
+  local output
+  local status
+
+  guard_root="$(mktemp -d)"
+  guard_artifact="$guard_root/must-not-be-created"
+  set +e
+  output="$(
+    env \
+      SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1 \
+      SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged-lab \
+      SKYBRIDGE_SMOKE_MAC_HOST_ONLY=1 \
+      SKYBRIDGE_SMOKE_KEYCHAIN_MODE=system \
+      SKYBRIDGE_SMOKE_PQC_TRUST_MODE=actual \
+      SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION=0 \
+      SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=0 \
+      SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=0 \
+      SKYBRIDGE_SMOKE_ARTIFACT_DIR="$guard_artifact" \
+      "$@" \
+      bash "$SMOKE_SCRIPT" 2>&1
+  )"
+  status=$?
+  set -e
+  [[ "$status" -eq 2 ]] \
+    || fail "$label must exit 2 before execution"
+  [[ "$output" == *"$expected_message"* ]] \
+    || fail "$label did not explain the exact rejected host-only boundary"
+  [[ ! -e "$guard_artifact" ]] \
+    || fail "$label must be rejected before artifact or runtime side effects"
+  /bin/rm -r "$guard_root"
+}
+
+run_host_only_guard_rejection \
+  "host-only invalid forced-mutation value" \
+  "SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION must be 0 or 1" \
+  SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION=invalid
+run_host_only_guard_rejection \
+  "host-only forced trust mutation" \
+  "forbids forced persistent trust mutation" \
+  SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION=1
+run_host_only_guard_rejection \
+  "host-only in-memory Keychain" \
+  "requires the persistent system Keychain view" \
+  SKYBRIDGE_SMOKE_KEYCHAIN_MODE=in-memory
+run_host_only_guard_rejection \
+  "host-only automatic pairing" \
+  "requires SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=0" \
+  SKYBRIDGE_SMOKE_AUTO_APPROVE_PAIRING=1
+run_host_only_guard_rejection \
+  "host-only automatic remote-control notice" \
+  "requires SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=0" \
+  SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=1
+run_host_only_guard_rejection \
+  "host-only injected trust" \
+  "requires SKYBRIDGE_SMOKE_PQC_TRUST_MODE=actual" \
+  SKYBRIDGE_SMOKE_PQC_TRUST_MODE=injected
+run_host_only_guard_rejection \
+  "host-only unsigned launch mode" \
+  "requires LAB_RUN=1 with MAC_HOST_LAUNCH_MODE=packaged-lab" \
+  SKYBRIDGE_SMOKE_MAC_HOST_LAUNCH_MODE=packaged
 
 echo "[test-real-device-smoke-preflight] all checks passed"

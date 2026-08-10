@@ -6,6 +6,76 @@ import SkyBridgeOpus
 import SkyBridgeRealtimeMedia
 
 final class SkyBridgeRealtimeMediaTests: XCTestCase {
+    @available(macOS 14.0, *)
+    func testRealtimeAudioSenderOwnershipRejectsRetiredSenderTerminalLease() {
+        var ownership = RemoteControlRealtimeAudioSenderOwnership()
+        let first = ownership.reserve()
+        XCTAssertEqual(ownership.currentLease, first)
+        XCTAssertTrue(ownership.isCurrent(first))
+
+        let replacement = ownership.reserve()
+        XCTAssertEqual(ownership.currentLease, replacement)
+        XCTAssertFalse(ownership.isCurrent(first))
+        XCTAssertTrue(ownership.isCurrent(replacement))
+
+        ownership.invalidate()
+        XCTAssertNil(ownership.currentLease)
+        XCTAssertFalse(ownership.isCurrent(first))
+        XCTAssertFalse(ownership.isCurrent(replacement))
+    }
+
+    @available(macOS 14.0, *)
+    func testRealtimeAudioSenderPublishesPendingLeaseAndRejectsStaleExistingSender() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"
+            ),
+            encoding: .utf8
+        )
+        let makeBody = try XCTUnwrap(
+            source.range(of: "private func makeP2PRealtimeAudioSenderIfNeeded(")
+        )
+        let detachBody = try XCTUnwrap(
+            source.range(
+                of: "private func detachRealtimeAudioSender(",
+                range: makeBody.upperBound..<source.endIndex
+            )
+        )
+        let slice = String(source[makeBody.lowerBound..<detachBody.lowerBound])
+
+        let exactExistingGuard = try XCTUnwrap(
+            slice.range(of: "peer.realtimeAudioSender === existingSender")
+        )
+        let staleFailure = try XCTUnwrap(
+            slice.range(
+                of: "throw CancellationError()",
+                range: exactExistingGuard.upperBound..<slice.endIndex
+            )
+        )
+        let reserve = try XCTUnwrap(
+            slice.range(
+                of: "let senderLease = peer.realtimeAudioSenderOwnership.reserve()",
+                range: staleFailure.upperBound..<slice.endIndex
+            )
+        )
+        let firstAwaitAfterReserve = try XCTUnwrap(
+            slice.range(
+                of: "await senderToClose.close",
+                range: reserve.upperBound..<slice.endIndex
+            )
+        )
+        XCTAssertLessThan(exactExistingGuard.lowerBound, staleFailure.lowerBound)
+        XCTAssertLessThan(staleFailure.lowerBound, reserve.lowerBound)
+        XCTAssertLessThan(reserve.lowerBound, firstAwaitAfterReserve.lowerBound)
+        XCTAssertTrue(source.contains("let sender = peer.realtimeAudioSender\n        if let expectedSender"))
+        XCTAssertTrue(source.contains("peer.realtimeAudioSenderOwnership.invalidate()"))
+        XCTAssertTrue(source.contains("owner: .screenSharingAttempt(attemptGeneration)"))
+        XCTAssertTrue(source.contains("owner: .realtimeAudioSender(senderLease)"))
+    }
     private func remoteControlSource(root: URL) throws -> String {
         let pumpSource = try String(
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeCore/RemoteControl/RemoteControlOutboundFramePump.swift"),
@@ -20,6 +90,125 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             encoding: .utf8
         )
         return [pumpSource, managerSource, videoSubmissionPipeSource].joined(separator: "\n")
+    }
+
+    func testRetiredPlaybackOwnerCannotReclaimOrReleaseReplacement() async {
+        let ownership = SkyBridgeRealtimeMediaPlaybackOwnership()
+        let firstOwner = SkyBridgeRealtimeMediaReceiverLifecycle()
+        let replacementOwner = SkyBridgeRealtimeMediaReceiverLifecycle()
+        let lateCallbackGate = RealtimeMediaTestGate()
+
+        XCTAssertEqual(ownership.claim(firstOwner), .acquiredVacant)
+        XCTAssertEqual(ownership.claim(firstOwner), .alreadyOwned)
+        XCTAssertEqual(ownership.claim(replacementOwner), .rejectedLiveOwner)
+
+        let lateClaim = Task {
+            await lateCallbackGate.wait()
+            return ownership.claim(firstOwner)
+        }
+
+        XCTAssertTrue(firstOwner.retire())
+        XCTAssertFalse(firstOwner.retire())
+        let replacementClaim = ownership.claim(replacementOwner)
+        XCTAssertEqual(replacementClaim, .replacedRetiredOwner)
+        XCTAssertTrue(replacementClaim.requiresPipelineReset)
+        await lateCallbackGate.open()
+
+        let lateClaimDisposition = await lateClaim.value
+        XCTAssertEqual(lateClaimDisposition, .rejectedInactiveCandidate)
+        XCTAssertFalse(ownership.release(ifOwnedBy: firstOwner))
+        XCTAssertTrue(ownership.isOwned(by: replacementOwner))
+        XCTAssertTrue(ownership.release(ifOwnedBy: replacementOwner))
+        XCTAssertFalse(ownership.isOwned(by: replacementOwner))
+
+        let finalOwner = SkyBridgeRealtimeMediaReceiverLifecycle()
+        XCTAssertEqual(ownership.claim(finalOwner), .acquiredVacant)
+        XCTAssertTrue(ownership.retireCurrentOwnerAndClear())
+        XCTAssertFalse(finalOwner.isActive)
+        XCTAssertEqual(ownership.claim(finalOwner), .rejectedInactiveCandidate)
+    }
+
+    func testRealtimeAudioReceiverReuseKeyRequiresExactPeerSessionModeAndInterface() {
+        let firstPeer = NSObject()
+        let replacementPeer = NSObject()
+        let interfaceIdentity = SkyBridgeRealtimeMediaInterfaceBinding.Identity(
+            normalizedName: "en0",
+            index: 14,
+            expectedRemoteScope: "en0"
+        )
+        let baseline = RemoteControlRealtimeAudioReceiverReuseKey(
+            peerId: "peer-a",
+            peerIdentity: ObjectIdentifier(firstPeer),
+            secureSessionId: "session-a",
+            sendKey: Data(repeating: 1, count: 32),
+            receiveKey: Data(repeating: 2, count: 32),
+            role: .initiator,
+            transcriptHash: Data(repeating: 3, count: 32),
+            mode: .lowLatency,
+            interfaceBindingIdentity: interfaceIdentity,
+            authenticatedRemoteHost: "fe80::1"
+        )
+
+        XCTAssertEqual(
+            baseline,
+            RemoteControlRealtimeAudioReceiverReuseKey(
+                peerId: "peer-a",
+                peerIdentity: ObjectIdentifier(firstPeer),
+                secureSessionId: "session-a",
+                sendKey: Data(repeating: 1, count: 32),
+                receiveKey: Data(repeating: 2, count: 32),
+                role: .initiator,
+                transcriptHash: Data(repeating: 3, count: 32),
+                mode: .lowLatency,
+                interfaceBindingIdentity: interfaceIdentity,
+                authenticatedRemoteHost: "fe80::1"
+            )
+        )
+        XCTAssertNotEqual(
+            baseline,
+            RemoteControlRealtimeAudioReceiverReuseKey(
+                peerId: "peer-a",
+                peerIdentity: ObjectIdentifier(replacementPeer),
+                secureSessionId: "session-a",
+                sendKey: Data(repeating: 1, count: 32),
+                receiveKey: Data(repeating: 2, count: 32),
+                role: .initiator,
+                transcriptHash: Data(repeating: 3, count: 32),
+                mode: .lowLatency,
+                interfaceBindingIdentity: interfaceIdentity,
+                authenticatedRemoteHost: "fe80::1"
+            )
+        )
+        XCTAssertNotEqual(
+            baseline,
+            RemoteControlRealtimeAudioReceiverReuseKey(
+                peerId: "peer-a",
+                peerIdentity: ObjectIdentifier(firstPeer),
+                secureSessionId: "session-a",
+                sendKey: Data(repeating: 1, count: 32),
+                receiveKey: Data(repeating: 2, count: 32),
+                role: .initiator,
+                transcriptHash: Data(repeating: 3, count: 32),
+                mode: .highFidelity,
+                interfaceBindingIdentity: interfaceIdentity,
+                authenticatedRemoteHost: "fe80::1"
+            )
+        )
+        XCTAssertNotEqual(
+            baseline,
+            RemoteControlRealtimeAudioReceiverReuseKey(
+                peerId: "peer-a",
+                peerIdentity: ObjectIdentifier(firstPeer),
+                secureSessionId: "session-a",
+                sendKey: Data(repeating: 9, count: 32),
+                receiveKey: Data(repeating: 2, count: 32),
+                role: .initiator,
+                transcriptHash: Data(repeating: 3, count: 32),
+                mode: .lowLatency,
+                interfaceBindingIdentity: interfaceIdentity,
+                authenticatedRemoteHost: "fe80::1"
+            )
+        )
     }
 
     func testRemoteControlInboundAdmissionBoundsAndReleasesUnauthenticatedConnections() throws {
@@ -368,9 +557,109 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(source.contains("case udpConnectionReady"))
         XCTAssertTrue(source.contains("case relayBindAckTimedOut"))
         XCTAssertTrue(source.contains("udpConnectionReadyTimedOut"))
+        XCTAssertTrue(source.contains("udpReadyPathMismatch"))
         XCTAssertTrue(source.contains("type\"") && source.contains("bind-result"))
         XCTAssertTrue(source.contains("relayBindRejected"))
         XCTAssertTrue(source.contains("relayBindTimedOut"))
+    }
+
+    func testUDPTransportPreservesLocalNetworkPrivacyDenial() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/SkyBridgeRealtimeMedia/UDPTransport.swift"),
+            encoding: .utf8
+        )
+        let senderStart = try XCTUnwrap(
+            source.range(of: "private func waitForConnectionReady(on connection: NWConnection)")
+        )
+        let waiting = try XCTUnwrap(
+            source.range(of: "case .waiting(let error):", range: senderStart.lowerBound..<source.endIndex)
+        )
+        let failed = try XCTUnwrap(
+            source.range(of: "case .failed(let error):", range: waiting.upperBound..<source.endIndex)
+        )
+        let timeout = try XCTUnwrap(
+            source.range(
+                of: "queue.asyncAfter(deadline: .now() + connectionReadyTimeout)",
+                range: failed.upperBound..<source.endIndex
+            )
+        )
+        let waitingBody = source[waiting.lowerBound..<failed.lowerBound]
+        let failedBody = source[failed.lowerBound..<timeout.lowerBound]
+        let timeoutBody = source[timeout.lowerBound..<source.endIndex]
+
+        XCTAssertTrue(source.contains("import SkyBridgeAppleTransport"))
+        XCTAssertTrue(
+            waitingBody.contains("NetworkFrameworkLocalNetworkPermissionClassifier.isDenied(")
+        )
+        XCTAssertTrue(waitingBody.contains(".udpLocalNetworkPermissionDenied"))
+        XCTAssertTrue(
+            failedBody.contains("NetworkFrameworkLocalNetworkPermissionClassifier")
+        )
+        XCTAssertTrue(failedBody.contains(".udpLocalNetworkPermissionDenied"))
+        XCTAssertTrue(
+            timeoutBody.contains("NetworkFrameworkLocalNetworkPermissionClassifier")
+        )
+        XCTAssertTrue(timeoutBody.contains(".udpLocalNetworkPermissionDenied"))
+        XCTAssertEqual(
+            SkyBridgeRealtimeMediaTransportError.udpLocalNetworkPermissionDenied
+                .errorDescription,
+            "udp local network permission denied"
+        )
+        XCTAssertTrue(
+            source.contains("case .udpListenerMissingBoundPort:")
+                && source.contains("guard let port = listener.port?.rawValue, port > 0")
+        )
+        XCTAssertTrue(source.contains("private var pendingListener: NWListener?"))
+        XCTAssertTrue(source.contains("private var pendingStartState: StartState?"))
+        XCTAssertTrue(source.contains("private static let maximumActiveConnections = 4"))
+        XCTAssertTrue(source.contains("throw SkyBridgeRealtimeMediaTransportError.udpReceiverAlreadyStarted"))
+        XCTAssertTrue(
+            source.contains(
+                ".failure(SkyBridgeRealtimeMediaTransportError.udpListenerReadyTimedOut)"
+            )
+        )
+        XCTAssertTrue(source.contains("let pendingListener = self.pendingListener"))
+        XCTAssertTrue(source.contains("let pendingStartState = self.pendingStartState"))
+        XCTAssertTrue(
+            source.contains(
+                "_ = pendingStartState?.complete(.failure(CancellationError()))"
+            )
+        )
+        XCTAssertTrue(source.contains("pendingListener?.cancel()"))
+        XCTAssertTrue(source.contains("self.listener === listener"))
+        XCTAssertTrue(source.contains("self.receiveNext(on: connection, ownedBy: listener)"))
+        let listenerStart = try XCTUnwrap(source.range(of: "let startState = StartState()"))
+        let listenerWaiting = try XCTUnwrap(
+            source.range(
+                of: "case .waiting(let error):",
+                range: listenerStart.lowerBound..<senderStart.lowerBound
+            )
+        )
+        let listenerFailed = try XCTUnwrap(
+            source.range(
+                of: "case .failed(let error):",
+                range: listenerWaiting.upperBound..<senderStart.lowerBound
+            )
+        )
+        let listenerWaitingBody = source[listenerWaiting.lowerBound..<listenerFailed.lowerBound]
+        XCTAssertTrue(
+            listenerWaitingBody.contains(
+                "NetworkFrameworkLocalNetworkPermissionClassifier.isDenied("
+            )
+        )
+        XCTAssertTrue(listenerWaitingBody.contains(".udpLocalNetworkPermissionDenied"))
+        XCTAssertTrue(
+            source.contains(
+                "case .cancelled:\n                let didComplete = startState.complete(.failure(CancellationError()))"
+            )
+        )
+        XCTAssertTrue(
+            source.contains(
+                "if !didComplete, self?.isCurrent(listener: listener) == true"
+            )
+        )
+        XCTAssertTrue(source.contains("self?.terminalFailureHandler?(CancellationError())"))
     }
 
     func testOptimisticRelayBindWatchdogDoesNotFireAfterStop() async throws {
@@ -1389,7 +1678,8 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(senderSource.contains("senderCatchUpFrameLimit"))
         XCTAssertTrue(senderSource.contains("senderCatchUpBacklogFrameTarget"))
         XCTAssertTrue(senderSource.contains("sentOrAttemptedFrames"))
-        XCTAssertTrue(senderSource.contains("func matches(sessionId: String, endpoint: SkyBridgeMediaEndpoint, mode: SkyBridgeMediaAudioMode) -> Bool"))
+        XCTAssertTrue(senderSource.contains("interfaceBindingIdentity: SkyBridgeRealtimeMediaInterfaceBinding.Identity? = nil"))
+        XCTAssertTrue(senderSource.contains("self.interfaceBindingIdentity == interfaceBindingIdentity"))
         XCTAssertTrue(senderSource.contains("func diagnosticSnapshot() -> RealtimeMediaAudioSenderDiagnosticSnapshot"))
         XCTAssertTrue(senderSource.contains("func close(reason: String = \"unspecified\") async"))
         XCTAssertTrue(senderSource.contains("kind: \"audioTxSenderClosed\""))
@@ -1437,6 +1727,125 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(senderSource.contains("audioTxEncodedTotal: encodedPackets"))
         XCTAssertTrue(senderSource.contains("audioTxSentTotal: sentPackets"))
         XCTAssertTrue(senderSource.contains("validationMode: mode.rawValue"))
+
+        let audioSenderFailure = try XCTUnwrap(
+            remoteControlSource.range(of: "audioTxSenderStartFailed session=")
+        )
+        let strictFailure = try XCTUnwrap(
+            remoteControlSource.range(
+                of: "await failStrictMediaCapture(",
+                range: audioSenderFailure.upperBound..<remoteControlSource.endIndex
+            )
+        )
+        let videoCaptureStart = try XCTUnwrap(
+            remoteControlSource.range(
+                of: "try await streamer.start(",
+                range: strictFailure.upperBound..<remoteControlSource.endIndex
+            )
+        )
+        XCTAssertLessThan(audioSenderFailure.lowerBound, strictFailure.lowerBound)
+        XCTAssertLessThan(strictFailure.lowerBound, videoCaptureStart.lowerBound)
+        XCTAssertTrue(remoteControlSource.contains("action=\\(strictAudioRequired ? \"strict-fail-closed\" : \"video-preserved\")"))
+        XCTAssertFalse(
+            remoteControlSource.contains("P2P PQC media audio sender unavailable; keeping video-only"),
+            "A requested strict audio stream must not silently continue as video-only after route or UDP startup failure."
+        )
+
+        let iosRemoteDesktopSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(iosRemoteDesktopSource.contains(".resolveAuthenticatedControlPath("))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("interfaceBinding: interfaceBinding"))
+        XCTAssertTrue(iosRemoteDesktopSource.contains("preparedInterfaceBinding = interfaceBinding"))
+        XCTAssertTrue(
+            iosRemoteDesktopSource.contains(
+                "realtimeMediaAudioInterfaceBinding = preparedInterfaceBinding"
+            )
+        )
+        XCTAssertTrue(iosRemoteDesktopSource.contains("interfaceBound=1 interfaceClass=infrastructure scopeMatch=1 transport=lan"))
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "let interfaceBinding = try SkyBridgeRealtimeMediaInterfaceBinding"
+            )
+        )
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "let receiver = SkyBridgeUDPRealtimeMediaReceiver(\n            interfaceBinding: interfaceBinding"
+            )
+        )
+        XCTAssertTrue(remoteControlSource.contains("let reuseKey = RemoteControlRealtimeAudioReceiverReuseKey("))
+        XCTAssertTrue(remoteControlSource.contains("peerIdentity: ObjectIdentifier(peer)"))
+        XCTAssertTrue(remoteControlSource.contains("secureSessionId: keys.sessionId"))
+        XCTAssertTrue(remoteControlSource.contains("mode: mode"))
+        XCTAssertTrue(remoteControlSource.contains("interfaceBindingIdentity: interfaceBinding.identity"))
+        XCTAssertTrue(remoteControlSource.contains("p2pRealtimeAudioReceiverReuseKey == reuseKey"))
+        XCTAssertTrue(remoteControlSource.contains("mediaFallbackPolicy: \"fail-fast\""))
+        XCTAssertTrue(remoteControlSource.contains("audioRxReceiverStartFailed reason="))
+        XCTAssertTrue(remoteControlSource.contains("if failureAction == .failSession"))
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "guard isCurrentPeer(peer) else { return }"
+            )
+        )
+        XCTAssertFalse(
+            remoteControlSource.contains(
+                "!(error is CancellationError)"
+            ),
+            "A CancellationError owned by the current peer must enter strict failure handling."
+        )
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "p2p-realtime-audio-receiver-start-failed-before-install"
+            )
+        )
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "p2p-realtime-audio-receiver-start-stale-before-install"
+            )
+        )
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "let currentKeys = peer.sessionKeys,"
+            )
+        )
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "Self.isSameRemoteControlSecureSession(currentKeys, keys)"
+            )
+        )
+        XCTAssertTrue(
+            remoteControlSource.contains(
+                "receiver.stop()\n            await renderer.close("
+            )
+        )
+        XCTAssertFalse(
+            remoteControlSource.contains(
+                "P2P PQC media audio receiver unavailable; keeping video-only"
+            )
+        )
+        XCTAssertTrue(
+            iosRemoteDesktopSource.contains(
+                "RemoteControlRealtimeMediaStartupPolicy.failureAction("
+            )
+        )
+        XCTAssertTrue(
+            iosRemoteDesktopSource.contains(
+                "await self.handleTransportFailure(\n                        \"realtime media audio startup failed [\\(reason)]\""
+            )
+        )
+        XCTAssertTrue(
+            iosRemoteDesktopSource.contains(
+                "receiver-start-failed-before-install"
+            )
+        )
+        XCTAssertFalse(
+            iosRemoteDesktopSource.contains(
+                "PQC media audio receiver unavailable; keeping video-only"
+            )
+        )
 
         XCTAssertTrue(webrtcSource.contains("diagnosticSessionId: sessionID"))
         XCTAssertTrue(webrtcSource.contains("kind: \"videoStats\""))
@@ -1563,7 +1972,12 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(remoteServerSource.contains("qos: .userInteractive"))
         XCTAssertTrue(remoteServerSource.contains("listener.start(queue: queue)"))
         XCTAssertTrue(remoteServerSource.contains("connection.start(queue: connectionQueue)"))
-        XCTAssertTrue(remoteServerSource.contains("parameters.includePeerToPeer = true"))
+        XCTAssertTrue(
+            remoteServerSource.contains(
+                "ApplePeerConnectivityPolicy.remoteControlMediaAllowsPeerToPeer"
+            )
+        )
+        XCTAssertFalse(remoteServerSource.contains("parameters.includePeerToPeer = true"))
         XCTAssertTrue(remoteServerSource.contains("BonjourInteropContract.makeCanonicalAdvertisementTXT("))
         XCTAssertFalse(remoteServerSource.contains("LocalNetworkAdvertisementAddressProvider.attachAddressTXT"))
 
@@ -1681,7 +2095,12 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertTrue(p2pSource.contains("let realtimeMediaAudioReady = settings.interactionSettings.enableAudioRedirection"))
+        XCTAssertTrue(
+            p2pSource.contains(
+                "let audioRedirectionEnabled = settings.interactionSettings.enableAudioRedirection"
+            )
+        )
+        XCTAssertTrue(p2pSource.contains("let realtimeMediaAudioReady = audioRedirectionEnabled"))
         XCTAssertTrue(p2pSource.contains("&& mediaAudioEndpoint != nil"))
         XCTAssertTrue(p2pSource.contains("&& mediaSessionId != nil"))
         XCTAssertTrue(p2pSource.contains("audioRedirectionEnabled: realtimeMediaAudioReady"))
@@ -1768,7 +2187,11 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
         XCTAssertTrue(audioSource.contains("await resetReceiveOrderingState(reason: \"source-migration\")"))
         XCTAssertTrue(audioSource.contains("private func resetReceiveOrderingState(reason: String) async"))
         XCTAssertTrue(audioSource.contains("replayWindow = SkyBridgeMediaReplayWindow()"))
-        XCTAssertTrue(audioSource.contains("await IOSRealtimeMediaAudioPlayer.shared.stop()"))
+        XCTAssertTrue(
+            audioSource.contains(
+                "await IOSRealtimeMediaAudioPlayer.shared.stop(ifOwnedBy: lifecycle)"
+            )
+        )
         XCTAssertFalse(
             audioSource.contains("guard acceptSource(datagram.remoteEndpoint) else"),
             "The iOS receiver must authenticate media packets before applying source endpoint policy; Network.framework can migrate the Mac sender's UDP port mid-session."
@@ -1819,8 +2242,20 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             contentsOf: root.appendingPathComponent("Sources/SkyBridgeRealtimeMedia/UDPTransport.swift"),
             encoding: .utf8
         )
-        XCTAssertTrue(transportSource.contains("public init(port: UInt16? = nil, allowLocalEndpointReuse: Bool = false)"))
+        XCTAssertTrue(transportSource.contains("interfaceBinding: SkyBridgeRealtimeMediaInterfaceBinding? = nil"))
         XCTAssertTrue(transportSource.contains("allowLocalEndpointReuse = allowLocalEndpointReuse"))
+        XCTAssertEqual(
+            transportSource.components(separatedBy: "parameters.requiredInterface = interfaceBinding.interface").count - 1,
+            2,
+            "The LAN audio sender and receiver must both preserve the authenticated control-path interface."
+        )
+        XCTAssertEqual(
+            transportSource.components(separatedBy: "parameters.includePeerToPeer = false").count - 1,
+            2,
+            "Dedicated remote-control media must stay on the infrastructure interface in both directions."
+        )
+        XCTAssertTrue(transportSource.contains("interfaceBinding.validatesReadyPath(connection.currentPath)"))
+        XCTAssertTrue(transportSource.contains("withTaskCancellationHandler"))
         XCTAssertFalse(
             transportSource.contains("parameters.allowLocalEndpointReuse = true"),
             "Realtime media UDP sockets should not request local port reuse by default because this path never intentionally shares a port across concurrent flows."
@@ -2226,6 +2661,29 @@ private final class LocalUDPDropRelay: @unchecked Sendable {
             }
             self.dropNext(on: connection)
         }
+    }
+}
+
+private actor RealtimeMediaTestGate {
+    private var isOpen = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            if isOpen {
+                continuation.resume()
+            } else {
+                waiter = continuation
+            }
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        waiter?.resume()
+        waiter = nil
     }
 }
 

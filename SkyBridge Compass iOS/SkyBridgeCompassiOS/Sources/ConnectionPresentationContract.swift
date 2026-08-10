@@ -1,5 +1,66 @@
 import Foundation
 
+enum PeerTransportRouteDecision: Sendable, Equatable {
+    case directLAN
+    case crossNetwork(sessionID: String)
+    case rejectUnavailableCrossNetworkTarget
+}
+
+/// Pure route-admission contract shared by feature managers.
+///
+/// The caller supplies the active, authenticated cross-network session state. This
+/// contract only verifies that an explicit route selection still names that exact
+/// session and one of its exact device identifiers. It never upgrades a LAN intent
+/// merely because the same peer also has a WebRTC session.
+enum PeerTransportRouteSelectionContract {
+    static func evaluate(
+        targetDeviceID: String,
+        routeIntent: PeerTransportRouteIntent,
+        activeCrossNetworkSessionID: String?,
+        activeCrossNetworkRemoteDeviceIDs: [String?]
+    ) -> PeerTransportRouteDecision {
+        switch routeIntent {
+        case .directLAN:
+            return .directLAN
+
+        case .crossNetwork(let expectedSessionID):
+            let expectedSessionID = normalizedSessionID(expectedSessionID)
+            guard !expectedSessionID.isEmpty,
+                  normalizedSessionID(activeCrossNetworkSessionID) == expectedSessionID else {
+                return .rejectUnavailableCrossNetworkTarget
+            }
+
+            let normalizedTarget = normalizedDeviceID(targetDeviceID)
+            guard !normalizedTarget.isEmpty else {
+                return .rejectUnavailableCrossNetworkTarget
+            }
+
+            let syntheticSessionTarget = normalizedDeviceID("webrtc-\(expectedSessionID)")
+            let remoteDeviceIDs = Set(
+                activeCrossNetworkRemoteDeviceIDs
+                    .map(normalizedDeviceID)
+                    .filter { !$0.isEmpty }
+            )
+            guard normalizedTarget == syntheticSessionTarget
+                    || remoteDeviceIDs.contains(normalizedTarget) else {
+                return .rejectUnavailableCrossNetworkTarget
+            }
+
+            return .crossNetwork(sessionID: expectedSessionID)
+        }
+    }
+
+    private static func normalizedSessionID(_ raw: String?) -> String {
+        raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func normalizedDeviceID(_ raw: String?) -> String {
+        raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+    }
+}
+
 public enum ActiveSessionSnapshotContract {
     public static func activate(
         sessionId: String,

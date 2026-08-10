@@ -21,6 +21,7 @@ MAX_MEDIA_LOG_BYTES = 256 * 1024 * 1024
 FINALIZATION_ORDER = "private-then-public-v1"
 RELEASE_MANIFEST_MODE = 0o600
 SESSION_REF_PATTERN = re.compile(r"[0-9a-f]{24}")
+EVIDENCE_REF_PATTERN = re.compile(r"ev1:[0-9a-f]{32}")
 SOURCE_REPOSITORY_COMPONENT_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 PRODUCTION_IDENTITY_PROOF_FILE = "ios-production-identity-proof.json"
@@ -176,6 +177,13 @@ def require_session_ref(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or SESSION_REF_PATTERN.fullmatch(value) is None:
         fail(f"{key} must be a 24-character lowercase hexadecimal session reference")
+    return value
+
+
+def require_evidence_ref(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or EVIDENCE_REF_PATTERN.fullmatch(value) is None:
+        fail(f"{key} must be a canonical ev1 evidence reference")
     return value
 
 
@@ -361,7 +369,7 @@ def validate_p2p(payload: dict[str, Any], artifact_dir: Path) -> None:
         "Active",
     ]:
         fail("P2P approvalLifecycle must be strict human approval order")
-    require_session_ref(payload, "approvalSessionRef")
+    require_evidence_ref(payload, "approvalSessionRef")
     if payload.get("iosBuildConfiguration") != "Release":
         fail("P2P iosBuildConfiguration must be Release; Debug is lab diagnostic-only")
     require_exact_bool(payload, "iosReleaseConfiguration", True)
@@ -391,14 +399,14 @@ def validate_p2p(payload: dict[str, Any], artifact_dir: Path) -> None:
 def validate_p2p_approval_proof(payload: dict[str, Any], artifact_dir: Path) -> None:
     proof = load_json(artifact_dir / "p2p-approval-proof.json", "P2P approval proof")
     expected_lifecycle = ["Shown", "PanelPresented", "HumanApproved", "Approved", "Active"]
-    if proof.get("schemaVersion") != 1:
-        fail("P2P approval proof schemaVersion must be 1")
+    if proof.get("schemaVersion") != 2:
+        fail("P2P approval proof schemaVersion must be 2")
     if proof.get("lifecycle") != expected_lifecycle:
         fail("P2P approval proof lifecycle is not strict human approval order")
     require_exact_bool(proof, "humanApproval", True)
     require_exact_bool(proof, "runtimeAutoApproval", False)
     require_exact_bool(proof, "panelActionsVerified", True)
-    proof_session_ref = require_session_ref(proof, "sessionRef")
+    proof_session_ref = require_evidence_ref(proof, "sessionRef")
     if proof_session_ref != payload.get("approvalSessionRef"):
         fail("P2P approval proof sessionRef does not match the manifest")
     if proof.get("humanApproval") is not payload.get("humanApproval"):
@@ -409,42 +417,45 @@ def validate_p2p_approval_proof(payload: dict[str, Any], artifact_dir: Path) -> 
     status = read_text_file(artifact_dir / "mac.status.log", "macOS P2P status log")
     event_pattern = re.compile(
         r"\bremoteControlNotice(?P<event>Shown|PanelPresented|HumanApproved|Approved|Active)\s+"
-        r"session=(?P<session>[^\s]+)\s+transport=p2p\b(?P<tail>[^\n]*)"
+        r"session=(?P<session>[^\s]+)\s+"
+        r"session_ref=(?P<session_ref>ev1:[0-9a-f]{32})\s+"
+        r"transport=p2p\b(?P<tail>[^\n]*)"
     )
-    events_by_session: dict[str, list[str]] = {}
-    panel_contract: dict[str, bool] = {}
-    active_sessions: set[str] = set()
+    events_by_session: dict[tuple[str, str], list[str]] = {}
+    panel_contract: dict[tuple[str, str], bool] = {}
+    active_sessions: set[tuple[str, str]] = set()
     for match in event_pattern.finditer(status):
         event = match.group("event")
         session = match.group("session")
+        session_ref = match.group("session_ref")
+        key = (session, session_ref)
         tail = match.group("tail")
         if event == "PanelPresented":
             if re.search(r"\bphase=awaitingApproval\b", tail) is None:
                 continue
             buttons_match = re.search(r"\bbuttons=([^\s]+)", tail)
             buttons = set(buttons_match.group(1).split(",")) if buttons_match else set()
-            panel_contract[session] = {"approve", "reject"}.issubset(buttons)
+            panel_contract[key] = {"approve", "reject"}.issubset(buttons)
         if event == "Active":
-            active_sessions.add(session)
-        events_by_session.setdefault(session, []).append(event)
+            active_sessions.add(key)
+        events_by_session.setdefault(key, []).append(event)
 
     valid_sessions = [
-        session
-        for session, events in events_by_session.items()
-        if events == expected_lifecycle and panel_contract.get(session) is True
+        key
+        for key, events in events_by_session.items()
+        if events == expected_lifecycle and panel_contract.get(key) is True
     ]
     if len(valid_sessions) != 1:
         fail("P2P approval lifecycle is missing strict same-session HumanApproved evidence")
-    raw_session = valid_sessions[0]
-    if active_sessions != {raw_session}:
+    raw_session, measured_session_ref = valid_sessions[0]
+    if active_sessions != {(raw_session, measured_session_ref)}:
         fail("P2P approval lifecycle contains an unmatched active notice session")
-    measured_session_ref = hashlib.sha256(raw_session.encode("utf-8")).hexdigest()[:24]
     if measured_session_ref != proof_session_ref:
-        fail("P2P HumanApproved raw session does not match approval proof sessionRef")
+        fail("P2P HumanApproved session evidence does not match approval proof sessionRef")
     escaped_session = re.escape(raw_session)
     auto_patterns = (
-        rf"\bremoteControlNoticeAutoApproved\s+session={escaped_session}\s+transport=p2p\b",
-        rf"\bremoteControlNoticeApproved\s+session={escaped_session}\s+transport=p2p\b[^\n]*\bapprovalSource=(?:auto|runtime)\b",
+        rf"\bremoteControlNoticeAutoApproved\s+session={escaped_session}\b[^\n]*\btransport=p2p\b",
+        rf"\bremoteControlNoticeApproved\s+session={escaped_session}\b[^\n]*\btransport=p2p\b[^\n]*\bapprovalSource=(?:auto|runtime)\b",
         rf"(?m)^(?=[^\n]*\bsession={escaped_session}\b)(?=[^\n]*\b(?:runtimeAutoApproval|autoApprove)=true\b)[^\n]*$",
     )
     if any(re.search(pattern, status, re.IGNORECASE) for pattern in auto_patterns):

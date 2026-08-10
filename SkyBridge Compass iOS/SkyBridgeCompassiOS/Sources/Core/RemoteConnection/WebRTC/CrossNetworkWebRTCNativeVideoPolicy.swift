@@ -77,6 +77,23 @@ enum CrossNetworkWebRTCNativeVideoPolicy {
         }
     }
 
+    static func allowsTrackRender(
+        isAdmitted: Bool,
+        currentTrackID: String?,
+        renderedTrackID: String,
+        currentRenderEpoch: UInt64,
+        renderedEpoch: UInt64
+    ) -> Bool {
+        guard isAdmitted,
+              currentRenderEpoch == renderedEpoch,
+              let currentTrackID,
+              !currentTrackID.isEmpty,
+              currentTrackID == renderedTrackID else {
+            return false
+        }
+        return true
+    }
+
 #if DEBUG || SKYBRIDGE_TESTING
     private static func positiveEnvironmentInteger(_ name: String) -> Int? {
         guard let rawValue = ProcessInfo.processInfo.environment[name],

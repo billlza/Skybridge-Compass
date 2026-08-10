@@ -43,6 +43,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 hasRenderedCrossNetworkNativeFrame: false,
                 nativeAudioReceiveEnabled: false,
                 realtimeMediaAudioMode: .highFidelity,
+                realtimeMediaAudioRequested: true,
                 mediaAudioEndpoint: endpoint,
                 mediaSessionId: "media-session-a",
                 streamRefreshToken: 42,
@@ -85,6 +86,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 hasRenderedCrossNetworkNativeFrame: true,
                 nativeAudioReceiveEnabled: false,
                 realtimeMediaAudioMode: .highFidelity,
+                realtimeMediaAudioRequested: false,
                 mediaAudioEndpoint: nil,
                 mediaSessionId: nil,
                 streamRefreshToken: nil,
@@ -126,6 +128,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 hasRenderedCrossNetworkNativeFrame: false,
                 nativeAudioReceiveEnabled: false,
                 realtimeMediaAudioMode: .highFidelity,
+                realtimeMediaAudioRequested: false,
                 mediaAudioEndpoint: nil,
                 mediaSessionId: nil,
                 streamRefreshToken: nil,
@@ -159,6 +162,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 hasRenderedCrossNetworkNativeFrame: false,
                 nativeAudioReceiveEnabled: false,
                 realtimeMediaAudioMode: .lowLatency,
+                realtimeMediaAudioRequested: true,
                 mediaAudioEndpoint: endpoint,
                 mediaSessionId: "media-session-ready",
                 streamRefreshToken: nil,
@@ -173,6 +177,41 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
         XCTAssertEqual(payload.audioMode, SkyBridgeMediaAudioMode.lowLatency.rawValue)
         XCTAssertEqual(payload.mediaSessionId, "media-session-ready")
         XCTAssertEqual(payload.mediaAudioEndpoint, endpoint)
+    }
+
+    func testCrossNetworkRefreshPreservesPQCIntentWhileOmittingAcknowledgedEndpoint() {
+        var settings = RemoteDesktopViewerSettings()
+        settings.audioRedirectionEnabled = true
+
+        let payload = RemoteDesktopViewerStreamConfigurationFactory.makePayload(
+            .init(
+                viewerSettings: settings,
+                supportedVideoFormats: ["h264", "hevc"],
+                preferredCodec: "h264",
+                activeTransportMode: .crossNetwork,
+                strictMediaValidationEnabled: true,
+                hasRenderedCrossNetworkNativeFrame: true,
+                nativeAudioReceiveEnabled: false,
+                realtimeMediaAudioMode: .highFidelity,
+                realtimeMediaAudioRequested: true,
+                mediaAudioEndpoint: nil,
+                mediaSessionId: nil,
+                streamRefreshToken: 101,
+                securityIdentity: nil,
+                smokeDimensions: nil,
+                smokeTargetFrameRate: nil
+            )
+        )
+
+        XCTAssertEqual(payload.audioRedirectionEnabled, true)
+        XCTAssertEqual(
+            payload.audioTransport,
+            SkyBridgeRealtimeMediaConstants.audioTransportPQCv1
+        )
+        XCTAssertEqual(payload.audioMode, SkyBridgeMediaAudioMode.highFidelity.rawValue)
+        XCTAssertNil(payload.mediaSessionId)
+        XCTAssertNil(payload.mediaAudioEndpoint)
+        XCTAssertEqual(payload.streamRefreshToken, 101)
     }
 
     func testSmokeOverridesWinAndRefreshTokenIsPassThrough() {
@@ -190,6 +229,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
                 hasRenderedCrossNetworkNativeFrame: false,
                 nativeAudioReceiveEnabled: false,
                 realtimeMediaAudioMode: .highFidelity,
+                realtimeMediaAudioRequested: false,
                 mediaAudioEndpoint: nil,
                 mediaSessionId: nil,
                 streamRefreshToken: 99,

@@ -185,6 +185,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var remoteVideoReceiver: RTCRtpReceiver?
     private var videoTransceiver: RTCRtpTransceiver?
     private var audioTransceiver: RTCRtpTransceiver?
+    private var remoteVideoAdmissionEnabled = false
+    private var remoteAudioAdmissionEnabled = false
     private var remoteVideoTrackInspectionTask: Task<Void, Never>?
     private var remoteVideoFrameEvidenceTask: Task<Void, Never>?
     private var didEmitRemoteVideoFrameEvidence = false
@@ -365,6 +367,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             videoTransceiver = nil
             audioTransceiver?.receiver.delegate = nil
             audioTransceiver = nil
+            remoteVideoAdmissionEnabled = false
+            remoteAudioAdmissionEnabled = false
             remoteVideoTrackInspectionTask?.cancel()
             remoteVideoTrackInspectionTask = nil
             remoteVideoFrameEvidenceTask?.cancel()
@@ -397,6 +401,36 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             onTrace = nil
             logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
         }
+    }
+
+    public func setRemoteAudioAdmissionEnabled(_ enabled: Bool) {
+#if canImport(WebRTC)
+        withState {
+            guard !isClosed else { return }
+            remoteAudioAdmissionEnabled = enabled
+            audioTransceiver?.receiver.track?.isEnabled = enabled
+            onTrace?(
+                "remote-audio-admission session=\(sessionId) enabled=\(enabled ? 1 : 0)"
+            )
+        }
+#else
+        _ = enabled
+#endif
+    }
+
+    public func setRemoteVideoAdmissionEnabled(_ enabled: Bool) {
+#if canImport(WebRTC)
+        withState {
+            guard !isClosed else { return }
+            remoteVideoAdmissionEnabled = enabled
+            remoteVideoTrack?.isEnabled = enabled
+            onTrace?(
+                "remote-video-admission session=\(sessionId) enabled=\(enabled ? 1 : 0)"
+            )
+        }
+#else
+        _ = enabled
+#endif
     }
     
     deinit {
@@ -1265,6 +1299,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         if let audioTransceiver {
             preferOpusCodecIfPossible(factory: factory, transceiver: audioTransceiver)
             audioTransceiver.receiver.delegate = self
+            audioTransceiver.receiver.track?.isEnabled = remoteAudioAdmissionEnabled
         }
     }
 
@@ -1366,9 +1401,9 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didEmitRemoteVideoFrameEvidence = isTrackRebind ? didEmitRemoteVideoFrameEvidence : false
         remoteVideoTrack = track
         if let track {
-            track.isEnabled = true
+            track.isEnabled = remoteVideoAdmissionEnabled
             logger.info("🎬 detected remote native video track. sessionId=\(self.sessionId, privacy: .public)")
-            onTrace?("remote-video-track-enabled session=\(sessionId) trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0)")
+            onTrace?("remote-video-track-installed session=\(sessionId) trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0)")
             remoteVideoTrackInspectionTask?.cancel()
             remoteVideoTrackInspectionTask = nil
             startRemoteVideoFrameEvidenceObservation()
@@ -2400,6 +2435,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
                 self.captureRemoteVideoTrack(transceiver.receiver.track as? RTCVideoTrack, receiver: transceiver.receiver)
             case .audio:
                 guard self.nativeAudioReceiveEnabled else { break }
+                transceiver.receiver.track?.isEnabled = self.remoteAudioAdmissionEnabled
                 transceiver.receiver.delegate = self
             default:
                 break
@@ -2417,6 +2453,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
                 self.captureRemoteVideoTrack(videoTrack, receiver: rtpReceiver)
             } else if rtpReceiver.track?.kind == kRTCMediaStreamTrackKindAudio {
                 guard self.nativeAudioReceiveEnabled else { return }
+                rtpReceiver.track?.isEnabled = self.remoteAudioAdmissionEnabled
                 rtpReceiver.delegate = self
             }
         }

@@ -756,8 +756,12 @@ if not static_only:
         "Supported platforms for the buildables in the current scheme is empty." not in output,
         f"{TEST_TARGET_NAME}.xcscheme 仍然出现 supported platforms is empty",
     )
+    destination_headers = (
+        f'Available destinations for the "{TEST_TARGET_NAME}" scheme:',
+        f'Destinations compatible with the "{TEST_TARGET_NAME}" scheme:',
+    )
     require(
-        f'Available destinations for the "{TEST_TARGET_NAME}" scheme:' in output,
+        any(header in output for header in destination_headers),
         f"{TEST_TARGET_NAME}.xcscheme 未返回可用 destinations",
     )
 

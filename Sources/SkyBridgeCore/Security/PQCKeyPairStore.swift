@@ -284,6 +284,52 @@ enum PQCKeyPairStore {
         )
     }
 
+    /// Reads only the canonical item and its already-committed backend claim.
+    /// This path never enumerates, migrates, reconciles, inserts, or deletes
+    /// legacy key material.
+    static func loadExistingAuthoritativeOnly(
+        descriptor: PQCKeyPairStoreDescriptor,
+        publicKeyLength: Int,
+        privateKeyLength: Int,
+        validatePair: (PQCKeyPairRecord) throws -> Void
+    ) throws -> PQCKeyPairRecord? {
+        try validateDescriptor(descriptor)
+        let keychainScope = try descriptor.storageScope.keychainScopeSource.resolve()
+        let location = try canonicalLocation(for: descriptor)
+        let authoritativeScope = try keychainScope.authoritativeOnly()
+        guard var encoded = try KeychainManager.shared.exportKeyStrict(
+            service: location.service,
+            account: location.account,
+            scope: authoritativeScope,
+            includeLegacyKeychain: false
+        ) else {
+            return nil
+        }
+        defer { PQCKeyPairRecordCodec.wipe(&encoded) }
+        if descriptor.authority == .active {
+            guard let backend = try PQCBackendAuthorityStore.load(
+                domain: descriptor.authorityDomain,
+                scopeSource: descriptor.storageScope.keychainScopeSource
+            ) else {
+                throw PQCBackendAuthorityError.corruptClaim
+            }
+            guard backend == descriptor.backend else {
+                throw PQCKeyPairStoreError.conflictingBackendIdentity(
+                    algorithm: descriptor.algorithm,
+                    existing: backend,
+                    requested: descriptor.backend
+                )
+            }
+        }
+        return try decodeAndValidate(
+            encoded,
+            descriptor: descriptor,
+            publicKeyLength: publicKeyLength,
+            privateKeyLength: privateKeyLength,
+            validatePair: validatePair
+        )
+    }
+
     private static func load(
         descriptor: PQCKeyPairStoreDescriptor,
         keychainScope: KeychainGenericPasswordScope,

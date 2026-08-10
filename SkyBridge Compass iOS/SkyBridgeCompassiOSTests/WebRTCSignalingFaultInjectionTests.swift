@@ -6,70 +6,104 @@ import XCTest
 @available(iOS 17.0, *)
 final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     @MainActor
-    func testFileTransferAckWaiterCancellationRemovesOnlyItsTokenAndAllowsKeyReuse() async throws {
-        let manager = CrossNetworkWebRTCManager.instance
-        let transferID = UUID().uuidString
-        let key = CrossNetworkWebRTCManager.fileTransferWaiterKey(
-            transferId: transferID,
-            op: .metadataAck,
-            chunkIndex: nil
+    func testFileTransferOwnerRejectsSameSessionIDReplacement() {
+        let sessionID = "ios-file-owner-replacement"
+        let sessionA = makeFileTransferOwnerSession(sessionID: sessionID)
+        let sessionB = makeFileTransferOwnerSession(sessionID: sessionID)
+        let keys = makeFileTransferOwnerKeys(sessionID: sessionID, byte: 0x31)
+        let lifecycleToken = UUID()
+        let ownerA = CrossNetworkWebRTCManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: sessionA,
+            lifecycleEpoch: 7,
+            fileTransferLifecycleToken: lifecycleToken,
+            keys: keys
         )
-        XCTAssertNil(manager.fileTransferWaiters[key])
-
-        var cancelledWaiter: Task<CrossNetworkFileTransferMessage, Error>? = Task { @MainActor in
-            try await manager.waitForFileTransferAck(
-                transferId: transferID,
-                op: .metadataAck,
-                timeoutSeconds: 30
-            )
-        }
-        defer { cancelledWaiter?.cancel() }
-        try await waitForFileTransferWaiter(key, manager: manager)
-
-        cancelledWaiter?.cancel()
-        do {
-            _ = try await cancelledWaiter?.value
-            XCTFail("A cancelled file-transfer waiter must throw CancellationError")
-        } catch is CancellationError {
-            // Expected.
-        } catch {
-            XCTFail("Expected CancellationError, got \(error)")
-        }
-        cancelledWaiter = nil
-        XCTAssertNil(manager.fileTransferWaiters[key])
-
-        let replacementWaiter = Task { @MainActor in
-            try await manager.waitForFileTransferAck(
-                transferId: transferID,
-                op: .metadataAck,
-                timeoutSeconds: 30
-            )
-        }
-        defer { replacementWaiter.cancel() }
-        try await waitForFileTransferWaiter(key, manager: manager)
-
-        manager.handleInboundFileTransferWire(
-            CrossNetworkFileTransferMessage(op: .metadataAck, transferId: transferID)
+        let ownerB = CrossNetworkWebRTCManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: sessionB,
+            lifecycleEpoch: 8,
+            fileTransferLifecycleToken: UUID(),
+            keys: keys
         )
-        let response = try await replacementWaiter.value
-        XCTAssertEqual(response.op, .metadataAck)
-        XCTAssertNil(manager.fileTransferWaiters[key])
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.isSameWebRTCFileTransferOperationOwner(
+                ownerA,
+                ownerB
+            )
+        )
     }
 
     @MainActor
-    private func waitForFileTransferWaiter(
-        _ key: CrossNetworkWebRTCManager.FileTransferWaiterKey,
-        manager: CrossNetworkWebRTCManager
-    ) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(2))
-        while manager.fileTransferWaiters[key] == nil {
-            guard clock.now < deadline else {
-                XCTFail("Timed out waiting for file-transfer waiter registration")
-                throw WebRTCSignalingFaultInjectionTestError.timedOut
-            }
-            try await Task.sleep(for: .milliseconds(5))
-        }
+    func testFileTransferOwnerRejectsOldAcknowledgementAfterSameSessionRekey() {
+        let sessionID = "ios-file-owner-rekey"
+        let session = makeFileTransferOwnerSession(sessionID: sessionID)
+        let lifecycleToken = UUID()
+        let ownerBeforeRekey = CrossNetworkWebRTCManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: session,
+            lifecycleEpoch: 11,
+            fileTransferLifecycleToken: lifecycleToken,
+            keys: makeFileTransferOwnerKeys(sessionID: sessionID, byte: 0x41)
+        )
+        let ownerAfterRekey = CrossNetworkWebRTCManager.WebRTCFileTransferOperationOwner(
+            sessionID: sessionID,
+            session: session,
+            lifecycleEpoch: 11,
+            fileTransferLifecycleToken: lifecycleToken,
+            keys: makeFileTransferOwnerKeys(sessionID: sessionID, byte: 0x42)
+        )
+
+        XCTAssertFalse(
+            CrossNetworkWebRTCManager.isSameWebRTCFileTransferOperationOwner(
+                ownerBeforeRekey,
+                ownerAfterRekey
+            )
+        )
+    }
+
+    func testFileTransferPresentationTokenCASPreventsStaleARemovingB() {
+        let tokenA = UUID()
+        let tokenB = UUID()
+
+        XCTAssertFalse(
+            WebRTCOutboundPresentationOwnershipPolicy.owns(
+                currentToken: tokenB,
+                expectedToken: tokenA
+            )
+        )
+        XCTAssertTrue(
+            WebRTCOutboundPresentationOwnershipPolicy.owns(
+                currentToken: tokenB,
+                expectedToken: tokenB
+            )
+        )
+    }
+
+    private func makeFileTransferOwnerSession(sessionID: String) -> WebRTCSession {
+        WebRTCSession(
+            sessionId: sessionID,
+            localDeviceId: "ios-file-owner-local",
+            role: .answerer,
+            ice: .init(
+                stunURL: "stun:127.0.0.1:3478",
+                turnURLs: [],
+                turnUsername: "",
+                turnPassword: ""
+            )
+        )
+    }
+
+    private func makeFileTransferOwnerKeys(sessionID: String, byte: UInt8) -> SessionKeys {
+        SessionKeys(
+            sendKey: Data(repeating: byte, count: 32),
+            receiveKey: Data(repeating: byte &+ 1, count: 32),
+            negotiatedSuite: .x25519Ed25519,
+            role: .responder,
+            transcriptHash: Data(repeating: byte &+ 2, count: 32),
+            sessionId: sessionID
+        )
     }
 
     func testSignalServerRejectedDescriptionRedactsResponseBody() {
@@ -1401,7 +1435,7 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
 
         retryTask.cancel()
         do {
-            try await retryTask.value
+            _ = try await retryTask.value
             XCTFail("Expected cancellation")
         } catch is CancellationError {
             // Expected: cancellation must not be converted into another retry.
@@ -1415,6 +1449,178 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
         XCTAssertEqual(attemptCount, 1)
         XCTAssertEqual(reconnectCount, 1)
         XCTAssertEqual(sleepCount, 1)
+    }
+
+    @MainActor
+    func testOwnerReplacementDuringRetryBackoffDoesNotStartAnotherAttempt() async {
+        let probe = RetryProbe()
+        let sleepStarted = AsyncOneShotTestLatch()
+        let releaseSleep = AsyncOneShotTestLatch()
+        let attemptState = SignalingAttemptState()
+        let controller = SignalingRetryController(
+            retryDelay: .seconds(5),
+            attemptTimeout: .seconds(1),
+            sleep: { duration in
+                await probe.recordSleep(duration)
+                await sleepStarted.signal()
+                guard await releaseSleep.wait(timeout: .seconds(2)) else {
+                    throw CancellationError()
+                }
+            }
+        )
+        let retryTask = Task { @MainActor in
+            try await controller.sendWithRetry(
+                retries: 3,
+                validateCurrentAttempt: {
+                    guard attemptState.isCurrent else { throw CancellationError() }
+                },
+                reconnectIfNeeded: {},
+                send: {
+                    _ = await probe.nextAttempt()
+                    throw WebRTCSignalingFaultInjectionTestError.sendFailed
+                }
+            )
+        }
+
+        let didStartBackoff = await sleepStarted.wait(timeout: .seconds(2))
+        XCTAssertTrue(didStartBackoff)
+        attemptState.isCurrent = false
+        await releaseSleep.signal()
+
+        do {
+            _ = try await retryTask.value
+            XCTFail("Expected stale signaling owner cancellation")
+        } catch is CancellationError {
+            // Expected: validation runs after backoff and before a second send.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let attemptCount = await probe.attemptCount()
+        let reconnectCount = await probe.reconnectCount()
+        let sleepCount = await probe.sleepCount()
+        XCTAssertEqual(attemptCount, 1)
+        XCTAssertEqual(reconnectCount, 0)
+        XCTAssertEqual(sleepCount, 1)
+    }
+
+    @MainActor
+    func testOwnerReplacementBetweenControllerAndChildValidationDoesNotSend() async {
+        let probe = RetryProbe()
+        let attemptState = SignalingAttemptState()
+        let controller = SignalingRetryController(
+            retryDelay: .milliseconds(10),
+            attemptTimeout: .seconds(1),
+            sleep: { _ in }
+        )
+
+        do {
+            _ = try await controller.sendWithRetry(
+                retries: 0,
+                validateCurrentAttempt: {
+                    attemptState.validationCount += 1
+                    if attemptState.validationCount == 2 {
+                        attemptState.isCurrent = false
+                    }
+                    guard attemptState.isCurrent else { throw CancellationError() }
+                },
+                reconnectIfNeeded: {},
+                send: {
+                    _ = await probe.nextAttempt()
+                }
+            )
+            XCTFail("Expected stale signaling owner cancellation")
+        } catch is CancellationError {
+            // Expected: the child validates the exact owner before invoking send.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(attemptState.validationCount, 2)
+        let attemptCount = await probe.attemptCount()
+        XCTAssertEqual(attemptCount, 0)
+    }
+
+    @MainActor
+    func testSendThatSelfCancelsCannotReturnSent() async {
+        let probe = RetryProbe()
+        let controller = SignalingRetryController(
+            retryDelay: .milliseconds(10),
+            attemptTimeout: .seconds(1),
+            sleep: { _ in }
+        )
+
+        do {
+            let outcome = try await controller.sendWithRetry(
+                retries: 0,
+                reconnectIfNeeded: {},
+                send: {
+                    _ = await probe.nextAttempt()
+                    withUnsafeCurrentTask { task in
+                        task?.cancel()
+                    }
+                }
+            )
+            XCTFail("A cancelled send child must not return \(outcome)")
+        } catch is CancellationError {
+            // Expected: cancellation is checked after the external send returns.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let attemptCount = await probe.attemptCount()
+        XCTAssertEqual(attemptCount, 1)
+    }
+
+    @MainActor
+    func testRequiredSetupFailureIsSupersededWhenHandshakeCompletesDuringSend() async throws {
+        let probe = RetryProbe()
+        let sendStarted = AsyncOneShotTestLatch()
+        let releaseSend = AsyncOneShotTestLatch()
+        let attemptState = SignalingAttemptState()
+        let controller = SignalingRetryController(
+            retryDelay: .milliseconds(10),
+            attemptTimeout: .seconds(1),
+            sleep: { duration in
+                await probe.recordSleep(duration)
+            }
+        )
+        let sendTask = Task { @MainActor in
+            try await controller.sendWithRetry(
+                retries: 2,
+                validateCurrentAttempt: {
+                    guard attemptState.isCurrent else { throw CancellationError() }
+                },
+                shouldSupersedeCurrentAttempt: {
+                    attemptState.handshakeComplete
+                },
+                reconnectIfNeeded: {
+                    await probe.recordReconnect()
+                },
+                send: {
+                    _ = await probe.nextAttempt()
+                    await sendStarted.signal()
+                    guard await releaseSend.wait(timeout: .seconds(2)) else {
+                        throw CancellationError()
+                    }
+                    throw WebRTCSignalingFaultInjectionTestError.sendFailed
+                }
+            )
+        }
+
+        let didStartSend = await sendStarted.wait(timeout: .seconds(2))
+        XCTAssertTrue(didStartSend)
+        attemptState.handshakeComplete = true
+        await releaseSend.signal()
+
+        let outcome = try await sendTask.value
+        XCTAssertEqual(outcome, .superseded)
+        let attemptCount = await probe.attemptCount()
+        let reconnectCount = await probe.reconnectCount()
+        let sleepCount = await probe.sleepCount()
+        XCTAssertEqual(attemptCount, 1)
+        XCTAssertEqual(reconnectCount, 0)
+        XCTAssertEqual(sleepCount, 0)
     }
 
     func testTimeoutCancelsHangingSendAttempt() async {
@@ -2229,6 +2435,7 @@ final class WebRTCSignalingFaultInjectionTests: XCTestCase {
 
 private enum WebRTCSignalingFaultInjectionTestError: Error {
     case reconnectFailed
+    case sendFailed
     case timedOut
 }
 
@@ -2328,6 +2535,14 @@ private actor RetryProbe {
     func attemptCount() -> Int { attempts }
     func reconnectCount() -> Int { reconnects }
     func sleepCount() -> Int { sleeps }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+private final class SignalingAttemptState {
+    var isCurrent = true
+    var handshakeComplete = false
+    var validationCount = 0
 }
 
 @available(iOS 17.0, *)

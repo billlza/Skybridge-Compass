@@ -6,13 +6,19 @@ import UIKit
 #endif
 
 @available(iOS 17.0, *)
+private struct FileTransferTargetSelection {
+    let device: DiscoveredDevice
+    let routeIntent: PeerTransportRouteIntent
+}
+
+@available(iOS 17.0, *)
 struct FileTransferView: View {
     @EnvironmentObject private var connectionManager: P2PConnectionManager
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var crossNetwork = CrossNetworkWebRTCManager.instance
     
     @State private var showFilePicker = false
-    @State private var targetDevice: DiscoveredDevice?
+    @State private var targetSelection: FileTransferTargetSelection?
     @State private var previewItem: FilePreviewItem?
     @State private var shareItem: FilePreviewItem?
     @State private var fileOpenErrorMessage: String?
@@ -98,40 +104,18 @@ struct FileTransferView: View {
             .foregroundColor(.white.opacity(0.4))
             .lineLimit(1)
             
-            let hasCrossNetwork: Bool = {
-                if case .connected = crossNetwork.state { return true }
-                return false
-            }()
-            
-            if lanQuickSendDevices.isEmpty && !hasCrossNetwork {
+            let crossNetworkSelection = crossNetworkQuickSendSelection
+
+            if lanQuickSendDevices.isEmpty && crossNetworkSelection == nil {
                 emptyDeviceState
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
-                        if hasCrossNetwork {
-                            let id = crossNetwork.remoteDeviceId ?? "webrtc-remote"
-                            let name = crossNetwork.remoteDeviceName ?? RuntimeLocalization.string("跨网设备")
-                            let pseudo = DiscoveredDevice(
-                                id: id,
-                                name: name,
-                                modelName: "Remote",
-                                platform: .macOS,
-                                osVersion: "",
-                                ipAddress: nil,
-                                services: [],
-                                portMap: [:],
-                                signalStrength: -50,
-                                lastSeen: Date(),
-                                isConnected: true,
-                                isTrusted: true,
-                                publicKey: nil,
-                                advertisedCapabilities: ["file_transfer"],
-                                capabilities: ["file_transfer"]
-                            )
+                        if let crossNetworkSelection {
                             DeviceQuickSendCard(
-                                device: pseudo,
+                                device: crossNetworkSelection.device,
                                 onTap: {
-                                    handleQuickSendTargetSelection(pseudo)
+                                    handleQuickSendTargetSelection(crossNetworkSelection)
                                 }
                             )
                         }
@@ -139,7 +123,12 @@ struct FileTransferView: View {
                             DeviceQuickSendCard(
                                 device: device,
                                 onTap: {
-                                    handleQuickSendTargetSelection(device)
+                                    handleQuickSendTargetSelection(
+                                        FileTransferTargetSelection(
+                                            device: device,
+                                            routeIntent: .directLAN
+                                        )
+                                    )
                                 }
                             )
                         }
@@ -172,6 +161,40 @@ struct FileTransferView: View {
         }
 
         return devices
+    }
+
+    private var crossNetworkQuickSendSelection: FileTransferTargetSelection? {
+        guard case .connected(let sessionID) = crossNetwork.state else { return nil }
+        let snapshot = crossNetwork.activeSessionSnapshot.flatMap { candidate in
+            candidate.sessionId == sessionID ? candidate : nil
+        }
+        let deviceID = snapshot?.deviceId
+            ?? crossNetwork.remoteDeviceId
+            ?? "webrtc-\(sessionID)"
+        let deviceName = snapshot?.deviceName
+            ?? crossNetwork.remoteDeviceName
+            ?? RuntimeLocalization.string("跨网设备")
+        let device = DiscoveredDevice(
+            id: deviceID,
+            name: deviceName,
+            modelName: "Remote",
+            platform: .macOS,
+            osVersion: "",
+            ipAddress: nil,
+            services: [],
+            portMap: [:],
+            signalStrength: -50,
+            lastSeen: Date(),
+            isConnected: true,
+            isTrusted: true,
+            publicKey: nil,
+            advertisedCapabilities: ["file_transfer"],
+            capabilities: ["file_transfer"]
+        )
+        return FileTransferTargetSelection(
+            device: device,
+            routeIntent: .crossNetwork(sessionID: sessionID)
+        )
     }
     
     private var emptyDeviceState: some View {
@@ -289,7 +312,7 @@ struct FileTransferView: View {
     }
     
     private func sendFiles(_ urls: [URL]) {
-        guard let device = targetDevice else {
+        guard let selection = targetSelection else {
             SkyBridgeLogger.shared.warning("⚠️ 未选择目标设备")
             return
         }
@@ -299,7 +322,8 @@ struct FileTransferView: View {
                 do {
                     try await fileTransferManager.sendFile(
                         at: url,
-                        to: device
+                        to: selection.device,
+                        routeIntent: selection.routeIntent
                     )
                     SkyBridgeLogger.shared.info("📤 开始发送: \(url.lastPathComponent)")
                 } catch {
@@ -313,11 +337,11 @@ struct FileTransferView: View {
         fileTransferManager.clearHistory()
     }
 
-    private func handleQuickSendTargetSelection(_ device: DiscoveredDevice) {
-        targetDevice = device
+    private func handleQuickSendTargetSelection(_ selection: FileTransferTargetSelection) {
+        targetSelection = selection
 #if DEBUG || SKYBRIDGE_TESTING
         if isUITestFilesScenario {
-            fileTransferManager.performUITestQuickSend(to: device)
+            fileTransferManager.performUITestQuickSend(to: selection.device)
             return
         }
 #endif

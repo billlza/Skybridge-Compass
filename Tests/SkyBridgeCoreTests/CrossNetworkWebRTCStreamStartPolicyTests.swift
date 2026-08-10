@@ -664,7 +664,11 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         }
         let helper = String(realtimeAudioCoordinatorSource[functionStart.lowerBound..<functionEnd.lowerBound])
 
-        XCTAssertTrue(helper.contains("requestSenderEndpoint(sessionID: sessionID)"))
+        XCTAssertTrue(
+            helper.contains(
+                "requestSenderEndpoint(\n                sessionID: sessionID,\n                validateOperationOwner: validateOperationOwner\n            )"
+            )
+        )
         XCTAssertTrue(helper.contains("leaseSource=localRoleLease"))
         XCTAssertTrue(helper.contains("relayBindPolicy: SkyBridgeRealtimeMediaRelayBindPolicy"))
         XCTAssertFalse(
@@ -682,7 +686,29 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
         XCTAssertTrue(source.contains("kind = \"audioTxRelayBindTimedOut\""))
         XCTAssertFalse(helper.contains("let endpoint = viewerAudioEndpoint"))
         XCTAssertTrue(source.contains("signalServer.requestMediaRelayLease(mediaAdmissionToken:"))
-        XCTAssertTrue(source.contains("makeWebRTCRealtimeAudioSenderCoordinator().refreshAdmissionLease(sessionID: sessionID)"))
+        XCTAssertTrue(
+            managerSource.contains(
+                "makeWebRTCRealtimeAudioSenderCoordinator().refreshAdmissionLease(\n            sessionID: sessionID,\n            validateOperationOwner: validateOperationOwner\n        )"
+            )
+        )
+        XCTAssertTrue(
+            realtimeAudioCoordinatorSource.contains(
+                "func requestSenderEndpoint(\n        sessionID: String,\n        validateOperationOwner: OperationOwnerValidator\n    )"
+            )
+        )
+        XCTAssertTrue(
+            realtimeAudioCoordinatorSource.contains(
+                "func refreshAdmissionLease(\n        sessionID: String,\n        validateOperationOwner: OperationOwnerValidator\n    )"
+            )
+        )
+        XCTAssertFalse(
+            realtimeAudioCoordinatorSource.contains("func requestSenderEndpoint(sessionID: String)"),
+            "Realtime audio endpoint acquisition must not retain a fail-open ownerless overload."
+        )
+        XCTAssertFalse(
+            realtimeAudioCoordinatorSource.contains("func refreshAdmissionLease(sessionID: String)"),
+            "Realtime audio lease refresh must not retain a fail-open ownerless overload."
+        )
         XCTAssertTrue(source.contains("preserveRealtimeAudioSender"))
         XCTAssertTrue(source.contains("audioTxSenderPreserved"))
         XCTAssertTrue(source.contains("directRealtimeAudioAttachTask = Task(priority: .utility)"))
@@ -1156,7 +1182,10 @@ final class CrossNetworkWebRTCStreamStartPolicyTests: XCTestCase {
             2,
             "Both successful and failed attach completions must be generation-bound."
         )
-        XCTAssertTrue(source.contains("webrtcScreenStreamingTaskTokensBySessionId"))
+        XCTAssertTrue(source.contains("private struct WebRTCScreenStreamingTaskRecord"))
+        XCTAssertTrue(source.contains("let callbackLease: WebRTCScreenCaptureCallbackLease"))
+        XCTAssertTrue(source.contains("record.callbackLease.revoke(token: record.token)"))
+        XCTAssertFalse(source.contains("webrtcScreenStreamingTaskTokensBySessionId"))
         XCTAssertTrue(source.contains("webrtcInteractionStreamingTaskTokensBySessionId"))
         XCTAssertTrue(source.contains("await task.value"))
         let stopStreamingBody = try sourceSlice(
