@@ -73,6 +73,187 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         }
     }
 
+    func testAndroidSKR1PolicyCanonicalGoldenVector() {
+        let expectedPreimage = goldenPreimage([
+            "domain=SkyBridge-SKR-1-Policy",
+            "version=1",
+            "policyRequirePQC=1",
+            "policyAllowClassicFallback=0",
+            "routeScope=lan"
+        ])
+
+        XCTAssertEqual(
+            sha256Hex(expectedPreimage),
+            "82dc84c640da0ab35b7711b86cfa38215c840b6f437f2d31a30a961ed17aae5e"
+        )
+        XCTAssertEqual(
+            androidSKR1GoldenRequest().expectedPolicyHashHex,
+            "82dc84c640da0ab35b7711b86cfa38215c840b6f437f2d31a30a961ed17aae5e"
+        )
+    }
+
+    func testAndroidSKR1RequestCanonicalAndBareJSONGoldenVector() throws {
+        let request = androidSKR1GoldenRequest()
+        let expectedPreimage = goldenPreimage([
+            "domain=SkyBridge-SKR-1-Request",
+            "version=1",
+            "requesterDeviceId=id:android-1",
+            "targetDeviceId=id:mac-1",
+            "requesterProtocolIdentityFingerprint=\(String(repeating: "a", count: 64))",
+            "targetProtocolIdentityFingerprint=\(String(repeating: "b", count: 64))",
+            "requestedSuiteWireIds=0x0001,0x0101",
+            "policyRequirePQC=1",
+            "policyAllowClassicFallback=0",
+            "policyHashHex=82dc84c640da0ab35b7711b86cfa38215c840b6f437f2d31a30a961ed17aae5e",
+            "routeScope=lan",
+            "bonjourEndpointDigest=\(String(repeating: "c", count: 64))",
+            "nonce=AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+            "sentAtMs=1700000000125"
+        ])
+
+        XCTAssertEqual(request.requestedSuiteWireIds, [0x0101, 0x0001])
+        XCTAssertEqual(request.nonce, androidSKR1GoldenNonce())
+        XCTAssertEqual(request.sentAt.timeIntervalSinceReferenceDate, 721_692_800.125, accuracy: 0)
+        XCTAssertEqual(request.canonicalPreimage, expectedPreimage)
+        XCTAssertEqual(
+            request.canonicalRequestHashHex,
+            "ef160c364bf085b77e1d14799283550343cf8844767951d819a87d04f8660428"
+        )
+        XCTAssertEqual(
+            sha256Hex(expectedPreimage),
+            "ef160c364bf085b77e1d14799283550343cf8844767951d819a87d04f8660428"
+        )
+
+        let envelope = try bareJSONEnvelope(.kemRefreshRequest(request))
+        XCTAssertEqual(envelope.keys.sorted(), ["kemRefreshRequest"])
+        let wire = try XCTUnwrap(envelope["kemRefreshRequest"] as? [String: Any])
+        XCTAssertEqual((wire["version"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual(wire["requesterDeviceId"] as? String, "id:android-1")
+        XCTAssertEqual(wire["targetDeviceId"] as? String, "id:mac-1")
+        XCTAssertEqual(
+            wire["requesterProtocolIdentityFingerprint"] as? String,
+            String(repeating: "a", count: 64)
+        )
+        XCTAssertEqual(
+            wire["targetProtocolIdentityFingerprint"] as? String,
+            String(repeating: "b", count: 64)
+        )
+        XCTAssertEqual(
+            (wire["requestedSuiteWireIds"] as? [NSNumber])?.map(\.uint16Value),
+            [0x0101, 0x0001]
+        )
+        XCTAssertEqual(wire["policyRequirePQC"] as? Bool, true)
+        XCTAssertEqual(wire["policyAllowClassicFallback"] as? Bool, false)
+        XCTAssertEqual(
+            wire["policyHashHex"] as? String,
+            "82dc84c640da0ab35b7711b86cfa38215c840b6f437f2d31a30a961ed17aae5e"
+        )
+        XCTAssertEqual(wire["routeScope"] as? String, "lan")
+        XCTAssertEqual(
+            wire["bonjourEndpointDigest"] as? String,
+            String(repeating: "c", count: 64)
+        )
+        XCTAssertEqual(wire["nonce"] as? String, "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX")
+        XCTAssertEqual((wire["sentAt"] as? NSNumber)?.doubleValue, 721_692_800.125)
+    }
+
+    func testAndroidSKR1ResponseCanonicalAndBareJSONGoldenVector() throws {
+        let response = androidSKR1GoldenResponse()
+        let expectedPreimage = goldenPreimage([
+            "domain=SkyBridge-SKR-1-SignedKEMRefresh",
+            "version=1",
+            "deviceId=id:mac-1",
+            "aliases=bonjour:mac@local.,id:mac-1",
+            "protocolSigningAlgorithm=Ed25519",
+            "protocolIdentityPublicKeyHash=02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+            "protocolIdentityFingerprint=6d2b9f7fa7f28ec0553190b584e04b31b946d0767464c9028284bdb721e4d884",
+            "suiteNames=ML-KEM-768,X-Wing",
+            "suiteWireIds=0x0001,0x0101",
+            "kemPublicKeyHash=fa7b34def1caf0972fcd82c9913908a287328dd7c71a3ecf109e62a8ec482a8d",
+            "keyId=skr-key-1",
+            "generation=1700000000125",
+            "sentAtMs=1700000000250",
+            "expiresAtMs=1700000300250",
+            "requestNonce=AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+            "requestHashHex=ef160c364bf085b77e1d14799283550343cf8844767951d819a87d04f8660428",
+            "policyRequirePQC=1",
+            "policyAllowClassicFallback=0",
+            "routeScope=lan",
+            "bonjourEndpointDigest=\(String(repeating: "c", count: 64))"
+        ])
+
+        XCTAssertEqual(response.aliases, ["id:mac-1", "bonjour:mac@local."])
+        XCTAssertEqual(response.kemPublicKeys.map(\.suiteWireId), [0x0101, 0x0001])
+        XCTAssertEqual(response.protocolIdentityPublicKey, Data(repeating: 0x11, count: 32))
+        XCTAssertEqual(response.kemPublicKeys[0].publicKey, Data(repeating: 0x66, count: 1_184))
+        XCTAssertEqual(response.kemPublicKeys[1].publicKey, Data(repeating: 0x55, count: 1_216))
+        XCTAssertEqual(response.requestNonce, androidSKR1GoldenNonce())
+        XCTAssertEqual(response.signature, Data(repeating: 0x77, count: 64))
+        XCTAssertEqual(response.routeScope, " LAN ")
+        XCTAssertEqual(response.sentAt.timeIntervalSinceReferenceDate, 721_692_800.25, accuracy: 0)
+        XCTAssertEqual(response.expiresAt.timeIntervalSinceReferenceDate, 721_693_100.25, accuracy: 0)
+        XCTAssertEqual(
+            ProtocolIdentityPublicKeys(
+                protocolPublicKey: response.protocolIdentityPublicKey,
+                protocolAlgorithm: .ed25519
+            ).authoritativeFingerprint.lowercased(),
+            response.protocolIdentityFingerprint
+        )
+        XCTAssertEqual(response.signaturePreimage, expectedPreimage)
+        XCTAssertEqual(
+            sha256Hex(expectedPreimage),
+            "e5cf02c00119fa5bc7d19335a726fed99807de83dc963fad1be144b8d310b99f"
+        )
+
+        let envelope = try bareJSONEnvelope(.signedKEMRefresh(response))
+        XCTAssertEqual(envelope.keys.sorted(), ["signedKEMRefresh"])
+        let wire = try XCTUnwrap(envelope["signedKEMRefresh"] as? [String: Any])
+        XCTAssertEqual((wire["version"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual(wire["deviceId"] as? String, "id:mac-1")
+        XCTAssertEqual(wire["aliases"] as? [String], ["id:mac-1", "bonjour:mac@local."])
+        XCTAssertEqual(wire["protocolSigningAlgorithm"] as? String, "Ed25519")
+        XCTAssertEqual(
+            wire["protocolIdentityPublicKey"] as? String,
+            Data(repeating: 0x11, count: 32).base64EncodedString()
+        )
+        XCTAssertEqual(
+            wire["protocolIdentityFingerprint"] as? String,
+            "6d2b9f7fa7f28ec0553190b584e04b31b946d0767464c9028284bdb721e4d884"
+        )
+        let wireKeys = try XCTUnwrap(wire["kemPublicKeys"] as? [[String: Any]])
+        XCTAssertEqual(
+            wireKeys.compactMap { ($0["suiteWireId"] as? NSNumber)?.uint16Value },
+            [0x0101, 0x0001]
+        )
+        XCTAssertEqual(
+            wireKeys.compactMap { $0["publicKey"] as? String },
+            [
+                Data(repeating: 0x66, count: 1_184).base64EncodedString(),
+                Data(repeating: 0x55, count: 1_216).base64EncodedString()
+            ]
+        )
+        XCTAssertEqual(wire["keyId"] as? String, "skr-key-1")
+        XCTAssertEqual((wire["generation"] as? NSNumber)?.uint64Value, 1_700_000_000_125)
+        XCTAssertEqual((wire["sentAt"] as? NSNumber)?.doubleValue, 721_692_800.25)
+        XCTAssertEqual((wire["expiresAt"] as? NSNumber)?.doubleValue, 721_693_100.25)
+        XCTAssertEqual(wire["requestNonce"] as? String, "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX")
+        XCTAssertEqual(
+            wire["requestHashHex"] as? String,
+            "ef160c364bf085b77e1d14799283550343cf8844767951d819a87d04f8660428"
+        )
+        XCTAssertEqual(wire["policyRequirePQC"] as? Bool, true)
+        XCTAssertEqual(wire["policyAllowClassicFallback"] as? Bool, false)
+        XCTAssertEqual(wire["routeScope"] as? String, " LAN ")
+        XCTAssertEqual(
+            wire["bonjourEndpointDigest"] as? String,
+            String(repeating: "c", count: 64)
+        )
+        XCTAssertEqual(
+            wire["signature"] as? String,
+            Data(repeating: 0x77, count: 64).base64EncodedString()
+        )
+    }
+
     func testRequestCanonicalHashIsStableAcrossSuiteOrdering() {
         let nonce = Data(repeating: 0x44, count: 24)
         let left = AppMessage.KEMRefreshRequestPayload(
@@ -1013,6 +1194,75 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         XCTAssertThrowsError(try wrongTarget.validatedForOOBBinding(request: request, now: now)) { error in
             XCTAssertEqual(error as? AppMessage.ProtocolIdentityBindingValidationError, .targetDeviceIdMismatch)
         }
+    }
+
+    private func androidSKR1GoldenRequest() -> AppMessage.KEMRefreshRequestPayload {
+        AppMessage.KEMRefreshRequestPayload(
+            requesterDeviceId: "id:android-1",
+            targetDeviceId: "id:mac-1",
+            requesterProtocolIdentityFingerprint: String(repeating: "a", count: 64),
+            targetProtocolIdentityFingerprint: String(repeating: "b", count: 64),
+            requestedSuiteWireIds: [0x0101, 0x0001],
+            policyRequirePQC: true,
+            policyAllowClassicFallback: false,
+            policyHashHex: "82dc84c640da0ab35b7711b86cfa38215c840b6f437f2d31a30a961ed17aae5e",
+            routeScope: "lan",
+            bonjourEndpointDigest: String(repeating: "c", count: 64),
+            nonce: androidSKR1GoldenNonce(),
+            sentAt: Date(timeIntervalSinceReferenceDate: 721_692_800.125)
+        )
+    }
+
+    private func androidSKR1GoldenResponse() -> AppMessage.SignedKEMRefreshPayload {
+        AppMessage.SignedKEMRefreshPayload(
+            deviceId: "id:mac-1",
+            aliases: ["id:mac-1", "bonjour:mac@local."],
+            protocolSigningAlgorithm: ProtocolSigningAlgorithm.ed25519.rawValue,
+            protocolIdentityPublicKey: Data(repeating: 0x11, count: 32),
+            protocolIdentityFingerprint:
+                "6d2b9f7fa7f28ec0553190b584e04b31b946d0767464c9028284bdb721e4d884",
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: Data(repeating: 0x66, count: 1_184)
+                ),
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.xwingMLDSA.wireId,
+                    publicKey: Data(repeating: 0x55, count: 1_216)
+                )
+            ],
+            keyId: "skr-key-1",
+            generation: 1_700_000_000_125,
+            sentAt: Date(timeIntervalSinceReferenceDate: 721_692_800.25),
+            expiresAt: Date(timeIntervalSinceReferenceDate: 721_693_100.25),
+            requestNonce: androidSKR1GoldenNonce(),
+            requestHashHex:
+                "ef160c364bf085b77e1d14799283550343cf8844767951d819a87d04f8660428",
+            policyRequirePQC: true,
+            policyAllowClassicFallback: false,
+            routeScope: " LAN ",
+            bonjourEndpointDigest: String(repeating: "c", count: 64),
+            signature: Data(repeating: 0x77, count: 64)
+        )
+    }
+
+    private func androidSKR1GoldenNonce() -> Data {
+        Data((0..<24).map { UInt8($0) })
+    }
+
+    private func bareJSONEnvelope(_ message: AppMessage) throws -> [String: Any] {
+        let encoded = try JSONEncoder().encode(message)
+        return try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+    }
+
+    private func goldenPreimage(_ lines: [String]) -> Data {
+        Data(lines.joined(separator: "\n").utf8)
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func validPayload(
