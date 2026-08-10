@@ -12,7 +12,7 @@ final class AppleCompatibilityVectorCaptureTests: XCTestCase {
     private static let toolRelativePath =
         "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift"
     private static let expectedInputSHA256 =
-        "d69eebb27da06153b7d5a43a1ec3a5dce9d77a4148cc1a295b49fa7e15a473ca"
+        "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0"
 
     func testProductionCodecsBuildDeterministicBoundedCaptureSet() throws {
         let repositoryRoot = Self.repositoryRoot
@@ -197,6 +197,28 @@ final class AppleCompatibilityVectorCaptureTests: XCTestCase {
         XCTAssertNoThrow(try Self.validateRelativeRepositoryPath(Self.inputRelativePath))
         XCTAssertNoThrow(try Self.validateCollectedAtUTC("2026-08-11T12:34:56.789Z"))
         XCTAssertThrowsError(try Self.validateCollectedAtUTC("2026-08-11T12:34:56+08:00"))
+
+        let keyHex = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        let canonicalIdentityHex = "012000\(keyHex)00"
+        XCTAssertNoThrow(try SemanticInputs.validateIdentityPublicKey(
+            canonicalIdentityHex,
+            field: "test identity"
+        ))
+        for invalidIdentityHex in [
+            keyHex,
+            "012000\(keyHex)",
+            "012000\(keyHex)0000"
+        ] {
+            XCTAssertThrowsError(try SemanticInputs.validateIdentityPublicKey(
+                invalidIdentityHex,
+                field: "test identity"
+            )) { error in
+                guard let captureError = error as? CaptureError,
+                      case .invalidSemanticInput = captureError else {
+                    return XCTFail("Expected typed invalidSemanticInput, got \(error)")
+                }
+            }
+        }
     }
 
     func testCaptureWriterIsIdempotentForIdenticalBytesAndRejectsOverwrite() throws {
@@ -441,12 +463,18 @@ private extension AppleCompatibilityVectorCaptureTests {
                 throw CaptureError.invalidSemanticInput("F2 suite IDs or raw order changed")
             }
             try Self.requireByteCount(messageA.clientNonceHex, 32, "MessageA client nonce")
-            try Self.requireByteCount(messageA.identityPublicKeyHex, 32, "MessageA identity key")
+            _ = try Self.validateIdentityPublicKey(
+                messageA.identityPublicKeyHex,
+                field: "MessageA identity key"
+            )
             try Self.requireByteCount(messageA.signatureHex, 64, "MessageA signature")
             try Self.requireByteCount(messageA.keyShares[0].shareHex, 32, "MessageA X25519 share")
             try Self.requireByteCount(messageB.responderShareHex, 32, "MessageB responder share")
             try Self.requireByteCount(messageB.serverNonceHex, 32, "MessageB server nonce")
-            try Self.requireByteCount(messageB.identityPublicKeyHex, 32, "MessageB identity key")
+            _ = try Self.validateIdentityPublicKey(
+                messageB.identityPublicKeyHex,
+                field: "MessageB identity key"
+            )
             try Self.requireByteCount(messageB.signatureHex, 64, "MessageB signature")
             try Self.requireByteCount(finished.macHex, 32, "Finished MAC")
             try Self.validateEncryptedPayload(messageB.encryptedPayload)
@@ -486,6 +514,26 @@ private extension AppleCompatibilityVectorCaptureTests {
             guard try decodeHex(value).count == count else {
                 throw CaptureError.invalidSemanticInput("\(field) must be \(count) bytes")
             }
+        }
+
+        static func validateIdentityPublicKey(
+            _ value: String,
+            field: String
+        ) throws -> IdentityPublicKeys {
+            let encoded = try decodeHex(value)
+            let identity: IdentityPublicKeys
+            do {
+                identity = try IdentityPublicKeys.decode(from: encoded)
+            } catch {
+                throw CaptureError.invalidSemanticInput("\(field) is not a production IdentityPublicKeys value")
+            }
+            guard identity.protocolAlgorithm == .ed25519,
+                  identity.protocolPublicKey.count == 32,
+                  identity.secureEnclavePublicKey == nil,
+                  identity.encoded == encoded else {
+                throw CaptureError.invalidSemanticInput("\(field) must be canonical Ed25519 without Secure Enclave")
+            }
+            return identity
         }
 
         private static func validateEncryptedPayload(_ input: EncryptedPayloadInput) throws {
@@ -971,8 +1019,24 @@ private extension AppleCompatibilityVectorCaptureTests {
               let finished = byType["finished"] else {
             throw CaptureError.invalidSemanticInput("missing F2 vectors")
         }
-        guard try HandshakeMessageA.decode(from: messageA.rawBytes).encoded == messageA.rawBytes,
-              try HandshakeMessageB.decode(from: messageB.rawBytes).encoded == messageB.rawBytes,
+        let decodedMessageA = try HandshakeMessageA.decode(from: messageA.rawBytes)
+        let decodedMessageB = try HandshakeMessageB.decode(from: messageB.rawBytes)
+        let decodedIdentityA = try IdentityPublicKeys.decode(from: decodedMessageA.identityPublicKey)
+        let decodedIdentityB = try IdentityPublicKeys.decode(from: decodedMessageB.identityPublicKey)
+        let expectedIdentityA = try SemanticInputs.validateIdentityPublicKey(
+            inputs.messageA.identityPublicKeyHex,
+            field: "MessageA identity key"
+        )
+        let expectedIdentityB = try SemanticInputs.validateIdentityPublicKey(
+            inputs.messageB.identityPublicKeyHex,
+            field: "MessageB identity key"
+        )
+        guard decodedMessageA.encoded == messageA.rawBytes,
+              decodedMessageB.encoded == messageB.rawBytes,
+              decodedIdentityA == expectedIdentityA,
+              decodedIdentityB == expectedIdentityB,
+              decodedIdentityA.encoded == decodedMessageA.identityPublicKey,
+              decodedIdentityB.encoded == decodedMessageB.identityPublicKey,
               try HandshakeFinished.decode(from: finished.rawBytes).encoded == finished.rawBytes else {
             throw CaptureError.roundTripMismatch("F2")
         }
