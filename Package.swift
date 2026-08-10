@@ -529,7 +529,8 @@ let package = Package(
             exclude: [
             ],
             resources: [
-                .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json")
+                .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json"),
+                .copy("Fixtures/AppleCompatibilityVectors/inputs.json")
             ],
             swiftSettings: ([
             ] + (enableApplePQCSDK ? [

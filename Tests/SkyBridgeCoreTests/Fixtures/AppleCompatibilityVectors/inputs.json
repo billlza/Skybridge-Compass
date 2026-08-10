@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "fixtureSetId": "apple-production-codec-v1",
+  "fileTransfer": [
+    {
+      "messageType": "metadata",
+      "op": "metadata",
+      "transferId": "11111111-2222-3333-4444-555555555555",
+      "senderDeviceId": "apple-reference-mac",
+      "senderDeviceName": "Apple Reference Mac",
+      "fileName": "vector.bin",
+      "fileSize": 6,
+      "chunkSize": 4,
+      "totalChunks": 2,
+      "mimeType": "application/octet-stream"
+    },
+    {
+      "messageType": "metadataAck",
+      "op": "metadataAck",
+      "transferId": "21111111-2222-3333-4444-555555555555"
+    },
+    {
+      "messageType": "chunk",
+      "op": "chunk",
+      "transferId": "31111111-2222-3333-4444-555555555555",
+      "chunkIndex": 0,
+      "chunkDataHex": "00010203fefd",
+      "chunkSha256Hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "rawSize": 6
+    },
+    {
+      "messageType": "chunkAck",
+      "op": "chunkAck",
+      "transferId": "41111111-2222-3333-4444-555555555555",
+      "chunkIndex": 0,
+      "receivedBytes": 6
+    },
+    {
+      "messageType": "complete",
+      "op": "complete",
+      "transferId": "51111111-2222-3333-4444-555555555555",
+      "receivedBytes": 6,
+      "fileSha256Hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "merkleRootHex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "merkleRootSignatureHex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "merkleRootSignatureAlg": "hmac-sha256-session-v1"
+    },
+    {
+      "messageType": "completeAck",
+      "op": "completeAck",
+      "transferId": "61111111-2222-3333-4444-555555555555",
+      "receivedBytes": 6,
+      "fileSha256Hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+    },
+    {
+      "messageType": "cancel",
+      "op": "cancel",
+      "transferId": "71111111-2222-3333-4444-555555555555",
+      "message": "cancelled-by-reference"
+    },
+    {
+      "messageType": "error",
+      "op": "error",
+      "transferId": "81111111-2222-3333-4444-555555555555",
+      "message": "path/segment"
+    }
+  ],
+  "cryptoCapabilities": {
+    "supportedKEM": ["X25519"],
+    "supportedSignature": ["Ed25519"],
+    "supportedAuthProfiles": ["classic"],
+    "supportedAEAD": ["AES-256-GCM"],
+    "pqcAvailable": false,
+    "platformVersion": "macOS-26.0",
+    "providerType": "CryptoKit-Classic"
+  },
+  "handshakePolicy": {
+    "requirePQC": false,
+    "allowClassicFallback": true,
+    "minimumTier": "classic",
+    "requireSecureEnclavePoP": false
+  },
+  "messageA": {
+    "supportedSuiteWireIds": [4097],
+    "keyShares": [
+      {
+        "suiteWireId": 4097,
+        "shareHex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+      }
+    ],
+    "clientNonceHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "identityPublicKeyHex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "signatureHex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "extensionsRawHex": "",
+    "secureEnclaveSignatureHex": null,
+    "initiatorContributionHex": null
+  },
+  "messageB": {
+    "selectedSuiteWireId": 4097,
+    "responderShareHex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "serverNonceHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "identityPublicKeyHex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+    "signatureHex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "secureEnclaveSignatureHex": null,
+    "encryptedPayload": {
+      "suiteWireId": 4097,
+      "encapsulatedKeyHex": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "nonceHex": "303132333435363738393a3b",
+      "ciphertextHex": "404142434445464748494a4b4c4d4e4f",
+      "tagHex": "505152535455565758595a5b5c5d5e5f"
+    }
+  },
+  "finished": {
+    "direction": "responderToInitiator",
+    "macHex": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+  },
+  "hpke": [
+    {
+      "messageType": "application-v1",
+      "suiteWireId": 4097,
+      "encapsulatedKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonceHex": "202122232425262728292a2b",
+      "ciphertextHex": "303132333435363738393a3b3c3d3e3f",
+      "tagHex": "404142434445464748494a4b4c4d4e4f"
+    },
+    {
+      "messageType": "application-v2",
+      "suiteWireId": 4097,
+      "encapsulatedKeyHex": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "nonceHex": "",
+      "ciphertextHex": "505152535455565758595a5b5c5d5e5f",
+      "tagHex": ""
+    },
+    {
+      "messageType": "handshake-v1",
+      "suiteWireId": 4097,
+      "encapsulatedKeyHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonceHex": "505152535455565758595a5b",
+      "ciphertextHex": "606162636465666768696a6b6c6d6e6f",
+      "tagHex": "707172737475767778797a7b7c7d7e7f"
+    },
+    {
+      "messageType": "handshake-v2",
+      "suiteWireId": 4097,
+      "encapsulatedKeyHex": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+      "nonceHex": "",
+      "ciphertextHex": "808182838485868788898a8b8c8d8e8f",
+      "tagHex": ""
+    },
+    {
+      "messageType": "v2-empty-nonce-tag",
+      "suiteWireId": 4097,
+      "encapsulatedKeyHex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "nonceHex": "",
+      "ciphertextHex": "deadbeef",
+      "tagHex": ""
+    }
+  ],
+  "bonjour": [
+    {
+      "messageType": "capabilities-record",
+      "deviceId": "ipad-reference-0001",
+      "pubKeyFingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "platform": "ipados",
+      "role": "control",
+      "serviceType": "_skybridge._tcp"
+    },
+    {
+      "messageType": "identity-keys-record",
+      "deviceId": "iphone-reference-01",
+      "pubKeyFingerprint": "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "platform": "ios",
+      "role": "dedicatedService",
+      "serviceType": "_skybridge-xfer._tcp"
+    },
+    {
+      "messageType": "main-service-record",
+      "deviceId": "mac-reference-0001",
+      "pubKeyFingerprint": "2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "platform": "macos",
+      "role": "control",
+      "serviceType": "_skybridge._tcp"
+    },
+    {
+      "messageType": "remote-service-record",
+      "deviceId": "mac-reference-0002",
+      "pubKeyFingerprint": "3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "platform": "macos",
+      "role": "dedicatedService",
+      "serviceType": "_skybridge-rd._tcp"
+    },
+    {
+      "messageType": "transfer-service-record",
+      "deviceId": "ipad-reference-0002",
+      "pubKeyFingerprint": "4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "platform": "ipados",
+      "role": "dedicatedService",
+      "serviceType": "_skybridge-xfer._tcp"
+    }
+  ]
+}
