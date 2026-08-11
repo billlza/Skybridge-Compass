@@ -26,6 +26,7 @@ import SkyBridgeRealtimeMedia
 private final class PeerConnection {
     let id: String
     let role: RemoteControlSessionRole
+    let inputOwner: RemoteControlInputOwner
     let connection: NWConnection
     var remoteVideoFormats: Set<String>
     var requestedStreamConfiguration: RemoteDesktopStreamConfiguration?
@@ -71,6 +72,11 @@ private final class PeerConnection {
     ) {
         self.id = id
         self.role = role
+        self.inputOwner = RemoteControlInputOwner(
+            transport: .p2p,
+            sessionID: id,
+            generation: UUID()
+        )
         self.connection = connection
         self.remoteVideoFormats = Set(remoteVideoFormats.map { $0.lowercased() })
         self.clipboardSessionId = UUID()
@@ -366,8 +372,28 @@ public final class RemoteControlManager: BaseManager {
         case .beingControlled:
             removedPeer = beingControlledPeers.removeValue(forKey: deviceId)
         }
+        if let removedPeer {
+            releaseRemoteInput(for: removedPeer, reason: "peer_removed")
+        }
         unregisterConnectedDevice(deviceId, for: role)
         return removedPeer
+    }
+
+    private func releaseRemoteInput(for peer: PeerConnection, reason: String) {
+        let result = RemoteControlInputLifecycleCoordinator.shared.releaseAll(
+            for: peer.inputOwner
+        )
+        guard result.hadTrackedInput else { return }
+        logger.info(
+            """
+            remote-input-release transport=p2p reason=\(reason, privacy: .public) \
+            mouseButtons=\(result.trackedMouseButtonCount, privacy: .public) \
+            keys=\(result.trackedKeyCount, privacy: .public) \
+            released=\(result.releasedControlCount, privacy: .public) \
+            failed=\(result.failedReleaseCount, privacy: .public) \
+            permissionSkipped=\(result.skippedForMissingPermission, privacy: .public)
+            """
+        )
     }
 
     private func registerConnectedDevice(_ deviceId: String, for role: RemoteControlSessionRole) {
@@ -824,6 +850,7 @@ public final class RemoteControlManager: BaseManager {
             activeClipboardPeerId = nil
         }
 
+        releaseRemoteInput(for: peer, reason: "p2p_user_stop")
         peer.connection.cancel()
         _ = removePeer(deviceId: deviceId, role: .beingControlled)
         if #available(macOS 14.0, *) {
@@ -853,6 +880,9 @@ public final class RemoteControlManager: BaseManager {
         resetCapturePipeline: Bool
     ) {
         let previousPeer = currentPeer(for: peer.role, deviceId: peer.id)
+        if let previousPeer, previousPeer !== peer {
+            releaseRemoteInput(for: previousPeer, reason: "p2p_session_replaced")
+        }
         registerPeer(peer)
 
         guard let previousPeer, previousPeer !== peer else { return }
@@ -985,9 +1015,6 @@ public final class RemoteControlManager: BaseManager {
             doubleClickIntervalMilliseconds: doubleClickInterval
         )
         try await peer.outboundFramePump.sendControlPayload(classifiedEvent, type: .mouseEvent)
-        logger.debug(
-            "🖱️ 发送鼠标事件 \(classifiedEvent.type.rawValue, privacy: .public) clickCount=\(classifiedEvent.clickCount ?? 1, privacy: .public) -> \(deviceId, privacy: .public)"
-        )
     }
 
     public func sendKeyboardEvent(_ event: RemoteKeyboardEvent, to deviceId: String) async throws {
@@ -996,7 +1023,6 @@ public final class RemoteControlManager: BaseManager {
         }
         try ensureSecureChannelEstablished(for: peer)
         try await peer.outboundFramePump.sendControlPayload(event, type: .keyboardEvent)
-        logger.debug("⌨️ 发送键盘事件 keyCode=\(event.keyCode) -> \(deviceId, privacy: .public)")
     }
 
  // MARK: - 屏幕共享（被控制端 -> 控制端）
@@ -3679,7 +3705,7 @@ public final class RemoteControlManager: BaseManager {
                 )
             }
             let evt = try JSONDecoder().decode(RemoteMouseEvent.self, from: message.payload)
-            await handleRemoteMouseEvent(evt)
+            handleRemoteMouseEvent(evt, from: peer)
         case .keyboardEvent:
             guard peer.requestedStreamConfiguration?.isStopRequest == false else {
                 throw RemoteControlError.handshakeInitializationFailed(
@@ -3687,7 +3713,7 @@ public final class RemoteControlManager: BaseManager {
                 )
             }
             let evt = try JSONDecoder().decode(RemoteKeyboardEvent.self, from: message.payload)
-            await handleRemoteKeyboardEvent(evt)
+            handleRemoteKeyboardEvent(evt, from: peer)
         case .screenData:
  // 正常情况下，被控制端不会收到 screenData；有就丢掉
             logger.debug("🎮 被控制端收到 screenData，忽略")
@@ -3801,6 +3827,14 @@ public final class RemoteControlManager: BaseManager {
             )
         peer.streamConfigurationApplicationGeneration &+= 1
         let applicationGeneration = peer.streamConfigurationApplicationGeneration
+
+        if effectiveConfig.isStopRequest {
+            // The authenticated stop intent ends HID ownership immediately. Do
+            // not make synthetic release depend on an outbound ACK that may be
+            // back-pressured indefinitely; media/config state is still committed
+            // only after the ACK below.
+            releaseRemoteInput(for: peer, reason: "p2p_stream_stop")
+        }
 
         // ACK is the commit receipt for this stream operation. Do not detach senders, publish the
         // configuration, enable the pump, or start capture until the exact ACK was sent.
@@ -4058,28 +4092,44 @@ public final class RemoteControlManager: BaseManager {
         emitSmokeTrace(message)
     }
 
-    private func handleRemoteMouseEvent(_ event: RemoteMouseEvent) async {
-        logger.debug("🖱️ 处理远程鼠标事件: \(event.type.rawValue, privacy: .public)")
-        guard RemoteControlInputEventInjector.ensureAccessibilityPermission() else {
-            logger.warning("⚠️ 未获得辅助功能权限，无法注入鼠标事件")
+    private func handleRemoteMouseEvent(_ event: RemoteMouseEvent, from peer: PeerConnection) {
+        guard isCurrentPeer(peer),
+              peer.role == .beingControlled,
+              peer.securityAdmissionApproved,
+              peer.requestedStreamConfiguration?.isStopRequest == false else {
             return
         }
-
-        RemoteControlInputEventInjector.postMouseEvent(event)
+        let result = RemoteControlInputLifecycleCoordinator.shared.postMouseEvent(
+            event,
+            owner: peer.inputOwner
+        )
+        if result != .posted {
+            logger.warning(
+                "remote-input-rejected transport=p2p kind=mouse reason=\(String(describing: result), privacy: .public)"
+            )
+        }
     }
 
     nonisolated static func mouseInjectionPoint(for event: RemoteMouseEvent) -> CGPoint {
         RemoteControlInputEventInjector.mouseInjectionPoint(for: event)
     }
 
-    private func handleRemoteKeyboardEvent(_ event: RemoteKeyboardEvent) async {
-        logger.debug("⌨️ 处理远程键盘事件: keyCode=\(event.keyCode)")
-        guard RemoteControlInputEventInjector.ensureAccessibilityPermission() else {
-            logger.warning("⚠️ 未获得辅助功能权限，无法注入键盘事件")
+    private func handleRemoteKeyboardEvent(_ event: RemoteKeyboardEvent, from peer: PeerConnection) {
+        guard isCurrentPeer(peer),
+              peer.role == .beingControlled,
+              peer.securityAdmissionApproved,
+              peer.requestedStreamConfiguration?.isStopRequest == false else {
             return
         }
-
-        RemoteControlInputEventInjector.postKeyboardEvent(event)
+        let result = RemoteControlInputLifecycleCoordinator.shared.postKeyboardEvent(
+            event,
+            owner: peer.inputOwner
+        )
+        if result != .posted {
+            logger.warning(
+                "remote-input-rejected transport=p2p kind=keyboard reason=\(String(describing: result), privacy: .public)"
+            )
+        }
     }
 
  // MARK: - 性能指标更新
@@ -4231,6 +4281,7 @@ public final class RemoteControlManager: BaseManager {
             kind: .interrupted,
             reason: error.localizedDescription
         )
+        releaseRemoteInput(for: peer, reason: "p2p_transport_retired")
         peer.connection.cancel()
         if peer.role == .beingControlled {
             RemoteControlSecurityNoticeCenter.shared.endNotice(

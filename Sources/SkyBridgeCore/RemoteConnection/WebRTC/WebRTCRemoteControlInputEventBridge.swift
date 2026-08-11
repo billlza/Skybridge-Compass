@@ -6,20 +6,34 @@
 import Foundation
 
 enum WebRTCRemoteControlInputEventBridge {
-    static func handleMouseEvent(_ event: MouseEventWire) {
-        guard let remoteEvent = remoteMouseEvent(from: event),
-              RemoteControlInputEventInjector.ensureAccessibilityPermission() else {
-            return
+    @MainActor
+    @discardableResult
+    static func handleMouseEvent(
+        _ event: MouseEventWire,
+        owner: RemoteControlInputOwner
+    ) -> RemoteControlInputPostResult {
+        guard let remoteEvent = remoteMouseEvent(from: event) else {
+            return .invalidEvent
         }
-        RemoteControlInputEventInjector.postMouseEvent(remoteEvent)
+        return RemoteControlInputLifecycleCoordinator.shared.postMouseEvent(
+            remoteEvent,
+            owner: owner
+        )
     }
 
-    static func handleKeyboardEvent(_ event: KeyboardEventWire) {
-        guard let remoteEvent = remoteKeyboardEvent(from: event),
-              RemoteControlInputEventInjector.ensureAccessibilityPermission() else {
-            return
+    @MainActor
+    @discardableResult
+    static func handleKeyboardEvent(
+        _ event: KeyboardEventWire,
+        owner: RemoteControlInputOwner
+    ) -> RemoteControlInputPostResult {
+        guard let remoteEvent = remoteKeyboardEvent(from: event) else {
+            return .invalidEvent
         }
-        RemoteControlInputEventInjector.postKeyboardEvent(remoteEvent)
+        return RemoteControlInputLifecycleCoordinator.shared.postKeyboardEvent(
+            remoteEvent,
+            owner: owner
+        )
     }
 
     static func remoteMouseEvent(from event: MouseEventWire) -> RemoteMouseEvent? {

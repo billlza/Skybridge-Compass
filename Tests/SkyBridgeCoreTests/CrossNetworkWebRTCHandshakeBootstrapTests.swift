@@ -1528,7 +1528,12 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(releaseAcceptanceFinalizer.contains("_verify_final_manifest(private_path, final_content, final_payload)"))
         XCTAssertFalse(releaseAcceptanceFinalizer.contains("original_private"))
         XCTAssertFalse(releaseAcceptanceFinalizer.localizedCaseInsensitiveContains("rollback"))
-        XCTAssertTrue(remoteSmokeSource.contains("if (( original_status == 0 && cleanup_status == 0 )); then"))
+        XCTAssertTrue(
+            remoteSmokeSource.contains(
+                "if (( original_status == 0 && cleanup_status == 0 )) \\\n" +
+                    "    && [[ \"$MAC_HOST_ONLY\" != \"1\" ]]; then"
+            )
+        )
         XCTAssertTrue(remoteSmokeSource.contains("derive_macos_smoke_host_minimal_entitlements"))
         XCTAssertTrue(remoteSmokeSource.contains("validate_macos_smoke_host_minimal_entitlements"))
         XCTAssertTrue(remoteSmokeSource.contains("required_groups = {expected_application_identifier, expected_shared_group}"))

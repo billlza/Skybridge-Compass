@@ -70,25 +70,21 @@ class InteractiveRemoteView: MTKView {
     override func mouseDown(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         onMouseEvent?(location, .leftMouseDown, Int(event.buttonNumber))
-        logger.debug("🖱️ 鼠标按下: (\(location.x), \(location.y))")
     }
     
     override func mouseUp(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         onMouseEvent?(location, .leftMouseUp, Int(event.buttonNumber))
-        logger.debug("🖱️ 鼠标释放: (\(location.x), \(location.y))")
     }
     
     override func rightMouseDown(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         onMouseEvent?(location, .rightMouseDown, Int(event.buttonNumber))
-        logger.debug("🖱️ 右键按下: (\(location.x), \(location.y))")
     }
     
     override func rightMouseUp(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
         onMouseEvent?(location, .rightMouseUp, Int(event.buttonNumber))
-        logger.debug("🖱️ 右键释放: (\(location.x), \(location.y))")
     }
     
     override func mouseMoved(with event: NSEvent) {
@@ -108,25 +104,21 @@ class InteractiveRemoteView: MTKView {
     
     override func scrollWheel(with event: NSEvent) {
         onScrollEvent?(event.scrollingDeltaX, event.scrollingDeltaY)
-        logger.debug("🎡 滚轮事件: dx=\(event.scrollingDeltaX), dy=\(event.scrollingDeltaY)")
     }
     
  // MARK: - 键盘事件处理
     
     override func keyDown(with event: NSEvent) {
         onKeyboardEvent?(event.keyCode, true)
-        logger.debug("⌨️ 按键按下: \(event.keyCode)")
     }
     
     override func keyUp(with event: NSEvent) {
         onKeyboardEvent?(event.keyCode, false)
-        logger.debug("⌨️ 按键释放: \(event.keyCode)")
     }
     
     override func flagsChanged(with event: NSEvent) {
  // 处理修饰键变化（Shift、Ctrl、Alt、Cmd等）
         let modifierFlags = event.modifierFlags
-        logger.debug("🔧 修饰键变化: \(modifierFlags.rawValue)")
         
  // 可以根据需要处理特定的修饰键
         if modifierFlags.contains(.shift) {

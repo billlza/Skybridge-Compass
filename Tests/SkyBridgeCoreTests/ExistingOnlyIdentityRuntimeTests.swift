@@ -63,8 +63,9 @@ final class ExistingOnlyIdentityRuntimeTests: XCTestCase {
 
         let host = try repositorySource("Sources/LocalLanInteropHost/main.swift")
         XCTAssertTrue(host.contains("@_spi(SkyBridgeSmokeDiagnostics) import SkyBridgeCore"))
+        let whitespaceNeutralHost = host.filter { !$0.isWhitespace }
         XCTAssertTrue(
-            host.contains(
+            whitespaceNeutralHost.contains(
                 "DeviceIdentityKeyManager.activateExistingOnlyIdentityRuntimeForSmokeDiagnostics()"
             )
         )

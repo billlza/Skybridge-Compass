@@ -44,6 +44,326 @@ enum RemoteControlInjectionMappingStore {
     }
 }
 
+struct RemoteControlInputOwner: Hashable, Sendable {
+    enum Transport: String, Sendable {
+        case p2p
+        case webRTC
+    }
+
+    let transport: Transport
+    let sessionID: String
+    let generation: UUID
+}
+
+enum RemoteControlMouseButton: Hashable, Sendable {
+    case left
+    case right
+}
+
+enum RemoteControlInputPostResult: Equatable, Sendable {
+    case posted
+    case invalidEvent
+    case permissionDenied
+    case ownerConflict
+    case untrackedRelease
+    case injectionFailed
+}
+
+struct RemoteControlInputReleaseResult: Equatable, Sendable {
+    let trackedMouseButtonCount: Int
+    let trackedKeyCount: Int
+    let releasedControlCount: Int
+    let failedReleaseCount: Int
+    let skippedForMissingPermission: Bool
+
+    var hadTrackedInput: Bool {
+        trackedMouseButtonCount > 0 || trackedKeyCount > 0
+    }
+}
+
+/// Owns the process-wide macOS HID pressed state for one exact remote-control
+/// session incarnation at a time. Callers remain responsible for authenticating
+/// the session and checking stream admission immediately before posting.
+///
+/// The coordinator is MainActor-bound so an input commit and an exact-owner
+/// teardown have a single linearization order: either the Down commits first and
+/// teardown observes/releases it, or teardown retires the owner first and the
+/// stale Down is rejected.
+@MainActor
+final class RemoteControlInputLifecycleCoordinator {
+    private enum PressedControl: Hashable {
+        case mouse(RemoteControlMouseButton)
+        case key(Int)
+    }
+
+    private struct PressedMouseState {
+        let injectionPoint: CGPoint
+        let clickCount: Int
+    }
+
+    static let shared = RemoteControlInputLifecycleCoordinator()
+
+    private let ensureAccessibilityPermission: () -> Bool
+    private let hasAccessibilityPermission: () -> Bool
+    private let mouseInjectionPoint: (RemoteMouseEvent) -> CGPoint
+    private let postMouseEvent: (RemoteMouseEvent, RemoteControlMouseButton?) -> Bool
+    private let postKeyboardEvent: (RemoteKeyboardEvent) -> Bool
+    private let currentPointerLocation: () -> CGPoint?
+    private let postMouseButtonRelease: (RemoteControlMouseButton, CGPoint, Int) -> Bool
+    private let postKeyboardRelease: (Int) -> Bool
+
+    private var currentOwner: RemoteControlInputOwner?
+    private var pressedControlOrder: [PressedControl] = []
+    private var pressedMouseStates: [RemoteControlMouseButton: PressedMouseState] = [:]
+    private var pressedKeys: Set<Int> = []
+    private var lastSuccessfulPointerPoint: CGPoint?
+
+    init(
+        ensureAccessibilityPermission: @escaping () -> Bool = {
+            RemoteControlInputEventInjector.ensureAccessibilityPermission()
+        },
+        hasAccessibilityPermission: @escaping () -> Bool = {
+            RemoteControlInputEventInjector.hasAccessibilityPermission()
+        },
+        mouseInjectionPoint: @escaping (RemoteMouseEvent) -> CGPoint = {
+            RemoteControlInputEventInjector.mouseInjectionPoint(for: $0)
+        },
+        postMouseEvent: @escaping (RemoteMouseEvent, RemoteControlMouseButton?) -> Bool = {
+            RemoteControlInputEventInjector.postMouseEvent($0, draggingButton: $1)
+        },
+        postKeyboardEvent: @escaping (RemoteKeyboardEvent) -> Bool = {
+            RemoteControlInputEventInjector.postKeyboardEvent($0)
+        },
+        currentPointerLocation: @escaping () -> CGPoint? = {
+            RemoteControlInputEventInjector.currentPointerLocation()
+        },
+        postMouseButtonRelease: @escaping (RemoteControlMouseButton, CGPoint, Int) -> Bool = {
+            RemoteControlInputEventInjector.postMouseButtonRelease($0, at: $1, clickCount: $2)
+        },
+        postKeyboardRelease: @escaping (Int) -> Bool = {
+            RemoteControlInputEventInjector.postKeyboardRelease(keyCode: $0)
+        }
+    ) {
+        self.ensureAccessibilityPermission = ensureAccessibilityPermission
+        self.hasAccessibilityPermission = hasAccessibilityPermission
+        self.mouseInjectionPoint = mouseInjectionPoint
+        self.postMouseEvent = postMouseEvent
+        self.postKeyboardEvent = postKeyboardEvent
+        self.currentPointerLocation = currentPointerLocation
+        self.postMouseButtonRelease = postMouseButtonRelease
+        self.postKeyboardRelease = postKeyboardRelease
+    }
+
+    @discardableResult
+    func postMouseEvent(
+        _ event: RemoteMouseEvent,
+        owner: RemoteControlInputOwner
+    ) -> RemoteControlInputPostResult {
+        guard event.x.isFinite, event.y.isFinite, event.timestamp.isFinite else {
+            return .invalidEvent
+        }
+
+        let button = Self.mouseButton(for: event.type)
+        if Self.isMouseButtonUp(event.type) {
+            guard currentOwner == owner,
+                  let button,
+                  pressedMouseStates[button] != nil else {
+                return .untrackedRelease
+            }
+        } else if hasConflictingPressedOwner(owner) {
+            return .ownerConflict
+        }
+
+        guard ensureAccessibilityPermission() else {
+            return .permissionDenied
+        }
+        let injectionPoint = mouseInjectionPoint(event)
+        guard injectionPoint.x.isFinite, injectionPoint.y.isFinite else {
+            return .invalidEvent
+        }
+        let draggingButton = event.type == .mouseMoved ? activeDragButton() : nil
+        guard postMouseEvent(event, draggingButton) else {
+            return .injectionFailed
+        }
+
+        currentOwner = owner
+        lastSuccessfulPointerPoint = injectionPoint
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown:
+            guard let button else { return .posted }
+            if pressedMouseStates[button] == nil {
+                pressedControlOrder.append(.mouse(button))
+            }
+            pressedMouseStates[button] = PressedMouseState(
+                injectionPoint: injectionPoint,
+                clickCount: max(1, min(event.clickCount ?? 1, 2))
+            )
+        case .leftMouseUp, .rightMouseUp:
+            guard let button else { return .posted }
+            pressedMouseStates.removeValue(forKey: button)
+            pressedControlOrder.removeAll { $0 == .mouse(button) }
+            clearOwnerWhenNoControlsRemain()
+        case .mouseMoved, .scrollUp, .scrollDown:
+            break
+        }
+        return .posted
+    }
+
+    @discardableResult
+    func postKeyboardEvent(
+        _ event: RemoteKeyboardEvent,
+        owner: RemoteControlInputOwner
+    ) -> RemoteControlInputPostResult {
+        guard event.timestamp.isFinite, UInt16(exactly: event.keyCode) != nil else {
+            return .invalidEvent
+        }
+        if event.type == .keyUp {
+            guard currentOwner == owner, pressedKeys.contains(event.keyCode) else {
+                return .untrackedRelease
+            }
+        } else if hasConflictingPressedOwner(owner) {
+            return .ownerConflict
+        }
+
+        guard ensureAccessibilityPermission() else {
+            return .permissionDenied
+        }
+        guard postKeyboardEvent(event) else {
+            return .injectionFailed
+        }
+
+        currentOwner = owner
+        switch event.type {
+        case .keyDown:
+            if pressedKeys.insert(event.keyCode).inserted {
+                pressedControlOrder.append(.key(event.keyCode))
+            }
+        case .keyUp:
+            pressedKeys.remove(event.keyCode)
+            pressedControlOrder.removeAll { $0 == .key(event.keyCode) }
+            clearOwnerWhenNoControlsRemain()
+        }
+        return .posted
+    }
+
+    /// Releases only the controls committed by the exact owner. The tracked
+    /// state is taken and cleared before any CGEvent post so repeated cleanup is
+    /// idempotent even if an individual synthetic release cannot be created.
+    @discardableResult
+    func releaseAll(
+        for owner: RemoteControlInputOwner
+    ) -> RemoteControlInputReleaseResult {
+        guard currentOwner == owner else {
+            return RemoteControlInputReleaseResult(
+                trackedMouseButtonCount: 0,
+                trackedKeyCount: 0,
+                releasedControlCount: 0,
+                failedReleaseCount: 0,
+                skippedForMissingPermission: false
+            )
+        }
+
+        let controlOrder = pressedControlOrder
+        let mouseStates = pressedMouseStates
+        let fallbackPointerPoint = lastSuccessfulPointerPoint
+        let trackedKeyCount = pressedKeys.count
+        let trackedMouseButtonCount = mouseStates.count
+        pressedControlOrder.removeAll(keepingCapacity: true)
+        pressedMouseStates.removeAll(keepingCapacity: true)
+        pressedKeys.removeAll(keepingCapacity: true)
+        lastSuccessfulPointerPoint = nil
+        currentOwner = nil
+
+        guard !controlOrder.isEmpty else {
+            return RemoteControlInputReleaseResult(
+                trackedMouseButtonCount: 0,
+                trackedKeyCount: 0,
+                releasedControlCount: 0,
+                failedReleaseCount: 0,
+                skippedForMissingPermission: false
+            )
+        }
+        guard hasAccessibilityPermission() else {
+            return RemoteControlInputReleaseResult(
+                trackedMouseButtonCount: trackedMouseButtonCount,
+                trackedKeyCount: trackedKeyCount,
+                releasedControlCount: 0,
+                failedReleaseCount: 0,
+                skippedForMissingPermission: true
+            )
+        }
+
+        let livePointer = currentPointerLocation().flatMap { point in
+            point.x.isFinite && point.y.isFinite ? point : nil
+        }
+        var releasedControlCount = 0
+        var failedReleaseCount = 0
+        for control in controlOrder.reversed() {
+            let posted: Bool
+            switch control {
+            case .mouse(let button):
+                guard let state = mouseStates[button] else { continue }
+                let point = livePointer ?? fallbackPointerPoint ?? state.injectionPoint
+                posted = postMouseButtonRelease(button, point, state.clickCount)
+            case .key(let keyCode):
+                posted = postKeyboardRelease(keyCode)
+            }
+            if posted {
+                releasedControlCount += 1
+            } else {
+                failedReleaseCount += 1
+            }
+        }
+        return RemoteControlInputReleaseResult(
+            trackedMouseButtonCount: trackedMouseButtonCount,
+            trackedKeyCount: trackedKeyCount,
+            releasedControlCount: releasedControlCount,
+            failedReleaseCount: failedReleaseCount,
+            skippedForMissingPermission: false
+        )
+    }
+
+    private func hasConflictingPressedOwner(_ owner: RemoteControlInputOwner) -> Bool {
+        guard let currentOwner, currentOwner != owner else { return false }
+        return !pressedControlOrder.isEmpty
+    }
+
+    private func clearOwnerWhenNoControlsRemain() {
+        if pressedControlOrder.isEmpty {
+            currentOwner = nil
+        }
+    }
+
+    /// Selects the most recently pressed mouse button that is still active.
+    /// This preserves native macOS drag semantics if both buttons are down,
+    /// while falling back to ordinary pointer motion when no button is held.
+    private func activeDragButton() -> RemoteControlMouseButton? {
+        for control in pressedControlOrder.reversed() {
+            guard case .mouse(let button) = control,
+                  pressedMouseStates[button] != nil else {
+                continue
+            }
+            return button
+        }
+        return nil
+    }
+
+    private static func mouseButton(for type: MouseEventType) -> RemoteControlMouseButton? {
+        switch type {
+        case .leftMouseDown, .leftMouseUp:
+            return .left
+        case .rightMouseDown, .rightMouseUp:
+            return .right
+        case .mouseMoved, .scrollUp, .scrollDown:
+            return nil
+        }
+    }
+
+    private static func isMouseButtonUp(_ type: MouseEventType) -> Bool {
+        type == .leftMouseUp || type == .rightMouseUp
+    }
+}
+
 enum RemoteControlInputEventInjector {
     static func ensureAccessibilityPermission() -> Bool {
         if AXIsProcessTrusted() { return true }
@@ -53,7 +373,18 @@ enum RemoteControlInputEventInjector {
         return AXIsProcessTrusted()
     }
 
-    static func postMouseEvent(_ event: RemoteMouseEvent) {
+    static func hasAccessibilityPermission() -> Bool {
+        AXIsProcessTrusted()
+    }
+
+    @discardableResult
+    static func postMouseEvent(
+        _ event: RemoteMouseEvent,
+        draggingButton: RemoteControlMouseButton? = nil
+    ) -> Bool {
+        guard event.x.isFinite, event.y.isFinite, event.timestamp.isFinite else {
+            return false
+        }
         // Viewer input and stream-side cursor/damage telemetry already share a top-left
         // display coordinate space. Do not flip Y again on injection, or taps in the
         // upper half land in the lower half (and vice versa).
@@ -68,19 +399,40 @@ enum RemoteControlInputEventInjector {
 
         switch event.type {
         case .mouseMoved:
-            post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left))
+            let button = draggingButton == .right ? CGMouseButton.right : .left
+            return post(
+                CGEvent(
+                    mouseEventSource: nil,
+                    mouseType: pointerMotionEventType(draggingButton: draggingButton),
+                    mouseCursorPosition: point,
+                    mouseButton: button
+                )
+            )
         case .leftMouseDown:
-            post(mouseEvent(.leftMouseDown, button: .left))
+            return post(mouseEvent(.leftMouseDown, button: .left))
         case .leftMouseUp:
-            post(mouseEvent(.leftMouseUp, button: .left))
+            return post(mouseEvent(.leftMouseUp, button: .left))
         case .rightMouseDown:
-            post(mouseEvent(.rightMouseDown, button: .right))
+            return post(mouseEvent(.rightMouseDown, button: .right))
         case .rightMouseUp:
-            post(mouseEvent(.rightMouseUp, button: .right))
+            return post(mouseEvent(.rightMouseUp, button: .right))
         case .scrollUp:
-            post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 24, wheel2: 0, wheel3: 0))
+            return post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 24, wheel2: 0, wheel3: 0))
         case .scrollDown:
-            post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -24, wheel2: 0, wheel3: 0))
+            return post(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -24, wheel2: 0, wheel3: 0))
+        }
+    }
+
+    static func pointerMotionEventType(
+        draggingButton: RemoteControlMouseButton?
+    ) -> CGEventType {
+        switch draggingButton {
+        case .left:
+            return .leftMouseDragged
+        case .right:
+            return .rightMouseDragged
+        case nil:
+            return .mouseMoved
         }
     }
 
@@ -104,16 +456,58 @@ enum RemoteControlInputEventInjector {
         return CGPoint(x: globalX, y: globalY)
     }
 
-    static func postKeyboardEvent(_ event: RemoteKeyboardEvent) {
+    @discardableResult
+    static func postKeyboardEvent(_ event: RemoteKeyboardEvent) -> Bool {
+        guard event.timestamp.isFinite, let code = CGKeyCode(exactly: event.keyCode) else {
+            return false
+        }
         let down = event.type == .keyDown
-        let code = CGKeyCode(event.keyCode)
         let cgEvent = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)
-        post(cgEvent)
+        return post(cgEvent)
     }
 
-    private static func post(_ cgEvent: CGEvent?) {
-        guard let cgEvent else { return }
+    static func currentPointerLocation() -> CGPoint? {
+        CGEvent(source: nil)?.location
+    }
+
+    @discardableResult
+    static func postMouseButtonRelease(
+        _ button: RemoteControlMouseButton,
+        at point: CGPoint,
+        clickCount: Int
+    ) -> Bool {
+        guard point.x.isFinite, point.y.isFinite else { return false }
+        let type: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
+        let cgButton: CGMouseButton = button == .left ? .left : .right
+        let cgEvent = CGEvent(
+            mouseEventSource: nil,
+            mouseType: type,
+            mouseCursorPosition: point,
+            mouseButton: cgButton
+        )
+        cgEvent?.setIntegerValueField(
+            .mouseEventClickState,
+            value: Int64(max(1, min(clickCount, 2)))
+        )
+        return post(cgEvent)
+    }
+
+    @discardableResult
+    static func postKeyboardRelease(keyCode: Int) -> Bool {
+        postKeyboardEvent(
+            RemoteKeyboardEvent(
+                type: .keyUp,
+                keyCode: keyCode,
+                timestamp: Date().timeIntervalSince1970
+            )
+        )
+    }
+
+    @discardableResult
+    private static func post(_ cgEvent: CGEvent?) -> Bool {
+        guard let cgEvent else { return false }
         cgEvent.post(tap: .cghidEventTap)
+        return true
     }
 }
 #endif

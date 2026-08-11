@@ -1239,6 +1239,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         sessionID: String,
         session: WebRTCSession
     ) {
+#if os(macOS)
+        if let record = webrtcControlTasksBySessionId[sessionID],
+           record.sessionObjectIdentifier == ObjectIdentifier(session) {
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: record.token,
+                reason: "webrtc_stream_stop"
+            )
+        }
+#endif
         commitWebRTCStreamConfigurationIngressState(
             rawConfiguration,
             plan: plan,
@@ -2536,6 +2546,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         markCrossNetworkPresenceDisconnected(sessionID: sessionID)
 
         if let controlTask = webrtcControlTasksBySessionId.removeValue(forKey: sessionID) {
+#if os(macOS)
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: controlTask.token,
+                reason: reason
+            )
+#endif
             _ = controlTask.inboundFileTransferReceiver.cleanupOnChannelClosed()
             controlTask.task.cancel()
         }
@@ -3406,6 +3423,16 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                 reason: "explicit_disconnect"
             )
         }
+
+#if os(macOS)
+        for (sessionID, record) in webrtcControlTasksBySessionId {
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: record.token,
+                reason: "explicit_disconnect"
+            )
+        }
+#endif
 
         // 1) 关闭所有 WebRTC 会话
         for (_, session) in webrtcSessionsBySessionId {
@@ -6446,6 +6473,33 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             && record.sessionObjectIdentifier == ObjectIdentifier(session)
     }
 
+#if os(macOS)
+    private func releaseWebRTCRemoteInput(
+        sessionID: String,
+        controlTaskToken: UUID,
+        reason: String
+    ) {
+        let result = RemoteControlInputLifecycleCoordinator.shared.releaseAll(
+            for: RemoteControlInputOwner(
+                transport: .webRTC,
+                sessionID: sessionID,
+                generation: controlTaskToken
+            )
+        )
+        guard result.hadTrackedInput else { return }
+        logger.info(
+            """
+            remote-input-release transport=webrtc reason=\(reason, privacy: .public) \
+            mouseButtons=\(result.trackedMouseButtonCount, privacy: .public) \
+            keys=\(result.trackedKeyCount, privacy: .public) \
+            released=\(result.releasedControlCount, privacy: .public) \
+            failed=\(result.failedReleaseCount, privacy: .public) \
+            permissionSkipped=\(result.skippedForMissingPermission, privacy: .public)
+            """
+        )
+    }
+#endif
+
     private func isCurrentWebRTCControlLoopSecureOwner(
         sessionID: String,
         session: WebRTCSession,
@@ -6492,6 +6546,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
             guard existingRecord.sessionObjectIdentifier != ObjectIdentifier(session) else {
                 return
             }
+#if os(macOS)
+            releaseWebRTCRemoteInput(
+                sessionID: sessionID,
+                controlTaskToken: existingRecord.token,
+                reason: "control_task_replaced"
+            )
+#endif
             webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
             _ = existingRecord.inboundFileTransferReceiver.cleanupOnChannelClosed()
             existingRecord.task.cancel()
@@ -6562,6 +6623,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                       self.webrtcSessionsBySessionId[sessionID] === session else {
                     return false
                 }
+#if os(macOS)
+                self.releaseWebRTCRemoteInput(
+                    sessionID: sessionID,
+                    controlTaskToken: controlTaskToken,
+                    reason: "control_channel_closed"
+                )
+#endif
                 self.webrtcControlTasksBySessionId.removeValue(forKey: sessionID)
                 return true
             }
@@ -11984,7 +12052,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 }
                                 do {
                                     let evt = try JSONDecoder().decode(MouseEventWire.self, from: rm.payload)
-                                    WebRTCRemoteControlInputEventBridge.handleMouseEvent(evt)
+                                    let inputResult = WebRTCRemoteControlInputEventBridge.handleMouseEvent(
+                                        evt,
+                                        owner: RemoteControlInputOwner(
+                                            transport: .webRTC,
+                                            sessionID: sessionID,
+                                            generation: controlTaskToken
+                                        )
+                                    )
+                                    if inputResult != .posted {
+                                        self.logger.warning(
+                                            "remote-input-rejected transport=webrtc kind=mouse reason=\(String(describing: inputResult), privacy: .public)"
+                                        )
+                                    }
                                 } catch {
                                     self.rejectWebRTCRemoteControlHostPayload(
                                         sessionID: sessionID,
@@ -12024,7 +12104,19 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                                 }
                                 do {
                                     let evt = try JSONDecoder().decode(KeyboardEventWire.self, from: rm.payload)
-                                    WebRTCRemoteControlInputEventBridge.handleKeyboardEvent(evt)
+                                    let inputResult = WebRTCRemoteControlInputEventBridge.handleKeyboardEvent(
+                                        evt,
+                                        owner: RemoteControlInputOwner(
+                                            transport: .webRTC,
+                                            sessionID: sessionID,
+                                            generation: controlTaskToken
+                                        )
+                                    )
+                                    if inputResult != .posted {
+                                        self.logger.warning(
+                                            "remote-input-rejected transport=webrtc kind=keyboard reason=\(String(describing: inputResult), privacy: .public)"
+                                        )
+                                    }
                                 } catch {
                                     self.rejectWebRTCRemoteControlHostPayload(
                                         sessionID: sessionID,
@@ -12369,6 +12461,13 @@ public final class CrossNetworkConnectionManager: ObservableObject {
                         if let establishedKeys = handshakeState.sessionKeys {
                             handshakeState.previousSessionKeysBeforeRekey = establishedKeys
                             self.webrtcRekeyInProgressSessionIds.insert(sessionID)
+#if os(macOS)
+                            self.releaseWebRTCRemoteInput(
+                                sessionID: sessionID,
+                                controlTaskToken: controlTaskToken,
+                                reason: "webrtc_rekey"
+                            )
+#endif
                             self.stopWebRTCScreenStreaming(sessionID: sessionID)
                             self.lastRekeyEvent = "received peer=\(peerDeviceId)"
                             logger.info(

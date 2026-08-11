@@ -1426,7 +1426,11 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID=\"${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-ipad-smoke-nebula}\""))
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE=\"${SKYBRIDGE_SMOKE_REQUIRE_REMOTE_CONTROL_NOTICE:-1}\""))
         XCTAssertFalse(script.contains("SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=\"${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-1}\""))
-        XCTAssertFalse(script.contains("--env \"SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE="))
+        XCTAssertTrue(
+            script.contains(
+                "--env \"SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=${SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE:-0}\""
+            )
+        )
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_LOCAL_ACCOUNT_DISPLAY_NAME=\"${SKYBRIDGE_SMOKE_REMOTE_ACCOUNT_DISPLAY_NAME:-}\""))
         XCTAssertTrue(script.contains("SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID=\"${SKYBRIDGE_SMOKE_REMOTE_NEBULA_ID:-}\""))
         XCTAssertTrue(script.contains("validate_ios_launch_notice_identity_env"))
