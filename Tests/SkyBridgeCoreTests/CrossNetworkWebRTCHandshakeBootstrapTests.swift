@@ -2339,8 +2339,8 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         let scriptSource = try readSource("Scripts/run_real_device_file_transfer_smoke.sh")
         let releaseReadiness = try readSource("Scripts/check_macos_release_readiness.sh")
 
-        let windowGroupPrefix = try sourceSlice(
-            from: "WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")",
+        let mainWindowPrefix = try sourceSlice(
+            from: "Window(localizationManager.localizedString(\"app.name\"), id: \"main\")",
             to: ".task {",
             in: appSource
         )
@@ -2351,7 +2351,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         )
 
         XCTAssertTrue(
-            windowGroupPrefix.contains("PairingTrustApprovalSheet"),
+            mainWindowPrefix.contains("PairingTrustApprovalSheet"),
             "PIB-1/SKR-1 approval must be app-level so signed-app smoke, startup, and unauthenticated states can present it."
         )
         XCTAssertFalse(

@@ -121,7 +121,7 @@ private enum VolatileSwiftUIAutosaveDefaultsPruner {
         let removedCount = await Task.detached(priority: .utility) { () -> Int in
             let defaults = UserDefaults.standard
             let volatileKeys = defaults.dictionaryRepresentation().keys.filter { key in
-                keyPrefixes.contains { key.hasPrefix($0) } || key.contains(unknownContextMarker)
+                keyPrefixes.contains { key.hasPrefix($0) } && key.contains(unknownContextMarker)
             }
 
             for key in volatileKeys {
@@ -133,6 +133,52 @@ private enum VolatileSwiftUIAutosaveDefaultsPruner {
 
         guard removedCount > 0 else { return }
         SkyBridgeLogger.ui.info("🧹 已延后清理 \(removedCount, privacy: .public) 个 SwiftUI 临时窗口偏好键")
+    }
+}
+
+/// Owns the one scene-level action that can create or focus the singleton main window.
+///
+/// Menu-bar callbacks outlive the main window's view hierarchy, so they cannot read SwiftUI's
+/// `openWindow` environment value directly. Retaining the value (rather than an `NSWindow`) keeps
+/// scene creation under SwiftUI and avoids guessing the main window from a localized title or the
+/// transient AppKit `isMainWindow` flag.
+@available(macOS 14.0, *)
+@MainActor
+private final class MainWindowPresentationCoordinator {
+    static let shared = MainWindowPresentationCoordinator()
+
+    private var openWindow: OpenWindowAction?
+
+    private init() {}
+
+    func register(openWindow: OpenWindowAction) {
+        self.openWindow = openWindow
+    }
+
+    @discardableResult
+    func present() -> Bool {
+        guard let openWindow else {
+            SkyBridgeLogger.ui.error("Main window presentation requested before the scene action was registered")
+            return false
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "main")
+        return true
+    }
+}
+
+@available(macOS 14.0, *)
+private struct MainWindowPresentationRegistrar: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onAppear {
+                MainWindowPresentationCoordinator.shared.register(openWindow: openWindow)
+            }
     }
 }
 
@@ -173,7 +219,7 @@ struct SkyBridgeCompassApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(localizationManager.localizedString("app.name"), id: "main") {
+        Window(localizationManager.localizedString("app.name"), id: "main") {
             Group {
                 if let _ = renderConfig {
                     Color.clear
@@ -202,6 +248,7 @@ struct SkyBridgeCompassApp: App {
             }
             .frame(minWidth: 1280, minHeight: 720)
             .preferredColorScheme(.dark)
+            .background(MainWindowPresentationRegistrar())
             .sheet(item: Binding(get: { pairingTrustApproval.pendingRequest }, set: { newValue in
                 if newValue == nil {
                     pairingTrustApproval.userDismissedCurrentPrompt()
@@ -661,10 +708,7 @@ struct SkyBridgeCompassApp: App {
             queue: nil
         ) { _ in
             Task { @MainActor in
-                NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first(where: { $0.title.contains("SkyBridge") || $0.isMainWindow }) {
-                    window.makeKeyAndOrderFront(nil)
-                }
+                MainWindowPresentationCoordinator.shared.present()
             }
         }
 
@@ -676,11 +720,7 @@ struct SkyBridgeCompassApp: App {
             queue: nil
         ) { _ in
             Task { @MainActor in
-                NSApp.activate(ignoringOtherApps: true)
- // 设备详情由主窗口处理
-                if let window = NSApp.windows.first(where: { $0.title.contains("SkyBridge") || $0.isMainWindow }) {
-                    window.makeKeyAndOrderFront(nil)
-                }
+                MainWindowPresentationCoordinator.shared.present()
             }
         }
 
@@ -705,11 +745,7 @@ struct SkyBridgeCompassApp: App {
             queue: nil
         ) { _ in
             Task { @MainActor in
-                NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first(where: { $0.title.contains("SkyBridge") || $0.isMainWindow }) {
-                    window.makeKeyAndOrderFront(nil)
-                }
- // 文件 URL 由主窗口处理
+                MainWindowPresentationCoordinator.shared.present()
             }
         }
 

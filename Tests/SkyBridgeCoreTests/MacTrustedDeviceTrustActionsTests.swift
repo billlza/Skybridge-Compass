@@ -901,8 +901,71 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(p2pSource.contains("连接码功能将支持"))
     }
 
-    func testMacAppAvoidsVolatileAutosaveDefaultsAndPerFrameDateStateWrites() throws {
+    func testMacMainSceneIsSingletonWhileAuxiliaryScenesRemainMultiWindow() throws {
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+        let appDelegateSource = try repositorySource(
+            "Sources/SkyBridgeCompassApp/Core/RemoteNotificationAppDelegate.swift"
+        )
+
+        XCTAssertTrue(
+            appSource.contains("Window(localizationManager.localizedString(\"app.name\"), id: \"main\")"),
+            "The main Mac scene must be a single-instance Window so historical scene restoration cannot recreate duplicate main windows."
+        )
+        XCTAssertFalse(
+            appSource.contains("WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")")
+        )
+        XCTAssertTrue(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
+        XCTAssertTrue(appSource.contains("WindowGroup(id: \"cross-network-connection\")"))
+        XCTAssertTrue(appSource.contains("WindowGroup(id: \"vnc-viewer\")"))
+        XCTAssertTrue(appSource.contains("WindowGroup(id: \"ssh-terminal\", for: UUID.self)"))
+        XCTAssertTrue(
+            appDelegateSource.contains("func applicationShouldTerminateAfterLastWindowClosed")
+        )
+        XCTAssertTrue(
+            appDelegateSource.contains("applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {\n        false\n    }")
+        )
+
+        XCTAssertTrue(appSource.contains("@Environment(\\.openWindow) private var openWindow"))
+        XCTAssertTrue(
+            appSource.contains("MainWindowPresentationCoordinator.shared.register(openWindow: openWindow)")
+        )
+        XCTAssertTrue(appSource.contains("openWindow(id: \"main\")"))
+        XCTAssertTrue(appSource.contains(".background(MainWindowPresentationRegistrar())"))
+
+        let menuHandlerStart = try XCTUnwrap(
+            appSource.range(of: "private static func setupMenuBarNotificationHandlers()")
+        )
+        let menuHandlerTail = appSource[menuHandlerStart.lowerBound...]
+        let menuHandlerEnd = try XCTUnwrap(
+            menuHandlerTail.range(of: "SkyBridgeLogger.ui.debugOnly(\"✅ 菜单栏通知处理器已设置\")")
+        )
+        let menuHandler = String(menuHandlerTail[..<menuHandlerEnd.upperBound])
+        XCTAssertEqual(
+            menuHandler.components(separatedBy: "MainWindowPresentationCoordinator.shared.present()").count - 1,
+            3,
+            "Main-window, device-detail, and file-transfer status-item actions must share the singleton scene presenter."
+        )
+        XCTAssertFalse(menuHandler.contains("title.contains(\"SkyBridge\")"))
+        XCTAssertFalse(menuHandler.contains("$0.isMainWindow"))
+    }
+
+    func testMacAppPrunesOnlyAnonymousSwiftUIAutosaveDefaults() throws {
+        let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
+
+        XCTAssertTrue(appSource.contains("pruneVolatileSwiftUIAutosaveDefaults()"))
+        XCTAssertTrue(appSource.contains("\"NSWindow Frame SwiftUI\""))
+        XCTAssertTrue(appSource.contains("\"NSSplitView Subview Frames SwiftUI\""))
+        XCTAssertTrue(appSource.contains("(unknown context at $"))
+        XCTAssertTrue(
+            appSource.contains("keyPrefixes.contains { key.hasPrefix($0) } && key.contains(unknownContextMarker)"),
+            "Only address-derived SwiftUI autosave keys are volatile; stable main and auxiliary window frames must remain restorable."
+        )
+        XCTAssertFalse(
+            appSource.contains("keyPrefixes.contains { key.hasPrefix($0) } || key.contains(unknownContextMarker)")
+        )
+    }
+
+    func testMacAnimatedBackgroundsAvoidPerFrameDateStateWrites() throws {
         let animatedBackgrounds = try [
             "Sources/SkyBridgeCompassApp/ClassicBackgroundV2.swift",
             "Sources/SkyBridgeCompassApp/StarryBackground.swift",
@@ -910,15 +973,6 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
             "Sources/SkyBridgeCompassApp/AuroraBackground.swift",
             "Sources/SkyBridgeCompassApp/AuroraBackgroundV2.swift"
         ].map(repositorySource)
-
-        XCTAssertTrue(
-            appSource.contains("WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")"),
-            "The main Mac window needs a stable id so AppKit does not persist frame keys based on volatile SwiftUI type names."
-        )
-        XCTAssertTrue(appSource.contains("pruneVolatileSwiftUIAutosaveDefaults()"))
-        XCTAssertTrue(appSource.contains("\"NSWindow Frame SwiftUI\""))
-        XCTAssertTrue(appSource.contains("\"NSSplitView Subview Frames SwiftUI\""))
-        XCTAssertTrue(appSource.contains("(unknown context at $"))
 
         for source in animatedBackgrounds {
             XCTAssertFalse(

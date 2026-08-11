@@ -5,14 +5,20 @@ import SkyBridgeCore
 
 /// Receives silent CloudKit pushes so the app can refresh without waiting for the 60 s poll.
 ///
-/// SwiftUI has no entry point for remote notifications, so an `NSApplicationDelegate` is required.
-/// This delegate is deliberately limited to the remote-notification path: adding unrelated lifecycle
-/// work here would recreate the "everything happens in the app delegate" pattern the project avoids.
+/// SwiftUI has no entry point for remote notifications or the last-window process-lifetime decision,
+/// so an `NSApplicationDelegate` owns those two AppKit-only boundaries. Other launch and product
+/// lifecycle work remains outside the delegate.
 ///
 /// Registration is not a capability declaration on its own — a push only reaches the process when a
 /// subsystem owns a matching CloudKit subscription, which `RemoteNotificationRouter` enforces.
 @available(macOS 14.0, *)
 final class RemoteNotificationAppDelegate: NSObject, NSApplicationDelegate {
+
+    /// The product keeps discovery and remote-control services available from its status item after
+    /// the single main window closes. Explicit Quit still follows the normal termination path.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard Self.hasRemoteNotificationEntitlement() else {
