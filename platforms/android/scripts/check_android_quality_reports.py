@@ -7,10 +7,48 @@ import argparse
 import os
 import stat
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 
 MAXIMUM_REPORT_BYTES = 64 * 1024 * 1024
+DIAGNOSTIC_IDENTIFIER_LIMIT = 256
+DIAGNOSTIC_MESSAGE_LIMIT = 2048
+DIAGNOSTIC_PATH_LIMIT = 1024
+DIAGNOSTIC_POSITION_LIMIT = 32
+DIAGNOSTIC_TRUNCATION_MARKER = "<truncated>"
+
+
+def sanitize_diagnostic_field(value: str | None, fallback: str, limit: int) -> str:
+    raw_value = value or fallback
+    single_line = "".join(character if character.isprintable() else " " for character in raw_value)
+    normalized = " ".join(single_line.split()) or fallback
+    if len(normalized) <= limit:
+        return normalized
+    retained_length = limit - len(DIAGNOSTIC_TRUNCATION_MARKER)
+    if retained_length <= 0:
+        raise ValueError("diagnostic field limit is too small for the truncation marker")
+    return f"{normalized[:retained_length]}{DIAGNOSTIC_TRUNCATION_MARKER}"
+
+
+def sanitize_diagnostic_path(value: str | None) -> str:
+    source = sanitize_diagnostic_field(value, "<missing-file>", DIAGNOSTIC_PATH_LIMIT)
+    windows_candidate = PureWindowsPath(source)
+    if windows_candidate.is_absolute():
+        basename = windows_candidate.name or "<unnamed>"
+        return sanitize_diagnostic_field(
+            f"<external>/{basename}", "<external>/<unnamed>", DIAGNOSTIC_PATH_LIMIT
+        )
+    candidate = Path(source)
+    working_directory = Path.cwd().resolve(strict=False)
+    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        relative = resolved_candidate.relative_to(working_directory)
+    except ValueError:
+        basename = candidate.name or "<unnamed>"
+        return sanitize_diagnostic_field(
+            f"<external>/{basename}", "<external>/<unnamed>", DIAGNOSTIC_PATH_LIMIT
+        )
+    return str(relative)
 
 
 def parse_report(path: Path) -> ET.Element:
@@ -47,10 +85,31 @@ def verify_lint_report(path: Path) -> None:
         )
     issues = list(root.findall("issue"))
     if issues:
-        identifiers = [issue.get("id") or "<missing-id>" for issue in issues[:10]]
+        descriptions = []
+        for issue in issues[:10]:
+            identifier = sanitize_diagnostic_field(
+                issue.get("id"), "<missing-id>", DIAGNOSTIC_IDENTIFIER_LIMIT
+            )
+            message = sanitize_diagnostic_field(
+                issue.get("message"), "<missing-message>", DIAGNOSTIC_MESSAGE_LIMIT
+            )
+            locations = []
+            for location in issue.findall("location")[:3]:
+                source = sanitize_diagnostic_path(location.get("file"))
+                line = sanitize_diagnostic_field(
+                    location.get("line"), "?", DIAGNOSTIC_POSITION_LIMIT
+                )
+                column = sanitize_diagnostic_field(
+                    location.get("column"), "?", DIAGNOSTIC_POSITION_LIMIT
+                )
+                locations.append(f"{source}:{line}:{column}")
+            location_summary = ",".join(locations) or "<missing-location>"
+            descriptions.append(
+                f"{identifier}: {message} [{location_summary}]"
+            )
         raise RuntimeError(
             f"Android lint report contains {len(issues)} issue(s) "
-            f"({', '.join(identifiers)}): {path}"
+            f"({'; '.join(descriptions)}): {path}"
         )
 
 
