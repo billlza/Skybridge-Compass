@@ -199,6 +199,124 @@ Files:
 This APK gate is physical-device/same-source evidence. It is not AAB validation and cannot replace
 Procedure 0A for a Play upload artifact.
 
+## Procedure 0C: Tracked liboqs / JNI Physical Runtime Matrix
+
+Purpose:
+
+- Execute the app-packaged `libskybridge_pqc.so` through the shipping
+  `AndroidPQCCryptoProvider`, without adding a parallel crypto implementation
+- Prove native load, ML-KEM-768 key generation/encapsulation/decapsulation and
+  shared-secret equality, plus ML-DSA-65 key generation/sign/positive verify and
+  altered-message/altered-signature rejection
+- Keep API level, kernel page size, process ABI, APK identity, and source revision
+  as independent observations
+
+This is an app instrumentation gate. It does not start or stop an AVD. The
+operator must make the exact API 37 / 16K runtime available first and remains
+responsible for its protocol-level shutdown after the run.
+
+### Freeze the source identity
+
+Freeze a clean source revision. The runner verifies this identity both before
+and after its fixed build:
+
+```bash
+EXPECTED_SOURCE_COMMIT="$(
+  sed -n 's/^source.commit=//p' \
+    app/build/outputs/release-audit/release/metadata.properties
+)"
+test "$EXPECTED_SOURCE_COMMIT" = "$(git -C "$RELEASE_REPO_ROOT" rev-parse HEAD)"
+test -z "$(git -C "$RELEASE_REPO_ROOT" status --porcelain --untracked-files=all)"
+```
+
+The runner removes only the two canonical APK output files, invokes
+`:app:assembleDebug :app:assembleDebugAndroidTest` once with fixed strict
+Gradle options, scans the build log for warnings, and accepts only the canonical
+app/test outputs. It never accepts caller-supplied APKs, so an older debug APK
+cannot be labeled with the current source revision. The pair is not rebuilt
+between runtime profiles, and the runner finishes through normal
+`./gradlew --stop` cleanup. If neither `local.properties` nor Android SDK
+environment variables exist, the runner derives the SDK root from the exact
+resolved `adb` installation without writing host-local configuration.
+
+On each selected runtime, the runner updates the existing debug app in place
+with `adb install -r -t`; it never uninstalls the target app or clears its data.
+An incompatible installed signing identity or version therefore fails closed
+instead of being bypassed through destructive removal. Only the disposable
+`.debug.test` instrumentation package is removed before and after a run, and
+failure cleanup is bounded to targets whose test-package phase actually began.
+
+For retained release evidence, `EXPECTED_SOURCE_COMMIT` comes from the existing
+release APK audit metadata. Its source revision and the two APK SHA-256 values
+are Level 1 accidental-mismatch checks, not a new signature or authentication
+protocol. Production signing and the AAB upload identity remain Procedures 0A
+and 0B.
+
+### Run the exact two-runtime matrix
+
+Supply the connected serials explicitly. The runner never selects the first
+device and never searches for an AVD by name:
+
+```bash
+SAMSUNG_API36_SERIAL="<exact-physical-Samsung-adb-serial>"
+API37_16K_SERIAL="<exact-API37-16K-adb-serial>"
+API37_16K_ABI="arm64-v8a" # use x86_64 only when that is the measured process ABI
+PQC_EVIDENCE_DIR="$ANDROID_ROOT/build/interop/native-pqc-runtime/current"
+
+bash scripts/run_android_pqc_native_runtime_gate.sh \
+  --samsung-api36-4k-serial "$SAMSUNG_API36_SERIAL" \
+  --api37-16k-serial "$API37_16K_SERIAL" \
+  --api37-16k-abi "$API37_16K_ABI" \
+  --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
+  --evidence-dir "$PQC_EVIDENCE_DIR"
+```
+
+The runner fails closed unless:
+
+- both serials are explicit and distinct, and every device operation uses
+  `adb -s <exact-serial>`
+- the clean `HEAD` equals the expected release-audit source revision before and
+  after the one fixed build, and both canonical APKs are newly produced
+- the API 36 / 4K target reports API `36`, page size `4096`, primary ABI
+  `arm64-v8a`, Samsung manufacturer, and a non-emulator runtime
+- the API 37 / 16K target reports API `37`, page size `16384`, and the exact
+  selected 64-bit ABI
+- both the host and the instrumented app process observe the same API/page/ABI
+- the same app/test APK pair is freshly installed on both targets and each
+  installed `base.apk` SHA-256 equals its selected local APK
+- exactly one test class runs and emits the canonical all-true native-PQC result
+- all retained key material, shared secrets, ciphertext, messages, and signatures
+  are cleared before the success marker
+- only the disposable instrumentation package is removed after each profile;
+  the debug app remains installed and its existing private data is preserved
+
+The retained `native-pqc-runtime-evidence.json` contains no serial, model,
+device identifier, key, ciphertext, shared secret, or signature bytes. Raw
+instrumentation output stays in a private temporary directory and is removed.
+
+Regression and compile checks (no device required):
+
+```bash
+python3 -W error -B scripts/tests/test_android_pqc_native_runtime_evidence.py
+python3 -W error -B scripts/tests/test_android_pqc_native_runtime_gate_contract.py
+bash -n scripts/run_android_pqc_native_runtime_gate.sh
+shellcheck -x scripts/run_android_pqc_native_runtime_gate.sh
+./gradlew \
+  --no-daemon \
+  --no-parallel \
+  --max-workers=2 \
+  --rerun-tasks \
+  --warning-mode all \
+  :app:compileDebugAndroidTestKotlin \
+  :app:assembleDebug \
+  :app:assembleDebugAndroidTest
+./gradlew --stop
+```
+
+This runtime gate does not replace AAB `PAGE_ALIGNMENT_16K`, ELF `PT_LOAD`
+alignment, release signing, Play distribution identity, or cross-platform
+protocol acceptance.
+
 ## Procedure 1: Android Instrumentation Smoke vs macOS WebRTC Smoke Host
 
 Purpose:
