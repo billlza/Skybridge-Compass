@@ -9,8 +9,8 @@ skybridge_require_zero_warning_tool_log() {
 
   local matches
   local scan_status
-  if matches="$(LC_ALL=C rg -n -i \
-      '(^|[[:space:]])warning:|^w: |deprecated gradle features were used|self-attach|dynamically loaded agent|dynamic loading of agents|slf4j:' \
+  if matches="$(LC_ALL=C rg -n \
+      '(?i:(^|[[:space:]])warning:)|^w: |Deprecated Gradle features were used|self-attach|dynamically loaded agent|dynamic loading of agents|(^|[[:space:]])SLF4J(\([WE]\))?:' \
       "$log_path" 2>&1)"; then
     scan_status=0
   else

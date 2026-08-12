@@ -179,9 +179,15 @@ grep -Fq 'KEY_ALIAS must identify a private-key entry' "$invalid_alias_output" |
 
 printf '%s\n' 'clean Gradle output' >"$TMP_DIR/strict-clean-fixture.txt"
 skybridge_require_zero_warning_tool_log "$TMP_DIR/strict-clean-fixture.txt"
+printf '%s\n' '+--- org.slf4j:slf4j-api:2.0.18' >"$TMP_DIR/strict-dependency-fixture.txt"
+skybridge_require_zero_warning_tool_log "$TMP_DIR/strict-dependency-fixture.txt"
 printf '%s\n' 'OpenJDK 64-Bit Server VM warning: test fixture' >"$TMP_DIR/strict-warning-fixture.log"
 if skybridge_require_zero_warning_tool_log "$TMP_DIR/strict-warning-fixture.log" >/dev/null 2>&1; then
   fail 'strict output scanner accepted a JVM warning fixture'
+fi
+printf '%s\n' 'SLF4J(W): test fixture' >"$TMP_DIR/strict-slf4j-warning-fixture.log"
+if skybridge_require_zero_warning_tool_log "$TMP_DIR/strict-slf4j-warning-fixture.log" >/dev/null 2>&1; then
+  fail 'strict output scanner accepted an SLF4J warning fixture'
 fi
 
 while IFS= read -r tool_log; do
