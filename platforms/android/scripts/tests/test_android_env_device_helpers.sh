@@ -194,6 +194,26 @@ expect_status 1 bash -c \
   'source "$1"; android_require_exact_success_output "$2" "fixture install"' \
   _ "$ANDROID_ROOT/scripts/lib/android_env.sh" $'Success\nSuccess'
 
+INSTALL_APK_PATH="/private/tmp/SkyBridge App/app-debug.apk"
+INSTALL_APK_BYTES="152873226"
+INSTALL_TRANSCRIPT="$INSTALL_APK_PATH: 1 file pushed, 0 skipped. 91.2 MB/s ($INSTALL_APK_BYTES bytes in 1.598s)"$'\nPerforming Push Install\nSuccess'
+android_require_exact_install_success_output \
+  "$INSTALL_TRANSCRIPT" "$INSTALL_APK_PATH" "$INSTALL_APK_BYTES" "fixture push install"
+android_require_exact_install_success_output \
+  "Success" "$INSTALL_APK_PATH" "$INSTALL_APK_BYTES" "fixture direct install"
+for invalid_transcript in \
+  "other.apk: 1 file pushed, 0 skipped. 91.2 MB/s ($INSTALL_APK_BYTES bytes in 1.598s)"$'\nPerforming Push Install\nSuccess' \
+  "$INSTALL_APK_PATH: 1 file pushed, 0 skipped. 91.2 MB/s (1 bytes in 1.598s)"$'\nPerforming Push Install\nSuccess' \
+  "$INSTALL_TRANSCRIPT"$'\nunexpected-terminal' \
+  "$INSTALL_APK_PATH: 1 file pushed, 0 skipped. 91.2 MB/s ($INSTALL_APK_BYTES bytes in 1.598s)"$'\nwarning\nPerforming Push Install\nSuccess' \
+  "$INSTALL_APK_PATH: 1 file pushed, 0 skipped. 91.2 MB/s ($INSTALL_APK_BYTES bytes in 1.598s)"$'\r\nPerforming Push Install\nSuccess'
+do
+  expect_status 1 bash -c \
+    'source "$1"; android_require_exact_install_success_output "$2" "$3" "$4" "fixture push install"' \
+    _ "$ANDROID_ROOT/scripts/lib/android_env.sh" "$invalid_transcript" \
+    "$INSTALL_APK_PATH" "$INSTALL_APK_BYTES"
+done
+
 FAKE_PM_MODE=present android_require_installed_apk_digest \
   "$FAKE_ADB" SERIAL-1 com.example.test "$EXPECTED_DIGEST"
 expect_status 1 env FAKE_PM_MODE=present FAKE_DIGEST=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \

@@ -333,6 +333,45 @@ android_require_exact_success_output() {
   esac
 }
 
+android_require_exact_install_success_output() {
+  local output="$1"
+  local expected_apk_path="$2"
+  local expected_apk_bytes="$3"
+  local label="$4"
+  local suffix=$'\nPerforming Push Install\nSuccess'
+  local push_line=""
+  local expected_prefix=""
+  local metrics=""
+
+  if android_require_exact_success_output "$output" "$label" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -z "$expected_apk_path" \
+      || "$expected_apk_path" == *$'\n'* \
+      || "$expected_apk_path" == *$'\r'* \
+      || ! "$expected_apk_bytes" =~ ^[1-9][0-9]*$ \
+      || "$output" == *$'\r'* \
+      || "$output" != *"$suffix" ]]; then
+    echo "$label did not report one exact install success transcript" >&2
+    return 1
+  fi
+  push_line="${output%"$suffix"}"
+  [[ -n "$push_line" && "$push_line" != *$'\n'* ]] || {
+    echo "$label did not report one exact install success transcript" >&2
+    return 1
+  }
+  expected_prefix="$expected_apk_path: 1 file pushed, 0 skipped. "
+  [[ "$push_line" == "$expected_prefix"* ]] || {
+    echo "$label push transcript was not bound to the selected APK" >&2
+    return 1
+  }
+  metrics="${push_line#"$expected_prefix"}"
+  [[ "$metrics" =~ ^[0-9]+([.][0-9]+)?[[:space:]]+(KB|MB|GB)/s[[:space:]]+\("$expected_apk_bytes"[[:space:]]+bytes[[:space:]]+in[[:space:]][0-9]+([.][0-9]+)?s\)$ ]] || {
+    echo "$label push transcript did not bind the selected APK byte count" >&2
+    return 1
+  }
+}
+
 android_require_installed_apk_digest() {
   local adb_bin="$1"
   local device_serial="$2"

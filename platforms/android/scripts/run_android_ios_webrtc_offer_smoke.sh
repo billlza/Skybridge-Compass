@@ -1293,7 +1293,12 @@ cat "$APP_APK_PROVENANCE" "$TEST_APK_PROVENANCE" >>"$PROVENANCE_FILE"
 cat "$PROVENANCE_FILE" >>"$ENV_FILE"
 APP_APK_SHA256="$(sed -n 's/^app_debug_apk_sha256=//p' "$APP_APK_PROVENANCE")"
 TEST_APK_SHA256="$(sed -n 's/^android_test_apk_sha256=//p' "$TEST_APK_PROVENANCE")"
-if [[ ! "$APP_APK_SHA256" =~ ^[0-9a-f]{64}$ || ! "$TEST_APK_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+APP_APK_BYTES="$(sed -n 's/^app_debug_apk_bytes=//p' "$APP_APK_PROVENANCE")"
+TEST_APK_BYTES="$(sed -n 's/^android_test_apk_bytes=//p' "$TEST_APK_PROVENANCE")"
+if [[ ! "$APP_APK_SHA256" =~ ^[0-9a-f]{64}$ \
+    || ! "$TEST_APK_SHA256" =~ ^[0-9a-f]{64}$ \
+    || ! "$APP_APK_BYTES" =~ ^[1-9][0-9]*$ \
+    || ! "$TEST_APK_BYTES" =~ ^[1-9][0-9]*$ ]]; then
   fail_summary "android_build" "apk_provenance_malformed"
 fi
 
@@ -1310,6 +1315,12 @@ if [[ "$IOS_TARGET" == "physical" ]]; then
     "$ADB_BIN" -s "$DEVICE_SERIAL" wait-for-device
     "$ADB_BIN" -s "$DEVICE_SERIAL" install --no-streaming -r -t "$APP_APK"
   } >"$ANDROID_INSTALL_LOG" 2>&1 || fail_summary "android_install" "app_install_failed"
+  APP_INSTALL_OUTPUT="$(<"$ANDROID_INSTALL_LOG")"
+  android_require_exact_install_success_output \
+    "$APP_INSTALL_OUTPUT" "$APP_APK" "$APP_APK_BYTES" \
+    "Android main-package overlay install" \
+    || fail_summary "android_install" "app_install_failed_or_ambiguous"
+  unset APP_INSTALL_OUTPUT
   ANDROID_TEST_PACKAGE_STATE="install_attempted"
   TEST_INSTALL_OUTPUT=""
   TEST_INSTALL_STATUS=0
@@ -1321,8 +1332,9 @@ if [[ "$IOS_TARGET" == "physical" ]]; then
   set -e
   printf '%s\n' "$TEST_INSTALL_OUTPUT" >>"$ANDROID_INSTALL_LOG"
   if (( TEST_INSTALL_STATUS != 0 )) \
-    || ! android_require_exact_success_output \
-      "$TEST_INSTALL_OUTPUT" "dedicated Android test-package install"; then
+    || ! android_require_exact_install_success_output \
+      "$TEST_INSTALL_OUTPUT" "$TEST_APK" "$TEST_APK_BYTES" \
+      "dedicated Android test-package install"; then
     fail_summary "android_install" "test_install_failed_or_ambiguous"
   fi
   unset TEST_INSTALL_OUTPUT TEST_INSTALL_STATUS

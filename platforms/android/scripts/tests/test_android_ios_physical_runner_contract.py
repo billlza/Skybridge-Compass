@@ -56,9 +56,12 @@ class PhysicalRunnerContractTests(unittest.TestCase):
             RUNNER[main_install : test_install + 120],
         )
         owned = RUNNER.index('ANDROID_TEST_PACKAGE_STATE="owned_installed"', test_install)
-        success_check = RUNNER.index("android_require_exact_success_output", test_install)
+        success_check = RUNNER.index(
+            "android_require_exact_install_success_output", test_install
+        )
         self.assertLess(success_check, owned)
         self.assertIn('"$TEST_INSTALL_OUTPUT"', RUNNER[success_check:owned])
+        self.assertIn('"$TEST_APK_BYTES"', RUNNER[success_check:owned])
         self.assertNotIn("TEST_INSTALL_SUCCESS_COUNT", RUNNER)
         ambiguous_cleanup = RUNNER.index(
             "Test package appeared after an ambiguous install attempt; refusing uninstall"

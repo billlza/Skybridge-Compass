@@ -411,9 +411,13 @@ single_line() {
 require_install_success() {
   local input="$1"
   local label="$2"
+  local expected_apk_path="$3"
+  local expected_apk_bytes="$4"
   local output=""
   output="$(<"$input")" || fail "$label output could not be read"
-  android_require_exact_success_output "$output" "$label" || fail "$label terminal was invalid"
+  android_require_exact_install_success_output \
+    "$output" "$expected_apk_path" "$expected_apk_bytes" "$label" \
+    || fail "$label terminal was invalid"
 }
 
 require_installed_apk_digest() {
@@ -565,12 +569,16 @@ run_profile() {
   }
   capture_adb "$profile" "$serial" "$prefix-app-install.txt" \
     install --no-streaming -r -t "$APP_APK" >/dev/null
-  require_install_success "$prefix-app-install.txt" "$profile app APK installation"
+  require_install_success \
+    "$prefix-app-install.txt" "$profile app APK installation" \
+    "$APP_APK" "$APP_APK_BYTES"
   require_test_package_absent "$profile" "$serial" "test install boundary"
   set_test_package_state "$serial" install_attempted
   capture_adb "$profile" "$serial" "$prefix-test-install.txt" \
     install --no-streaming -t "$TEST_APK" >/dev/null
-  require_install_success "$prefix-test-install.txt" "$profile test APK installation"
+  require_install_success \
+    "$prefix-test-install.txt" "$profile test APK installation" \
+    "$TEST_APK" "$TEST_APK_BYTES"
   set_test_package_state "$serial" owned_installed
 
   require_installed_apk_digest "$profile" "$serial" "$TEST_PACKAGE" "$TEST_APK_SHA256" "$profile-test"

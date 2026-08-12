@@ -130,7 +130,7 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
         attempted = profile.index('set_test_package_state "$serial" install_attempted')
         test_install = profile.index('install --no-streaming -t "$TEST_APK"')
         install_success = profile.index(
-            'require_install_success "$prefix-test-install.txt"',
+            '"$prefix-test-install.txt" "$profile test APK installation"',
         )
         test_digest = profile.index(
             'require_installed_apk_digest "$profile" "$serial" "$TEST_PACKAGE"',
@@ -143,6 +143,7 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
         self.assertLess(attempted, test_install)
         self.assertLess(test_install, install_success)
         self.assertLess(install_success, owned)
+        self.assertIn('"$TEST_APK" "$TEST_APK_BYTES"', profile[install_success:owned])
         self.assertLess(owned, test_digest)
         self.assertLess(owned, normal_cleanup)
 
