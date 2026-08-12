@@ -78,6 +78,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes python3-pil ripgrep shellcheck
           python3 -W error -B scripts/tests/test_launcher_icon_generation_contract.py
+          python3 -W error -B scripts/tests/test_android_quality_reports.py
           bash -n \
             scripts/check_android_packaged_placeholders.sh \
             scripts/check_android_release_aab.sh \
@@ -126,19 +127,18 @@ jobs:
             :app:lintDebug \
             :app:assembleDebug \
             :app:assembleDebugAndroidTest \
+            :shared:assembleRelease \
             :app:compileReleaseKotlin \
             2>&1 | tee "$gradle_log"
           skybridge_require_zero_warning_tool_log "$gradle_log"
-          if find . -path '*/build/test-results/testDebugUnitTest/TEST-*.xml' \
-              -type f -exec rg -l '<failure|<error' {} + | rg -q .; then
-            echo "Android unit-test XML contains a failure or error." >&2
-            exit 1
-          fi
-          if find . -path '*/build/reports/lint-results-debug.xml' \
-              -type f -exec rg -l '<issue' {} + | rg -q .; then
-            echo "Android lint XML contains at least one issue." >&2
-            exit 1
-          fi
+          python3 -W error -B scripts/check_android_quality_reports.py \
+            --root . \
+            shared \
+            core \
+            device-discovery \
+            remote-control \
+            file-transfer \
+            app
 
       - name: Inspect the diagnostic viewer artifact
         shell: bash

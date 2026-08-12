@@ -224,6 +224,11 @@ fun OpenSourceLicensesScreen(navController: NavController) {
             .bufferedReader()
             .use { it.readText() }
     }
+    val liboqsNotice = remember(context) {
+        context.assets.open("third_party_licenses/liboqs.txt")
+            .bufferedReader()
+            .use { it.readText() }
+    }
     val licenses = listOf(
         License("Kotlin", "Apache 2.0", "JetBrains"),
         License("Jetpack Compose", "Apache 2.0", "Google"),
@@ -231,7 +236,11 @@ fun OpenSourceLicensesScreen(navController: NavController) {
         License("Kotlinx Serialization", "Apache 2.0", "JetBrains"),
         License("Hilt", "Apache 2.0", "Google"),
         License("Kotest", "Apache 2.0", "Kotest"),
-        License("liboqs", "MIT", "Open Quantum Safe"),
+        License(
+            "liboqs and PQC implementations",
+            "MIT / Apache-2.0 / CC0 / BSD-like",
+            "Open Quantum Safe and contributors"
+        ),
         License("Bouncy Castle", "MIT", "Legion of the Bouncy Castle"),
         License("WebRTC Android SDK", "BSD-3-Clause / MIT", "WebRTC project authors / WebRTC SDKs")
     )
@@ -293,6 +302,30 @@ fun OpenSourceLicensesScreen(navController: NavController) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(webRtcNotice, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "liboqs and PQC implementations",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            t(
+                                "完整第三方许可与归属声明",
+                                "Complete third-party license and attribution notice",
+                                "完全なサードパーティーライセンスと帰属表示"
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(liboqsNotice, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }

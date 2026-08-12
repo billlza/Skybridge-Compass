@@ -5,12 +5,16 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd -P)"
 android_root="$repo_root/platforms/android"
 cmake_file="$android_root/shared/src/main/cpp/CMakeLists.txt"
 liboqs_source="$android_root/shared/scripts/build_liboqs/liboqs"
+quality_workflow="$repo_root/.github/workflows/android-release-quality.yml"
 
 [[ -f "$cmake_file" ]]
 [[ -f "$liboqs_source/CMakeLists.txt" ]]
+[[ -f "$quality_workflow" ]]
 git -C "$repo_root" ls-files --error-unmatch \
   "platforms/android/shared/scripts/build_liboqs/liboqs/CMakeLists.txt" \
   >/dev/null
+
+rg -F --quiet -- ':shared:assembleRelease \' "$quality_workflow"
 
 required_markers=(
   'add_subdirectory("${LIBOQS_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/liboqs")'

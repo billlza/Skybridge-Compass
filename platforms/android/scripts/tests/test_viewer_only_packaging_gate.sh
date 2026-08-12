@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd -P)"
 BUILD_FILE="$ROOT_DIR/app/build.gradle.kts"
 AUDIT_SCRIPT="$ROOT_DIR/scripts/check_android_packaged_placeholders.sh"
+AAB_AUDIT_SCRIPT="$ROOT_DIR/scripts/check_android_release_aab.sh"
+LIBOQS_NOTICE="$ROOT_DIR/app/src/main/assets/third_party_licenses/liboqs.txt"
 RUNBOOK="$ROOT_DIR/docs/REAL_DEVICE_INTEROP_RUNBOOK.md"
 # shellcheck source=scripts/lib/android_packaging_policy.sh
 source "$ROOT_DIR/scripts/lib/android_packaging_policy.sh"
@@ -41,6 +43,13 @@ done
 rg -Fq -- '--mode formal' "$AUDIT_SCRIPT" || fail 'formal APK mode is missing'
 rg -Fq 'apksigner' "$AUDIT_SCRIPT" || fail 'formal APK signature verification is missing'
 rg -Fq 'viewer/client only' "$RUNBOOK" || fail 'runbook viewer boundary is missing'
+[[ -s "$LIBOQS_NOTICE" ]] || fail 'packaged liboqs notice is missing or empty'
+rg -Fq 'assets/third_party_licenses/liboqs.txt' "$AUDIT_SCRIPT" || {
+  fail 'formal APK gate does not require the liboqs notice'
+}
+rg -Fq 'assets/third_party_licenses/liboqs.txt' "$AAB_AUDIT_SCRIPT" || {
+  fail 'formal AAB gate does not require the liboqs notice'
+}
 
 if command -v java >/dev/null 2>&1; then
   release_runtime="${TMPDIR:-/tmp}/skybridge-release-runtime.$$.txt"

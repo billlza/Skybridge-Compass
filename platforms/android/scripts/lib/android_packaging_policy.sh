@@ -134,6 +134,7 @@ with zipfile.ZipFile(aab_path) as archive:
         "BundleConfig.pb",
         "base/manifest/AndroidManifest.xml",
         "base/assets/skybridge-release/source.properties",
+        "base/assets/third_party_licenses/liboqs.txt",
         "base/assets/third_party_licenses/webrtc-sdk.txt",
     }
     missing = sorted(required - regular_names)

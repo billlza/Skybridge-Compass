@@ -406,6 +406,12 @@ PY
     echo "FAIL WebRTC third-party notice missing"
     status=1
   fi
+  if rg -Fqx 'assets/third_party_licenses/liboqs.txt' "$CONTENTS_FILE"; then
+    echo "OK liboqs third-party notice packaged"
+  else
+    echo "FAIL liboqs third-party notice missing"
+    status=1
+  fi
 } >"$SUMMARY_FILE"
 
 cat "$SUMMARY_FILE"

@@ -60,6 +60,7 @@ required = {
     "BundleConfig.pb": b"bundle-config",
     "base/manifest/AndroidManifest.xml": b"manifest-protobuf",
     "base/assets/skybridge-release/source.properties": source_binding,
+    "base/assets/third_party_licenses/liboqs.txt": b"license",
     "base/assets/third_party_licenses/webrtc-sdk.txt": b"license",
 }
 
@@ -71,6 +72,14 @@ def write_zip(name, entries):
                 archive.writestr(entry_name, payload)
 
 write_zip("valid.aab", required.items())
+write_zip(
+    "missing-liboqs-notice.aab",
+    [
+        (entry_name, payload)
+        for entry_name, payload in required.items()
+        if entry_name != "base/assets/third_party_licenses/liboqs.txt"
+    ],
+)
 write_zip("traversal.aab", [*required.items(), ("../escape", b"bad")])
 write_zip("control-character.aab", [*required.items(), ("base/assets/bad\nname", b"bad")])
 write_zip(
@@ -175,6 +184,11 @@ PY
 android_inspect_aab_archive \
   "$TMP_DIR/valid.aab" "$TMP_DIR/modules.txt" "$TMP_DIR/aab-contents.txt"
 [[ "$(<"$TMP_DIR/modules.txt")" == 'base' ]] || fail 'valid AAB module list is incorrect'
+expect_failure 'AAB missing liboqs notice' \
+  android_inspect_aab_archive \
+    "$TMP_DIR/missing-liboqs-notice.aab" \
+    "$TMP_DIR/missing-liboqs-modules.txt" \
+    "$TMP_DIR/missing-liboqs-contents.txt"
 expect_failure 'traversal AAB entry' \
   android_inspect_aab_archive \
     "$TMP_DIR/traversal.aab" "$TMP_DIR/traversal-modules.txt" "$TMP_DIR/traversal-contents.txt"

@@ -461,6 +461,12 @@ status=0
     echo "FAIL WebRTC third-party notice missing"
     status=1
   fi
+  if rg -Fqx 'assets/third_party_licenses/liboqs.txt' "$APK_CONTENTS_FILE"; then
+    echo "OK liboqs third-party notice packaged"
+  else
+    echo "FAIL liboqs third-party notice missing"
+    status=1
+  fi
   if rg -Fqx 'assets/skybridge-release/source.properties' "$APK_CONTENTS_FILE"; then
     echo "OK release source binding packaged"
   else
