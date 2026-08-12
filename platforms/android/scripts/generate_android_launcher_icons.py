@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -29,6 +31,10 @@ ADAPTIVE_ICON_DP = 108
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MAC_RELEASE_ROOT = PROJECT_ROOT.parents[1]
+GENERATOR_PATH = Path(__file__).resolve()
+GENERATION_MANIFEST = PROJECT_ROOT / "app" / "launcher-icon-generation.json"
+GENERATION_MANIFEST_SCHEMA_VERSION = 1
+GENERATION_MANIFEST_PURPOSE = "detect-accidental-launcher-asset-drift"
 if not (MAC_RELEASE_ROOT / "project.yml").is_file():
     raise RuntimeError(
         "Android launcher icon verification requires the canonical monorepo layout "
@@ -98,6 +104,95 @@ def render_svg_source(path: Path) -> Image.Image:
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def expected_output_paths(res_dir: Path) -> list[Path]:
+    return [
+        res_dir / f"drawable-{density}" / name
+        for density in DENSITIES
+        for name in ("ic_launcher_foreground.png", "ic_launcher_monochrome.png")
+    ]
+
+
+def asset_set_sha256(res_dir: Path, paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"launcher icon asset must be a regular file: {path}")
+        relative = path.relative_to(res_dir).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def expected_generation_manifest(source_path: Path, res_dir: Path) -> dict[str, object]:
+    outputs = expected_output_paths(res_dir)
+    return {
+        "schemaVersion": GENERATION_MANIFEST_SCHEMA_VERSION,
+        "purpose": GENERATION_MANIFEST_PURPOSE,
+        "source": source_path.relative_to(MAC_RELEASE_ROOT).as_posix(),
+        "sourceSha256": sha256(source_path),
+        "generator": GENERATOR_PATH.relative_to(MAC_RELEASE_ROOT).as_posix(),
+        "generatorSha256": sha256(GENERATOR_PATH),
+        "assetSetSha256": asset_set_sha256(res_dir, outputs),
+    }
+
+
+def validate_generation_manifest_payload(
+    actual: object,
+    expected: dict[str, object],
+) -> None:
+    if not isinstance(actual, dict):
+        raise RuntimeError("launcher icon generation manifest must be a JSON object")
+    if set(actual) != set(expected):
+        raise RuntimeError("launcher icon generation manifest has an unexpected field set")
+    drifted = [key for key, value in expected.items() if actual.get(key) != value]
+    if drifted:
+        raise RuntimeError(
+            "launcher icon generation binding drifted: " + ", ".join(sorted(drifted))
+        )
+
+
+def verify_generation_manifest(source_path: Path, res_dir: Path) -> None:
+    if GENERATION_MANIFEST.is_symlink() or not GENERATION_MANIFEST.is_file():
+        raise RuntimeError(
+            f"missing regular launcher icon generation manifest: {GENERATION_MANIFEST}"
+        )
+    if GENERATION_MANIFEST.stat().st_size > 16 * 1024:
+        raise RuntimeError("launcher icon generation manifest exceeds 16 KiB")
+    try:
+        actual = json.loads(GENERATION_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("launcher icon generation manifest is invalid JSON") from error
+    validate_generation_manifest_payload(
+        actual,
+        expected_generation_manifest(source_path, res_dir),
+    )
+
+
+def write_generation_manifest(source_path: Path, res_dir: Path) -> None:
+    payload = expected_generation_manifest(source_path, res_dir)
+    content = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    GENERATION_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=GENERATION_MANIFEST.parent,
+            prefix=f".{GENERATION_MANIFEST.name}.",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.chmod(0o644)
+        temporary_path.replace(GENERATION_MANIFEST)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def verify_source_path_policy(path: Path, allow_experimental_source: bool) -> None:
@@ -329,17 +424,14 @@ def write_preview(res_dir: Path) -> Path:
 
 
 def verify_outputs(res_dir: Path, paths: list[Path]) -> None:
-    expected = {res_dir / f"drawable-{density}" / name for density in DENSITIES for name in (
-        "ic_launcher_foreground.png",
-        "ic_launcher_monochrome.png",
-    )}
+    expected = set(expected_output_paths(res_dir))
     actual = set(paths)
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
         raise RuntimeError(f"unexpected output set; missing={missing}; extra={extra}")
     for path in sorted(paths):
-        if not path.is_file() or path.stat().st_size <= 0:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
             raise RuntimeError(f"invalid generated icon: {path}")
         density = path.parent.name.removeprefix("drawable-")
         expected_size = DENSITIES[density]
@@ -430,49 +522,41 @@ def copy_generated_outputs(staged_res_dir: Path, target_res_dir: Path) -> list[P
     return copied
 
 
-def compare_generated_outputs(staged_res_dir: Path, target_res_dir: Path) -> None:
-    drifted: list[str] = []
-    for density in DENSITIES:
-        for name in ("ic_launcher_foreground.png", "ic_launcher_monochrome.png"):
-            relative = Path(f"drawable-{density}") / name
-            generated = staged_res_dir / relative
-            checked_in = target_res_dir / relative
-            if not checked_in.is_file():
-                drifted.append(f"missing {checked_in}")
-            elif generated.read_bytes() != checked_in.read_bytes():
-                drifted.append(str(checked_in))
-    if drifted:
-        raise RuntimeError("Android launcher icon resources drifted from canonical source: " + ", ".join(drifted))
-
-
 def main() -> int:
     args = parse_args()
     source_path = args.source.resolve(strict=True)
     verify_source_path_policy(source_path, args.allow_experimental_source)
-    source = load_source(source_path, args.allow_svg)
+    is_canonical_source = source_path == DEFAULT_CANONICAL_ICON.resolve(strict=True)
     source_hash = sha256(source_path)
-
-    subject_mask = make_subject_mask(source)
-    foreground_art = make_foreground_art(source, subject_mask)
     verify_resource_contract(RES_DIR)
 
-    with tempfile.TemporaryDirectory(prefix="skybridge-android-launcher-icons-") as temp_dir:
-        staged_res_dir = Path(temp_dir) / "res"
-        outputs = write_density_assets(staged_res_dir, foreground_art, subject_mask)
-        verify_outputs(staged_res_dir, outputs)
-        if args.check:
-            compare_generated_outputs(staged_res_dir, RES_DIR)
-            preview = write_preview(RES_DIR) if args.write_preview else None
-        else:
+    if args.check:
+        outputs = expected_output_paths(RES_DIR)
+        verify_outputs(RES_DIR, outputs)
+        verify_generation_manifest(source_path, RES_DIR)
+        preview = write_preview(RES_DIR) if args.write_preview else None
+    else:
+        source = load_source(source_path, args.allow_svg)
+        subject_mask = make_subject_mask(source)
+        foreground_art = make_foreground_art(source, subject_mask)
+        with tempfile.TemporaryDirectory(prefix="skybridge-android-launcher-icons-") as temp_dir:
+            staged_res_dir = Path(temp_dir) / "res"
+            outputs = write_density_assets(staged_res_dir, foreground_art, subject_mask)
+            verify_outputs(staged_res_dir, outputs)
             copied = copy_generated_outputs(staged_res_dir, RES_DIR)
             verify_outputs(RES_DIR, copied)
-            preview = write_preview(RES_DIR)
+        if is_canonical_source:
+            write_generation_manifest(source_path, RES_DIR)
+            verify_generation_manifest(source_path, RES_DIR)
+        preview = write_preview(RES_DIR)
 
     print(f"source={source_path}")
     print(f"source_sha256={source_hash}")
     print(f"generated={len(outputs)} assets")
     if args.check:
         print("check=passed")
+    elif not is_canonical_source:
+        print("generation_binding=not-updated-experimental-source")
     if preview is None:
         print("preview=skipped")
     else:

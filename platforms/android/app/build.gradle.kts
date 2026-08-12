@@ -954,7 +954,7 @@ tasks.register("locateDebugArtifacts") {
 
 val checkLauncherIcons = tasks.register<Exec>("checkLauncherIcons") {
     group = "verification"
-    description = "Verify Android launcher icons are derived from the canonical SkyBridge SVG design source."
+    description = "Verify launcher asset structure and its generation binding to the canonical SVG source."
     workingDir = rootProject.projectDir
     environment("PYTHONDONTWRITEBYTECODE", "1")
     commandLine("python3", "scripts/generate_android_launcher_icons.py", "--check")

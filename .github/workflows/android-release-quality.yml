@@ -69,7 +69,8 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes librsvg2-bin python3-pil ripgrep shellcheck
+          sudo apt-get install --yes python3-pil ripgrep shellcheck
+          python3 scripts/tests/test_launcher_icon_generation_contract.py
           bash -n \
             scripts/check_android_packaged_placeholders.sh \
             scripts/check_android_release_aab.sh \
