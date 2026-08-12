@@ -79,6 +79,10 @@ class NativePqcRuntimeEvidenceTests(unittest.TestCase):
         self.assertIs(payload["matrixComplete"], True)
         self.assertEqual(payload["sourceCommit"], "1" * 40)
         self.assertEqual(
+            payload["testPackage"],
+            "com.skybridge.compass.debug.nativepqc.test",
+        )
+        self.assertEqual(
             [run["profile"] for run in payload["runs"]],
             ["samsung-api36-4k", "api37-16k"],
         )

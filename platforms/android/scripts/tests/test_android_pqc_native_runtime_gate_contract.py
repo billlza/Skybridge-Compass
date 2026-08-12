@@ -31,25 +31,53 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
             "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk",
             self.runner,
         )
+        self.assertIn(
+            'TEST_PACKAGE="com.skybridge.compass.debug.nativepqc.test"',
+            self.runner,
+        )
+        self.assertIn(
+            '-PskybridgeNativePqcGateTestApplicationId="$TEST_PACKAGE"',
+            self.runner,
+        )
         fixed_build = re.compile(
             r'"\$GRADLEW"\s+.*?--rerun-tasks\s+.*?--warning-mode all\s+'
+            r'.*?-PskybridgeNativePqcGateTestApplicationId="\$TEST_PACKAGE"\s+'
             r':app:assembleDebug\s+:app:assembleDebugAndroidTest',
             re.DOTALL,
         )
         self.assertRegex(self.runner.replace("\\\n", " "), fixed_build)
         self.assertIn("skybridge_require_zero_warning_tool_log", self.runner)
         self.assertIn('"$GRADLEW" --stop', self.runner)
+        self.assertIn("acquire_lane_lock", self.runner)
+        self.assertIn("--git-common-dir", self.runner)
+        self.assertIn("skybridge-native-pqc-runtime.lock", self.runner)
+        self.assertIn('rmdir "$LANE_LOCK_DIR"', self.runner)
+        lock_release = self.runner.index(
+            'release_lane_lock || fail "native-PQC repository lane lock release failed"',
+        )
+        session_complete = self.runner.index("SESSION_COMPLETE=1", lock_release)
+        success_message = self.runner.index(
+            "Android native PQC runtime matrix passed",
+            session_complete,
+        )
+        self.assertLess(lock_release, session_complete)
+        self.assertLess(session_complete, success_message)
         self.assertIn('export ANDROID_HOME="$GRADLE_SDK_ROOT"', self.runner)
         self.assertIn('export ANDROID_SDK_ROOT="$GRADLE_SDK_ROOT"', self.runner)
         self.assertIn('install --no-streaming -r -t "$APP_APK"', self.runner)
         self.assertIn('install --no-streaming -r -t "$TEST_APK"', self.runner)
         self.assertIn('"$ADB_BIN" -s "$serial"', self.runner)
-        adb_invocations = re.findall(r'(?m)^\s*"\$ADB_BIN"[^\n]*', self.runner)
+        adb_invocations = re.findall(
+            r'(?m)^\s*(?:if ! )?"\$ADB_BIN"[^\n]*',
+            self.runner,
+        )
         self.assertGreater(len(adb_invocations), 0)
         self.assertTrue(
-            all(invocation.lstrip().startswith('"$ADB_BIN" -s "$serial"') for invocation in adb_invocations),
+            all('"$ADB_BIN" -s "$serial"' in invocation for invocation in adb_invocations),
         )
         self.assertIn("the two runtime profiles require distinct serials", self.runner)
+        self.assertNotIn("${manufacturer,,}", self.runner)
+        self.assertIn("manufacturer normalization failed", self.runner)
 
     def test_runner_rechecks_clean_commit_after_the_fixed_build(self) -> None:
         pre_build = self.runner.index('require_frozen_source "pre-build verification"')
@@ -79,10 +107,51 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
             self.assertNotRegex(self.runner, pattern)
         self.assertIn('install --no-streaming -r -t "$APP_APK"', self.runner)
         self.assertIn('uninstall "$TEST_PACKAGE"', self.runner)
-        self.assertIn("SAMSUNG_TEST_PACKAGE_TOUCHED=0", self.runner)
-        self.assertIn("API37_TEST_PACKAGE_TOUCHED=0", self.runner)
-        self.assertIn('if [[ "$SAMSUNG_TEST_PACKAGE_TOUCHED" == "1" ]]', self.runner)
-        self.assertIn('if [[ "$API37_TEST_PACKAGE_TOUCHED" == "1" ]]', self.runner)
+        self.assertNotIn("TEST_PACKAGE_TOUCHED", self.runner)
+        self.assertNotIn("best_effort_remove_test_package", self.runner)
+        self.assertIn('SAMSUNG_TEST_PACKAGE_STATE="untouched"', self.runner)
+        self.assertIn('API37_TEST_PACKAGE_STATE="untouched"', self.runner)
+        self.assertIn("test package existed before this run", self.runner)
+        self.assertIn("ownership_ambiguous", self.runner)
+        self.assertIn("refusing uninstall", self.runner)
+
+        profile_start = self.runner.index("run_profile() {")
+        profile_end = self.runner.index(
+            'require_test_package_absent "samsung-api36-4k"',
+            profile_start,
+        )
+        profile = self.runner[profile_start:profile_end]
+        app_install = profile.index('install --no-streaming -r -t "$APP_APK"')
+        install_boundary = profile.index(
+            'require_test_package_absent "$profile" "$serial" "test install boundary"',
+        )
+        attempted = profile.index('set_test_package_state "$serial" install_attempted')
+        test_install = profile.index('install --no-streaming -r -t "$TEST_APK"')
+        test_digest = profile.index(
+            'require_installed_apk_digest "$profile" "$serial" "$TEST_PACKAGE"',
+        )
+        owned = profile.index('set_test_package_state "$serial" owned_installed')
+        normal_cleanup = profile.index(
+            'reconcile_and_remove_run_test_package "$profile" "$serial" "normal completion"',
+        )
+        self.assertLess(app_install, install_boundary)
+        self.assertLess(install_boundary, attempted)
+        self.assertLess(attempted, test_install)
+        self.assertLess(test_install, test_digest)
+        self.assertLess(test_digest, owned)
+        self.assertLess(owned, normal_cleanup)
+
+        samsung_preflight = self.runner.index(
+            'require_test_package_absent "samsung-api36-4k" "$SAMSUNG_SERIAL" "matrix preflight"',
+        )
+        api37_preflight = self.runner.index(
+            'require_test_package_absent "api37-16k" "$API37_SERIAL" "matrix preflight"',
+        )
+        samsung_run = self.runner.index(
+            'run_profile "samsung-api36-4k" "$SAMSUNG_SERIAL"',
+        )
+        self.assertLess(samsung_preflight, api37_preflight)
+        self.assertLess(api37_preflight, samsung_run)
 
     def test_runner_checks_device_and_installed_apk_identity(self) -> None:
         for required in (

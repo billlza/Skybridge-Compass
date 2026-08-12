@@ -566,6 +566,14 @@ val releaseSigningValuesPresent = listOf(
     RELEASE_KEY_ALIAS,
     RELEASE_KEY_PASSWORD
 ).all(String::isNotEmpty)
+val nativePqcGateTestApplicationId = providers
+    .gradleProperty("skybridgeNativePqcGateTestApplicationId")
+    .orNull
+nativePqcGateTestApplicationId?.let { configuredApplicationId ->
+    require(configuredApplicationId == "com.skybridge.compass.debug.nativepqc.test") {
+        "skybridgeNativePqcGateTestApplicationId must select the dedicated native-PQC test package"
+    }
+}
 android {
     namespace = "com.skybridge.compass"
     compileSdk = 37
@@ -578,6 +586,7 @@ android {
         versionName = "1.0.2"
 
         testInstrumentationRunner = "com.skybridge.compass.android.HiltTestRunner"
+        nativePqcGateTestApplicationId?.let { testApplicationId = it }
         vectorDrawables {
             useSupportLibrary = true
         }

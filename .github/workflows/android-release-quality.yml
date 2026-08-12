@@ -79,10 +79,14 @@ jobs:
           sudo apt-get install --yes python3-pil ripgrep shellcheck
           python3 -W error -B scripts/tests/test_launcher_icon_generation_contract.py
           python3 -W error -B scripts/tests/test_android_quality_reports.py
+          python3 -W error -B scripts/tests/test_android_pqc_native_runtime_evidence.py
+          python3 -W error -B scripts/tests/test_android_pqc_native_runtime_gate_behavior.py
+          python3 -W error -B scripts/tests/test_android_pqc_native_runtime_gate_contract.py
           bash -n \
             scripts/check_android_packaged_placeholders.sh \
             scripts/check_android_release_aab.sh \
             scripts/lib/strict_gradle_output.sh \
+            scripts/run_android_pqc_native_runtime_gate.sh \
             scripts/tests/test_android_release_aab_gate.sh \
             scripts/tests/test_release_artifact_preflight.sh \
             scripts/tests/test_tracked_liboqs_build_contract.sh \
@@ -92,6 +96,7 @@ jobs:
             scripts/check_android_release_aab.sh \
             scripts/lib/android_packaging_policy.sh \
             scripts/lib/strict_gradle_output.sh \
+            scripts/run_android_pqc_native_runtime_gate.sh \
             scripts/tests/test_android_release_aab_gate.sh \
             scripts/tests/test_release_artifact_preflight.sh \
             scripts/tests/test_tracked_liboqs_build_contract.sh \

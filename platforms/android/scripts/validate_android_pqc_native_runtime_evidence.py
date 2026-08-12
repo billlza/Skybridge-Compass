@@ -29,7 +29,7 @@ EXPECTED_TEST_CLASS = (
     "NativePqcRuntimeInstrumentationTest"
 )
 EXPECTED_APP_PACKAGE = "com.skybridge.compass.debug"
-EXPECTED_TEST_PACKAGE = "com.skybridge.compass.debug.test"
+EXPECTED_TEST_PACKAGE = "com.skybridge.compass.debug.nativepqc.test"
 EXPECTED_RUNNER = "com.skybridge.compass.android.HiltTestRunner"
 
 MARKER_PATTERN = re.compile(

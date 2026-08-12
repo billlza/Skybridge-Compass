@@ -15,7 +15,7 @@ GRADLEW="$ROOT_DIR/gradlew"
 APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
 APP_PACKAGE="com.skybridge.compass.debug"
-TEST_PACKAGE="com.skybridge.compass.debug.test"
+TEST_PACKAGE="com.skybridge.compass.debug.nativepqc.test"
 TEST_RUNNER="com.skybridge.compass.android.HiltTestRunner"
 TEST_CLASS="com.skybridge.compass.android.crypto.NativePqcRuntimeInstrumentationTest"
 INSTRUMENTATION_COMPONENT="$TEST_PACKAGE/$TEST_RUNNER"
@@ -28,12 +28,14 @@ EVIDENCE_DIR=""
 ADB_BIN=""
 GIT_ROOT=""
 PRIVATE_DIR=""
+LANE_LOCK_DIR=""
+LANE_LOCK_ACQUIRED=0
 BUILD_STARTED=0
 GRADLE_STOPPED=0
 EVIDENCE_CREATED=0
 SESSION_COMPLETE=0
-SAMSUNG_TEST_PACKAGE_TOUCHED=0
-API37_TEST_PACKAGE_TOUCHED=0
+SAMSUNG_TEST_PACKAGE_STATE="untouched"
+API37_TEST_PACKAGE_STATE="untouched"
 
 usage() {
   cat <<'USAGE'
@@ -143,18 +145,50 @@ require_frozen_source "pre-build verification"
 PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-pqc-native-runtime.XXXXXX")"
 chmod 0700 "$PRIVATE_DIR"
 
-best_effort_remove_test_package() {
-  local serial="$1"
-  "$ADB_BIN" -s "$serial" uninstall "$TEST_PACKAGE" >/dev/null 2>&1 || true
-}
-
-mark_test_package_touched() {
+test_package_state() {
   local serial="$1"
   case "$serial" in
-    "$SAMSUNG_SERIAL") SAMSUNG_TEST_PACKAGE_TOUCHED=1 ;;
-    "$API37_SERIAL") API37_TEST_PACKAGE_TOUCHED=1 ;;
+    "$SAMSUNG_SERIAL") printf '%s\n' "$SAMSUNG_TEST_PACKAGE_STATE" ;;
+    "$API37_SERIAL") printf '%s\n' "$API37_TEST_PACKAGE_STATE" ;;
+    *) return 1 ;;
+  esac
+}
+
+set_test_package_state() {
+  local serial="$1"
+  local state="$2"
+  case "$state" in
+    untouched|baseline_absent|install_attempted|owned_installed|cleaned|ownership_ambiguous) ;;
+    *) fail "refusing to record an invalid test-package ownership state" ;;
+  esac
+  case "$serial" in
+    "$SAMSUNG_SERIAL") SAMSUNG_TEST_PACKAGE_STATE="$state" ;;
+    "$API37_SERIAL") API37_TEST_PACKAGE_STATE="$state" ;;
     *) fail "refusing to track an unexpected adb serial for cleanup" ;;
   esac
+}
+
+acquire_lane_lock() {
+  local common_git_dir=""
+  common_git_dir="$(git -C "$GIT_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
+    fail "unable to resolve the common Git directory for the native-PQC lane lock"
+  }
+  [[ "$common_git_dir" == /* && -d "$common_git_dir" && ! -L "$common_git_dir" ]] || {
+    fail "the common Git directory is not a trusted absolute directory"
+  }
+  LANE_LOCK_DIR="$common_git_dir/skybridge-native-pqc-runtime.lock"
+  if ! mkdir -m 0700 -- "$LANE_LOCK_DIR" 2>/dev/null; then
+    fail "another native-PQC runtime matrix owns the repository lane lock"
+  fi
+  LANE_LOCK_ACQUIRED=1
+}
+
+release_lane_lock() {
+  [[ "$LANE_LOCK_ACQUIRED" == "1" ]] || return 0
+  if ! rmdir "$LANE_LOCK_DIR"; then
+    return 1
+  fi
+  LANE_LOCK_ACQUIRED=0
 }
 
 stop_gradle() {
@@ -180,6 +214,8 @@ stop_gradle() {
 cleanup() {
   local status=$?
   local stop_status=0
+  local test_cleanup_status=0
+  local state=""
   trap - EXIT
   set +e
   if [[ "$BUILD_STARTED" == "1" && "$GRADLE_STOPPED" != "1" ]]; then
@@ -190,11 +226,41 @@ cleanup() {
     fi
   fi
   if { [[ "$SESSION_COMPLETE" != "1" ]] || (( status != 0 )); }; then
-    if [[ "$SAMSUNG_TEST_PACKAGE_TOUCHED" == "1" ]]; then
-      best_effort_remove_test_package "$SAMSUNG_SERIAL"
-    fi
-    if [[ "$API37_TEST_PACKAGE_TOUCHED" == "1" ]]; then
-      best_effort_remove_test_package "$API37_SERIAL"
+    state="$(test_package_state "$SAMSUNG_SERIAL")"
+    case "$state" in
+      install_attempted|owned_installed)
+        reconcile_and_remove_run_test_package \
+          "samsung-api36-4k" "$SAMSUNG_SERIAL" "failure cleanup" || test_cleanup_status=1
+        ;;
+      ownership_ambiguous)
+        echo "Samsung test-package ownership is ambiguous; refusing destructive cleanup" >&2
+        test_cleanup_status=1
+        ;;
+      untouched|baseline_absent|cleaned) ;;
+      *)
+        echo "Samsung test-package ownership state is invalid: $state" >&2
+        test_cleanup_status=1
+        ;;
+    esac
+
+    state="$(test_package_state "$API37_SERIAL")"
+    case "$state" in
+      install_attempted|owned_installed)
+        reconcile_and_remove_run_test_package \
+          "api37-16k" "$API37_SERIAL" "failure cleanup" || test_cleanup_status=1
+        ;;
+      ownership_ambiguous)
+        echo "API 37 test-package ownership is ambiguous; refusing destructive cleanup" >&2
+        test_cleanup_status=1
+        ;;
+      untouched|baseline_absent|cleaned) ;;
+      *)
+        echo "API 37 test-package ownership state is invalid: $state" >&2
+        test_cleanup_status=1
+        ;;
+    esac
+    if (( status == 0 && test_cleanup_status != 0 )); then
+      status=$test_cleanup_status
     fi
   fi
   if [[ "$EVIDENCE_CREATED" == "1" ]] \
@@ -205,9 +271,19 @@ cleanup() {
   if [[ -n "$PRIVATE_DIR" && -d "$PRIVATE_DIR" ]]; then
     /bin/rm -rf -- "$PRIVATE_DIR"
   fi
+  if [[ "$LANE_LOCK_ACQUIRED" == "1" ]]; then
+    if ! release_lane_lock; then
+      echo "Failed to release the native-PQC repository lane lock: $LANE_LOCK_DIR" >&2
+      if (( status == 0 )); then
+        status=1
+      fi
+    fi
+  fi
   exit "$status"
 }
 trap cleanup EXIT
+
+acquire_lane_lock
 
 for output_apk in "$APP_APK" "$TEST_APK"; do
   if [[ -e "$output_apk" || -L "$output_apk" ]]; then
@@ -223,6 +299,7 @@ if ! "$GRADLEW" \
     --max-workers=2 \
     --rerun-tasks \
     --warning-mode all \
+    -PskybridgeNativePqcGateTestApplicationId="$TEST_PACKAGE" \
     :app:assembleDebug \
     :app:assembleDebugAndroidTest \
     2>&1 | tee "$PRIVATE_DIR/gradle-build.log"; then
@@ -373,18 +450,115 @@ require_installed_apk_digest() {
   }
 }
 
-remove_test_package() {
+require_test_package_absent() {
   local profile="$1"
   local serial="$2"
-  local output="$PRIVATE_DIR/${profile}-test-uninstall.txt"
+  local phase="$3"
+  local output="$PRIVATE_DIR/${profile}-test-package-preflight.txt"
 
   capture_adb "$profile" "$serial" "$output" shell pm path "$TEST_PACKAGE" >/dev/null
-  if rg -q '^package:' "$output"; then
-    capture_adb "$profile" "$serial" "$output" uninstall "$TEST_PACKAGE" >/dev/null
-    require_install_success "$output" "$profile test package removal"
-  elif [[ -s "$output" ]]; then
-    fail "$profile test package query returned unexpected output"
+  if [[ ! -s "$output" ]]; then
+    set_test_package_state "$serial" baseline_absent
+    return
   fi
+  if rg -q '^package:' "$output"; then
+    fail "$profile test package existed before this run during $phase; remove it explicitly before retrying"
+  fi
+  fail "$profile test package query returned unexpected output during $phase"
+}
+
+reconcile_and_remove_run_test_package() {
+  local profile="$1"
+  local serial="$2"
+  local phase="$3"
+  local state=""
+  local phase_slug="${phase// /-}"
+  local path_output="$PRIVATE_DIR/${profile}-test-path-${phase_slug}.txt"
+  local digest_output="$PRIVATE_DIR/${profile}-test-digest-${phase_slug}.txt"
+  local uninstall_output="$PRIVATE_DIR/${profile}-test-uninstall-${phase_slug}.txt"
+  local verify_output="$PRIVATE_DIR/${profile}-test-verify-absent-${phase_slug}.txt"
+  local package_value=""
+  local remote_path=""
+  local digest_value=""
+  local success_count=""
+
+  state="$(test_package_state "$serial")" || {
+    echo "$profile cleanup refused an unexpected adb serial during $phase" >&2
+    return 1
+  }
+  case "$state" in
+    install_attempted|owned_installed) ;;
+    *)
+      echo "$profile cleanup refused non-owned test-package state $state during $phase" >&2
+      return 1
+      ;;
+  esac
+
+  if ! "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$path_output" 2>&1; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile could not reconcile the test package during $phase; refusing uninstall" >&2
+    return 1
+  fi
+  package_value="$(tr -d '\r' <"$path_output")"
+  if [[ -z "$package_value" ]]; then
+    if [[ "$state" == "install_attempted" ]]; then
+      set_test_package_state "$serial" cleaned
+      return 0
+    fi
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile owned test package disappeared before $phase" >&2
+    return 1
+  fi
+  if [[ "$package_value" == *$'\n'* ]] \
+      || [[ ! "$package_value" =~ ^package:(/data/app/[A-Za-z0-9_./=+~-]+/base\.apk)$ ]]; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile test-package path was not one canonical base APK during $phase; refusing uninstall" >&2
+    return 1
+  fi
+  remote_path="${BASH_REMATCH[1]}"
+  if [[ "$remote_path" == *"/../"* || "$remote_path" == *"/./"* ]]; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile test-package path was non-canonical during $phase; refusing uninstall" >&2
+    return 1
+  fi
+  if ! "$ADB_BIN" -s "$serial" shell sha256sum "$remote_path" >"$digest_output" 2>&1; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile could not hash the test package during $phase; refusing uninstall" >&2
+    return 1
+  fi
+  digest_value="$(tr -d '\r' <"$digest_output")"
+  if [[ "$digest_value" == *$'\n'* ]] \
+      || [[ ! "$digest_value" =~ ^([0-9a-f]{64})[[:space:]]+([^[:space:]]+)$ ]] \
+      || [[ "${BASH_REMATCH[1]}" != "$TEST_APK_SHA256" ]] \
+      || [[ "${BASH_REMATCH[2]}" != "$remote_path" ]]; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile test-package bytes were not owned by this run during $phase; refusing uninstall" >&2
+    return 1
+  fi
+
+  set_test_package_state "$serial" owned_installed
+  if ! "$ADB_BIN" -s "$serial" uninstall "$TEST_PACKAGE" >"$uninstall_output" 2>&1; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile owned test-package uninstall failed during $phase" >&2
+    return 1
+  fi
+  success_count="$(
+    tr -d '\r' <"$uninstall_output" |
+      LC_ALL=C awk '$0 == "Success" { count++ } END { print count + 0 }'
+  )"
+  if [[ "$success_count" != "1" ]] \
+      || LC_ALL=C rg -n '(?i:failure|error:)' "$uninstall_output" >/dev/null; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile owned test-package uninstall had an invalid terminal result during $phase" >&2
+    return 1
+  fi
+  if ! "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$verify_output" 2>&1 \
+      || [[ -s "$verify_output" ]]; then
+    set_test_package_state "$serial" ownership_ambiguous
+    echo "$profile could not prove test-package absence after $phase" >&2
+    return 1
+  fi
+  set_test_package_state "$serial" cleaned
 }
 
 run_profile() {
@@ -401,6 +575,7 @@ run_profile() {
   local page_size=""
   local abi=""
   local manufacturer=""
+  local manufacturer_lower=""
   local qemu=""
   local instrumentation=""
 
@@ -424,24 +599,29 @@ run_profile() {
   if [[ "$require_physical_samsung" == "1" ]]; then
     capture_adb "$profile" "$serial" "$prefix-manufacturer.txt" shell getprop ro.product.manufacturer >/dev/null
     manufacturer="$(single_line "$prefix-manufacturer.txt" "$profile manufacturer")"
+    manufacturer_lower="$(
+      printf '%s' "$manufacturer" | LC_ALL=C tr '[:upper:]' '[:lower:]'
+    )" || fail "$profile manufacturer normalization failed"
     capture_adb "$profile" "$serial" "$prefix-qemu.txt" shell getprop ro.kernel.qemu >/dev/null
     qemu="$(tr -d '\r\n' <"$prefix-qemu.txt")"
-    [[ "${manufacturer,,}" == "samsung" && "$qemu" != "1" ]] || {
+    [[ "$manufacturer_lower" == "samsung" && "$qemu" != "1" ]] || {
       fail "$profile must be a physical Samsung runtime"
     }
   fi
 
-  mark_test_package_touched "$serial"
-  remove_test_package "$profile" "$serial"
+  require_test_package_absent "$profile" "$serial" "profile preflight"
   capture_adb "$profile" "$serial" "$prefix-app-install.txt" \
     install --no-streaming -r -t "$APP_APK" >/dev/null
   require_install_success "$prefix-app-install.txt" "$profile app APK installation"
+  require_test_package_absent "$profile" "$serial" "test install boundary"
+  set_test_package_state "$serial" install_attempted
   capture_adb "$profile" "$serial" "$prefix-test-install.txt" \
     install --no-streaming -r -t "$TEST_APK" >/dev/null
   require_install_success "$prefix-test-install.txt" "$profile test APK installation"
 
-  require_installed_apk_digest "$profile" "$serial" "$APP_PACKAGE" "$APP_APK_SHA256" "$profile-app"
   require_installed_apk_digest "$profile" "$serial" "$TEST_PACKAGE" "$TEST_APK_SHA256" "$profile-test"
+  set_test_package_state "$serial" owned_installed
+  require_installed_apk_digest "$profile" "$serial" "$APP_PACKAGE" "$APP_APK_SHA256" "$profile-app"
   capture_adb "$profile" "$serial" "$prefix-instrumentation-list.txt" \
     shell pm list instrumentation >/dev/null
   instrumentation="instrumentation:$INSTRUMENTATION_COMPONENT (target=$APP_PACKAGE)"
@@ -460,9 +640,13 @@ run_profile() {
   if rg -Fq -- "$serial" "$prefix-instrumentation.txt"; then
     fail "$profile instrumentation output exposed a device serial"
   fi
-  remove_test_package "$profile" "$serial"
+  reconcile_and_remove_run_test_package "$profile" "$serial" "normal completion" || {
+    fail "$profile could not remove the run-owned test package"
+  }
 }
 
+require_test_package_absent "samsung-api36-4k" "$SAMSUNG_SERIAL" "matrix preflight"
+require_test_package_absent "api37-16k" "$API37_SERIAL" "matrix preflight"
 run_profile "samsung-api36-4k" "$SAMSUNG_SERIAL" 36 4096 arm64-v8a 1
 run_profile "api37-16k" "$API37_SERIAL" 37 16384 "$API37_ABI" 0
 
@@ -486,5 +670,6 @@ if rg -Fq -- "$SAMSUNG_SERIAL" "$EVIDENCE_DIR/native-pqc-runtime-evidence.json" 
 fi
 
 stop_gradle || fail "Gradle normal stop failed"
+release_lane_lock || fail "native-PQC repository lane lock release failed"
 SESSION_COMPLETE=1
 echo "Android native PQC runtime matrix passed: $EVIDENCE_DIR/native-pqc-runtime-evidence.json"

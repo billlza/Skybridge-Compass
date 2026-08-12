@@ -239,12 +239,32 @@ between runtime profiles, and the runner finishes through normal
 environment variables exist, the runner derives the SDK root from the exact
 resolved `adb` installation without writing host-local configuration.
 
+The fixed build selects the dedicated instrumentation application id
+`com.skybridge.compass.debug.nativepqc.test`. It does not replace or remove the
+generic `com.skybridge.compass.debug.test` package used by other Android test
+lanes.
+
+One atomic lock in the repository's common Git directory serializes this matrix
+across its worktrees. This protects the canonical APK output paths and the
+dedicated test-package ownership transition from concurrent invocations of the
+same gate. A process killed before normal cleanup can leave a visible stale lock;
+the next run fails closed so an operator can inspect the interrupted run before
+removing that empty lock directory. The runner releases the lane lock before it
+publishes its only success message; a release failure removes the incomplete
+evidence instead of leaving a misleading successful terminal state.
+
 On each selected runtime, the runner updates the existing debug app in place
 with `adb install -r -t`; it never uninstalls the target app or clears its data.
 An incompatible installed signing identity or version therefore fails closed
-instead of being bypassed through destructive removal. Only the disposable
-`.debug.test` instrumentation package is removed before and after a run, and
-failure cleanup is bounded to targets whose test-package phase actually began.
+instead of being bypassed through destructive removal. The disposable
+`.debug.test` instrumentation package must be absent at matrix preflight and
+again immediately before installation. A pre-existing test package fails closed
+and must be handled explicitly by the operator outside the runner. The runner
+records ownership only after its test APK install and device-side digest check;
+normal and failure cleanup uninstall only that run-owned package. An interrupted
+install is removed only when its device-side digest proves that it is the exact
+test APK built by this run. Unknown or different bytes produce an explicit
+ownership-ambiguous failure and are never deleted.
 
 For retained release evidence, `EXPECTED_SOURCE_COMMIT` comes from the existing
 release APK audit metadata. Its source revision and the two APK SHA-256 values
@@ -284,10 +304,12 @@ The runner fails closed unless:
 - both the host and the instrumented app process observe the same API/page/ABI
 - the same app/test APK pair is freshly installed on both targets and each
   installed `base.apk` SHA-256 equals its selected local APK
+- the test package is absent before the matrix; pre-existing or ownership-ambiguous
+  test-package state fails without automatic deletion
 - exactly one test class runs and emits the canonical all-true native-PQC result
 - all retained key material, shared secrets, ciphertext, messages, and signatures
   are cleared before the success marker
-- only the disposable instrumentation package is removed after each profile;
+- only the run-owned disposable instrumentation package is removed after each profile;
   the debug app remains installed and its existing private data is preserved
 
 The retained `native-pqc-runtime-evidence.json` contains no serial, model,
