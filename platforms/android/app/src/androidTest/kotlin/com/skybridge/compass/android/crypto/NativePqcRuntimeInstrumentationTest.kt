@@ -1,6 +1,7 @@
 package com.skybridge.compass.android.crypto
 
 import android.os.Build
+import android.os.Bundle
 import android.os.Process
 import android.system.Os
 import android.system.OsConstants
@@ -156,27 +157,29 @@ class NativePqcRuntimeInstrumentationTest {
         }
 
         assertTrue("PQC runtime test did not clear all retained byte buffers", cleanupComplete)
-        println(
-            buildString {
-                append(MARKER_PREFIX)
-                append(" schema=1")
-                append(" profile=").append(expectation.profile)
-                append(" provider=").append(EXPECTED_PROVIDER)
-                append(" api=").append(expectation.apiLevel)
-                append(" abi=").append(actualAbi)
-                append(" page_size=").append(actualPageSize)
-                append(" native_load=true")
-                append(" mlkem_keygen=true")
-                append(" mlkem_encaps=true")
-                append(" mlkem_decaps=true")
-                append(" mlkem_secret_match=").append(kemSecretMatched)
-                append(" mldsa_keygen=true")
-                append(" mldsa_sign=true")
-                append(" mldsa_verify=").append(signatureVerified)
-                append(" mldsa_negative_message=").append(alteredMessageRejected)
-                append(" mldsa_negative_signature=").append(alteredSignatureRejected)
-                append(" cleanup=").append(cleanupComplete)
-            },
+        val resultMarker = buildString {
+            append(MARKER_PREFIX)
+            append(" schema=1")
+            append(" profile=").append(expectation.profile)
+            append(" provider=").append(EXPECTED_PROVIDER)
+            append(" api=").append(expectation.apiLevel)
+            append(" abi=").append(actualAbi)
+            append(" page_size=").append(actualPageSize)
+            append(" native_load=true")
+            append(" mlkem_keygen=true")
+            append(" mlkem_encaps=true")
+            append(" mlkem_decaps=true")
+            append(" mlkem_secret_match=").append(kemSecretMatched)
+            append(" mldsa_keygen=true")
+            append(" mldsa_sign=true")
+            append(" mldsa_verify=").append(signatureVerified)
+            append(" mldsa_negative_message=").append(alteredMessageRejected)
+            append(" mldsa_negative_signature=").append(alteredSignatureRejected)
+            append(" cleanup=").append(cleanupComplete)
+        }
+        InstrumentationRegistry.getInstrumentation().sendStatus(
+            RESULT_STATUS_CODE,
+            Bundle().apply { putString(RESULT_STATUS_STREAM_KEY, resultMarker) },
         )
     }
 
@@ -213,6 +216,8 @@ class NativePqcRuntimeInstrumentationTest {
         private const val API37_16K_PROFILE = "api37-16k"
         private const val EXPECTED_PROVIDER = "liboqs-android"
         private const val MARKER_PREFIX = "SB-PQC-NATIVE-RUNTIME"
+        private const val RESULT_STATUS_CODE = 2
+        private const val RESULT_STATUS_STREAM_KEY = "stream"
 
         private val ALLOWED_EXPECTATIONS = setOf(
             RuntimeExpectation(SAMSUNG_API36_4K_PROFILE, 36, 4_096, "arm64-v8a"),

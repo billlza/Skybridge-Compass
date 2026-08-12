@@ -187,6 +187,8 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
             "signingKeyPair?.clear()",
             "mldsa_negative_message=",
             "mldsa_negative_signature=",
+            "sendStatus(",
+            "RESULT_STATUS_STREAM_KEY",
         ):
             self.assertIn(required, self.instrumentation)
         for forbidden in (
@@ -195,6 +197,7 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
             "ciphertext.contentToString",
             "signature.contentToString",
             "privateKey.bytes.contentToString",
+            "println(",
         ):
             self.assertNotIn(forbidden, self.instrumentation)
 
