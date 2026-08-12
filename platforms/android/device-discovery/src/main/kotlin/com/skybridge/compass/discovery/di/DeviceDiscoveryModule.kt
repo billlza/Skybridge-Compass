@@ -33,6 +33,8 @@ import com.skybridge.compass.discovery.domain.usecases.ObserveNearbyTransferUpda
 import com.skybridge.compass.discovery.domain.usecases.CancelNearbyPayloadUseCase
 import com.skybridge.compass.discovery.data.services.DeviceListService
 import com.skybridge.compass.discovery.data.services.DeviceListServiceImpl
+import com.skybridge.compass.core.data.RuntimeNetworkParametersSource
+import com.skybridge.compass.core.network.RuntimeReconnectPolicyFactory
 import com.skybridge.compass.core.p2p.TcpControlClient
 import dagger.Binds
 import dagger.Module
@@ -243,21 +245,22 @@ object DeviceDiscoveryModule {
     @Singleton
     fun provideDeviceDiscoveryRepository(
         unifiedDiscoveryService: UnifiedDeviceDiscoveryService,
-        connectionsClient: ConnectionsClient,
-        @ApplicationContext context: Context,
         wifiAwarePeerRegistry: WifiAwarePeerRegistry,
         nearbyConnectionsManager: NearbyConnectionsManager,
         wifiAwareDataPathManager: WifiAwareDataPathManager,
-        tcpControlClient: TcpControlClient
+        tcpControlClient: TcpControlClient,
+        runtimeNetworkParameters: RuntimeNetworkParametersSource,
+        // `max_reconnect_attempts` 的运行时读取面（R7.4）：每次新会话重新取当前持久化值。
+        reconnectPolicyFactory: RuntimeReconnectPolicyFactory
     ): DeviceDiscoveryRepository {
         return DeviceDiscoveryRepositoryImpl(
             unifiedDiscoveryService,
-            connectionsClient,
-            context,
             wifiAwarePeerRegistry,
             nearbyConnectionsManager,
             wifiAwareDataPathManager,
-            tcpControlClient
+            tcpControlClient,
+            runtimeNetworkParameters,
+            reconnectPolicyFactory
         )
     }
     

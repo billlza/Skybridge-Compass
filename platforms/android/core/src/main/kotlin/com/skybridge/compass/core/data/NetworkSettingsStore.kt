@@ -6,7 +6,6 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
 import com.skybridge.compass.core.webrtc.SkyBridgeServerConfig
 import kotlinx.coroutines.flow.Flow
@@ -54,81 +53,146 @@ object NetworkSettingsStore {
 
     fun observe(context: Context): Flow<NetworkSettings> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { prefs ->
             NetworkSettings(
                 portRangeStart = prefs[KEY_PORT_START] ?: 8080,
                 portRangeEnd = prefs[KEY_PORT_END] ?: 8090,
                 discoveryTimeoutMs = prefs[KEY_DISCOVERY_TIMEOUT] ?: 30000L,
                 maxReconnectAttempts = prefs[KEY_MAX_RECONNECT] ?: 3,
-                tlsStrictMode = prefs[KEY_TLS_STRICT] ?: true,
-                handshakeEnabled = prefs[KEY_HANDSHAKE_ENABLED] ?: true,
-                encryptionMode = prefs[KEY_ENCRYPTION_MODE] ?: "AES_GCM",
+                tlsStrictMode = readTlsStrictMode(prefs[KEY_TLS_STRICT]),
+                handshakeEnabled = readHandshakeEnabled(prefs[KEY_HANDSHAKE_ENABLED]),
+                encryptionMode = readEncryptionMode(prefs[KEY_ENCRYPTION_MODE]),
                 webrtcEnabled = prefs[KEY_WEBRTC_ENABLED] ?: true,
-                webrtcSignalingUrl = (prefs[KEY_WEBRTC_SIGNALING_URL] ?: DEFAULT_WEBRTC_SIGNALING_URL).trim()
-                    .ifBlank { DEFAULT_WEBRTC_SIGNALING_URL },
-                stunServers = parseCsv(prefs[KEY_STUN_SERVERS]) ?: DEFAULT_STUN_SERVERS,
-                turnServers = parseCsv(prefs[KEY_TURN_SERVERS]) ?: DEFAULT_TURN_SERVERS
+                webrtcSignalingUrl = NetworkEndpointPolicy.normalizeWebRtcSignalingUrl(
+                    prefs[KEY_WEBRTC_SIGNALING_URL] ?: DEFAULT_WEBRTC_SIGNALING_URL
+                ),
+                stunServers = NetworkEndpointPolicy.normalizeStunServers(parseCsv(prefs[KEY_STUN_SERVERS])),
+                turnServers = NetworkEndpointPolicy.normalizeTurnServers(parseCsv(prefs[KEY_TURN_SERVERS]))
             )
         }
 
-    suspend fun setPortRange(context: Context, start: Int, end: Int) {
-        val s = start.coerceAtLeast(1)
-        val e = end.coerceAtLeast(s).coerceAtMost(65535)
-        context.networkSettingsDataStore.edit { prefs ->
-            prefs[KEY_PORT_START] = s
-            prefs[KEY_PORT_END] = e
+    /**
+     * 先校验后写入（R7.8）：端口两端各自 ∈ 1..65535 且 `end >= start`。
+     *
+     * 越界一律**拒绝**并原样返回 [NetworkSettingValidation.Rejected]，此时**不触碰 DataStore**，
+     * 原持久化值保持不变。仅在接受时写入；写入前的钳制是存储层兜底，对已校验值为恒等映射。
+     */
+    suspend fun setPortRange(
+        context: Context,
+        start: Int,
+        end: Int
+    ): NetworkSettingValidation<IntRange> {
+        return writeIfAccepted(NetworkSettingsValidator.validatePortRange(start, end)) { range ->
+            val s = NetworkSettingsStorageBackstop.clampPortStart(range.first)
+            val e = NetworkSettingsStorageBackstop.clampPortEnd(s, range.last)
+            context.networkSettingsDataStore.edit { prefs ->
+                prefs[KEY_PORT_START] = s
+                prefs[KEY_PORT_END] = e
+            }
         }
     }
 
-    suspend fun setDiscoveryTimeoutMs(context: Context, timeoutMs: Long) {
-        val t = timeoutMs.coerceIn(250L, 120_000L)
-        context.networkSettingsDataStore.edit { prefs ->
-            prefs[KEY_DISCOVERY_TIMEOUT] = t
+    /**
+     * 文本框保存入口：接收**原始字符串**，因此空与非数值也能被表达并拒绝（R7.8）。
+     * 拒绝时不写入，原持久化值保留。
+     */
+    suspend fun setPortRangeFromInput(
+        context: Context,
+        rawStart: String,
+        rawEnd: String
+    ): NetworkSettingValidation<IntRange> {
+        val validation = NetworkSettingsValidator.validatePortRangeInput(rawStart, rawEnd)
+        val accepted = validation.acceptedValueOrNull() ?: return validation
+        return setPortRange(context, accepted.first, accepted.last)
+    }
+
+    /** 先校验后写入（R7.8）：发现超时 ∈ 250..120000ms，越界拒绝且不写入。 */
+    suspend fun setDiscoveryTimeoutMs(
+        context: Context,
+        timeoutMs: Long
+    ): NetworkSettingValidation<Long> {
+        return writeIfAccepted(
+            NetworkSettingsValidator.validateDiscoveryTimeoutMs(timeoutMs)
+        ) { accepted ->
+            val t = NetworkSettingsStorageBackstop.clampDiscoveryTimeoutMs(accepted)
+            context.networkSettingsDataStore.edit { prefs ->
+                prefs[KEY_DISCOVERY_TIMEOUT] = t
+            }
         }
     }
 
-    suspend fun setMaxReconnectAttempts(context: Context, attempts: Int) {
-        val a = attempts.coerceIn(0, 10)
-        context.networkSettingsDataStore.edit { prefs ->
-            prefs[KEY_MAX_RECONNECT] = a
+    /** 文本框保存入口（毫秒原始字符串）：空/非数值/越界一律拒绝且不写入。 */
+    suspend fun setDiscoveryTimeoutMsFromInput(
+        context: Context,
+        rawTimeoutMs: String
+    ): NetworkSettingValidation<Long> {
+        val validation = NetworkSettingsValidator.validateDiscoveryTimeoutMsInput(rawTimeoutMs)
+        val accepted = validation.acceptedValueOrNull() ?: return validation
+        return setDiscoveryTimeoutMs(context, accepted)
+    }
+
+    /** 先校验后写入（R7.8）：重连次数 ∈ 0..10，越界拒绝且不写入。 */
+    suspend fun setMaxReconnectAttempts(
+        context: Context,
+        attempts: Int
+    ): NetworkSettingValidation<Int> {
+        return writeIfAccepted(
+            NetworkSettingsValidator.validateMaxReconnectAttempts(attempts)
+        ) { accepted ->
+            val a = NetworkSettingsStorageBackstop.clampReconnectAttempts(accepted)
+            context.networkSettingsDataStore.edit { prefs ->
+                prefs[KEY_MAX_RECONNECT] = a
+            }
         }
+    }
+
+    /** 文本框保存入口：空/非数值/越界一律拒绝且不写入。 */
+    suspend fun setMaxReconnectAttemptsFromInput(
+        context: Context,
+        rawAttempts: String
+    ): NetworkSettingValidation<Int> {
+        val validation = NetworkSettingsValidator.validateMaxReconnectAttemptsInput(rawAttempts)
+        val accepted = validation.acceptedValueOrNull() ?: return validation
+        return setMaxReconnectAttempts(context, accepted)
     }
 
     // TLS 严格模式
     fun observeTlsStrictMode(context: Context): Flow<Boolean> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
-            .map { it[KEY_TLS_STRICT] ?: true }
+            .catch { rethrowPreferenceReadFailure(it) }
+            .map { readTlsStrictMode(it[KEY_TLS_STRICT]) }
 
     suspend fun setTlsStrictMode(context: Context, enabled: Boolean) {
-        context.networkSettingsDataStore.edit { it[KEY_TLS_STRICT] = enabled }
+        require(enabled) { "TLS strict mode cannot be disabled" }
+        context.networkSettingsDataStore.edit { it[KEY_TLS_STRICT] = true }
     }
 
     // 握手开关
     fun observeHandshakeEnabled(context: Context): Flow<Boolean> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
-            .map { it[KEY_HANDSHAKE_ENABLED] ?: true }
+            .catch { rethrowPreferenceReadFailure(it) }
+            .map { readHandshakeEnabled(it[KEY_HANDSHAKE_ENABLED]) }
 
     suspend fun setHandshakeEnabled(context: Context, enabled: Boolean) {
-        context.networkSettingsDataStore.edit { it[KEY_HANDSHAKE_ENABLED] = enabled }
+        require(enabled) { "transport handshake cannot be disabled" }
+        context.networkSettingsDataStore.edit { it[KEY_HANDSHAKE_ENABLED] = true }
     }
 
     // 加密模式（例如：AES_GCM、AES_CBC 等）
     fun observeEncryptionMode(context: Context): Flow<String> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
-            .map { it[KEY_ENCRYPTION_MODE] ?: "AES_GCM" }
+            .catch { rethrowPreferenceReadFailure(it) }
+            .map { readEncryptionMode(it[KEY_ENCRYPTION_MODE]) }
 
     suspend fun setEncryptionMode(context: Context, mode: String) {
-        val normalized = mode.uppercase()
+        val normalized = normalizeEncryptionMode(mode)
         context.networkSettingsDataStore.edit { it[KEY_ENCRYPTION_MODE] = normalized }
     }
 
     fun observeWebRtcEnabled(context: Context): Flow<Boolean> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_WEBRTC_ENABLED] ?: true }
 
     suspend fun setWebRtcEnabled(context: Context, enabled: Boolean) {
@@ -137,49 +201,46 @@ object NetworkSettingsStore {
 
     fun observeWebRtcSignalingUrl(context: Context): Flow<String> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
-            .map { (it[KEY_WEBRTC_SIGNALING_URL] ?: DEFAULT_WEBRTC_SIGNALING_URL).trim().ifBlank { DEFAULT_WEBRTC_SIGNALING_URL } }
+            .catch { rethrowPreferenceReadFailure(it) }
+            .map { NetworkEndpointPolicy.normalizeWebRtcSignalingUrl(it[KEY_WEBRTC_SIGNALING_URL] ?: DEFAULT_WEBRTC_SIGNALING_URL) }
 
     suspend fun setWebRtcSignalingUrl(context: Context, url: String) {
-        val normalized = url.trim().ifBlank { DEFAULT_WEBRTC_SIGNALING_URL }
+        require(url.trim().isNotEmpty()) { "WebRTC signaling URL cannot be blank" }
+        val normalized = NetworkEndpointPolicy.normalizeWebRtcSignalingUrl(url)
         context.networkSettingsDataStore.edit { it[KEY_WEBRTC_SIGNALING_URL] = normalized }
     }
 
     // STUN/TURN 列表（CSV 存储）
     fun observeStunServers(context: Context): Flow<List<String>> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { prefs ->
-            (prefs[KEY_STUN_SERVERS] ?: "").split(',').mapNotNull { s ->
-                val v = s.trim()
-                if (v.isEmpty()) null else v
-            }
+            NetworkEndpointPolicy.normalizeStunServers(parseCsv(prefs[KEY_STUN_SERVERS]))
         }
 
     suspend fun setStunServers(context: Context, servers: List<String>) {
-        val csv = servers.map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
+        require(servers.any { it.isNotBlank() }) { "STUN server list cannot be blank" }
+        val csv = NetworkEndpointPolicy.normalizeStunServers(servers).joinToString(",")
         context.networkSettingsDataStore.edit { it[KEY_STUN_SERVERS] = csv }
     }
 
     fun observeTurnServers(context: Context): Flow<List<String>> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { prefs ->
-            (prefs[KEY_TURN_SERVERS] ?: "").split(',').mapNotNull { s ->
-                val v = s.trim()
-                if (v.isEmpty()) null else v
-            }
+            NetworkEndpointPolicy.normalizeTurnServers(parseCsv(prefs[KEY_TURN_SERVERS]))
         }
 
     suspend fun setTurnServers(context: Context, servers: List<String>) {
-        val csv = servers.map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
+        require(servers.any { it.isNotBlank() }) { "TURN server list cannot be blank" }
+        val csv = NetworkEndpointPolicy.normalizeTurnServers(servers).joinToString(",")
         context.networkSettingsDataStore.edit { it[KEY_TURN_SERVERS] = csv }
     }
 
     // 证书固定 JSON（与 PinProvider 结构兼容）
     fun observeCertificatePinsJson(context: Context): Flow<String?> =
         context.networkSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_CERT_PINS_JSON] }
 
     suspend fun setCertificatePinsJson(context: Context, pinsJson: String) {
@@ -194,5 +255,30 @@ object NetworkSettingsStore {
             if (v.isEmpty()) null else v
         }
         return list.ifEmpty { null }
+    }
+
+    private fun readTlsStrictMode(value: Boolean?): Boolean {
+        require(value != false) { "stored TLS strict mode is disabled" }
+        return true
+    }
+
+    private fun readHandshakeEnabled(value: Boolean?): Boolean {
+        require(value != false) { "stored transport handshake is disabled" }
+        return true
+    }
+
+    private fun readEncryptionMode(value: String?): String =
+        normalizeEncryptionMode(value ?: "AES_GCM")
+
+    private fun normalizeEncryptionMode(mode: String): String {
+        val normalized = mode.trim().uppercase()
+        require(normalized == "AES_GCM") { "unsupported network encryption mode" }
+        return normalized
+    }
+
+    private suspend fun kotlinx.coroutines.flow.FlowCollector<androidx.datastore.preferences.core.Preferences>.rethrowPreferenceReadFailure(
+        error: Throwable
+    ) {
+        throw error
     }
 }

@@ -36,7 +36,21 @@ data class WebRtcSignalingEnvelope(
         val sdp: String? = null,
         val candidate: String? = null,
         val sdpMid: String? = null,
-        val sdpMLineIndex: Int? = null
-    )
+        val sdpMLineIndex: Int? = null,
+        // Strict-PQC JOIN bootstrap: the macOS/iOS host advertises its KEM public keys in the
+        // signaling JOIN so a strict-PQC peer can offer PQC directly in its INITIAL. Q-Periapt
+        // bootstrap additionally requires explicit peer platform metadata before the key is cached.
+        val protocolSigningAlgorithm: ProtocolSigningAlgorithm? = null,
+        val protocolPublicKeyFingerprint: String? = null,
+        val protocolPublicKeyBytes: String? = null,
+        val kemPublicKeys: List<BootstrapKemPublicKey>? = null,
+        val platform: String? = null,
+        val osVersion: String? = null
+    ) {
+        @Serializable
+        data class BootstrapKemPublicKey(
+            val suiteWireId: Int,
+            val publicKey: String
+        )
+    }
 }
-

@@ -1,8 +1,6 @@
 package com.skybridge.compass.shared.p2p
 
 import com.skybridge.compass.shared.crypto.providers.AndroidPQCCryptoProvider
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.security.PrivateKey
 import java.security.SecureRandom
 
@@ -18,12 +16,13 @@ class P2PHandshakeServer(
     private val secureRandom: SecureRandom = SecureRandom()
 ) {
     data class KemPrivateKeys(
+        val qPeriaptPrivateKey: ByteArray? = null,
         val xWingPrivateKey: ByteArray? = null,
         val mlKem768PrivateKey: ByteArray? = null
     )
 
     data class RespondOptions(
-        val platformVersion: String = android.os.Build.VERSION.RELEASE,
+        val platformVersion: String = defaultPlatformVersion(),
         val kemPrivateKeys: KemPrivateKeys = KemPrivateKeys(),
         val handshakePolicy: P2PHandshakePolicy = P2PHandshakePolicy.DEFAULT,
         val allowClassicBootstrapForTrustedPeer: Boolean = false,
@@ -44,7 +43,9 @@ class P2PHandshakeServer(
         val serverNonce32: ByteArray,
         val transcriptHashA32: ByteArray,
         val transcriptHashB32: ByteArray,
-        val sessionKeys: P2PHandshakeWire.DerivedSessionKeys
+        val sessionKeys: P2PHandshakeWire.DerivedSessionKeys,
+        /** Fingerprint whose MessageA signature and configured pin were verified for this state. */
+        val remoteProtocolIdentityFingerprint: String
     )
 
     data class Response(
@@ -57,7 +58,7 @@ class P2PHandshakeServer(
             rawMessageA = rawMessageA,
             peerIdForTrust = null,
             trustStore = null,
-            allowTrustOnFirstUse = true,
+            allowTrustOnFirstUse = false,
             options = RespondOptions()
         )
     }
@@ -67,7 +68,7 @@ class P2PHandshakeServer(
             rawMessageA = rawMessageA,
             peerIdForTrust = null,
             trustStore = null,
-            allowTrustOnFirstUse = true,
+            allowTrustOnFirstUse = false,
             options = options
         )
     }
@@ -76,7 +77,7 @@ class P2PHandshakeServer(
         rawMessageA: ByteArray,
         peerIdForTrust: String?,
         trustStore: P2PHandshakeWire.TrustStore?,
-        allowTrustOnFirstUse: Boolean = true,
+        allowTrustOnFirstUse: Boolean = false,
         options: RespondOptions = RespondOptions()
     ): Response {
         val msgA = P2PHandshakeWire.decodeMessageA(rawMessageA)
@@ -130,6 +131,7 @@ class P2PHandshakeServer(
                     Quad(priv, null, pub, P2PIdentityPublicKeys.ProtocolAlgorithm.ED25519)
                 }
             }
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND,
             P2PCryptoSuite.MLKEM_768,
             P2PCryptoSuite.X_WING -> {
                 val injected = options.protocolSigningKeys
@@ -159,19 +161,32 @@ class P2PHandshakeServer(
                 platformVersion = options.platformVersion,
                 providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_CRYPTO_KIT_CLASSIC
             ).deterministicEncode()
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND -> {
+                val capabilities = P2PCryptoCapabilities(
+                    supportedKEM = listOf(P2PQPeriaptKem.KEM_CAPABILITY_NAME),
+                    supportedSignature = listOf("ml-dsa-65"),
+                    supportedAuthProfiles = listOf(QPeriaptPlatformPolicy.AUTH_PROFILE),
+                    supportedAEAD = listOf("aes256GCM", "chaCha20Poly1305"),
+                    pqcAvailable = true,
+                    platformVersion = options.platformVersion,
+                    providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_QPERIAPT
+                )
+                QPeriaptPlatformPolicy.requireLocalAndroidSupported(options.platformVersion)
+                capabilities.deterministicEncode()
+            }
             P2PCryptoSuite.MLKEM_768 -> P2PCryptoCapabilities(
-                supportedKEM = listOf("mlkem-768", "x25519"),
-                supportedSignature = listOf("ml-dsa-65", "ed25519"),
-                supportedAuthProfiles = listOf("pqc", "classic"),
+                supportedKEM = listOf("mlkem-768"),
+                supportedSignature = listOf("ml-dsa-65"),
+                supportedAuthProfiles = listOf("pqc"),
                 supportedAEAD = listOf("aes256GCM", "chaCha20Poly1305"),
                 pqcAvailable = true,
                 platformVersion = options.platformVersion,
                 providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_LIBOQS
             ).deterministicEncode()
             P2PCryptoSuite.X_WING -> P2PCryptoCapabilities(
-                supportedKEM = listOf("x-wing", "mlkem-768", "x25519"),
-                supportedSignature = listOf("ml-dsa-65", "ed25519"),
-                supportedAuthProfiles = listOf("hybrid", "pqc", "classic"),
+                supportedKEM = listOf("x-wing", "mlkem-768"),
+                supportedSignature = listOf("ml-dsa-65"),
+                supportedAuthProfiles = listOf("hybrid", "pqc"),
                 supportedAEAD = listOf("aes256GCM", "chaCha20Poly1305"),
                 pqcAvailable = true,
                 platformVersion = options.platformVersion,
@@ -184,7 +199,7 @@ class P2PHandshakeServer(
 
         val sharedSecret32: ByteArray
         val responderShare: ByteArray
-        val sealedBoxCombined: ByteArray
+        val sealedBox: P2PHPKESealedBox
         when (suite) {
             P2PCryptoSuite.X25519 -> {
                 val seal = P2PClassicHpkeX25519.sealAndExport(
@@ -195,7 +210,27 @@ class P2PHandshakeServer(
                 )
                 sharedSecret32 = seal.exportedSecret32
                 responderShare = seal.sealedBox.encapsulatedKey
-                sealedBoxCombined = seal.sealedBox.combinedWithHeader()
+                sealedBox = seal.sealedBox
+            }
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND -> {
+                val sk = requireNotNull(options.kemPrivateKeys.qPeriaptPrivateKey) {
+                    "Q-Periapt selected but local Q-Periapt private key is missing"
+                }
+                val pqc = AndroidPQCCryptoProvider()
+                sharedSecret32 = P2PQPeriaptKem.decapsulate(
+                    ciphertext = initiatorShare,
+                    privateKey = sk,
+                    pqcProvider = pqc
+                )
+                responderShare = ByteArray(0)
+                val sealed = P2PHandshakeWire.sealHandshakePayload(
+                    sharedSecret32 = sharedSecret32,
+                    transcriptHashA32 = transcriptA,
+                    suite = suite,
+                    plaintext = payloadPlaintext,
+                    encapsulatedKey = ByteArray(0)
+                )
+                sealedBox = sealed
             }
             P2PCryptoSuite.MLKEM_768 -> {
                 val sk = requireNotNull(options.kemPrivateKeys.mlKem768PrivateKey) {
@@ -214,7 +249,7 @@ class P2PHandshakeServer(
                     plaintext = payloadPlaintext,
                     encapsulatedKey = ByteArray(0)
                 )
-                sealedBoxCombined = sealed.combinedWithHeader()
+                sealedBox = sealed
             }
             P2PCryptoSuite.X_WING -> {
                 val sk = requireNotNull(options.kemPrivateKeys.xWingPrivateKey) {
@@ -230,22 +265,14 @@ class P2PHandshakeServer(
                     plaintext = payloadPlaintext,
                     encapsulatedKey = ByteArray(0)
                 )
-                sealedBoxCombined = sealed.combinedWithHeader()
+                sealedBox = sealed
             }
             P2PCryptoSuite.MLKEM_768_FS_COMPAT ->
                 error("0x0102 is compatibility parse-only and not negotiable")
             P2PCryptoSuite.P256 -> error("P256 suite is not supported by this server")
         }
 
-        // Build MessageB without signature first (for transcript hash B)
-        val msgBWithoutSig = buildMessageBWithoutSignature(
-            suite = suite,
-            responderShare = responderShare,
-            serverNonce32 = serverNonce,
-            encryptedPayloadCombined = sealedBoxCombined,
-            identityPublicKeyBytes = identityBytes
-        )
-        val transcriptB = sha256(msgBWithoutSig)
+        val sealedBoxCombined = sealedBox.combinedWithHeader()
 
         val sigPreimage = P2PHandshakeWire.buildMessageBSignaturePreimagePublic(
             transcriptHashA32 = transcriptA,
@@ -266,10 +293,18 @@ class P2PHandshakeServer(
                 error("P256_ECDSA_LEGACY not supported for handshake signing")
         }
 
-        val msgB = buildMessageBWithSignature(
-            withoutSig = msgBWithoutSig,
-            signature = sigB
+        val msgB = P2PHandshakeWire.encodeMessageB(
+            P2PHandshakeWire.MessageB(
+                selectedSuite = P2PCryptoSuiteId.Known(suite),
+                responderShare = responderShare,
+                serverNonce = serverNonce,
+                encryptedPayload = sealedBox,
+                identityPublicKeys = identityKeysWire,
+                signature = sigB,
+                secureEnclaveSignature = null
+            )
         )
+        val transcriptB = P2PHandshakeWire.transcriptHashBFromWire(msgB)
 
         val keys = P2PHandshakeWire.deriveSessionKeys(
             roleIsInitiator = false,
@@ -290,7 +325,9 @@ class P2PHandshakeServer(
             serverNonce32 = serverNonce,
             transcriptHashA32 = transcriptA,
             transcriptHashB32 = transcriptB,
-            sessionKeys = keys
+            sessionKeys = keys,
+            remoteProtocolIdentityFingerprint =
+                P2PHandshakeWire.computePeerSigningFingerprint(msgA.identityPublicKeys)
         )
 
         return Response(state = st, messageBToSend = HandshakePaddingP1.wrap(msgB))
@@ -313,43 +350,6 @@ class P2PHandshakeServer(
         return HandshakePaddingP1.wrap(finished)
     }
 
-    private fun buildMessageBWithoutSignature(
-        suite: P2PCryptoSuite,
-        responderShare: ByteArray,
-        serverNonce32: ByteArray,
-        encryptedPayloadCombined: ByteArray,
-        identityPublicKeyBytes: ByteArray
-    ): ByteArray {
-        require(serverNonce32.size == 32) { "serverNonce must be 32 bytes" }
-        val bb = ByteBuffer.allocate(
-            1 + 2 + 2 + responderShare.size + 32 +
-                2 + encryptedPayloadCombined.size +
-                2 + identityPublicKeyBytes.size
-        ).order(ByteOrder.LITTLE_ENDIAN)
-        bb.put(0x01)
-        bb.putShort(suite.wireId.toShort())
-        bb.putShort(responderShare.size.toShort())
-        bb.put(responderShare)
-        bb.put(serverNonce32)
-        bb.putShort(encryptedPayloadCombined.size.toShort())
-        bb.put(encryptedPayloadCombined)
-        bb.putShort(identityPublicKeyBytes.size.toShort())
-        bb.put(identityPublicKeyBytes)
-        return bb.array()
-    }
-
-    private fun buildMessageBWithSignature(withoutSig: ByteArray, signature: ByteArray): ByteArray {
-        val bb = ByteBuffer.allocate(withoutSig.size + 2 + signature.size + 2).order(ByteOrder.LITTLE_ENDIAN)
-        bb.put(withoutSig)
-        bb.putShort(signature.size.toShort())
-        bb.put(signature)
-        bb.putShort(0) // no secure enclave sig
-        return bb.array()
-    }
-
-    private fun sha256(data: ByteArray): ByteArray =
-        java.security.MessageDigest.getInstance("SHA-256").digest(data)
-
     private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun runBlockingSign(
@@ -362,15 +362,22 @@ class P2PHandshakeServer(
     }
 
     private fun selectSuite(messageA: P2PHandshakeWire.MessageA, options: RespondOptions): P2PCryptoSuite {
-        val platformMajor = parsePlatformMajorVersion(options.platformVersion)
-        val preferredTiers = when {
-            platformMajor != null && platformMajor >= 16 ->
-                listOf(SuiteTier.X_WING, SuiteTier.PQC, SuiteTier.CLASSIC)
-            platformMajor != null && platformMajor in 13..15 ->
-                listOf(SuiteTier.PQC, SuiteTier.CLASSIC)
-            else ->
-                listOf(SuiteTier.CLASSIC)
+        val normalizedLocalPolicy = normalizePolicy(options.handshakePolicy)
+        val normalizedPeerPolicy = normalizePolicy(messageA.policy)
+        val requestedMinimumTier = maxTier(
+            parseMinimumTier(normalizedLocalPolicy.minimumTierRaw),
+            parseMinimumTier(normalizedPeerPolicy.minimumTierRaw)
+        )
+        val qPeriaptExplicit = requestedMinimumTier == SuiteTier.Q_PERIAPT
+        if (qPeriaptExplicit) {
+            QPeriaptPlatformPolicy.requireLocalAndroidSupported(options.platformVersion)
         }
+        val preferredTiers =
+            if (qPeriaptExplicit) {
+                listOf(SuiteTier.Q_PERIAPT)
+            } else {
+                listOf(SuiteTier.X_WING, SuiteTier.PQC, SuiteTier.CLASSIC)
+            }
 
         fun supports(suite: P2PCryptoSuite): Boolean =
             messageA.supportedSuites.any { it.knownOrNull() == suite }
@@ -381,12 +388,6 @@ class P2PHandshakeServer(
         val runtimeHasLiboqs = AndroidPQCCryptoProvider.isAvailable()
         val runtimeHasXWing = P2PXWingKem.isAvailable()
 
-        val normalizedLocalPolicy = normalizePolicy(options.handshakePolicy)
-        val normalizedPeerPolicy = normalizePolicy(messageA.policy)
-        val requestedMinimumTier = maxTier(
-            parseMinimumTier(normalizedLocalPolicy.minimumTierRaw),
-            parseMinimumTier(normalizedPeerPolicy.minimumTierRaw)
-        )
         val peerSupportsMlKemOnly =
             supports(P2PCryptoSuite.MLKEM_768) &&
                 hasKeyShare(P2PCryptoSuite.MLKEM_768) &&
@@ -403,7 +404,7 @@ class P2PHandshakeServer(
         val selectedTier = preferredTiers.firstOrNull { tier ->
             val tierAllowed = when (tier) {
                 SuiteTier.CLASSIC ->
-                    options.allowClassicBootstrapForTrustedPeer ||
+                    (options.allowClassicBootstrapForTrustedPeer && !qPeriaptExplicit) ||
                         (!effectiveRequirePqc &&
                             effectiveAllowClassicFallback &&
                             tier.rank >= effectiveMinimumTier.rank)
@@ -412,6 +413,19 @@ class P2PHandshakeServer(
             if (!tierAllowed) return@firstOrNull false
 
             when (tier) {
+                SuiteTier.Q_PERIAPT ->
+                    P2PQPeriaptKem.isAvailable() &&
+                        options.kemPrivateKeys.qPeriaptPrivateKey != null &&
+                        supports(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND) &&
+                        hasKeyShare(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND) &&
+                        messageA.capabilities
+                            .let {
+                                QPeriaptPlatformPolicy.requireHandshakePeerEligible(
+                                    capabilities = it,
+                                    peerRole = "initiator"
+                                )
+                                true
+                            }
                 SuiteTier.X_WING ->
                     runtimeHasXWing &&
                         options.kemPrivateKeys.xWingPrivateKey != null &&
@@ -428,18 +442,50 @@ class P2PHandshakeServer(
             }
         } ?: run {
             if (options.allowClassicBootstrapForTrustedPeer &&
+                !qPeriaptExplicit &&
                 supports(P2PCryptoSuite.X25519) &&
                 hasKeyShare(P2PCryptoSuite.X25519)
             ) {
                 SuiteTier.CLASSIC
             } else {
-                throw IllegalStateException(
-                    "No compatible suite for effective policy(minimum=${effectiveMinimumTier.name}, requirePqc=$effectiveRequirePqc, allowClassicFallback=$effectiveAllowClassicFallback)"
-                )
+                // Explicit set intersection for the diagnostic: a tier is mutually
+                // supported iff this responder can run it (runtime + private key) AND
+                // the initiator both declared it and sent a matching key share (R4.3).
+                fun tierMutuallySupported(tier: SuiteTier): Boolean = when (tier) {
+                    SuiteTier.Q_PERIAPT ->
+                        P2PQPeriaptKem.isAvailable() &&
+                            options.kemPrivateKeys.qPeriaptPrivateKey != null &&
+                            supports(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND) &&
+                            hasKeyShare(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND)
+                    SuiteTier.X_WING ->
+                        runtimeHasXWing &&
+                            options.kemPrivateKeys.xWingPrivateKey != null &&
+                            supports(P2PCryptoSuite.X_WING) &&
+                            hasKeyShare(P2PCryptoSuite.X_WING)
+                    SuiteTier.PQC ->
+                        runtimeHasLiboqs &&
+                            options.kemPrivateKeys.mlKem768PrivateKey != null &&
+                            supports(P2PCryptoSuite.MLKEM_768) &&
+                            hasKeyShare(P2PCryptoSuite.MLKEM_768)
+                    SuiteTier.CLASSIC ->
+                        supports(P2PCryptoSuite.X25519) && hasKeyShare(P2PCryptoSuite.X25519)
+                }
+                val mutualTiers = preferredTiers.filter { tierMutuallySupported(it) }
+                val detail = if (mutualTiers.isEmpty()) {
+                    "no common suite for effective policy(minimum=${effectiveMinimumTier.name}, " +
+                        "requirePqc=$effectiveRequirePqc, allowClassicFallback=$effectiveAllowClassicFallback)"
+                } else {
+                    "no policy-permitted suite in intersection ${mutualTiers.map { it.name }} " +
+                        "for effective policy(minimum=${effectiveMinimumTier.name}, " +
+                        "requirePqc=$effectiveRequirePqc, allowClassicFallback=$effectiveAllowClassicFallback)"
+                }
+                // Terminate the handshake, classified as "no common suite" (R4.3/R4.4).
+                throw HandshakeNegotiationException(HandshakeFailure.SuiteIntersectionEmpty(detail))
             }
         }
 
         val suite = when (selectedTier) {
+            SuiteTier.Q_PERIAPT -> P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND
             SuiteTier.X_WING -> P2PCryptoSuite.X_WING
             SuiteTier.PQC -> P2PCryptoSuite.MLKEM_768
             SuiteTier.CLASSIC -> P2PCryptoSuite.X25519
@@ -451,12 +497,8 @@ class P2PHandshakeServer(
         return suite
     }
 
-    private fun parsePlatformMajorVersion(value: String): Int? {
-        val token = Regex("(\\d{1,2})").find(value)?.groupValues?.getOrNull(1) ?: return null
-        return token.toIntOrNull()
-    }
-
     private enum class SuiteTier {
+        Q_PERIAPT,
         X_WING,
         PQC,
         CLASSIC;
@@ -466,17 +508,21 @@ class P2PHandshakeServer(
                 CLASSIC -> 0
                 PQC -> 1
                 X_WING -> 2
+                Q_PERIAPT -> 3
             }
     }
 
     private fun parseMinimumTier(raw: String): SuiteTier = when (raw.trim()) {
+        P2PQPeriaptKem.MINIMUM_TIER_RAW, "q-periapt", "qperiapt" -> SuiteTier.Q_PERIAPT
         "nativePQC", "x-wing", "xwing", "strictXWing" -> SuiteTier.X_WING
         "liboqsPQC", "pqc", "mlkem", "ml-kem" -> SuiteTier.PQC
-        else -> SuiteTier.CLASSIC
+        "classic" -> SuiteTier.CLASSIC
+        else -> throw IllegalArgumentException("Unsupported handshake minimum tier: $raw")
     }
 
     private fun normalizePolicy(policy: P2PHandshakePolicy): P2PHandshakePolicy {
         val normalizedTier = when (parseMinimumTier(policy.minimumTierRaw)) {
+            SuiteTier.Q_PERIAPT -> P2PQPeriaptKem.MINIMUM_TIER_RAW
             SuiteTier.X_WING -> "nativePQC"
             SuiteTier.PQC -> "liboqsPQC"
             SuiteTier.CLASSIC -> "classic"
@@ -493,6 +539,7 @@ class P2PHandshakeServer(
     ) {
         val expected = when (suite) {
             P2PCryptoSuite.X25519 -> P2PIdentityPublicKeys.ProtocolAlgorithm.ED25519
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND,
             P2PCryptoSuite.MLKEM_768,
             P2PCryptoSuite.X_WING ->
                 P2PIdentityPublicKeys.ProtocolAlgorithm.ML_DSA_65
@@ -505,3 +552,9 @@ class P2PHandshakeServer(
         }
     }
 }
+
+private fun defaultPlatformVersion(): String =
+    QPeriaptPlatformPolicy.androidHandshakePlatformVersion(
+        release = android.os.Build.VERSION.RELEASE,
+        sdkInt = android.os.Build.VERSION.SDK_INT
+    )

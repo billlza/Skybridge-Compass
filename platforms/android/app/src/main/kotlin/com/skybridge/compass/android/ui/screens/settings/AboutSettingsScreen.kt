@@ -1,8 +1,8 @@
 package com.skybridge.compass.android.ui.screens.settings
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
+import androidx.core.net.toUri
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -52,7 +52,7 @@ fun HelpSupportScreen(navController: NavController) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://skybridge.app/docs"))
+                        val intent = Intent(Intent.ACTION_VIEW, "https://skybridge.app/docs".toUri())
                         context.startActivity(intent)
                     }
                 ) {
@@ -68,7 +68,7 @@ fun HelpSupportScreen(navController: NavController) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://skybridge.app/faq"))
+                        val intent = Intent(Intent.ACTION_VIEW, "https://skybridge.app/faq".toUri())
                         context.startActivity(intent)
                     }
                 ) {
@@ -85,7 +85,7 @@ fun HelpSupportScreen(navController: NavController) {
                     modifier = Modifier.fillMaxWidth(),
                     onClick = {
                         val intent = Intent(Intent.ACTION_SENDTO).apply {
-                            data = Uri.parse("mailto:support@skybridge.app")
+                            data = "mailto:support@skybridge.app".toUri()
                             putExtra(Intent.EXTRA_SUBJECT, t("SkyBridge Compass 支持请求", "SkyBridge Compass Support Request", "SkyBridge Compass サポート依頼"))
                         }
                         context.startActivity(intent)
@@ -196,7 +196,7 @@ fun FeedbackScreen(navController: NavController) {
                         }
                     }
                     val intent = Intent(Intent.ACTION_SENDTO).apply {
-                        data = Uri.parse("mailto:feedback@skybridge.app")
+                        data = "mailto:feedback@skybridge.app".toUri()
                         putExtra(Intent.EXTRA_SUBJECT, subject)
                         putExtra(Intent.EXTRA_TEXT, body)
                     }
@@ -218,6 +218,12 @@ fun FeedbackScreen(navController: NavController) {
 @Composable
 fun OpenSourceLicensesScreen(navController: NavController) {
     fun t(zh: String, en: String, ja: String): String = resolveLocalizedText(zh, en, ja)
+    val context = LocalContext.current
+    val webRtcNotice = remember(context) {
+        context.assets.open("third_party_licenses/webrtc-sdk.txt")
+            .bufferedReader()
+            .use { it.readText() }
+    }
     val licenses = listOf(
         License("Kotlin", "Apache 2.0", "JetBrains"),
         License("Jetpack Compose", "Apache 2.0", "Google"),
@@ -226,7 +232,8 @@ fun OpenSourceLicensesScreen(navController: NavController) {
         License("Hilt", "Apache 2.0", "Google"),
         License("Kotest", "Apache 2.0", "Kotest"),
         License("liboqs", "MIT", "Open Quantum Safe"),
-        License("Bouncy Castle", "MIT", "Legion of the Bouncy Castle")
+        License("Bouncy Castle", "MIT", "Legion of the Bouncy Castle"),
+        License("WebRTC Android SDK", "BSD-3-Clause / MIT", "WebRTC project authors / WebRTC SDKs")
     )
     
     Scaffold(
@@ -263,6 +270,30 @@ fun OpenSourceLicensesScreen(navController: NavController) {
                         headlineContent = { Text(license.name) },
                         supportingContent = { Text("${license.author} · ${license.type}") }
                     )
+                }
+            }
+
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "WebRTC Android SDK",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            t(
+                                "完整第三方许可与归属声明",
+                                "Complete third-party license and attribution notice",
+                                "完全なサードパーティーライセンスと帰属表示"
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(webRtcNotice, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }
@@ -334,7 +365,7 @@ fun VersionInfoScreen(navController: NavController) {
                     InfoRow(t("应用版本", "App Version", "アプリバージョン"), BuildConfig.VERSION_NAME)
                     InfoRow(t("构建号", "Build", "ビルド"), BuildConfig.VERSION_CODE.toString())
                     InfoRow(t("协议版本", "Protocol Version", "プロトコルバージョン"), "2.0")
-                    InfoRow(t("最低 Android", "Minimum Android", "最低 Android"), "13 (API 33)")
+                    InfoRow(t("最低 Android", "Minimum Android", "最低 Android"), "16 (API 36)")
                 }
             }
             

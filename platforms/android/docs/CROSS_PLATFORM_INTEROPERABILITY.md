@@ -2,182 +2,81 @@
 
 ## 概述
 
-本文档详细说明了 Android 端与 iOS/macOS 端在文件传输和远程控制功能上的跨平台互操作性实现。
+本文档记录 Android 端与 macOS/iOS 的 current-path 互操作边界，并明确哪些内容仍只是 legacy/lab 协议或未完成证明。任何“兼容”声明都必须以 `docs/REAL_DEVICE_INTEROP_RUNBOOK.md` 中的真机 artifact 为准。
 
-## 1. 文件传输协议兼容性
+当前可作为 Android <-> Apple 互操作主路径的内容：
 
-### 1.1 协议格式
+- Bonjour / NSD 发现真实 Apple peer，并记录 device id 与 fingerprint。
+- WebRTC code-based session 使用 SBWC application envelope，PQC 默认开启。
+- Q-Periapt 验证必须精确断言 `Q_PERIAPT_CONTEXT_BOUND` / `0x0011`，不能用 X-Wing 或 ML-KEM 成功替代。
+- WebRTC 文件传输使用 `WebRtcFileTransferController` 与 `CrossNetworkFileTransferMessage`，验收必须包含 bytes、chunk ACK、complete ACK 和 SHA-256 receipt。
+- LAN remote smoke 当前只证明 secure session 与 screen frame received；mouse、keyboard、text、clipboard 需要额外手工或 UI automation artifact。
 
-与 iOS/macOS `FileTransferEngine` 完全兼容的协议格式：
+Windows 互操作不是本文档的已完成项。Android <-> Windows 必须另有 Windows native DNS-SD、live file-transfer、live remote-desktop evidence；否则只能称为 proof gap。
 
-```
-+----------------+
-| Magic: "SBFT"  |  4 bytes
-+----------------+
-| Version        |  2 bytes (Little-Endian)
-+----------------+
-| MessageType    |  1 byte
-+----------------+
-| Flags          |  1 byte
-+----------------+
-| PayloadLength  |  4 bytes (Little-Endian)
-+----------------+
-| Payload        |  [PayloadLength] bytes
-+----------------+
-```
+## 1. 文件传输 current path
 
-### 1.2 消息类型
+### 1.1 WebRTC / SBWC 文件传输
 
-| 类型 | 值 | 说明 |
-|------|-----|------|
-| METADATA | 0x01 | 文件元数据 |
-| CHUNK | 0x02 | 数据块 |
-| COMPLETE | 0x03 | 传输完成 |
-| ACK | 0x04 | 确认 |
-| RESUME_REQ | 0x05 | 断点续传请求 |
-| RESUME_ACK | 0x06 | 断点续传确认 |
-| ERROR | 0x07 | 错误 |
-| CANCEL | 0x08 | 取消 |
+发布路径使用 WebRTC data channel 上的 SBWC application envelope 承载 `CrossNetworkFileTransferMessage`，而不是旧的裸 `SBFT` LAN binary framing。
 
-### 1.3 数据块头部格式
+关键实现文件：
 
-与 iOS/macOS `FileChunkPacket` 兼容：
+- `file-transfer/src/main/kotlin/com/skybridge/compass/filetransfer/webrtc/WebRtcFileTransferController.kt`
+- `file-transfer/src/main/kotlin/com/skybridge/compass/filetransfer/webrtc/CrossNetworkFileTransferValidator.kt`
+- `shared` 模块中的 `CrossNetworkFileTransferMessage` / `CrossNetworkFileTransferOp`
 
-```
-+------------------+
-| transferId       |  36 bytes (UTF-8, 0-padded)
-+------------------+
-| chunkIndex       |  4 bytes (Big-Endian)
-+------------------+
-| totalChunks      |  4 bytes (Big-Endian)
-+------------------+
-| dataLength       |  8 bytes (Big-Endian)
-+------------------+
-| checksum         |  64 bytes (SHA-256 hex, space-padded)
-+------------------+
-| flags            |  1 byte
-+------------------+
-| timestamp        |  8 bytes (Double, Unix timestamp in seconds)
-+------------------+
-```
+验收要求：
 
-### 1.4 加密与压缩
+- metadata、chunk、complete、error 都必须通过 validator。
+- 发送端和接收端 evidence 必须包含非零 transferred bytes、chunk ACK、complete ACK、最终 SHA-256 receipt、session id 和 peer digest。
+- 失败必须暴露为明确阶段和错误原因，不能把失败包装成空结果或“已完成”。
 
-| 特性 | Android 实现 | iOS/macOS 实现 | 兼容性 |
-|------|-------------|---------------|--------|
-| 加密 | AES-256-GCM | AES-256-GCM | ✅ 完全兼容 |
-| 压缩 | DEFLATE | LZFSE/DEFLATE | ✅ DEFLATE 互通 |
-| 校验和 | SHA-256 | SHA-256 | ✅ 完全兼容 |
-| Merkle 树 | SHA-256 | SHA-256 | ✅ 完全兼容 |
+### 1.2 Legacy / lab SBFT
 
-### 1.5 关键实现文件
+旧的 `SBFT` / `CrossPlatformFileTransferProtocol.kt` / `CrossPlatformFileTransferService.kt` 只能作为历史协议或实验路径阅读。它们不能单独支撑当前发布版“与 macOS/iOS 完全兼容”的声明，也不能替代 WebRTC/SBWC 文件传输 artifact。
 
-- `CrossPlatformFileTransferProtocol.kt` - 协议定义和序列化
-- `CrossPlatformFileTransferService.kt` - 完整的文件传输服务
+## 2. 远程控制 current path
 
-## 2. 远程控制协议兼容性
+### 2.1 Android as viewer/client
 
-### 2.1 协议格式
+Android public app release 是 macOS/iOS peer 的 remote-desktop viewer/control client。Android 端发送远端输入事件并解码安全屏幕帧；发布包不得暴露 Android-as-host 行为。
 
-与 iOS/macOS `RemoteDesktopManager` 兼容的协议格式：
+关键实现文件：
 
-```
-+----------------+
-| Magic: "SBRC"  |  4 bytes
-+----------------+
-| Version        |  2 bytes (Little-Endian)
-+----------------+
-| EventType      |  1 byte
-+----------------+
-| Flags          |  1 byte
-+----------------+
-| Timestamp      |  8 bytes (Double, Unix timestamp in seconds)
-+----------------+
-| PayloadLength  |  4 bytes (Little-Endian)
-+----------------+
-| Payload        |  [PayloadLength] bytes
-+----------------+
-```
+- `app/src/debug/kotlin/com/skybridge/compass/android/debug/DebugLanInteropSmokeActivity.kt`
+- `core` 模块中的 `MacRemoteControlClient`
+- `core` 模块中的 remote-control secure envelope / trusted-session policy
 
-### 2.2 事件类型
+### 2.2 证明边界
 
-| 事件 | 值 | 说明 |
-|------|-----|------|
-| MOUSE_MOVE | 0x01 | 鼠标移动 |
-| MOUSE_DOWN | 0x02 | 鼠标按下 |
-| MOUSE_UP | 0x03 | 鼠标释放 |
-| MOUSE_SCROLL | 0x04 | 鼠标滚轮 |
-| KEY_DOWN | 0x10 | 按键按下 |
-| KEY_UP | 0x11 | 按键释放 |
-| KEY_REPEAT | 0x12 | 按键重复 |
-| TOUCH_BEGIN | 0x20 | 触摸开始 |
-| TOUCH_MOVE | 0x21 | 触摸移动 |
-| TOUCH_END | 0x22 | 触摸结束 |
-| SESSION_START | 0x80 | 会话开始 |
-| SESSION_END | 0x81 | 会话结束 |
+| 能力 | 当前证明状态 | 验收要求 |
+|------|-------------|---------|
+| Bonjour / `_skybridge-remote._tcp` 发现 | Android <-> macOS LAN smoke 可证明 | artifact 记录 expected device id 与 fingerprint |
+| 安全会话与屏幕帧 | 自动 smoke 可证明 `secure_frame_received` | `android-status.log` 记录 secure state，summary 记录 frame success |
+| mouse / keyboard / text / clipboard | 自动 smoke 尚不能证明 | 必须有手工或 UI automation artifact 记录输入动作与 host-side effect |
+| Android 作为 host | 发布路径不支持 | packaging audit 必须证明 host service / MediaProjection / Accessibility 入口未打包 |
+| Windows remote desktop | 未完成证明 | 需要 Windows artifact 记录 frame、input path、notice lifecycle、disconnect truth |
 
-### 2.3 键码映射
+### 2.3 Legacy / lab SBRC
 
-完整的 Android KeyCode ↔ macOS Virtual Key Code 映射：
+旧的 `SBRC` / `CrossPlatformRemoteControlProtocol.kt` / `CrossPlatformRemoteControlService.kt` 只能作为协议历史或实验路径。当前发布版 remote desktop 验收以 secure envelope、trusted session policy、screen-frame artifact 和 input-closure artifact 为准。
 
-```kotlin
-// 示例映射
-29 (A) -> 0x00
-30 (B) -> 0x0B
-62 (SPACE) -> 0x31
-66 (ENTER) -> 0x24
-67 (DELETE) -> 0x33
-```
+## 3. Android Release 方向
 
-### 2.4 修饰键映射
+Android public app release is a remote-desktop viewer/control client for macOS/iOS peers. It must
+not expose Android-as-host behavior in the shipping APK. In particular, the app manifest must not
+declare an Accessibility service, MediaProjection foreground service, overlay permission, camera
+permission, or audio-recording permission for remote-control hosting. The legacy Android host
+module can remain in source for lab work, but packaging audit must keep it out of the app artifact.
 
-| Android Meta State | macOS ModifierFlags |
-|-------------------|---------------------|
-| META_SHIFT_* | 0x00020000 (Shift) |
-| META_CTRL_* | 0x00040000 (Control) |
-| META_ALT_* | 0x00080000 (Option) |
-| META_META_* | 0x00100000 (Command) |
-| META_CAPS_LOCK | 0x00010000 (Caps Lock) |
-
-### 2.5 事件转换
-
-| macOS 事件 | Android 转换 |
-|-----------|-------------|
-| 鼠标左键点击 | 触摸点击 (TAP) |
-| 鼠标右键点击 | 长按 (LONG_PRESS) |
-| 鼠标滚轮 | 滑动手势 (SWIPE) |
-| 键盘输入 | 文本注入 / 全局操作 |
-
-### 2.6 关键实现文件
-
-- `CrossPlatformRemoteControlProtocol.kt` - 协议定义和键码映射
-- `CrossPlatformRemoteControlService.kt` - 远程控制服务
-
-## 3. AccessibilityService 要求
-
-远程控制功能需要 `AccessibilityService` 来注入输入事件：
-
-```xml
-<service
-    android:name=".remotecontrol.service.SkyBridgeAccessibilityService"
-    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-    <intent-filter>
-        <action android:name="android.accessibilityservice.AccessibilityService"/>
-    </intent-filter>
-    <meta-data
-        android:name="android.accessibilityservice"
-        android:resource="@xml/accessibility_service_config"/>
-</service>
-```
-
-### 3.1 支持的操作
+### 3.1 支持的远端操作
 
 | 操作 | API 级别 | 实现方式 |
 |------|---------|---------|
-| 触摸手势 | 24+ | dispatchGesture() |
-| 滑动手势 | 24+ | dispatchGesture() |
-| 返回键 | 16+ | GLOBAL_ACTION_BACK |
-| Home 键 | 16+ | GLOBAL_ACTION_HOME |
+| 指针点击/拖动 | 36+ | Android client sends remote-control wire events |
+| 文本输入 | 36+ | Android client sends remote text payloads |
+| 远端屏幕帧 | 36+ | Android client decodes secure screen frames |
 | 最近任务 | 16+ | GLOBAL_ACTION_RECENTS |
 | 文本输入 | 21+ | ACTION_SET_TEXT |
 
@@ -187,9 +86,9 @@
 
 | 模块 | 文件 | 问题 | 状态 |
 |------|------|------|------|
-| 文件传输 | FileTransferProtocolManager.kt | 网络发送为占位实现 | ✅ 已用 CrossPlatformFileTransferService 替代 |
+| 文件传输 | FileTransferProtocolManager.kt | 网络发送为占位实现 | 发布路径改为 WebRTC/SBWC `WebRtcFileTransferController` |
 | 文件传输 | FileTransferNetworkServiceImpl.kt | 加密/压缩服务为占位 | ✅ 已在协议层实现 |
-| 远程控制 | RemoteControlManager.kt | 事件注入为占位 | ✅ 已用 CrossPlatformRemoteControlService 替代 |
+| 远程控制 | RemoteControlManager.kt | 事件注入为占位 | 发布路径改为 Android viewer/client + secure remote-control envelope |
 
 ### 4.2 设置界面功能状态
 
@@ -234,62 +133,36 @@ DeveloperSettingsStore (developer_settings)
 
 ## 5. 使用示例
 
-### 5.1 发送文件到 macOS
+### 5.1 文件传输验收入口
+
+文件传输的发布验收必须走 WebRTC/SBWC 会话，并在 artifact 中记录 bytes、ACK 与 SHA-256 receipt。旧的 `CrossPlatformFileTransferService` 代码片段不再作为 current-path 示例。
+
+可执行入口见 `docs/REAL_DEVICE_INTEROP_RUNBOOK.md`：
+
+- Android <-> Apple WebRTC smoke: `scripts/run_android_apple_webrtc_smoke.sh`
+- Signed release APK packaging audit: `scripts/check_android_packaged_placeholders.sh --mode formal --apk <signed-release.apk> --mapping app/build/outputs/mapping/release/mapping.txt --audit-metadata app/build/outputs/release-audit/release/metadata.properties --expected-cert-sha256 "$EXPECTED_ANDROID_SIGNING_CERT_SHA256" --expected-commit "$(git rev-parse HEAD)"` (certificate fingerprint comes from the approved release-key channel, not the inspected APK; canonical Git worktree must be clean)
+- Signed release AAB formal audit: `scripts/check_android_release_aab.sh --aab <signed-release.aab> --mapping app/build/outputs/mapping/release/mapping.txt --audit-metadata app/build/outputs/release-audit/release/aab-metadata.properties --bundletool <official-bundletool-all-1.18.3.jar> --expected-upload-cert-sha256 "$EXPECTED_ANDROID_UPLOAD_CERT_SHA256" --expected-commit "$(git rev-parse HEAD)"` (proves only the independently approved upload certificate; Play app-signing/distribution certificate and delivered APK remain a separate Play gate)
+- Windows peer: 需要 Windows 侧 live file-transfer evidence，Android 本仓库不能单独证明
+
+### 5.2 远程桌面 client 会话
 
 ```kotlin
-val service = CrossPlatformFileTransferService(context)
-
-// 监听传输状态
-service.transferStateFlow.collect { state ->
-    when (state) {
-        is TransferState.Progress -> {
-            println("进度: ${state.bytesTransferred}/${state.totalBytes}")
-        }
-        is TransferState.Completed -> {
-            println("传输完成")
-        }
-        is TransferState.Failed -> {
-            println("传输失败: ${state.error}")
-        }
-    }
-}
-
-// 发送文件
-service.sendFile(
-    fileUri = fileUri,
-    remoteAddress = "192.168.1.100",
-    remotePort = 8080,
-    encryptionKey = sessionKey, // 可选，来自 PQC 握手
-    enableCompression = true
+val client = MacRemoteControlClient(context)
+client.connect(
+    target = MacRemoteControlClient.ConnectionTarget(
+        host = "192.168.1.100",
+        port = 5901,
+        displayName = "MacBook Pro"
+    ),
+    enableHandshake = true,
+    securityConfig = MacRemoteControlClient.SecurityConfig(
+        encryptionRequired = true,
+        allowPlaintextFallback = false
+    )
 )
-```
 
-### 5.2 远程控制会话
-
-```kotlin
-val service = CrossPlatformRemoteControlService(context)
-
-// 设置 AccessibilityService
-service.setAccessibilityService(accessibilityService)
-service.setScreenSize(1080, 1920)
-
-// 启动会话
-val sessionId = service.startSession(
-    remoteAddress = "192.168.1.100",
-    remotePort = 5901,
-    deviceId = "android-device-id",
-    deviceName = "My Android"
-).getOrThrow()
-
-// 发送触摸事件到 macOS
-service.sendTouchEvent(
-    sessionId = sessionId,
-    touchId = 0,
-    x = 500f,
-    y = 800f,
-    pressure = 1f,
-    eventType = EventType.TOUCH_BEGIN
-)
+// Android sends remote input to the macOS/iOS peer; it does not inject input into Android itself.
+client.sendMouseMove(x = 500.0, y = 800.0)
 ```
 
 ## 6. 安全考虑
@@ -301,16 +174,15 @@ service.sendTouchEvent(
 
 ## 7. 已知限制
 
-1. **远程控制方向**: 目前主要支持 macOS → Android 方向的控制
-2. **屏幕捕获**: Android 端屏幕镜像需要 MediaProjection 权限
-3. **按键注入**: 部分按键无法直接注入，使用全局操作替代
+1. **远程控制方向**: public Android app 支持 Android → macOS/iOS 方向，不发布 Android 被控入口
+2. **屏幕捕获**: public Android app 不申请 MediaProjection；远端屏幕帧来自 macOS/iOS peer
+3. **按键注入**: Android 作为 client 发送远端输入事件，本机不启用 Accessibility 注入
 4. **音频**: 远程音频传输尚未实现
 
 ## 8. 后续优化
 
-1. 实现 WebRTC 作为可选传输协议
-2. 添加屏幕镜像 (Android → macOS) 支持
+1. 补齐 mouse / keyboard / text / clipboard 的自动化 input-closure artifact
+2. 补齐 Android <-> Windows native discovery、live file-transfer、live remote-desktop evidence
 3. 实现音频流传输
 4. 优化大文件传输的内存使用
 5. 添加传输队列管理
-

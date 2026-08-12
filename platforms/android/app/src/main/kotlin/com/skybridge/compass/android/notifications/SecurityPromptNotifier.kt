@@ -1,18 +1,22 @@
 package com.skybridge.compass.android.notifications
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
-import android.os.Build
+import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.skybridge.compass.android.MainActivity
 import com.skybridge.compass.android.securityprompts.SecurityPromptStore
 import com.skybridge.compass.core.p2p.PairingTrustConflict
 import com.skybridge.compass.core.p2p.PairingTrustRequest
+import java.util.Locale
 
 /**
  * Dedicated system notifications for security prompts (inbound file transfers, remote-control approvals).
@@ -28,7 +32,10 @@ object SecurityPromptNotifier {
 
     const val EXTRA_TRANSFER_ID = "extra_transfer_id"
     const val EXTRA_PAIRING_REQUEST_ID = "extra_pairing_request_id"
-    const val EXTRA_NAV_ROUTE = "extra_nav_route"
+    internal const val EXTRA_REVIEW_KIND = "extra_security_review_kind"
+    internal const val EXTRA_REVIEW_ID = "extra_security_review_id"
+    internal const val REVIEW_KIND_INBOUND_FILE = "inbound_file"
+    internal const val REVIEW_KIND_PAIRING_TRUST = "pairing_trust"
 
     private var initialized = false
 
@@ -43,17 +50,19 @@ object SecurityPromptNotifier {
 
         val notificationId = inboundNotificationId(prompt.transferId)
 
-        val sender = prompt.senderDeviceName
-            ?: prompt.senderDeviceId
-            ?: "Unknown device"
+        val sender = prompt.senderDeviceId ?: "Unauthenticated sender"
+        val declaredName = prompt.senderDeviceName?.takeIf { it.isNotBlank() && it != sender }
         val size = prompt.fileSizeBytes?.let { formatBytes(it) } ?: "Unknown size"
-        val body = "$sender wants to send “${prompt.fileName}” ($size)"
-
-        val reviewRoute = "security/incoming_transfer_review/${prompt.transferId}"
+        val body = if (declaredName != null) {
+            "$sender wants to send “${prompt.fileName}” ($size); declared name: $declaredName"
+        } else {
+            "$sender wants to send “${prompt.fileName}” ($size)"
+        }
 
         val reviewIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_NAV_ROUTE, reviewRoute)
+            putExtra(EXTRA_REVIEW_KIND, REVIEW_KIND_INBOUND_FILE)
+            putExtra(EXTRA_REVIEW_ID, prompt.transferId)
         }
         val reviewPending = PendingIntent.getActivity(
             context,
@@ -87,7 +96,7 @@ object SecurityPromptNotifier {
             .addAction(0, "Review", reviewPending)
             .addAction(0, "Decline", declinePending)
 
-        NotificationManagerCompat.from(context).notify(notificationId, builder.build())
+        notifySecurityPrompt(context, notificationId, builder)
     }
 
     fun cancelInboundFilePrompt(context: Context, transferId: String) {
@@ -105,11 +114,10 @@ object SecurityPromptNotifier {
         } else {
             "$sender pairing request conflicts with an existing trusted identity"
         }
-        val reviewRoute = "security/pairing_trust_review/${prompt.requestId}"
-
         val reviewIntent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra(EXTRA_NAV_ROUTE, reviewRoute)
+            putExtra(EXTRA_REVIEW_KIND, REVIEW_KIND_PAIRING_TRUST)
+            putExtra(EXTRA_REVIEW_ID, prompt.requestId)
         }
         val reviewPending = PendingIntent.getActivity(
             context,
@@ -148,15 +156,63 @@ object SecurityPromptNotifier {
             .addAction(0, "Review", reviewPending)
             .addAction(0, "Decline", declinePending)
 
-        NotificationManagerCompat.from(context).notify(notificationId, builder.build())
+        notifySecurityPrompt(context, notificationId, builder)
     }
 
     fun cancelPairingTrustPrompt(context: Context, requestId: String) {
         NotificationManagerCompat.from(context).cancel(pairingNotificationId(requestId))
     }
 
+    internal sealed interface ReviewIntentResolution {
+        data object NotPresent : ReviewIntentResolution
+        data class Accepted(val route: String) : ReviewIntentResolution
+        data class Rejected(val reason: String) : ReviewIntentResolution
+    }
+
+    /**
+     * Resolves only notification intents that still name an exact live prompt.
+     * The caller never accepts a route string supplied by an exported activity.
+     */
+    internal fun resolveReviewIntent(intent: Intent?): ReviewIntentResolution {
+        if (intent == null) return ReviewIntentResolution.NotPresent
+        val hasKind = intent.hasExtra(EXTRA_REVIEW_KIND)
+        val hasId = intent.hasExtra(EXTRA_REVIEW_ID)
+        if (!hasKind && !hasId) return ReviewIntentResolution.NotPresent
+        if (!hasKind || !hasId) {
+            return ReviewIntentResolution.Rejected("security review intent is incomplete")
+        }
+
+        val kind = intent.getStringExtra(EXTRA_REVIEW_KIND)
+        val reviewId = intent.getStringExtra(EXTRA_REVIEW_ID)
+        if (reviewId.isNullOrBlank() || reviewId.length > 256 || reviewId.any(Char::isISOControl)) {
+            return ReviewIntentResolution.Rejected("security review identifier is invalid")
+        }
+
+        val encodedId = Uri.encode(reviewId)
+        return when (kind) {
+            REVIEW_KIND_INBOUND_FILE -> {
+                if (SecurityPromptStore.getInboundPrompt(reviewId) == null) {
+                    ReviewIntentResolution.Rejected("inbound file prompt is not current")
+                } else {
+                    ReviewIntentResolution.Accepted(
+                        "security/incoming_transfer_review/$encodedId"
+                    )
+                }
+            }
+            REVIEW_KIND_PAIRING_TRUST -> {
+                if (SecurityPromptStore.getPairingPrompt(reviewId) == null) {
+                    ReviewIntentResolution.Rejected("pairing trust prompt is not current")
+                } else {
+                    ReviewIntentResolution.Accepted(
+                        "security/pairing_trust_review/$encodedId"
+                    )
+                }
+            }
+            else -> ReviewIntentResolution.Rejected("security review kind is invalid")
+        }
+    }
+
     private fun createChannels(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = NotificationChannel(
             CHANNEL_SECURITY,
@@ -168,6 +224,20 @@ object SecurityPromptNotifier {
             lightColor = Color.YELLOW
         }
         mgr.createNotificationChannel(channel)
+    }
+
+    private fun notifySecurityPrompt(
+        context: Context,
+        notificationId: Int,
+        builder: NotificationCompat.Builder
+    ) {
+        if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            throw SecurityException("POST_NOTIFICATIONS permission is required for security prompts")
+        }
+        NotificationManagerCompat.from(context).notify(notificationId, builder.build())
     }
 
     private fun inboundNotificationId(transferId: String): Int = transferId.hashCode()
@@ -187,6 +257,7 @@ object SecurityPromptNotifier {
             PairingTrustConflict.DEVICE_ID_MIGRATION_REQUIRED -> "This authoritative fingerprint is already pinned to another device ID."
             PairingTrustConflict.QUARANTINED_IDENTITY -> "This identity is quarantined and requires reverification."
             PairingTrustConflict.REVOKED_IDENTITY -> "This identity has been revoked."
+            PairingTrustConflict.TRUST_STORE_CORRUPTED -> "The trusted-device store is corrupted and must be repaired before approving this peer."
             null -> null
         }
         return if (conflict == null) base else "$base\n\n$conflict"
@@ -203,7 +274,7 @@ object SecurityPromptNotifier {
         return if (unit == 0) {
             "${bytes} ${units[unit]}"
         } else {
-            String.format("%.1f %s", size, units[unit])
+            String.format(Locale.ROOT, "%.1f %s", size, units[unit])
         }
     }
 }

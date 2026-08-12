@@ -4,7 +4,6 @@ package com.skybridge.compass.android.ui.screens.auth
 
 import android.app.Activity
 import android.content.Intent
-import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -62,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.util.PatternsCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import com.skybridge.compass.android.ui.theme.IOSParityTokens
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
@@ -128,18 +128,13 @@ fun LoginScreen(
 
     fun openCredentialSettings() {
         runCatching {
-            val intent =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Intent(Settings.ACTION_BIOMETRIC_ENROLL).apply {
-                        putExtra(
-                            Settings.EXTRA_BIOMETRIC_AUTHENTICATORS_ALLOWED,
-                            BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                                BiometricManager.Authenticators.DEVICE_CREDENTIAL
-                        )
-                    }
-                } else {
-                    Intent(Settings.ACTION_SECURITY_SETTINGS)
-                }
+            val intent = Intent(Settings.ACTION_BIOMETRIC_ENROLL).apply {
+                putExtra(
+                    Settings.EXTRA_BIOMETRIC_AUTHENTICATORS_ALLOWED,
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+                )
+            }
             context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
     }
@@ -340,7 +335,7 @@ fun LoginScreen(
         unfocusedPlaceholderColor = Color.White.copy(alpha = 0.72f),
         focusedLeadingIconColor = Color.White.copy(alpha = 0.72f),
         unfocusedLeadingIconColor = Color.White.copy(alpha = 0.72f),
-        cursorColor = Color(0xFF8BB8FF)
+        cursorColor = IOSParityTokens.ColorTokens.CyanAccent
     )
 
     Box(
@@ -367,7 +362,7 @@ fun LoginScreen(
             androidx.compose.material3.Icon(
                 imageVector = Icons.Default.Public,
                 contentDescription = null,
-                tint = Color(0xFF7CB8FF),
+                tint = IOSParityTokens.ColorTokens.CyanAccent,
                 modifier = Modifier.size(80.dp)
             )
             Spacer(modifier = Modifier.height(14.dp))
@@ -618,7 +613,10 @@ fun LoginScreen(
                         .alpha(if (canSubmit) 1f else 0.6f)
                         .background(
                             Brush.horizontalGradient(
-                                listOf(Color(0xFF0A84FF), Color(0xFF5E5CE6))
+                                listOf(
+                                    IOSParityTokens.ColorTokens.CyanAccent,
+                                    IOSParityTokens.ColorTokens.PurpleAccent
+                                )
                             ),
                             RoundedCornerShape(12.dp)
                         ),
@@ -683,7 +681,7 @@ fun LoginScreen(
                     } else {
                         t("没有账号？注册", "No account yet? Sign up", "アカウントがありませんか？ 登録")
                     },
-                    color = Color(0xFF8BB8FF)
+                    color = IOSParityTokens.ColorTokens.CyanAccent
                 )
             }
 
@@ -701,7 +699,7 @@ fun LoginScreen(
                 ) {
                     Text(
                         t("重新发送验证码", "Resend Code", "コードを再送"),
-                        color = Color(0xFF8BB8FF)
+                        color = IOSParityTokens.ColorTokens.CyanAccent
                     )
                 }
             }
@@ -718,13 +716,95 @@ fun LoginScreen(
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(t("忘记密码", "Forgot Password", "パスワードを忘れた場合"), color = Color(0xFF8BB8FF))
+                    Text(t("忘记密码", "Forgot Password", "パスワードを忘れた場合"), color = IOSParityTokens.ColorTokens.CyanAccent)
                 }
             }
 
             Spacer(modifier = Modifier.height(18.dp))
             AuthDivider()
             Spacer(modifier = Modifier.height(18.dp))
+
+            // Nebula 安全登录（OAuth 2.1 + PKCE，系统浏览器）— iOS parity (Apple+Nebula → Google+Nebula on Android).
+            val nebulaConfigured = viewModel.isNebulaConfigured
+            Button(
+                onClick = {
+                    localError = null
+                    localInfo = null
+                    ensureCloudReady { viewModel.loginNebulaOAuth(context, register = isRegistering) }
+                },
+                enabled = !uiState.loading && nebulaConfigured,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                shape = RoundedCornerShape(14.dp),
+                contentPadding = PaddingValues(0.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent
+                )
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(if (nebulaConfigured) 1f else 0.55f)
+                        .background(
+                            // iOS uses an indigo→blue gradient for Nebula; SecondaryIndigo/PrimaryBlue
+                            // are the shared iOS-parity tokens for exactly .indigo / .blue.
+                            Brush.horizontalGradient(
+                                listOf(
+                                    IOSParityTokens.ColorTokens.SecondaryIndigo,
+                                    IOSParityTokens.ColorTokens.PrimaryBlue
+                                )
+                            ),
+                            RoundedCornerShape(14.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.Icon(
+                            imageVector = Icons.Default.Public,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Text(
+                            text = if (isRegistering) {
+                                t("使用 Nebula 安全注册", "Sign up with Nebula", "Nebula で安全に登録")
+                            } else {
+                                t("使用 Nebula 安全登录", "Continue with Nebula", "Nebula で続行")
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = if (nebulaConfigured) {
+                    t(
+                        "Nebula 登录将在系统浏览器中完成，授权与二次验证均不在 App 内处理。",
+                        "Nebula sign-in completes in your system browser; authorization and MFA stay outside the app.",
+                        "Nebula ログインはシステムブラウザーで完了します。認可と二段階認証はアプリ内では処理されません。"
+                    )
+                } else {
+                    t(
+                        "Nebula 配置缺失：请先提供 NEBULA_BASE_URL / NEBULA_CLIENT_ID。",
+                        "Nebula configuration is missing: provide NEBULA_BASE_URL / NEBULA_CLIENT_ID first.",
+                        "Nebula 設定がありません：先に NEBULA_BASE_URL / NEBULA_CLIENT_ID を設定してください。"
+                    )
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (nebulaConfigured) Color.White.copy(alpha = 0.68f) else IOSParityTokens.ColorTokens.WarningOrange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
 
             OutlinedButton(
                 onClick = {
@@ -748,7 +828,7 @@ fun LoginScreen(
                 ) {
                     Text(
                         text = "G",
-                        color = Color(0xFF8BB8FF),
+                        color = IOSParityTokens.ColorTokens.CyanAccent,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -903,12 +983,12 @@ private fun RowScope.LoginLanguageChip(
         modifier = Modifier.weight(1f),
         shape = RoundedCornerShape(999.dp),
         colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = if (selected) Color(0xFF8BB8FF).copy(alpha = 0.20f) else Color.White.copy(alpha = 0.06f),
-            contentColor = if (selected) Color(0xFFB9D7FF) else Color.White
+            containerColor = if (selected) IOSParityTokens.ColorTokens.CyanAccent.copy(alpha = 0.20f) else Color.White.copy(alpha = 0.06f),
+            contentColor = if (selected) IOSParityTokens.ColorTokens.CyanAccent else Color.White
         ),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            if (selected) Color(0xFF8BB8FF).copy(alpha = 0.45f) else Color.White.copy(alpha = 0.14f)
+            if (selected) IOSParityTokens.ColorTokens.CyanAccent.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.14f)
         ),
         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
     ) {

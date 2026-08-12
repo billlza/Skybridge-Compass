@@ -12,10 +12,15 @@ import com.skybridge.compass.discovery.domain.entities.DiscoveryProtocolProfiles
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import javax.inject.Inject
 import javax.inject.Singleton
+
+class DeviceDiscoveryException(
+    val protocol: DiscoveryProtocol,
+    message: String,
+    cause: Throwable
+) : IllegalStateException(message, cause)
 
 /**
  * 统一设备发现服务
@@ -48,25 +53,25 @@ class UnifiedDeviceDiscoveryService @Inject constructor(
         
         // 根据协议启动相应的发现服务
         if (protocols.contains(DiscoveryProtocol.BONJOUR)) {
-            flows.add(bonjourDiscovery.startDiscovery().catch { emit(emptyList()) })
+            flows.add(bonjourDiscovery.startDiscovery().withProtocolFailure(DiscoveryProtocol.BONJOUR))
         }
         
         if (protocols.contains(DiscoveryProtocol.WIFI_DIRECT)) {
-            flows.add(wifiDirectDiscovery.startDiscovery().catch { emit(emptyList()) })
+            flows.add(wifiDirectDiscovery.startDiscovery().withProtocolFailure(DiscoveryProtocol.WIFI_DIRECT))
         }
 
         if (protocols.contains(DiscoveryProtocol.WIFI_AWARE)) {
-            flows.add(wifiAwareDiscovery.startDiscovery().catch { emit(emptyList()) })
+            flows.add(wifiAwareDiscovery.startDiscovery().withProtocolFailure(DiscoveryProtocol.WIFI_AWARE))
         }
 
         if (protocols.contains(DiscoveryProtocol.NEARBY_CONNECTIONS)) {
-            flows.add(nearbyDiscovery.startDiscovery().catch { emit(emptyList()) })
+            flows.add(nearbyDiscovery.startDiscovery().withProtocolFailure(DiscoveryProtocol.NEARBY_CONNECTIONS))
         }
         if (protocols.contains(DiscoveryProtocol.BLUETOOTH)) {
-            flows.add(bleDiscovery.startDiscovery().catch { emit(emptyList()) })
+            flows.add(bleDiscovery.startDiscovery().withProtocolFailure(DiscoveryProtocol.BLUETOOTH))
         }
         if (protocols.contains(DiscoveryProtocol.UDP_BROADCAST)) {
-            flows.add(udpDiscovery.startDiscovery().catch { emit(emptyList()) })
+            flows.add(udpDiscovery.startDiscovery().withProtocolFailure(DiscoveryProtocol.UDP_BROADCAST))
         }
         
         // 如果没有启用任何协议，返回空流
@@ -96,7 +101,7 @@ class UnifiedDeviceDiscoveryService @Inject constructor(
      * 使用量子算法和智能去重优化设备列表
      */
     private suspend fun optimizeDeviceList(devices: List<DiscoveredDevice>): List<DiscoveredDevice> {
-        // 1. 去重 - 基于设备ID和地址
+        // 1. 去重 - 优先基于稳定设备 ID，缺失时退回端点特征
         val uniqueDevices = deduplicateDevices(devices)
         
         // 2. 量子优化排序
@@ -116,51 +121,22 @@ class UnifiedDeviceDiscoveryService @Inject constructor(
      * 基于多个维度进行智能去重
      */
     private fun deduplicateDevices(devices: List<DiscoveredDevice>): List<DiscoveredDevice> {
-        val deviceMap = mutableMapOf<String, DiscoveredDevice>()
+        val deviceMap = mutableMapOf<DeviceDeduplicationKey, DiscoveredDevice>()
         
         devices.forEach { device ->
-            val key = generateDeviceKey(device)
+            val key = DeviceDeduplicationPolicy.keyFor(device)
             val existing = deviceMap[key]
             
             if (existing == null) {
                 deviceMap[key] = device
             } else {
-                // 合并设备信息，选择信号更强或信息更完整的
-                deviceMap[key] = mergeDeviceInfo(existing, device)
+                deviceMap[key] = DeviceDeduplicationPolicy.merge(existing, device)
             }
         }
         
         return deviceMap.values.toList()
     }
-    
-    /**
-     * 生成设备唯一键
-     */
-    private fun generateDeviceKey(device: DiscoveredDevice): String {
-        return "${device.name}_${device.connectionInfo.address}_${device.type}"
-    }
-    
-    /**
-     * 合并设备信息
-     */
-    private fun mergeDeviceInfo(device1: DiscoveredDevice, device2: DiscoveredDevice): DiscoveredDevice {
-        return if (device1.signalStrength >= device2.signalStrength) {
-            device1.copy(
-                capabilities = device1.capabilities + device2.capabilities,
-                lastSeen = maxOf(device1.lastSeen, device2.lastSeen),
-                batteryLevel = device1.batteryLevel ?: device2.batteryLevel,
-                osVersion = device1.osVersion ?: device2.osVersion
-            )
-        } else {
-            device2.copy(
-                capabilities = device1.capabilities + device2.capabilities,
-                lastSeen = maxOf(device1.lastSeen, device2.lastSeen),
-                batteryLevel = device2.batteryLevel ?: device1.batteryLevel,
-                osVersion = device2.osVersion ?: device1.osVersion
-            )
-        }
-    }
-    
+
     /**
      * 计算优化的信号强度
      */
@@ -192,6 +168,52 @@ class UnifiedDeviceDiscoveryService @Inject constructor(
         strength = (strength - timeDecay).coerceAtLeast(0)
         
         return strength
+    }
+
+    private fun Flow<List<DiscoveredDevice>>.withProtocolFailure(
+        protocol: DiscoveryProtocol
+    ): Flow<List<DiscoveredDevice>> = catch { error ->
+        throw DeviceDiscoveryException(
+            protocol = protocol,
+            message = "$protocol discovery failed: ${error.message ?: error.javaClass.simpleName}",
+            cause = error
+        )
+    }
+}
+
+internal data class DeviceDeduplicationKey(
+    val namespace: String,
+    val value: String
+)
+
+internal object DeviceDeduplicationPolicy {
+    fun keyFor(device: DiscoveredDevice): DeviceDeduplicationKey {
+        val stableId = device.id.trim()
+        if (stableId.isNotEmpty()) {
+            return DeviceDeduplicationKey(namespace = "device-id", value = stableId)
+        }
+
+        return DeviceDeduplicationKey(
+            namespace = "endpoint",
+            value = "${device.name}|${device.connectionInfo.address}|${device.type}"
+        )
+    }
+
+    fun merge(device1: DiscoveredDevice, device2: DiscoveredDevice): DiscoveredDevice {
+        val primary = if (device1.signalStrength >= device2.signalStrength) device1 else device2
+        val secondary = if (primary == device1) device2 else device1
+
+        return primary.copy(
+            capabilities = device1.capabilities + device2.capabilities,
+            connectionInfo = primary.connectionInfo.copy(
+                txtRecords = secondary.connectionInfo.txtRecords + primary.connectionInfo.txtRecords,
+                extra = secondary.connectionInfo.extra + primary.connectionInfo.extra
+            ),
+            lastSeen = maxOf(device1.lastSeen, device2.lastSeen),
+            isConnected = device1.isConnected || device2.isConnected,
+            batteryLevel = primary.batteryLevel ?: secondary.batteryLevel,
+            osVersion = primary.osVersion ?: secondary.osVersion
+        )
     }
 }
 

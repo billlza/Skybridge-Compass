@@ -3,7 +3,8 @@ package com.skybridge.compass.android.di
 import android.content.Context
 import androidx.room.Room
 import com.skybridge.compass.core.data.database.AppDatabase
-import com.skybridge.compass.android.permissions.PermissionManager
+import com.skybridge.compass.shared.productsession.InMemoryProductSessionAuthorityStore
+import com.skybridge.compass.shared.productsession.ProductSessionAuthorityStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -31,10 +32,14 @@ object AppModule {
         return Room.databaseBuilder(
             context,
             AppDatabase::class.java,
-            "skybridge_database"
+            AppDatabase.DATABASE_NAME
         )
-        .fallbackToDestructiveMigration(true)
         .build()
     }
+
+    @Provides
+    @Singleton
+    fun provideProductSessionAuthorityStore(): ProductSessionAuthorityStore =
+        InMemoryProductSessionAuthorityStore()
     
 }

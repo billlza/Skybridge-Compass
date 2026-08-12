@@ -3,7 +3,6 @@ package com.skybridge.compass.android.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -30,7 +29,12 @@ data class AppSettings(
     val useDynamicColor: Boolean = false,
     val hapticFeedback: Boolean = true,
     val keepScreenOn: Boolean = false,
-    val showBatteryOptimizationWarning: Boolean = true
+    val showBatteryOptimizationWarning: Boolean = true,
+    /**
+     * Mirrors macOS/iOS `SettingsManager.enableRealTimeWeather`. Opt-in on every platform because
+     * turning it on starts location resolution and periodic network calls.
+     */
+    val realTimeWeatherEnabled: Boolean = false
 )
 
 /**
@@ -49,13 +53,14 @@ object AppSettingsStore {
     private val KEY_HAPTIC_FEEDBACK = booleanPreferencesKey("haptic_feedback")
     private val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
     private val KEY_BATTERY_OPT_WARNING = booleanPreferencesKey("battery_opt_warning")
+    private val KEY_REAL_TIME_WEATHER = booleanPreferencesKey("real_time_weather_enabled")
 
     /**
      * 观察所有应用设置
      */
     fun observe(context: Context): Flow<AppSettings> =
         context.appSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { prefs ->
                 AppSettings(
                     darkMode = prefs[KEY_DARK_MODE] ?: true,
@@ -66,7 +71,8 @@ object AppSettingsStore {
                     useDynamicColor = prefs[KEY_DYNAMIC_COLOR] ?: false,
                     hapticFeedback = prefs[KEY_HAPTIC_FEEDBACK] ?: true,
                     keepScreenOn = prefs[KEY_KEEP_SCREEN_ON] ?: false,
-                    showBatteryOptimizationWarning = prefs[KEY_BATTERY_OPT_WARNING] ?: true
+                    showBatteryOptimizationWarning = prefs[KEY_BATTERY_OPT_WARNING] ?: true,
+                    realTimeWeatherEnabled = prefs[KEY_REAL_TIME_WEATHER] ?: false
                 )
             }
 
@@ -75,7 +81,7 @@ object AppSettingsStore {
      */
     fun observeDarkMode(context: Context): Flow<Boolean> =
         context.appSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_DARK_MODE] ?: true }
 
     /**
@@ -92,7 +98,7 @@ object AppSettingsStore {
      */
     fun observeAutoConnect(context: Context): Flow<Boolean> =
         context.appSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_AUTO_CONNECT] ?: true }
 
     /**
@@ -109,7 +115,7 @@ object AppSettingsStore {
      */
     fun observeNotifications(context: Context): Flow<Boolean> =
         context.appSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_NOTIFICATIONS] ?: true }
 
     /**
@@ -117,12 +123,12 @@ object AppSettingsStore {
      */
     fun observeRememberLogin(context: Context): Flow<Boolean> =
         context.appSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_REMEMBER_LOGIN] ?: false }
 
     fun observeAppLanguage(context: Context): Flow<String> =
         context.appSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { it[KEY_APP_LANGUAGE] ?: APP_LANGUAGE_SYSTEM }
 
     /**
@@ -189,11 +195,34 @@ object AppSettingsStore {
     }
 
     /**
+     * 观察实时天气开关（对齐 macOS/iOS 的 enableRealTimeWeather）
+     */
+    fun observeRealTimeWeatherEnabled(context: Context): Flow<Boolean> =
+        context.appSettingsDataStore.data
+            .catch { rethrowPreferenceReadFailure(it) }
+            .map { it[KEY_REAL_TIME_WEATHER] ?: false }
+
+    /**
+     * 设置实时天气开关
+     */
+    suspend fun setRealTimeWeatherEnabled(context: Context, enabled: Boolean) {
+        context.appSettingsDataStore.edit { prefs ->
+            prefs[KEY_REAL_TIME_WEATHER] = enabled
+        }
+    }
+
+    /**
      * 重置所有设置为默认值
      */
     suspend fun resetToDefaults(context: Context) {
         context.appSettingsDataStore.edit { prefs ->
             prefs.clear()
         }
+    }
+
+    private suspend fun kotlinx.coroutines.flow.FlowCollector<androidx.datastore.preferences.core.Preferences>.rethrowPreferenceReadFailure(
+        error: Throwable
+    ) {
+        throw error
     }
 }

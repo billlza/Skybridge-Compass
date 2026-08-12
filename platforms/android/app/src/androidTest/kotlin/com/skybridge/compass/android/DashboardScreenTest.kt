@@ -1,207 +1,151 @@
 package com.skybridge.compass.android
 
-import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
+import android.os.Build
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollToNode
 import androidx.navigation.compose.rememberNavController
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.skybridge.compass.android.data.APP_LANGUAGE_EN
+import com.skybridge.compass.android.data.APP_LANGUAGE_SYSTEM
+import com.skybridge.compass.android.i18n.AppLanguageRuntime
+import com.skybridge.compass.android.ui.navigation.NavigationSemantics
+import com.skybridge.compass.android.ui.navigation.Screen
 import com.skybridge.compass.android.ui.screens.dashboard.DashboardScreen
 import com.skybridge.compass.android.ui.theme.SkyBridgeCompassTheme
+import com.skybridge.compass.core.data.database.AppDatabase
+import dagger.hilt.android.testing.HiltAndroidRule
+import dagger.hilt.android.testing.HiltAndroidTest
+import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import javax.inject.Inject
 
-/**
- * Dashboard屏幕UI测试
- */
+@HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
 class DashboardScreenTest {
-    
-    @get:Rule
-    val composeTestRule = createComposeRule()
-    
-    @Test
-    fun dashboardScreen_displaysCorrectTitle() {
+
+    @Inject lateinit var database: AppDatabase
+
+    @get:Rule(order = -1)
+    val databaseCleanupRule = TestDatabaseCleanupRule {
+        if (::database.isInitialized) database else null
+    }
+
+    @get:Rule(order = 0)
+    val hiltRule = HiltAndroidRule(this)
+
+    @get:Rule(order = 1)
+    val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    @Before
+    fun setUp() {
+        hiltRule.inject()
+        AppLanguageRuntime.applySetting(APP_LANGUAGE_EN)
         composeTestRule.setContent {
             SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
+                DashboardScreen(navController = rememberNavController())
             }
         }
-        
-        // 验证标题显示
+    }
+
+    @After
+    fun tearDown() {
+        AppLanguageRuntime.applySetting(APP_LANGUAGE_SYSTEM)
+    }
+
+    @Test
+    fun dashboardScreen_displaysCurrentTitleAndDeviceSummary() {
         composeTestRule
-            .onNodeWithText("SkyBridge Compass")
+            .onNodeWithTag(NavigationSemantics.DASHBOARD_TITLE, useUnmergedTree = true)
+            .assertIsDisplayed()
+        composeTestRule
+            .onNodeWithText(Build.MODEL, substring = false)
+            .assertIsDisplayed()
+        composeTestRule
+            .onNodeWithText("Android ${Build.VERSION.RELEASE}")
             .assertIsDisplayed()
     }
-    
+
     @Test
-    fun dashboardScreen_displaysStatusCards() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
-        }
-        
-        // 验证状态卡片显示
+    fun dashboardScreen_displaysCurrentSummaryCards() {
+        scrollDashboardTo(NavigationSemantics.DASHBOARD_DISCOVERY_STAT)
+
         composeTestRule
-            .onNodeWithText("已连接设备")
+            .onNodeWithTag(NavigationSemantics.DASHBOARD_DISCOVERY_STAT)
             .assertIsDisplayed()
-        
         composeTestRule
-            .onNodeWithText("活跃会话")
+            .onNodeWithText("Discovery & Connections")
             .assertIsDisplayed()
-        
         composeTestRule
-            .onNodeWithText("网络质量")
+            .onNodeWithTag(NavigationSemantics.DASHBOARD_TRANSFER_STAT)
             .assertIsDisplayed()
-        
         composeTestRule
-            .onNodeWithText("数据传输")
+            .onNodeWithText("Transfers & Performance")
             .assertIsDisplayed()
     }
-    
+
     @Test
-    fun dashboardScreen_displaysQuickActionCards() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
+    fun dashboardScreen_displaysCurrentQuickActions() {
+        val actions = listOf(
+            Triple(NavigationSemantics.ACTION_SCAN_NETWORK, Screen.DeviceDiscovery.route, "Scan Network"),
+            Triple(NavigationSemantics.ACTION_SEND_FILE, Screen.FileTransfer.route, "Send File"),
+            Triple(NavigationSemantics.ACTION_REMOTE_DESKTOP, Screen.RemoteControl.route, "Remote Desktop"),
+            Triple(NavigationSemantics.ACTION_CROSS_NETWORK, Screen.DeviceDiscovery.route, "Cross-Network")
+        )
+
+        actions.forEach { (actionId, route, label) ->
+            val tag = NavigationSemantics.dashboardAction(actionId, route)
+            scrollDashboardTo(tag)
+            composeTestRule.onNodeWithTag(tag).assertIsDisplayed()
+            composeTestRule.onNodeWithText(label).assertIsDisplayed()
         }
-        
-        // 验证快速操作卡片显示
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .assertIsDisplayed()
-        
-        composeTestRule
-            .onNodeWithText("屏幕镜像")
-            .assertIsDisplayed()
-        
-        composeTestRule
-            .onNodeWithText("远程控制")
-            .assertIsDisplayed()
-        
-        composeTestRule
-            .onNodeWithText("设置")
-            .assertIsDisplayed()
     }
-    
+
     @Test
-    fun dashboardScreen_quickActionCardsAreClickable() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
+    fun dashboardScreen_currentQuickActionsAreClickable() {
+        listOf(
+            NavigationSemantics.ACTION_SCAN_NETWORK to Screen.DeviceDiscovery.route,
+            NavigationSemantics.ACTION_SEND_FILE to Screen.FileTransfer.route,
+            NavigationSemantics.ACTION_REMOTE_DESKTOP to Screen.RemoteControl.route,
+            NavigationSemantics.ACTION_CROSS_NETWORK to Screen.DeviceDiscovery.route
+        ).forEach { (actionId, route) ->
+            val tag = NavigationSemantics.dashboardAction(actionId, route)
+            scrollDashboardTo(tag)
+            composeTestRule
+                .onNodeWithTag(tag)
+                .assertIsDisplayed()
+                .assertHasClickAction()
         }
-        
-        // 验证快速操作卡片可点击
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .assertHasClickAction()
-        
-        composeTestRule
-            .onNodeWithText("屏幕镜像")
-            .assertHasClickAction()
-        
-        composeTestRule
-            .onNodeWithText("远程控制")
-            .assertHasClickAction()
-        
-        composeTestRule
-            .onNodeWithText("设置")
-            .assertHasClickAction()
     }
-    
+
     @Test
-    fun dashboardScreen_connectionStatusIndicatorWorks() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
-        }
-        
-        // 等待连接状态指示器出现
-        composeTestRule.waitForIdle()
-        
-        // 验证连接状态指示器存在
-        composeTestRule
-            .onAllNodesWithContentDescription("连接状态")
-            .assertCountEquals(1)
+    fun dashboardScreen_displaysCurrentTopBarActions() {
+        composeTestRule.onNodeWithContentDescription("Refresh").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Notifications").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Scan to Connect").assertIsDisplayed()
     }
-    
+
     @Test
-    fun dashboardScreen_scrollsCorrectly() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
-        }
-        
-        // 验证可以滚动到底部
+    fun dashboardScreen_scrollsToNearbyDevicesSection() {
         composeTestRule
-            .onNodeWithText("设置")
-            .performScrollTo()
-            .assertIsDisplayed()
+            .onNodeWithTag(NavigationSemantics.DASHBOARD_SCROLL)
+            .performScrollToNode(androidx.compose.ui.test.hasText("Nearby Devices"))
+
+        composeTestRule.onNodeWithText("Nearby Devices").assertIsDisplayed()
+        composeTestRule.onNodeWithText("View All").assertIsDisplayed()
     }
-    
-    @Test
-    fun dashboardScreen_handlesDataUpdates() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
-        }
-        
-        // 等待数据更新
-        composeTestRule.waitForIdle()
-        
-        // 验证数据会更新（由于模拟数据的随机性，我们只验证元素存在）
+
+    private fun scrollDashboardTo(tag: String) {
         composeTestRule
-            .onNodeWithText("已连接设备")
-            .assertIsDisplayed()
-    }
-    
-    @Test
-    fun dashboardScreen_respondsToScreenSizeChanges() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
-        }
-        
-        // 验证响应式布局工作正常
-        // 在不同屏幕尺寸下，布局应该适应
-        composeTestRule
-            .onNodeWithText("已连接设备")
-            .assertIsDisplayed()
-        
-        composeTestRule
-            .onNodeWithText("活跃会话")
-            .assertIsDisplayed()
-    }
-    
-    @Test
-    fun dashboardScreen_networkQualityIndicatorDisplays() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                DashboardScreen(navController = navController)
-            }
-        }
-        
-        // 等待网络质量指示器加载
-        composeTestRule.waitForIdle()
-        
-        // 验证网络质量指示器显示
-        composeTestRule
-            .onNodeWithText("网络质量")
-            .assertIsDisplayed()
+            .onNodeWithTag(NavigationSemantics.DASHBOARD_SCROLL)
+            .performScrollToNode(hasTestTag(tag))
     }
 }

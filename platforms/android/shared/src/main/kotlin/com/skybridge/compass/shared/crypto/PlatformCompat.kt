@@ -11,13 +11,11 @@ import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Platform compatibility layer for Android 13-17 (API 33-36).
+ * Platform compatibility layer for the current Android product line.
  *
- * Provides version-aware crypto operations with graceful degradation:
- * - Android 17 (API 36): Full PQC support with hardware acceleration
- * - Android 16 (API 35): PQC support with software fallback
- * - Android 14-15 (API 34): Hybrid crypto with enhanced security
- * - Android 13 (API 33): Classic crypto with compatibility mode
+ * Current supported runtime contract:
+ * - Android 16 (API 36) or newer
+ * - Android 17 (API 37) compatibility testing
  *
  * Key features:
  * - Hardware-backed keystore when available
@@ -30,8 +28,8 @@ object PlatformCompat {
     const val API_ANDROID_13 = 33  // Tiramisu
     const val API_ANDROID_14 = 34  // Upside Down Cake
     const val API_ANDROID_15 = 35  // Vanilla Ice Cream
-    const val API_ANDROID_16 = 35  // Extension (same as 15 currently)
-    const val API_ANDROID_17 = 36  // Latest
+    const val API_ANDROID_16 = 36
+    const val API_ANDROID_17 = 37
 
     /**
      * Current device API level.
@@ -49,7 +47,7 @@ object PlatformCompat {
     val androidVersion: String = Build.VERSION.RELEASE
 
     /**
-     * Check if running on Android 17 (API 36) or higher.
+     * Check if running on Android 17 (API 37) or higher.
      */
     val isAndroid17OrHigher: Boolean
         get() = apiLevel >= API_ANDROID_17
@@ -194,7 +192,7 @@ object PlatformCompat {
      * Signature verification mode for cross-platform compatibility.
      */
     enum class SignatureMode {
-        /** Use PQC ML-DSA-65 (preferred for Android 17+) */
+        /** Use PQC ML-DSA-65 (preferred when both peers advertise PQC support) */
         PQC_ML_DSA,
         /** Use Ed25519 (compatible with Apple CryptoKit) */
         ED25519,
@@ -216,7 +214,7 @@ object PlatformCompat {
         peerApiLevel: Int = 0
     ): SignatureMode {
         return when {
-            // Both Android 17+ with PQC support
+            // Both Android 17+ with PQC support.
             peerPlatform == "android" && peerApiLevel >= API_ANDROID_17 && isAndroid17OrHigher -> {
                 SignatureMode.PQC_ML_DSA
             }

@@ -11,6 +11,7 @@ data class InboundFileTransferApprovalRequest(
     val fileName: String?,
     val mimeType: String?,
     val fileSizeBytes: Long?,
+    val authenticatedSenderDeviceId: String?,
     val senderDeviceId: String?,
     val senderDeviceName: String?
 )
@@ -27,4 +28,3 @@ sealed interface InboundFileTransferDecision {
 fun interface InboundFileTransferApprovalProvider {
     suspend fun requestDecision(request: InboundFileTransferApprovalRequest): InboundFileTransferDecision
 }
-

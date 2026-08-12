@@ -3,6 +3,7 @@ package com.skybridge.compass.android
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Bundle
+import android.util.Log
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -29,12 +30,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.compose.rememberNavController
 import dagger.hilt.android.AndroidEntryPoint
-import com.skybridge.compass.android.permissions.PermissionManager
 import com.skybridge.compass.android.ui.components.BottomNavigationBar
 import com.skybridge.compass.android.ui.components.IOSBackgroundEffectsViewModel
 import com.skybridge.compass.android.ui.components.IOSDashboardAnimatedBackground
 import com.skybridge.compass.android.ui.components.TopActionBar
 import com.skybridge.compass.android.ui.navigation.SkyBridgeNavigation
+import com.skybridge.compass.android.ui.navigation.Screen
 import com.skybridge.compass.android.ui.performance.PerformanceMonitorEffect
 import com.skybridge.compass.android.ui.theme.SkyBridgeCompassTheme
 import com.skybridge.compass.shared.account.AccountStore
@@ -46,13 +47,10 @@ import com.skybridge.compass.shared.notifications.NotificationSeverity
 import com.skybridge.compass.android.i18n.localizedText
 import com.skybridge.compass.android.i18n.resolveLocalizedText
 import com.skybridge.compass.auth.AuthRepository
-import com.skybridge.compass.android.data.cloud.CloudUserSettingsSyncManager
-import com.skybridge.compass.discovery.data.services.P2PLocalNodeService
-import io.ktor.client.HttpClient
-import kotlinx.serialization.json.Json
 import javax.inject.Inject
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -80,19 +78,16 @@ import com.skybridge.compass.android.i18n.AppLanguageRuntime
 
 @AndroidEntryPoint
 class MainActivity : FragmentActivity() {
-    private lateinit var permissionManager: PermissionManager
     @Inject lateinit var authRepository: AuthRepository
-    @Inject lateinit var httpClient: HttpClient
-    @Inject lateinit var json: Json
-    @Inject lateinit var p2pLocalNodeService: P2PLocalNodeService
-    private var cloudSettingsSync: CloudUserSettingsSyncManager? = null
     private var pendingNavRoute: String? by mutableStateOf(null)
     private var forceVisualTestMode: Boolean by mutableStateOf(false)
+    private var forceLoginScreen: Boolean by mutableStateOf(false)
 
     companion object {
         const val EXTRA_NAV_ROUTE = "skybridge.nav_route"
         const val EXTRA_FORCE_VISUAL_TEST_MODE = "skybridge.force_visual_test_mode"
         const val EXTRA_BYPASS_AUTH_FOR_SCREENSHOT = "skybridge.bypass_auth"
+        const val EXTRA_FORCE_LOGIN_SCREEN = "skybridge.force_login_screen"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,29 +96,18 @@ class MainActivity : FragmentActivity() {
         // 初始化系统通知发布器（渠道与桥接）
         try {
             com.skybridge.compass.android.notifications.SystemNotifier.init(this)
-        } catch (_: Throwable) {}
+        } catch (t: Throwable) {
+            Log.w("SkyBridgeMain", "Failed to initialize system notifier", t)
+        }
         // Init security prompt notifications (Review/Decline).
         try {
             SecurityPromptNotifier.init(this)
-        } catch (_: Throwable) {}
-
-        // 挂载账号持久化存储，并加载主账号
-        try {
-            AccountStore.attachStorage(AndroidAccountStorage(applicationContext))
-        } catch (_: Throwable) {}
-
-        // 启动云端设置同步（best-effort；无云配置/未登录则自动空转）
-        cloudSettingsSync = CloudUserSettingsSyncManager(
-            appContext = applicationContext,
-            authRepository = authRepository,
-            httpClient = httpClient,
-            json = json
-        ).also { it.start() }
-
-        // Start LAN control endpoint + Bonjour advertising (best-effort).
-        lifecycleScope.launch {
-            runCatching { p2pLocalNodeService.start() }
+        } catch (t: Throwable) {
+            Log.w("SkyBridgeMain", "Failed to initialize security prompt notifier", t)
         }
+
+        // Account profile contains identifiers and contact fields; encrypted storage is mandatory.
+        AccountStore.attachStorage(AndroidAccountStorage(applicationContext))
 
         // 首次启动欢迎提示（历史为空且主账号存在时）
         try {
@@ -141,9 +125,9 @@ class MainActivity : FragmentActivity() {
                     )
                 )
             }
-        } catch (_: Throwable) {}
-
-        permissionManager = PermissionManager(this)
+        } catch (t: Throwable) {
+            Log.w("SkyBridgeMain", "Failed to post welcome notification", t)
+        }
 
         handleNavIntent(intent)
         setContent {
@@ -157,20 +141,21 @@ class MainActivity : FragmentActivity() {
                 dynamicColor = appSettings.useDynamicColor
             ) {
                 LaunchedEffect(appSettings.keepScreenOn) {
-                    if (appSettings.keepScreenOn) {
-                        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    } else {
-                        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    // 判定见 keepScreenOnWindowFlag（同文件，纯函数、可单元测试）。
+                    when (keepScreenOnWindowFlag(appSettings.keepScreenOn)) {
+                        KeepScreenOnWindowFlag.ADD ->
+                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        KeepScreenOnWindowFlag.CLEAR ->
+                            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }
                 }
                 SkyBridgeCompassApp(
                     securityNavRoute = pendingNavRoute,
-                    forceVisualTestMode = forceVisualTestMode
+                    forceVisualTestMode = forceVisualTestMode,
+                    forceLoginScreen = forceLoginScreen
                 )
             }
         }
-
-        requestPermissionsIfNeeded()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -182,11 +167,23 @@ class MainActivity : FragmentActivity() {
     private fun handleNavIntent(intent: Intent?) {
         val visualModeEnabledInThisBuild =
             (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-        val route = (
-            if (visualModeEnabledInThisBuild) intent?.getStringExtra(EXTRA_NAV_ROUTE) else null
-        ) ?: intent?.getStringExtra(SecurityPromptNotifier.EXTRA_NAV_ROUTE)
-        if (!route.isNullOrBlank()) {
-            pendingNavRoute = route
+        if (visualModeEnabledInThisBuild && intent?.hasExtra(EXTRA_NAV_ROUTE) == true) {
+            val requestedRoute = intent.getStringExtra(EXTRA_NAV_ROUTE)
+            val resolvedRoute = requestedRoute?.let(::resolveDebugNavigationRoute)
+            if (resolvedRoute == null) {
+                Log.w("SkyBridgeMain", "Rejected invalid debug navigation route")
+            } else {
+                pendingNavRoute = resolvedRoute
+            }
+        }
+        when (val review = SecurityPromptNotifier.resolveReviewIntent(intent)) {
+            is SecurityPromptNotifier.ReviewIntentResolution.Accepted -> {
+                pendingNavRoute = review.route
+            }
+            is SecurityPromptNotifier.ReviewIntentResolution.Rejected -> {
+                Log.w("SkyBridgeMain", "Rejected security review intent: ${review.reason}")
+            }
+            SecurityPromptNotifier.ReviewIntentResolution.NotPresent -> Unit
         }
         if (visualModeEnabledInThisBuild) {
             if (intent?.hasExtra(EXTRA_FORCE_VISUAL_TEST_MODE) == true) {
@@ -195,16 +192,8 @@ class MainActivity : FragmentActivity() {
             if (intent?.hasExtra(EXTRA_BYPASS_AUTH_FOR_SCREENSHOT) == true) {
                 forceVisualTestMode = intent.getBooleanExtra(EXTRA_BYPASS_AUTH_FOR_SCREENSHOT, false)
             }
-        }
-    }
-
-    private fun requestPermissionsIfNeeded() {
-        if (!permissionManager.areAllPermissionsGranted()) {
-            permissionManager.requestAllPermissions { permissions ->
-                val deniedPermissions = permissions.filter { !it.value }.keys
-                if (deniedPermissions.isNotEmpty()) {
-                    println("Denied permissions: $deniedPermissions")
-                }
+            if (intent?.hasExtra(EXTRA_FORCE_LOGIN_SCREEN) == true) {
+                forceLoginScreen = intent.getBooleanExtra(EXTRA_FORCE_LOGIN_SCREEN, false)
             }
         }
     }
@@ -212,48 +201,119 @@ class MainActivity : FragmentActivity() {
     override fun onStart() {
         super.onStart()
         lifecycleScope.launch {
-            val rememberLogin = runCatching {
-                AppSettingsStore.observeRememberLogin(applicationContext).first()
-            }.getOrDefault(false)
+            val rememberLogin = readRememberLoginPreference(
+                read = { AppSettingsStore.observeRememberLogin(applicationContext).first() },
+                onFailure = { error ->
+                    Log.e("SkyBridgeMain", "Failed to read remember-login preference", error)
+                    NotificationCenter.post(
+                        NotificationEvent(
+                            title = resolveLocalizedText(
+                                "无法读取登录设置",
+                                "Unable to read sign-in settings",
+                                "サインイン設定を読み込めません"
+                            ),
+                            message = resolveLocalizedText(
+                                "已停止自动恢复会话，请检查应用存储。",
+                                "Automatic session restore was stopped; check app storage.",
+                                "セッションの自動復元を停止しました。アプリストレージを確認してください。"
+                            ),
+                            module = NotificationModule.SYSTEM,
+                            severity = NotificationSeverity.ERROR
+                        )
+                    )
+                }
+            ) ?: return@launch
             if (rememberLogin) {
-                runCatching {
+                try {
                     authRepository.loadSessionFromStorage(true)
-                    authRepository.getCurrentUserProfile()?.let { AccountStore.setPrimaryAccount(it) }
                     authRepository.syncNebulaIdFromIdentitiesIfMissing()
-                    authRepository.getCurrentUserProfile()?.let { AccountStore.setPrimaryAccount(it) }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    Log.w("SkyBridgeMain", "Failed to refresh stored session profile", error)
                 }
             }
         }
     }
 }
 
+internal fun resolveDebugNavigationRoute(route: String): String? =
+    route.takeIf { it in DEBUG_NAVIGATION_ROUTES }
+
+private val DEBUG_NAVIGATION_ROUTES = setOf(
+    Screen.Dashboard.route,
+    Screen.DeviceDiscovery.route,
+    Screen.ScreenMirroring.route,
+    Screen.RemoteControl.route,
+    Screen.PibPairing.route,
+    Screen.FileTransfer.route,
+    Screen.Settings.route,
+    Screen.AccountCenter.route,
+    Screen.DeviceAuthentication.route,
+    Screen.EncryptionSettings.route,
+    Screen.AccessControl.route,
+    Screen.PrivacySettings.route,
+    Screen.WebRtcSettings.route,
+    Screen.RemoteDesktopStreamSettings.route,
+    Screen.HelpSupport.route,
+    Screen.Feedback.route,
+    Screen.OpenSourceLicenses.route,
+    Screen.VersionInfo.route
+)
+
+internal suspend fun readRememberLoginPreference(
+    read: suspend () -> Boolean,
+    onFailure: (Exception) -> Unit
+): Boolean? = try {
+    read()
+} catch (error: CancellationException) {
+    throw error
+} catch (error: Exception) {
+    onFailure(error)
+    null
+}
+
+/**
+ * `keep_screen_on` 的窗口标志判定（R7.2）。
+ *
+ * 该开关的运行时消费方是 [MainActivity] 的 `LaunchedEffect(appSettings.keepScreenOn)`：开为
+ * `addFlags(FLAG_KEEP_SCREEN_ON)`、关为 `clearFlags(FLAG_KEEP_SCREEN_ON)`。判定本身在此提取为纯
+ * 函数，使「设置值改变消费方行为」可被单元测试证明，而**不改动任何 UI 节点或屏幕结构**（G2）。
+ */
+internal enum class KeepScreenOnWindowFlag {
+    /** 持有 `FLAG_KEEP_SCREEN_ON`，屏幕在会话期间保持常亮。 */
+    ADD,
+
+    /** 清除 `FLAG_KEEP_SCREEN_ON`，回到系统默认息屏策略。 */
+    CLEAR
+}
+
+/** 设置值 → 窗口标志动作。默认值 `false`（见 `AppSettings.keepScreenOn`）映射为 [KeepScreenOnWindowFlag.CLEAR]。 */
+internal fun keepScreenOnWindowFlag(keepScreenOn: Boolean): KeepScreenOnWindowFlag =
+    if (keepScreenOn) KeepScreenOnWindowFlag.ADD else KeepScreenOnWindowFlag.CLEAR
+
 @Composable
 fun SkyBridgeCompassApp(
     securityNavRoute: String? = null,
-    forceVisualTestMode: Boolean = false
+    forceVisualTestMode: Boolean = false,
+    forceLoginScreen: Boolean = false
 ) {
     val navController = rememberNavController()
-    val backgroundEffectsViewModel: IOSBackgroundEffectsViewModel = hiltViewModel()
-    val backgroundUi = backgroundEffectsViewModel.uiState
     val authViewModel: com.skybridge.compass.auth.AuthViewModel = androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel()
     val authState = authViewModel.uiState.collectAsState().value
 
-    LaunchedEffect(securityNavRoute, authState.isAuthenticated, forceVisualTestMode) {
-        if ((authState.isAuthenticated || forceVisualTestMode) && !securityNavRoute.isNullOrBlank()) {
-            runCatching {
-                navController.navigate(securityNavRoute) { launchSingleTop = true }
-            }
+    val canShowAuthenticatedContent =
+        !forceLoginScreen && (authState.isAuthenticated || forceVisualTestMode)
+
+    LaunchedEffect(securityNavRoute, canShowAuthenticatedContent) {
+        if (canShowAuthenticatedContent && !securityNavRoute.isNullOrBlank()) {
+            navController.navigate(securityNavRoute) { launchSingleTop = true }
         }
     }
 
-    PerformanceMonitorEffect(
-        context = LocalContext.current,
-        lifecycleOwner = LocalLifecycleOwner.current
-    )
-
     // 未登录：仅显示登录界面，不展示导航栏
     // Use a light iOS-like gradient background for login instead of dark starfield
-    if (!authState.isAuthenticated && !forceVisualTestMode) {
+    if (!canShowAuthenticatedContent) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -271,6 +331,13 @@ fun SkyBridgeCompassApp(
         }
         return
     }
+
+    val backgroundEffectsViewModel: IOSBackgroundEffectsViewModel = hiltViewModel()
+    val backgroundUi = backgroundEffectsViewModel.uiState
+    PerformanceMonitorEffect(
+        context = LocalContext.current,
+        lifecycleOwner = LocalLifecycleOwner.current
+    )
 
     Box(modifier = Modifier.fillMaxSize()) {
         IOSDashboardAnimatedBackground(

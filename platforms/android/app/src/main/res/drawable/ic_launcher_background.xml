@@ -4,32 +4,15 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    
-    <!-- Background gradient -->
-    <path android:pathData="M0,0h108v108h-108z">
-        <aapt:attr name="android:fillColor" xmlns:aapt="http://schemas.android.com/aapt">
-            <gradient 
-                android:startColor="#E3F2FD"
-                android:endColor="#BBDEFB"
-                android:type="linear"
-                android:angle="135" />
-        </aapt:attr>
-    </path>
-    
-    <!-- Subtle cloud pattern in background -->
-    <path android:pathData="M20,25 Q25,20 30,25 Q35,20 40,25 Q35,30 30,25 Q25,30 20,25 Z"
-          android:fillColor="#90CAF9"
-          android:fillAlpha="0.3"/>
-    
-    <path android:pathData="M70,15 Q75,10 80,15 Q85,10 90,15 Q85,20 80,15 Q75,20 70,15 Z"
-          android:fillColor="#90CAF9"
-          android:fillAlpha="0.2"/>
-    
-    <path android:pathData="M15,80 Q20,75 25,80 Q30,75 35,80 Q30,85 25,80 Q20,85 15,80 Z"
-          android:fillColor="#90CAF9"
-          android:fillAlpha="0.25"/>
-    
-    <path android:pathData="M80,85 Q85,80 90,85 Q95,80 100,85 Q95,90 90,85 Q85,90 80,85 Z"
-          android:fillColor="#90CAF9"
-          android:fillAlpha="0.2"/>
+    <path
+        android:fillColor="#F9FDFE"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.86"
+        android:pathData="M0,0 H108 V36 C92,31 74,28 54,28 C34,28 16,31 0,36 Z" />
+    <path
+        android:fillColor="#E8F7FD"
+        android:fillAlpha="0.92"
+        android:pathData="M0,65 H108 V108 H0 Z" />
 </vector>

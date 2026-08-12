@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.*
 import java.net.InetAddress
@@ -78,7 +79,7 @@ fun Long.formatBytes(): String {
         unitIndex++
     }
     
-    return String.format("%.2f %s", size, units[unitIndex])
+    return String.format(Locale.ROOT, "%.2f %s", size, units[unitIndex])
 }
 
 /**

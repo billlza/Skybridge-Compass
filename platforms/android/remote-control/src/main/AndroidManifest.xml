@@ -1,4 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- R6.5/R6.6: MediaProjection-based screen capture runs in a foreground service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application>
+
+        <!-- Android remote-desktop host capture foreground service (task 13.5, R6.5/R6.6/R6.12).
+             FQN must stay com.skybridge.compass.remotecontrol.host.AndroidRemoteControlHostService
+             so the RemoteControlViewModel stop-hook (task 13.2) can resolve and stop it. -->
+        <service
+            android:name="com.skybridge.compass.remotecontrol.host.AndroidRemoteControlHostService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Accessibility input-injection service (task 13.6, R6.7/R6.8).
+             Declaring it here makes InputExecutionManager reachable from a real entry point in the
+             merged :app manifest. BIND_ACCESSIBILITY_SERVICE ensures only the system can bind it. -->
+        <service
+            android:name="com.skybridge.compass.remotecontrol.service.RemoteControlAccessibilityService"
+            android:exported="true"
+            android:label="@string/remote_control_accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/remote_control_accessibility_service_config" />
+        </service>
+
+    </application>
+
 </manifest>

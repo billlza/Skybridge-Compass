@@ -697,13 +697,13 @@ plugins {
 
 android {
     namespace = "com.skybridge.compass"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.skybridge.compass"
         // Android 13+ only (2026 baseline)
         minSdk = 33
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0.0"
 

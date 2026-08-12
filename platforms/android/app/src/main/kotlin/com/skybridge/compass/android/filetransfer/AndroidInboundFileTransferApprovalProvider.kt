@@ -19,7 +19,7 @@ class AndroidInboundFileTransferApprovalProvider(
         // If file transfer is disabled, hard-decline with no UI.
         if (!settings.allowFileTransfer) return InboundFileTransferDecision.Decline
 
-        val senderId = request.senderDeviceId?.trim()?.takeIf { it.isNotBlank() }
+        val senderId = request.authenticatedSenderDeviceId?.trim()?.takeIf { it.isNotBlank() }
         val trusted = senderId?.let { isTrustedPeer(it) } ?: false
 
         // Auto-accept only for trusted devices when enabled.
@@ -35,7 +35,7 @@ class AndroidInboundFileTransferApprovalProvider(
             fileName = request.fileName ?: "skybridge-received",
             mimeType = request.mimeType,
             fileSizeBytes = request.fileSizeBytes,
-            senderDeviceId = request.senderDeviceId,
+            senderDeviceId = senderId,
             senderDeviceName = request.senderDeviceName
         )
 
@@ -69,4 +69,3 @@ class AndroidInboundFileTransferApprovalProvider(
         return cleaned.ifBlank { "skybridge-received" }
     }
 }
-

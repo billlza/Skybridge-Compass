@@ -11,9 +11,13 @@ import com.skybridge.compass.android.data.AppSettingsStore
 import com.skybridge.compass.android.i18n.currentAppLocale
 import com.skybridge.compass.android.i18n.resolveLocalizedText
 import com.skybridge.compass.android.i18n.resolveLocalizedTextForSetting
+import com.skybridge.compass.android.weather.AirQualityIndex
+import com.skybridge.compass.android.weather.AirQualityLevel
+import com.skybridge.compass.android.weather.WeatherAvailability
 import com.skybridge.compass.android.weather.WeatherCondition
 import com.skybridge.compass.android.weather.WeatherError
 import com.skybridge.compass.android.weather.WeatherRepository
+import com.skybridge.compass.android.weather.WeatherSnapshot
 import com.skybridge.compass.android.weather.WeatherState
 import com.skybridge.compass.core.data.model.Connection
 import com.skybridge.compass.core.data.model.ConnectionProtocol
@@ -29,6 +33,7 @@ import com.skybridge.compass.discovery.domain.entities.DiscoveryProtocol
 import com.skybridge.compass.discovery.domain.entities.DiscoveryProtocolProfiles
 import com.skybridge.compass.discovery.domain.entities.DeviceType
 import com.skybridge.compass.discovery.domain.usecases.StartDeviceDiscoveryUseCase
+import com.skybridge.compass.android.ui.theme.IOSParityTokens.SecurityBadgeTone
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.catch
@@ -75,7 +80,9 @@ class DashboardViewModel @Inject constructor(
         observeRecentDevices()
         observeActiveConnections()
         measureNetworkQuality()
-        weatherRepository.refreshWeather()
+        // No explicit refresh here: WeatherRepository starts itself off the persisted
+        // `enableRealTimeWeather` preference, so kicking it from every observer would only
+        // duplicate the first fetch.
     }
 
     private fun t(zh: String, en: String, ja: String): String =
@@ -193,8 +200,103 @@ class DashboardViewModel @Inject constructor(
             recentDevices = recentDevices,
             activeConnections = activeConnections,
             connectedDevices = recentDevices.size.takeIf { it > 0 } ?: uiState.connectedDevices,
-            activeSessions = activeConnections.size.takeIf { it > 0 } ?: uiState.activeSessions
+            activeSessions = activeConnections.size.takeIf { it > 0 } ?: uiState.activeSessions,
+            securityBadge = buildSecurityBadge()
         )
+    }
+
+    /**
+     * Derive the 4-state security badge purely from already-observed state — network
+     * reachability and the active connection set. No new data source is wired; the suite
+     * evidence is read from connection metadata when the handshake layer has populated it.
+     */
+    private fun buildSecurityBadge(): DashboardSecurityBadge {
+        if (!latestNetworkState.isConnected) {
+            return DashboardSecurityBadge(
+                tone = SecurityBadgeTone.Offline,
+                label = t("离线", "Offline", "オフライン")
+            )
+        }
+
+        val connected = latestActiveConnections.filter { it.status == ConnectionStatus.CONNECTED }
+        if (connected.isEmpty()) {
+            // Reachable network, but no established secure session to vouch for yet.
+            return DashboardSecurityBadge(
+                tone = SecurityBadgeTone.Pending,
+                label = t("待确认", "Pending", "確認待ち")
+            )
+        }
+
+        // Read negotiated suite/security evidence from connection metadata when present.
+        val evidence = connected.firstNotNullOfOrNull { it.securityEvidenceTier() }
+        return when (evidence) {
+            SecurityEvidenceTier.PQC -> DashboardSecurityBadge(
+                tone = SecurityBadgeTone.VerifiedPqc,
+                label = "PQC"
+            )
+            SecurityEvidenceTier.CLASSIC -> DashboardSecurityBadge(
+                tone = SecurityBadgeTone.Classic,
+                label = "Classic"
+            )
+            null -> DashboardSecurityBadge(
+                tone = SecurityBadgeTone.Pending,
+                label = t("待确认", "Pending", "確認待ち")
+            )
+        }
+    }
+
+    /**
+     * Read-only live-transfer banner state from the aggregate transfer statistics.
+     * We have aggregate (not per-file) telemetry, so an in-flight banner is indeterminate
+     * and reports session count + an estimated throughput from the measured bandwidth.
+     */
+    private fun buildLiveTransfer(): DashboardLiveTransfer? {
+        val active = latestTransferStats.activeTransfers
+        if (active > 0) {
+            val mbps = latestNetworkQuality.bandwidthMbps.takeIf { it > 0f }
+            val speedText = mbps?.let { "${"%.1f".format(it)} MB/s" }
+                ?: t("传输中", "Transferring", "転送中")
+            return DashboardLiveTransfer(
+                isActive = true,
+                title = t("正在传输 $active 个文件", "Transferring $active files", "$active 件のファイルを転送中"),
+                detail = t(
+                    "累计 ${dataTransferredLabel()} · 网络 ${networkQualityLabel()}",
+                    "Total ${dataTransferredLabel()} · Network ${networkQualityLabel()}",
+                    "合計 ${dataTransferredLabel()} ・ ネットワーク ${networkQualityLabel()}"
+                ),
+                progress = 0f,
+                speedText = speedText,
+                succeeded = true
+            )
+        }
+        if (latestTransferStats.completedTransfers > 0) {
+            return DashboardLiveTransfer(
+                isActive = false,
+                title = t("最近传输完成", "Last transfer completed", "最近の転送が完了"),
+                detail = t(
+                    "已完成 ${latestTransferStats.completedTransfers} 个 · 累计 ${dataTransferredLabel()}",
+                    "${latestTransferStats.completedTransfers} completed · Total ${dataTransferredLabel()}",
+                    "${latestTransferStats.completedTransfers} 件完了 ・ 合計 ${dataTransferredLabel()}"
+                ),
+                progress = 1f,
+                speedText = "",
+                succeeded = true
+            )
+        }
+        return null
+    }
+
+    private fun dataTransferredLabel(): String {
+        val totalBytes = latestTransferStats.totalBytesSent + latestTransferStats.totalBytesReceived
+        return "${totalBytes / (1024 * 1024)} MB"
+    }
+
+    private fun networkQualityLabel(): String = when (latestNetworkQuality.level) {
+        QualityLevel.EXCELLENT -> t("优秀", "Excellent", "優秀")
+        QualityLevel.GOOD -> t("良好", "Good", "良好")
+        QualityLevel.FAIR -> t("一般", "Fair", "普通")
+        QualityLevel.POOR -> t("较差", "Poor", "不良")
+        QualityLevel.OFFLINE -> t("离线", "Offline", "オフライン")
     }
 
     private fun renderOverviewState() {
@@ -219,67 +321,146 @@ class DashboardViewModel @Inject constructor(
             networkLatencyMs = latestNetworkQuality.latencyMs.coerceAtLeast(0),
             isOffline = !latestNetworkState.isConnected,
             weather = buildWeatherCardState(),
+            securityBadge = buildSecurityBadge(),
+            liveTransfer = buildLiveTransfer(),
             isLoading = latestWeatherState.isLoading,
             error = uiState.error
         )
     }
 
-    private fun buildWeatherCardState(): DashboardWeatherCardState {
-        val weather = latestWeatherState.weather
-        if (weather == null) {
-            val conditionText = when (latestWeatherState.error) {
-                WeatherError.NETWORK_UNAVAILABLE ->
-                    t("实时天气暂不可用", "Live weather unavailable", "リアル天気を利用できません")
-                WeatherError.WEATHER_UNAVAILABLE ->
-                    t("天气未同步", "Weather not synced", "天気は未同期です")
-                null -> if (latestWeatherState.isLoading) {
-                    t("正在同步天气", "Syncing weather", "天気を同期しています")
-                } else {
-                    t("天气未同步", "Weather not synced", "天気は未同期です")
-                }
-            }
-            val updatedText = when {
-                latestWeatherState.isLoading ->
-                    t("正在获取实时天气", "Fetching live weather", "天気を取得しています")
-                latestWeatherState.error == WeatherError.NETWORK_UNAVAILABLE ->
-                    t("请检查网络后重试", "Check your network and try again", "ネットワークを確認して再試行してください")
-                else -> t("等待更新", "Waiting for update", "更新待ち")
-            }
-            return DashboardWeatherCardState(
-                icon = if (latestNetworkState.isConnected) DashboardWeatherIcon.Cloudy else DashboardWeatherIcon.Offline,
-                temperatureText = "--°",
-                conditionText = conditionText,
-                locationText = t("当前位置", "Current Area", "現在地"),
-                humidityText = "--",
-                windText = "--",
-                sourceText = t("实时天气", "Live Weather", "リアル天気"),
-                updatedText = updatedText
+    private fun buildWeatherCardState(): DashboardWeatherCardState =
+        when (latestWeatherState.availability) {
+            // The very first DataStore read has not landed yet; rendering "off" here would make
+            // the card flicker on every cold start.
+            WeatherAvailability.RESOLVING -> DashboardWeatherCardState.Resolving
+
+            WeatherAvailability.DISABLED -> DashboardWeatherCardState.Disabled(
+                title = t("实时天气未启用", "Real-time weather is off", "リアルタイム天気はオフです"),
+                message = t(
+                    "开启后按需读取粗略位置与天气数据；关闭时不会有任何后台请求。",
+                    "When on, it resolves an approximate location on demand. Nothing runs in the background while it is off.",
+                    "オンにすると必要なときだけおおよその位置と天気を取得します。オフの間はバックグラウンド通信を行いません。"
+                ),
+                actionLabel = t("启用天气", "Enable Weather", "天気を有効化")
             )
+
+            WeatherAvailability.ENABLED -> buildEnabledWeatherCardState()
         }
 
-        val formatter = SimpleDateFormat("HH:mm", currentAppLocale())
-        val timeLabel = formatter.format(Date(weather.updatedAtEpochMillis))
-        val sourceLabel = if (weather.isFromCache) {
-            "${t("缓存", "Cache", "キャッシュ")} · ${weather.sourceName}"
-        } else {
-            weather.sourceName
-        }
+    private fun buildEnabledWeatherCardState(): DashboardWeatherCardState {
+        val weather = latestWeatherState.weather
+            ?: return buildWeatherPlaceholderState()
 
-        return DashboardWeatherCardState(
+        val timeLabel = SimpleDateFormat("HH:mm", currentAppLocale())
+            .format(Date(weather.updatedAtEpochMillis))
+
+        return DashboardWeatherCardState.Ready(
             icon = weather.condition.toDashboardWeatherIcon(),
             temperatureText = "${weather.temperatureCelsius.roundToInt()}°",
+            feelsLikeText = weather.feelsLikeCelsius?.let {
+                t("体感 ${it.roundToInt()}°", "Feels ${it.roundToInt()}°", "体感 ${it.roundToInt()}°")
+            },
             conditionText = weather.condition.toDisplayText(latestAppLanguage),
-            locationText = weather.locationName.ifBlank { t("当前位置", "Current Area", "現在地") },
-            humidityText = weather.humidityPercent?.let { "$it%" } ?: "--",
-            windText = weather.windSpeedKmh?.let { "${it.roundToInt()} km/h" } ?: "--",
-            sourceText = sourceLabel,
-            updatedText = t(
-                "更新于 $timeLabel",
-                "Updated at $timeLabel",
-                "$timeLabel 更新"
-            )
+            locationText = weather.locationName.ifBlank {
+                t("当前位置", "Current Area", "現在地")
+            },
+            metrics = buildWeatherMetrics(weather),
+            sourceText = if (weather.isFromCache) {
+                "${t("缓存", "Cache", "キャッシュ")} · ${weather.sourceName}"
+            } else {
+                weather.sourceName
+            },
+            updatedText = t("更新于 $timeLabel", "Updated at $timeLabel", "$timeLabel 更新"),
+            isRefreshing = latestWeatherState.isLoading,
+            // A stale reading is worth showing, but the user should know why it is not moving.
+            staleNotice = if (latestWeatherState.error == WeatherError.NETWORK_UNAVAILABLE) {
+                t("网络不可用，显示上次结果", "Offline — showing the last result", "オフラインのため前回の結果を表示中")
+            } else {
+                null
+            },
+            locationUpgradeLabel = locationUpgradeLabel()
         )
     }
+
+    private fun buildWeatherPlaceholderState(): DashboardWeatherCardState {
+        if (latestWeatherState.isLoading) {
+            return DashboardWeatherCardState.Loading(
+                title = t("正在获取实时天气", "Fetching live weather", "天気を取得しています"),
+                message = t("首次加载需要几秒钟", "The first load takes a few seconds", "初回の読み込みには数秒かかります")
+            )
+        }
+
+        val message = when (latestWeatherState.error) {
+            WeatherError.LOCATION_UNAVAILABLE -> t(
+                "无法确定所在位置，请检查定位服务或网络连接。",
+                "Could not determine your location. Check location services or your network.",
+                "現在地を特定できません。位置情報サービスまたはネットワークを確認してください。"
+            )
+            WeatherError.NETWORK_UNAVAILABLE, WeatherError.WEATHER_UNAVAILABLE, null -> t(
+                "天气服务暂时不可达，请检查网络后重试。",
+                "Weather providers are unreachable. Check your network and try again.",
+                "天気サービスに接続できません。ネットワークを確認して再試行してください。"
+            )
+        }
+
+        return DashboardWeatherCardState.Error(
+            title = t("天气数据获取失败", "Weather is unavailable", "天気を取得できませんでした"),
+            message = message,
+            actionLabel = t("重试", "Retry", "再試行")
+        )
+    }
+
+    private fun buildWeatherMetrics(weather: WeatherSnapshot): List<DashboardWeatherMetric> =
+        buildList {
+            weather.humidityPercent?.let {
+                add(
+                    DashboardWeatherMetric(
+                        kind = DashboardWeatherMetricKind.HUMIDITY,
+                        label = t("湿度", "Humidity", "湿度"),
+                        value = "$it%"
+                    )
+                )
+            }
+            weather.windSpeedKmh?.let {
+                add(
+                    DashboardWeatherMetric(
+                        kind = DashboardWeatherMetricKind.WIND,
+                        label = t("风速", "Wind", "風速"),
+                        value = "${it.roundToInt()} km/h"
+                    )
+                )
+            }
+            weather.visibilityKm?.let {
+                add(
+                    DashboardWeatherMetric(
+                        kind = DashboardWeatherMetricKind.VISIBILITY,
+                        label = t("能见度", "Visibility", "視程"),
+                        value = "${it.roundToInt()} km"
+                    )
+                )
+            }
+            weather.airQualityIndex?.let {
+                add(
+                    DashboardWeatherMetric(
+                        kind = DashboardWeatherMetricKind.AIR_QUALITY,
+                        label = "AQI",
+                        value = "$it",
+                        airQualityLevel = AirQualityIndex.levelOf(it)
+                    )
+                )
+            }
+        }
+
+    /**
+     * Only offered while weather is running on an IP-derived guess; granting coarse location is
+     * what upgrades the reading from country/ISP level to the actual city.
+     */
+    private fun locationUpgradeLabel(): String? =
+        if (latestWeatherState.locationPermissionMissing) {
+            t("使用当前位置", "Use my location", "現在地を使う")
+        } else {
+            null
+        }
 
     /**
      * 测量网络质量
@@ -313,7 +494,19 @@ class DashboardViewModel @Inject constructor(
      */
     fun refresh() {
         measureNetworkQuality()
-        weatherRepository.refreshWeather(forceCurrentLocation = true)
+        weatherRepository.refreshWeather(forceFreshFix = true)
+    }
+
+    /** Backs the "启用天气" action on the disabled weather card. */
+    fun enableRealTimeWeather() {
+        viewModelScope.launch {
+            AppSettingsStore.setRealTimeWeatherEnabled(context, true)
+        }
+    }
+
+    /** Called once the user has answered the coarse-location prompt. */
+    fun onLocationPermissionChanged() {
+        weatherRepository.onLocationPermissionChanged()
     }
 }
 
@@ -324,30 +517,105 @@ data class DashboardUiState(
     val dataTransferredLabel: String = "0 MB",
     val transferProgress: Float = 0f,
     val networkLatencyMs: Long = 0L,
-    val weather: DashboardWeatherCardState = DashboardWeatherCardState(),
+    val weather: DashboardWeatherCardState = DashboardWeatherCardState.Resolving,
     val recentDevices: List<DashboardRecentDevice> = emptyList(),
     val activeConnections: List<DashboardActiveConnection> = emptyList(),
+    val securityBadge: DashboardSecurityBadge = DashboardSecurityBadge(),
+    val liveTransfer: DashboardLiveTransfer? = null,
     val isLoading: Boolean = true,
     val isOffline: Boolean = false,
     val error: String? = null
 )
 
-data class DashboardWeatherCardState(
-    val icon: DashboardWeatherIcon = DashboardWeatherIcon.Cloudy,
-    val temperatureText: String = "--°",
-    val conditionText: String = resolveLocalizedText("天气未同步", "Weather not synced", "天気は未同期です"),
-    val locationText: String = resolveLocalizedText("当前位置", "Current Area", "現在地"),
-    val humidityText: String = "--",
-    val windText: String = "--",
-    val sourceText: String = resolveLocalizedText("实时天气", "Live Weather", "リアル天気"),
-    val updatedText: String = resolveLocalizedText("等待更新", "Waiting for update", "更新待ち")
+/**
+ * Read-only presentation of the connection security posture for the welcome-card badge.
+ * Mirrors the iOS `securityBadgePresentation` 4-state contract (PQC / Classic / 待确认 / 离线).
+ * Derived purely from already-observed state (network reachability + active connections),
+ * not from any new data source.
+ */
+data class DashboardSecurityBadge(
+    val tone: SecurityBadgeTone = SecurityBadgeTone.Offline,
+    val label: String = resolveLocalizedText("离线", "Offline", "オフライン")
 )
+
+/**
+ * Read-only live-transfer banner state derived from the existing transfer statistics.
+ * `null` means there is no in-flight transfer and no recent result to surface.
+ */
+data class DashboardLiveTransfer(
+    val isActive: Boolean,
+    val title: String,
+    val detail: String,
+    val progress: Float,
+    val speedText: String,
+    val succeeded: Boolean
+)
+
+/**
+ * The five states the dashboard weather card can be in, mirroring the macOS
+ * `WeatherDashboardCard` branches (disabled / loading / error / data) plus a [Resolving] state for
+ * the window before the `enableRealTimeWeather` preference has been read.
+ */
+sealed interface DashboardWeatherCardState {
+
+    data object Resolving : DashboardWeatherCardState
+
+    data class Disabled(
+        val title: String,
+        val message: String,
+        val actionLabel: String
+    ) : DashboardWeatherCardState
+
+    data class Loading(
+        val title: String,
+        val message: String
+    ) : DashboardWeatherCardState
+
+    data class Error(
+        val title: String,
+        val message: String,
+        val actionLabel: String
+    ) : DashboardWeatherCardState
+
+    data class Ready(
+        val icon: DashboardWeatherIcon,
+        val temperatureText: String,
+        val feelsLikeText: String?,
+        val conditionText: String,
+        val locationText: String,
+        val metrics: List<DashboardWeatherMetric>,
+        val sourceText: String,
+        val updatedText: String,
+        val isRefreshing: Boolean,
+        val staleNotice: String?,
+        val locationUpgradeLabel: String?
+    ) : DashboardWeatherCardState
+}
+
+data class DashboardWeatherMetric(
+    val kind: DashboardWeatherMetricKind,
+    val label: String,
+    val value: String,
+    val airQualityLevel: AirQualityLevel? = null
+)
+
+enum class DashboardWeatherMetricKind {
+    HUMIDITY,
+    WIND,
+    VISIBILITY,
+    AIR_QUALITY
+}
 
 enum class DashboardWeatherIcon {
     Sunny,
+    PartlyCloudy,
     Cloudy,
     Rainy,
-    Offline
+    Snowy,
+    Foggy,
+    Haze,
+    Stormy,
+    Unknown
 }
 
 data class DashboardRecentDevice(
@@ -370,14 +638,14 @@ data class DashboardActiveConnection(
 
 private fun WeatherCondition.toDashboardWeatherIcon(): DashboardWeatherIcon = when (this) {
     WeatherCondition.CLEAR -> DashboardWeatherIcon.Sunny
-    WeatherCondition.PARTLY_CLOUDY,
-    WeatherCondition.CLOUDY,
-    WeatherCondition.FOGGY,
-    WeatherCondition.HAZE,
-    WeatherCondition.UNKNOWN -> DashboardWeatherIcon.Cloudy
-    WeatherCondition.RAINY,
-    WeatherCondition.SNOWY,
-    WeatherCondition.STORMY -> DashboardWeatherIcon.Rainy
+    WeatherCondition.PARTLY_CLOUDY -> DashboardWeatherIcon.PartlyCloudy
+    WeatherCondition.CLOUDY -> DashboardWeatherIcon.Cloudy
+    WeatherCondition.RAINY -> DashboardWeatherIcon.Rainy
+    WeatherCondition.SNOWY -> DashboardWeatherIcon.Snowy
+    WeatherCondition.FOGGY -> DashboardWeatherIcon.Foggy
+    WeatherCondition.HAZE -> DashboardWeatherIcon.Haze
+    WeatherCondition.STORMY -> DashboardWeatherIcon.Stormy
+    WeatherCondition.UNKNOWN -> DashboardWeatherIcon.Unknown
 }
 
 private fun WeatherCondition.toDisplayText(languageSetting: String): String = when (this) {
@@ -416,4 +684,33 @@ private fun ConnectionProtocol.toDisplayLabel(): String = when (this) {
     ConnectionProtocol.WEBSOCKET -> "WebSocket"
     ConnectionProtocol.HTTP -> "HTTP"
     ConnectionProtocol.HTTPS -> "HTTPS"
+}
+
+/** Negotiated security tier as evidenced by the connection (read-only, from metadata). */
+private enum class SecurityEvidenceTier { PQC, CLASSIC }
+
+/**
+ * Best-effort read of the negotiated security suite from connection metadata. The handshake
+ * layer stamps the selected suite under a "suite"/"security"/"pqc" key when available; this
+ * only reads that evidence and never assumes a tier the connection has not reported.
+ */
+private fun Connection.securityEvidenceTier(): SecurityEvidenceTier? {
+    val raw = (metadata["suite"]
+        ?: metadata["security"]
+        ?: metadata["securityEvidence"]
+        ?: metadata["pqc"]
+        ?: metadata["tier"])
+        ?.lowercase()
+        ?: return null
+    return when {
+        raw == "true" -> SecurityEvidenceTier.PQC
+        raw == "false" -> SecurityEvidenceTier.CLASSIC
+        raw.contains("pqc") || raw.contains("mlkem") || raw.contains("ml-kem") ||
+            raw.contains("kyber") || raw.contains("liboqs") || raw.contains("hybrid") ->
+            SecurityEvidenceTier.PQC
+        raw.contains("classic") || raw.contains("x25519") || raw.contains("ecdh") ||
+            raw.contains("rsa") || raw.contains("p256") ->
+            SecurityEvidenceTier.CLASSIC
+        else -> null
+    }
 }

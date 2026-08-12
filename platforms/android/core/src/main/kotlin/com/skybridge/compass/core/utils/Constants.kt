@@ -96,13 +96,7 @@ object Constants {
             android.Manifest.permission.POST_NOTIFICATIONS
         )
         
-        val OPTIONAL_PERMISSIONS = arrayOf(
-            android.Manifest.permission.RECORD_AUDIO,
-            android.Manifest.permission.CAMERA,
-            android.Manifest.permission.READ_MEDIA_IMAGES,
-            android.Manifest.permission.READ_MEDIA_VIDEO,
-            android.Manifest.permission.READ_MEDIA_AUDIO
-        )
+        val OPTIONAL_PERMISSIONS = emptyArray<String>()
     }
     
     // 通知配置

@@ -1,6 +1,5 @@
 package com.skybridge.compass.android.i18n
 
-import android.os.Build
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
@@ -92,10 +91,5 @@ fun resolveLocalizedText(
 }
 
 private fun currentLanguage(configuration: android.content.res.Configuration): String {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-        configuration.locales[0]?.language ?: Locale.getDefault().language
-    } else {
-        @Suppress("DEPRECATION")
-        configuration.locale?.language ?: Locale.getDefault().language
-    }
+    return configuration.locales[0]?.language ?: Locale.getDefault().language
 }

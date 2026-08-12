@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <!-- Device discovery permissions for Android 13+ -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
@@ -20,24 +21,12 @@
     <!-- Nearby Wi-Fi devices permission for Android 13+ -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 
-    <!-- Screen recording and projection permissions -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- Notification permission for Android 13+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- File access permissions - Updated for Android 13+ -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
+    <!-- File transfer uses the system document picker/SAF grants instead of broad media storage permissions. -->
 
     <!-- Wake lock for maintaining connections -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -58,6 +47,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.SkyBridgeCompass"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
         android:dataExtractionRules="@xml/data_extraction_rules">
@@ -73,24 +64,23 @@
             </intent-filter>
         </activity>
 
-        <service
-            android:name="com.skybridge.compass.android.remote.host.AndroidRemoteControlHostService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+        <!-- Nebula OAuth (PKCE) redirect receiver: catches skybridge://auth/nebula from Custom Tabs. -->
+        <activity
+            android:name="com.skybridge.compass.android.NebulaRedirectActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="skybridge" android:host="auth" android:path="/nebula" />
+            </intent-filter>
+        </activity>
 
         <!-- Device discovery handled in repository; no Android service component -->
-
-        <!-- Remote control AccessibilityService -->
-        <service
-            android:name="com.skybridge.compass.remotecontrol.service.RemoteControlAccessibilityService"
-            android:enabled="true"
-            android:exported="false"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/remote_control_accessibility_service_config" />
-        </service>
 
         <receiver
             android:name="com.skybridge.compass.android.notifications.IncomingFileTransferActionReceiver"

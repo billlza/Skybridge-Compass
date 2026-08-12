@@ -5,6 +5,7 @@ package com.skybridge.compass.core.p2p
 import android.content.Context
 import android.os.Build
 import android.util.Base64
+import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -14,11 +15,15 @@ import com.skybridge.compass.shared.crypto.models.CryptoSuite
 import com.skybridge.compass.shared.crypto.models.KeyMaterial
 import com.skybridge.compass.shared.crypto.models.KeyPair
 import com.skybridge.compass.shared.crypto.providers.AndroidPQCCryptoProvider
+import com.skybridge.compass.shared.account.NebulaId
 import com.skybridge.compass.shared.p2p.P2PCryptoSuite
 import com.skybridge.compass.shared.p2p.P2PHandshakeClient
 import com.skybridge.compass.shared.p2p.P2PHandshakePolicy
 import com.skybridge.compass.shared.p2p.P2PHandshakeWire
+import com.skybridge.compass.shared.p2p.P2PQPeriaptKem
 import com.skybridge.compass.shared.p2p.P2PXWingKem
+import com.skybridge.compass.shared.p2p.QPeriaptPlatformPolicy
+import com.skybridge.compass.shared.platform.AndroidPlatformMetadata
 import com.skybridge.compass.core.webrtc.AndroidRemoteVideoFormats
 import java.math.BigInteger
 import java.security.KeyPairGenerator
@@ -42,22 +47,50 @@ import javax.inject.Singleton
  *   - X-Wing identity key pair (public 1216, private 2432) when available
  */
 @Singleton
-class LocalP2PIdentity @Inject constructor(
-    @param:ApplicationContext private val appContext: Context
+class LocalP2PIdentity(
+    @param:ApplicationContext private val appContext: Context,
+    private val storageMode: StorageMode = StorageMode.ENCRYPTED
 ) {
+    @Inject
+    constructor(
+        @ApplicationContext appContext: Context
+    ) : this(
+        appContext = appContext,
+        storageMode = StorageMode.ENCRYPTED
+    )
+
+    enum class StorageMode {
+        ENCRYPTED,
+        ISOLATED_PLAINTEXT_TEST
+    }
+
     private val storageContext by lazy { appContext.createDeviceProtectedStorageContext() }
-    private val prefs by lazy { encryptedPrefs(storageContext) }
+    private val prefs by lazy { prefs(storageContext, storageMode) }
     private val keyManager by lazy { SkyBridgeKeyManager(storageContext) }
     @Volatile private var inMemoryEd25519PrivateKey: PrivateKey? = null
     @Volatile private var inMemoryEd25519PublicRaw32: ByteArray? = null
 
     fun deviceName(): String = Build.MODEL.ifBlank { "Android" }
 
+    /**
+     * Resolve the device name to PUBLISH in Bonjour/NSD discovery, honoring the privacy
+     * `showDeviceName` toggle (Settings → Privacy). When ON we advertise the real [deviceName]; when
+     * OFF we advertise a generic, non-identifying name so the device stays discoverable/connectable
+     * without exposing the owner's model name in discovery results.
+     *
+     * The toggle value is owned by the app-module SecuritySettingsStore and passed in by the caller
+     * (the LAN remote-control host), so core stays free of an app-module dependency.
+     */
+    fun publishedDeviceName(showDeviceName: Boolean): String =
+        if (showDeviceName) deviceName() else ANONYMIZED_DEVICE_NAME
+
     fun deviceId(): String {
         val existing = prefs.getString(KEY_DEVICE_ID, null)
         if (!existing.isNullOrBlank()) return existing
         val created = UUID.randomUUID().toString()
-        prefs.edit().putString(KEY_DEVICE_ID, created).apply()
+        prefs.edit {
+            putString(KEY_DEVICE_ID, created)
+        }
         return created
     }
 
@@ -75,7 +108,9 @@ class LocalP2PIdentity @Inject constructor(
             ?: return ""
         val raw = uncompressedP256Point(pub)
         val fp = sha256HexLower(raw)
-        prefs.edit().putString(KEY_PUBKEY_FP, fp).apply()
+        prefs.edit {
+            putString(KEY_PUBKEY_FP, fp)
+        }
         return fp
     }
 
@@ -102,13 +137,13 @@ class LocalP2PIdentity @Inject constructor(
             }
 
             else -> {
-            val (priv, pubRaw32) = P2PHandshakeWire.generateEd25519IdentityKeyPair()
+                val (priv, pubRaw32) = P2PHandshakeWire.generateEd25519IdentityKeyPair()
                 val privBytes = priv.encoded
                 if (privBytes != null) {
-                    prefs.edit()
-                        .putString(KEY_ED25519_PRIV_PKCS8_B64, Base64.encodeToString(privBytes, Base64.NO_WRAP))
-                        .putString(KEY_ED25519_PUB_RAW32_B64, Base64.encodeToString(pubRaw32, Base64.NO_WRAP))
-                        .apply()
+                    prefs.edit {
+                        putString(KEY_ED25519_PRIV_PKCS8_B64, Base64.encodeToString(privBytes, Base64.NO_WRAP))
+                        putString(KEY_ED25519_PUB_RAW32_B64, Base64.encodeToString(pubRaw32, Base64.NO_WRAP))
+                    }
                 } else {
                     inMemoryEd25519PrivateKey = priv
                     inMemoryEd25519PublicRaw32 = pubRaw32
@@ -117,7 +152,7 @@ class LocalP2PIdentity @Inject constructor(
             }
         }
 
-        val (mlPriv, mlPub) = if (smokeClassicOnly()) {
+        val (mlPriv, mlPub) = if (storageMode == StorageMode.ISOLATED_PLAINTEXT_TEST) {
             null to null
         } else {
             val mlPrivB64 = prefs.getString(KEY_MLDSA65_PRIV_RAW_B64, null)
@@ -129,10 +164,10 @@ class LocalP2PIdentity @Inject constructor(
                 val kp = kotlinx.coroutines.runBlocking { provider.generateKeyPair(KeyUsage.SIGNING) }
                 val privRaw = kp.privateKey.bytes
                 val pubRaw = kp.publicKey.bytes
-                prefs.edit()
-                    .putString(KEY_MLDSA65_PRIV_RAW_B64, Base64.encodeToString(privRaw, Base64.NO_WRAP))
-                    .putString(KEY_MLDSA65_PUB_RAW_B64, Base64.encodeToString(pubRaw, Base64.NO_WRAP))
-                    .apply()
+                prefs.edit {
+                    putString(KEY_MLDSA65_PRIV_RAW_B64, Base64.encodeToString(privRaw, Base64.NO_WRAP))
+                    putString(KEY_MLDSA65_PUB_RAW_B64, Base64.encodeToString(pubRaw, Base64.NO_WRAP))
+                }
                 privRaw to pubRaw
             } else {
                 null to null
@@ -148,20 +183,44 @@ class LocalP2PIdentity @Inject constructor(
     }
 
     data class KemIdentityKeys(
+        val qPeriaptPublicKey: ByteArray?,
+        val qPeriaptPrivateKey: ByteArray?,
         val mlKem768PublicKey: ByteArray?,
         val mlKem768PrivateKey: ByteArray?,
         val xWingPublicKey: ByteArray?,
         val xWingPrivateKey: ByteArray?
     )
 
-    fun getOrCreateKemIdentityKeys(): KemIdentityKeys {
-        if (smokeClassicOnly()) {
+    fun getOrCreateKemIdentityKeys(allowQPeriapt: Boolean = false): KemIdentityKeys {
+        if (storageMode == StorageMode.ISOLATED_PLAINTEXT_TEST) {
             return KemIdentityKeys(
+                qPeriaptPublicKey = null,
+                qPeriaptPrivateKey = null,
                 mlKem768PublicKey = null,
                 mlKem768PrivateKey = null,
                 xWingPublicKey = null,
                 xWingPrivateKey = null
             )
+        }
+        val qPeriapt = if (allowQPeriapt) {
+            QPeriaptPlatformPolicy.requireLocalAndroidSupported(
+                QPeriaptPlatformPolicy.androidHandshakePlatformVersion(
+                    release = Build.VERSION.RELEASE,
+                    sdkInt = Build.VERSION.SDK_INT
+                )
+            )
+            P2PQPeriaptKem.availabilityFailureReason()?.let { reason ->
+                throw IllegalStateException("Q-Periapt unavailable: $reason")
+            }
+            getOrCreateKemKeyPair(
+                alias = ALIAS_KEM_QPERIAPT,
+                suite = CryptoSuite.Q_PERIAPT_CONTEXT_BOUND
+            ) {
+                val provider = AndroidPQCCryptoProvider()
+                P2PQPeriaptKem.asKeyPair(P2PQPeriaptKem.generateKeyPair(provider))
+            }
+        } else {
+            null
         }
         val mlKem = getOrCreateKemKeyPair(alias = ALIAS_KEM_MLKEM768, suite = CryptoSuite.ML_KEM_768_ML_DSA_65) {
             val provider = AndroidPQCCryptoProvider()
@@ -182,6 +241,8 @@ class LocalP2PIdentity @Inject constructor(
         }
 
         return KemIdentityKeys(
+            qPeriaptPublicKey = qPeriapt?.publicKey?.bytes,
+            qPeriaptPrivateKey = qPeriapt?.privateKey?.bytes,
             mlKem768PublicKey = mlKem?.publicKey?.bytes,
             mlKem768PrivateKey = mlKem?.privateKey?.bytes,
             xWingPublicKey = xWing?.publicKey?.bytes,
@@ -189,28 +250,19 @@ class LocalP2PIdentity @Inject constructor(
         )
     }
 
-    fun discoveryCryptoSuitesCsv(): String {
-        if (smokeClassicOnly()) {
+    fun discoveryCryptoSuitesCsv(
+        allowQPeriapt: Boolean = false,
+        allowClassic: Boolean = false
+    ): String {
+        if (storageMode == StorageMode.ISOLATED_PLAINTEXT_TEST) {
             return "1001"
         }
-        val kem = getOrCreateKemIdentityKeys()
+        val kem = getOrCreateKemIdentityKeys(allowQPeriapt = allowQPeriapt)
         return buildList {
-            when (Build.VERSION.SDK_INT) {
-                in Int.MIN_VALUE..33 -> {
-                    add("1001")
-                }
-
-                in 34..35 -> {
-                    if (kem.mlKem768PublicKey != null) add("0101")
-                    add("1001")
-                }
-
-                else -> {
-                    if (kem.xWingPublicKey != null) add("0001")
-                    if (kem.mlKem768PublicKey != null) add("0101")
-                    add("1001")
-                }
-            }
+            if (allowQPeriapt && kem.qPeriaptPublicKey != null) add("0011")
+            if (kem.xWingPublicKey != null) add("0001")
+            if (kem.mlKem768PublicKey != null) add("0101")
+            if (allowClassic) add("1001")
         }.joinToString(",")
     }
 
@@ -220,39 +272,71 @@ class LocalP2PIdentity @Inject constructor(
         generator: () -> KeyPair
     ): KeyPair? {
         return try {
-            keyManager.retrievePQCKeyPair(alias) ?: run {
+            keyManager.retrievePQCKeyPair(alias)?.also { validateKemKeyPair(alias, suite, it) } ?: run {
                 val kp = generator()
+                validateKemKeyPair(alias, suite, kp)
                 keyManager.storePQCKeyPair(kp, alias)
                 kp
             }
-        } catch (_: Throwable) {
-            null
+        } catch (t: Throwable) {
+            throw IllegalStateException("Failed to load or create KEM keypair for $alias", t)
+        }
+    }
+
+    private fun validateKemKeyPair(alias: String, suite: CryptoSuite, keyPair: KeyPair) {
+        val (expectedPublicSize, expectedPrivateSize) = when (suite) {
+            CryptoSuite.Q_PERIAPT_CONTEXT_BOUND ->
+                P2PQPeriaptKem.QPERIAPT_PUBLIC_KEY_SIZE to P2PQPeriaptKem.QPERIAPT_PRIVATE_KEY_SIZE
+            CryptoSuite.X_WING_ML_DSA ->
+                P2PXWingKem.XWING_PUBLIC_KEY_SIZE to P2PXWingKem.XWING_PRIVATE_KEY_SIZE
+            CryptoSuite.ML_KEM_768_ML_DSA_65 ->
+                AndroidPQCCryptoProvider.MLKEM768_PUBLIC_KEY_SIZE to AndroidPQCCryptoProvider.MLKEM768_SECRET_KEY_SIZE
+            else -> error("Unsupported KEM suite for $alias: ${suite.rawValue}")
+        }
+        require(keyPair.publicKey.bytes.size == expectedPublicSize) {
+            "Invalid public key length for $alias: ${keyPair.publicKey.bytes.size}"
+        }
+        require(keyPair.privateKey.bytes.size == expectedPrivateSize) {
+            "Invalid private key length for $alias: ${keyPair.privateKey.bytes.size}"
         }
     }
 
     /**
      * Build the local `pairingIdentityExchange` payload for macOS/iOS bootstrap.
      */
-    fun buildPairingIdentityExchange(nowSwiftSeconds: Double, platform: String = "android"): AppMessage.PairingIdentityExchangePayload {
-        val kem = getOrCreateKemIdentityKeys()
-        val keys = ArrayList<AppMessage.KemPublicKeyInfo>(2)
-        // Crypto policy by Android version (per project requirement):
-        // - Android 13–15 (API 33–35): liboqs PQC only (no X-Wing key)
-        // - Android 16+ (API 36+): X-Wing + PQC
-        val allowPqc = Build.VERSION.SDK_INT >= 33
-        val allowXWing = Build.VERSION.SDK_INT >= 36
+    fun buildPairingIdentityExchange(
+        nowSwiftSeconds: Double,
+        platform: String = "android",
+        allowQPeriapt: Boolean = false,
+        accountDisplayName: String? = null,
+        nebulaId: String? = null
+    ): AppMessage.PairingIdentityExchangePayload {
+        val kem = getOrCreateKemIdentityKeys(allowQPeriapt = allowQPeriapt)
+        val keys = ArrayList<AppMessage.KemPublicKeyInfo>(3)
 
-        if (allowPqc && allowXWing && kem.xWingPublicKey != null) {
+        if (allowQPeriapt && kem.qPeriaptPublicKey != null) {
+            keys += AppMessage.KemPublicKeyInfo(
+                suiteWireId = P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND.wireId.toInt(),
+                publicKey = kem.qPeriaptPublicKey
+            )
+        }
+        if (kem.xWingPublicKey != null) {
             keys += AppMessage.KemPublicKeyInfo(
                 suiteWireId = P2PCryptoSuite.X_WING.wireId.toInt(),
                 publicKey = kem.xWingPublicKey
             )
         }
-        if (allowPqc && kem.mlKem768PublicKey != null) {
+        if (kem.mlKem768PublicKey != null) {
             keys += AppMessage.KemPublicKeyInfo(
                 suiteWireId = P2PCryptoSuite.MLKEM_768.wireId.toInt(),
                 publicKey = kem.mlKem768PublicKey
             )
+        }
+        val normalizedNebulaId = NebulaId.parseOrNull(nebulaId)?.value
+        val normalizedDisplayName = if (normalizedNebulaId != null) {
+            accountDisplayName?.trim()?.takeIf { it.isNotEmpty() }
+        } else {
+            null
         }
         return AppMessage.PairingIdentityExchangePayload(
             deviceId = deviceId(),
@@ -260,41 +344,47 @@ class LocalP2PIdentity @Inject constructor(
             deviceName = deviceName(),
             modelName = Build.MODEL,
             platform = platform,
-            osVersion = "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+            osVersion = AndroidPlatformMetadata.versionString(Build.VERSION.RELEASE, Build.VERSION.SDK_INT),
             chip = null,
             remoteVideoFormats = AndroidRemoteVideoFormats.supportedStreamingFormats(),
-            sentAt = nowSwiftSeconds
+            capabilities = androidBusinessCapabilities(),
+            sentAt = nowSwiftSeconds,
+            accountDisplayName = normalizedDisplayName,
+            nebulaId = normalizedNebulaId
         )
     }
+
+    private fun androidBusinessCapabilities(): List<String> =
+        listOf(
+            "webrtcMedia",
+            "remoteControl",
+            "clipboard",
+            "fileTransfer"
+        )
 
     fun handshakeClient(peerKem: P2PHandshakeClient.PeerKemPublicKeys, policy: P2PHandshakePolicyOverride? = null): P2PHandshakeClient {
         val effectivePolicy = policy ?: defaultHandshakePolicyOverride()
         val effectiveProviderType = P2PHandshakeWire.compatibleProviderTypeRawForTier(effectivePolicy.minimumTierRaw)
         return P2PHandshakeClient(
-            platformVersion = Build.VERSION.RELEASE,
+            platformVersion = QPeriaptPlatformPolicy.androidHandshakePlatformVersion(
+                release = Build.VERSION.RELEASE,
+                sdkInt = Build.VERSION.SDK_INT
+            ),
             providerTypeRaw = effectivePolicy.providerTypeRaw.ifBlank { effectiveProviderType },
         )
     }
 
-    fun defaultHandshakePolicyOverride(): P2PHandshakePolicyOverride = when {
-        Build.VERSION.SDK_INT >= 36 -> capabilityAwareHandshakePolicyOverride(
+    fun defaultHandshakePolicyOverride(): P2PHandshakePolicyOverride =
+        capabilityAwareHandshakePolicyOverride(
             requirePqc = true,
             allowClassicFallback = false,
             minimumTierRaw = "nativePQC"
         )
-        Build.VERSION.SDK_INT >= 33 -> capabilityAwareHandshakePolicyOverride(
-            requirePqc = true,
-            allowClassicFallback = true,
-            minimumTierRaw = "liboqsPQC"
-        )
-        else -> capabilityAwareHandshakePolicyOverride(
-            requirePqc = false,
-            allowClassicFallback = true,
-            minimumTierRaw = "classic"
-        )
-    }
 
     fun trustStore(): P2PHandshakeWire.TrustStore = PrefsTrustStore(prefs)
+
+    fun formalAcceptanceTrustStore(): P2PHandshakeWire.TrustStore =
+        FormalAcceptancePrefsTrustStore(prefs)
 
     fun trustedPeerStore(): TrustedPeerStore = TrustedPeerStore(prefs)
 
@@ -302,6 +392,9 @@ class LocalP2PIdentity @Inject constructor(
 
     companion object {
         private const val PREFS_NAME = "skybridge_p2p_identity"
+
+        /** Generic, non-identifying name advertised when the privacy `showDeviceName` toggle is OFF. */
+        const val ANONYMIZED_DEVICE_NAME = "SkyBridge Device"
 
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_PUBKEY_FP = "pub_key_fp"
@@ -314,9 +407,10 @@ class LocalP2PIdentity @Inject constructor(
 
         private const val ALIAS_KEM_MLKEM768 = "p2p_kem_identity_mlkem768"
         private const val ALIAS_KEM_XWING = "p2p_kem_identity_xwing"
+        private const val ALIAS_KEM_QPERIAPT = "p2p_kem_identity_qperiapt"
 
-        private fun encryptedPrefs(context: Context) =
-            if (System.getProperty("skybridge.smoke.classicOnly") == "1") {
+        private fun prefs(context: Context, storageMode: StorageMode) =
+            if (storageMode == StorageMode.ISOLATED_PLAINTEXT_TEST) {
                 context.getSharedPreferences("${PREFS_NAME}_smoke", Context.MODE_PRIVATE)
             } else {
                 EncryptedSharedPreferences.create(
@@ -367,8 +461,6 @@ class LocalP2PIdentity @Inject constructor(
         }
     }
 
-    private fun smokeClassicOnly(): Boolean =
-        System.getProperty("skybridge.smoke.classicOnly") == "1"
 }
 
 /**
@@ -377,20 +469,39 @@ class LocalP2PIdentity @Inject constructor(
 internal class PrefsTrustStore(
     private val prefs: android.content.SharedPreferences
 ) : P2PHandshakeWire.TrustStore {
-    override fun loadPeerSigningFingerprint(peerId: String): String? =
-        prefs.getString("trust_fp_${peerId.sha256Key()}", null)
-            ?: TrustedPeerStore(prefs)
-                .findByKnownDeviceId(peerId)
-                ?.protocolPublicKeyFingerprint
+    override fun loadPeerSigningFingerprint(peerId: String): String? {
+        val canonical = TrustedPeerStore(prefs)
+            .findRecordByKnownDeviceIdIncludingInactive(peerId)
+        return when {
+            canonical == null ->
+                // Legacy pins are consulted only for peers that have never had a canonical record.
+                // This is a one-way compatibility read; a blocked canonical identity must win.
+                prefs.getString("trust_fp_${peerId.sha256Key()}", null)
+
+            canonical.lifecycleState == TrustedPeerLifecycleState.ACTIVE ->
+                canonical.protocolPublicKeyFingerprint
+
+            else ->
+                // REVERIFICATION_REQUIRED, QUARANTINED and REVOKED are authoritative deny states.
+                null
+        }
+    }
 
     override fun savePeerSigningFingerprint(peerId: String, peerSigningFingerprint: String) {
         val normalizedFingerprint = peerSigningFingerprint.trim().lowercase()
-        prefs.edit().putString("trust_fp_${peerId.sha256Key()}", normalizedFingerprint).apply()
-        TrustedPeerStore(prefs).upsertCurrentPathAuthority(
+        val stored = TrustedPeerStore(prefs).upsertVerifiedCurrentPathAuthority(
             deviceId = peerId,
             protocolPublicKeyFingerprint = normalizedFingerprint,
             aliasIds = listOf(peerId)
         )
+        check(stored.lifecycleState == TrustedPeerLifecycleState.ACTIVE &&
+            stored.protocolPublicKeyFingerprint == normalizedFingerprint
+        ) {
+            "Cannot persist peer signing fingerprint while canonical trust record is blocked"
+        }
+        prefs.edit {
+            putString("trust_fp_${peerId.sha256Key()}", normalizedFingerprint)
+        }
     }
 
     private fun String.sha256Key(): String {
@@ -398,6 +509,25 @@ internal class PrefsTrustStore(
         val sb = StringBuilder(d.size * 2)
         for (b in d) sb.append(String.format("%02x", b))
         return sb.toString()
+    }
+}
+
+/**
+ * Non-mutating trust view for formal acceptance probes.
+ *
+ * Legacy records without authenticated product provenance are intentionally invisible. Writes fail
+ * closed, and record parsing does not repair integrity markers or migrate stored data.
+ */
+internal class FormalAcceptancePrefsTrustStore(
+    private val prefs: android.content.SharedPreferences
+) : P2PHandshakeWire.TrustStore {
+    override fun loadPeerSigningFingerprint(peerId: String): String? =
+        TrustedPeerStore(prefs)
+            .findVerifiedRecordByKnownDeviceIdReadOnly(peerId)
+            ?.protocolPublicKeyFingerprint
+
+    override fun savePeerSigningFingerprint(peerId: String, peerSigningFingerprint: String) {
+        error("formal acceptance trust store is read-only")
     }
 }
 
@@ -413,7 +543,9 @@ internal class PrefsFallbackCooldownStore(
     }
 
     override fun saveLastClassicFallbackAtMillis(peerId: String, unixTimeMillis: Long) {
-        prefs.edit().putLong("fallback_${peerId.sha256Key()}", unixTimeMillis).apply()
+        prefs.edit {
+            putLong("fallback_${peerId.sha256Key()}", unixTimeMillis)
+        }
     }
 
     private fun String.sha256Key(): String {
@@ -436,7 +568,7 @@ data class P2PHandshakePolicyOverride(
 )
 
 fun P2PHandshakePolicyOverride.forTrustedClassicBootstrap(enabled: Boolean): P2PHandshakePolicyOverride =
-    if (!enabled) {
+    if (!enabled || minimumTierRaw == P2PQPeriaptKem.MINIMUM_TIER_RAW) {
         this
     } else {
         P2PHandshakePolicyOverride(
@@ -459,11 +591,14 @@ fun resolveRequestedHandshakeMinimumTierRaw(
     requirePqc: Boolean
 ): String {
     val normalizedRequestedTier = when (requestedMinimumTierRaw.trim()) {
+        P2PQPeriaptKem.MINIMUM_TIER_RAW, "q-periapt", "qperiapt" -> P2PQPeriaptKem.MINIMUM_TIER_RAW
         "nativePQC", "x-wing", "xwing", "strictXWing" -> "nativePQC"
         "liboqsPQC", "pqc", "mlkem", "ml-kem" -> "liboqsPQC"
-        else -> "classic"
+        "classic" -> "classic"
+        else -> throw IllegalArgumentException("Unsupported handshake minimum tier: $requestedMinimumTierRaw")
     }
     return when (normalizedRequestedTier) {
+        P2PQPeriaptKem.MINIMUM_TIER_RAW -> P2PQPeriaptKem.MINIMUM_TIER_RAW
         "nativePQC" -> when {
             P2PXWingKem.isAvailable() -> "nativePQC"
             AndroidPQCCryptoProvider.isAvailable() -> "liboqsPQC"
@@ -478,7 +613,8 @@ fun resolveRequestedHandshakeMinimumTierRaw(
         }
 
         else -> if (requirePqc) {
-            bestAvailablePqcMinimumTierRaw() ?: "classic"
+            bestAvailablePqcMinimumTierRaw()
+                ?: throw IllegalStateException("PQC is required but no PQC provider is available")
         } else {
             "classic"
         }
@@ -516,4 +652,4 @@ fun P2PHandshakeWire.TrustStore.isPeerPinned(peerId: String): Boolean =
     loadPeerSigningFingerprint(peerId)?.isNotBlank() == true
 
 fun P2PHandshakeClient.PeerKemPublicKeys.isMissingPqcMaterial(): Boolean =
-    xWingPublicKey == null && mlKem768PublicKey == null
+    qPeriaptPublicKey == null && xWingPublicKey == null && mlKem768PublicKey == null

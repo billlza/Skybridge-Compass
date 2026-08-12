@@ -10,6 +10,7 @@ import android.util.Base64
 import android.util.Log
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.core.content.edit
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
@@ -26,7 +27,9 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.net.URI
 import java.security.KeyStore
+import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -36,6 +39,38 @@ data class SupabaseConfig(
     val url: String,
     val anonKey: String
 )
+
+internal fun canonicalSupabaseProjectOrigin(raw: String): String {
+    val candidate = raw.trim()
+    require(candidate.isNotEmpty()) { "Supabase project origin is empty" }
+    val parsed = URI(candidate)
+    require(!parsed.isOpaque) { "Supabase project origin must be hierarchical" }
+    require(parsed.scheme?.lowercase(Locale.ROOT) == "https") {
+        "Supabase project origin must use HTTPS"
+    }
+    require(parsed.rawUserInfo == null) { "Supabase project origin must not contain user info" }
+    require(parsed.rawQuery == null) { "Supabase project origin must not contain a query" }
+    require(parsed.rawFragment == null) { "Supabase project origin must not contain a fragment" }
+    require(parsed.rawPath.isNullOrEmpty() || parsed.rawPath == "/") {
+        "Supabase project origin must not contain a path"
+    }
+    val host = requireNotNull(parsed.host?.takeIf { it.isNotBlank() }) {
+        "Supabase project origin host is missing"
+    }
+    require(parsed.port == -1 || parsed.port in 1..65535) {
+        "Supabase project origin port is invalid"
+    }
+    val canonicalPort = parsed.port.takeUnless { it == 443 } ?: -1
+    return URI(
+        "https",
+        null,
+        host.lowercase(Locale.ROOT),
+        canonicalPort,
+        null,
+        null,
+        null
+    ).toASCIIString()
+}
 
 sealed class SupabaseConfigState {
     data object Missing : SupabaseConfigState()
@@ -71,21 +106,23 @@ object SupabaseConfigStore {
 
     fun requireConfig(context: Context): SupabaseConfig {
         cachedConfig?.let { return it }
+        if (hasEncryptedConfig(prefs(context))) {
+            throw SupabaseConfigLockedException()
+        }
         managedDefaults()?.let {
             cachedConfig = it
             return it
         }
-        if (!hasEncryptedConfig(prefs(context))) {
-            throw SupabaseConfigMissingException()
-        }
-        throw SupabaseConfigLockedException()
+        throw SupabaseConfigMissingException()
     }
 
     fun managedDefaults(): SupabaseConfig? {
         val url = BuildConfig.SUPABASE_URL.trim().removeSuffix("/")
         val anonKey = BuildConfig.SUPABASE_ANON_KEY.trim()
         if (url.isBlank() || anonKey.isBlank()) return null
-        return SupabaseConfig(url = url, anonKey = anonKey)
+        return runCatching { normalizeConfig(SupabaseConfig(url = url, anonKey = anonKey)) }
+            .onFailure { Log.e(TAG, "Built-in Supabase config is invalid", it) }
+            .getOrNull()
     }
 
     fun provisionManagedDefaults(
@@ -115,19 +152,8 @@ object SupabaseConfigStore {
         config: SupabaseConfig,
         onResult: (Result<Unit>) -> Unit
     ) {
-        val normalized = normalizeConfig(config)
-        if (normalized.url.isBlank() || normalized.anonKey.isBlank()) {
-            onResult(
-                Result.failure(
-                    SupabaseConfigInvalidException(
-                        resolveLocalizedText(
-                            "URL 或 Anon Key 为空",
-                            "URL or anon key is empty",
-                            "URL または Anon Key が空です"
-                        )
-                    )
-                )
-            )
+        val normalized = runCatching { normalizeConfig(config) }.getOrElse { error ->
+            onResult(Result.failure(error))
             return
         }
         val authCheck = canAuthenticate(activity)
@@ -183,11 +209,19 @@ object SupabaseConfigStore {
                         runCatching {
                             withContext(Dispatchers.IO) {
                                 val prefs = prefs(activity)
-                                prefs.edit().apply {
-                                    putString(KEY_CIPHERTEXT, Base64.encodeToString(encrypted, Base64.NO_WRAP))
-                                    putString(KEY_IV, Base64.encodeToString(iv, Base64.NO_WRAP))
+                                val ciphertext = Base64.encodeToString(encrypted, Base64.NO_WRAP)
+                                val encodedIv = Base64.encodeToString(iv, Base64.NO_WRAP)
+                                prefs.edit(commit = true) {
+                                    putString(KEY_CIPHERTEXT, ciphertext)
+                                    putString(KEY_IV, encodedIv)
                                     putLong(KEY_LAST_UNLOCKED, System.currentTimeMillis())
-                                }.apply()
+                                }
+                                check(prefs.getString(KEY_CIPHERTEXT, null) == ciphertext) {
+                                    "Failed to persist Supabase encrypted config ciphertext"
+                                }
+                                check(prefs.getString(KEY_IV, null) == encodedIv) {
+                                    "Failed to persist Supabase encrypted config IV"
+                                }
                             }
                         }.onFailure { e ->
                             Log.e(TAG, "Supabase prefs write failed", e)
@@ -288,7 +322,9 @@ object SupabaseConfigStore {
                         cachedConfig = config
                         runCatching {
                             withContext(Dispatchers.IO) {
-                                prefs.edit().putLong(KEY_LAST_UNLOCKED, System.currentTimeMillis()).apply()
+                                prefs.edit(commit = true) {
+                                    putLong(KEY_LAST_UNLOCKED, System.currentTimeMillis())
+                                }
                             }
                         }
                         onResult(Result.success(config))
@@ -307,21 +343,22 @@ object SupabaseConfigStore {
     suspend fun reset(context: Context) {
         cachedConfig = null
         withContext(Dispatchers.IO) {
-            prefs(context).edit().apply {
+            prefs(context).edit(commit = true) {
                 remove(KEY_CIPHERTEXT)
                 remove(KEY_IV)
                 remove(KEY_LAST_UNLOCKED)
-            }.apply()
+            }
         }
     }
 
     private fun currentState(context: Context, prefs: SharedPreferences): SupabaseConfigState {
         cachedConfig?.let { return SupabaseConfigState.Available(it) }
+        if (hasEncryptedConfig(prefs)) return SupabaseConfigState.Locked
         managedDefaults()?.let {
             cachedConfig = it
             return SupabaseConfigState.Available(it)
         }
-        return if (hasEncryptedConfig(prefs)) SupabaseConfigState.Locked else SupabaseConfigState.Missing
+        return SupabaseConfigState.Missing
     }
 
     private fun hasEncryptedConfig(prefs: SharedPreferences): Boolean {
@@ -333,8 +370,26 @@ object SupabaseConfigStore {
     }
 
     private fun normalizeConfig(config: SupabaseConfig): SupabaseConfig {
-        val url = config.url.trim().removeSuffix("/")
+        val rawUrl = config.url.trim()
         val anonKey = config.anonKey.trim()
+        if (rawUrl.isBlank() || anonKey.isBlank()) {
+            throw SupabaseConfigInvalidException(
+                resolveLocalizedText(
+                    "URL 或 Anon Key 为空",
+                    "URL or anon key is empty",
+                    "URL または Anon Key が空です"
+                )
+            )
+        }
+        val url = runCatching { canonicalSupabaseProjectOrigin(rawUrl) }.getOrElse {
+            throw SupabaseConfigInvalidException(
+                resolveLocalizedText(
+                    "Supabase URL 无效",
+                    "Supabase URL is invalid",
+                    "Supabase URL が無効です"
+                )
+            )
+        }
         return SupabaseConfig(url = url, anonKey = anonKey)
     }
 
@@ -349,10 +404,7 @@ object SupabaseConfigStore {
         val json = JSONObject(String(bytes, Charsets.UTF_8))
         val url = json.optString("url").trim().removeSuffix("/")
         val anonKey = json.optString("anonKey").trim()
-        if (url.isBlank() || anonKey.isBlank()) {
-            throw SupabaseConfigInvalidException(resolveLocalizedText("配置内容为空", "Configuration content is empty", "設定内容が空です"))
-        }
-        return SupabaseConfig(url = url, anonKey = anonKey)
+        return normalizeConfig(SupabaseConfig(url = url, anonKey = anonKey))
     }
 
     private fun canAuthenticate(context: Context): Int {

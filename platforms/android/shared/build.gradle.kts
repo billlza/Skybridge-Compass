@@ -1,15 +1,16 @@
 plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.plugin.compose")
-    id("org.jetbrains.kotlin.plugin.serialization")
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
     namespace = "com.skybridge.compass.shared"
-    compileSdk = 36
+    compileSdk = 37
+    ndkVersion = "30.0.14904198"
 
     defaultConfig {
-        minSdk = 33
+        minSdk = 36
         
         // NDK configuration for native PQC library
         ndk {
@@ -74,36 +75,36 @@ kotlin {
     jvmToolchain(21)
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        freeCompilerArgs.add("-Xannotation-default-target=param-property")
     }
 }
 
 dependencies {
     // Compose BOM
-    implementation(platform("androidx.compose:compose-bom:2026.03.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.extended)
 
     // Kotlin coroutines (for StateFlow in AccountStore)
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-    implementation("org.bouncycastle:bcprov-jdk18on:1.83")
+    implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.bouncycastle.bcprov)
 
     // javax.inject annotations used by NetworkOptimizer/ErrorRecoveryManager
-    implementation("javax.inject:javax.inject:1")
+    implementation(libs.javax.inject)
     
     // OkHttp for WebSocket support
-    implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation(libs.okhttp)
     
     // Kotlinx Serialization for JSON
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
+    implementation(libs.kotlinx.serialization.json)
     
     // Testing dependencies
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.junit.jupiter:junit-jupiter-api:6.0.3")
-    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:6.0.3")
-    testImplementation("io.kotest:kotest-runner-junit5:6.1.6")
-    testImplementation("io.kotest:kotest-assertions-core:6.1.6")
-    testImplementation("io.kotest:kotest-property:6.1.6")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    testImplementation(libs.junit4)
+    testImplementation(libs.junit.jupiter.api)
+    testRuntimeOnly(libs.junit.jupiter.engine)
+    testRuntimeOnly(libs.junit.vintage.engine)
+    testImplementation(libs.kotest.runner.junit5)
+    testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.kotest.property)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

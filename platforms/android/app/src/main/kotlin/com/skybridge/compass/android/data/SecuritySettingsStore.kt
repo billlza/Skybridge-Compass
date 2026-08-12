@@ -4,36 +4,93 @@ import android.content.Context
 import android.os.Build
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.skybridge.compass.core.p2p.resolveRequestedHandshakeMinimumTierRaw
+import com.skybridge.compass.shared.p2p.P2PQPeriaptKem
+import com.skybridge.compass.shared.p2p.QPeriaptPlatformPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
-import java.io.IOException
 
 private val Context.securitySettingsDataStore by preferencesDataStore(name = "security_settings")
 
-private fun defaultEnforcePqcHandshake(): Boolean = Build.VERSION.SDK_INT >= 33
+private fun defaultEnforcePqcHandshake(): Boolean = true
 
-private fun defaultAllowClassicFallbackForCompatibility(): Boolean =
-    Build.VERSION.SDK_INT in 33..35
+private fun defaultAllowClassicFallbackForCompatibility(): Boolean = false
 
-private fun defaultPqcMinimumTier(): String = when {
-    Build.VERSION.SDK_INT >= 36 ->
-        resolveRequestedHandshakeMinimumTierRaw(
-            requestedMinimumTierRaw = "nativePQC",
-            requirePqc = true
+private fun defaultPqcMinimumTier(): String =
+    resolveRequestedHandshakeMinimumTierRaw(
+        requestedMinimumTierRaw = "nativePQC",
+        requirePqc = true
+    )
+
+internal fun localQPeriaptSupported(): Boolean =
+    QPeriaptPlatformPolicy.isLocalAndroidSupported(
+        QPeriaptPlatformPolicy.androidPlatformVersion(
+            release = Build.VERSION.RELEASE,
+            sdkInt = Build.VERSION.SDK_INT
         )
-    Build.VERSION.SDK_INT >= 33 ->
-        resolveRequestedHandshakeMinimumTierRaw(
-            requestedMinimumTierRaw = "liboqsPQC",
-            requirePqc = true
-        )
-    else -> "classic"
+    )
+
+internal fun normalizePqcMinimumTier(
+    tier: String,
+    qPeriaptSupported: Boolean = localQPeriaptSupported()
+): String {
+    val normalized = when (tier) {
+        P2PQPeriaptKem.MINIMUM_TIER_RAW, "nativePQC", "liboqsPQC", "classic" -> tier
+        else -> throw IllegalArgumentException("unsupported PQC minimum tier")
+    }
+    if (normalized == P2PQPeriaptKem.MINIMUM_TIER_RAW) {
+        require(qPeriaptSupported) {
+            "Q-Periapt requires Android 16+ / API 36+"
+        }
+    }
+    return normalized
 }
+
+/** Q-Periapt 的平台前提文本所需的最低 Android 版本（与 [QPeriaptPlatformPolicy] 的判定一致）。 */
+internal const val Q_PERIAPT_MIN_ANDROID_RELEASE: Int = 16
+
+/** Q-Periapt 的平台前提所需最低 API 等级。 */
+internal const val Q_PERIAPT_MIN_ANDROID_API: Int = 36
+
+/**
+ * 读取持久化的最低安全等级（R7.9 的**读取面**）。
+ *
+ * 与写入面 [normalizePqcMinimumTier] 的关键差别：**本函数永不抛出**。
+ *
+ * R7.9 要求「低于所需平台版本的项，其持久化值不参与运行时行为判定」。此前这里直接复用写入面的
+ * `normalizePqcMinimumTier`，于是当持久化值为 `q-periapt` 而本机不满足 Android 16+/API 36+ 时
+ * 会抛 `IllegalArgumentException`；该调用位于 `observe()` 的 `map` 内，异常会摧毁整个
+ * security settings 流（不只是这一项）。这条路径是**可达的**：云端设置同步会把新机器上保存的
+ * 值下发到旧机器（`CloudUserSettingsSyncManager`），备份恢复与系统降级同理。
+ *
+ * 正确语义是「该值不参与判定」，即**回落到平台可支持的默认值**，而不是让读取失败：
+ * - 平台前提不满足的 `q-periapt` → [defaultPqcMinimumTier]（`nativePQC`，仍是 PQC，不降级到 classic）；
+ * - 无法识别的等级字符串（未来版本写入的值）→ 同样回落，保证旧版本不会因前向值崩溃。
+ *
+ * 写入面仍然严格拒绝不满足前提的取值，因此这里的回落不会成为绕过前提的通道。
+ */
+internal fun readStoredPqcMinimumTier(
+    tier: String?,
+    qPeriaptSupported: Boolean = localQPeriaptSupported()
+): String {
+    if (tier == null) return defaultPqcMinimumTier()
+    return runCatching { normalizePqcMinimumTier(tier, qPeriaptSupported) }
+        .getOrElse { defaultPqcMinimumTier() }
+}
+
+/**
+ * 某个持久化等级在本机是否因平台前提而**不参与**运行时判定（R7.9）。
+ *
+ * 供界面呈现前提文本与测试断言使用；判定与 [readStoredPqcMinimumTier] 的回落条件同源。
+ */
+internal fun pqcMinimumTierIsGatedByPlatform(
+    tier: String?,
+    qPeriaptSupported: Boolean = localQPeriaptSupported()
+): Boolean = tier == P2PQPeriaptKem.MINIMUM_TIER_RAW && !qPeriaptSupported
 
 data class SecuritySettings(
     // Device authentication
@@ -96,7 +153,7 @@ object SecuritySettingsStore {
     fun observe(context: Context): Flow<SecuritySettings> =
         context.securitySettingsDataStore.data
             .catch { e ->
-                if (e is IOException) emit(emptyPreferences()) else throw e
+                throw e
             }
             .map { prefs ->
                 SecuritySettings(
@@ -104,12 +161,12 @@ object SecuritySettingsStore {
                     autoTrustKnownDevices = prefs[KEY_AUTO_TRUST] ?: false,
                     pairingTimeoutSec = (prefs[KEY_PAIRING_TIMEOUT_SEC] ?: 30).coerceIn(5, 600),
 
-                    encryptionEnabled = prefs[KEY_ENCRYPTION_ENABLED] ?: true,
+                    encryptionEnabled = true,
                     encryptionAlgorithm = prefs[KEY_ENCRYPTION_ALGORITHM] ?: "AES-256-GCM",
-                    pqcEnabled = prefs[KEY_PQC_ENABLED] ?: true,
+                    pqcEnabled = true,
                     enforcePqcHandshake = prefs[KEY_ENFORCE_PQC_HANDSHAKE] ?: defaultEnforcePqcHandshake(),
                     allowClassicFallbackForCompatibility = prefs[KEY_ALLOW_CLASSIC_FALLBACK] ?: defaultAllowClassicFallbackForCompatibility(),
-                    pqcMinimumTier = prefs[KEY_PQC_MINIMUM_TIER] ?: defaultPqcMinimumTier(),
+                    pqcMinimumTier = readStoredPqcMinimumTier(prefs[KEY_PQC_MINIMUM_TIER]),
                     requireSecureEnclavePoP = prefs[KEY_REQUIRE_SECURE_ENCLAVE_POP] ?: false,
 
                     allowScreenMirroring = prefs[KEY_ALLOW_SCREEN_MIRRORING] ?: true,
@@ -139,7 +196,8 @@ object SecuritySettingsStore {
     }
 
     suspend fun setEncryptionEnabled(context: Context, enabled: Boolean) {
-        context.securitySettingsDataStore.edit { it[KEY_ENCRYPTION_ENABLED] = enabled }
+        require(enabled) { "transport encryption cannot be disabled" }
+        context.securitySettingsDataStore.edit { it[KEY_ENCRYPTION_ENABLED] = true }
     }
 
     suspend fun setEncryptionAlgorithm(context: Context, algorithm: String) {
@@ -147,7 +205,8 @@ object SecuritySettingsStore {
     }
 
     suspend fun setPqcEnabled(context: Context, enabled: Boolean) {
-        context.securitySettingsDataStore.edit { it[KEY_PQC_ENABLED] = enabled }
+        require(enabled) { "PQC cannot be disabled for this product line" }
+        context.securitySettingsDataStore.edit { it[KEY_PQC_ENABLED] = true }
     }
 
     suspend fun setEnforcePqcHandshake(context: Context, enabled: Boolean) {
@@ -159,10 +218,7 @@ object SecuritySettingsStore {
     }
 
     suspend fun setPqcMinimumTier(context: Context, tier: String) {
-        val normalized = when (tier) {
-            "nativePQC", "liboqsPQC", "classic" -> tier
-            else -> defaultPqcMinimumTier()
-        }
+        val normalized = normalizePqcMinimumTier(tier)
         context.securitySettingsDataStore.edit { it[KEY_PQC_MINIMUM_TIER] = normalized }
     }
 

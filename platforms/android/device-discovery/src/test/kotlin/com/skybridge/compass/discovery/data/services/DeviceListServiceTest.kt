@@ -50,17 +50,7 @@ class DeviceListServiceTest : FunSpec({
             
             // 验证内容一致
             val imported = result.getOrThrow()
-            imported.size shouldBe devices.size
-            imported.map { it.id }.toSet() shouldBe devices.map { it.id }.toSet()
-            
-            // 验证每个设备的关键字段
-            for (original in devices) {
-                val found = imported.find { it.id == original.id }
-                found?.name shouldBe original.name
-                found?.type shouldBe original.type
-                found?.connectionInfo?.address shouldBe original.connectionInfo.address
-                found?.connectionInfo?.port shouldBe original.connectionInfo.port
-            }
+            imported shouldBe devices
         }
     }
     

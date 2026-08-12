@@ -18,6 +18,7 @@ import com.skybridge.compass.android.data.SecuritySettings
 import com.skybridge.compass.android.data.SecuritySettingsStore
 import com.skybridge.compass.android.notifications.SecurityPromptNotifier
 import com.skybridge.compass.android.securityprompts.SecurityPromptStore
+import java.util.Locale
 
 @Composable
 fun IncomingTransferReviewScreen(navController: NavController, transferId: String) {
@@ -55,7 +56,8 @@ fun IncomingTransferReviewScreen(navController: NavController, transferId: Strin
         return
     }
 
-    val sender = prompt.senderDeviceName ?: prompt.senderDeviceId ?: "Unknown device"
+    val sender = prompt.senderDeviceId ?: "Unauthenticated sender"
+    val declaredName = prompt.senderDeviceName?.takeIf { it.isNotBlank() && it != sender }
     val size = prompt.fileSizeBytes?.let { formatBytes(it) } ?: "Unknown size"
     val desiredName = sanitizeFileName(prompt.fileName)
     val exists = remember(desiredName) { downloadsItemExists(context, desiredName) }
@@ -65,7 +67,11 @@ fun IncomingTransferReviewScreen(navController: NavController, transferId: Strin
         title = { Text("Incoming file transfer") },
         text = {
             Text(
-                "From: $sender\nFile: ${prompt.fileName}\nSize: $size\nSave to: Downloads",
+                buildString {
+                    append("From: $sender\n")
+                    if (declaredName != null) append("Declared name: $declaredName\n")
+                    append("File: ${prompt.fileName}\nSize: $size\nSave to: Downloads")
+                },
                 style = MaterialTheme.typography.bodyMedium
             )
         },
@@ -154,7 +160,6 @@ private fun formatBytes(bytes: Long): String {
     return if (unit == 0) {
         "${bytes} ${units[unit]}"
     } else {
-        String.format("%.1f %s", size, units[unit])
+        String.format(Locale.ROOT, "%.1f %s", size, units[unit])
     }
 }
-

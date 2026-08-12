@@ -33,27 +33,29 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.skybridge.compass.android.i18n.resolveLocalizedText
 import com.skybridge.compass.core.data.NetworkSettings
-import com.skybridge.compass.core.data.NetworkSettingsStore
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WebRtcSettingsScreen(navController: NavController) {
+fun WebRtcSettingsScreen(
+    navController: NavController,
+    viewModel: SettingsViewModel = hiltViewModel()
+) {
     fun t(zh: String, en: String, ja: String): String = resolveLocalizedText(zh, en, ja)
 
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val settings by NetworkSettingsStore.observe(context).collectAsState(initial = NetworkSettings())
+    val settings by viewModel.networkSettings.collectAsState(initial = NetworkSettings())
 
     var signalingUrl by remember(settings.webrtcSignalingUrl) { mutableStateOf(settings.webrtcSignalingUrl) }
     var stunServersInput by remember(settings.stunServers) { mutableStateOf(settings.stunServers.joinToString(",")) }
     var turnServersInput by remember(settings.turnServers) { mutableStateOf(settings.turnServers.joinToString(",")) }
+    var validationMessage by remember { mutableStateOf<String?>(null) }
 
     fun parseServers(input: String): List<String> =
         input
@@ -100,7 +102,7 @@ fun WebRtcSettingsScreen(navController: NavController) {
                         Switch(
                             checked = settings.webrtcEnabled,
                             onCheckedChange = { enabled ->
-                                scope.launch { NetworkSettingsStore.setWebRtcEnabled(context, enabled) }
+                                viewModel.setWebRtcEnabled(enabled)
                             }
                         )
                     }
@@ -125,10 +127,23 @@ fun WebRtcSettingsScreen(navController: NavController) {
                             enabled = settings.webrtcEnabled,
                             onClick = {
                                 scope.launch {
-                                    NetworkSettingsStore.setWebRtcSignalingUrl(context, signalingUrl)
+                                    runCatching {
+                                        viewModel.setWebRtcSignalingUrl(signalingUrl)
+                                    }.onSuccess {
+                                        validationMessage = null
+                                    }.onFailure { error ->
+                                        validationMessage = error.message ?: t("信令地址无效", "Invalid signaling URL", "シグナリング URL が無効です")
+                                    }
                                 }
                             }
                         ) { Text(t("应用", "Apply", "適用")) }
+                    }
+                    validationMessage?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             }
@@ -143,7 +158,7 @@ fun WebRtcSettingsScreen(navController: NavController) {
                         modifier = Modifier.fillMaxWidth(),
                         enabled = settings.webrtcEnabled,
                         label = { Text(t("STUN（逗号分隔）", "STUN (comma separated)", "STUN（カンマ区切り）")) },
-                        placeholder = { Text("stun:54.92.79.99:3478, stun:stun.l.google.com:19302") }
+                        placeholder = { Text("stun:54.92.79.99:3478") }
                     )
                     OutlinedTextField(
                         value = turnServersInput,
@@ -159,11 +174,24 @@ fun WebRtcSettingsScreen(navController: NavController) {
                             enabled = settings.webrtcEnabled,
                             onClick = {
                                 scope.launch {
-                                    NetworkSettingsStore.setStunServers(context, parseServers(stunServersInput))
-                                    NetworkSettingsStore.setTurnServers(context, parseServers(turnServersInput))
+                                    runCatching {
+                                        viewModel.setStunServers(parseServers(stunServersInput))
+                                        viewModel.setTurnServers(parseServers(turnServersInput))
+                                    }.onSuccess {
+                                        validationMessage = null
+                                    }.onFailure { error ->
+                                        validationMessage = error.message ?: t("ICE 配置无效", "Invalid ICE configuration", "ICE 設定が無効です")
+                                    }
                                 }
                             }
                         ) { Text(t("保存 ICE", "Save ICE", "ICE を保存")) }
+                    }
+                    validationMessage?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
 
                     Spacer(Modifier.height(4.dp))

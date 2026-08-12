@@ -38,6 +38,7 @@ data class CryptoSuite(
      */
     val kemAlgorithm: String
         get() = when (this) {
+            Q_PERIAPT_CONTEXT_BOUND -> "Q-Periapt-ContextBound"
             X_WING_ML_DSA -> "X-Wing"
             ML_KEM_768_ML_DSA_65 -> "ML-KEM-768"
             X25519_ED25519 -> "X25519"
@@ -50,6 +51,7 @@ data class CryptoSuite(
      */
     val signatureAlgorithm: String
         get() = when (this) {
+            Q_PERIAPT_CONTEXT_BOUND -> "ML-DSA-65"
             X_WING_ML_DSA -> "ML-DSA-65"
             ML_KEM_768_ML_DSA_65 -> "ML-DSA-65"
             X25519_ED25519 -> "Ed25519"
@@ -70,6 +72,15 @@ data class CryptoSuite(
     }
     
     companion object {
+        /**
+         * Q-Periapt ContextBound hybrid KEM + ML-DSA-65 signature.
+         * Wire ID: 0x0011
+         *
+         * Beta suite for macOS 26+ / iOS 26+ / Android 16+ only. The KEM is
+         * ML-KEM-768 + X25519 with the ContextBound combiner.
+         */
+        val Q_PERIAPT_CONTEXT_BOUND = CryptoSuite("Q-Periapt-ContextBound+ML-DSA-65", 0x0011u)
+
         /**
          * X-Wing hybrid KEM + ML-DSA-65 signature.
          * Wire ID: 0x0001
@@ -93,7 +104,7 @@ data class CryptoSuite(
          * Wire ID: 0x1001
          * 
          * Classic elliptic curve suite, widely supported.
-         * Used as fallback when PQC is unavailable.
+         * Available only for explicit classic compatibility/bootstrap paths.
          */
         val X25519_ED25519 = CryptoSuite("X25519+Ed25519", 0x1001u)
         
@@ -102,12 +113,15 @@ data class CryptoSuite(
          * Wire ID: 0x1002
          * 
          * NIST P-256 curve suite, maximum compatibility.
-         * Used as ultimate fallback.
+         * Available only for explicit classic compatibility/bootstrap paths.
          */
         val P256_ECDSA = CryptoSuite("P-256+ECDSA", 0x1002u)
         
         /**
-         * All known crypto suites in priority order (highest first).
+         * Production crypto suites in priority order (highest first).
+         *
+         * Q-Periapt stays parseable by wire ID, but it is an explicit beta opt-in
+         * and must not be offered by generic production-suite iteration.
          */
         val ALL_SUITES = listOf(
             ML_KEM_768_ML_DSA_65,
@@ -115,6 +129,8 @@ data class CryptoSuite(
             X25519_ED25519,
             P256_ECDSA
         )
+
+        val EXPLICIT_BETA_SUITES = listOf(Q_PERIAPT_CONTEXT_BOUND)
         
         /**
          * Creates a CryptoSuite from its wire protocol ID.
@@ -123,6 +139,7 @@ data class CryptoSuite(
          * @return The corresponding CryptoSuite, or null if unknown
          */
         fun fromWireId(wireId: UShort): CryptoSuite? = when (wireId) {
+            0x0011.toUShort() -> Q_PERIAPT_CONTEXT_BOUND
             0x0001.toUShort() -> X_WING_ML_DSA
             0x0101.toUShort() -> ML_KEM_768_ML_DSA_65
             0x1001.toUShort() -> X25519_ED25519

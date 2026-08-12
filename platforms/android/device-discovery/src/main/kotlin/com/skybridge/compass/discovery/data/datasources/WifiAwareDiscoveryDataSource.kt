@@ -9,7 +9,6 @@ import android.net.wifi.aware.DiscoverySessionCallback
 import android.net.wifi.aware.PeerHandle
 import android.net.wifi.aware.SubscribeConfig
 import android.net.wifi.aware.WifiAwareManager
-import android.os.Build
 import androidx.core.app.ActivityCompat
 import com.skybridge.compass.discovery.domain.entities.ConnectionInfo
 import com.skybridge.compass.discovery.domain.entities.DeviceCapability
@@ -129,14 +128,10 @@ class WifiAwareDiscoveryDataSource @Inject constructor(@param:dagger.hilt.androi
     }
 
     private fun hasNearbyWifiPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            ) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
-        }
+        return ActivityCompat.checkSelfPermission(
+            context,
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     @Serializable

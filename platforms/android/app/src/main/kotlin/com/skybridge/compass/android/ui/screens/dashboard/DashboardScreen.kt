@@ -1,6 +1,15 @@
 package com.skybridge.compass.android.ui.screens.dashboard
 
+import android.Manifest
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,20 +31,35 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Air
+import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Dehaze
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GppGood
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockClock
+import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.Spa
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Thunderstorm
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.WaterDrop
+import androidx.compose.material.icons.filled.WbCloudy
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material.icons.filled.WifiOff
@@ -50,11 +74,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -63,12 +89,15 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
-import com.skybridge.compass.android.data.DeveloperSettings
-import com.skybridge.compass.android.data.DeveloperSettingsStore
 import com.skybridge.compass.android.i18n.localizedText
+import com.skybridge.compass.android.ui.components.IOSGlassCard
 import com.skybridge.compass.android.ui.components.LiquidGlassSurface
+import com.skybridge.compass.android.ui.components.iosPlatformAccent
+import com.skybridge.compass.android.ui.navigation.NavigationSemantics
 import com.skybridge.compass.android.ui.navigation.Screen
+import com.skybridge.compass.android.ui.theme.IOSParityTokens
 import com.skybridge.compass.android.ui.theme.SkyBridgeCompassTheme
+import com.skybridge.compass.android.weather.AirQualityLevel
 import com.skybridge.compass.shared.account.AccountStore
 import java.util.Locale
 
@@ -82,23 +111,51 @@ fun DashboardScreen(
 ) {
     val state = viewModel.uiState
     val profile = AccountStore.primaryAccount.collectAsState().value
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val devSettings by DeveloperSettingsStore.observe(context).collectAsState(initial = DeveloperSettings())
 
-    val quickActions = buildList {
-        add(QuickAction(t("扫描网络", "Scan Network", "ネットワークをスキャン"), Icons.Filled.Search, Screen.DeviceDiscovery.route, Color(0xFF00BCD4)))
-        if (devSettings.enableFileTransfer) {
-            add(QuickAction(t("发送文件", "Send File", "ファイル送信"), Icons.AutoMirrored.Filled.Send, Screen.FileTransfer.route, Color(0xFFAF52DE)))
-        }
-        if (devSettings.enableRemoteControl) {
-            add(QuickAction(t("远程桌面", "Remote Desktop", "リモートデスクトップ"), Icons.Filled.Computer, Screen.RemoteControl.route, Color(0xFF0A84FF)))
-        }
-        add(QuickAction(t("扫码连接", "Scan to Connect", "コードを読み取って接続"), Icons.Filled.Devices, Screen.DeviceDiscovery.route, Color(0xFF00C7BE)))
-    }
+    // Coarse location is only ever requested from the weather card's own affordance, so the
+    // dashboard never prompts unless the user asked for a precise reading.
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { viewModel.onLocationPermissionChanged() }
+
+    // iOS parity: all four quick actions are always available — file transfer and remote
+    // desktop are shipping features, so they no longer hinge on the developer feature-flags
+    // (matching the now-ungated bottom-nav tabs).
+    val quickActions = listOf(
+        QuickAction(
+            id = NavigationSemantics.ACTION_SCAN_NETWORK,
+            title = t("扫描网络", "Scan Network", "ネットワークをスキャン"),
+            icon = Icons.Filled.Search,
+            route = Screen.DeviceDiscovery.route,
+            color = IOSParityTokens.ColorTokens.CyanAccent
+        ),
+        QuickAction(
+            id = NavigationSemantics.ACTION_SEND_FILE,
+            title = t("发送文件", "Send File", "ファイル送信"),
+            icon = Icons.AutoMirrored.Filled.Send,
+            route = Screen.FileTransfer.route,
+            color = IOSParityTokens.ColorTokens.PurpleAccent
+        ),
+        QuickAction(
+            id = NavigationSemantics.ACTION_REMOTE_DESKTOP,
+            title = t("远程桌面", "Remote Desktop", "リモートデスクトップ"),
+            icon = Icons.Filled.Computer,
+            route = Screen.RemoteControl.route,
+            color = IOSParityTokens.ColorTokens.PrimaryBlue
+        ),
+        QuickAction(
+            id = NavigationSemantics.ACTION_CROSS_NETWORK,
+            title = t("跨网连接", "Cross-Network", "クロスネット接続"),
+            icon = Icons.Filled.Devices,
+            route = Screen.DeviceDiscovery.route,
+            color = Color(0xFF00C7BE)
+        )
+    )
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .testTag(NavigationSemantics.DASHBOARD_SCROLL)
             .padding(horizontal = 16.dp),
         contentPadding = PaddingValues(top = 10.dp, bottom = 120.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -123,8 +180,10 @@ fun DashboardScreen(
                     }
                 },
                 onRefresh = viewModel::refresh,
-                onOpenSettings = {
-                    navController.navigate(Screen.Settings.route) {
+                onOpenNotifications = {
+                    // No standalone notification center on Android; the account/activity
+                    // surface is where pending pairing + transfer events land.
+                    navController.navigate(Screen.AccountCenter.route) {
                         launchSingleTop = true
                         restoreState = true
                     }
@@ -134,11 +193,20 @@ fun DashboardScreen(
 
         item { WelcomeCard(state = state) }
 
-        if (state.activeSessions > 0 || state.dataTransferredLabel != "0 MB") {
-            item { TransferStatusCard(state = state) }
+        state.liveTransfer?.let { transfer ->
+            item { LiveTransferBanner(transfer = transfer) }
         }
 
-        item { WeatherCard(weather = state.weather, onRefresh = viewModel::refresh) }
+        item {
+            WeatherCard(
+                weather = state.weather,
+                onRefresh = viewModel::refresh,
+                onEnableWeather = viewModel::enableRealTimeWeather,
+                onRequestLocationPermission = {
+                    locationPermissionLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+                }
+            )
+        }
         item { StatsSection(state = state) }
 
         item {
@@ -183,7 +251,7 @@ private fun DashboardTopBar(
     onOpenAccount: () -> Unit,
     onOpenScanner: () -> Unit,
     onRefresh: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenNotifications: () -> Unit
 ) {
     val initial = userDisplayName.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "U"
 
@@ -239,6 +307,7 @@ private fun DashboardTopBar(
                 Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
                     Text(
                         text = "SkyBridge Compass",
+                        modifier = Modifier.testTag(NavigationSemantics.DASHBOARD_TITLE),
                         style = MaterialTheme.typography.labelLarge,
                         color = Color.White.copy(alpha = 0.92f),
                         fontWeight = FontWeight.SemiBold,
@@ -248,6 +317,7 @@ private fun DashboardTopBar(
                 }
             }
 
+            // Trailing actions mirror iOS: refresh + notification bell + QR-scan
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 DashboardIconCircleButton(
                     icon = Icons.Filled.Refresh,
@@ -264,14 +334,14 @@ private fun DashboardTopBar(
                     }
                 )
                 DashboardIconCircleButton(
-                    icon = Icons.Filled.Search,
-                    contentDescription = t("扫描设备", "Scan Devices", "デバイスをスキャン"),
-                    onClick = onOpenScanner
+                    icon = Icons.Filled.Notifications,
+                    contentDescription = t("通知", "Notifications", "通知"),
+                    onClick = onOpenNotifications
                 )
                 DashboardIconCircleButton(
-                    icon = Icons.Filled.Settings,
-                    contentDescription = t("设置", "Settings", "設定"),
-                    onClick = onOpenSettings
+                    icon = Icons.Filled.QrCodeScanner,
+                    contentDescription = t("扫码连接", "Scan to Connect", "コードを読み取って接続"),
+                    onClick = onOpenScanner
                 )
             }
         }
@@ -322,7 +392,7 @@ private fun WelcomeCard(state: DashboardUiState) {
     val networkColor = if (state.isOffline) Color(0xFFFF453A) else Color(0xFF34C759)
     val chipName = when {
         Build.SUPPORTED_ABIS.any { it.contains("arm64", ignoreCase = true) } -> "ARM64"
-        Build.SUPPORTED_ABIS.isNotEmpty() -> Build.SUPPORTED_ABIS.first().uppercase(Locale.getDefault())
+        Build.SUPPORTED_ABIS.isNotEmpty() -> Build.SUPPORTED_ABIS.first().uppercase(Locale.ROOT)
         else -> "CPU"
     }
 
@@ -402,150 +472,268 @@ private fun WelcomeCard(state: DashboardUiState) {
                 }
             }
 
-            // PQC Badge (iOS: green lock + green gradient border)
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(16.dp))
-                    .border(
-                        width = 1.dp,
-                        brush = Brush.linearGradient(
-                            colors = listOf(
-                                Color(0xFF34C759).copy(alpha = 0.4f),
-                                Color.Transparent
-                            ),
-                            start = Offset.Zero,
-                            end = Offset(100f, 100f)
-                        ),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Lock,
-                    contentDescription = null,
-                    tint = Color(0xFF34C759),
-                    modifier = Modifier.size(22.dp)
-                )
-                Text(
-                    text = "PQC",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF34C759),
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 10.sp
-                )
-            }
+            // Security badge — 4-state, mirrors iOS securityBadgePresentation
+            // (PQC=green lock.shield.fill / Classic=blue lock.fill / 待确认=orange lock / 离线=gray lock.slash)
+            SecurityBadgeView(badge = state.securityBadge)
         }
     }
 }
 
+@Composable
+private fun SecurityBadgeView(badge: DashboardSecurityBadge) {
+    val badgeColor = IOSParityTokens.SecurityBadge.color(badge.tone)
+    val badgeIcon = when (badge.tone) {
+        IOSParityTokens.SecurityBadgeTone.VerifiedPqc -> Icons.Filled.GppGood
+        IOSParityTokens.SecurityBadgeTone.Classic -> Icons.Filled.Lock
+        IOSParityTokens.SecurityBadgeTone.Pending -> Icons.Filled.LockClock
+        IOSParityTokens.SecurityBadgeTone.Offline -> Icons.Filled.LockOpen
+    }
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .background(Color.White.copy(alpha = 0.10f), RoundedCornerShape(16.dp))
+            .border(
+                width = 1.dp,
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        badgeColor.copy(alpha = 0.4f),
+                        Color.Transparent
+                    ),
+                    start = Offset.Zero,
+                    end = Offset(100f, 100f)
+                ),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Icon(
+            imageVector = badgeIcon,
+            contentDescription = badge.label,
+            tint = badgeColor,
+            modifier = Modifier
+                .size(22.dp)
+                .shadow(
+                    elevation = 4.dp,
+                    shape = CircleShape,
+                    ambientColor = badgeColor.copy(alpha = 0.4f),
+                    spotColor = badgeColor.copy(alpha = 0.4f)
+                )
+        )
+        Text(
+            text = badge.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = badgeColor,
+            fontWeight = FontWeight.Bold,
+            fontSize = 10.sp
+        )
+    }
+}
+
 // ──────────────────────────────────────────────────────────────
-// Transfer Status Card (iOS: transferOverviewSection)
+// Live Transfer Banner (iOS: transferOverviewSection / LiveTransferBannerView)
+// Active  → animated gradient progress bar + speed
+// Idle    → last-result chip (success / fail)
 // ──────────────────────────────────────────────────────────────
 
 @Composable
-private fun TransferStatusCard(state: DashboardUiState) {
-    val isActive = state.activeSessions > 0
-    val statusIcon = if (isActive) Icons.AutoMirrored.Filled.Send else Icons.Filled.Folder
-    val statusColor = if (isActive) Color(0xFF0A84FF) else Color(0xFF34C759)
-    val statusText = if (isActive) {
-        t("正在进行 ${state.activeSessions} 个会话", "${state.activeSessions} active sessions", "${state.activeSessions} 件のセッション進行中")
-    } else {
-        t("最近同步已完成", "Recent sync completed", "最近の同期が完了しました")
+private fun LiveTransferBanner(transfer: DashboardLiveTransfer) {
+    val accent = if (transfer.isActive) IOSParityTokens.ColorTokens.PrimaryBlue
+        else if (transfer.succeeded) IOSParityTokens.ColorTokens.SuccessGreen
+        else IOSParityTokens.ColorTokens.ErrorRed
+    val leadingIcon = when {
+        transfer.isActive -> Icons.AutoMirrored.Filled.Send
+        transfer.succeeded -> Icons.Filled.CheckCircle
+        else -> Icons.Filled.ErrorOutline
     }
-    val subtitle = t(
-        "累计传输 ${state.dataTransferredLabel} · 网络 ${state.networkQuality}",
-        "Transferred ${state.dataTransferredLabel} · Network ${state.networkQuality}",
-        "転送量 ${state.dataTransferredLabel} ・ ネットワーク ${state.networkQuality}"
-    )
 
     IOSGlassCard {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(statusColor.copy(alpha = 0.2f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = statusIcon,
-                    contentDescription = null,
-                    tint = statusColor,
-                    modifier = Modifier.size(18.dp)
-                )
+        Column(modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(accent.copy(alpha = 0.2f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = leadingIcon,
+                        contentDescription = null,
+                        tint = accent,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = transfer.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = transfer.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.65f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                if (transfer.isActive && transfer.speedText.isNotBlank()) {
+                    Text(
+                        text = transfer.speedText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = accent,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .background(accent.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                } else if (!transfer.isActive) {
+                    Text(
+                        text = if (transfer.succeeded) t("完成", "Done", "完了") else t("失败", "Failed", "失敗"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = accent,
+                        modifier = Modifier
+                            .background(accent.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
             }
 
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.65f),
-                    maxLines = 1
-                )
+            if (transfer.isActive) {
+                Spacer(modifier = Modifier.height(12.dp))
+                AnimatedTransferProgressBar(accent = accent)
             }
-
-            Text(
-                text = if (isActive) t("进行中", "Active", "進行中") else t("正常", "Normal", "正常"),
-                style = MaterialTheme.typography.labelSmall,
-                color = statusColor,
-                modifier = Modifier
-                    .background(statusColor.copy(alpha = 0.15f), RoundedCornerShape(999.dp))
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            )
         }
     }
 }
 
+/**
+ * Indeterminate animated gradient bar. Aggregate telemetry has no per-file percentage, so the
+ * bar sweeps a moving cyan -> blue gradient to convey "in flight" without faking fixed progress.
+ */
+@Composable
+private fun AnimatedTransferProgressBar(accent: Color) {
+    val transition = rememberInfiniteTransition(label = "transferSweep")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "sweep"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(6.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color.White.copy(alpha = 0.08f))
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        colorStops = arrayOf(
+                            ((phase - 0.3f).coerceIn(0f, 1f)) to Color.Transparent,
+                            phase.coerceIn(0f, 1f) to accent,
+                            ((phase + 0.3f).coerceIn(0f, 1f)) to IOSParityTokens.ColorTokens.CyanAccent,
+                            1f to Color.Transparent
+                        )
+                    )
+                )
+        )
+    }
+}
+
 // ──────────────────────────────────────────────────────────────
-// Weather Card (iOS: WeatherCardView)
+// Weather Card (macOS: WeatherDashboardCard / iOS: WeatherCardView)
 // ──────────────────────────────────────────────────────────────
 
 @Composable
 private fun WeatherCard(
     weather: DashboardWeatherCardState,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    onEnableWeather: () -> Unit,
+    onRequestLocationPermission: () -> Unit
 ) {
     IOSGlassCard {
+        Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            when (weather) {
+                is DashboardWeatherCardState.Resolving -> WeatherPlaceholderRow(
+                    icon = Icons.Filled.Cloud,
+                    iconTint = Color.White.copy(alpha = 0.5f),
+                    title = t("实时天气", "Real-Time Weather", "リアルタイム天気"),
+                    message = t("正在读取设置…", "Reading settings…", "設定を読み込んでいます…")
+                )
+
+                is DashboardWeatherCardState.Disabled -> WeatherPlaceholderRow(
+                    icon = Icons.Filled.CloudOff,
+                    iconTint = Color.White.copy(alpha = 0.68f),
+                    title = weather.title,
+                    message = weather.message,
+                    action = weather.actionLabel to onEnableWeather,
+                    actionIcon = Icons.Filled.MyLocation
+                )
+
+                is DashboardWeatherCardState.Loading -> WeatherPlaceholderRow(
+                    icon = Icons.Filled.Cloud,
+                    iconTint = IOSParityTokens.ColorTokens.CyanAccent,
+                    title = weather.title,
+                    message = weather.message,
+                    showProgress = true
+                )
+
+                is DashboardWeatherCardState.Error -> WeatherPlaceholderRow(
+                    icon = Icons.Filled.ErrorOutline,
+                    iconTint = Color(0xFFFF9F0A),
+                    title = weather.title,
+                    message = weather.message,
+                    action = weather.actionLabel to onRefresh,
+                    actionIcon = Icons.Filled.Refresh
+                )
+
+                is DashboardWeatherCardState.Ready -> WeatherReadyContent(
+                    weather = weather,
+                    onRefresh = onRefresh,
+                    onRequestLocationPermission = onRequestLocationPermission
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeatherReadyContent(
+    weather: DashboardWeatherCardState.Ready,
+    onRefresh: () -> Unit,
+    onRequestLocationPermission: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.width(80.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(56.dp)
-                        .background(Color.White.copy(alpha = 0.11f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = weather.icon.toImageVector(),
-                        contentDescription = null,
-                        tint = Color.White.copy(alpha = 0.92f),
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
+                WeatherConditionGlyph(icon = weather.icon)
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = weather.temperatureText,
@@ -553,6 +741,14 @@ private fun WeatherCard(
                     color = Color.White,
                     fontWeight = FontWeight.Thin
                 )
+                weather.feelsLikeText?.let { feelsLike ->
+                    Text(
+                        text = feelsLike,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.56f),
+                        fontSize = 9.sp
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(16.dp))
@@ -570,7 +766,9 @@ private fun WeatherCard(
                             text = weather.locationText,
                             style = MaterialTheme.typography.titleSmall,
                             color = Color.White,
-                            fontWeight = FontWeight.SemiBold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = weather.conditionText,
@@ -578,12 +776,14 @@ private fun WeatherCard(
                             color = Color.White.copy(alpha = 0.7f)
                         )
                     }
-                    WeatherRefreshButton(onClick = onRefresh)
+                    WeatherRefreshButton(
+                        isRefreshing = weather.isRefreshing,
+                        onClick = onRefresh
+                    )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    WeatherMetricBadge(icon = Icons.Filled.WaterDrop, value = weather.humidityText)
-                    WeatherMetricBadge(icon = Icons.Filled.Air, value = weather.windText)
+                if (weather.metrics.isNotEmpty()) {
+                    WeatherMetricsGrid(metrics = weather.metrics)
                 }
 
                 Row(modifier = Modifier.fillMaxWidth()) {
@@ -603,51 +803,230 @@ private fun WeatherCard(
                 }
             }
         }
+
+        weather.staleNotice?.let { notice ->
+            WeatherFootnote(icon = Icons.Filled.WifiOff, text = notice, tint = Color(0xFFFF9F0A))
+        }
+
+        weather.locationUpgradeLabel?.let { label ->
+            WeatherFootnote(
+                icon = Icons.Filled.MyLocation,
+                text = label,
+                tint = IOSParityTokens.ColorTokens.CyanAccent,
+                onClick = onRequestLocationPermission
+            )
+        }
     }
 }
 
 @Composable
-private fun WeatherRefreshButton(onClick: () -> Unit) {
+private fun WeatherConditionGlyph(icon: DashboardWeatherIcon) {
+    val accent = icon.accentColor()
+    Box(
+        modifier = Modifier
+            .size(56.dp)
+            .background(
+                // Radial wash standing in for the macOS card's icon glow.
+                Brush.radialGradient(
+                    colors = listOf(accent.copy(alpha = 0.30f), Color.Transparent)
+                ),
+                CircleShape
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon.toImageVector(),
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(28.dp)
+        )
+    }
+}
+
+/** Two-column metric grid matching the macOS card's `LazyVGrid`. */
+@Composable
+private fun WeatherMetricsGrid(metrics: List<DashboardWeatherMetric>) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        metrics.chunked(2).forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                row.forEach { metric ->
+                    WeatherMetricBadge(
+                        metric = metric,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (row.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WeatherRefreshButton(isRefreshing: Boolean, onClick: () -> Unit) {
     val refreshDescription = localizedText("刷新天气", "Refresh Weather", "天気を更新")
+    val rotation by rememberInfiniteTransition(label = "weather-refresh").animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "weather-refresh-rotation"
+    )
+
     Box(
         modifier = Modifier
             .size(28.dp)
             .background(Color(0xFF1E2537).copy(alpha = 0.62f), CircleShape)
             .clip(CircleShape)
-            .clickable(onClick = onClick),
+            .clickable(enabled = !isRefreshing, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = Icons.Filled.Refresh,
             contentDescription = refreshDescription,
-            tint = Color.White.copy(alpha = 0.9f),
-            modifier = Modifier.size(12.dp)
+            tint = Color.White.copy(alpha = if (isRefreshing) 0.5f else 0.9f),
+            modifier = Modifier
+                .size(12.dp)
+                .rotate(if (isRefreshing) rotation else 0f)
         )
     }
 }
 
 @Composable
-private fun WeatherMetricBadge(icon: ImageVector, value: String) {
+private fun WeatherMetricBadge(
+    metric: DashboardWeatherMetric,
+    modifier: Modifier = Modifier
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
-        modifier = Modifier
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier
             .background(Color(0xFF1E2537).copy(alpha = 0.62f), RoundedCornerShape(999.dp))
-            .padding(horizontal = 6.dp, vertical = 3.dp)
+            .padding(horizontal = 7.dp, vertical = 4.dp)
+    ) {
+        Icon(
+            imageVector = metric.kind.toImageVector(),
+            contentDescription = null,
+            tint = metric.airQualityLevel?.toColor() ?: Color(0xFF00BCD4),
+            modifier = Modifier.size(10.dp)
+        )
+        Text(
+            text = metric.label,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White.copy(alpha = 0.6f),
+            fontSize = 9.sp,
+            maxLines = 1
+        )
+        Text(
+            text = metric.value,
+            style = MaterialTheme.typography.labelSmall,
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun WeatherFootnote(
+    icon: ImageVector,
+    text: String,
+    tint: Color,
+    onClick: (() -> Unit)? = null
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .background(tint.copy(alpha = 0.10f), RoundedCornerShape(999.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = Color(0xFF00BCD4),
-            modifier = Modifier.size(10.dp)
+            tint = tint,
+            modifier = Modifier.size(12.dp)
         )
         Text(
-            text = value,
+            text = text,
             style = MaterialTheme.typography.labelSmall,
-            color = Color.White,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium
+            color = Color.White.copy(alpha = 0.82f),
+            fontSize = 10.sp
         )
+    }
+}
+
+/** Shared layout for the resolving / disabled / loading / error branches. */
+@Composable
+private fun WeatherPlaceholderRow(
+    icon: ImageVector,
+    iconTint: Color,
+    title: String,
+    message: String,
+    showProgress: Boolean = false,
+    action: Pair<String, () -> Unit>? = null,
+    actionIcon: ImageVector = Icons.Filled.Refresh
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Box(
+            modifier = Modifier.size(56.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            if (showProgress) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                    color = iconTint
+                )
+            } else {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = iconTint,
+                    modifier = Modifier.size(34.dp)
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.68f),
+                fontSize = 11.sp
+            )
+            action?.let { (label, onClick) ->
+                Spacer(modifier = Modifier.height(2.dp))
+                WeatherFootnote(
+                    icon = actionIcon,
+                    text = label,
+                    tint = IOSParityTokens.ColorTokens.CyanAccent,
+                    onClick = onClick
+                )
+            }
+        }
     }
 }
 
@@ -662,14 +1041,18 @@ private fun StatsSection(state: DashboardUiState) {
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         StatCard(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .testTag(NavigationSemantics.DASHBOARD_DISCOVERY_STAT),
             title = localizedText("发现与连接", "Discovery & Connections", "検出と接続"),
             value = "${state.connectedDevices} / ${state.activeSessions}",
             icon = Icons.Filled.Wifi,
             accentColor = Color(0xFF00BCD4)
         )
         StatCard(
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .testTag(NavigationSemantics.DASHBOARD_TRANSFER_STAT),
             title = localizedText("传输与性能", "Transfers & Performance", "転送とパフォーマンス"),
             value = "${state.dataTransferredLabel.replace(" MB", "")} / ${state.networkQuality}",
             icon = Icons.Filled.Speed,
@@ -766,8 +1149,10 @@ private fun QuickActionsSection(
         ) {
             actions.forEach { action ->
                 QuickActionCapsuleButton(
+                    actionId = action.id,
                     title = action.title,
                     icon = action.icon,
+                    route = action.route,
                     color = action.color,
                     onClick = { onClick(action.route) }
                 )
@@ -778,8 +1163,10 @@ private fun QuickActionsSection(
 
 @Composable
 private fun QuickActionCapsuleButton(
+    actionId: String,
     title: String,
     icon: ImageVector,
+    route: String,
     color: Color,
     onClick: () -> Unit
 ) {
@@ -802,6 +1189,7 @@ private fun QuickActionCapsuleButton(
                 ),
                 shape = RoundedCornerShape(999.dp)
             )
+            .testTag(NavigationSemantics.dashboardAction(actionId, route))
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
@@ -890,16 +1278,9 @@ private fun RecentDevicesSection(
 @Composable
 private fun RecentDeviceRow(device: DashboardRecentDevice) {
     val statusText = if (device.isConnected) localizedText("已连接", "Connected", "接続済み") else localizedText("可连接", "Ready to Connect", "接続可能")
-    val statusColor = if (device.isConnected) Color(0xFF34C759) else Color.White.copy(alpha = 0.68f)
-    val statusBackground = if (device.isConnected) Color(0xFF34C759).copy(alpha = 0.18f) else Color(0xFF1E2537).copy(alpha = 0.62f)
-    val platformColor = when {
-        device.platformLabel.contains("iOS", ignoreCase = true) -> Color(0xFF00BCD4)
-        device.platformLabel.contains("macOS", ignoreCase = true) -> Color(0xFF0A84FF)
-        device.platformLabel.contains("Android", ignoreCase = true) -> Color(0xFF34C759)
-        device.platformLabel.contains("Windows", ignoreCase = true) -> Color(0xFF0A84FF)
-        device.platformLabel.contains("Linux", ignoreCase = true) -> Color(0xFFFF9F0A)
-        else -> Color.Gray
-    }
+    val statusColor = if (device.isConnected) IOSParityTokens.ColorTokens.SuccessGreen else Color.White.copy(alpha = 0.68f)
+    val statusBackground = if (device.isConnected) IOSParityTokens.ColorTokens.SuccessGreen.copy(alpha = 0.18f) else Color(0xFF1E2537).copy(alpha = 0.62f)
+    val platformColor = iosPlatformAccent(device.platformLabel)
 
     Box(
         modifier = Modifier
@@ -1107,51 +1488,53 @@ private fun ActiveConnectionRow(connection: DashboardActiveConnection) {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Shared Glass Card (iOS: .ultraThinMaterial + gradient stroke)
-// ──────────────────────────────────────────────────────────────
-
-@Composable
-private fun IOSGlassCard(
-    modifier: Modifier = Modifier,
-    accentColor: Color = Color(0xFF00BCD4),
-    cornerRadius: Int = 24,
-    content: @Composable () -> Unit
-) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(cornerRadius.dp))
-            .background(Color(0xFF1E2537).copy(alpha = 0.62f))
-            .border(
-                width = 1.dp,
-                brush = Brush.linearGradient(
-                    colors = listOf(
-                        Color.White.copy(alpha = 0.30f),
-                        Color.Transparent,
-                        accentColor.copy(alpha = 0.12f)
-                    ),
-                    start = Offset.Zero,
-                    end = Offset(600f, 600f)
-                ),
-                shape = RoundedCornerShape(cornerRadius.dp)
-            )
-    ) {
-        content()
-    }
-}
-
-// ──────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────
 
 private fun DashboardWeatherIcon.toImageVector(): ImageVector = when (this) {
     DashboardWeatherIcon.Sunny -> Icons.Filled.WbSunny
+    DashboardWeatherIcon.PartlyCloudy -> Icons.Filled.WbCloudy
     DashboardWeatherIcon.Cloudy -> Icons.Filled.Cloud
-    DashboardWeatherIcon.Rainy -> Icons.Filled.Thunderstorm
-    DashboardWeatherIcon.Offline -> Icons.Filled.WifiOff
+    DashboardWeatherIcon.Rainy -> Icons.Filled.WaterDrop
+    DashboardWeatherIcon.Snowy -> Icons.Filled.AcUnit
+    DashboardWeatherIcon.Foggy -> Icons.Filled.Dehaze
+    DashboardWeatherIcon.Haze -> Icons.Filled.BlurOn
+    DashboardWeatherIcon.Stormy -> Icons.Filled.Thunderstorm
+    DashboardWeatherIcon.Unknown -> Icons.Filled.Cloud
+}
+
+/** Condition tint, mirroring the macOS card's `iconColor(for:)` mapping. */
+private fun DashboardWeatherIcon.accentColor(): Color = when (this) {
+    DashboardWeatherIcon.Sunny -> Color(0xFFFFD60A)
+    DashboardWeatherIcon.PartlyCloudy -> Color(0xFFB9C6D8)
+    DashboardWeatherIcon.Cloudy -> Color(0xFF9AA6B8)
+    DashboardWeatherIcon.Rainy -> Color(0xFF0A84FF)
+    DashboardWeatherIcon.Snowy -> Color(0xFF64D2FF)
+    DashboardWeatherIcon.Foggy,
+    DashboardWeatherIcon.Haze -> Color(0xFF9AA6B8).copy(alpha = 0.7f)
+    DashboardWeatherIcon.Stormy -> Color(0xFFBF5AF2)
+    DashboardWeatherIcon.Unknown -> Color(0xFF9AA6B8)
+}
+
+private fun DashboardWeatherMetricKind.toImageVector(): ImageVector = when (this) {
+    DashboardWeatherMetricKind.HUMIDITY -> Icons.Filled.WaterDrop
+    DashboardWeatherMetricKind.WIND -> Icons.Filled.Air
+    DashboardWeatherMetricKind.VISIBILITY -> Icons.Filled.Visibility
+    DashboardWeatherMetricKind.AIR_QUALITY -> Icons.Filled.Spa
+}
+
+/** AQI banding colours, matching the macOS card's `aqiColor(aqi:)` ramp. */
+private fun AirQualityLevel.toColor(): Color = when (this) {
+    AirQualityLevel.GOOD -> Color(0xFF30D158)
+    AirQualityLevel.MODERATE -> Color(0xFFFFD60A)
+    AirQualityLevel.SENSITIVE -> Color(0xFFFF9F0A)
+    AirQualityLevel.UNHEALTHY -> Color(0xFFFF453A)
+    AirQualityLevel.VERY_UNHEALTHY -> Color(0xFFBF5AF2)
+    AirQualityLevel.HAZARDOUS -> Color(0xFFA2845E)
 }
 
 private data class QuickAction(
+    val id: String,
     val title: String,
     val icon: ImageVector,
     val route: String,

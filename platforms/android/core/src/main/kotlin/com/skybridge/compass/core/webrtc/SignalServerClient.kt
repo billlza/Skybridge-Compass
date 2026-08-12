@@ -4,7 +4,9 @@ package com.skybridge.compass.core.webrtc
 
 import android.os.Build
 import android.util.Base64
+import com.skybridge.compass.core.BuildConfig
 import com.skybridge.compass.core.p2p.LocalP2PIdentity
+import com.skybridge.compass.shared.crypto.providers.AndroidPQCCryptoProvider
 import com.skybridge.compass.shared.p2p.P2PHandshakeWire
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
@@ -24,6 +26,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNames
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.net.URI
 
 class SignalServerClient(
@@ -45,7 +49,8 @@ class SignalServerClient(
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?: "1"
-    }
+    },
+    private val isDebugBuildProvider: () -> Boolean = { BuildConfig.DEBUG }
 ) {
     data class UserAuthContext(
         val bearerToken: String,
@@ -346,6 +351,7 @@ class SignalServerClient(
         binding: ProtocolIdentityBinding,
         validDurationSeconds: Int
     ): SessionLease {
+        requireLegacyEndpointAllowedForDiagnostics("registerSession")
         val requestBody = makeRegisterSessionRequestBody(
             sessionId = sessionId,
             binding = binding,
@@ -403,6 +409,7 @@ class SignalServerClient(
         deviceName: String,
         validDurationSeconds: Int
     ): ConnectionCodeLease {
+        requireLegacyEndpointAllowedForDiagnostics("registerConnectionCode")
         val requestBody = makeRegisterCodeRequestBody(
             binding = binding,
             deviceName = deviceName,
@@ -481,6 +488,7 @@ class SignalServerClient(
         code: String,
         binding: ProtocolIdentityBinding
     ): ConnectionCodeLookup {
+        requireLegacyEndpointAllowedForDiagnostics("lookupConnectionCode")
         val response: LookupCodeResponseBody = performJsonRequest(
             path = lookupCodePath(code),
             method = HttpMethod.GET,
@@ -547,6 +555,7 @@ class SignalServerClient(
         qrBootstrapToken: String,
         binding: ProtocolIdentityBinding
     ): RedeemedSessionLease {
+        requireLegacyEndpointAllowedForDiagnostics("redeemSession")
         val requestBody = RedeemSessionRequestBody(
             sessionId = sessionId,
             qrBootstrapToken = qrBootstrapToken,
@@ -641,7 +650,7 @@ class SignalServerClient(
             val payload = response.bodyAsText()
             if (!response.status.isSuccess()) {
                 throw IllegalStateException(
-                    "signal server rejected (${response.status.value}): $payload"
+                    safeServerRejectionMessage(response.status.value, payload)
                 )
             }
             payload
@@ -650,9 +659,7 @@ class SignalServerClient(
         return try {
             defaultJson.decodeFromString(responseText)
         } catch (err: Throwable) {
-            throw IllegalStateException(
-                "signal server malformed response: ${err.message ?: "unknown"}"
-            )
+            throw IllegalStateException("signal server malformed response")
         }
     }
 
@@ -699,13 +706,10 @@ class SignalServerClient(
         binding: ProtocolIdentityBinding,
         localIdentity: LocalP2PIdentity
     ): AdmissionLease? {
-        if (!shouldUseAdmission()) {
+        if (!shouldAttemptAdmissionForBaseUrl(baseUrlProvider(), userAuthContextProvider())) {
             return null
         }
-        val authContext = sanitizedUserAuthContext(userAuthContextProvider()) ?: return null
-        if (authContext.tenantId.isBlank()) {
-            return null
-        }
+        requireAdmissionAuthContext()
         val challenge = requestAdmissionChallenge(binding)
         val signature = signAdmissionChallenge(
             payload = challenge.signaturePayload(),
@@ -716,6 +720,22 @@ class SignalServerClient(
             challenge = challenge,
             binding = binding,
             signature = signature
+        )
+    }
+
+    private suspend fun requireAdmissionAuthContext(): UserAuthContext {
+        val raw = userAuthContextProvider()
+        val bearerToken = raw?.bearerToken?.trim().orEmpty()
+        val tenantId = raw?.tenantId?.trim().orEmpty()
+        if (bearerToken.isEmpty()) {
+            throw IllegalStateException("missing authenticated user session")
+        }
+        if (tenantId.isEmpty()) {
+            throw IllegalStateException("missing tenant id")
+        }
+        return UserAuthContext(
+            bearerToken = bearerToken,
+            tenantId = tenantId
         )
     }
 
@@ -733,7 +753,7 @@ class SignalServerClient(
         )
     }
 
-    private fun signAdmissionChallenge(
+    private suspend fun signAdmissionChallenge(
         payload: ByteArray,
         binding: ProtocolIdentityBinding,
         localIdentity: LocalP2PIdentity
@@ -744,12 +764,111 @@ class SignalServerClient(
                 P2PHandshakeWire.signEd25519Public(payload, signingKeys.ed25519PrivateKey)
 
             ProtocolSigningAlgorithm.ML_DSA_65 ->
-                error("ML-DSA-65 admission signing is not available on Android current-path smoke")
+                AndroidPQCCryptoProvider().sign(
+                    payload,
+                    requireNotNull(signingKeys.mlDsa65PrivateKeyRaw) {
+                        "ML-DSA-65 private key unavailable for current-path admission"
+                    }
+                )
         }
     }
 
     private fun shouldUseAdmission(): Boolean {
-        val host = runCatching { URI(baseUrlProvider().trim()) }
+        return shouldUseAdmissionForBaseUrl(baseUrlProvider())
+    }
+
+    private fun requireLegacyEndpointAllowedForDiagnostics(operation: String) {
+        // R4.10: public signaling base URLs must use current-path admission; the legacy
+        // register/lookup/redeem direct endpoints are permitted ONLY for local/private
+        // diagnostic endpoints in a debug build. Any public base URL, any non-debug build,
+        // or any host outside the diagnostic ranges must fail closed BEFORE a request is sent.
+        if (shouldUseAdmission()) {
+            throw IllegalStateException(
+                "$operation requires current-path admission on public signaling endpoint"
+            )
+        }
+        if (!isLegacyDiagnosticEndpointAllowed(baseUrlProvider())) {
+            throw IllegalStateException(
+                "$operation legacy signaling path rejected: current-path authentication required"
+            )
+        }
+    }
+
+    /**
+     * R4.10 admission gate for the legacy direct signaling endpoints.
+     *
+     * Returns true only when the build is a debug build AND the target host is a
+     * local/private diagnostic host within one of the permitted ranges
+     * (127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+     * 169.254.0.0/16, fc00::/7). All other cases (public hosts, non-debug builds,
+     * unparseable URLs) return false so the caller fails closed before sending.
+     */
+    internal fun isLegacyDiagnosticEndpointAllowed(baseUrl: String): Boolean {
+        if (!isDebugBuildProvider()) {
+            return false
+        }
+        val host = runCatching { URI(baseUrl.trim()) }
+            .getOrNull()
+            ?.host
+            ?.lowercase()
+            ?: return false
+        return isDiagnosticEndpointHost(host)
+    }
+
+    internal fun isDiagnosticEndpointHost(rawHost: String): Boolean {
+        val host = normalizeHostLiteral(rawHost)
+        return isIpv4DiagnosticHost(host) || isIpv6DiagnosticHost(host)
+    }
+
+    private fun normalizeHostLiteral(host: String): String {
+        var normalized = host.trim().lowercase()
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length - 1)
+        }
+        // Drop an IPv6 zone identifier if present (e.g. fe80::1%eth0).
+        val zoneIndex = normalized.indexOf('%')
+        if (zoneIndex >= 0) {
+            normalized = normalized.substring(0, zoneIndex)
+        }
+        return normalized
+    }
+
+    private fun isIpv4DiagnosticHost(host: String): Boolean {
+        val parts = host.split('.')
+        if (parts.size != 4) {
+            return false
+        }
+        val octets = parts.map { it.toIntOrNull() ?: return false }
+        if (octets.any { it !in 0..255 }) {
+            return false
+        }
+        return when {
+            octets[0] == 127 -> true                          // 127.0.0.0/8
+            octets[0] == 10 -> true                           // 10.0.0.0/8
+            octets[0] == 172 && octets[1] in 16..31 -> true   // 172.16.0.0/12
+            octets[0] == 192 && octets[1] == 168 -> true      // 192.168.0.0/16
+            octets[0] == 169 && octets[1] == 254 -> true      // 169.254.0.0/16
+            else -> false
+        }
+    }
+
+    private fun isIpv6DiagnosticHost(host: String): Boolean {
+        if (!host.contains(':')) {
+            return false
+        }
+        val canonical = when (host) {
+            "::1", "0:0:0:0:0:0:0:1" -> return true            // ::1/128 loopback
+            else -> host
+        }
+        // fc00::/7 unique local addresses: first byte 0xfc or 0xfd.
+        val firstGroup = canonical.substringBefore(':').takeIf { it.isNotEmpty() } ?: return false
+        val firstGroupValue = firstGroup.toIntOrNull(16) ?: return false
+        val firstByte = (firstGroupValue shr 8) and 0xFF
+        return firstByte == 0xFC || firstByte == 0xFD
+    }
+
+    internal fun shouldUseAdmissionForBaseUrl(baseUrl: String): Boolean {
+        val host = runCatching { URI(baseUrl.trim()) }
             .getOrNull()
             ?.host
             ?.lowercase()
@@ -761,6 +880,28 @@ class SignalServerClient(
             return false
         }
         return !isPrivateIpv4Host(host)
+    }
+
+    internal fun shouldAttemptAdmissionForBaseUrl(
+        baseUrl: String,
+        authContext: UserAuthContext?
+    ): Boolean =
+        shouldUseAdmissionForBaseUrl(baseUrl) || sanitizedUserAuthContext(authContext) != null
+
+    internal fun safeServerRejectionMessage(statusCode: Int, payload: String): String {
+        val errorCode = runCatching {
+            defaultJson.parseToJsonElement(payload)
+                .jsonObject["error"]
+                ?.jsonPrimitive
+                ?.content
+                ?.trim()
+                ?.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,80}")) }
+        }.getOrNull()
+        return if (errorCode.isNullOrEmpty()) {
+            "signal server rejected ($statusCode)"
+        } else {
+            "signal server rejected ($statusCode, error=$errorCode)"
+        }
     }
 
     private fun isPrivateIpv4Host(host: String): Boolean {

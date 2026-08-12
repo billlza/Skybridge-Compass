@@ -30,6 +30,8 @@ import kotlin.math.max
 import com.skybridge.compass.discovery.presentation.events.DeviceDiscoveryEvent
 import com.skybridge.compass.discovery.presentation.states.DeviceDiscoveryState
 import com.skybridge.compass.discovery.presentation.states.DeviceSortBy
+import com.skybridge.compass.shared.productsession.ProductSessionAuthority
+import com.skybridge.compass.shared.productsession.ProductSessionAuthorityStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -60,7 +62,8 @@ class DeviceDiscoveryViewModel @Inject constructor(
     private val sendNearbyStreamUseCase: SendNearbyStreamUseCase,
     private val observeNearbyTransferUpdatesUseCase: ObserveNearbyTransferUpdatesUseCase,
     private val cancelNearbyPayloadUseCase: CancelNearbyPayloadUseCase,
-    private val deviceListService: DeviceListService
+    private val deviceListService: DeviceListService,
+    productSessionAuthorityStore: ProductSessionAuthorityStore
 ) : ViewModel() {
     private var discoveryJob: Job? = null
     
@@ -76,6 +79,7 @@ class DeviceDiscoveryViewModel @Inject constructor(
     
     private val _uiState = MutableStateFlow(DeviceDiscoveryState())
     val uiState: StateFlow<DeviceDiscoveryState> = _uiState.asStateFlow()
+    val productSessions: StateFlow<List<ProductSessionAuthority>> = productSessionAuthorityStore.sessions
     
     /**
      * 处理UI事件
@@ -145,11 +149,7 @@ class DeviceDiscoveryViewModel @Inject constructor(
             .onEach { payload ->
                 when (payload) {
                     is NearbyPayload.Bytes -> {
-                        val text = try {
-                            payload.data.toString(Charsets.UTF_8)
-                        } catch (_: Throwable) {
-                            "(binary ${payload.data.size} bytes)"
-                        }
+                        val text = payload.data.toString(Charsets.UTF_8)
                         _nearbyMessages.tryEmit(UiNearbyMessage.Text(text))
                     }
                     is NearbyPayload.FilePayload -> {
@@ -170,7 +170,7 @@ class DeviceDiscoveryViewModel @Inject constructor(
                                 )
                             } else {
                                 // 非图片：关闭句柄并直接提示文件接收
-                                try { pfd.close() } catch (_: Throwable) {}
+                                closePayloadDescriptor(payload.payloadId, pfd, "关闭 Nearby 文件句柄失败")
                                 _nearbyMessages.tryEmit(UiNearbyMessage.FileReceived(payload.payloadId))
                             }
                         } else {
@@ -185,10 +185,13 @@ class DeviceDiscoveryViewModel @Inject constructor(
                                 val buf = ByteArray(8 * 1024)
                                 val read = bis.read(buf)
                                 if (read > 0) buf.copyOf(read) else ByteArray(0)
-                            } catch (_: Throwable) {
-                                ByteArray(0)
+                            } catch (e: Exception) {
+                                _nearbyMessages.tryEmit(
+                                    UiNearbyMessage.Error("读取 Nearby 流失败: ${errorMessage(e)}")
+                                )
+                                return@launch
                             } finally {
-                                try { input.close() } catch (_: Throwable) {}
+                                closeInputStream(payload.payloadId, input, "关闭 Nearby 流失败")
                             }
                             _nearbyMessages.tryEmit(UiNearbyMessage.StreamPreview(payload.payloadId, preview))
                         }
@@ -315,8 +318,8 @@ class DeviceDiscoveryViewModel @Inject constructor(
                 } else {
                     _nearbyMessages.tryEmit(UiNearbyMessage.FileReceived(payloadId))
                 }
-            } catch (t: Throwable) {
-                _nearbyMessages.tryEmit(UiNearbyMessage.Error("图片解码失败: ${t.message ?: "unknown"}"))
+            } catch (e: Exception) {
+                _nearbyMessages.tryEmit(UiNearbyMessage.Error("图片解码失败: ${errorMessage(e)}"))
             }
         }
     }
@@ -324,18 +327,17 @@ class DeviceDiscoveryViewModel @Inject constructor(
     /** 主动释放保留的文件句柄，避免资源泄露 */
     fun releaseFilePayload(payloadId: Long) {
         pendingFilePayloads.remove(payloadId)?.let { pfd ->
-            try { pfd.close() } catch (_: Throwable) {}
+            closePayloadDescriptor(payloadId, pfd, "关闭 Nearby 文件句柄失败")
         }
     }
 
     override fun onCleared() {
         discoveryJob?.cancel()
-        super.onCleared()
         // 释放所有未处理的文件句柄
         val it = pendingFilePayloads.iterator()
         while (it.hasNext()) {
             val entry = it.next()
-            try { entry.value.close() } catch (_: Throwable) {}
+            closePayloadDescriptor(entry.key, entry.value, "关闭待处理 Nearby 文件句柄失败")
             it.remove()
         }
     }
@@ -350,10 +352,29 @@ class DeviceDiscoveryViewModel @Inject constructor(
             }
             BitmapFactory.decodeFileDescriptor(pfd.fileDescriptor, null, opts)
             if (opts.outWidth > 0 && opts.outHeight > 0) ImagePeek(opts.outMimeType, opts.outWidth, opts.outHeight) else null
-        } catch (_: Throwable) {
+        } catch (_: Exception) {
             null
         }
     }
+
+    private fun closePayloadDescriptor(payloadId: Long, pfd: ParcelFileDescriptor, context: String) {
+        try {
+            pfd.close()
+        } catch (e: Exception) {
+            _nearbyMessages.tryEmit(UiNearbyMessage.Error("$context payloadId=$payloadId: ${errorMessage(e)}"))
+        }
+    }
+
+    private fun closeInputStream(payloadId: Long, input: InputStream, context: String) {
+        try {
+            input.close()
+        } catch (e: Exception) {
+            _nearbyMessages.tryEmit(UiNearbyMessage.Error("$context payloadId=$payloadId: ${errorMessage(e)}"))
+        }
+    }
+
+    private fun errorMessage(error: Exception): String =
+        error.message?.takeIf { it.isNotBlank() } ?: error::class.java.simpleName
 
     private fun isImageMime(mime: String?): Boolean {
         if (mime.isNullOrBlank()) return false

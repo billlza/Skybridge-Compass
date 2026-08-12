@@ -1,7 +1,6 @@
 package com.skybridge.compass.discovery.data.datasources
 
 import android.content.Context
-import android.os.Build
 import android.Manifest
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.nearby.Nearby
@@ -44,20 +43,12 @@ class NearbyConnectionsDiscoveryDataSource @Inject constructor(
         telemetry.recordDiscoveryStart(DiscoveryProtocol.NEARBY_CONNECTIONS)
         val discovered = mutableMapOf<String, DiscoveredDevice>()
 
-        // 运行时权限检查：Android 12+ 需要 BLUETOOTH_SCAN；更早版本通常需要定位权限以启用 BLE/Wi‑Fi 扫描
-        val hasRequired = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.BLUETOOTH_SCAN
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        }
+        val hasRequired = ActivityCompat.checkSelfPermission(
+            context,
+            Manifest.permission.BLUETOOTH_SCAN
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         if (!hasRequired) {
-            telemetry.recordPermissionMissing(DiscoveryProtocol.NEARBY_CONNECTIONS, if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "BLUETOOTH_SCAN" else "ACCESS_FINE_LOCATION")
+            telemetry.recordPermissionMissing(DiscoveryProtocol.NEARBY_CONNECTIONS, "BLUETOOTH_SCAN")
             trySend(emptyList())
             close()
             return@callbackFlow

@@ -1,0 +1,27 @@
+{
+  "expectedFields" : {
+    "fileSha256" : "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "op" : "completeAck",
+    "receivedBytes" : "6",
+    "transferId" : "61111111-2222-3333-4444-555555555555",
+    "version" : "1"
+  },
+  "messageType" : "completeAck",
+  "provenance" : {
+    "captureToolPath" : "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift",
+    "collectedAtUtc" : "2026-08-10T22:59:36.000Z",
+    "note" : "CrossNetworkFileTransferMessage encoded by the shipping canonical production codec",
+    "origin" : "APPLE_REFERENCE_CAPTURE",
+    "repoIdentity" : "github.com/billlza/Skybridge-Compass",
+    "repositoryRemoteURL" : "https://github.com/billlza/Skybridge-Compass",
+    "semanticInputPath" : "Tests/SkyBridgeCoreTests/Fixtures/AppleCompatibilityVectors/inputs.json",
+    "semanticInputSha256" : "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0",
+    "source" : "SkyBridge Apple production codec XCTest capture",
+    "sourceCommit" : "6d6f601ea0ac23ba5c62d46b98c3efd03acc4898",
+    "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+    "sourceSetSha256" : "7ea5e3760a2f27818700bdad3f047f26d9670365eb79ea73e70a72ea69364cfb"
+  },
+  "rawBytesHex" : "7b2266696c65536861323536223a22494345694979516c4a69636f4b536f724c4330754c7a41784d6a4d304e5459334f446b364f7a7739506a383d222c226f70223a22636f6d706c65746541636b222c2272656365697665644279746573223a362c227472616e736665724964223a2236313131313131312d323232322d333333332d343434342d353535353535353535353535222c2276657273696f6e223a317d",
+  "schemaVersion" : 1,
+  "surface" : "F1"
+}

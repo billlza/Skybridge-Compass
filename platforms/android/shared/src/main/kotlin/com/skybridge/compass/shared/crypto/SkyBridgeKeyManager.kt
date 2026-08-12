@@ -76,7 +76,7 @@ class SkyBridgeKeyManager(private val context: Context) {
                 }
             }
             
-            val preferStrongBox = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && PlatformCompat.hasStrongBox
+            val preferStrongBox = PlatformCompat.hasStrongBox
             return runCatching {
                 generateDeviceIdentityKey(preferStrongBox = preferStrongBox)
             }.recoverCatching { error ->
@@ -171,7 +171,7 @@ class SkyBridgeKeyManager(private val context: Context) {
                 }
             }
             
-            val preferStrongBox = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && PlatformCompat.hasStrongBox
+            val preferStrongBox = PlatformCompat.hasStrongBox
             return runCatching {
                 generateWrappingKey(preferStrongBox = preferStrongBox)
             }.recoverCatching { error ->
@@ -366,7 +366,7 @@ class SkyBridgeKeyManager(private val context: Context) {
             setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512)
             setUserAuthenticationRequired(false)
 
-            if (preferStrongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (preferStrongBox) {
                 setIsStrongBoxBacked(true)
             }
         }
@@ -394,7 +394,7 @@ class SkyBridgeKeyManager(private val context: Context) {
             setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             setUserAuthenticationRequired(false)
 
-            if (preferStrongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            if (preferStrongBox) {
                 setIsStrongBoxBacked(true)
             }
         }

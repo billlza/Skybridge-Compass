@@ -1,4 +1,28 @@
-# Android 设备发现技术规划（2025）
+# Android 设备发现技术规划（2026）
+
+## 2026-07-05 当前结论
+
+本文件早期版本把 Wi-Fi Aware、Nearby、BLE、UDP 与 Bonjour/mDNS 都写成近似同级的发现主线。这个判断对 Android-to-Android 能力探索仍有价值，但不应作为 Android 与 macOS/iOS 互通的主路径。
+
+当前 SkyBridge Android 的 Apple 互通最佳实践是：
+
+- 跨 macOS/iOS 基线：Android NSD/Bonjour 发现 + WebRTC DataChannel 连接 + SkyBridge app-layer P2P/Q-Periapt 握手。
+- Android-to-Android 增强：Wi-Fi Aware/NAN 与 Nearby Connections 可以作为后续增强，但它们不直接替代 Apple 互通路径。
+- Android 16+/API 36+ 局域网发现必须纳入 Local Network Permission 运行时权限模型，不能只假设 `INTERNET` 权限足够。
+- Bonjour TXT 中的 `deviceId` / `pubKeyFP` 只能视为 advertised identity hints；信任必须来自已钉扎配置或 app-layer 加密握手，不得把 TXT 元数据命名为 verified identity。
+- 不引入 Android Rust core。Android 保持 Kotlin-first，并复用现有 `device-discovery`、`core`、`remote-control`、`shared` 模块边界。
+
+2026 官方资料核对：
+
+- Android Gradle Plugin 9.3 支持 API level 37，当前 AGP 9.3.0-rc01 + Gradle 9.6.1 lane 仍是本 repo 已验证组合。
+- Android Local Network Protection 将本地网络访问纳入新的运行时权限模型，直接影响 mDNS/NSD、局域网 remote control 与 smoke 验收。
+- KSP 继续是 Kotlin-first annotation processing 路径；本项目继续避免 kapt/Java-first 新路径扩散。
+
+## 验收边界
+
+- 模拟器验收：可证明 Android API 36+ runtime、APK/instrumentation、loopback/compat signaling、WebRTC/Q-Periapt app-layer 行为。
+- 真机验收：只有连接到真实 Android 16+ 设备后才能证明 OEM 网络栈、Wi-Fi 多播、权限弹窗、功耗与真实 LAN 稳定性。
+- iOS/macOS 验收：必须分别报告 Android->iOS、iOS->Android、Android->macOS、macOS->Android 的 peer direction；不能把某一个方向的 success 泛化成“Apple interop 全部完成”。
 
 ## 背景与目标
 

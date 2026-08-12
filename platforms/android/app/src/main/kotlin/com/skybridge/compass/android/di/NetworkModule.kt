@@ -2,6 +2,7 @@ package com.skybridge.compass.android.di
 
 import android.content.Context
 import com.skybridge.compass.BuildConfig
+import com.skybridge.compass.R
 import com.skybridge.compass.android.security.PinProvider
 import com.skybridge.compass.android.security.PinProviderImpl
 import dagger.Module
@@ -34,7 +35,7 @@ object NetworkModule {
         PinProviderImpl(
             json = json,
             allowUnverifiedPinsInDebug = BuildConfig.DEBUG,
-            publicKeyPem = readRawResourceText(context, "pins_public_key")
+            publicKeyPem = readRawResourceText(context, R.raw.pins_public_key)
         )
 
     /**
@@ -61,7 +62,10 @@ object NetworkModule {
         // Add logging in debug builds
         if (BuildConfig.DEBUG) {
             val loggingInterceptor = HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.BODY
+                level = HttpLoggingInterceptor.Level.BASIC
+                redactHeader("Authorization")
+                redactHeader("apikey")
+                redactHeader("X-API-Key")
             }
             builder.addInterceptor(loggingInterceptor)
         }
@@ -104,13 +108,7 @@ object NetworkModule {
         }
     }
 
-    private fun readRawResourceText(context: Context, name: String): String? {
-        return try {
-            val resId = context.resources.getIdentifier(name, "raw", context.packageName)
-            if (resId == 0) return null
-            context.resources.openRawResource(resId).bufferedReader().use { it.readText().trim() }
-        } catch (_: Exception) {
-            null
-        }
+    private fun readRawResourceText(context: Context, resId: Int): String {
+        return context.resources.openRawResource(resId).bufferedReader().use { it.readText().trim() }
     }
 }

@@ -1,17 +1,7 @@
 package com.skybridge.compass.discovery.data.repositories
-import kotlinx.coroutines.CompletableDeferred
 import com.skybridge.compass.discovery.data.aware.WifiAwarePeerRegistry
-import com.google.android.gms.nearby.connection.ConnectionsStatusCodes
-import com.google.android.gms.nearby.connection.PayloadCallback
 import com.google.android.gms.nearby.connection.Payload
-import com.google.android.gms.nearby.connection.ConnectionResolution
-import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
-import com.google.android.gms.nearby.connection.ConnectionsClient
-import android.net.NetworkRequest
-import android.net.NetworkCapabilities
 import android.net.Network
-import android.net.ConnectivityManager
-import android.content.Context
 
 import com.skybridge.compass.discovery.data.services.UnifiedDeviceDiscoveryService
 import com.skybridge.compass.discovery.data.nearby.NearbyConnectionsManager
@@ -26,7 +16,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.flow.filter
 import com.skybridge.compass.discovery.domain.entities.NearbyPayload
 import com.skybridge.compass.discovery.domain.entities.NearbyTransferUpdate
 import android.os.ParcelFileDescriptor
@@ -34,12 +23,19 @@ import java.io.InputStream
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate
 import javax.inject.Inject
 import javax.inject.Singleton
-import java.net.InetSocketAddress
-import java.net.Socket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.skybridge.compass.core.data.RuntimeNetworkParametersSource
+import com.skybridge.compass.core.network.DisconnectCause
+import com.skybridge.compass.core.network.ReconnectAttemptResult
+import com.skybridge.compass.core.network.ReconnectCoordinator
+import com.skybridge.compass.core.network.RuntimeReconnectPolicyFactory
 import com.skybridge.compass.core.p2p.TcpControlClient
 import com.skybridge.compass.core.p2p.TcpControlSession
+import kotlin.time.Duration
+import kotlinx.coroutines.delay
+import com.skybridge.compass.discovery.data.services.DiscoveryWindow.withDiscoveryWindow
+import com.skybridge.compass.discovery.data.interop.AppleBonjourPeerRoutes
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -49,35 +45,47 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @Singleton
 class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDiscoveryService: UnifiedDeviceDiscoveryService,
-    private val nearbyClient: ConnectionsClient,
-    private val appContext: Context,
     private val wifiAwarePeerRegistry: WifiAwarePeerRegistry,
     private val nearbyManager: NearbyConnectionsManager,
     private val awareDataPathManager: WifiAwareDataPathManager,
-    private val tcpControlClient: TcpControlClient
+    private val tcpControlClient: TcpControlClient,
+    private val runtimeParameters: RuntimeNetworkParametersSource,
+    private val reconnectPolicyFactory: RuntimeReconnectPolicyFactory
 ) : DeviceDiscoveryRepository {
-    
+
+    /**
+     * 退避睡眠注入点（R7.4 接线的可测试缝）。生产用 [delay]；测试注入空实现以免真实等待。
+     * 不是设置镜像变量，只是时钟缝，故不属 R7.10 的清零对象。
+     */
+    internal var reconnectSleep: suspend (Duration) -> Unit = { delay(it) }
+
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     private val _connectionStates = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val deviceIdToEndpointId: MutableMap<String, String> = mutableMapOf()
     private val endpointIdToDeviceId: MutableMap<String, String> = mutableMapOf()
     private val tcpSessionsByDeviceId: MutableMap<String, TcpControlSession> = ConcurrentHashMap()
-    
+
     private var isDiscovering = false
-    
+
     override suspend fun startDiscovery(protocols: Set<DiscoveryProtocol>): Flow<List<DiscoveredDevice>> {
         if (isDiscovering) {
             return _discoveredDevices.asStateFlow()
         }
         
         isDiscovering = true
-        
+
+        // R7.4: the discovery window is read once, here at discovery-start time, so this run uses
+        // the value that was persisted when it started. Changing the setting affects the next run
+        // and never truncates or extends a run that is already in flight.
+        val discoveryWindow = runtimeParameters.current().discoveryWindow
+
         return unifiedDiscoveryService.startDiscovery(protocols)
             .distinctUntilChanged()
             .onEach { devices ->
                 _discoveredDevices.value = devices
                 updateConnectionStates(devices)
             }
+            .withDiscoveryWindow(discoveryWindow)
             .onCompletion {
                 isDiscovering = false
             }
@@ -93,40 +101,54 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
     }
     
     override suspend fun connectToDevice(device: DiscoveredDevice): Boolean {
-        return try {
-            // 这里应该实现实际的连接逻辑
-            // 根据设备的连接信息和协议建立连接
-            val success = performConnection(device)
-            
-            if (success) {
-                updateDeviceConnectionState(device.id, true)
-                updateDeviceInList(device.copy(isConnected = true))
-            }
-            
-            success
-        } catch (e: Exception) {
-            false
+        // 首次尝试立即进行（用户发起的连接不应先等一个退避间隔）。
+        val success = performConnection(device) || reconnectAfterFailedConnect(device)
+
+        if (success) {
+            updateDeviceConnectionState(device.id, true)
+            updateDeviceInList(device.copy(isConnected = true))
         }
+
+        return success
     }
-    
-    override suspend fun disconnectFromDevice(deviceId: String) {
-        try {
-            // 实现断开连接逻辑
-            performDisconnection(deviceId)
-            updateDeviceConnectionState(deviceId, false)
-            
-            // 更新设备列表中的连接状态
-            val updatedDevices = _discoveredDevices.value.map { device ->
-                if (device.id == deviceId) {
-                    device.copy(isConnected = false)
+
+    /**
+     * 首次连接失败后按 `max_reconnect_attempts` 退避重试（R7.4 / R4.7）。
+     *
+     * 该方法是 `max_reconnect_attempts` 的**运行时消费方**：每次新会话都经
+     * [RuntimeReconnectPolicyFactory.forNewSession] 重新取当前持久化值构造策略，
+     * 因此设置改动对随后建立的连接生效，而进行中的重试仍按其开始时取得的上限运行。
+     * 设为 0 时不进行任何重试。
+     */
+    private suspend fun reconnectAfterFailedConnect(device: DiscoveredDevice): Boolean {
+        val policy = reconnectPolicyFactory.forNewSession()
+        if (policy.maxAttempts <= 0) return false
+
+        return ReconnectCoordinator(
+            policy = policy,
+            attemptConnect = {
+                if (performConnection(device)) {
+                    ReconnectAttemptResult.Established
                 } else {
-                    device
+                    ReconnectAttemptResult.Failed(FAILURE_CONNECT_REJECTED)
                 }
+            },
+            sleep = { reconnectSleep(it) }
+        ).onDisconnected(DisconnectCause.UNEXPECTED)
+    }
+
+    override suspend fun disconnectFromDevice(deviceId: String) {
+        performDisconnection(deviceId)
+        updateDeviceConnectionState(deviceId, false)
+
+        val updatedDevices = _discoveredDevices.value.map { device ->
+            if (device.id == deviceId) {
+                device.copy(isConnected = false)
+            } else {
+                device
             }
-            _discoveredDevices.value = updatedDevices
-        } catch (e: Exception) {
-            // 处理断开连接错误
         }
+        _discoveredDevices.value = updatedDevices
     }
     
     override fun getDeviceConnectionStatus(deviceId: String): Flow<Boolean> {
@@ -146,13 +168,14 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
     private suspend fun performConnection(device: DiscoveredDevice): Boolean {
         return when (device.connectionInfo.protocol) {
             DiscoveryProtocol.BONJOUR -> {
-                connectViaTcp(device.id, device.connectionInfo.address, device.connectionInfo.port)
+                val handshakeEndpoint = AppleBonjourPeerRoutes.from(device).handshake ?: return false
+                connectViaTcp(device.id, handshakeEndpoint.host, handshakeEndpoint.port)
             }
             DiscoveryProtocol.WIFI_DIRECT -> {
-                connectViaWifiDirect(device)
+                connectViaWifiDirect()
             }
             DiscoveryProtocol.BLUETOOTH -> {
-                connectViaBluetooth(device)
+                connectViaBluetooth()
             }
             DiscoveryProtocol.NEARBY_CONNECTIONS -> {
                 connectViaNearby(device)
@@ -169,44 +192,32 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
      */
     private suspend fun connectViaTcp(deviceId: String, address: String, port: Int): Boolean {
         return withContext(Dispatchers.IO) {
-            try {
-                // Real Pro-release compatible control channel (length framing + handshake + AES-GCM app frames).
-                val session = tcpControlClient.connect(
-                    host = address,
-                    port = port,
-                    peerDeviceIdHint = deviceId
-                )
-                tcpSessionsByDeviceId[deviceId] = session
-                true
-            } catch (_: Exception) {
-                false
-            }
+            // Real Pro-release compatible control channel (length framing + handshake + AES-GCM app frames).
+            val session = tcpControlClient.connect(
+                host = address,
+                port = port,
+                peerDeviceIdHint = deviceId
+            )
+            tcpSessionsByDeviceId[deviceId] = session
+            true
         }
     }
     
     /**
      * 通过WiFi Direct连接设备
      */
-    private suspend fun connectViaWifiDirect(device: DiscoveredDevice): Boolean {
-        return try {
-            // Wi‑Fi Direct requires WifiP2pManager orchestration and user consent flows.
-            // Returning false is safer than reporting success without a real connection.
-            false
-        } catch (e: Exception) {
-            false
-        }
+    private fun connectViaWifiDirect(): Boolean {
+        // Wi‑Fi Direct requires WifiP2pManager orchestration and user consent flows.
+        // Returning false is safer than reporting success without a real connection.
+        return false
     }
     
     /**
      * 通过蓝牙连接设备
      */
-    private suspend fun connectViaBluetooth(device: DiscoveredDevice): Boolean {
-        return try {
-            // Bluetooth connection requires pairing + BLUETOOTH_CONNECT permission and a concrete RFCOMM profile.
-            false
-        } catch (e: Exception) {
-            false
-        }
+    private fun connectViaBluetooth(): Boolean {
+        // Bluetooth connection requires pairing + BLUETOOTH_CONNECT permission and a concrete RFCOMM profile.
+        return false
     }
 
     /**
@@ -214,29 +225,21 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
      * 连接建立仍依赖 Nearby 管理器与其生命周期回调，但这里不再伪造成功状态。
      */
     private suspend fun connectViaNearby(device: DiscoveredDevice): Boolean {
-        return try {
-            val endpointId = device.connectionInfo.address.ifEmpty { device.id }
-            rememberNearbyMapping(device.id, endpointId)
-            val ok = nearbyManager.requestConnection(device.name.ifEmpty { "SkyBridgeClient" }, endpointId)
-            if (ok) {
-                val hello = """{"op":"hello","id":"${device.id}","ver":1}"""
-                nearbyManager.sendBytes(endpointId, hello.toByteArray())
-            }
-            ok
-        } catch (e: Exception) {
-            false
+        val endpointId = device.connectionInfo.address.ifEmpty { device.id }
+        rememberNearbyMapping(device.id, endpointId)
+        val ok = nearbyManager.requestConnection(device.name.ifEmpty { "SkyBridgeClient" }, endpointId)
+        if (ok) {
+            val hello = """{"op":"hello","id":"${device.id}","ver":1}"""
+            nearbyManager.sendBytes(endpointId, hello.toByteArray())
         }
+        return ok
     }
 /**
      * 通过 Wi‑Fi Aware 连接设备。
      * 连接建立仍依赖 Aware 会话中的数据通道，但这里不再伪造成功状态。
      */
     private suspend fun connectViaWifiAware(device: DiscoveredDevice): Boolean {
-        return try {
-            awareDataPathManager.initiateDataPath(device.id)
-        } catch (e: Exception) {
-            false
-        }
+        return awareDataPathManager.initiateDataPath(device.id)
     }
 /**
      * 执行设备断开连接
@@ -246,9 +249,7 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
         // 根据设备ID找到对应的连接并关闭
         tcpSessionsByDeviceId.remove(deviceId)?.close()
         deviceIdToEndpointId[deviceId]?.let { endpointId ->
-            try {
-                nearbyManager.disconnect(endpointId)
-            } catch (_: Exception) {}
+            nearbyManager.disconnect(endpointId)
             endpointIdToDeviceId.remove(endpointId)
         }
         deviceIdToEndpointId.remove(deviceId)
@@ -385,5 +386,16 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
 
     private fun resolveEndpointId(deviceId: String): String {
         return deviceIdToEndpointId[deviceId] ?: deviceId
+    }
+
+    private companion object {
+        /**
+         * 单次重连尝试失败的原因分类，交给 [ReconnectCoordinator] 汇总到
+         * [com.skybridge.compass.core.network.ReconnectState.GaveUp.failureCategory]。
+         *
+         * 这里的失败是「连接未能建立」这一可重试类别（对端拒绝/无响应），不是 R4.13 的安全终态
+         * 失败——后者由 [DisconnectCause.TERMINAL] 表达，不进入重连循环。
+         */
+        private const val FAILURE_CONNECT_REJECTED = "CONNECT_REJECTED"
     }
 }

@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.skybridge.compass.android.ui.theme.IOSParityTokens
 
 /**
  * Apple-like grouped list section:
@@ -35,8 +36,8 @@ import androidx.compose.ui.unit.dp
  */
 @Composable
 fun GroupedGlassSection(
-    title: String? = null,
     modifier: Modifier = Modifier,
+    title: String? = null,
     containerPadding: PaddingValues = PaddingValues(horizontal = 0.dp, vertical = 0.dp),
     content: @Composable ColumnScope.() -> Unit
 ) {
@@ -52,13 +53,15 @@ fun GroupedGlassSection(
         }
         LiquidGlassSurface(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(18.dp),
-            blurRadius = 0.dp,
-            tintColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.14f),
-            tintAlpha = 0.14f,
-            borderAlpha = 0.14f,
-            highlightAlpha = 0.06f,
-            edgeGlowAlpha = 0.05f,
+            shape = RoundedCornerShape(IOSParityTokens.ShapeTokens.GlassSectionCornerRadius),
+            opticalDepth = 22.dp,
+            tintColor = MaterialTheme.colorScheme.surface.copy(
+                alpha = IOSParityTokens.GlassTokens.SectionTintAlpha
+            ),
+            tintAlpha = IOSParityTokens.GlassTokens.SectionTintAlpha,
+            borderAlpha = IOSParityTokens.GlassTokens.SectionBorderAlpha,
+            highlightAlpha = IOSParityTokens.GlassTokens.SectionHighlightAlpha,
+            edgeGlowAlpha = IOSParityTokens.GlassTokens.SectionEdgeGlowAlpha,
             contentPadding = containerPadding
         ) {
             Column { content() }
@@ -88,9 +91,9 @@ fun GroupedGlassDivider(
 @Composable
 fun GroupedGlassRow(
     title: String,
+    modifier: Modifier = Modifier,
     subtitle: String? = null,
     icon: ImageVector? = null,
-    modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null
 ) {
@@ -105,7 +108,7 @@ fun GroupedGlassRow(
             LiquidGlassSurface(
                 shape = RoundedCornerShape(12.dp),
                 blurRadius = 0.dp,
-                tintColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                tintColor = com.skybridge.compass.android.ui.theme.IOSParityTokens.ColorTokens.CyanAccent.copy(alpha = 0.16f),
                 tintAlpha = 0.16f,
                 borderAlpha = 0.12f,
                 highlightAlpha = 0.06f,
@@ -116,7 +119,7 @@ fun GroupedGlassRow(
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
+                    tint = com.skybridge.compass.android.ui.theme.IOSParityTokens.ColorTokens.CyanAccent,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -148,5 +151,4 @@ fun GroupedGlassRow(
         }
     }
 }
-
 

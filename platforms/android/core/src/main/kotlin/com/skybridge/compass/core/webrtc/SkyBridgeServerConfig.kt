@@ -20,11 +20,7 @@ object SkyBridgeServerConfig {
     val turnURL: String get() = "turn:$turnServerHost:$turnServerPort?transport=udp"
     val turnTLSURL: String get() = "turns:$turnServerHost:$turnTlsServerPort?transport=tcp"
     val turnURLs: List<String> get() = listOf(turnTLSURL, turnURL)
-    val defaultStunServers: List<String> get() = listOf(
-        stunURL,
-        "stun:stun.l.google.com:19302",
-        "stun:stun1.l.google.com:19302"
-    )
+    val defaultStunServers: List<String> get() = listOf(stunURL)
     val defaultTurnServers: List<String> get() = turnURLs
 
     /**

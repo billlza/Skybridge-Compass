@@ -2,7 +2,13 @@
 
 **Version:** 1.0
 **Date:** 2026-01-11
-**Status:** Draft Design Document
+**Status:** Historical draft; partially superseded
+
+> This document preserves early design context and code examples. It is not the current protocol
+> authority. Use `docs/ADR-2026-07-01-ANDROID-P2P-QPERIAPT-STACK.md` for security/platform policy and
+> `docs/ADR-2026-07-23-PEER-FAMILY-PROTOCOL-LANES.md` for protocol ownership and peer-family lanes.
+> In particular, Android-to-Apple follows the current Apple-observed contract without modifying
+> Apple source; authenticated same-family peers may negotiate a private optimized lane.
 
 ---
 

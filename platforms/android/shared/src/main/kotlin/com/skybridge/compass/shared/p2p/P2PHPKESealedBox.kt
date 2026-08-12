@@ -26,9 +26,21 @@ data class P2PHPKESealedBox(
     val ciphertext: ByteArray,
     val tag: ByteArray
 ) {
-    fun combinedWithHeader(): ByteArray {
-        val headerSize = 17
-        val out = ByteBuffer.allocate(headerSize + encapsulatedKey.size + nonce.size + ciphertext.size + tag.size)
+    fun combinedWithHeader(): ByteArray = combinedWithHeader(MAX_CIPHERTEXT_BYTES_APPLICATION)
+
+    internal fun combinedWithHeaderForHandshake(): ByteArray =
+        combinedWithHeader(MAX_CIPHERTEXT_BYTES_HANDSHAKE)
+
+    private fun combinedWithHeader(maximumCiphertextLength: Int): ByteArray {
+        val totalByteCount = validateWireShape(
+            version = version,
+            encapsulatedKeyLength = encapsulatedKey.size,
+            nonceLength = nonce.size,
+            ciphertextLength = ciphertext.size,
+            tagLength = tag.size,
+            maximumCiphertextLength = maximumCiphertextLength
+        )
+        val out = ByteBuffer.allocate(totalByteCount)
             .order(ByteOrder.LITTLE_ENDIAN)
         out.put(byteArrayOf(0x48, 0x50, 0x4B, 0x45)) // "HPKE"
         out.put(version.toByte())
@@ -49,14 +61,17 @@ data class P2PHPKESealedBox(
         MessageDigest.getInstance("SHA-256").digest(combinedWithHeader())
 
     companion object {
+        private const val HEADER_SIZE = 17
+        private const val MAX_ENCAPSULATED_KEY_BYTES = 4_096
+        private const val MAX_CIPHERTEXT_BYTES_HANDSHAKE = 64 * 1_024
+        private const val MAX_CIPHERTEXT_BYTES_APPLICATION = 256 * 1_024
+
         fun parse(combined: ByteArray, isHandshake: Boolean = true): P2PHPKESealedBox {
-            val headerSize = 17
-            require(combined.size >= headerSize) { "Data too short for HPKE header" }
+            require(combined.size >= HEADER_SIZE) { "Data too short for HPKE header" }
             require(combined[0] == 0x48.toByte() && combined[1] == 0x50.toByte() && combined[2] == 0x4B.toByte() && combined[3] == 0x45.toByte()) {
                 "HPKE magic mismatch"
             }
             val version = combined[4].toInt() and 0xFF
-            require(version == 1 || version == 2) { "Unsupported HPKESealedBox version: $version" }
 
             val bb = ByteBuffer.wrap(combined).order(ByteOrder.LITTLE_ENDIAN)
             bb.position(5)
@@ -67,21 +82,21 @@ data class P2PHPKESealedBox(
             val tagLen = bb.get().toInt() and 0xFF
             val ctLen = bb.int
 
-            require(encLen <= 4096) { "encLen too large: $encLen" }
-            if (version == 1) {
-                require(nonceLen == 12) { "invalid nonceLen: $nonceLen" }
-                require(tagLen == 16) { "invalid tagLen: $tagLen" }
-            } else {
-                require(nonceLen == 0 || nonceLen == 12) { "invalid nonceLen: $nonceLen" }
-                require(tagLen == 0 || tagLen == 16) { "invalid tagLen: $tagLen" }
-            }
-            val maxCt = if (isHandshake) 64 * 1024 else 256 * 1024
-            require(ctLen in 0..maxCt) { "ctLen too large: $ctLen" }
-
-            val expectedTotal = headerSize + encLen + nonceLen + ctLen + tagLen
+            val expectedTotal = validateWireShape(
+                version = version,
+                encapsulatedKeyLength = encLen,
+                nonceLength = nonceLen,
+                ciphertextLength = ctLen,
+                tagLength = tagLen,
+                maximumCiphertextLength = if (isHandshake) {
+                    MAX_CIPHERTEXT_BYTES_HANDSHAKE
+                } else {
+                    MAX_CIPHERTEXT_BYTES_APPLICATION
+                }
+            )
             require(combined.size == expectedTotal) { "length mismatch: expected=$expectedTotal actual=${combined.size}" }
 
-            var off = headerSize
+            var off = HEADER_SIZE
             val enc = combined.copyOfRange(off, off + encLen)
             off += encLen
             val nonce = combined.copyOfRange(off, off + nonceLen)
@@ -99,7 +114,38 @@ data class P2PHPKESealedBox(
                 tag = tag
             )
         }
+
+        private fun validateWireShape(
+            version: Int,
+            encapsulatedKeyLength: Int,
+            nonceLength: Int,
+            ciphertextLength: Int,
+            tagLength: Int,
+            maximumCiphertextLength: Int
+        ): Int {
+            require(version == 1 || version == 2) { "Unsupported HPKESealedBox version: $version" }
+            require(encapsulatedKeyLength in 0..MAX_ENCAPSULATED_KEY_BYTES) {
+                "encLen out of range: $encapsulatedKeyLength"
+            }
+            if (version == 1) {
+                require(nonceLength == 12) { "invalid nonceLen: $nonceLength" }
+                require(tagLength == 16) { "invalid tagLen: $tagLength" }
+            } else {
+                require(nonceLength == 0) { "invalid nonceLen: $nonceLength" }
+                require(tagLength == 0) { "invalid tagLen: $tagLength" }
+            }
+            require(ciphertextLength in 0..maximumCiphertextLength) {
+                "ctLen out of range: $ciphertextLength"
+            }
+            val totalByteCount = HEADER_SIZE.toLong() +
+                encapsulatedKeyLength.toLong() +
+                nonceLength.toLong() +
+                ciphertextLength.toLong() +
+                tagLength.toLong()
+            require(totalByteCount <= Int.MAX_VALUE.toLong()) {
+                "HPKESealedBox total length overflow: $totalByteCount"
+            }
+            return totalByteCount.toInt()
+        }
     }
 }
-
-

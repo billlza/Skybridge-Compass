@@ -3,6 +3,9 @@ package com.skybridge.compass.core.filetransfer
 import android.content.Context
 import android.os.Environment
 import android.util.Log
+import com.skybridge.compass.core.data.RuntimeNetworkParametersSource
+import com.skybridge.compass.core.network.ListenPortAllocator
+import com.skybridge.compass.core.network.ListenPortRangeExhaustedException
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -22,7 +25,8 @@ import javax.inject.Singleton
 
 @Singleton
 class MacLanFileTransferServer @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val runtimeParameters: RuntimeNetworkParametersSource
 ) {
     companion object {
         private const val TAG = "MacLanFileTransferServer"
@@ -34,12 +38,31 @@ class MacLanFileTransferServer @Inject constructor(
 
     @Volatile private var serverSocket: ServerSocket? = null
 
-    fun start(port: Int = MacLanFileTransferProtocol.DEFAULT_PORT): Int {
+    /**
+     * Start the LAN transfer listener on a port from the user-configured listen range
+     * (`RuntimeNetworkParameters.listenPortRange`), replacing
+     * [MacLanFileTransferProtocol.DEFAULT_PORT] as the port source (R7.4, design §7).
+     *
+     * The range is read here, at start time, so the next listener honors a changed setting while an
+     * already-listening server keeps its bound port.
+     */
+    suspend fun start(): Int = start(portRange = runtimeParameters.current().listenPortRange)
+
+    /**
+     * Start on a specific configured range. Ports are tried in ascending order; when every port in
+     * the range is occupied this throws [ListenPortRangeExhaustedException] rather than silently
+     * falling back to a hardcoded default port.
+     *
+     * @return bound port, always inside [portRange]
+     */
+    fun start(portRange: IntRange): Int {
         if (!started.compareAndSet(false, true)) {
-            return serverSocket?.localPort ?: port
+            return serverSocket?.localPort ?: portRange.first
         }
         val server = try {
-            ServerSocket(port).also { serverSocket = it }
+            ListenPortAllocator.bindWithin(portRange) { candidate ->
+                ServerSocket(candidate)
+            }.also { serverSocket = it }
         } catch (t: Throwable) {
             started.set(false)
             serverSocket = null

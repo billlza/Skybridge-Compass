@@ -1,12 +1,15 @@
 package com.skybridge.compass.android.notifications
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Color
-import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.skybridge.compass.android.data.AppSettingsStore
 import com.skybridge.compass.android.i18n.resolveLocalizedText
 import com.skybridge.compass.shared.notifications.NotificationCenter
@@ -17,6 +20,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+
+/**
+ * `notifications_enabled` 的桥接门判定（R7.2）。
+ *
+ * [SystemNotifier] 订阅 `AppSettingsStore.observeNotifications`，并用该值决定是否把应用内通知
+ * 事件桥接为安卓系统通知。判定提取为纯函数，使「关闭开关后不再发布系统通知」可被单元测试证明。
+ */
+internal fun shouldPostBridgedNotification(notificationsEnabled: Boolean): Boolean =
+    notificationsEnabled
 
 /**
  * 系统通知发布器
@@ -47,53 +59,53 @@ object SystemNotifier {
         }
         NotificationCenter.systemNotifier = { event ->
             try {
-                if (notificationsEnabled) {
+                if (shouldPostBridgedNotification(notificationsEnabled)) {
                     postSystemNotification(appContext, event)
                 }
-            } catch (_: Throwable) {}
+            } catch (t: Throwable) {
+                Log.w("SystemNotifier", "Failed to post bridged system notification", t)
+            }
         }
         initialized = true
     }
 
     private fun createChannels(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            val channels = listOf(
-                NotificationChannel(
-                    CHANNEL_INFO,
-                    resolveLocalizedText("SkyBridge 信息", "SkyBridge Info", "SkyBridge 情報"),
-                    NotificationManager.IMPORTANCE_DEFAULT
-                ).apply {
-                    description = resolveLocalizedText("一般信息提示", "General information", "一般情報")
-                    enableLights(true); lightColor = Color.BLUE
-                },
-                NotificationChannel(
-                    CHANNEL_SUCCESS,
-                    resolveLocalizedText("SkyBridge 成功", "SkyBridge Success", "SkyBridge 成功"),
-                    NotificationManager.IMPORTANCE_DEFAULT
-                ).apply {
-                    description = resolveLocalizedText("成功提示", "Success messages", "成功メッセージ")
-                    enableLights(true); lightColor = Color.GREEN
-                },
-                NotificationChannel(
-                    CHANNEL_WARNING,
-                    resolveLocalizedText("SkyBridge 警告", "SkyBridge Warning", "SkyBridge 警告"),
-                    NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = resolveLocalizedText("警告与注意事项", "Warnings and cautions", "警告と注意事項")
-                    enableLights(true); lightColor = Color.YELLOW
-                },
-                NotificationChannel(
-                    CHANNEL_ERROR,
-                    resolveLocalizedText("SkyBridge 错误", "SkyBridge Error", "SkyBridge エラー"),
-                    NotificationManager.IMPORTANCE_HIGH
-                ).apply {
-                    description = resolveLocalizedText("错误与异常", "Errors and exceptions", "エラーと例外")
-                    enableLights(true); lightColor = Color.RED
-                }
-            )
-            mgr.createNotificationChannels(channels)
-        }
+        val mgr = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channels = listOf(
+            NotificationChannel(
+                CHANNEL_INFO,
+                resolveLocalizedText("SkyBridge 信息", "SkyBridge Info", "SkyBridge 情報"),
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = resolveLocalizedText("一般信息提示", "General information", "一般情報")
+                enableLights(true); lightColor = Color.BLUE
+            },
+            NotificationChannel(
+                CHANNEL_SUCCESS,
+                resolveLocalizedText("SkyBridge 成功", "SkyBridge Success", "SkyBridge 成功"),
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = resolveLocalizedText("成功提示", "Success messages", "成功メッセージ")
+                enableLights(true); lightColor = Color.GREEN
+            },
+            NotificationChannel(
+                CHANNEL_WARNING,
+                resolveLocalizedText("SkyBridge 警告", "SkyBridge Warning", "SkyBridge 警告"),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = resolveLocalizedText("警告与注意事项", "Warnings and cautions", "警告と注意事項")
+                enableLights(true); lightColor = Color.YELLOW
+            },
+            NotificationChannel(
+                CHANNEL_ERROR,
+                resolveLocalizedText("SkyBridge 错误", "SkyBridge Error", "SkyBridge エラー"),
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = resolveLocalizedText("错误与异常", "Errors and exceptions", "エラーと例外")
+                enableLights(true); lightColor = Color.RED
+            }
+        )
+        mgr.createNotificationChannels(channels)
     }
 
     private fun channelFor(severity: NotificationSeverity): String = when (severity) {
@@ -116,6 +128,12 @@ object SystemNotifier {
     }
 
     private fun postSystemNotification(context: Context, event: NotificationEvent) {
+        if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
         val builder = NotificationCompat.Builder(context, channelFor(event.severity))
             .setSmallIcon(smallIconFor(event.module))
             .setContentTitle(event.title)

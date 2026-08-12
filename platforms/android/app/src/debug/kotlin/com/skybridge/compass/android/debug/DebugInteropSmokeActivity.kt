@@ -7,15 +7,19 @@ import android.view.Gravity
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
+import com.skybridge.compass.R
 import com.skybridge.compass.core.data.NetworkSettingsStore
+import com.skybridge.compass.core.p2p.LocalP2PIdentity
 import com.skybridge.compass.core.p2p.P2PHandshakePolicyOverride
 import com.skybridge.compass.core.webrtc.SkyBridgeWebRtcConnectionManager
+import com.skybridge.compass.core.webrtc.WebRtcDiagnosticsConfig
 import com.skybridge.compass.shared.p2p.P2PHandshakeWire
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.File
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -38,40 +42,42 @@ class DebugInteropSmokeActivity : ComponentActivity() {
         val timeoutSeconds = intent.getStringExtra(EXTRA_TIMEOUT_SECONDS)?.toLongOrNull()
             ?: DEFAULT_TIMEOUT_SECONDS
         val pqcEnabled = intent.getBooleanExtra(EXTRA_PQC_ENABLED, true)
-        val allowStaticFallback = intent.getBooleanExtra(EXTRA_ALLOW_STATIC_ED25519_FALLBACK, false)
         val autoFinish = intent.getBooleanExtra(EXTRA_AUTO_FINISH, true)
-        val bearerToken = intent.getStringExtra(EXTRA_BEARER_TOKEN)?.trim().orEmpty()
-        val tenantId = intent.getStringExtra(EXTRA_TENANT_ID)?.trim().orEmpty()
-
-        if (allowStaticFallback) {
-            System.setProperty("skybridge.smoke.allowStaticEd25519Fallback", "1")
-        } else {
-            System.clearProperty("skybridge.smoke.allowStaticEd25519Fallback")
-        }
-        System.setProperty("skybridge.smoke.forceRelayIce", "1")
-        System.setProperty("skybridge.smoke.immediateHandshake", "1")
-        if (!pqcEnabled) {
-            System.setProperty("skybridge.smoke.classicOnly", "1")
-        } else {
-            System.clearProperty("skybridge.smoke.classicOnly")
-        }
-        if (bearerToken.isNotEmpty() && tenantId.isNotEmpty()) {
-            System.setProperty("skybridge.smoke.bearerToken", bearerToken)
-            System.setProperty("skybridge.smoke.tenantId", tenantId)
-        }
 
         statusView = TextView(this).apply {
             textSize = 14f
             setPadding(32, 48, 32, 48)
             typeface = Typeface.MONOSPACE
             gravity = Gravity.START
-            text = "Starting SkyBridge debug smoke..."
+            text = getString(R.string.debug_interop_smoke_starting)
         }
         setContentView(statusView)
+        statusFile().delete()
 
-        manager = SkyBridgeWebRtcConnectionManager(applicationContext)
+        if (!consumeSmokeNonce(intent.getStringExtra(EXTRA_SMOKE_NONCE))) {
+            emit("failure reason=invalid_smoke_nonce")
+            finish()
+            return
+        }
 
-        emit("boot code=$code signaling=$wsUrl pqc=$pqcEnabled staticFallback=$allowStaticFallback")
+        val localIdentity = LocalP2PIdentity(
+            appContext = applicationContext.createDeviceProtectedStorageContext(),
+            storageMode = if (pqcEnabled) {
+                LocalP2PIdentity.StorageMode.ENCRYPTED
+            } else {
+                LocalP2PIdentity.StorageMode.ISOLATED_PLAINTEXT_TEST
+            }
+        )
+        manager = SkyBridgeWebRtcConnectionManager(
+            appContext = applicationContext,
+            localIdentityProvider = { localIdentity },
+            diagnosticsConfig = WebRtcDiagnosticsConfig(
+                forceRelayIce = true,
+                immediateHandshake = true
+            )
+        )
+
+        emit("boot code=<redacted> signaling=${DebugSmokeRedaction.urlForArtifact(wsUrl)} pqc=$pqcEnabled")
         emit("status-file=${statusFile().absolutePath}")
 
         if (code.isEmpty()) {
@@ -110,15 +116,20 @@ class DebugInteropSmokeActivity : ComponentActivity() {
                                 emitOnce("state idle signaling=$signaling")
 
                             is SkyBridgeWebRtcConnectionManager.State.Waiting ->
-                                emitOnce("state waiting code=${state.code} signaling=$signaling")
+                                emitOnce("state waiting code=<redacted> signaling=$signaling")
 
                             is SkyBridgeWebRtcConnectionManager.State.Connecting ->
-                                emitOnce("state connecting code=${state.code} signaling=$signaling")
+                                emitOnce("state connecting code=<redacted> signaling=$signaling")
 
                             is SkyBridgeWebRtcConnectionManager.State.Connected -> {
-                                emitOnce("state connected code=${state.code} signaling=$signaling")
+                                // DataChannel open, handshake not yet complete. Keep waiting.
+                                emitOnce("state connected code=<redacted> signaling=$signaling")
+                            }
+
+                            is SkyBridgeWebRtcConnectionManager.State.Established -> {
+                                emitOnce("state established code=<redacted> signaling=$signaling")
                                 if (manager.hasSessionKeys()) {
-                                    markSuccess("connected_with_session_keys")
+                                    markSuccess("established_with_session_keys")
                                     completedSuccessfully = true
                                     if (autoFinish) {
                                         delay(1500L)
@@ -159,13 +170,9 @@ class DebugInteropSmokeActivity : ComponentActivity() {
 
     override fun onDestroy() {
         smokeJob?.cancel()
-        manager.release()
-        System.clearProperty("skybridge.smoke.allowStaticEd25519Fallback")
-        System.clearProperty("skybridge.smoke.forceRelayIce")
-        System.clearProperty("skybridge.smoke.immediateHandshake")
-        System.clearProperty("skybridge.smoke.classicOnly")
-        System.clearProperty("skybridge.smoke.bearerToken")
-        System.clearProperty("skybridge.smoke.tenantId")
+        if (::manager.isInitialized) {
+            manager.release()
+        }
         super.onDestroy()
     }
 
@@ -183,11 +190,12 @@ class DebugInteropSmokeActivity : ComponentActivity() {
     }
 
     private fun emit(line: String) {
-        val stamped = "[${timestamp()}] $line"
+        val safeLine = DebugSmokeRedaction.statusLine(line)
+        val stamped = "[${timestamp()}] $safeLine"
         Log.i(TAG, stamped)
         statusFile().parentFile?.mkdirs()
         statusFile().appendText("$stamped\n")
-        statusLines.addLast(line)
+        statusLines.addLast(safeLine)
         while (statusLines.size > 12) {
             statusLines.removeFirst()
         }
@@ -199,20 +207,32 @@ class DebugInteropSmokeActivity : ComponentActivity() {
     private fun statusFile(): File =
         File(filesDir, STATUS_FILE_NAME)
 
+    private fun nonceFile(): File =
+        File(filesDir, NONCE_FILE_NAME)
+
+    private fun consumeSmokeNonce(providedRaw: String?): Boolean {
+        val provided = providedRaw?.trim().orEmpty()
+        val file = nonceFile()
+        val expected = if (file.isFile) file.readText().trim() else ""
+        file.delete()
+        return provided.isNotEmpty() &&
+            expected.isNotEmpty() &&
+            MessageDigest.isEqual(provided.toByteArray(), expected.toByteArray())
+    }
+
     private fun timestamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
 
     companion object {
         private const val TAG = "SB-DEBUG-SMOKE"
         private const val STATUS_FILE_NAME = "debug-interop-smoke-status.log"
+        private const val NONCE_FILE_NAME = "debug-interop-smoke-nonce"
         private const val EXTRA_CODE = "skybridgeCode"
         private const val EXTRA_WS_URL = "skybridgeWsUrl"
         private const val EXTRA_TIMEOUT_SECONDS = "skybridgeTimeoutSeconds"
         private const val EXTRA_PQC_ENABLED = "skybridgePqcEnabled"
-        private const val EXTRA_ALLOW_STATIC_ED25519_FALLBACK = "skybridgeAllowStaticEd25519Fallback"
         private const val EXTRA_AUTO_FINISH = "skybridgeAutoFinish"
-        private const val EXTRA_BEARER_TOKEN = "skybridgeBearerToken"
-        private const val EXTRA_TENANT_ID = "skybridgeTenantId"
+        private const val EXTRA_SMOKE_NONCE = "skybridgeSmokeNonce"
         private const val DEFAULT_SIGNALING_WS_URL = "ws://10.0.2.2:18443/ws"
         private const val DEFAULT_TIMEOUT_SECONDS = 120L
     }

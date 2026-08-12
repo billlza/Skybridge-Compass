@@ -1,13 +1,54 @@
 package com.skybridge.compass.shared.p2p
 
+import com.skybridge.compass.shared.crypto.KeyUsage
+import com.skybridge.compass.shared.crypto.providers.AndroidPQCCryptoProvider
 import java.util.Base64
+import java.security.ProviderException
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class P2PHandshakeCompatibilityTests {
+
+    @Test
+    fun invalidEd25519SignatureRemainsAnOrdinaryVerificationFailure() {
+        val (privateKey, publicKey) = P2PHandshakeWire.generateEd25519IdentityKeyPair()
+        val data = "invalid-signature-regression".toByteArray()
+        val invalidSignature = P2PHandshakeWire.signEd25519Public(
+            "different-signed-message".toByteArray(),
+            privateKey,
+        )
+
+        val outcome = P2PHandshakeWire.verifyByAlgorithmDetailed(
+            data = data,
+            signature = invalidSignature,
+            publicKey = publicKey,
+            algorithm = P2PIdentityPublicKeys.ProtocolAlgorithm.ED25519,
+        )
+
+        assertFalse(outcome.verified)
+        assertEquals(null, outcome.failure)
+    }
+
+    @Test
+    fun ed25519ProviderFailureIsPreservedByDetailedOutcome() {
+        val outcome = P2PHandshakeWire.verifyByAlgorithmDetailed(
+            data = byteArrayOf(1, 2, 3),
+            signature = ByteArray(64),
+            publicKey = ByteArray(32),
+            algorithm = P2PIdentityPublicKeys.ProtocolAlgorithm.ED25519,
+            ed25519Verifier = { _, _, _ ->
+                throw ProviderException("synthetic Ed25519 provider failure")
+            },
+        )
+
+        assertFalse(outcome.verified)
+        assertEquals("synthetic Ed25519 provider failure", outcome.failure)
+    }
 
     @Test
     fun messageASignatureVerifiesForStaticEd25519PublicKeyWithLow7BitsSet() {
@@ -33,7 +74,7 @@ class P2PHandshakeCompatibilityTests {
                 platformVersion = "test",
                 providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_CRYPTO_KIT_CLASSIC
             ),
-            policy = P2PHandshakePolicy.DEFAULT,
+            policy = classicPolicy(),
             identityKeys = identity,
             identitySigningPrivateKey = privateKey
         )
@@ -72,7 +113,7 @@ class P2PHandshakeCompatibilityTests {
                 platformVersion = "test",
                 providerTypeRaw = "test"
             ),
-            policy = P2PHandshakePolicy.DEFAULT,
+            policy = classicPolicy(),
             identityKeys = identity,
             identitySigningPrivateKey = idPriv
         )
@@ -88,7 +129,7 @@ class P2PHandshakeCompatibilityTests {
     }
 
     @Test
-    fun decodeMessageAToleratesUnknownKeyShareSuiteIds() {
+    fun decodeMessageAToleratesUnknownKeyShareSuiteIdsWhenTheyAreAlsoOffered() {
         val (idPriv, idPubRaw32) = P2PHandshakeWire.generateEd25519IdentityKeyPair()
         val identity = P2PIdentityPublicKeys.Keys(
             protocolPublicKey = idPubRaw32,
@@ -108,7 +149,7 @@ class P2PHandshakeCompatibilityTests {
                 platformVersion = "test",
                 providerTypeRaw = "test"
             ),
-            policy = P2PHandshakePolicy.DEFAULT,
+            policy = classicPolicy(),
             identityKeys = identity,
             identitySigningPrivateKey = idPriv
         )
@@ -118,6 +159,8 @@ class P2PHandshakeCompatibilityTests {
         // version(1) + supportedCount(2) + suiteWireId(2) + keyShareCount(2) + keyShareSuiteId(2)
         raw[7] = 0x7E
         raw[8] = 0x7E
+        raw[3] = 0x7E
+        raw[4] = 0x7E
 
         val decoded = P2PHandshakeWire.decodeMessageA(raw)
         assertEquals(1, decoded.keyShares.size)
@@ -146,7 +189,7 @@ class P2PHandshakeCompatibilityTests {
                 platformVersion = "test",
                 providerTypeRaw = "test"
             ),
-            policy = P2PHandshakePolicy.DEFAULT,
+            policy = classicPolicy(),
             identityKeys = identity,
             identitySigningPrivateKey = idPriv
         )
@@ -166,22 +209,32 @@ class P2PHandshakeCompatibilityTests {
 
         val server = P2PHandshakeServer()
         assertThrows(IllegalArgumentException::class.java) {
-            server.respond(raw)
+            server.respond(raw, P2PHandshakeServer.RespondOptions(platformVersion = "Android 16 (API 36)"))
         }
     }
 
     @Test
     fun clientRejectsUnknownSelectedSuiteAfterSignatureVerification() {
-        val client = P2PHandshakeClient(platformVersion = "test")
-        val (state, msgA) = client.start()
+        val client = P2PHandshakeClient(platformVersion = "Android 16 (API 36)")
+        val (state, msgA) = client.start(P2PHandshakeClient.StartOptions(handshakePolicy = classicPolicy()))
 
         val server = P2PHandshakeServer()
-        val response = server.respond(msgA)
+        val response = server.respond(
+            msgA,
+            P2PHandshakeServer.RespondOptions(
+                platformVersion = "Android 16 (API 36)",
+                handshakePolicy = classicPolicy()
+            )
+        )
 
-        val raw = response.messageBToSend.copyOf()
+        val raw = HandshakePaddingP1.unwrapIfNeeded(response.messageBToSend).copyOf()
         // MessageB layout: version(1) + selectedSuite(2)
         raw[1] = 0x42
         raw[2] = 0x42
+        val hpkeOffset = indexOf(raw, byteArrayOf(0x48, 0x50, 0x4B, 0x45))
+        assertTrue(hpkeOffset >= 0)
+        raw[hpkeOffset + 5] = 0x42
+        raw[hpkeOffset + 6] = 0x42
 
         val transcriptA32 = P2PHandshakeWire.transcriptHashAFromWire(state.messageAWithoutPadding)
         val parsedB = P2PHandshakeWire.decodeMessageB(raw)
@@ -204,6 +257,65 @@ class P2PHandshakeCompatibilityTests {
         assertThrows(IllegalArgumentException::class.java) {
             client.finish(state, raw)
         }
+    }
+
+    @Test
+    fun clientRejectsValidSignedKnownSuiteThatWasNotOfferedBeforeTrustOrDecrypt() {
+        val client = P2PHandshakeClient(platformVersion = "Android 16 (API 36)")
+        val (state, messageA) = client.start(
+            P2PHandshakeClient.StartOptions(handshakePolicy = classicPolicy()),
+        )
+        val response = P2PHandshakeServer().respond(
+            messageA,
+            P2PHandshakeServer.RespondOptions(
+                platformVersion = "Android 16 (API 36)",
+                handshakePolicy = classicPolicy(),
+            ),
+        )
+        val decodedResponse = P2PHandshakeWire.decodeMessageB(response.messageBToSend)
+        assertEquals(P2PCryptoSuite.X25519, decodedResponse.selectedSuite.knownOrNull())
+        assertEquals(decodedResponse.selectedSuite.wireId, decodedResponse.encryptedPayload.suiteWireId)
+        assertTrue(
+            P2PHandshakeWire.verifyMessageBSignature(
+                messageB = decodedResponse,
+                transcriptHashA32 = P2PHandshakeWire.transcriptHashAFromWire(state.messageAWithoutPadding),
+                rawMessageBWithoutPadding = response.messageBToSend,
+            ),
+        )
+        // The server response is a valid, signed X25519 MessageB whose HPKE suite is also X25519.
+        // Model a stale/corrupted attempt that did not offer X25519. A null keypair is a sentinel:
+        // reaching the decrypt branch would throw "Missing classic keypair" instead.
+        val unofferedState = state.copy(
+            offeredSuites = listOf(P2PCryptoSuite.MLKEM_768),
+            x25519KeyPair = null,
+        )
+        var trustReads = 0
+        var trustWrites = 0
+        val trustStore = object : P2PHandshakeWire.TrustStore {
+            override fun loadPeerSigningFingerprint(peerId: String): String? {
+                trustReads++
+                return null
+            }
+
+            override fun savePeerSigningFingerprint(peerId: String, peerSigningFingerprint: String) {
+                trustWrites++
+            }
+        }
+
+        val failure = assertThrows(IllegalArgumentException::class.java) {
+            client.finish(
+                state = unofferedState,
+                rawMessageB = response.messageBToSend,
+                peerIdForTrust = "peer-unoffered-suite",
+                trustStore = trustStore,
+                allowTrustOnFirstUse = true,
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("not offered"))
+        assertFalse(failure.message.orEmpty().contains("Missing classic keypair"))
+        assertEquals(0, trustReads)
+        assertEquals(0, trustWrites)
     }
 
     @Test
@@ -233,7 +345,7 @@ class P2PHandshakeCompatibilityTests {
                 platformVersion = "test",
                 providerTypeRaw = "test"
             ),
-            policy = P2PHandshakePolicy.DEFAULT,
+            policy = classicPolicy(),
             identityKeys = identity,
             identitySigningPrivateKey = idPriv,
             extensionsRaw = ext
@@ -265,7 +377,8 @@ class P2PHandshakeCompatibilityTests {
         val firstDecision = P2PHandshakeWire.verifyOrPersistPeerTrust(
             peerId = "peer-A",
             identityPublicKeys = firstKeys,
-            trustStore = store
+            trustStore = store,
+            allowTrustOnFirstUse = true
         )
         assertEquals(P2PHandshakeWire.TrustDecision.TRUSTED_NEW, firstDecision)
 
@@ -306,8 +419,7 @@ class P2PHandshakeCompatibilityTests {
             P2PHandshakeWire.verifyOrPersistPeerTrust(
                 peerId = "peer-strict",
                 identityPublicKeys = keys,
-                trustStore = store,
-                allowTrustOnFirstUse = false
+                trustStore = store
             )
         }
     }
@@ -333,7 +445,7 @@ class P2PHandshakeCompatibilityTests {
                 platformVersion = "legacy-test",
                 providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_CRYPTO_KIT_CLASSIC
             ),
-            policy = P2PHandshakePolicy.DEFAULT,
+            policy = classicPolicy(),
             identityKeys = identity,
             identitySigningPrivateKey = idPriv
         )
@@ -396,7 +508,7 @@ class P2PHandshakeCompatibilityTests {
     @Test
     fun suitePlanAndroid17UsesPqcWhenXWingUnavailable() {
         val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
-            platformVersion = "17",
+            platformVersion = "Android 17 (API 37)",
             liboqsAvailable = true,
             xWingAvailable = false,
             peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
@@ -409,9 +521,34 @@ class P2PHandshakeCompatibilityTests {
     }
 
     @Test
-    fun suitePlanAndroid14UsesPqcTier() {
+    fun startUsesResolvedPolicyWhenPeerOnlyHasMlKem() = runBlocking {
+        assumeTrue("Android PQC provider is required for this regression test", AndroidPQCCryptoProvider.isAvailable())
+
+        val provider = AndroidPQCCryptoProvider()
+        val serverKem = provider.generateKeyPair(KeyUsage.KEY_EXCHANGE)
+        val client = P2PHandshakeClient(platformVersion = "Android 16 (API 36)")
+
+        val (state, messageA) = client.start(
+            P2PHandshakeClient.StartOptions(
+                peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+                    mlKem768PublicKey = serverKem.publicKey.bytes
+                ),
+                handshakePolicy = P2PHandshakePolicy.DEFAULT
+            )
+        )
+
+        val decoded = P2PHandshakeWire.decodeMessageA(HandshakePaddingP1.unwrapIfNeeded(messageA))
+        assertEquals(listOf(P2PCryptoSuite.MLKEM_768), state.offeredSuites)
+        assertEquals("liboqsPQC", state.handshakePolicy.minimumTierRaw)
+        assertEquals("liboqsPQC", decoded.policy.minimumTierRaw)
+        assertTrue(decoded.policy.requirePqc)
+        assertFalse(decoded.policy.allowClassicFallback)
+    }
+
+    @Test
+    fun suitePlanAllowsNonQPeriaptPqcOnAndroid14Runtime() {
         val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
-            platformVersion = "14",
+            platformVersion = "Android 14 (API 34)",
             liboqsAvailable = true,
             xWingAvailable = true,
             peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
@@ -419,32 +556,207 @@ class P2PHandshakeCompatibilityTests {
                 xWingPublicKey = ByteArray(1) { 0x03 }
             )
         )
-        assertEquals(P2PCryptoSuite.MLKEM_768, plan.selectedSuite)
-        assertFalse(plan.usedClassicFallback)
+        assertEquals(P2PCryptoSuite.X_WING, plan.selectedSuite)
     }
 
     @Test
-    fun suitePlanAndroid13UsesPqcTier() {
+    fun suitePlanAllowsNonQPeriaptPqcOnAndroid13Runtime() {
         val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
-            platformVersion = "13",
+            platformVersion = "Android 13 (API 33)",
             liboqsAvailable = true,
-            xWingAvailable = true,
+            xWingAvailable = false,
             peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
                 mlKem768PublicKey = ByteArray(1) { 0x04 },
                 xWingPublicKey = ByteArray(1) { 0x05 }
             )
         )
         assertEquals(P2PCryptoSuite.MLKEM_768, plan.selectedSuite)
-        assertFalse(plan.usedClassicFallback)
+    }
+
+    @Test
+    fun serverAllowsNonQPeriaptPqcHandshakeOnAndroid14Runtime() = runBlocking {
+        assumeTrue("Android PQC provider is required for this regression test", AndroidPQCCryptoProvider.isAvailable())
+
+        val provider = AndroidPQCCryptoProvider()
+        val serverKem = provider.generateKeyPair(KeyUsage.KEY_EXCHANGE)
+        val policy = P2PHandshakePolicy(
+            requirePqc = true,
+            allowClassicFallback = false,
+            minimumTierRaw = "liboqsPQC",
+            requireSecureEnclavePoP = false
+        )
+        val client = P2PHandshakeClient(platformVersion = "Android 14 (API 34)")
+        val (clientState, messageA) = client.start(
+            P2PHandshakeClient.StartOptions(
+                peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+                    mlKem768PublicKey = serverKem.publicKey.bytes
+                ),
+                handshakePolicy = policy
+            )
+        )
+
+        val response = P2PHandshakeServer().respond(
+            rawMessageA = messageA,
+            options = P2PHandshakeServer.RespondOptions(
+                platformVersion = "Android 14 (API 34)",
+                kemPrivateKeys = P2PHandshakeServer.KemPrivateKeys(
+                    mlKem768PrivateKey = serverKem.privateKey.bytes
+                ),
+                handshakePolicy = policy
+            )
+        )
+
+        assertEquals(
+            P2PCryptoSuite.MLKEM_768,
+            P2PHandshakeWire.decodeMessageB(response.messageBToSend).selectedSuite.knownOrNull()
+        )
+        assertEquals(P2PCryptoSuite.MLKEM_768, client.finish(clientState, response.messageBToSend).negotiatedSuite)
+    }
+
+    @Test
+    fun suitePlanDoesNotSelectQPeriaptUnlessExplicitlyRequested() {
+        val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
+            platformVersion = "Android 17 (API 37)",
+            liboqsAvailable = true,
+            xWingAvailable = true,
+            qPeriaptAvailable = true,
+            peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+                qPeriaptPublicKey = ByteArray(1) { 0x06 },
+                xWingPublicKey = ByteArray(1) { 0x07 },
+                mlKem768PublicKey = ByteArray(1) { 0x08 }
+            ),
+            policy = P2PHandshakePolicy(
+                requirePqc = true,
+                allowClassicFallback = false,
+                minimumTierRaw = "nativePQC",
+                requireSecureEnclavePoP = false
+            )
+        )
+        assertEquals(P2PCryptoSuite.X_WING, plan.selectedSuite)
+        assertEquals("nativePQC", plan.minimumTierRaw)
+    }
+
+    @Test
+    fun suitePlanSelectsQPeriaptWhenExplicitlyRequestedAndAvailable() {
+        val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
+            platformVersion = "Android 17 (API 37)",
+            liboqsAvailable = true,
+            xWingAvailable = true,
+            qPeriaptAvailable = true,
+            peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+                qPeriaptPublicKey = ByteArray(1) { 0x09 },
+                xWingPublicKey = ByteArray(1) { 0x0a },
+                mlKem768PublicKey = ByteArray(1) { 0x0b }
+            ),
+            policy = P2PHandshakePolicy(
+                requirePqc = true,
+                allowClassicFallback = false,
+                minimumTierRaw = P2PQPeriaptKem.MINIMUM_TIER_RAW,
+                requireSecureEnclavePoP = false
+            )
+        )
+        assertEquals(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND, plan.selectedSuite)
+        assertEquals(P2PQPeriaptKem.MINIMUM_TIER_RAW, plan.minimumTierRaw)
+        assertEquals(listOf(P2PQPeriaptKem.KEM_CAPABILITY_NAME), plan.supportedKem)
+        assertEquals(listOf(QPeriaptPlatformPolicy.AUTH_PROFILE), plan.supportedAuthProfiles)
+    }
+
+    @Test
+    fun suitePlanRejectsQPeriaptExplicitRequestOnUnsupportedAndroidRuntime() {
+        assertThrows(IllegalArgumentException::class.java) {
+            P2PHandshakeClient.resolveSuitePlanForTesting(
+                platformVersion = "Android 15 (API 35)",
+                liboqsAvailable = true,
+                xWingAvailable = true,
+                qPeriaptAvailable = true,
+                peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+                    qPeriaptPublicKey = ByteArray(1) { 0x10 },
+                    xWingPublicKey = ByteArray(1) { 0x11 },
+                    mlKem768PublicKey = ByteArray(1) { 0x12 }
+                ),
+                policy = P2PHandshakePolicy(
+                    requirePqc = true,
+                    allowClassicFallback = false,
+                    minimumTierRaw = P2PQPeriaptKem.MINIMUM_TIER_RAW,
+                    requireSecureEnclavePoP = false
+                )
+            )
+        }
+    }
+
+    @Test
+    fun suitePlanRejectsQPeriaptExplicitRequestInsteadOfFallingBack() {
+        assertThrows(IllegalStateException::class.java) {
+            P2PHandshakeClient.resolveSuitePlanForTesting(
+                platformVersion = "Android 17 (API 37)",
+                liboqsAvailable = true,
+                xWingAvailable = true,
+                qPeriaptAvailable = false,
+                peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+                    xWingPublicKey = ByteArray(1) { 0x0c },
+                    mlKem768PublicKey = ByteArray(1) { 0x0d }
+                ),
+                policy = P2PHandshakePolicy(
+                    requirePqc = true,
+                    allowClassicFallback = false,
+                    minimumTierRaw = P2PQPeriaptKem.MINIMUM_TIER_RAW,
+                    requireSecureEnclavePoP = false
+                )
+            )
+        }
+    }
+
+    @Test
+    fun suitePlanRejectsTrustedClassicBootstrapForQPeriaptExplicitRequest() {
+        assertThrows(IllegalStateException::class.java) {
+            P2PHandshakeClient.resolveSuitePlanForTesting(
+                platformVersion = "Android 17 (API 37)",
+                liboqsAvailable = true,
+                xWingAvailable = true,
+                qPeriaptAvailable = false,
+                peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(),
+                policy = P2PHandshakePolicy(
+                    requirePqc = true,
+                    allowClassicFallback = false,
+                    minimumTierRaw = P2PQPeriaptKem.MINIMUM_TIER_RAW,
+                    requireSecureEnclavePoP = false
+                ),
+                allowClassicBootstrapForTrustedPeer = true
+            )
+        }
+    }
+
+    @Test
+    fun suitePlanRejectsUnknownMinimumTier() {
+        assertThrows(IllegalArgumentException::class.java) {
+            P2PHandshakeClient.resolveSuitePlanForTesting(
+                platformVersion = "Android 17 (API 37)",
+                liboqsAvailable = true,
+                xWingAvailable = true,
+                peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(),
+                policy = P2PHandshakePolicy(
+                    requirePqc = true,
+                    allowClassicFallback = false,
+                    minimumTierRaw = "typoPQC",
+                    requireSecureEnclavePoP = false
+                )
+            )
+        }
     }
 
     @Test
     fun suitePlanMarksClassicFallbackWhenPqcUnavailable() {
         val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
-            platformVersion = "17",
+            platformVersion = "Android 17 (API 37)",
             liboqsAvailable = true,
             xWingAvailable = false,
-            peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys()
+            peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(),
+            policy = P2PHandshakePolicy(
+                requirePqc = false,
+                allowClassicFallback = true,
+                minimumTierRaw = "classic",
+                requireSecureEnclavePoP = false
+            )
         )
         assertEquals(P2PCryptoSuite.X25519, plan.selectedSuite)
         assertTrue(plan.usedClassicFallback)
@@ -454,7 +766,7 @@ class P2PHandshakeCompatibilityTests {
     fun strictPolicyRejectsClassicDowngradeWhenPeerKemMissing() {
         assertThrows(IllegalStateException::class.java) {
             P2PHandshakeClient.resolveSuitePlanForTesting(
-                platformVersion = "17",
+                platformVersion = "Android 17 (API 37)",
                 liboqsAvailable = true,
                 xWingAvailable = true,
                 peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(),
@@ -471,7 +783,7 @@ class P2PHandshakeCompatibilityTests {
     @Test
     fun strictPolicyAllowsTrustedClassicBootstrapWhenPeerKemMissing() {
         val plan = P2PHandshakeClient.resolveSuitePlanForTesting(
-            platformVersion = "17",
+            platformVersion = "Android 17 (API 37)",
             liboqsAvailable = true,
             xWingAvailable = true,
             peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(),
@@ -523,4 +835,12 @@ class P2PHandshakeCompatibilityTests {
         assertTrue(afterWindow.allowed)
         assertEquals(0L, afterWindow.remainingMillis)
     }
+
+    private fun classicPolicy(): P2PHandshakePolicy =
+        P2PHandshakePolicy(
+            requirePqc = false,
+            allowClassicFallback = true,
+            minimumTierRaw = "classic",
+            requireSecureEnclavePoP = false
+        )
 }

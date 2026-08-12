@@ -9,34 +9,159 @@ It focuses on the paths that are currently treated as production-ready in Androi
 - Android <-> Apple WebRTC code-based session establishment
 - Android app-layer trust establishment with PQC enabled by default
 - Android app build + instrumentation smoke evidence collection
+- Android AAB formal audit for the exact store upload artifact
 - Android APK packaging audit to prove legacy placeholder classes are not shipped
 
 ## Paths
 
-- Android repo root: `<repo-root>/platforms/android`
-- macOS release repo: `<repo-root>`
-- iOS app project: `<repo-root>/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj`
-- Android interop artifacts: `<repo-root>/platforms/android/build/interop`
-- macOS LAN inbound inbox: choose a writable host directory appropriate for your machine
+Run every command from the canonical Android project inside a Git release worktree. Derive paths;
+do not copy a source tree or bind evidence to a workstation-specific directory:
 
-## Procedure 0: Android Packaging Audit
+```bash
+RELEASE_REPO_ROOT="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
+ANDROID_ROOT="$RELEASE_REPO_ROOT/platforms/android"
+MAC_RELEASE_ROOT="${SKYBRIDGE_MAC_RELEASE_ROOT:-$RELEASE_REPO_ROOT}"
+MAC_RELEASE_ROOT="$(cd "$MAC_RELEASE_ROOT" && pwd -P)"
+IOS_PROJECT="$MAC_RELEASE_ROOT/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
+INTEROP_ROOT="$ANDROID_ROOT/build/interop"
+
+test "$(cd "$ANDROID_ROOT" && pwd -P)" = "$RELEASE_REPO_ROOT/platforms/android"
+test "$(git -C "$MAC_RELEASE_ROOT" rev-parse --show-toplevel)" = "$MAC_RELEASE_ROOT"
+test -f "$RELEASE_REPO_ROOT/platforms/android/settings.gradle.kts"
+test -f "$MAC_RELEASE_ROOT/Package.swift"
+test -d "$IOS_PROJECT"
+git -C "$RELEASE_REPO_ROOT" rev-parse --verify HEAD
+git -C "$MAC_RELEASE_ROOT" rev-parse --verify HEAD
+# Required when the run is being retained as release evidence:
+test -z "$(git -C "$RELEASE_REPO_ROOT" status --porcelain --untracked-files=all)"
+test -z "$(git -C "$MAC_RELEASE_ROOT" status --porcelain --untracked-files=all)"
+cd "$ANDROID_ROOT"
+```
+
+`SKYBRIDGE_MAC_RELEASE_ROOT` is needed only when Apple validation intentionally uses a separate
+registered Git worktree. Before release evidence, both selected worktrees must be clean; record each
+Git `HEAD`, branch, and `git status --porcelain` in the run artifact. A host-provided LAN inbox path
+is runtime output from `LocalLanInteropHost`, not a fixed path in this runbook.
+
+## Procedure 0A: Android AAB Formal Audit
 
 Purpose:
 
-- Prove legacy placeholder implementations are no longer packaged into the Android debug APK
-- Keep the audit executable and repeatable before real-device runs
+- Prove the existing signed release AAB, matching R8 mapping, generated AAB audit metadata, and
+  packaged source binding all refer to the explicitly selected clean Git commit
+- Validate the bundle with the pinned official bundletool CLI, generate an audit-only universal
+  APK, and inspect package/version, modules, manifest, DEX classes, native libraries, licenses, and
+  the public viewer/client-only boundary
+- Prove the AAB upload signer against an independently approved upload-certificate fingerprint
+
+Prerequisite tool:
+
+- Download the executable `bundletool-all-1.18.3.jar` from the official
+  [google/bundletool 1.18.3 release](https://github.com/google/bundletool/releases/tag/1.18.3)
+  and provide its absolute path. The gate never downloads a floating tool. The AGP dependency cache
+  may contain a non-executable bundletool library JAR; it is not an accepted substitute.
+- A bundletool upgrade is a deliberate maintenance transaction: review the official release, update
+  the script's pinned version, update this runbook, and rerun the AAB regression/generation checks.
 
 ### Command
 
 ```bash
-bash scripts/check_android_packaged_placeholders.sh
+RELEASE_AAB="$ANDROID_ROOT/app/build/outputs/bundle/release/app-release.aab"
+EXPECTED_SOURCE_COMMIT="$(git -C "$RELEASE_REPO_ROOT" rev-parse HEAD)"
+BUNDLETOOL_JAR="/absolute/path/to/bundletool-all-1.18.3.jar"
+
+bash scripts/check_android_release_aab.sh \
+  --aab "$RELEASE_AAB" \
+  --mapping "$ANDROID_ROOT/app/build/outputs/mapping/release/mapping.txt" \
+  --audit-metadata "$ANDROID_ROOT/app/build/outputs/release-audit/release/aab-metadata.properties" \
+  --bundletool "$BUNDLETOOL_JAR" \
+  --expected-upload-cert-sha256 "$EXPECTED_ANDROID_UPLOAD_CERT_SHA256" \
+  --expected-commit "$EXPECTED_SOURCE_COMMIT"
+```
+
+`EXPECTED_ANDROID_UPLOAD_CERT_SHA256` must come from the approved release/Play-Console identity
+channel, never from the AAB being inspected. The gate rejects a dirty canonical worktree, malformed
+or unsafe ZIP entries, duplicate modules/entries, incomplete metadata, a mismatched AAB/mapping,
+unsigned payload entries, the wrong upload certificate, or viewer-host surfaces. The SHA-256 fields
+in the audit metadata are Level 1 accidental-artifact identity checks; they are not a new signing or
+authentication scheme.
+
+The universal APK is generated into the audit directory with an isolated one-day audit key solely
+because bundletool requires APK signing. Its certificate is not a release identity. With Play App
+Signing, the AAB upload certificate proves who may upload; Google Play's app-signing/distribution
+certificate signs the APKs installed by users. Final Play identity therefore remains an independent
+Play Console or downloaded test-track APK gate and cannot be proven from the local AAB.
+
+### Acceptance criteria
+
+- `scripts/check_android_release_aab.sh` exits `0` for the existing formal artifact
+- official bundletool 1.18.3 validates the AAB and generates exactly one audit-only universal APK
+- the bundle contains exactly the `base` module; no host feature module is shipped
+- bundle config reports only `PAGE_ALIGNMENT_16K`, and the generated universal APK passes
+  Build Tools 37.0.0 `zipalign -c -P 16 -v 4`
+- NDK 30.0.14904198 `llvm-objdump -p` reports every `PT_LOAD` segment in every `arm64-v8a` and
+  `x86_64` shared library with `p_align >= 0x4000`; 32-bit ABI alignments are recorded but do not
+  create a false failure outside the current official 64-bit requirement
+- `com.skybridge.compass`, `versionName=1.0.2`, and `versionCode=2` match
+- host/Accessibility/MediaProjection classes, permissions, services, and manifest surfaces are absent
+- WebRTC native ABI content, WebRTC license notice, and source-binding asset are present
+- AAB audit metadata binds the AAB and exact R8 mapping to `EXPECTED_SOURCE_COMMIT`
+- AAB JAR signature covers every non-`META-INF` payload and matches the approved upload certificate
+- Play app-signing/distribution identity is still recorded as not proven by this gate
+- installation, launch, native loading, and product behavior on a real 16KB-kernel emulator/device
+  remain an independent runtime gate; the current Samsung device's 4KB `getconf PAGESIZE` is not
+  accepted as that evidence
+
+Regression tests:
+
+```bash
+bash scripts/tests/test_android_release_aab_gate.sh
+bash scripts/tests/test_release_artifact_preflight.sh
+```
+
+## Procedure 0B: Android APK Packaging Audit
+
+Purpose:
+
+- Prove the exact signed release APK has the expected identity/signing, native ABI, third-party
+  notice, viewer/client-only surface, permissions, and required current-path classes
+- Bind the inspected artifact to the canonical Git source selected above
+
+### Command
+
+```bash
+RELEASE_APK="$ANDROID_ROOT/app/build/outputs/apk/release/app-release.apk"
+EXPECTED_SOURCE_COMMIT="$(git -C "$RELEASE_REPO_ROOT" rev-parse HEAD)"
+bash scripts/check_android_packaged_placeholders.sh \
+  --mode formal \
+  --apk "$RELEASE_APK" \
+  --mapping "$ANDROID_ROOT/app/build/outputs/mapping/release/mapping.txt" \
+  --audit-metadata "$ANDROID_ROOT/app/build/outputs/release-audit/release/metadata.properties" \
+  --expected-cert-sha256 "$EXPECTED_ANDROID_SIGNING_CERT_SHA256" \
+  --expected-commit "$EXPECTED_SOURCE_COMMIT"
 ```
 
 Optional custom output directory:
 
 ```bash
 bash scripts/check_android_packaged_placeholders.sh \
-  "<repo-root>/platforms/android/build/interop/android-packaging-audit/manual-run"
+  --mode formal \
+  --apk "$RELEASE_APK" \
+  --mapping "$ANDROID_ROOT/app/build/outputs/mapping/release/mapping.txt" \
+  --audit-metadata "$ANDROID_ROOT/app/build/outputs/release-audit/release/metadata.properties" \
+  --expected-cert-sha256 "$EXPECTED_ANDROID_SIGNING_CERT_SHA256" \
+  --expected-commit "$EXPECTED_SOURCE_COMMIT" \
+  --run-dir "$INTEROP_ROOT/android-packaging-audit/manual-run"
+```
+
+`EXPECTED_ANDROID_SIGNING_CERT_SHA256` must come from the approved release-key channel; never copy
+it from the APK being inspected. Formal mode also requires the canonical release worktree to remain
+clean at audit time and verifies the packaged source-binding asset against `EXPECTED_SOURCE_COMMIT`.
+
+For a local development diagnostic only (never release evidence):
+
+```bash
+bash scripts/check_android_packaged_placeholders.sh --mode diagnostic-debug
 ```
 
 ### Logs and artifacts
@@ -48,14 +173,31 @@ The script writes one timestamped directory under:
 Files:
 
 - `environment.txt`
-- `app-debug.dex-list.txt`
+- `source-provenance.txt`
+- `apk-dex-classes.txt`
+- `apk-permissions.txt`
+- `apk-badging.txt`
+- `apk-signing.txt`
+- `apk-contents.txt`
 - `summary.txt`
 
 ### Acceptance criteria
 
 - Script exits `0`
+- formal mode inspects an existing APK and never silently rebuilds debug
+- `apksigner` verifies a modern APK signature and `aapt` reports
+  `com.skybridge.compass`, `versionName=1.0.2`, `versionCode=2`
 - `summary.txt` reports all forbidden legacy classes as `OK absent`
-- `summary.txt` reports all required shipping classes as `OK present`
+- host/Accessibility/MediaProjection classes and permission are absent
+- WebRTC native ABI content and packaged WebRTC license notice are present
+- APK source-binding asset equals the explicitly expected clean Git commit
+- matching release R8 mapping is used to resolve original host classes without adding keep rules
+- release audit metadata binds that mapping to the inspected APK (Level 1 accidental-artifact
+  mismatch detection, not a new security/authentication mechanism)
+- signing certificate equals the independently configured production certificate fingerprint
+
+This APK gate is physical-device/same-source evidence. It is not AAB validation and cannot replace
+Procedure 0A for a Play upload artifact.
 
 ## Procedure 1: Android Instrumentation Smoke vs macOS WebRTC Smoke Host
 
@@ -75,7 +217,7 @@ Preflight:
 
 - `adb` is installed and the target Android device appears in `adb devices`
 - `swift` is installed
-- the macOS repo at `<repo-root>` builds `LocalWebRTCSmokeHost`
+- the source-bound macOS release worktree builds `LocalWebRTCSmokeHost`
 - Android and Apple peers can both reach the same signaling WebSocket endpoint
 - Android security settings for the test run are known:
   - PQC run: `PQC enabled = true`, `Allow Classic Fallback = false`
@@ -83,9 +225,16 @@ Preflight:
 
 Optional parameters:
 
-- `--mac-package-path <path>`: defaults to the repository root containing `Package.swift`
+- `--mac-package-path <path>`: defaults to the Git worktree that contains `platforms/android`; pass
+  `"$MAC_RELEASE_ROOT"` when validating against a separate Apple release worktree
 - `--pqc true|false`: defaults to `true`
-- `--allow-static-ed25519-fallback true|false`: defaults to `false`
+- `--pqc-minimum-tier nativePQC|liboqsPQC|qperiaptPQC|classic`: defaults to `nativePQC`
+- `--expect-qperiapt true|false`: defaults to `true` when `--pqc-minimum-tier qperiaptPQC`, otherwise `false`
+- `--expected-negotiated-suite <suite-name-or-wire-id>`: defaults to `Q_PERIAPT_CONTEXT_BOUND` in Q-Periapt mode
+- `--require-direct-route true|false`: defaults to `false`. When `true`, the exact
+  secure operation owner must still have a selected ICE route classified as
+  `DIRECT` at terminal success; `RELAY` and `UNKNOWN` fail closed. This proves a
+  non-TURN selected pair, not that both peers used a particular Wi-Fi access point.
 - `--android-timeout-seconds <n>`: defaults to `120`
 - `--mac-timeout-seconds <n>`: defaults to `120`
 - `--mac-hold-after-success-seconds <n>`: defaults to `3`
@@ -96,8 +245,31 @@ Optional parameters:
 bash scripts/run_android_apple_webrtc_smoke.sh \
   --device <adb-serial> \
   --ws-url <wss://host:port/ws> \
+  --pqc true
+```
+
+For an explicit direct-P2P diagnostic, keep the product's normal TURN-capable
+configuration but make this single smoke fail closed unless the selected pair is
+direct:
+
+```bash
+bash scripts/run_android_apple_webrtc_smoke.sh \
+  --device <adb-serial> \
+  --ws-url <wss://host:port/ws> \
   --pqc true \
-  --allow-static-ed25519-fallback false
+  --require-direct-route true
+```
+
+Q-Periapt beta validation must request and assert the exact suite:
+
+```bash
+bash scripts/run_android_apple_webrtc_smoke.sh \
+  --device <adb-serial> \
+  --ws-url <wss://host:port/ws> \
+  --pqc true \
+  --pqc-minimum-tier qperiaptPQC \
+  --expect-qperiapt true \
+  --expected-negotiated-suite Q_PERIAPT_CONTEXT_BOUND
 ```
 
 ### Logs and artifacts
@@ -128,7 +300,9 @@ Files:
 - Android side reaches app-layer session keys; this is asserted by the instrumentation test itself
 - `android-handshake.log` contains `SB-HANDSHAKE` evidence when logcat is available
 - When `--pqc true`, host-side success must be reached without forcing `classicOnly`
-- No use of static fallback unless `--allow-static-ed25519-fallback true` was explicitly requested
+- Q-Periapt smoke is accepted only when `summary.txt` contains `expected_qperiapt=true`, `android_qperiapt_asserted=true`, `android_bootstrap_qperiapt=true`, `android_negotiated_suite=Q_PERIAPT_CONTEXT_BOUND/0x0011`, `mac_negotiated_suite=Q-Periapt-ContextBound`, and `qperiapt_assertion_ok=true`
+- A successful X-Wing or ML-KEM run is not Q-Periapt proof, even though it is valid PQC proof
+- The smoke must use generated device identity keys. `--allow-static-ed25519-fallback` was removed and the scripts reject it explicitly.
 
 ## Procedure 2: macOS LAN Host for Android Manual Remote Desktop Validation
 
@@ -148,7 +322,7 @@ bash scripts/run_mac_lan_interop_host.sh
 This wraps:
 
 ```bash
-swift run --package-path "<repo-root>" LocalLanInteropHost
+swift run --package-path "$MAC_RELEASE_ROOT" LocalLanInteropHost
 ```
 
 ### Logs
@@ -176,7 +350,8 @@ bash scripts/run_android_mac_lan_remote_smoke.sh \
   --device <adb-serial> \
   --start-mac-host true \
   --require-secure true \
-  --allow-plaintext-fallback false
+  --allow-plaintext-fallback false \
+  --allow-tofu false
 ```
 
 Artifacts:
@@ -194,6 +369,8 @@ Automated smoke acceptance:
 - Android reaches `success reason=secure_frame_received`
 - If policy requires PQC but peer KEM bootstrap is missing, the run must fail explicitly instead of silently falling back
 - `android-status.log` contains `security secure` before success
+- Strict automated smoke requires expected device id and fingerprint. Use `--allow-tofu true` only for explicit first-pairing diagnostics, not release evidence.
+- This automated smoke proves discovery, secure session state, and at least one received frame. It does not prove mouse, keyboard, text, or clipboard input closure.
 
 ### Android side manual checklist
 
@@ -216,6 +393,20 @@ Automated smoke acceptance:
 - Screen frames are visible
 - Pointer and keyboard input reach the Mac
 - No old Android `ScreenCaptureService` path is needed
+- Automated smoke artifacts alone satisfy only the discovery/session/frame subset. Pointer, keyboard, text, and clipboard acceptance requires manual or UI-automation artifacts that record the input action and observed host-side effect.
+
+## Procedure 2A: Windows Peer Proof Boundary
+
+Android <-> Windows interop is not accepted by Procedure 1 or Procedure 2. Gradle tests, Android packaging audit, Apple WebRTC smoke, and Android <-> macOS LAN smoke do not prove Windows discovery, file transfer, or remote desktop behavior.
+
+Windows acceptance requires a separate artifact set with all of the following facts:
+
+- Windows native DNS-SD discovers the Android or Apple peer and records the expected device id plus 64-hex fingerprint.
+- File transfer evidence records non-zero transferred bytes, chunk/complete ACKs, final SHA-256 receipt, session id, peer digest, and any failure stage.
+- Remote desktop evidence records notice lifecycle, encrypted session state, screen frame dimensions/bytes, FPS or latency, input path for mouse/keyboard/text/clipboard, and disconnect state.
+- The evidence must distinguish transport-only/WebRTC helper proof from app-control or product-control proof.
+
+Until those artifacts exist for the target Windows build, Android <-> Windows support remains a proof gap rather than a completed compatibility claim.
 
 ## Procedure 3: iOS Peer Smoke
 
@@ -298,6 +489,10 @@ Purpose:
 ## Notes on current scope
 
 - Android production defaults now intentionally prefer the Apple-compatible Bonjour discovery path instead of exposing unfinished direct-connect protocols by default.
+- Android public app release is viewer/client only for remote desktop. Procedure 0 must fail if
+  the APK contains Android host services, Accessibility service registration, MediaProjection
+  foreground service, overlay permission, camera permission, or audio-recording permission.
 - Android PQC smoke defaults to enabled. Fallback must now be requested explicitly.
 - Legacy/experimental modules can still exist in the source tree, but the shipping APK should now be validated with Procedure 0 rather than by scanning source text alone.
-- In this workspace on March 17, 2026, the iOS smoke wrapper was executed successfully, but Android real-device instrumentation smoke was not executed here because `adb` was unavailable in this shell at that time.
+- Historical smoke runs are routing context only; release acceptance requires artifacts bound to the
+  clean Git revisions selected by the path preflight above.

@@ -1,0 +1,29 @@
+{
+  "expectedFields" : {
+    "platformVersion" : "macOS-26.0",
+    "pqcAvailable" : "false",
+    "providerTypeRaw" : "CryptoKit-Classic",
+    "supportedAEAD" : "[AES-256-GCM]",
+    "supportedAuthProfiles" : "[classic]",
+    "supportedKEM" : "[X25519]",
+    "supportedSignature" : "[Ed25519]"
+  },
+  "messageType" : "cryptoCapabilities",
+  "provenance" : {
+    "captureToolPath" : "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift",
+    "collectedAtUtc" : "2026-08-10T22:59:36.000Z",
+    "note" : "CryptoCapabilities.deterministicEncode production output",
+    "origin" : "APPLE_REFERENCE_CAPTURE",
+    "repoIdentity" : "github.com/billlza/Skybridge-Compass",
+    "repositoryRemoteURL" : "https://github.com/billlza/Skybridge-Compass",
+    "semanticInputPath" : "Tests/SkyBridgeCoreTests/Fixtures/AppleCompatibilityVectors/inputs.json",
+    "semanticInputSha256" : "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0",
+    "source" : "SkyBridge Apple production codec XCTest capture",
+    "sourceCommit" : "6d6f601ea0ac23ba5c62d46b98c3efd03acc4898",
+    "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/CryptoCapabilities.swift",
+    "sourceSetSha256" : "7ea5e3760a2f27818700bdad3f047f26d9670365eb79ea73e70a72ea69364cfb"
+  },
+  "rawBytesHex" : "01000000060000005832353531390100000007000000456432353531390100000007000000636c6173736963010000000b0000004145532d3235362d47434d000a0000006d61634f532d32362e301100000043727970746f4b69742d436c6173736963",
+  "schemaVersion" : 1,
+  "surface" : "F2"
+}

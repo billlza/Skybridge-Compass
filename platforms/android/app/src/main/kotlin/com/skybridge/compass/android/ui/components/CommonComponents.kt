@@ -172,10 +172,10 @@ fun CircularProgressIndicatorWithLabel(
 fun StatCard(
     title: String,
     value: String,
+    modifier: Modifier = Modifier,
     change: String? = null,
     changePositive: Boolean = true,
-    icon: ImageVector,
-    modifier: Modifier = Modifier
+    icon: ImageVector
 ) {
     Card(
         modifier = modifier,

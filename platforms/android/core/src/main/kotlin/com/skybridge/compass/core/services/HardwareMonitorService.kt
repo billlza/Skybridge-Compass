@@ -252,13 +252,8 @@ class HardwareMonitorServiceImpl @Inject constructor(
             @Suppress("DEPRECATION")
             val wifiInfo = wifiManager.connectionInfo
             if (wifiInfo != null) {
-                ssid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    // Android 10+ 需要位置权限才能获取 SSID
-                    wifiInfo.ssid?.replace("\"", "")
-                } else {
-                    @Suppress("DEPRECATION")
-                    wifiInfo.ssid?.replace("\"", "")
-                }
+                // Android 10+ requires location permission to expose SSID.
+                ssid = wifiInfo.ssid?.replace("\"", "")
                 linkSpeed = wifiInfo.linkSpeed
             }
         }

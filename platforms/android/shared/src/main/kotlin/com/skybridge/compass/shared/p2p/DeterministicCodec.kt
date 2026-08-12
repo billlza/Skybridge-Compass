@@ -48,7 +48,13 @@ object DeterministicCodec {
         private var offset: Int = 0
         val isAtEnd: Boolean get() = offset >= data.size
 
-        fun decodeBool(): Boolean = decodeU8() != 0
+        fun decodeBool(): Boolean {
+            return when (val raw = decodeU8()) {
+                0x00 -> false
+                0x01 -> true
+                else -> throw IllegalArgumentException("Invalid deterministic bool: $raw")
+            }
+        }
 
         fun decodeU32(): Int {
             require(offset + 4 <= data.size) { "Unexpected end of data" }
@@ -79,5 +85,4 @@ object DeterministicCodec {
         }
     }
 }
-
 

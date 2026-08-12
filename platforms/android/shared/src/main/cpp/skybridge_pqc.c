@@ -117,7 +117,7 @@ Java_com_skybridge_compass_shared_crypto_providers_AndroidPQCCryptoProvider_nati
     return result;
 #else
     throw_exception(env, "java/lang/UnsupportedOperationException",
-                   "liboqs not available - use Kotlin fallback");
+                   "liboqs not available - native PQC provider unavailable");
     return NULL;
 #endif
 }
@@ -198,7 +198,7 @@ Java_com_skybridge_compass_shared_crypto_providers_AndroidPQCCryptoProvider_nati
     return result;
 #else
     throw_exception(env, "java/lang/UnsupportedOperationException",
-                   "liboqs not available - use Kotlin fallback");
+                   "liboqs not available - native PQC provider unavailable");
     return NULL;
 #endif
 }
@@ -284,7 +284,7 @@ Java_com_skybridge_compass_shared_crypto_providers_AndroidPQCCryptoProvider_nati
     return result;
 #else
     throw_exception(env, "java/lang/UnsupportedOperationException",
-                   "liboqs not available - use Kotlin fallback");
+                   "liboqs not available - native PQC provider unavailable");
     return NULL;
 #endif
 }
@@ -346,7 +346,7 @@ Java_com_skybridge_compass_shared_crypto_providers_AndroidPQCCryptoProvider_nati
     return result;
 #else
     throw_exception(env, "java/lang/UnsupportedOperationException",
-                   "liboqs not available - use Kotlin fallback");
+                   "liboqs not available - native PQC provider unavailable");
     return NULL;
 #endif
 }
@@ -427,7 +427,7 @@ Java_com_skybridge_compass_shared_crypto_providers_AndroidPQCCryptoProvider_nati
     return result;
 #else
     throw_exception(env, "java/lang/UnsupportedOperationException",
-                   "liboqs not available - use Kotlin fallback");
+                   "liboqs not available - native PQC provider unavailable");
     return NULL;
 #endif
 }
@@ -490,7 +490,7 @@ Java_com_skybridge_compass_shared_crypto_providers_AndroidPQCCryptoProvider_nati
     return (status == OQS_SUCCESS) ? JNI_TRUE : JNI_FALSE;
 #else
     throw_exception(env, "java/lang/UnsupportedOperationException",
-                   "liboqs not available - use Kotlin fallback");
+                   "liboqs not available - native PQC provider unavailable");
     return JNI_FALSE;
 #endif
 }

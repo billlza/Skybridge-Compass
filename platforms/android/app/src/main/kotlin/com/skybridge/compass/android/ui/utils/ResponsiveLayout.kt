@@ -1,7 +1,8 @@
 package com.skybridge.compass.android.ui.utils
 
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -25,8 +26,8 @@ object ResponsiveLayout {
      */
     @Composable
     fun getScreenSize(): ScreenSize {
-        val configuration = LocalConfiguration.current
-        val screenWidth = configuration.screenWidthDp.dp
+        val windowSize = LocalWindowInfo.current.containerSize
+        val screenWidth = with(LocalDensity.current) { windowSize.width.toDp() }
         
         return when {
             screenWidth < 600.dp -> ScreenSize.COMPACT
@@ -88,8 +89,8 @@ object ResponsiveLayout {
      */
     @Composable
     fun isLandscape(): Boolean {
-        val configuration = LocalConfiguration.current
-        return configuration.screenWidthDp > configuration.screenHeightDp
+        val windowSize = LocalWindowInfo.current.containerSize
+        return windowSize.width > windowSize.height
     }
     
     /**

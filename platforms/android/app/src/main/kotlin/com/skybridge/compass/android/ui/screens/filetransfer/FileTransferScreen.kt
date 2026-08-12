@@ -23,10 +23,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AddCircle
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
@@ -38,14 +38,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,29 +51,32 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavController
 import androidx.navigation.compose.rememberNavController
 import com.skybridge.compass.android.data.DeveloperSettings
 import com.skybridge.compass.android.data.DeveloperSettingsStore
-import com.skybridge.compass.android.data.SecuritySettings
-import com.skybridge.compass.android.data.SecuritySettingsStore
-import com.skybridge.compass.android.filetransfer.AndroidInboundFileTransferApprovalProvider
+import com.skybridge.compass.android.discovery.DiscoveryPeerLaunchTarget
 import com.skybridge.compass.android.i18n.localizedText
 import com.skybridge.compass.android.i18n.resolveLocalizedText
-import com.skybridge.compass.android.security.toHandshakePolicyOverride
+import com.skybridge.compass.android.ui.components.IOSGlassCard
+import com.skybridge.compass.android.ui.components.IOSGlassRow
 import com.skybridge.compass.android.ui.components.LiquidGlassSurface
+import com.skybridge.compass.android.ui.theme.IOSParityTokens
 import com.skybridge.compass.android.ui.theme.SkyBridgeCompassTheme
-import com.skybridge.compass.core.webrtc.AndroidCrossNetworkWebRtcTransportAdapter
 import com.skybridge.compass.core.webrtc.SkyBridgeWebRtcConnectionManager
-import com.skybridge.compass.filetransfer.webrtc.WebRtcFileTransferController
-import kotlinx.coroutines.launch
-import java.util.UUID
 
 @Composable
 private fun t(zh: String, en: String, ja: String): String = localizedText(zh, en, ja)
 
 @Composable
-fun FileTransferScreen(navController: NavController) {
+fun FileTransferScreen(
+    navController: NavController,
+    initialTarget: DiscoveryPeerLaunchTarget? = null,
+    launchTargetError: String? = null,
+    viewModel: FileTransferViewModel = hiltViewModel()
+) {
     val featureDisabledTitle = localizedText(
         "文件传输已在设置中关闭",
         "File transfer is disabled in Settings",
@@ -90,9 +89,7 @@ fun FileTransferScreen(navController: NavController) {
     )
     val openSettingsLabel = localizedText("打开设置", "Open Settings", "設定を開く")
     val context = LocalContext.current
-    val appContext = remember(context) { context.applicationContext }
-    val scope = rememberCoroutineScope()
-    val devSettings by DeveloperSettingsStore.observe(context).collectAsState(initial = DeveloperSettings())
+    val devSettings by DeveloperSettingsStore.observe(context).collectAsStateWithLifecycle(initialValue = DeveloperSettings())
 
     if (!devSettings.enableFileTransfer) {
         Column(
@@ -113,128 +110,170 @@ fun FileTransferScreen(navController: NavController) {
         return
     }
 
-    val securitySettings by SecuritySettingsStore.observe(context)
-        .collectAsState(initial = SecuritySettings())
-
-    val webrtcResult = remember(appContext) {
-        runCatching {
-            AndroidCrossNetworkWebRtcTransportAdapter(
-                SkyBridgeWebRtcConnectionManager(appContext)
-            )
-        }
+    if (launchTargetError != null) {
+        FileTransferInitError(message = launchTargetError)
+        return
     }
-    val webrtc = webrtcResult.getOrNull()
-    if (webrtc == null) {
+    if (initialTarget != null && !initialTarget.isFileTransfer) {
         FileTransferInitError(
-            message = webrtcResult.exceptionOrNull()?.message ?: t("WebRTC 初始化失败", "WebRTC initialization failed", "WebRTC の初期化に失敗しました")
+            message = t(
+                "发现页传入的端点不是文件传输服务。",
+                "The selected discovery endpoint is not a File Transfer service.",
+                "選択した検出エンドポイントはファイル転送サービスではありません。"
+            )
         )
         return
     }
 
-    val inboundApprovalProvider = remember(appContext) { AndroidInboundFileTransferApprovalProvider(appContext) }
-    val transferControllerResult = remember(webrtc, inboundApprovalProvider, appContext) {
-        runCatching {
-            WebRtcFileTransferController(
-                webrtc = webrtc,
-                appContext = appContext,
-                inboundApprovalProvider = inboundApprovalProvider,
-                saveAcceptedInboundToDownloads = true
+    val securitySettings by viewModel.securitySettings.collectAsStateWithLifecycle()
+    val transferEnabled = securitySettings.allowFileTransfer
+
+    initialTarget?.let { lanTarget ->
+        val statusState by viewModel.statusMessage.collectAsStateWithLifecycle()
+        val inboundLogState by viewModel.inboundLogs.collectAsStateWithLifecycle()
+        val lanProgress by viewModel.lanProgress.collectAsStateWithLifecycle()
+        val statusMessage = resolveStatus(statusState)
+        val inboundLogs = inboundLogState.map { resolveInboundLog(it) }
+        val filePicker = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+
+            val resolver = context.contentResolver
+            val fileName = queryDisplayName(context, uri) ?: "android-file-${System.currentTimeMillis()}"
+            val size = queryFileSize(context, uri)
+            viewModel.sendLanFile(
+                target = lanTarget,
+                contentResolver = resolver,
+                uri = uri,
+                fileName = fileName,
+                fileSize = size,
+                transferEnabled = transferEnabled
             )
         }
-    }
-    val transferController = transferControllerResult.getOrNull()
-    if (transferController == null) {
-        FileTransferInitError(
-            message = transferControllerResult.exceptionOrNull()?.message ?: t("文件传输控制器初始化失败", "File transfer controller initialization failed", "ファイル転送コントローラーの初期化に失敗しました")
-        )
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 120.dp)
+        ) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = t("文件传输", "File Transfer", "ファイル転送"),
+                        style = MaterialTheme.typography.headlineLarge,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    IconButton(onClick = { filePicker.launch(arrayOf("*/*")) }) {
+                        Icon(
+                            imageVector = Icons.Filled.AddCircle,
+                            contentDescription = t("选择文件", "Select File", "ファイルを選択"),
+                            tint = IOSParityTokens.ColorTokens.CyanAccent
+                        )
+                    }
+                }
+            }
+            item {
+                LanPeerSendSection(
+                    target = lanTarget,
+                    transferEnabled = transferEnabled,
+                    onSendFile = { filePicker.launch(arrayOf("*/*")) }
+                )
+            }
+            item {
+                val lanProgressBytesText = lanProgress?.let {
+                    "${it.confirmedBytes}/${it.totalBytes} bytes (${it.percent}%)"
+                } ?: "-"
+                TransferStatusSection(
+                    connStateText = t("Bonjour 局域网", "Bonjour LAN", "Bonjour LAN"),
+                    statusMessage = statusMessage,
+                    signalingStatusText = lanTarget.serviceType,
+                    generatedCode = "",
+                    progressBytesText = lanProgressBytesText,
+                    progressFraction = lanProgress?.fraction ?: 0f,
+                    eventText = null
+                )
+            }
+            fileTransferHistoryItems(inboundLogs)
+        }
         return
     }
 
-    LaunchedEffect(
-        securitySettings.pqcEnabled,
-        securitySettings.enforcePqcHandshake,
-        securitySettings.allowClassicFallbackForCompatibility,
-        securitySettings.pqcMinimumTier,
-        securitySettings.requireSecureEnclavePoP,
-        webrtc
-    ) {
-        webrtc.setPqcEnabled(securitySettings.pqcEnabled)
-        webrtc.setHandshakePolicyOverride(securitySettings.toHandshakePolicyOverride())
+    val transferController = viewModel.transferController
+    val connStateFlow = viewModel.connState
+    val signalingFlow = viewModel.signalingStatus
+    val progressFlow = viewModel.progress
+    if (viewModel.webrtc == null || connStateFlow == null || signalingFlow == null) {
+        FileTransferInitError(
+            message = viewModel.webrtcInitError ?: t("WebRTC 初始化失败", "WebRTC initialization failed", "WebRTC の初期化に失敗しました")
+        )
+        return
+    }
+    if (transferController == null || progressFlow == null) {
+        FileTransferInitError(
+            message = viewModel.controllerInitError ?: t("文件传输控制器初始化失败", "File transfer controller initialization failed", "ファイル転送コントローラーの初期化に失敗しました")
+        )
+        return
     }
 
     var codeInput by rememberSaveable { mutableStateOf("") }
-    var statusMessage by rememberSaveable { mutableStateOf(resolveLocalizedText("等待建立连接", "Waiting for connection", "接続待機中")) }
-    var generatedCode by rememberSaveable { mutableStateOf("") }
-    val inboundLogs = remember { mutableStateListOf<String>() }
 
-    val connState by webrtc.state.collectAsState()
-    val signalingStatus by webrtc.signalingStatus.collectAsState()
-    val progress by transferController.progress.collectAsState()
-    val transferEnabled = securitySettings.allowFileTransfer
-    val connected = connState is SkyBridgeWebRtcConnectionManager.State.Connected
-
-    DisposableEffect(webrtc, transferController) {
-        webrtc.onData = { bytes ->
-            transferController.handleIncoming(bytes)
-        }
-        onDispose {
-            webrtc.disconnect()
+    val connState by connStateFlow.collectAsStateWithLifecycle()
+    val signalingStatus by signalingFlow.collectAsStateWithLifecycle()
+    val progress by progressFlow.collectAsStateWithLifecycle()
+    val statusState by viewModel.statusMessage.collectAsStateWithLifecycle()
+    val generatedCode by viewModel.generatedCode.collectAsStateWithLifecycle()
+    val inboundLogState by viewModel.inboundLogs.collectAsStateWithLifecycle()
+    val statusMessage = resolveStatus(statusState)
+    val inboundLogs = inboundLogState.map { resolveInboundLog(it) }
+    // The old onGenerateCode populated the text field with the freshly generated code; mirror the
+    // VM-owned generatedCode into the local input field to keep that exact behavior.
+    LaunchedEffect(generatedCode) {
+        if (generatedCode.isNotBlank()) {
+            codeInput = generatedCode
         }
     }
-
-    LaunchedEffect(transferController) {
-        transferController.receivedFiles.collect { file ->
-            val label = file.localPath ?: file.fileName ?: file.transferId
-            inboundLogs.add(0, resolveLocalizedText("已接收: $label", "Received: $label", "受信済み: $label"))
-            statusMessage = resolveLocalizedText("接收完成: $label", "Receive complete: $label", "受信完了: $label")
-        }
-    }
+    // Canon: "ready to transfer" == handshakeComplete. Gate on Established (post-handshake),
+    // NOT on Connected (DataChannel-open only). Connected still streams encrypted frames once
+    // keys land, but the user-facing transfer gate must wait for the secure handshake.
+    val connected = viewModel.isConnected(connState)
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        if (!transferEnabled) {
-            statusMessage = resolveLocalizedText("文件传输已在设置中关闭", "File transfer is disabled in Settings", "ファイル転送は設定で無効になっています")
-            return@rememberLauncherForActivityResult
-        }
-        if (!connected) {
-            statusMessage = resolveLocalizedText("请先建立 WebRTC 连接", "Please establish a WebRTC connection first", "先に WebRTC 接続を確立してください")
-            return@rememberLauncherForActivityResult
-        }
 
         val resolver = context.contentResolver
         val fileName = queryDisplayName(context, uri) ?: "android-file-${System.currentTimeMillis()}"
         val mime = resolver.getType(uri)
 
-        runCatching {
-            resolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-        }
-
-        scope.launch {
-            val transferId = "android-${UUID.randomUUID()}"
+        // Only grab a persistable read permission once we know the send will be attempted; the
+        // transferEnabled / connected gating (and its status strings) lives in viewModel.sendFile,
+        // matching the old inline guard order exactly.
+        if (transferEnabled && connected) {
             runCatching {
-                transferController.sendFile(
-                    contentResolver = resolver,
-                    uri = uri,
-                    transferId = transferId,
-                    fileName = fileName,
-                    mimeType = mime,
-                    chunkSize = 128 * 1024
-                )
-            }.onSuccess {
-                statusMessage = resolveLocalizedText("已发送: $fileName", "Sent: $fileName", "送信済み: $fileName")
-            }.onFailure {
-                statusMessage = resolveLocalizedText(
-                    "发送失败: ${it.message ?: "未知错误"}",
-                    "Send failed: ${it.message ?: "unknown"}",
-                    "送信失敗: ${it.message ?: "不明"}"
+                resolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }
         }
+
+        viewModel.sendFile(
+            contentResolver = resolver,
+            uri = uri,
+            fileName = fileName,
+            mimeType = mime,
+            transferEnabled = transferEnabled,
+            connected = connected
+        )
     }
 
     val pct = if (progress.totalBytes > 0) {
@@ -264,9 +303,9 @@ fun FileTransferScreen(navController: NavController) {
                 )
                 IconButton(onClick = { filePicker.launch(arrayOf("*/*")) }) {
                     Icon(
-                        imageVector = Icons.Filled.Add,
+                        imageVector = Icons.Filled.AddCircle,
                         contentDescription = t("选择文件", "Select File", "ファイルを選択"),
-                        tint = Color(0xFF7CC0FF)
+                        tint = IOSParityTokens.ColorTokens.CyanAccent
                     )
                 }
             }
@@ -279,45 +318,10 @@ fun FileTransferScreen(navController: NavController) {
                 connected = connected,
                 transferEnabled = transferEnabled,
                 generatedCode = generatedCode,
-                onGenerateCode = {
-                    scope.launch {
-                        runCatching { webrtc.generateConnectionCode() }
-                            .onSuccess { code ->
-                                generatedCode = code
-                                codeInput = code
-                                statusMessage = resolveLocalizedText(
-                                    "已创建连接码: $code，等待对端加入",
-                                    "Connection code created: $code, waiting for peer",
-                                    "接続コードを作成しました: $code、相手を待機中"
-                                )
-                            }
-                            .onFailure { error ->
-                                statusMessage = resolveLocalizedText(
-                                    "生成连接码失败: ${error.message ?: "未知错误"}",
-                                    "Failed to create connection code: ${error.message ?: "Unknown error"}",
-                                    "接続コードの生成に失敗しました: ${error.message ?: "不明なエラー"}"
-                                )
-                            }
-                    }
-                },
-                onConnectPeer = {
-                    val code = codeInput.uppercase().filter { it.isLetterOrDigit() }
-                    if (code.length !in 6..16) {
-                        statusMessage = resolveLocalizedText(
-                            "连接码无效，请输入 6-16 位字母数字",
-                            "Invalid connection code. Enter 6-16 alphanumeric characters.",
-                            "接続コードが無効です。6-16 文字の英数字を入力してください。"
-                        )
-                        return@QuickSendSection
-                    }
-                    webrtc.startAnswerer(code)
-                    statusMessage = resolveLocalizedText("正在连接: $code", "Connecting: $code", "接続中: $code")
-                },
+                onGenerateCode = { viewModel.generateConnectionCode() },
+                onConnectPeer = { viewModel.connectPeer(codeInput) },
                 onSendFile = { filePicker.launch(arrayOf("*/*")) },
-                onDisconnect = {
-                    webrtc.disconnect()
-                    statusMessage = resolveLocalizedText("连接已关闭", "Connection closed", "接続を閉じました")
-                }
+                onDisconnect = { viewModel.disconnect() }
             )
         }
 
@@ -333,71 +337,129 @@ fun FileTransferScreen(navController: NavController) {
             )
         }
 
-        item {
-            Text(
-                text = t("传输历史", "Transfer History", "転送履歴"),
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
+        fileTransferHistoryItems(inboundLogs)
+    }
+}
 
-        if (inboundLogs.isEmpty()) {
-            item {
-                LiquidGlassSurface(
-                    modifier = Modifier.fillMaxWidth(),
-                    blurRadius = 0.dp,
-                    tintColor = Color.White.copy(alpha = 0.05f),
-                    tintAlpha = 0.05f,
-                    borderAlpha = 0.12f,
-                    highlightAlpha = 0.04f,
-                    edgeGlowAlpha = 0.03f,
-                    contentPadding = PaddingValues(20.dp)
+private fun androidx.compose.foundation.lazy.LazyListScope.fileTransferHistoryItems(inboundLogs: List<String>) {
+    item {
+        Text(
+            text = resolveLocalizedText("传输历史", "Transfer History", "転送履歴"),
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+
+    if (inboundLogs.isEmpty()) {
+        item {
+            IOSGlassCard(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 30.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Icon(
+                        imageVector = Icons.Filled.CloudDone,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.4f),
+                        modifier = Modifier.size(34.dp)
+                    )
                     Text(
-                        text = t("暂无接收记录", "No received files yet", "受信履歴はまだありません"),
+                        text = resolveLocalizedText("暂无接收记录", "No received files yet", "受信履歴はまだありません"),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = Color.White.copy(alpha = 0.66f)
+                        color = Color.White.copy(alpha = 0.6f)
                     )
                 }
             }
-        } else {
-            items(inboundLogs) { item ->
-                LiquidGlassSurface(
-                    modifier = Modifier.fillMaxWidth(),
-                    blurRadius = 0.dp,
-                    tintColor = Color.White.copy(alpha = 0.05f),
-                    tintAlpha = 0.05f,
-                    borderAlpha = 0.12f,
-                    highlightAlpha = 0.04f,
-                    edgeGlowAlpha = 0.03f,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)
+        }
+    } else {
+        items(inboundLogs) { item ->
+            IOSGlassRow(
+                modifier = Modifier.fillMaxWidth(),
+                accentColor = IOSParityTokens.ColorTokens.SuccessGreen
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .background(IOSParityTokens.ColorTokens.SuccessGreen.copy(alpha = 0.20f), CircleShape),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .background(Color(0xFF34C759).copy(alpha = 0.20f), CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.CloudDone,
-                                contentDescription = null,
-                                tint = Color(0xFF34C759),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = item,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.86f)
+                        Icon(
+                            imageVector = Icons.Filled.CloudDone,
+                            contentDescription = null,
+                            tint = IOSParityTokens.ColorTokens.SuccessGreen,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = item,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White.copy(alpha = 0.86f)
+                    )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LanPeerSendSection(
+    target: DiscoveryPeerLaunchTarget,
+    transferEnabled: Boolean,
+    onSendFile: () -> Unit
+) {
+    IOSGlassCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(IOSParityTokens.ColorTokens.CyanAccent.copy(alpha = 0.20f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = null,
+                        tint = IOSParityTokens.ColorTokens.CyanAccent
+                    )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(t("Bonjour 直传", "Bonjour Direct Send", "Bonjour 直接送信"), style = MaterialTheme.typography.titleMedium, color = Color.White)
+                    Text(
+                        text = t(
+                            "目标：${target.peerName}（端口 ${target.port}）",
+                            "Target: ${target.peerName} (port ${target.port})",
+                            "宛先: ${target.peerName}（ポート ${target.port}）"
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.68f)
+                    )
+                }
+            }
+            Button(
+                onClick = onSendFile,
+                enabled = transferEnabled,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.CloudUpload, contentDescription = null)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(t("选择并发送文件", "Select and Send File", "ファイルを選択して送信"))
             }
         }
     }
@@ -415,28 +477,25 @@ private fun QuickSendSection(
     onSendFile: () -> Unit,
     onDisconnect: () -> Unit
 ) {
-    LiquidGlassSurface(
-        blurRadius = 0.dp,
-        tintColor = Color.White.copy(alpha = 0.05f),
-        tintAlpha = 0.05f,
-        borderAlpha = 0.12f,
-        highlightAlpha = 0.04f,
-        edgeGlowAlpha = 0.03f,
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(14.dp)
-    ) {
+    IOSGlassCard(modifier = Modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
                         .size(44.dp)
-                        .background(Color(0xFF0A84FF).copy(alpha = 0.22f), CircleShape),
+                        .background(IOSParityTokens.ColorTokens.CyanAccent.copy(alpha = 0.20f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Filled.Folder, contentDescription = null, tint = Color(0xFF7CC0FF))
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = null,
+                        tint = IOSParityTokens.ColorTokens.CyanAccent
+                    )
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -454,10 +513,10 @@ private fun QuickSendSection(
                 Text(
                     text = if (connected) t("已连接", "Connected", "接続済み") else t("未连接", "Not Connected", "未接続"),
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (connected) Color(0xFF34C759) else Color.White.copy(alpha = 0.72f),
+                    color = if (connected) IOSParityTokens.ColorTokens.SuccessGreen else Color.White.copy(alpha = 0.72f),
                     modifier = Modifier
                         .background(
-                            color = if (connected) Color(0xFF34C759).copy(alpha = 0.16f) else Color.White.copy(alpha = 0.08f),
+                            color = if (connected) IOSParityTokens.ColorTokens.SuccessGreen.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.08f),
                             shape = RoundedCornerShape(999.dp)
                         )
                         .padding(horizontal = 8.dp, vertical = 4.dp)
@@ -537,25 +596,18 @@ private fun TransferStatusSection(
     progressFraction: Float,
     eventText: String?
 ) {
-    LiquidGlassSurface(
-        blurRadius = 0.dp,
-        tintColor = Color.White.copy(alpha = 0.05f),
-        tintAlpha = 0.05f,
-        borderAlpha = 0.12f,
-        highlightAlpha = 0.04f,
-        edgeGlowAlpha = 0.03f,
-        modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(14.dp)
-    ) {
+    IOSGlassCard(modifier = Modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Filled.Sync,
                     contentDescription = null,
-                    tint = Color(0xFF7CC0FF),
+                    tint = IOSParityTokens.ColorTokens.CyanAccent,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
@@ -572,7 +624,7 @@ private fun TransferStatusSection(
             LinearProgressIndicator(
                 progress = { progressFraction.coerceIn(0f, 1f) },
                 modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF34C759),
+                color = IOSParityTokens.ColorTokens.CyanAccent,
                 trackColor = Color.White.copy(alpha = 0.12f)
             )
             Text(t("进度：$progressBytesText", "Progress: $progressBytesText", "進捗: $progressBytesText"), color = Color.White.copy(alpha = 0.68f))
@@ -597,6 +649,11 @@ private fun renderState(state: SkyBridgeWebRtcConnectionManager.State): String {
             "接続中 (${state.code})"
         )
         is SkyBridgeWebRtcConnectionManager.State.Connected -> resolveLocalizedText(
+            "传输通道已就绪，握手中 (${state.code})",
+            "Channel open, handshaking (${state.code})",
+            "チャネル確立、ハンドシェイク中 (${state.code})"
+        )
+        is SkyBridgeWebRtcConnectionManager.State.Established -> resolveLocalizedText(
             "已连接 (${state.code})",
             "Connected (${state.code})",
             "接続済み (${state.code})"
@@ -609,11 +666,82 @@ private fun renderState(state: SkyBridgeWebRtcConnectionManager.State): String {
     }
 }
 
+/**
+ * Maps the VM-owned [FileTransferViewModel.LocalizedStatus] back to the exact zh/en/ja strings the
+ * old inline code emitted. Kept at the UI layer so the VM stays free of Compose/locale resolution.
+ */
+private fun resolveStatus(status: FileTransferViewModel.LocalizedStatus): String = when (status) {
+    FileTransferViewModel.LocalizedStatus.WaitingForConnection ->
+        resolveLocalizedText("等待建立连接", "Waiting for connection", "接続待機中")
+    is FileTransferViewModel.LocalizedStatus.ReceiveComplete ->
+        resolveLocalizedText("接收完成: ${status.label}", "Receive complete: ${status.label}", "受信完了: ${status.label}")
+    is FileTransferViewModel.LocalizedStatus.ConnectionCodeCreated ->
+        resolveLocalizedText(
+            "已创建连接码: ${status.code}，等待对端加入",
+            "Connection code created: ${status.code}, waiting for peer",
+            "接続コードを作成しました: ${status.code}、相手を待機中"
+        )
+    is FileTransferViewModel.LocalizedStatus.GenerateCodeFailed ->
+        resolveLocalizedText(
+            "生成连接码失败: ${status.error ?: "未知错误"}",
+            "Failed to create connection code: ${status.error ?: "Unknown error"}",
+            "接続コードの生成に失敗しました: ${status.error ?: "不明なエラー"}"
+        )
+    FileTransferViewModel.LocalizedStatus.InvalidConnectionCode ->
+        resolveLocalizedText(
+            "连接码无效，请输入 6-16 位字母数字",
+            "Invalid connection code. Enter 6-16 alphanumeric characters.",
+            "接続コードが無効です。6-16 文字の英数字を入力してください。"
+        )
+    is FileTransferViewModel.LocalizedStatus.Connecting ->
+        resolveLocalizedText("正在连接: ${status.code}", "Connecting: ${status.code}", "接続中: ${status.code}")
+    FileTransferViewModel.LocalizedStatus.ConnectionClosed ->
+        resolveLocalizedText("连接已关闭", "Connection closed", "接続を閉じました")
+    FileTransferViewModel.LocalizedStatus.TransferDisabled ->
+        resolveLocalizedText("文件传输已在设置中关闭", "File transfer is disabled in Settings", "ファイル転送は設定で無効になっています")
+    FileTransferViewModel.LocalizedStatus.AuthenticatedClassicSessionRequired ->
+        resolveLocalizedText(
+            "该局域网文件传输端点需要已认证 classic 会话，当前 Android 发送端尚未建立该会话",
+            "This LAN file-transfer endpoint requires an authenticated classic session; Android has not established that sender session yet.",
+            "この LAN ファイル転送エンドポイントには認証済み classic セッションが必要ですが、Android 送信側はまだそのセッションを確立していません。"
+        )
+    FileTransferViewModel.LocalizedStatus.EstablishConnectionFirst ->
+        resolveLocalizedText("请先建立 WebRTC 连接", "Please establish a WebRTC connection first", "先に WebRTC 接続を確立してください")
+    is FileTransferViewModel.LocalizedStatus.Sending ->
+        resolveLocalizedText("正在发送: ${status.fileName}", "Sending: ${status.fileName}", "送信中: ${status.fileName}")
+    is FileTransferViewModel.LocalizedStatus.Sent ->
+        resolveLocalizedText("已发送: ${status.fileName}", "Sent: ${status.fileName}", "送信済み: ${status.fileName}")
+    is FileTransferViewModel.LocalizedStatus.SendFailed ->
+        resolveLocalizedText(
+            "发送失败: ${status.error ?: "未知错误"}",
+            "Send failed: ${status.error ?: "unknown"}",
+            "送信失敗: ${status.error ?: "不明"}"
+        )
+    is FileTransferViewModel.LocalizedStatus.Cancelled ->
+        resolveLocalizedText("已取消传输", "Transfer cancelled", "転送をキャンセルしました")
+}
+
+private fun resolveInboundLog(log: FileTransferViewModel.InboundLog): String = when (log) {
+    is FileTransferViewModel.InboundLog.Received ->
+        resolveLocalizedText("已接收: ${log.label}", "Received: ${log.label}", "受信済み: ${log.label}")
+}
+
 private fun queryDisplayName(context: Context, uri: Uri): String? {
     return context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
         val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
         if (idx >= 0 && cursor.moveToFirst()) {
             cursor.getString(idx)
+        } else {
+            null
+        }
+    }
+}
+
+private fun queryFileSize(context: Context, uri: Uri): Long? {
+    return context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (idx >= 0 && cursor.moveToFirst() && !cursor.isNull(idx)) {
+            cursor.getLong(idx)
         } else {
             null
         }

@@ -5,13 +5,6 @@
         <certificateTransparency enabled="true"/>
     </base-config>
 
-    <!-- Debug: allow user-added CAs and bypass pinning for testing -->
-    <debug-overrides>
-        <trust-anchors>
-            <certificates src="user" overridePins="true"/>
-        </trust-anchors>
-    </debug-overrides>
-
     <!-- Static pinning: add your domains and SPKI pins here
          Example:
          <domain-config>

@@ -1,0 +1,28 @@
+{
+  "expectedFields" : {
+    "ciphertext" : "606162636465666768696a6b6c6d6e6f",
+    "encapsulatedKey" : "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "nonce" : "505152535455565758595a5b",
+    "suiteWireId" : "4097",
+    "tag" : "707172737475767778797a7b7c7d7e7f",
+    "version" : "1"
+  },
+  "messageType" : "handshake-v1",
+  "provenance" : {
+    "captureToolPath" : "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift",
+    "collectedAtUtc" : "2026-08-10T22:59:36.000Z",
+    "note" : "HPKESealedBox.combinedWithHeader(suite:) production output",
+    "origin" : "APPLE_REFERENCE_CAPTURE",
+    "repoIdentity" : "github.com/billlza/Skybridge-Compass",
+    "repositoryRemoteURL" : "https://github.com/billlza/Skybridge-Compass",
+    "semanticInputPath" : "Tests/SkyBridgeCoreTests/Fixtures/AppleCompatibilityVectors/inputs.json",
+    "semanticInputSha256" : "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0",
+    "source" : "SkyBridge Apple production codec XCTest capture",
+    "sourceCommit" : "6d6f601ea0ac23ba5c62d46b98c3efd03acc4898",
+    "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HPKESealedBox.swift",
+    "sourceSetSha256" : "7ea5e3760a2f27818700bdad3f047f26d9670365eb79ea73e70a72ea69364cfb"
+  },
+  "rawBytesHex" : "48504b45010110000020000c1010000000202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f505152535455565758595a5b606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+  "schemaVersion" : 1,
+  "surface" : "F3"
+}

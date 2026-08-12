@@ -1,0 +1,27 @@
+{
+  "expectedFields" : {
+    "deviceId" : "6d61632d7265666572656e63652d30303031",
+    "hs_soa" : "31",
+    "platform" : "6d61636f73",
+    "pubKeyFP" : "32313233343536373839616263646566303132333435363738396162636465663031323334353637383961626364656630313233343536373839616263646566",
+    "version" : "32"
+  },
+  "messageType" : "main-service-record",
+  "provenance" : {
+    "captureToolPath" : "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift",
+    "collectedAtUtc" : "2026-08-10T22:59:36.000Z",
+    "note" : "canonical production raw TXT; serviceType=_skybridge._tcp; role=control; SRV owns the port",
+    "origin" : "APPLE_REFERENCE_CAPTURE",
+    "repoIdentity" : "github.com/billlza/Skybridge-Compass",
+    "repositoryRemoteURL" : "https://github.com/billlza/Skybridge-Compass",
+    "semanticInputPath" : "Tests/SkyBridgeCoreTests/Fixtures/AppleCompatibilityVectors/inputs.json",
+    "semanticInputSha256" : "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0",
+    "source" : "SkyBridge Apple production codec XCTest capture",
+    "sourceCommit" : "6d6f601ea0ac23ba5c62d46b98c3efd03acc4898",
+    "sourcePath" : "Sources/SkyBridgeProtocolCore/Discovery/BonjourInteropProtocolContract.swift",
+    "sourceSetSha256" : "7ea5e3760a2f27818700bdad3f047f26d9670365eb79ea73e70a72ea69364cfb"
+  },
+  "rawBytesHex" : "1b64657669636549643d6d61632d7265666572656e63652d303030310868735f736f613d310e706c6174666f726d3d6d61636f73497075624b657946503d323132333435363738396162636465663031323334353637383961626364656630313233343536373839616263646566303132333435363738396162636465660976657273696f6e3d32",
+  "schemaVersion" : 1,
+  "surface" : "F4"
+}

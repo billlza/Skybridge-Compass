@@ -237,7 +237,7 @@ fun PerformanceMonitorEffect(
  * 性能测量装饰器
  */
 @Composable
-fun <T> MeasurePerformance(
+fun <T> measurePerformance(
     tag: String,
     content: @Composable () -> T
 ): T {

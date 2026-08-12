@@ -562,7 +562,7 @@ object CrossPlatformRemoteControlProtocol {
             57 to 0x3A,  // ALT_LEFT (Option)
             58 to 0x3D,  // ALT_RIGHT
             117 to 0x37, // META_LEFT (Command)
-            118 to 0x37, // META_RIGHT (Command)
+            118 to 0x36, // META_RIGHT (Right Command)
             
             // 符号键
             55 to 0x2B,  // COMMA
@@ -579,14 +579,17 @@ object CrossPlatformRemoteControlProtocol {
         )
         
         private val macOSToAndroid = androidToMacOS.entries.associate { (k, v) -> v to k }
-        
-        fun androidToMacOS(androidKeyCode: Int): Int {
-            return androidToMacOS[androidKeyCode] ?: androidKeyCode
-        }
-        
-        fun macOSToAndroid(macOSKeyCode: Int): Int {
-            return macOSToAndroid[macOSKeyCode] ?: macOSKeyCode
-        }
+
+        /**
+         * Strict Android-key lookup for outbound remote input.
+         *
+         * The wire carries a macOS virtual key code, not a Unicode code point and not an arbitrary
+         * Android integer. Callers at an input boundary must use this nullable lookup and reject an
+         * unmapped key instead of forwarding the source value as a different Mac key.
+         */
+        fun androidToMacOSOrNull(androidKeyCode: Int): Int? = androidToMacOS[androidKeyCode]
+
+        fun macOSToAndroidOrNull(macOSKeyCode: Int): Int? = macOSToAndroid[macOSKeyCode]
     }
     
     /**
@@ -660,4 +663,3 @@ object CrossPlatformRemoteControlProtocol {
         return androidMetaState
     }
 }
-

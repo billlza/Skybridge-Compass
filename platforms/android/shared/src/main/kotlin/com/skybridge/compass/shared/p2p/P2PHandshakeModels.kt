@@ -66,9 +66,9 @@ data class P2PHandshakePolicy(
 
     companion object {
         val DEFAULT = P2PHandshakePolicy(
-            requirePqc = false,
-            allowClassicFallback = true,
-            minimumTierRaw = "classic",
+            requirePqc = true,
+            allowClassicFallback = false,
+            minimumTierRaw = "nativePQC",
             requireSecureEnclavePoP = false
         )
 
@@ -89,5 +89,4 @@ data class P2PHandshakePolicy(
         }
     }
 }
-
 

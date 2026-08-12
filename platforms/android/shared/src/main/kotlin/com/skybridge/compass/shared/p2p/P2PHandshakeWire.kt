@@ -1,9 +1,8 @@
 package com.skybridge.compass.shared.p2p
 
 import android.util.Log
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import com.skybridge.compass.shared.crypto.KeyUsage
+import com.skybridge.compass.shared.crypto.Ed25519SoftwareVerifier
 import com.skybridge.compass.shared.crypto.providers.AndroidPQCCryptoProvider
 import kotlinx.coroutines.runBlocking
 import org.bouncycastle.jce.provider.BouncyCastleProvider
@@ -18,8 +17,6 @@ import java.security.Security
 import java.security.Signature
 import java.security.KeyFactory
 import java.security.spec.PKCS8EncodedKeySpec
-import java.security.spec.X509EncodedKeySpec
-import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -36,16 +33,15 @@ import javax.crypto.spec.SecretKeySpec
  */
 object P2PHandshakeWire {
     private const val TAG = "SB-HANDSHAKE-WIRE"
+    const val PROVIDER_TYPE_QPERIAPT = "Q-Periapt-ContextBound"
     const val PROVIDER_TYPE_CRYPTO_KIT_PQC = "CryptoKit-PQC"
     const val PROVIDER_TYPE_LIBOQS = "liboqs"
     const val PROVIDER_TYPE_CRYPTO_KIT_CLASSIC = "CryptoKit-Classic"
 
-    private const val STATIC_SMOKE_ED25519_PKCS8_B64 =
-        "MC4CAQAwBQYDK2VwBCIEIOdc14db9199/Tj4MwDdozvyzqSvrvWIaG6Kn5U1URwU"
-    private const val STATIC_SMOKE_ED25519_PUBLIC_B64 =
-        "JnurU6zrCNr6Dm+XMUiwEcJ0PDs9af0Av1YHyulQNg4="
-
     private const val PROTOCOL_VERSION: Byte = 0x01
+    private const val MAX_HANDSHAKE_MESSAGE_BYTES: Int = 16 * 1_024
+    private const val MAX_SUPPORTED_SUITES: Int = 8
+    private const val MAX_KEY_SHARES: Int = 2
     private val DOMAIN_A = "SkyBridge-A".toByteArray(Charsets.UTF_8)
     private val DOMAIN_B = "SkyBridge-B".toByteArray(Charsets.UTF_8)
     private const val CLASSIC_FALLBACK_COOLDOWN_MILLIS: Long = 300_000L
@@ -113,9 +109,11 @@ object P2PHandshakeWire {
     )
 
     fun compatibleProviderTypeRawForTier(minimumTierRaw: String): String = when (minimumTierRaw.trim()) {
+        P2PQPeriaptKem.MINIMUM_TIER_RAW -> PROVIDER_TYPE_QPERIAPT
         "nativePQC" -> PROVIDER_TYPE_CRYPTO_KIT_PQC
         "liboqsPQC" -> PROVIDER_TYPE_LIBOQS
-        else -> PROVIDER_TYPE_CRYPTO_KIT_CLASSIC
+        "classic" -> PROVIDER_TYPE_CRYPTO_KIT_CLASSIC
+        else -> throw IllegalArgumentException("Unsupported handshake minimum tier: $minimumTierRaw")
     }
 
     // Shared trust contract used by handshake call-sites and artifacts.
@@ -211,6 +209,7 @@ object P2PHandshakeWire {
     fun decodeMessageA(wire: ByteArray): MessageA {
         val data = HandshakePaddingP1.unwrapIfNeeded(wire)
         require(data.size >= 1 + 2 + 2 + 32) { "MessageA too short" }
+        require(data.size <= MAX_HANDSHAKE_MESSAGE_BYTES) { "MessageA exceeds maximum length" }
         val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val version = bb.get()
         require(version == PROTOCOL_VERSION) { "Version mismatch: $version" }
@@ -233,9 +232,9 @@ object P2PHandshakeWire {
             val share = ByteArray(shareLen)
             bb.get(share)
             val parsedSuiteId = P2PCryptoSuiteId.parse(suiteId)
-            parsedSuiteId.knownOrNull()?.let { validateKeyShareLength(share.size, it) }
             keyShares += KeyShare(parsedSuiteId, share)
         }
+        validateMessageAOfferShape(suites, keyShares)
 
         val clientNonce = ByteArray(32)
         bb.get(clientNonce)
@@ -293,6 +292,7 @@ object P2PHandshakeWire {
             require(bb.remaining() >= seSigLen) { "SE signature truncated" }
             ByteArray(seSigLen).also { bb.get(it) }
         } else null
+        require(!bb.hasRemaining()) { "MessageA contains trailing bytes" }
 
         return MessageA(
             supportedSuites = suites,
@@ -336,6 +336,31 @@ object P2PHandshakeWire {
                 mlDsaPrivateKey = null
             )
         }
+    }
+
+    /**
+     * Canonically encodes an already-signed MessageA value.
+     *
+     * This is the same unpadded production wire representation emitted by the signing overloads.
+     * Padding remains a transport concern. Suite and key-share order are protocol data and are
+     * therefore preserved exactly.
+     */
+    fun encodeMessageA(message: MessageA): ByteArray {
+        val withoutSignature = buildMessageAWithoutSignatureGeneric(
+            supportedSuites = message.supportedSuites,
+            keyShares = message.keyShares,
+            clientNonce32 = message.clientNonce,
+            capabilitiesBytes = message.capabilities.deterministicEncode(),
+            policyBytes = message.policy.deterministicEncode(),
+            identityPublicKeyBytes = message.identityPublicKeys.encode(),
+            initiatorContribution = message.initiatorContribution,
+            extensionsRaw = message.extensionsRaw
+        )
+        return appendMessageSignatures(
+            withoutSignature = withoutSignature,
+            signature = message.signature,
+            secureEnclaveSignature = message.secureEnclaveSignature
+        )
     }
 
     fun encodeMessageAWithRawSigningKey(
@@ -397,13 +422,11 @@ object P2PHandshakeWire {
         )
         val sig = signer(concat(DOMAIN_A, withoutSig))
 
-        val out = ByteBuffer.allocate(withoutSig.size + 2 + sig.size + 2)
-            .order(ByteOrder.LITTLE_ENDIAN)
-        out.put(withoutSig)
-        out.putShort(sig.size.toShort())
-        out.put(sig)
-        out.putShort(0) // no secure enclave signature
-        return out.array()
+        return appendMessageSignatures(
+            withoutSignature = withoutSig,
+            signature = sig,
+            secureEnclaveSignature = null
+        )
     }
 
     private fun buildMessageAWithoutSignature(
@@ -436,6 +459,14 @@ object P2PHandshakeWire {
         initiatorContribution: ByteArray?,
         extensionsRaw: ByteArray
     ): ByteArray {
+        validateMessageAOfferShape(supportedSuites, keyShares)
+        require(clientNonce32.size == 32) { "clientNonce must be 32 bytes" }
+        requireUInt16Length(capabilitiesBytes, "capabilities")
+        requireUInt16Length(policyBytes, "policy")
+        requireUInt16Length(identityPublicKeyBytes, "identityPublicKey")
+        keyShares.forEachIndexed { index, keyShare ->
+            requireUInt16Length(keyShare.shareBytes, "keyShares[$index]")
+        }
         val needsV2Contribution = supportedSuites.any { it.knownOrNull() == P2PCryptoSuite.MLKEM_768_FS_COMPAT }
         val contributionBytes = when {
             !needsV2Contribution -> ByteArray(0)
@@ -445,7 +476,7 @@ object P2PHandshakeWire {
                 initiatorContribution
             }
         }
-        require(extensionsRaw.size <= 0xFFFF) { "extensionsRaw too large: ${extensionsRaw.size}" }
+        requireUInt16Length(extensionsRaw, "extensionsRaw")
         val suitesBytes = ByteBuffer.allocate(2 + supportedSuites.size * 2).order(ByteOrder.LITTLE_ENDIAN).apply {
             putShort(supportedSuites.size.toShort())
             for (suiteId in supportedSuites) putShort(suiteId.wireId.toShort())
@@ -461,14 +492,17 @@ object P2PHandshakeWire {
         }.array()
 
         val extensionsLen = if (extensionsRaw.isEmpty()) 0 else P2PSoa.CONTAINER_MAGIC.size + 2 + extensionsRaw.size
-        val out = ByteBuffer.allocate(
+        val encodedSize =
             1 + suitesBytes.size + ksBytes.size + 32 +
                 2 + capabilitiesBytes.size +
                 2 + policyBytes.size +
                 2 + identityPublicKeyBytes.size +
                 (if (needsV2Contribution) 2 + contributionBytes.size else 0) +
                 extensionsLen
-        ).order(ByteOrder.LITTLE_ENDIAN)
+        require(encodedSize <= MAX_HANDSHAKE_MESSAGE_BYTES) {
+            "MessageA without signature exceeds maximum length: $encodedSize"
+        }
+        val out = ByteBuffer.allocate(encodedSize).order(ByteOrder.LITTLE_ENDIAN)
 
         out.put(PROTOCOL_VERSION)
         out.put(suitesBytes)
@@ -492,6 +526,76 @@ object P2PHandshakeWire {
         return out.array()
     }
 
+    private fun appendMessageSignatures(
+        withoutSignature: ByteArray,
+        signature: ByteArray,
+        secureEnclaveSignature: ByteArray?
+    ): ByteArray {
+        requireUInt16Length(signature, "signature")
+        val secureEnclaveBytes = secureEnclaveSignature ?: ByteArray(0)
+        requireUInt16Length(secureEnclaveBytes, "secureEnclaveSignature")
+        val encodedSize = withoutSignature.size.toLong() + 2L + signature.size + 2L + secureEnclaveBytes.size
+        require(encodedSize <= MAX_HANDSHAKE_MESSAGE_BYTES.toLong()) {
+            "Handshake message exceeds maximum length: $encodedSize"
+        }
+        return ByteBuffer.allocate(encodedSize.toInt()).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put(withoutSignature)
+            putShort(signature.size.toShort())
+            put(signature)
+            putShort(secureEnclaveBytes.size.toShort())
+            put(secureEnclaveBytes)
+        }.array()
+    }
+
+    private fun requireUInt16Length(bytes: ByteArray, fieldName: String) {
+        require(bytes.size <= 0xFFFF) { "$fieldName too large: ${bytes.size}" }
+    }
+
+    private fun validateMessageAOfferShape(
+        supportedSuites: List<P2PCryptoSuiteId>,
+        keyShares: List<KeyShare>
+    ) {
+        require(supportedSuites.size in 1..MAX_SUPPORTED_SUITES) {
+            "supportedSuites count out of range: ${supportedSuites.size}"
+        }
+        require(keyShares.size in 0..MAX_KEY_SHARES && keyShares.size <= supportedSuites.size) {
+            "keyShares count out of range: ${keyShares.size}"
+        }
+
+        val supportedWireIds = supportedSuites.map(P2PCryptoSuiteId::wireId)
+        require(supportedWireIds.distinct().size == supportedWireIds.size) {
+            "Duplicate supported suite"
+        }
+
+        val seenKeyShareWireIds = HashSet<UShort>(keyShares.size)
+        var lastSupportedIndex = -1
+        keyShares.forEach { keyShare ->
+            require(seenKeyShareWireIds.add(keyShare.suiteId.wireId)) {
+                "Duplicate keyShare suite"
+            }
+            val supportedIndex = supportedWireIds.indexOf(keyShare.suiteId.wireId)
+            require(supportedIndex >= 0) { "keyShare suite not in supportedSuites" }
+            require(supportedIndex > lastSupportedIndex) { "keyShares out of order" }
+            lastSupportedIndex = supportedIndex
+            keyShare.knownSuite?.let { validateKeyShareLength(keyShare.shareBytes.size, it) }
+        }
+    }
+
+    private fun validateResponderShareLength(length: Int, suite: P2PCryptoSuiteId) {
+        val knownSuite = suite.knownOrNull() ?: return
+        val expectedLength = when (knownSuite) {
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND,
+            P2PCryptoSuite.X_WING,
+            P2PCryptoSuite.MLKEM_768 -> 0
+            P2PCryptoSuite.MLKEM_768_FS_COMPAT,
+            P2PCryptoSuite.X25519 -> 32
+            P2PCryptoSuite.P256 -> 65
+        }
+        require(length == expectedLength) {
+            "ResponderShare length mismatch for ${knownSuite.name}: $length != $expectedLength"
+        }
+    }
+
     private fun canonicalMessageAWithoutSignature(messageA: MessageA): ByteArray =
         buildMessageAWithoutSignatureGeneric(
             supportedSuites = messageA.supportedSuites,
@@ -507,6 +611,7 @@ object P2PHandshakeWire {
     fun decodeMessageB(wire: ByteArray): MessageB {
         val data = HandshakePaddingP1.unwrapIfNeeded(wire)
         require(data.size >= 1 + 2 + 2 + 32 + 2) { "MessageB too short" }
+        require(data.size <= MAX_HANDSHAKE_MESSAGE_BYTES) { "MessageB exceeds maximum length" }
         val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val version = bb.get()
         require(version == PROTOCOL_VERSION) { "Version mismatch: $version" }
@@ -518,6 +623,7 @@ object P2PHandshakeWire {
         require(shareLen >= 0 && bb.remaining() >= shareLen) { "Responder share truncated" }
         val responderShare = ByteArray(shareLen)
         bb.get(responderShare)
+        validateResponderShareLength(responderShare.size, suite)
 
         val serverNonce = ByteArray(32)
         bb.get(serverNonce)
@@ -527,6 +633,12 @@ object P2PHandshakeWire {
         val payload = ByteArray(payloadLen)
         bb.get(payload)
         val encryptedPayload = P2PHPKESealedBox.parse(payload, isHandshake = true)
+        require(encryptedPayload.suiteWireId == suite.wireId) {
+            "MessageB encrypted payload suite does not match selected suite"
+        }
+        require(encryptedPayload.combinedWithHeaderForHandshake().contentEquals(payload)) {
+            "MessageB encrypted payload is not canonically encoded for selected suite"
+        }
 
         val idKeyLen = bb.short.toInt() and 0xFFFF
         require(bb.remaining() >= idKeyLen) { "Identity key truncated" }
@@ -543,6 +655,7 @@ object P2PHandshakeWire {
             require(bb.remaining() >= seSigLen) { "SE signature truncated" }
             ByteArray(seSigLen).also { bb.get(it) }
         } else null
+        require(!bb.hasRemaining()) { "MessageB contains trailing bytes" }
 
         return MessageB(
             selectedSuite = suite,
@@ -552,6 +665,47 @@ object P2PHandshakeWire {
             identityPublicKeys = P2PIdentityPublicKeys.decode(idKey),
             signature = sig,
             secureEnclaveSignature = seSig
+        )
+    }
+
+    /**
+     * Canonically encodes an already-signed MessageB value without transport padding.
+     */
+    fun encodeMessageB(message: MessageB): ByteArray {
+        require(message.serverNonce.size == 32) { "serverNonce must be 32 bytes" }
+        requireUInt16Length(message.responderShare, "responderShare")
+        validateResponderShareLength(message.responderShare.size, message.selectedSuite)
+        val payloadBytes = message.encryptedPayload.combinedWithHeaderForHandshake()
+        require(message.encryptedPayload.suiteWireId == message.selectedSuite.wireId) {
+            "MessageB payload suite does not match selected suite"
+        }
+        requireUInt16Length(payloadBytes, "encryptedPayload")
+        // Re-parse the produced handshake payload before it can enter the signed wire. This keeps
+        // version and per-field length constraints aligned with the production decoder.
+        P2PHPKESealedBox.parse(payloadBytes, isHandshake = true)
+        val identityBytes = message.identityPublicKeys.encode()
+        requireUInt16Length(identityBytes, "identityPublicKey")
+
+        val unsignedSize = 1L + 2L + 2L + message.responderShare.size + 32L +
+            2L + payloadBytes.size + 2L + identityBytes.size
+        require(unsignedSize <= MAX_HANDSHAKE_MESSAGE_BYTES.toLong()) {
+            "MessageB without signature exceeds maximum length: $unsignedSize"
+        }
+        val withoutSignature = ByteBuffer.allocate(unsignedSize.toInt()).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put(PROTOCOL_VERSION)
+            putShort(message.selectedSuite.wireId.toShort())
+            putShort(message.responderShare.size.toShort())
+            put(message.responderShare)
+            put(message.serverNonce)
+            putShort(payloadBytes.size.toShort())
+            put(payloadBytes)
+            putShort(identityBytes.size.toShort())
+            put(identityBytes)
+        }.array()
+        return appendMessageSignatures(
+            withoutSignature = withoutSignature,
+            signature = message.signature,
+            secureEnclaveSignature = message.secureEnclaveSignature
         )
     }
 
@@ -813,16 +967,6 @@ object P2PHandshakeWire {
             }
             .firstOrNull()
             ?: run {
-                if (System.getProperty("skybridge.smoke.allowStaticEd25519Fallback") == "1") {
-                    val staticPrivateKey = runCatching {
-                        decodeEd25519PrivateKey(Base64.getDecoder().decode(STATIC_SMOKE_ED25519_PKCS8_B64))
-                    }.getOrNull()
-                    if (staticPrivateKey != null) {
-                        val rawPub = Base64.getDecoder().decode(STATIC_SMOKE_ED25519_PUBLIC_B64)
-                        return staticPrivateKey to rawPub
-                    }
-                    return generateEd25519KeyPairFromAndroidKeyStore()
-                }
                 val defaultGenerator = KeyPairGenerator.getInstance("Ed25519")
                 require(!defaultGenerator.provider.name.contains("AndroidKeyStore", ignoreCase = true)) {
                     "No exportable Ed25519 software provider available"
@@ -842,22 +986,6 @@ object P2PHandshakeWire {
             "No exportable Ed25519 KeyFactory provider available"
         }
         return defaultFactory.generatePrivate(PKCS8EncodedKeySpec(pkcs8))
-    }
-
-    private fun generateEd25519KeyPairFromAndroidKeyStore(): Pair<PrivateKey, ByteArray> {
-        val alias = "skybridge-smoke-ed25519-${System.nanoTime()}"
-        val generator = KeyPairGenerator.getInstance("ED25519", "AndroidKeyStore")
-        val spec = KeyGenParameterSpec.Builder(
-            alias,
-            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-        ).build()
-        generator.initialize(spec)
-        val keyPair = generator.generateKeyPair()
-        val rawPub = keyPair.public.encoded.copyOfRange(
-            keyPair.public.encoded.size - 32,
-            keyPair.public.encoded.size
-        )
-        return keyPair.private to rawPub
     }
 
     private fun softwareEd25519KeyFactoryOrNull(): KeyFactory? {
@@ -965,15 +1093,16 @@ object P2PHandshakeWire {
         ).verified
     }
 
-    private fun verifyByAlgorithmDetailed(
+    internal fun verifyByAlgorithmDetailed(
         data: ByteArray,
         signature: ByteArray,
         publicKey: ByteArray,
-        algorithm: P2PIdentityPublicKeys.ProtocolAlgorithm
+        algorithm: P2PIdentityPublicKeys.ProtocolAlgorithm,
+        ed25519Verifier: (ByteArray, ByteArray, ByteArray) -> Boolean = Ed25519SoftwareVerifier::verify
     ): VerifyOutcome {
         return when (algorithm) {
             P2PIdentityPublicKeys.ProtocolAlgorithm.ED25519 -> {
-                runCatching { verifyEd25519(data, signature, publicKey) }
+                runCatching { ed25519Verifier(data, signature, publicKey) }
                     .fold(
                         onSuccess = { VerifyOutcome(verified = it) },
                         onFailure = { VerifyOutcome(verified = false, failure = it.message ?: it::class.java.simpleName) }
@@ -997,43 +1126,7 @@ object P2PHandshakeWire {
         }
     }
 
-    private fun verifyEd25519(data: ByteArray, signature: ByteArray, rawPublicKey32: ByteArray): Boolean {
-        if (rawPublicKey32.size != 32) return false
-        return try {
-            val keySpec = X509EncodedKeySpec(
-                byteArrayOf(
-                    0x30, 0x2a,
-                    0x30, 0x05,
-                    0x06, 0x03, 0x2b, 0x65, 0x70,
-                    0x03, 0x21, 0x00
-                ) + rawPublicKey32
-            )
-            val kf = softwareEd25519KeyFactoryOrNull()
-                ?: KeyFactory.getInstance("Ed25519")
-            val pubKey = kf.generatePublic(keySpec)
-            val verifier = softwareEd25519Signatures()
-                .asSequence()
-                .mapNotNull { candidate ->
-                    runCatching {
-                        candidate.initVerify(pubKey)
-                        candidate
-                    }.getOrNull()
-                }
-                .firstOrNull()
-                ?: Signature.getInstance("Ed25519").also { fallback ->
-                    require(!fallback.provider.name.contains("AndroidKeyStore", ignoreCase = true)) {
-                        "No exportable Ed25519 software signature provider available"
-                    }
-                    fallback.initVerify(pubKey)
-                }
-            verifier.update(data)
-            verifier.verify(signature)
-        } catch (_: Throwable) {
-            false
-        }
-    }
-
-    private data class VerifyOutcome(
+    internal data class VerifyOutcome(
         val verified: Boolean,
         val failure: String? = null
     )
@@ -1094,6 +1187,7 @@ object P2PHandshakeWire {
 
     fun validateKeyShareLength(length: Int, suite: P2PCryptoSuite) {
         val expected = when (suite) {
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND -> P2PQPeriaptKem.QPERIAPT_CIPHERTEXT_SIZE
             P2PCryptoSuite.X_WING -> 1120
             P2PCryptoSuite.MLKEM_768 -> 1088
             P2PCryptoSuite.MLKEM_768_FS_COMPAT -> 1088
@@ -1251,23 +1345,20 @@ object P2PHandshakeWire {
     }
 
     fun computePeerSigningFingerprint(identityPublicKeys: P2PIdentityPublicKeys.Keys): String {
-        val digest = sha256(identityPublicKeys.encode())
-        return digest.joinToString("") { "%02x".format(it) }
+        return ProtocolIdentityFingerprint.compute(identityPublicKeys)
     }
 
     fun verifyOrPersistPeerTrust(
         peerId: String,
         identityPublicKeys: P2PIdentityPublicKeys.Keys,
         trustStore: TrustStore,
-        allowTrustOnFirstUse: Boolean = true
+        allowTrustOnFirstUse: Boolean = false
     ): TrustDecision {
         require(peerId.isNotBlank()) { "peerId is required for trust verification" }
         val observed = computePeerSigningFingerprint(identityPublicKeys)
         val pinned = trustStore.loadPeerSigningFingerprint(peerId)
         if (pinned == null) {
-            if (!allowTrustOnFirstUse) {
-                return TrustDecision.UNTRUSTED_EPHEMERAL
-            }
+            require(allowTrustOnFirstUse) { "Peer is not pre-pinned: $peerId" }
             trustStore.savePeerSigningFingerprint(peerId, observed)
             return TrustDecision.TRUSTED_NEW
         }

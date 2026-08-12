@@ -68,6 +68,12 @@ object CryptoProviderFactory {
      * @throws CryptoProviderUnavailableException if no suitable provider is available
      */
     fun createProvider(suite: CryptoSuite): CryptoProvider {
+        if (suite == CryptoSuite.Q_PERIAPT_CONTEXT_BOUND) {
+            throw CryptoProviderUnavailableException(
+                provider = "Q-Periapt",
+                message = "Q-Periapt is an explicit P2P beta KEM and is not exposed through CryptoProviderFactory"
+            )
+        }
         val era = currentEra()
         if (!isSuiteAllowedByEra(suite, era)) {
             throw CryptoProviderUnavailableException(
@@ -151,6 +157,12 @@ object CryptoProviderFactory {
      * @return The CryptoTier of the best available provider for this suite
      */
     fun getAvailableTier(suite: CryptoSuite): CryptoTier {
+        if (suite == CryptoSuite.Q_PERIAPT_CONTEXT_BOUND) {
+            throw CryptoProviderUnavailableException(
+                provider = "Q-Periapt",
+                message = "Q-Periapt tier is explicit qperiaptPQC, not a production provider tier"
+            )
+        }
         val era = currentEra()
         if (!isSuiteAllowedByEra(suite, era)) return CryptoTier.CLASSIC
 

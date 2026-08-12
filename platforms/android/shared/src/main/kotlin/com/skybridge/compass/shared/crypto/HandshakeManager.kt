@@ -637,8 +637,7 @@ class HandshakeManager(
 
         if (selectedSuite.isPQC && pqcSignature != null && pqcSigningPublicKey != null && pqcProvider != null) {
             try {
-                // Use verifyWithFallback for cross-platform compatibility
-                val isValid = pqcProvider!!.verifyWithFallback(
+                val isValid = pqcProvider!!.verify(
                     transcriptHash,
                     pqcSignature,
                     pqcSigningPublicKey
@@ -670,17 +669,15 @@ class HandshakeManager(
 
         if (classicSignature != null && classicSigningPublicKey != null) {
             try {
-                val isValid = if (pqcProvider != null) {
-                    // Use cross-platform verifier
-                    pqcProvider!!.verifyWithFallback(
-                        transcriptHash,
-                        classicSignature,
-                        classicSigningPublicKey
-                    )
-                } else {
-                    // Direct verification based on key size
-                    verifyClassicSignature(transcriptHash, classicSignature, classicSigningPublicKey)
+                val explicitClassicAlgorithm = requireNotNull(signatureAlgorithm) {
+                    "Server classic signature is missing its algorithm binding"
                 }
+                val isValid = verifyClassicSignature(
+                    data = transcriptHash,
+                    signature = classicSignature,
+                    publicKey = classicSigningPublicKey,
+                    algorithm = explicitClassicAlgorithm
+                )
 
                 if (!isValid) {
                     throw HandshakeException(
@@ -689,12 +686,8 @@ class HandshakeManager(
                     )
                 }
 
-                val algorithm = when (classicSigningPublicKey.size) {
-                    32 -> SIG_ALG_ED25519
-                    else -> SIG_ALG_ECDSA_P256
-                }
                 telemetry?.recordEvent("crypto_classic_signature_verified", mapOf(
-                    "algorithm" to algorithm,
+                    "algorithm" to explicitClassicAlgorithm,
                     "public_key_size" to classicSigningPublicKey.size
                 ))
                 return // Classic verification succeeded
@@ -704,6 +697,11 @@ class HandshakeManager(
                 telemetry?.recordEvent("crypto_classic_signature_verify_error", mapOf(
                     "error" to (e.message ?: "Unknown")
                 ))
+                throw HandshakeException(
+                    "ClientHandshake",
+                    "Server classic signature verification could not be completed",
+                    e
+                )
             }
         }
 
@@ -834,39 +832,26 @@ class HandshakeManager(
     }
 
     /**
-     * Verifies a classic signature (Ed25519 or ECDSA) based on public key format.
+     * Verifies a classic signature using the peer's authenticated algorithm field.
      *
      * @param data Original data
      * @param signature Signature to verify
-     * @param publicKey Public key (format detected by size)
+     * @param publicKey Public key encoded for [algorithm]
      * @return true if signature is valid
      */
     private fun verifyClassicSignature(
         data: ByteArray,
         signature: ByteArray,
-        publicKey: ByteArray
+        publicKey: ByteArray,
+        algorithm: String
     ): Boolean {
-        return try {
-            when {
-                // Ed25519 public key (32 bytes)
-                publicKey.size == 32 && PlatformCompat.apiLevel >= 33 -> {
-                    val keySpec = java.security.spec.EdECPublicKeySpec(
-                        java.security.spec.NamedParameterSpec.ED25519,
-                        java.security.spec.EdECPoint(
-                            publicKey[31].toInt() and 0x80 != 0,
-                            java.math.BigInteger(1, publicKey.sliceArray(0 until 31).reversedArray())
-                        )
-                    )
-                    val keyFactory = java.security.KeyFactory.getInstance("Ed25519")
-                    val pubKey = keyFactory.generatePublic(keySpec)
-
-                    val sig = Signature.getInstance("Ed25519")
-                    sig.initVerify(pubKey)
-                    sig.update(data)
-                    sig.verify(signature)
+        return when (algorithm) {
+            SIG_ALG_ED25519 -> Ed25519SoftwareVerifier.verify(data, signature, publicKey)
+            SIG_ALG_ECDSA_P256 -> {
+                require(publicKey.size in listOf(33, 65)) {
+                    "ECDSA P-256 public key has invalid length: ${publicKey.size}"
                 }
-                // ECDSA P-256 public key (65 bytes uncompressed or 33 bytes compressed)
-                publicKey.size in listOf(33, 65) -> {
+                try {
                     val keyFactory = java.security.KeyFactory.getInstance("EC")
                     val keySpec = java.security.spec.X509EncodedKeySpec(
                         createX509PublicKeyBytes(publicKey)
@@ -884,11 +869,11 @@ class HandshakeManager(
                         signature
                     }
                     sig.verify(derSig)
+                } catch (_: java.security.GeneralSecurityException) {
+                    false
                 }
-                else -> false
             }
-        } catch (e: Exception) {
-            false
+            else -> throw IllegalArgumentException("Unsupported classic signature algorithm: $algorithm")
         }
     }
 

@@ -1,11 +1,13 @@
 package com.skybridge.compass.filetransfer.webrtc.resume
 
 import android.content.Context
+import com.skybridge.compass.filetransfer.webrtc.CrossNetworkFileTransferValidator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.io.IOException
 
 /**
  * Simple file-backed checkpoint store (JSON per transferId) for true resume across app restarts.
@@ -21,33 +23,46 @@ class AndroidFileTransferCheckpointStore(
         mkdirs()
     }
 
-    private fun fileFor(id: String): File = File(dir, "$id.json")
+    private fun fileFor(id: String): File {
+        val canonicalTransferId = CrossNetworkFileTransferValidator.canonicalTransferId(id)
+        return File(dir, "$canonicalTransferId.json")
+    }
 
     override suspend fun load(transferId: String): TransferCheckpoint? = withContext(Dispatchers.IO) {
-        val f = fileFor(transferId)
+        val canonicalTransferId = CrossNetworkFileTransferValidator.canonicalTransferId(transferId)
+        val f = fileFor(canonicalTransferId)
         if (!f.exists()) return@withContext null
-        runCatching {
-            json.decodeFromString(TransferCheckpoint.serializer(), f.readText())
-        }.getOrNull()
+        val checkpoint = json.decodeFromString(TransferCheckpoint.serializer(), f.readText())
+        require(CrossNetworkFileTransferValidator.canonicalTransferId(checkpoint.transferId) == canonicalTransferId) {
+            "checkpoint transferId does not match requested transfer"
+        }
+        checkpoint.copy(transferId = canonicalTransferId)
     }
 
     override suspend fun save(checkpoint: TransferCheckpoint) = withContext(Dispatchers.IO) {
-        val f = fileFor(checkpoint.transferId)
-        val updated = checkpoint.copy(updatedAtMs = System.currentTimeMillis())
+        val canonicalTransferId = CrossNetworkFileTransferValidator.canonicalTransferId(checkpoint.transferId)
+        val f = fileFor(canonicalTransferId)
+        val updated = checkpoint.copy(
+            transferId = canonicalTransferId,
+            updatedAtMs = System.currentTimeMillis()
+        )
         f.writeText(json.encodeToString(TransferCheckpoint.serializer(), updated))
     }
 
     override suspend fun delete(transferId: String) = withContext(Dispatchers.IO) {
-        runCatching { fileFor(transferId).delete() }
-        Unit
+        val checkpointFile = fileFor(transferId)
+        if (checkpointFile.exists() && !checkpointFile.delete()) {
+            throw IOException("failed to delete checkpoint file: ${checkpointFile.absolutePath}")
+        }
     }
 
     override suspend fun list(): List<TransferCheckpoint> = withContext(Dispatchers.IO) {
         val files = dir.listFiles()?.toList().orEmpty().filter { it.isFile && it.name.endsWith(".json") }
-        files.mapNotNull { f ->
-            runCatching { json.decodeFromString(TransferCheckpoint.serializer(), f.readText()) }.getOrNull()
+        files.map { f ->
+            val checkpoint = json.decodeFromString(TransferCheckpoint.serializer(), f.readText())
+            checkpoint.copy(
+                transferId = CrossNetworkFileTransferValidator.canonicalTransferId(checkpoint.transferId)
+            )
         }.sortedByDescending { it.updatedAtMs }
     }
 }
-
-

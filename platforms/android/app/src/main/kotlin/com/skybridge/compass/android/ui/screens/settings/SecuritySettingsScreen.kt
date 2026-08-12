@@ -9,26 +9,28 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.navigation.NavController
 import com.skybridge.compass.android.i18n.resolveLocalizedText
-import com.skybridge.compass.android.data.SecuritySettingsStore
-import kotlinx.coroutines.launch
+import com.skybridge.compass.android.data.Q_PERIAPT_MIN_ANDROID_API
+import com.skybridge.compass.android.data.Q_PERIAPT_MIN_ANDROID_RELEASE
+import com.skybridge.compass.android.data.localQPeriaptSupported
+import com.skybridge.compass.shared.p2p.P2PQPeriaptKem
 
 /**
  * 设备认证设置页面
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceAuthenticationScreen(navController: NavController) {
+fun DeviceAuthenticationScreen(
+    navController: NavController,
+    viewModel: SettingsViewModel = hiltViewModel()
+) {
     fun t(zh: String, en: String, ja: String): String = resolveLocalizedText(zh, en, ja)
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val settings by SecuritySettingsStore.observe(context).collectAsState(
-        initial = com.skybridge.compass.android.data.SecuritySettings()
-    )
+    val settings by viewModel.securitySettings.collectAsState()
+    val qPeriaptSupported = remember { localQPeriaptSupported() }
     var pairingTimeout by remember(settings.pairingTimeoutSec) { mutableStateOf(settings.pairingTimeoutSec.toString()) }
     val parsedPairingTimeout = pairingTimeout.toIntOrNull()?.coerceIn(5, 600)
     val timeoutDirty = parsedPairingTimeout != null && parsedPairingTimeout != settings.pairingTimeoutSec
@@ -70,9 +72,7 @@ fun DeviceAuthenticationScreen(navController: NavController) {
                             }
                             Switch(
                                 checked = settings.requirePairing,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setRequirePairing(context, enabled) }
-                                }
+                                onCheckedChange = viewModel::setRequirePairing
                             )
                         }
                     }
@@ -97,9 +97,7 @@ fun DeviceAuthenticationScreen(navController: NavController) {
                             }
                             Switch(
                                 checked = settings.autoTrustKnownDevices,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setAutoTrustKnownDevices(context, enabled) }
-                                }
+                                onCheckedChange = viewModel::setAutoTrustKnownDevices
                             )
                         }
                     }
@@ -139,9 +137,7 @@ fun DeviceAuthenticationScreen(navController: NavController) {
                                 enabled = timeoutDirty,
                                 onClick = {
                                     val timeout = parsedPairingTimeout ?: return@TextButton
-                                    scope.launch {
-                                        SecuritySettingsStore.setPairingTimeoutSec(context, timeout)
-                                    }
+                                    viewModel.setPairingTimeoutSec(timeout)
                                 }
                             ) {
                                 Text(t("保存", "Save", "保存"))
@@ -170,9 +166,7 @@ fun DeviceAuthenticationScreen(navController: NavController) {
                             }
                             Switch(
                                 checked = settings.enforcePqcHandshake,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setEnforcePqcHandshake(context, enabled) }
-                                }
+                                onCheckedChange = viewModel::setEnforcePqcHandshake
                             )
                         }
 
@@ -191,11 +185,7 @@ fun DeviceAuthenticationScreen(navController: NavController) {
                             }
                             Switch(
                                 checked = settings.allowClassicFallbackForCompatibility,
-                                onCheckedChange = { enabled ->
-                                    scope.launch {
-                                        SecuritySettingsStore.setAllowClassicFallbackForCompatibility(context, enabled)
-                                    }
-                                }
+                                onCheckedChange = viewModel::setAllowClassicFallbackForCompatibility
                             )
                         }
 
@@ -205,45 +195,55 @@ fun DeviceAuthenticationScreen(navController: NavController) {
                             fontWeight = FontWeight.Medium
                         )
                         val tierOptions = listOf(
+                            P2PQPeriaptKem.MINIMUM_TIER_RAW to "Q-Periapt (Beta)",
                             "nativePQC" to "X-Wing",
                             "liboqsPQC" to "ML-KEM",
                             "classic" to "Classic"
                         )
                         tierOptions.forEach { (tierValue, label) ->
+                            val tierEnabled =
+                                tierValue != P2PQPeriaptKem.MINIMUM_TIER_RAW || qPeriaptSupported
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(
                                     selected = settings.pqcMinimumTier == tierValue,
+                                    enabled = tierEnabled,
                                     onClick = {
-                                        scope.launch { SecuritySettingsStore.setPqcMinimumTier(context, tierValue) }
+                                        if (tierEnabled) {
+                                            viewModel.setPqcMinimumTier(tierValue)
+                                        }
                                     }
                                 )
-                                Text(label)
+                                // R7.9（任务 15.7）：平台前提不满足时，除了不可修改，还必须**呈现说明
+                                // 所需最低平台版本的前提文本**。前提文本直接拼进既有标签的字符串里，
+                                // 不新增任何节点——行、容器与嵌套层级保持不变（G2 / G6）。
+                                val prerequisiteSuffix = if (tierEnabled) {
+                                    ""
+                                } else {
+                                    t(
+                                        "（需要 Android $Q_PERIAPT_MIN_ANDROID_RELEASE+ / API $Q_PERIAPT_MIN_ANDROID_API+，当前设备不支持，该项取值不参与运行时判定）",
+                                        " (requires Android $Q_PERIAPT_MIN_ANDROID_RELEASE+ / API $Q_PERIAPT_MIN_ANDROID_API+; unsupported on this device, so this value does not affect runtime)",
+                                        "（Android $Q_PERIAPT_MIN_ANDROID_RELEASE+ / API $Q_PERIAPT_MIN_ANDROID_API+ が必要です。この端末では非対応のため、この値は実行時に反映されません）"
+                                    )
+                                }
+                                Text(
+                                    text = label + prerequisiteSuffix,
+                                    color = if (tierEnabled) {
+                                        MaterialTheme.colorScheme.onSurface
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                                    }
+                                )
                             }
                         }
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(t("要求 Secure Enclave PoP", "Require Secure Enclave PoP", "Secure Enclave PoP を必須化"), fontWeight = FontWeight.Medium)
-                                Text(
-                                    t("与 iOS/mac 协议字段保持一致（当前为兼容保留）", "Keep parity with the iOS/mac protocol field (retained for compatibility)", "iOS/mac のプロトコル項目との整合のために保持しています"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = settings.requireSecureEnclavePoP,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setRequireSecureEnclavePoP(context, enabled) }
-                                }
-                            )
-                        }
+                        // NOTE: The "Require Secure Enclave PoP" control was removed from the UI.
+                        // The protocol documents this field as NOT enforced (P2PHandshakeWire.kt:35),
+                        // so presenting a toggle that takes no effect was misleading. The on-wire
+                        // field and its DataStore key are preserved as-is for cross-platform compat
+                        // (still threaded into the handshake policy signature + cloud settings sync).
                     }
                 }
             }
@@ -258,14 +258,7 @@ fun DeviceAuthenticationScreen(navController: NavController) {
 @Composable
 fun EncryptionSettingsScreen(navController: NavController) {
     fun t(zh: String, en: String, ja: String): String = resolveLocalizedText(zh, en, ja)
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val settings by SecuritySettingsStore.observe(context).collectAsState(
-        initial = com.skybridge.compass.android.data.SecuritySettings()
-    )
-    
-    val algorithms = listOf("AES-128-GCM", "AES-256-GCM", "ChaCha20-Poly1305")
-    
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -294,18 +287,25 @@ fun EncryptionSettingsScreen(navController: NavController) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(t("启用传输加密", "Enable Transport Encryption", "通信暗号化を有効化"), fontWeight = FontWeight.Medium)
+                                Text(t("传输加密", "Transport Encryption", "通信暗号化"), fontWeight = FontWeight.Medium)
                                 Text(
-                                    t("所有数据传输使用端到端加密（当前版本始终启用）", "Use end-to-end encryption for all transfers (always enabled in this version)", "すべての転送でエンドツーエンド暗号化を使用します（このバージョンでは常時有効）"),
+                                    t(
+                                        "所有数据传输使用端到端加密。由跨平台传输契约固定为始终启用，不可关闭。",
+                                        "All transfers use end-to-end encryption. Fixed to always-on by the cross-platform transport contract; cannot be turned off.",
+                                        "すべての転送でエンドツーエンド暗号化を使用します。クロスプラットフォームの転送契約により常時有効で固定され、無効にできません。"
+                                    ),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Switch(
-                                checked = settings.encryptionEnabled,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setEncryptionEnabled(context, enabled) }
-                                }
+                            // R7.6: fixed, unchangeable value presented as read-only text instead of
+                            // an inert disabled switch. Leaf-internal replacement of the trailing
+                            // slot only — the row, its card/column/row containers and every nesting
+                            // level are untouched (G2 / R11.3).
+                            Text(
+                                text = t("始终启用", "Always On", "常時有効"),
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
@@ -313,28 +313,31 @@ fun EncryptionSettingsScreen(navController: NavController) {
             }
             
             item {
+                // The transport always uses AES-256-GCM per the canonical cross-platform suite
+                // contract; the algorithm is not selectable cross-platform, so this is shown as a
+                // read-only fact rather than an inert picker.
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(t("加密算法", "Encryption Algorithm", "暗号化アルゴリズム"), fontWeight = FontWeight.Medium)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        algorithms.forEach { algorithm ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(
-                                    selected = settings.encryptionAlgorithm == algorithm,
-                                    onClick = {
-                                        scope.launch { SecuritySettingsStore.setEncryptionAlgorithm(context, algorithm) }
-                                    }
-                                )
-                                Text(algorithm)
-                            }
-                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "AES-256-GCM",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            t(
+                                "由跨平台密码套件固定，不可单独选择。",
+                                "Fixed by the cross-platform cipher suite; not individually selectable.",
+                                "クロスプラットフォームの暗号スイートで固定され、個別に選択できません。"
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
-            
+
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -344,18 +347,22 @@ fun EncryptionSettingsScreen(navController: NavController) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(t("后量子加密 (实验性)", "Post-quantum Encryption (Experimental)", "耐量子暗号（実験的）"), fontWeight = FontWeight.Medium)
+                                Text(t("后量子加密", "Post-quantum Encryption", "耐量子暗号"), fontWeight = FontWeight.Medium)
                                 Text(
-                                    t("使用 ML-KEM 混合加密保护数据", "Protect data with ML-KEM hybrid encryption", "ML-KEM ハイブリッド暗号でデータを保護します"),
+                                    t(
+                                        "使用 ML-KEM 混合加密保护数据。由跨平台握手套件固定为始终启用，不可关闭。",
+                                        "Protect data with ML-KEM hybrid encryption. Fixed to always-on by the cross-platform handshake suite; cannot be turned off.",
+                                        "ML-KEM ハイブリッド暗号でデータを保護します。クロスプラットフォームのハンドシェイクスイートにより常時有効で固定され、無効にできません。"
+                                    ),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
-                            Switch(
-                                checked = settings.pqcEnabled,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setPqcEnabled(context, enabled) }
-                                }
+                            // R7.6: same leaf-internal replacement as the transport row above.
+                            Text(
+                                text = t("始终启用", "Always On", "常時有効"),
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
@@ -370,13 +377,12 @@ fun EncryptionSettingsScreen(navController: NavController) {
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AccessControlScreen(navController: NavController) {
+fun AccessControlScreen(
+    navController: NavController,
+    viewModel: SettingsViewModel = hiltViewModel()
+) {
     fun t(zh: String, en: String, ja: String): String = resolveLocalizedText(zh, en, ja)
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val settings by SecuritySettingsStore.observe(context).collectAsState(
-        initial = com.skybridge.compass.android.data.SecuritySettings()
-    )
+    val settings by viewModel.securitySettings.collectAsState()
     
     Scaffold(
         topBar = {
@@ -409,11 +415,11 @@ fun AccessControlScreen(navController: NavController) {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         PermissionRow(t("屏幕镜像", "Screen Mirroring", "画面ミラーリング"), t("允许查看对端屏幕（远程桌面）", "Allow viewing the peer's screen (remote desktop)", "相手端末の画面表示（リモートデスクトップ）を許可"), settings.allowScreenMirroring) {
-                            scope.launch { SecuritySettingsStore.setAllowScreenMirroring(context, it) }
+                            viewModel.setAllowScreenMirroring(it)
                         }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         PermissionRow(t("文件传输", "File Transfer", "ファイル転送"), t("允许发送和接收文件", "Allow sending and receiving files", "ファイルの送受信を許可"), settings.allowFileTransfer) {
-                            scope.launch { SecuritySettingsStore.setAllowFileTransfer(context, it) }
+                            viewModel.setAllowFileTransfer(it)
                         }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         PermissionRow(
@@ -422,7 +428,7 @@ fun AccessControlScreen(navController: NavController) {
                             checked = settings.autoAcceptTrustedDevices,
                             enabled = settings.allowFileTransfer
                         ) {
-                            scope.launch { SecuritySettingsStore.setAutoAcceptTrustedDevices(context, it) }
+                            viewModel.setAutoAcceptTrustedDevices(it)
                         }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         PermissionRow(
@@ -431,11 +437,11 @@ fun AccessControlScreen(navController: NavController) {
                             checked = settings.confirmOverwriteOnInbound,
                             enabled = settings.allowFileTransfer
                         ) {
-                            scope.launch { SecuritySettingsStore.setConfirmOverwriteOnInbound(context, it) }
+                            viewModel.setConfirmOverwriteOnInbound(it)
                         }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         PermissionRow(t("远程控制", "Remote Control", "リモート操作"), t("允许向对端发送鼠标/触控输入", "Allow sending mouse or touch input to the peer", "相手端末へマウス / タッチ入力を送信できます"), settings.allowRemoteControl) {
-                            scope.launch { SecuritySettingsStore.setAllowRemoteControl(context, it) }
+                            viewModel.setAllowRemoteControl(it)
                         }
                         HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                         PermissionRow(
@@ -444,7 +450,7 @@ fun AccessControlScreen(navController: NavController) {
                             checked = settings.allowClipboardSync,
                             enabled = true
                         ) {
-                            scope.launch { SecuritySettingsStore.setAllowClipboardSync(context, it) }
+                            viewModel.setAllowClipboardSync(it)
                         }
                     }
                 }
@@ -483,13 +489,12 @@ private fun PermissionRow(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PrivacySettingsScreen(navController: NavController) {
+fun PrivacySettingsScreen(
+    navController: NavController,
+    viewModel: SettingsViewModel = hiltViewModel()
+) {
     fun t(zh: String, en: String, ja: String): String = resolveLocalizedText(zh, en, ja)
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val settings by SecuritySettingsStore.observe(context).collectAsState(
-        initial = com.skybridge.compass.android.data.SecuritySettings()
-    )
+    val settings by viewModel.securitySettings.collectAsState()
     
     Scaffold(
         topBar = {
@@ -510,60 +515,10 @@ fun PrivacySettingsScreen(navController: NavController) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(t("收集分析数据", "Collect Analytics", "分析データを収集"), fontWeight = FontWeight.Medium)
-                                Text(
-                                    t("帮助我们改进应用体验", "Help us improve the app experience", "アプリ体験の改善に役立てます"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = settings.collectAnalytics,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setCollectAnalytics(context, enabled) }
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-            
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(t("分享使用数据", "Share Usage Data", "利用データを共有"), fontWeight = FontWeight.Medium)
-                                Text(
-                                    t("匿名分享使用统计", "Share anonymized usage statistics", "匿名の利用統計を共有します"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = settings.shareUsageData,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setShareUsageData(context, enabled) }
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-            
+            // NOTE: "Collect Analytics" and "Share Usage Data" controls were removed — there is no
+            // analytics SDK or backend in this app, so the toggles did nothing. Their DataStore keys
+            // are retained for cloud-settings-sync schema compatibility but are no longer presented.
+
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
@@ -575,16 +530,18 @@ fun PrivacySettingsScreen(navController: NavController) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(t("显示设备名称", "Show Device Name", "デバイス名を表示"), fontWeight = FontWeight.Medium)
                                 Text(
-                                    t("在发现列表中显示本机名称", "Show this device name in discovery results", "探索結果にこの端末名を表示します"),
+                                    t(
+                                        "关闭后在 Bonjour/NSD 广播中使用匿名名称，仍可被发现连接",
+                                        "When off, advertise an anonymized name in Bonjour/NSD discovery (still discoverable)",
+                                        "オフのとき Bonjour/NSD 広告では匿名名を使用します（引き続き検出可能）"
+                                    ),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                             Switch(
                                 checked = settings.showDeviceName,
-                                onCheckedChange = { enabled ->
-                                    scope.launch { SecuritySettingsStore.setShowDeviceName(context, enabled) }
-                                }
+                                onCheckedChange = viewModel::setShowDeviceName
                             )
                         }
                     }

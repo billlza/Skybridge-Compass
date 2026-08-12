@@ -2,9 +2,9 @@ package com.skybridge.compass.android.monitoring
 
 import android.app.Activity
 import android.app.Application
-import android.os.Build
 import android.util.Log
 import androidx.core.app.FrameMetricsAggregator
+import androidx.core.util.size
 import com.skybridge.compass.android.i18n.resolveLocalizedText
 import com.skybridge.compass.shared.notifications.NotificationCenter
 import com.skybridge.compass.shared.notifications.NotificationEvent
@@ -32,7 +32,6 @@ class FrameMetricsSampler(
     private var job: Job? = null
 
     fun install() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         application.registerActivityLifecycleCallbacks(this)
         if (job == null) {
             job = scope.launch {
@@ -45,7 +44,6 @@ class FrameMetricsSampler(
     }
 
     fun uninstall() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         application.unregisterActivityLifecycleCallbacks(this)
         job?.cancel()
         job = null
@@ -53,14 +51,13 @@ class FrameMetricsSampler(
 
     private fun sampleJank() {
         val activity = currentActivity ?: return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
         val metrics = aggregator.remove(activity) ?: return
         aggregator.add(activity)
 
         val totalMetrics = metrics[FrameMetricsAggregator.TOTAL_DURATION] ?: return
         var total = 0
         var jank = 0
-        for (i in 0 until totalMetrics.size()) {
+        for (i in 0 until totalMetrics.size) {
             val durationMs = totalMetrics.keyAt(i)
             val count = totalMetrics.valueAt(i)
             total += count
@@ -95,15 +92,11 @@ class FrameMetricsSampler(
 
     override fun onActivityResumed(activity: Activity) {
         currentActivity = activity
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            aggregator.add(activity)
-        }
+        aggregator.add(activity)
     }
 
     override fun onActivityPaused(activity: Activity) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            aggregator.remove(activity)
-        }
+        aggregator.remove(activity)
         if (currentActivity == activity) {
             currentActivity = null
         }

@@ -11,7 +11,6 @@ import com.skybridge.compass.shared.crypto.models.HPKESealedBox
 import com.skybridge.compass.shared.crypto.models.KeyMaterial
 import com.skybridge.compass.shared.crypto.models.KeyPair
 import java.security.SecureRandom
-import java.security.Signature
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -24,10 +23,10 @@ import javax.crypto.spec.SecretKeySpec
  * - ML-KEM-768 (FIPS 203): Key Encapsulation Mechanism
  * - ML-DSA-65 (FIPS 204): Digital Signature Algorithm
  *
- * Platform Compatibility (Android 13-17):
- * - Android 17 (API 36): Full PQC with hardware acceleration hints
- * - Android 14-16 (API 34-35): Full PQC with software implementation
- * - Android 13 (API 33): PQC with graceful fallback to hybrid mode
+ * Platform Compatibility:
+ * - Current SkyBridge Android product line requires Android 16 / API 36+.
+ * - Android 17 / API 37+: PQC with hardware acceleration hints when StrongBox is available.
+ * - Android 16 / API 36: PQC with software implementation.
  *
  * Cross-Platform:
  * - Compatible with macOS/iOS CryptoKit PQC implementation
@@ -126,6 +125,9 @@ class AndroidPQCCryptoProvider(
         }
 
         val result = nativeMLKEM768Encaps(recipientPublicKey)
+        require(result.size == MLKEM768_CIPHERTEXT_SIZE + MLKEM768_SHARED_SECRET_SIZE) {
+            "Invalid ML-KEM encapsulation result size: ${result.size}"
+        }
 
         val ciphertext = result.sliceArray(0 until MLKEM768_CIPHERTEXT_SIZE)
         val sharedSecret = result.sliceArray(MLKEM768_CIPHERTEXT_SIZE until result.size)
@@ -148,7 +150,11 @@ class AndroidPQCCryptoProvider(
             "Invalid secret key size: ${secretKey.size}, expected $MLKEM768_SECRET_KEY_SIZE"
         }
 
-        return nativeMLKEM768Decaps(ciphertext, secretKey)
+        val sharedSecret = nativeMLKEM768Decaps(ciphertext, secretKey)
+        require(sharedSecret.size == MLKEM768_SHARED_SECRET_SIZE) {
+            "Invalid ML-KEM decapsulation result size: ${sharedSecret.size}"
+        }
+        return sharedSecret
     }
 
     // ========== CryptoProvider implementation ==========
@@ -236,7 +242,11 @@ class AndroidPQCCryptoProvider(
      */
     override suspend fun sign(data: ByteArray, privateKey: ByteArray): ByteArray {
         try {
-            return nativeMLDSA65Sign(data, privateKey)
+            val signature = nativeMLDSA65Sign(data, privateKey)
+            require(signature.size == MLDSA65_SIGNATURE_SIZE) {
+                "Invalid ML-DSA signature size: ${signature.size}"
+            }
+            return signature
         } catch (e: Exception) {
             throw CryptoOperationException("sign", "Failed to sign: ${e.message}", e)
         }
@@ -250,6 +260,12 @@ class AndroidPQCCryptoProvider(
         signature: ByteArray,
         publicKey: ByteArray
     ): Boolean {
+        require(publicKey.size == MLDSA65_PUBLIC_KEY_SIZE) {
+            "Invalid ML-DSA-65 public key size: ${publicKey.size}"
+        }
+        require(signature.size == MLDSA65_SIGNATURE_SIZE) {
+            "Invalid ML-DSA-65 signature size: ${signature.size}"
+        }
         try {
             return nativeMLDSA65Verify(data, signature, publicKey)
         } catch (e: Exception) {
@@ -265,6 +281,9 @@ class AndroidPQCCryptoProvider(
             return when (usage) {
                 KeyUsage.KEY_EXCHANGE -> {
                     val keyData = nativeMLKEM768KeyGen()
+                    require(keyData.size == MLKEM768_PUBLIC_KEY_SIZE + MLKEM768_SECRET_KEY_SIZE) {
+                        "Invalid ML-KEM keypair result size: ${keyData.size}"
+                    }
                     val publicKey = keyData.sliceArray(0 until MLKEM768_PUBLIC_KEY_SIZE)
                     val privateKey = keyData.sliceArray(MLKEM768_PUBLIC_KEY_SIZE until keyData.size)
                     
@@ -275,6 +294,9 @@ class AndroidPQCCryptoProvider(
                 }
                 KeyUsage.SIGNING -> {
                     val keyData = nativeMLDSA65KeyGen()
+                    require(keyData.size == MLDSA65_PUBLIC_KEY_SIZE + MLDSA65_SECRET_KEY_SIZE) {
+                        "Invalid ML-DSA keypair result size: ${keyData.size}"
+                    }
                     val publicKey = keyData.sliceArray(0 until MLDSA65_PUBLIC_KEY_SIZE)
                     val privateKey = keyData.sliceArray(MLDSA65_PUBLIC_KEY_SIZE until keyData.size)
                     
@@ -321,166 +343,6 @@ class AndroidPQCCryptoProvider(
         }
         
         return result.sliceArray(0 until length)
-    }
-
-    // ========== Cross-Platform Compatibility Methods ==========
-
-    /**
-     * Verify signature with automatic algorithm detection.
-     * Supports ML-DSA, Ed25519, and ECDSA for Apple compatibility.
-     *
-     * @param data Original message
-     * @param signature Signature to verify
-     * @param publicKey Public key (format determined by size)
-     * @return true if signature is valid
-     */
-    suspend fun verifyWithFallback(
-        data: ByteArray,
-        signature: ByteArray,
-        publicKey: ByteArray
-    ): Boolean {
-        return when {
-            // ML-DSA-65 public key (1952 bytes)
-            publicKey.size == MLDSA65_PUBLIC_KEY_SIZE -> {
-                verify(data, signature, publicKey)
-            }
-            // Ed25519 public key (32 bytes)
-            publicKey.size == 32 && PlatformCompat.apiLevel >= 33 -> {
-                verifyEd25519(data, signature, publicKey)
-            }
-            // P-256 public key (65 bytes uncompressed, 33 bytes compressed)
-            publicKey.size in listOf(33, 65) -> {
-                verifyECDSA(data, signature, publicKey)
-            }
-            else -> {
-                throw CryptoOperationException(
-                    "verifyWithFallback",
-                    "Unknown public key format: ${publicKey.size} bytes"
-                )
-            }
-        }
-    }
-
-    /**
-     * Verify Ed25519 signature (Apple CryptoKit compatible).
-     */
-    private fun verifyEd25519(
-        data: ByteArray,
-        signature: ByteArray,
-        publicKey: ByteArray
-    ): Boolean {
-        require(publicKey.size == 32) { "Ed25519 public key must be 32 bytes" }
-        require(signature.size == 64) { "Ed25519 signature must be 64 bytes" }
-
-        return try {
-            val keySpec = java.security.spec.EdECPublicKeySpec(
-                java.security.spec.NamedParameterSpec.ED25519,
-                java.security.spec.EdECPoint(
-                    publicKey[31].toInt() and 0x80 != 0,
-                    java.math.BigInteger(1, publicKey.sliceArray(0 until 31).reversedArray())
-                )
-            )
-            val keyFactory = java.security.KeyFactory.getInstance("Ed25519")
-            val pubKey = keyFactory.generatePublic(keySpec)
-
-            val sig = Signature.getInstance("Ed25519")
-            sig.initVerify(pubKey)
-            sig.update(data)
-            sig.verify(signature)
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    /**
-     * Verify ECDSA P-256 signature (Apple CryptoKit P256.Signing compatible).
-     */
-    private fun verifyECDSA(
-        data: ByteArray,
-        signature: ByteArray,
-        publicKey: ByteArray
-    ): Boolean {
-        return try {
-            val keyFactory = java.security.KeyFactory.getInstance("EC")
-
-            // Convert public key to X509 format if needed
-            val pubKeyBytes = if (publicKey.size == 65) {
-                // Already uncompressed
-                publicKey
-            } else {
-                // Decompress point (simplified - production should use proper decompression)
-                publicKey
-            }
-
-            val keySpec = java.security.spec.X509EncodedKeySpec(
-                createX509PublicKeyBytes(pubKeyBytes)
-            )
-            val pubKey = keyFactory.generatePublic(keySpec)
-
-            val sig = Signature.getInstance("SHA256withECDSA")
-            sig.initVerify(pubKey)
-            sig.update(data)
-
-            // Convert signature from raw (r||s) to DER if needed
-            val derSig = if (signature.size == 64) {
-                rawToDerSignature(signature)
-            } else {
-                signature
-            }
-
-            sig.verify(derSig)
-        } catch (e: Exception) {
-            false
-        }
-    }
-
-    /**
-     * Create X.509 SubjectPublicKeyInfo bytes for P-256 public key.
-     */
-    private fun createX509PublicKeyBytes(rawPublicKey: ByteArray): ByteArray {
-        // P-256 OID: 1.2.840.10045.3.1.7
-        val oid = byteArrayOf(
-            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86.toByte(),
-            0x48, 0xce.toByte(), 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
-            0x86.toByte(), 0x48, 0xce.toByte(), 0x3d, 0x03, 0x01, 0x07,
-            0x03, 0x42, 0x00
-        )
-        return oid + rawPublicKey
-    }
-
-    /**
-     * Convert raw signature (r||s) to DER format.
-     */
-    private fun rawToDerSignature(raw: ByteArray): ByteArray {
-        require(raw.size == 64) { "Raw signature must be 64 bytes (r||s)" }
-
-        val r = raw.sliceArray(0 until 32)
-        val s = raw.sliceArray(32 until 64)
-
-        fun encodeInteger(bytes: ByteArray): ByteArray {
-            // Remove leading zeros but keep one if the high bit is set
-            var start = 0
-            while (start < bytes.size - 1 && bytes[start] == 0.toByte()) {
-                start++
-            }
-            val trimmed = bytes.sliceArray(start until bytes.size)
-
-            // Add leading zero if high bit is set (to keep positive)
-            val needsLeadingZero = trimmed[0].toInt() and 0x80 != 0
-            val encoded = if (needsLeadingZero) {
-                byteArrayOf(0) + trimmed
-            } else {
-                trimmed
-            }
-
-            return byteArrayOf(0x02, encoded.size.toByte()) + encoded
-        }
-
-        val rEnc = encodeInteger(r)
-        val sEnc = encodeInteger(s)
-        val inner = rEnc + sEnc
-
-        return byteArrayOf(0x30, inner.size.toByte()) + inner
     }
 
     /**

@@ -69,6 +69,16 @@ class NebulaIDGenerator private constructor(
 
             return NebulaIDGenerator(safeDatacenterId, safeWorkerId)
         }
+
+        /**
+         * Validate Nebula ID format without constructing a generator instance.
+         *
+         * This is used by identity projection code paths that must not create new IDs or trigger
+         * generator side effects merely to validate peer-visible account metadata.
+         */
+        fun isValidID(nebulaId: String): Boolean {
+            return NebulaId.isValid(nebulaId)
+        }
     }
 
     // 状态变量
@@ -169,12 +179,8 @@ class NebulaIDGenerator private constructor(
      */
     fun parseID(nebulaId: String): NebulaIDInfo? {
         // 验证格式：NEBULA-YYYY-XXXXXXXXXXXX
-        val components = nebulaId.split(SEPARATOR)
-        if (components.size != 3 ||
-            components[0] != PREFIX ||
-            components[2].length != 12) {
-            return null
-        }
+        val canonicalNebulaId = NebulaId.parseOrNull(nebulaId)?.value ?: return null
+        val components = canonicalNebulaId.split(SEPARATOR)
 
         val year = components[1].toIntOrNull() ?: return null
 
@@ -188,7 +194,7 @@ class NebulaIDGenerator private constructor(
         val parsedSequence = rawId and MAX_SEQUENCE
 
         return NebulaIDInfo(
-            fullId = nebulaId,
+            fullId = canonicalNebulaId,
             rawId = rawId,
             year = year,
             timestamp = timestamp,
@@ -204,7 +210,7 @@ class NebulaIDGenerator private constructor(
      * @param nebulaId 星云ID字符串
      * @return 是否为有效格式
      */
-    fun isValidID(nebulaId: String): Boolean = parseID(nebulaId) != null
+    fun isValidID(nebulaId: String): Boolean = Companion.isValidID(nebulaId)
 
     /**
      * 生成用户注册ID
@@ -213,7 +219,7 @@ class NebulaIDGenerator private constructor(
     @Throws(NebulaIDError::class)
     fun generateUserRegistrationID(): NebulaIDInfo {
         return generateID().also {
-            Log.i(TAG, "生成用户注册ID: ${it.fullId}")
+            Log.i(TAG, "生成用户注册ID成功")
         }
     }
 
@@ -224,7 +230,7 @@ class NebulaIDGenerator private constructor(
     @Throws(NebulaIDError::class)
     fun generateSessionID(): NebulaIDInfo {
         return generateID().also {
-            Log.i(TAG, "生成会话ID: ${it.fullId}")
+            Log.i(TAG, "生成会话ID成功")
         }
     }
 
@@ -235,7 +241,7 @@ class NebulaIDGenerator private constructor(
     @Throws(NebulaIDError::class)
     fun generateCompanyID(): NebulaIDInfo {
         return generateID().also {
-            Log.i(TAG, "生成企业ID: ${it.fullId}")
+            Log.i(TAG, "生成企业ID成功")
         }
     }
 
@@ -299,7 +305,7 @@ class NebulaIDGenerator private constructor(
         // 构建完整ID
         val fullId = "$PREFIX$SEPARATOR$currentYear$SEPARATOR$base36String"
 
-        Log.d(TAG, "生成星云ID: $fullId")
+        Log.d(TAG, "生成星云ID成功")
 
         return NebulaIDInfo(
             fullId = fullId,

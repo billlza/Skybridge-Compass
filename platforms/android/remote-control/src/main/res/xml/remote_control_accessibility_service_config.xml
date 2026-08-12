@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accessibility service configuration for RemoteControlAccessibilityService (R6.7).
+
+  canPerformGestures is the capability InputExecutionManager needs for dispatchGesture-based pointer,
+  touch and scroll injection; flagRequestFilterKeyEvents plus canRequestFilterKeyEvents cover the
+  keyboard path. The service observes no app content for its own purposes — it only executes admitted
+  remote input — so the event mask stays at the minimum needed to keep the service connected, and
+  retrieval of window content is required to resolve the focused editable node for text commits.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewFocused|typeViewTextChanged|typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRequestFilterKeyEvents|flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canPerformGestures="true"
+    android:canRequestFilterKeyEvents="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/remote_control_accessibility_service_description"
+    android:notificationTimeout="100"
+    android:summary="@string/remote_control_accessibility_service_summary" />

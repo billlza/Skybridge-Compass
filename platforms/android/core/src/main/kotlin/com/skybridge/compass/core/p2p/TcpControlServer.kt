@@ -1,5 +1,7 @@
 package com.skybridge.compass.core.p2p
 
+import com.skybridge.compass.core.network.ListenPortAllocator
+import com.skybridge.compass.core.network.ListenPortRangeExhaustedException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,12 +36,37 @@ class TcpControlServer @Inject constructor(
      * @param port 0 = ephemeral
      * @return bound port
      */
-    fun start(port: Int = 0): Int {
-        if (!running.compareAndSet(false, true)) {
-            return serverSocket?.localPort ?: port
+    fun start(port: Int = 0): Int = startWith(fallbackPort = port) {
+        ServerSocket(port).apply { reuseAddress = true }
+    }
+
+    /**
+     * Start listening on a port taken from the user-configured listen range
+     * (`RuntimeNetworkParameters.listenPortRange`, R7.4).
+     *
+     * Ports are tried in ascending order and the first bindable one wins. When **every** port in
+     * the range is occupied this throws [ListenPortRangeExhaustedException] instead of silently
+     * falling back to an ephemeral or hardcoded port — a silent fallback would recreate exactly the
+     * "the setting looks applied but is not" defect this wiring removes.
+     *
+     * @return bound port, always inside [portRange]
+     */
+    fun start(portRange: IntRange): Int = startWith(fallbackPort = portRange.first) {
+        ListenPortAllocator.bindWithin(portRange) { candidate ->
+            ServerSocket(candidate).apply { reuseAddress = true }
         }
-        val ss = ServerSocket(port).apply {
-            reuseAddress = true
+    }
+
+    private fun startWith(fallbackPort: Int, openSocket: () -> ServerSocket): Int {
+        if (!running.compareAndSet(false, true)) {
+            return serverSocket?.localPort ?: fallbackPort
+        }
+        val ss = try {
+            openSocket()
+        } catch (failure: Throwable) {
+            running.set(false)
+            serverSocket = null
+            throw failure
         }
         serverSocket = ss
         scope.launch {

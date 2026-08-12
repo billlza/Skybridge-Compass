@@ -5,7 +5,6 @@ import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.media.MediaCodec
 import android.media.MediaFormat
-import android.os.Build
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -21,12 +20,10 @@ import kotlin.math.max
 
 internal fun decodeRemoteStaticBitmap(payload: ByteArray): Bitmap? {
     if (payload.isEmpty()) return null
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        runCatching {
-            val source = ImageDecoder.createSource(java.nio.ByteBuffer.wrap(payload))
-            return ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-            }
+    runCatching {
+        val source = ImageDecoder.createSource(java.nio.ByteBuffer.wrap(payload))
+        return ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
         }
     }
     return BitmapFactory.decodeByteArray(payload, 0, payload.size)
@@ -36,13 +33,18 @@ internal fun decodeRemoteStaticBitmap(payload: ByteArray): Bitmap? {
 internal fun RemoteVideoSurface(
     modifier: Modifier,
     frame: RemoteFrame,
-    normalizedFormat: String
+    normalizedFormat: String,
+    onDecoderError: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val decoder = remember(context) { SurfaceBackedRemoteVideoDecoder() }
 
     DisposableEffect(decoder) {
         onDispose { decoder.release() }
+    }
+
+    LaunchedEffect(decoder, onDecoderError) {
+        decoder.onError = onDecoderError
     }
 
     LaunchedEffect(frame, normalizedFormat) {
@@ -91,6 +93,16 @@ private class SurfaceBackedRemoteVideoDecoder {
     private var pendingFrame: PendingFrame? = null
     private var lastQueuedPtsUs: Long = 0L
 
+    /**
+     * Surfaced to the ViewModel when the codec cannot render a frame (R6.11): either the normalized
+     * format is not a video codec, or `MediaCodec` init/decode threw. On the throw path the codec is
+     * released synchronously in [releaseCodecLocked] (well within the 2s bound R6.11 requires) and
+     * this callback makes that stop-and-release observable to the UI so it presents the reason
+     * instead of silently dropping the frame.
+     */
+    @Volatile
+    var onError: (String?) -> Unit = {}
+
     fun attachSurface(newSurface: Surface?) {
         synchronized(lock) {
             if (surface === newSurface) return
@@ -129,7 +141,13 @@ private class SurfaceBackedRemoteVideoDecoder {
         val mimeType = when (pending.normalizedFormat) {
             AndroidRemoteVideoFormats.H264 -> MediaFormat.MIMETYPE_VIDEO_AVC
             AndroidRemoteVideoFormats.HEVC -> MediaFormat.MIMETYPE_VIDEO_HEVC
-            else -> return
+            else -> {
+                // Not a video codec this decoder can render (R6.11): stop, release, surface the reason.
+                pendingFrame = null
+                releaseCodecLocked()
+                onError(pending.normalizedFormat)
+                return
+            }
         }
         val payload = pending.frame.imageBytes
         if (payload.isEmpty()) return
@@ -165,8 +183,12 @@ private class SurfaceBackedRemoteVideoDecoder {
             )
             pendingFrame = null
             drainOutputLocked(activeCodec)
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            // MediaCodec init/decode failed (R6.11): release decode resources promptly (synchronous,
+            // well inside the 2s bound) and surface the decoder failure instead of dropping silently.
+            pendingFrame = null
             releaseCodecLocked()
+            onError(t.message ?: t.javaClass.simpleName)
         }
     }
 
@@ -191,9 +213,7 @@ private class SurfaceBackedRemoteVideoDecoder {
 
         val mediaFormat = MediaFormat.createVideoFormat(mimeType, width, height).apply {
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, max(width * height, inputSize))
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-            }
+            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
         }
 
         codec = MediaCodec.createDecoderByType(mimeType).apply {

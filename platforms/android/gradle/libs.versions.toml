@@ -1,0 +1,216 @@
+# Gradle Version Catalog — SkyBridge Compass Android
+#
+# 任务 1.3 产物（_Requirements: 1.7, 1.8_）。
+# 全部插件与库均以固定版本号声明；不使用区间、`+`、`latest.*` 或 `SNAPSHOT`。
+# 由 BOM 统一管理版本的下游制品在 [libraries] 中省略版本（BOM 自身固定版本）。
+# 同一坐标在多模块间通过单一 version.ref 解析出相同版本字符串（R1.8）。
+#
+# 版本取值来自 dependency-inventory.md 第 6 节的升级决定：
+#   - 决定「升级」的坐标采用候选稳定版本；
+#   - 决定「不升级」的坐标保留当前已声明版本。
+# 硬约束（不由本目录改变）：compileSdk/targetSdk 37、minSdk 36、jvmToolchain 21、jvmTarget JVM_17。
+
+[versions]
+# --- 插件 / 构建工具 ---
+agp = "9.3.1"                     # AGP：9.3.0-rc01(预发布) → 9.3.1(稳定)（升级）
+kotlin = "2.4.10"                 # Kotlin 插件线（serialization/compose/parcelize）：2.4.0 → 2.4.10（升级）
+ksp = "2.3.10"                    # KSP：2.3.9 → 2.3.10（升级，与 Kotlin 对齐）
+hilt = "2.60.1"                   # Dagger Hilt（插件 + 库）：无更高稳定版（保持）
+benManesVersions = "0.61.0"       # io.github.ben-manes.versions：依赖更新报告插件
+desugarJdkLibs = "2.1.5"          # 满足 Nearby 2.1.3 下限并采用 Google Maven 当前稳定版
+
+# --- AndroidX 基础 / UI ---
+coreKtx = "1.19.0"                # 保持
+appcompat = "1.7.1"               # 保持
+profileinstaller = "1.4.1"        # 保持
+browser = "1.10.0"                # 1.9.0 → 1.10.0（升级）
+composeBom = "2026.06.01"         # Compose BOM（保持，统一管理下游 compose 制品）
+navigation = "2.9.8"              # 保持（navigation-compose / navigation-testing）
+lifecycle = "2.11.0"             # 保持（viewmodel-compose / runtime-compose / runtime-ktx）
+activity = "1.13.0"               # 保持（activity-compose / activity-ktx）
+fragment = "1.8.9"                # 保持
+coil = "2.7.0"                    # 保持
+hiltNavigationCompose = "1.4.0"   # 保持
+datastore = "1.2.1"               # 保持
+annotation = "1.10.0"             # 保持
+documentfile = "1.1.0"            # 保持
+work = "2.11.2"                   # 保持
+room = "2.8.4"                    # 保持（runtime / ktx / compiler）
+securityCrypto = "1.1.0"          # 保持
+biometric = "1.1.0"               # 保持
+
+# --- 网络 / 序列化 ---
+retrofit = "3.0.0"                # 保持（retrofit / converter-gson）
+okhttp = "5.4.0"                  # 保持（okhttp / logging-interceptor）
+ktor = "3.5.2"                    # 3.5.1 → 3.5.2（统一升级全部 Ktor 制品）
+supabaseBom = "3.7.0"             # Supabase BOM（保持，统一管理下游 supabase 制品）
+kotlinxSerializationJson = "1.11.0" # 保持
+kotlinxCoroutines = "1.11.0"      # 保持（core / android / test）
+
+# --- Google Play Services / 其它 ---
+playServicesAuth = "21.6.0"       # 保持
+playServicesNearby = "19.4.0"     # 19.3.0 → 19.4.0（升级）
+jmdns = "3.6.3"                   # 保持
+bouncycastle = "1.85.2"           # 1.85 → 1.85.2（升级）
+javaxInject = "1"                 # 保持（该坐标仅有版本 1）
+
+# --- 测试 ---
+junit4 = "4.13.2"                 # 保持
+junitJupiter = "6.1.3"            # 6.1.2 → 6.1.3（升级，含 vintage engine）
+junitPlatformLauncher = "6.1.3"   # JUnit Platform launcher（与 JUnit 6 统一版本线对齐）
+kotest = "6.2.4"                  # runner/assertions/property 保持同一发布版本
+mockk = "1.14.11"                 # 保持（四模块统一 mock 方案；mockito-core 已下线，见任务 2.2）
+slf4j = "2.0.18"                  # JVM test logging provider，与解析到的 slf4j-api 精确对齐
+androidxTestJunit = "1.3.0"       # 保持（androidx.test.ext:junit）
+androidxTestRules = "1.7.0"       # 保持
+espresso = "3.7.0"                # 保持
+benchmarkMacro = "1.4.1"          # 保持
+uiautomator = "2.4.0"             # 2.3.0 → 2.4.0（升级）
+
+[libraries]
+# --- Kotlin runtime alignment ---
+kotlin-bom = { module = "org.jetbrains.kotlin:kotlin-bom", version.ref = "kotlin" }
+desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugarJdkLibs" }
+
+# --- AndroidX 基础 ---
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
+androidx-profileinstaller = { module = "androidx.profileinstaller:profileinstaller", version.ref = "profileinstaller" }
+androidx-browser = { module = "androidx.browser:browser", version.ref = "browser" }
+androidx-annotation = { module = "androidx.annotation:annotation", version.ref = "annotation" }
+androidx-documentfile = { module = "androidx.documentfile:documentfile", version.ref = "documentfile" }
+androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
+
+# --- Compose（版本由 compose-bom 统一管理，制品省略版本）---
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { module = "androidx.compose.ui:ui" }
+androidx-compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
+androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+androidx-compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
+androidx-compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
+androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
+androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
+androidx-compose-foundation = { module = "androidx.compose.foundation:foundation" }
+
+# --- Navigation / Lifecycle / Activity / Fragment ---
+androidx-navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navigation" }
+androidx-navigation-testing = { module = "androidx.navigation:navigation-testing", version.ref = "navigation" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-process = { module = "androidx.lifecycle:lifecycle-process", version.ref = "lifecycle" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity" }
+androidx-activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "activity" }
+androidx-fragment-ktx = { module = "androidx.fragment:fragment-ktx", version.ref = "fragment" }
+
+# --- 图片加载 ---
+coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coil" }
+
+# --- 依赖注入（Hilt）---
+hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }
+hilt-compiler = { module = "com.google.dagger:hilt-compiler", version.ref = "hilt" }
+hilt-android-testing = { module = "com.google.dagger:hilt-android-testing", version.ref = "hilt" }
+androidx-hilt-navigation-compose = { module = "androidx.hilt:hilt-navigation-compose", version.ref = "hiltNavigationCompose" }
+
+# --- 网络（Retrofit / OkHttp / Ktor）---
+retrofit = { module = "com.squareup.retrofit2:retrofit", version.ref = "retrofit" }
+retrofit-converter-gson = { module = "com.squareup.retrofit2:converter-gson", version.ref = "retrofit" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+okhttp-logging-interceptor = { module = "com.squareup.okhttp3:logging-interceptor", version.ref = "okhttp" }
+ktor-client-core = { module = "io.ktor:ktor-client-core", version.ref = "ktor" }
+ktor-client-okhttp = { module = "io.ktor:ktor-client-okhttp", version.ref = "ktor" }
+ktor-client-android = { module = "io.ktor:ktor-client-android", version.ref = "ktor" }
+ktor-client-content-negotiation = { module = "io.ktor:ktor-client-content-negotiation", version.ref = "ktor" }
+ktor-client-logging = { module = "io.ktor:ktor-client-logging", version.ref = "ktor" }
+ktor-client-websockets = { module = "io.ktor:ktor-client-websockets", version.ref = "ktor" }
+ktor-client-mock = { module = "io.ktor:ktor-client-mock", version.ref = "ktor" }
+ktor-serialization-kotlinx-json = { module = "io.ktor:ktor-serialization-kotlinx-json", version.ref = "ktor" }
+
+# --- Supabase（版本由 supabase bom 统一管理，制品省略版本）---
+supabase-bom = { module = "io.github.jan-tennert.supabase:bom", version.ref = "supabaseBom" }
+supabase-kt = { module = "io.github.jan-tennert.supabase:supabase-kt" }
+supabase-auth-kt = { module = "io.github.jan-tennert.supabase:auth-kt" }
+supabase-postgrest-kt = { module = "io.github.jan-tennert.supabase:postgrest-kt" }
+supabase-storage-kt = { module = "io.github.jan-tennert.supabase:storage-kt" }
+supabase-realtime-kt = { module = "io.github.jan-tennert.supabase:realtime-kt" }
+
+# --- Kotlinx 序列化 / 协程 ---
+kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
+
+# --- WorkManager / Room ---
+androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "work" }
+androidx-room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
+androidx-room-ktx = { module = "androidx.room:room-ktx", version.ref = "room" }
+androidx-room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
+
+# --- 安全 / 生物识别 ---
+androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "securityCrypto" }
+androidx-biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
+
+# --- Google Play Services / WebRTC / 发现 / 加密 ---
+play-services-auth = { module = "com.google.android.gms:play-services-auth", version.ref = "playServicesAuth" }
+play-services-nearby = { module = "com.google.android.gms:play-services-nearby", version.ref = "playServicesNearby" }
+# Maintained Maven Central artifact. Its Java API uses direct native methods rather than the
+# incomplete generated-*Jni bridge surface found in newer com.infobip artifacts. The app build
+# validates Java/JNI closure and all four packaged ABIs before repackaging its manifest metadata.
+google-webrtc = { module = "io.github.webrtc-sdk:android", version = { strictly = "144.7559.09" } }
+jmdns = { module = "org.jmdns:jmdns", version.ref = "jmdns" }
+bouncycastle-bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+javax-inject = { module = "javax.inject:javax.inject", version.ref = "javaxInject" }
+
+# --- 测试 ---
+junit4 = { module = "junit:junit", version.ref = "junit4" }
+junit-jupiter-api = { module = "org.junit.jupiter:junit-jupiter-api", version.ref = "junitJupiter" }
+junit-jupiter-engine = { module = "org.junit.jupiter:junit-jupiter-engine", version.ref = "junitJupiter" }
+junit-vintage-engine = { module = "org.junit.vintage:junit-vintage-engine", version.ref = "junitJupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version.ref = "junitPlatformLauncher" }
+kotest-runner-junit5 = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotest-assertions-core = { module = "io.kotest:kotest-assertions-core", version.ref = "kotest" }
+kotest-property = { module = "io.kotest:kotest-property", version.ref = "kotest" }
+mockk = { module = "io.mockk:mockk", version.ref = "mockk" }
+slf4j-nop = { module = "org.slf4j:slf4j-nop", version.ref = "slf4j" }
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestJunit" }
+androidx-test-rules = { module = "androidx.test:rules", version.ref = "androidxTestRules" }
+androidx-test-espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
+androidx-benchmark-macro-junit4 = { module = "androidx.benchmark:benchmark-macro-junit4", version.ref = "benchmarkMacro" }
+androidx-test-uiautomator = { module = "androidx.test.uiautomator:uiautomator", version.ref = "uiautomator" }
+
+[bundles]
+# 语义分组，便于任务 1.4 迁移引用；不改变任一坐标解析出的版本。
+compose-ui = [
+    "androidx-compose-ui",
+    "androidx-compose-ui-graphics",
+    "androidx-compose-ui-tooling-preview",
+    "androidx-compose-material3",
+]
+ktor-client = [
+    "ktor-client-core",
+    "ktor-client-content-negotiation",
+    "ktor-client-websockets",
+    "ktor-serialization-kotlinx-json",
+]
+kotest = [
+    "kotest-runner-junit5",
+    "kotest-assertions-core",
+    "kotest-property",
+]
+junit-jupiter = [
+    "junit-jupiter-api",
+    "junit-jupiter-engine",
+    "junit-vintage-engine",
+]
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+android-test = { id = "com.android.test", version.ref = "agp" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlin" }
+hilt-android = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+ben-manes-versions = { id = "io.github.ben-manes.versions", version.ref = "benManesVersions" }

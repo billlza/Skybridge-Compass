@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SkyBridge Compass</string>
+    <string name="debug_interop_smoke_starting">Starting SkyBridge debug smoke…</string>
+    <string name="debug_lan_smoke_starting">Starting SkyBridge LAN smoke…</string>
 </resources>

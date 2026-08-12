@@ -5,16 +5,21 @@ import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.graphics.Path
 import android.media.AudioManager
-import android.os.Build
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
 import com.skybridge.compass.core.utils.Logger
+import com.skybridge.compass.remotecontrol.admission.Admission
+import com.skybridge.compass.remotecontrol.admission.RemoteInputAdmissionGate
 import com.skybridge.compass.remotecontrol.model.*
+import com.skybridge.compass.remotecontrol.secure.RemoteControlSecureEnvelope.PacketType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -47,6 +52,25 @@ class InputExecutionManager @Inject constructor(
     // 执行结果流
     private val _executionResults = MutableSharedFlow<InputEventResponse>()
     val executionResults: SharedFlow<InputEventResponse> = _executionResults.asSharedFlow()
+
+    /**
+     * 远程输入准入门（R6.7/R6.8）：复用信封计数器做严格单调 + 256 事件接受窗口，
+     * 仅放行来自已授权对端的事件，拒绝时记审计事件。
+     */
+    val admissionGate = RemoteInputAdmissionGate()
+
+    /**
+     * 本地停止硬门（R6.7）：触发后同步置位，后续事件立即丢弃，无需等待协程调度。
+     */
+    private val injectionHardStopped = AtomicBoolean(false)
+
+    /** 在途注入任务，本地停止时一并取消，使全部注入在 1 秒内停止。 */
+    private val inFlightInjections: MutableSet<Job> =
+        Collections.newSetFromMap(ConcurrentHashMap<Job, Boolean>())
+
+    /** 本地停止入口是否已触发（可观测，供测试与 UI 断言）。 */
+    val isInjectionHardStopped: Boolean
+        get() = injectionHardStopped.get()
     
     /**
      * 设置无障碍服务
@@ -68,6 +92,7 @@ class InputExecutionManager @Inject constructor(
             }
             
             _executionConfig.value = config
+            injectionHardStopped.set(false)
             _isExecutionActive.value = true
             
             // 重置统计
@@ -89,7 +114,7 @@ class InputExecutionManager @Inject constructor(
         return try {
             Logger.remoteControl("停止输入执行")
             
-            _isExecutionActive.value = false
+            stopAllInjectionNow()
             
             Logger.remoteControl("输入执行已停止")
             Result.success(Unit)
@@ -97,6 +122,68 @@ class InputExecutionManager @Inject constructor(
         } catch (e: Exception) {
             Logger.remoteControl("停止输入执行失败", e)
             Result.failure(e)
+        }
+    }
+
+    /**
+     * 授权对端并开启注入准入（R6.7）。仅该对端的输入事件会被执行。
+     *
+     * @param baselineCounter 授权时刻会话上已观察到的信封计数器（会话中途启用注入时必须传入，
+     *   否则首个事件会落在接受窗口之外）。
+     */
+    fun authorizeInjectionPeer(peerId: String, baselineCounter: Long = 0L) {
+        admissionGate.startInjection(peerId, baselineCounter)
+    }
+
+    /**
+     * 本地停止入口（R6.7）：**同步**关闭准入硬门、取消全部在途注入，使触发后立即（远快于 1 秒）
+     * 停止全部输入注入；返回前门已关闭，后续事件一律丢弃。幂等。
+     */
+    fun stopAllInjectionNow() {
+        injectionHardStopped.set(true)
+        _isExecutionActive.value = false
+        admissionGate.stopAllInjection()
+
+        // 取消在途注入（排队中与执行中的手势等待）。
+        val pending = inFlightInjections.toList()
+        inFlightInjections.clear()
+        pending.forEach { job -> job.cancel() }
+
+        Logger.remoteControl("本地停止入口已触发：全部输入注入已停止 (cancelled=${pending.size})")
+    }
+
+    /**
+     * 经准入门执行远程输入事件（R6.7/R6.8）。
+     *
+     * 复用既有安全信封计数器（不新增线字段）：仅当注入未被本地停止、对端已授权、会话签名有效、
+     * 计数器严格大于本会话已接受最大值且落在 256 事件接受窗口内时才真正注入；否则丢弃、
+     * 不改变设备输入状态，并由准入门记录一条含拒绝原因的审计事件。
+     */
+    suspend fun executeAdmittedInputEvent(
+        event: InputEvent,
+        envelopeCounter: Long,
+        peerId: String,
+        signatureValid: Boolean,
+        packetType: PacketType = PacketType.CONTROL,
+    ): InputEventResponse {
+        val startTime = System.currentTimeMillis()
+
+        // 硬门优先：本地停止后立即丢弃，不进入准入统计。
+        if (injectionHardStopped.get()) {
+            return createErrorResponse(event.eventId, "输入注入已被本地停止", startTime)
+        }
+
+        val admission = admissionGate.admit(
+            envelopeCounter = envelopeCounter,
+            packetType = packetType,
+            peerId = peerId,
+            signatureValid = signatureValid,
+        )
+
+        return when (admission) {
+            is Admission.Reject ->
+                createErrorResponse(event.eventId, "输入事件被准入门拒绝: ${admission.reason}", startTime)
+            is Admission.Accept -> executeInputEvent(event)
         }
     }
     
@@ -107,17 +194,23 @@ class InputExecutionManager @Inject constructor(
         val startTime = System.currentTimeMillis()
         
         return try {
+            // R6.7 本地停止硬门：置位后一律不注入。
+            if (injectionHardStopped.get()) {
+                return createErrorResponse(event.eventId, "输入注入已被本地停止", startTime)
+            }
             if (!_isExecutionActive.value) {
                 return createErrorResponse(event.eventId, "输入执行未启动", startTime)
             }
             
-            val success = when (event) {
-                is TouchEvent -> executeTouchEvent(event)
-                is KeyboardEvent -> executeKeyboardEvent(event)
-                is MouseEvent -> executeMouseEvent(event)
-                is GestureEvent -> executeGestureEvent(event)
-                is TextInputEvent -> executeTextInputEvent(event)
-                is SystemKeyEvent -> executeSystemKeyEvent(event)
+            val success = withRegisteredInjection {
+                when (event) {
+                    is TouchEvent -> executeTouchEvent(event)
+                    is KeyboardEvent -> executeKeyboardEvent(event)
+                    is MouseEvent -> executeMouseEvent(event)
+                    is GestureEvent -> executeGestureEvent(event)
+                    is TextInputEvent -> executeTextInputEvent(event)
+                    is SystemKeyEvent -> executeSystemKeyEvent(event)
+                }
             }
             
             val processingTime = System.currentTimeMillis() - startTime
@@ -137,11 +230,28 @@ class InputExecutionManager @Inject constructor(
             
             response
             
+        } catch (e: CancellationException) {
+            // 本地停止取消了在途注入：不再改变设备输入状态。
+            Logger.remoteControl("输入注入在途被取消（本地停止）")
+            createErrorResponse(event.eventId, "输入注入已被本地停止", startTime)
         } catch (e: Exception) {
             Logger.remoteControl("执行输入事件失败", e)
             val response = createErrorResponse(event.eventId, e.message ?: "执行失败", startTime)
             _executionResults.emit(response)
             response
+        }
+    }
+
+    /**
+     * 把一次注入登记为「在途」，使本地停止入口能取消它（R6.7 的 1 秒停止预算）。
+     */
+    private suspend fun <T> withRegisteredInjection(block: suspend () -> T): T = coroutineScope {
+        val job = coroutineContext[Job]
+        if (job != null) inFlightInjections.add(job)
+        try {
+            block()
+        } finally {
+            if (job != null) inFlightInjections.remove(job)
         }
     }
     
@@ -190,13 +300,11 @@ class InputExecutionManager @Inject constructor(
                 }
             }
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                service.dispatchGesture(gesture, callback, null)
-                
-                // 等待手势完成
-                delay(200)
-            }
-            
+            service.dispatchGesture(gesture, callback, null)
+
+            // 等待手势完成
+            delay(200)
+
             success
             
         } catch (e: Exception) {
@@ -458,19 +566,11 @@ class InputExecutionManager @Inject constructor(
     }
 
     private fun openQuickSettings(service: AccessibilityService): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)
-        } else {
-            false
-        }
+        return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)
     }
 
     private fun takeScreenshot(service: AccessibilityService): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
-        } else {
-            false
-        }
+        return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
     }
 
     private fun openSystemSettings(): Boolean {
@@ -491,18 +591,12 @@ class InputExecutionManager @Inject constructor(
 
     private fun muteVolume(): Boolean {
         val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return false
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            audioManager.adjustSuggestedStreamVolume(
-                AudioManager.ADJUST_TOGGLE_MUTE,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.FLAG_SHOW_UI
-            )
-            true
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.setStreamMute(AudioManager.STREAM_MUSIC, true)
-            true
-        }
+        audioManager.adjustSuggestedStreamVolume(
+            AudioManager.ADJUST_TOGGLE_MUTE,
+            AudioManager.STREAM_MUSIC,
+            AudioManager.FLAG_SHOW_UI
+        )
+        return true
     }
     
     /**
@@ -524,11 +618,9 @@ class InputExecutionManager @Inject constructor(
                 }
             }
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                service.dispatchGesture(gesture, callback, null)
-                delay(200)
-            }
-            
+            service.dispatchGesture(gesture, callback, null)
+            delay(200)
+
             success
             
         } catch (e: Exception) {
@@ -564,11 +656,9 @@ class InputExecutionManager @Inject constructor(
                 }
             }
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                service.dispatchGesture(gesture, callback, null)
-                delay(1200)
-            }
-            
+            service.dispatchGesture(gesture, callback, null)
+            delay(1200)
+
             success
             
         } catch (e: Exception) {
@@ -600,11 +690,9 @@ class InputExecutionManager @Inject constructor(
                 }
             }
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                service.dispatchGesture(gesture, callback, null)
-                delay(400)
-            }
-            
+            service.dispatchGesture(gesture, callback, null)
+            delay(400)
+
             success
             
         } catch (e: Exception) {
@@ -618,7 +706,6 @@ class InputExecutionManager @Inject constructor(
      */
     private suspend fun executePinchGesture(centerX: Float, centerY: Float, scale: Float): Boolean {
         val service = accessibilityService ?: return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
 
         return try {
             // Treat scale > 1 as zoom-out (fingers move apart), scale < 1 as pinch-in.
@@ -667,7 +754,6 @@ class InputExecutionManager @Inject constructor(
      */
     private suspend fun executeRotateGesture(centerX: Float, centerY: Float, rotation: Float): Boolean {
         val service = accessibilityService ?: return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
 
         return try {
             // Interpret rotation as degrees (positive = clockwise).
@@ -753,11 +839,9 @@ class InputExecutionManager @Inject constructor(
                 }
             }
             
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                service.dispatchGesture(gesture, callback, null)
-                delay(900)
-            }
-            
+            service.dispatchGesture(gesture, callback, null)
+            delay(900)
+
             success
             
         } catch (e: Exception) {
@@ -795,12 +879,11 @@ class InputExecutionManager @Inject constructor(
      */
     private fun updateStats(success: Boolean, processingTime: Long) {
         _executionStats.value = _executionStats.value.let { stats ->
-            stats.copy(
-                totalEvents = stats.totalEvents + 1,
-                successfulEvents = if (success) stats.successfulEvents + 1 else stats.successfulEvents,
-                failedEvents = if (!success) stats.failedEvents + 1 else stats.failedEvents,
-                averageLatency = (stats.averageLatency * (stats.totalEvents - 1) + processingTime) / stats.totalEvents,
-                lastEventTime = System.currentTimeMillis()
+            InputExecutionStatsReducer.record(
+                stats = stats,
+                success = success,
+                processingTime = processingTime,
+                now = System.currentTimeMillis()
             )
         }
     }
@@ -1091,5 +1174,25 @@ class InputExecutionManager @Inject constructor(
                 Logger.remoteControl("清理输入执行资源失败", e)
             }
         }
+    }
+}
+
+internal object InputExecutionStatsReducer {
+    fun record(
+        stats: InputEventStats,
+        success: Boolean,
+        processingTime: Long,
+        now: Long
+    ): InputEventStats {
+        val nextTotal = stats.totalEvents + 1
+        val averageLatency =
+            ((stats.averageLatency * stats.totalEvents.coerceAtLeast(0)) + processingTime) / nextTotal
+        return stats.copy(
+            totalEvents = nextTotal,
+            successfulEvents = if (success) stats.successfulEvents + 1 else stats.successfulEvents,
+            failedEvents = if (!success) stats.failedEvents + 1 else stats.failedEvents,
+            averageLatency = averageLatency,
+            lastEventTime = now
+        )
     }
 }

@@ -1,0 +1,204 @@
+{
+  "captureToolPath" : "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift",
+  "captures" : [
+    {
+      "documentSha256" : "112c1ca2b9e07fe5d6659993c2a18f483dfbb0bc74f61583120906d151776ed5",
+      "messageType" : "cancel",
+      "rawByteCount" : 114,
+      "relativePath" : "f1-file-transfer/cancel-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "ddec9c37e6c354422fbca6e9684093d5d4fd1e09bfe2ec4593e1ba44c8861d34",
+      "messageType" : "chunk",
+      "rawByteCount" : 189,
+      "relativePath" : "f1-file-transfer/chunk-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "3f2aeef2aafb42221f77bda96be033a38fe3eba76c3f9819e31ee21fe09f47e3",
+      "messageType" : "chunkAck",
+      "rawByteCount" : 114,
+      "relativePath" : "f1-file-transfer/chunkAck-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "9d3514d7de4bc43be87cea207d2e287b8916bd7ad7fce4febbd0db16d5835b75",
+      "messageType" : "complete",
+      "rawByteCount" : 338,
+      "relativePath" : "f1-file-transfer/complete-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "a03c7a0003bf7cae494f6f8c9f03b7428cb12e57b0c28ae43fb5bac29026d99d",
+      "messageType" : "completeAck",
+      "rawByteCount" : 162,
+      "relativePath" : "f1-file-transfer/completeAck-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "bffe2f1e76dcf12aa3ba89cfe79858e964e9b4f7fc6000035e3bbf43a6a97d04",
+      "messageType" : "error",
+      "rawByteCount" : 103,
+      "relativePath" : "f1-file-transfer/error-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "52dd823de512bba83eea559380f2dc0602b8e7b2f7b60dded60d1cf4943ba67f",
+      "messageType" : "metadata",
+      "rawByteCount" : 266,
+      "relativePath" : "f1-file-transfer/metadata-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "14f280674d3f86e09eca31db3867f20722e76af9b7afd2ab5a89566e6e587ea4",
+      "messageType" : "metadataAck",
+      "rawByteCount" : 84,
+      "relativePath" : "f1-file-transfer/metadataAck-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+      "surface" : "F1"
+    },
+    {
+      "documentSha256" : "09ff98acacfea25de1b10cd9d6958f9e056de754434b3d0383f0e7688c688e0a",
+      "messageType" : "cryptoCapabilities",
+      "rawByteCount" : 99,
+      "relativePath" : "f2-p2p-handshake/cryptoCapabilities-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/CryptoCapabilities.swift",
+      "surface" : "F2"
+    },
+    {
+      "documentSha256" : "3439ef547830a92956bcae3b2c94f11e65115361ed9d964d6d1d4d5c60fff136",
+      "messageType" : "finished",
+      "rawByteCount" : 38,
+      "relativePath" : "f2-p2p-handshake/finished-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HandshakeMessages.swift",
+      "surface" : "F2"
+    },
+    {
+      "documentSha256" : "59ce7582deb7c9f089bc9bc1d7466d6d1d5367e42abfa50ec7e85792d8db16b0",
+      "messageType" : "handshakePolicy",
+      "rawByteCount" : 14,
+      "relativePath" : "f2-p2p-handshake/handshakePolicy-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/TranscriptBuilder.swift",
+      "surface" : "F2"
+    },
+    {
+      "documentSha256" : "02787636a2a821f9a4c051591d9f67079e5293c91fb7dcbe919f91903bd3893d",
+      "messageType" : "messageA",
+      "rawByteCount" : 298,
+      "relativePath" : "f2-p2p-handshake/messageA-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HandshakeMessages.swift",
+      "surface" : "F2"
+    },
+    {
+      "documentSha256" : "5a22d4ec04375268b538cec99ee4644346c991393591bb38c2da8f3987c19a2e",
+      "messageType" : "messageB",
+      "rawByteCount" : 270,
+      "relativePath" : "f2-p2p-handshake/messageB-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HandshakeMessages.swift",
+      "surface" : "F2"
+    },
+    {
+      "documentSha256" : "90aaeb634473236330f7847a7720c932910c405dfbe63ab930134fc4448689ed",
+      "messageType" : "application-v1",
+      "rawByteCount" : 93,
+      "relativePath" : "f3-hpke-sealed-box/application-v1-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HPKESealedBox.swift",
+      "surface" : "F3"
+    },
+    {
+      "documentSha256" : "ab2f329dad8594a52a8b3b99c8bc2a110c12c61ade2e1cd442559f5144c306cb",
+      "messageType" : "application-v2",
+      "rawByteCount" : 65,
+      "relativePath" : "f3-hpke-sealed-box/application-v2-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HPKESealedBox.swift",
+      "surface" : "F3"
+    },
+    {
+      "documentSha256" : "d3da5c84e3ffad0e6c218104c3863a94ef8781c27ca489b62cc6dcf903fe6071",
+      "messageType" : "handshake-v1",
+      "rawByteCount" : 93,
+      "relativePath" : "f3-hpke-sealed-box/handshake-v1-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HPKESealedBox.swift",
+      "surface" : "F3"
+    },
+    {
+      "documentSha256" : "974b43c413c450fb0f7c362a684e74e6be14b33f075105e6bfc9e55443c09f2d",
+      "messageType" : "handshake-v2",
+      "rawByteCount" : 65,
+      "relativePath" : "f3-hpke-sealed-box/handshake-v2-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HPKESealedBox.swift",
+      "surface" : "F3"
+    },
+    {
+      "documentSha256" : "79864be71d1397745bbca5c23332ddfe7933efb5ba5190f967c1b5197920de0e",
+      "messageType" : "v2-empty-nonce-tag",
+      "rawByteCount" : 53,
+      "relativePath" : "f3-hpke-sealed-box/v2-empty-nonce-tag-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/P2P/HPKESealedBox.swift",
+      "surface" : "F3"
+    },
+    {
+      "documentSha256" : "7644c6b4936e964b64d32618d5cd161fab16026c00573afc52ca50b7506dc25c",
+      "messageType" : "capabilities-record",
+      "rawByteCount" : 138,
+      "relativePath" : "f4-bonjour-txt/capabilities-record-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/Discovery/BonjourInteropProtocolContract.swift",
+      "surface" : "F4"
+    },
+    {
+      "documentSha256" : "0fe8d526f6ad84332bea451bdd81f3b1a2b8eb2a6f0ac916439d44aa2c2ec742",
+      "messageType" : "identity-keys-record",
+      "rawByteCount" : 126,
+      "relativePath" : "f4-bonjour-txt/identity-keys-record-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/Discovery/BonjourInteropProtocolContract.swift",
+      "surface" : "F4"
+    },
+    {
+      "documentSha256" : "212fa57c0a1be9b4c7a77160bacafff8efe941b3fae8660637bbce565d9d3416",
+      "messageType" : "main-service-record",
+      "rawByteCount" : 136,
+      "relativePath" : "f4-bonjour-txt/main-service-record-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/Discovery/BonjourInteropProtocolContract.swift",
+      "surface" : "F4"
+    },
+    {
+      "documentSha256" : "5a663a56fb21bcfd97cc4cf46bafe23b8a02d7ca7bb03c0d6474558a996ea8d0",
+      "messageType" : "remote-service-record",
+      "rawByteCount" : 127,
+      "relativePath" : "f4-bonjour-txt/remote-service-record-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/Discovery/BonjourInteropProtocolContract.swift",
+      "surface" : "F4"
+    },
+    {
+      "documentSha256" : "f3bf7051eb624720535fc34be19ea5b9a49588757b882c63feb9e9fca6f10189",
+      "messageType" : "transfer-service-record",
+      "rawByteCount" : 129,
+      "relativePath" : "f4-bonjour-txt/transfer-service-record-1.json",
+      "sourcePath" : "Sources/SkyBridgeProtocolCore/Discovery/BonjourInteropProtocolContract.swift",
+      "surface" : "F4"
+    }
+  ],
+  "collectedAtUtc" : "2026-08-10T22:59:36.000Z",
+  "fixtureSetId" : "apple-production-codec-v1",
+  "integrityPurpose" : "SHA-256 values detect accidental capture corruption; they are not an authenticity claim",
+  "repoIdentity" : "github.com/billlza/Skybridge-Compass",
+  "repositoryRemoteURL" : "https://github.com/billlza/Skybridge-Compass",
+  "schemaVersion" : 1,
+  "semanticInputPath" : "Tests/SkyBridgeCoreTests/Fixtures/AppleCompatibilityVectors/inputs.json",
+  "semanticInputSha256" : "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0",
+  "sourceCommit" : "6d6f601ea0ac23ba5c62d46b98c3efd03acc4898",
+  "sourceSetSha256" : "7ea5e3760a2f27818700bdad3f047f26d9670365eb79ea73e70a72ea69364cfb",
+  "toolchain" : {
+    "swiftVersion" : "Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3 clang-2100.1.1.101)",
+    "testExecutableSha256" : "b161213d98efcbccc25784bbd258a4f91cb484de89169bed7c9d4a1e1047a653",
+    "xcodeVersion" : "Xcode 26.6\nBuild version 17F113"
+  }
+}

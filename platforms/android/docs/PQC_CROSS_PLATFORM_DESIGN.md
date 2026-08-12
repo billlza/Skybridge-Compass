@@ -1,11 +1,16 @@
 # SkyBridge Compass - 跨平台 PQC 握手设计
 
+> Superseded for current Android P2P/Q-Periapt implementation decisions by
+> `docs/ADR-2026-07-01-ANDROID-P2P-QPERIAPT-STACK.md`. This file remains as
+> historical design context; do not use its Android 13-15, macOS 14+, or iOS 17+
+> compatibility assumptions as the current product contract.
+
 ## 概述
 
 本文档详细分析 macOS/iOS 与 Android 平台的 PQC (后量子密码学) 握手实现，并提供确保跨平台互操作性的设计方案。
 
 **目标平台：**
-- Android 13+ (API 33+)
+- Android 16+ (API 36+)
 - macOS 14.0+ / macOS Tahoe 26+
 - iOS 17+ / iOS 26+
 
@@ -470,4 +475,3 @@ assert(p2pHex == "6e885214bc7db0d5f795b16fdbe4c18b680059215e4584dc1c361dad84ad2d
 *文档版本: 1.1*
 *最后更新: 2026-01-28*
 *作者: SkyBridge 跨平台团队*
-

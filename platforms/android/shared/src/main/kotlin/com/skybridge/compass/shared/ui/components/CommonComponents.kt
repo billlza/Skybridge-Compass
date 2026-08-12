@@ -171,9 +171,9 @@ fun GradientCard(
 @Composable
 fun InfoCard(
     title: String,
-    subtitle: String? = null,
     icon: ImageVector,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     iconTint: Color = MaterialTheme.colorScheme.primary,
     onClick: (() -> Unit)? = null
 ) {
@@ -346,8 +346,8 @@ fun TrendIndicator(
  */
 @Composable
 fun LoadingIndicator(
-    message: String = "Loading...",
     modifier: Modifier = Modifier,
+    message: String = "Loading...",
     showMessage: Boolean = true
 ) {
     Column(
@@ -377,9 +377,9 @@ fun LoadingIndicator(
 @Composable
 fun EmptyStateIndicator(
     title: String,
+    modifier: Modifier = Modifier,
     subtitle: String? = null,
     icon: ImageVector = Icons.Default.Inbox,
-    modifier: Modifier = Modifier,
     actionButton: @Composable (() -> Unit)? = null
 ) {
     Column(
@@ -420,8 +420,8 @@ fun EmptyStateIndicator(
 @Composable
 fun ErrorStateIndicator(
     title: String,
-    subtitle: String? = null,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     onRetry: (() -> Unit)? = null
 ) {
     Column(
@@ -481,7 +481,7 @@ fun AnimatedCounter(
     style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.headlineMedium,
     color: Color = MaterialTheme.colorScheme.primary
 ) {
-    var animatedCount by remember { mutableStateOf(0) }
+    var animatedCount by remember { mutableIntStateOf(0) }
     
     LaunchedEffect(count) {
         val animationDuration = 1000L
@@ -598,13 +598,13 @@ fun SpeedIndicator(
 private fun formatSpeed(bytesPerSecond: Long): Pair<String, String> {
     return when {
         bytesPerSecond >= 1_000_000_000 -> {
-            String.format("%.1f", bytesPerSecond / 1_000_000_000.0) to "GB/s"
+            String.format(Locale.ROOT, "%.1f", bytesPerSecond / 1_000_000_000.0) to "GB/s"
         }
         bytesPerSecond >= 1_000_000 -> {
-            String.format("%.1f", bytesPerSecond / 1_000_000.0) to "MB/s"
+            String.format(Locale.ROOT, "%.1f", bytesPerSecond / 1_000_000.0) to "MB/s"
         }
         bytesPerSecond >= 1_000 -> {
-            String.format("%.1f", bytesPerSecond / 1_000.0) to "KB/s"
+            String.format(Locale.ROOT, "%.1f", bytesPerSecond / 1_000.0) to "KB/s"
         }
         else -> {
             bytesPerSecond.toString() to "B/s"

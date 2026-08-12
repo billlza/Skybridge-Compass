@@ -2,7 +2,6 @@ package com.skybridge.compass.android.data
 
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
-import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -26,7 +25,7 @@ object DeveloperSettingsStore {
 
     fun observe(context: Context): Flow<DeveloperSettings> =
         context.developerSettingsDataStore.data
-            .catch { emit(emptyPreferences()) }
+            .catch { rethrowPreferenceReadFailure(it) }
             .map { prefs ->
             DeveloperSettings(
                 enableScreenMirroring = prefs[KEY_SCREEN_MIRRORING] ?: true,
@@ -45,5 +44,11 @@ object DeveloperSettingsStore {
 
     suspend fun setEnableFileTransfer(context: Context, enabled: Boolean) {
         context.developerSettingsDataStore.edit { prefs -> prefs[KEY_FILE_TRANSFER] = enabled }
+    }
+
+    private suspend fun kotlinx.coroutines.flow.FlowCollector<androidx.datastore.preferences.core.Preferences>.rethrowPreferenceReadFailure(
+        error: Throwable
+    ) {
+        throw error
     }
 }

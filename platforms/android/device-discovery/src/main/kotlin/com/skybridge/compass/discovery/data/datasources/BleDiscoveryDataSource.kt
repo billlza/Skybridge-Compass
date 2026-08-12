@@ -6,11 +6,11 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
-import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
 import android.Manifest
 import androidx.core.app.ActivityCompat
+import androidx.core.util.size
 import com.skybridge.compass.discovery.domain.entities.ConnectionInfo
 import com.skybridge.compass.discovery.data.telemetry.DiscoveryTelemetry
 import com.skybridge.compass.discovery.domain.entities.DeviceCapability
@@ -36,20 +36,12 @@ class BleDiscoveryDataSource @Inject constructor(
         val discovered = mutableMapOf<String, DiscoveredDevice>()
         telemetry.recordDiscoveryStart(DiscoveryProtocol.BLUETOOTH)
 
-        // 运行时权限检查：Android 12+ 需要 BLUETOOTH_SCAN；更早版本需要定位权限
-        val hasRequired = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.BLUETOOTH_SCAN
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        } else {
-            ActivityCompat.checkSelfPermission(
-                context,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        }
+        val hasRequired = ActivityCompat.checkSelfPermission(
+            context,
+            Manifest.permission.BLUETOOTH_SCAN
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         if (!hasRequired) {
-            telemetry.recordPermissionMissing(DiscoveryProtocol.BLUETOOTH, if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "BLUETOOTH_SCAN" else "ACCESS_FINE_LOCATION")
+            telemetry.recordPermissionMissing(DiscoveryProtocol.BLUETOOTH, "BLUETOOTH_SCAN")
             trySend(emptyList())
             close()
             return@callbackFlow
@@ -132,7 +124,7 @@ class BleDiscoveryDataSource @Inject constructor(
                 version = null,
                 extra = mapOf(
                     "uuid_count" to (uuids.size).toString(),
-                    "has_manufacturer_data" to (record?.manufacturerSpecificData?.size() ?: 0).toString()
+                    "has_manufacturer_data" to (record?.manufacturerSpecificData?.size ?: 0).toString()
                 )
             ),
             signalStrength = result.rssi,

@@ -1,14 +1,14 @@
 plugins {
-    id("com.android.test")
+    alias(libs.plugins.android.test)
 }
 
 android {
     namespace = "com.skybridge.compass.baselineprofile"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
-        minSdk = 33
-        targetSdk = 36
+        minSdk = 36
+        targetSdk = 37
         testInstrumentationRunner = "androidx.benchmark.junit4.AndroidBenchmarkRunner"
         testInstrumentationRunnerArguments["androidx.benchmark.suppressErrors"] = "EMULATOR"
     }
@@ -23,15 +23,14 @@ android {
 }
 
 dependencies {
-    implementation("androidx.benchmark:benchmark-macro-junit4:1.4.1")
-    implementation("androidx.test.ext:junit:1.3.0")
-    implementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    implementation(libs.androidx.benchmark.macro.junit4)
+    implementation(libs.androidx.test.ext.junit)
+    implementation(libs.androidx.test.uiautomator)
 }
 
 kotlin {
     jvmToolchain(21)
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        freeCompilerArgs.add("-Xannotation-default-target=param-property")
     }
 }

@@ -5,19 +5,40 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Pro release TrafficPadding.swift (SBP2) compatible unwrap for post-handshake traffic.
+ * Pro release TrafficPadding.swift (SBP2) compatible padding for post-handshake traffic.
  *
- * For now we keep wrap disabled on Android (returns payload unchanged), but we always support
- * unwrap so we can interop with Apple when padding is enabled there.
+ * Unwrap is always supported so we can interop with Apple when padding is enabled there.
+ * TX wrap is now implemented behind a feature flag ([txPaddingEnabled], default off) that
+ * mirrors the canon's "wrap-when-enabled" contract: when off, [wrapIfEnabled] returns the
+ * payload unchanged so the existing interop path is byte-for-byte unaffected; when on, it
+ * emits SBP2 framing (rounding the wrapped size up to a coarse [PADDING_BUCKET] bucket to
+ * blunt length-based traffic analysis), which the peer's [unwrapIfNeeded] strips
+ * transparently.
  */
 object TrafficPaddingP2 {
     // "SBP2"
     private val MAGIC = "SBP2".encodeToByteArray()
     private const val HEADER_LEN = 4 + 4 // magic + u32 actualLen (big-endian)
 
+    /** Coarse padding bucket (bytes) used to quantize wrapped frame sizes. */
+    const val PADDING_BUCKET: Int = 256
+
+    /**
+     * TX padding feature flag. Default off, matching the canon flag default so that
+     * enabling it is an explicit, opt-in deployment decision and the LAN interop path
+     * stays unchanged until both ends agree to pad. Volatile so a runtime toggle is
+     * visible across threads.
+     */
+    @Volatile
+    var txPaddingEnabled: Boolean = false
+
     fun wrapIfEnabled(payload: ByteArray, label: String? = null): ByteArray {
-        // Disabled by default for Android (feature flag can be added later).
-        return payload
+        if (!txPaddingEnabled) return payload
+        // Round the framed size up to the next padding bucket so distinct payload
+        // lengths collapse into a small set of observable sizes.
+        val framed = HEADER_LEN + payload.size
+        val bucketed = ((framed + PADDING_BUCKET - 1) / PADDING_BUCKET) * PADDING_BUCKET
+        return wrapToLength(payload, bucketed)
     }
 
     fun unwrapIfNeeded(data: ByteArray, label: String? = null): ByteArray {

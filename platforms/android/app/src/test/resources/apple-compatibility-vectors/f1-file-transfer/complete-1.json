@@ -1,0 +1,30 @@
+{
+  "expectedFields" : {
+    "fileSha256" : "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "merkleRoot" : "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "merkleRootSignature" : "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "merkleRootSignatureAlg" : "hmac-sha256-session-v1",
+    "op" : "complete",
+    "receivedBytes" : "6",
+    "transferId" : "51111111-2222-3333-4444-555555555555",
+    "version" : "1"
+  },
+  "messageType" : "complete",
+  "provenance" : {
+    "captureToolPath" : "Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift",
+    "collectedAtUtc" : "2026-08-10T22:59:36.000Z",
+    "note" : "CrossNetworkFileTransferMessage encoded by the shipping canonical production codec",
+    "origin" : "APPLE_REFERENCE_CAPTURE",
+    "repoIdentity" : "github.com/billlza/Skybridge-Compass",
+    "repositoryRemoteURL" : "https://github.com/billlza/Skybridge-Compass",
+    "semanticInputPath" : "Tests/SkyBridgeCoreTests/Fixtures/AppleCompatibilityVectors/inputs.json",
+    "semanticInputSha256" : "d3ff9759f75fb6dd4651b0b41e156005809ce3db6cc80524ca56533e17058cb0",
+    "source" : "SkyBridge Apple production codec XCTest capture",
+    "sourceCommit" : "6d6f601ea0ac23ba5c62d46b98c3efd03acc4898",
+    "sourcePath" : "Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/CrossNetworkFileTransferWireEncoder.swift",
+    "sourceSetSha256" : "7ea5e3760a2f27818700bdad3f047f26d9670365eb79ea73e70a72ea69364cfb"
+  },
+  "rawBytesHex" : "7b2266696c65536861323536223a22494345694979516c4a69636f4b536f724c4330754c7a41784d6a4d304e5459334f446b364f7a7739506a383d222c226d65726b6c65526f6f74223a225145464351305246526b64495355704c5445314f54314252556c4e5556565a5857466c6157317864586c383d222c226d65726b6c65526f6f745369676e6174757265223a22594746695932526c5a6d646f615770726247317562334278636e4e3064585a3365486c3665337839666e383d222c226d65726b6c65526f6f745369676e6174757265416c67223a22686d61632d7368613235362d73657373696f6e2d7631222c226f70223a22636f6d706c657465222c2272656365697665644279746573223a362c227472616e736665724964223a2235313131313131312d323232322d333333332d343434342d353535353535353535353535222c2276657273696f6e223a317d",
+  "schemaVersion" : 1,
+  "surface" : "F1"
+}

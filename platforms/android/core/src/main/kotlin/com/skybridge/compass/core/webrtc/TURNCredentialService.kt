@@ -36,48 +36,48 @@ class TURNCredentialService {
     @Serializable
     private data class ServerResponse(
         val username: String,
-        val password: String,
+        val password: String? = null,
+        val credential: String? = null,
         val ttl: Int,
         val uris: List<String>? = null,
         val expiresAt: Long? = null,
         val mode: String? = null
     )
 
-    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
     private val httpClient = HttpClient(Android) {
-        install(ContentNegotiation) { json(this@TURNCredentialService.json) }
+        install(ContentNegotiation) { json(credentialJson) }
     }
 
-    private val cachedByAdmissionToken = linkedMapOf<String, TurnCredentials>()
+    private data class CredentialCacheKey(
+        val endpoint: String,
+        val admissionToken: String
+    )
+
+    private val cachedByEndpointAndAdmissionToken = linkedMapOf<CredentialCacheKey, TurnCredentials>()
 
     suspend fun getCredentials(
         turnAdmissionToken: String? = null,
-        deviceId: String? = null
+        deviceId: String? = null,
+        signalingServerOrigin: String? = null
     ): TurnCredentials {
         val tokenKey = turnAdmissionToken?.trim().orEmpty()
-        if (tokenKey.isNotEmpty()) {
-            cachedByAdmissionToken[tokenKey]?.takeIf { it.isValid() }?.let { return it }
-        }
+        require(tokenKey.isNotEmpty()) { "turn credential admission token is required" }
+        val endpoint = turnCredentialEndpoint(signalingServerOrigin)
+        val cacheKey = CredentialCacheKey(endpoint, tokenKey)
+        cachedByEndpointAndAdmissionToken[cacheKey]?.takeIf { it.isValid() }?.let { return it }
 
-        val fresh = if (tokenKey.isNotEmpty()) {
-            runCatching { fetchFromServer(tokenKey, deviceId) }
-                .getOrElse { fallbackCredentials() }
-        } else {
-            fallbackCredentials()
-        }
+        val fresh = fetchFromServer(endpoint, tokenKey, deviceId)
 
-        if (tokenKey.isNotEmpty()) {
-            cachedByAdmissionToken[tokenKey] = fresh
-        }
+        cachedByEndpointAndAdmissionToken[cacheKey] = fresh
         return fresh
     }
 
     private suspend fun fetchFromServer(
+        endpoint: String,
         turnAdmissionToken: String,
         deviceId: String?
     ): TurnCredentials {
-        val url = SkyBridgeServerConfig.turnCredentialEndpoint()
-        val response = httpClient.get(url) {
+        val response = httpClient.get(endpoint) {
             header(HttpHeaders.Accept, "application/json")
             header(HttpHeaders.UserAgent, SignalServerClient.defaultUserAgent())
             header("X-API-Key", SkyBridgeServerConfig.clientApiKey)
@@ -89,76 +89,113 @@ class TURNCredentialService {
         val payload = response.bodyAsText()
         if (!response.status.isSuccess()) {
             throw IllegalStateException(
-                "turn credential request failed (${response.status.value}): $payload"
+                "turn credential request failed (${response.status.value})"
             )
         }
-        val resp = json.decodeFromString<ServerResponse>(payload)
-
-        val expiresAt = resp.expiresAt
-            ?.takeIf { it > 0L }
-            ?.let { raw ->
-                if (raw >= 1_000_000_000_000L) raw else raw * 1000L
-            }
-            ?: (System.currentTimeMillis() + resp.ttl.toLong() * 1000L)
-        return TurnCredentials(
-            username = resp.username,
-            password = resp.password,
-            ttl = resp.ttl,
-            uris = preferredTurnUris(
-                serverUris = resp.uris.orEmpty(),
-                fallbackUris = SkyBridgeServerConfig.turnURLs
-            ),
-            expiresAtMillis = expiresAt
-        )
+        return decodeServerCredentials(payload)
     }
 
-    private fun fallbackCredentials(): TurnCredentials =
-        TurnCredentials(
-            username = "",
-            password = "",
-            ttl = 3600,
-            uris = emptyList(),
-            expiresAtMillis = System.currentTimeMillis() + 3600_000L
-        )
+    internal companion object {
+        private val credentialJson = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
-    private fun preferredTurnUris(
-        serverUris: List<String>,
-        fallbackUris: List<String>
-    ): List<String> {
-        val effective = normalizeTurnUris(serverUris).ifEmpty {
-            normalizeTurnUris(fallbackUris)
+        internal fun decodeServerCredentials(
+            payload: String,
+            nowMillis: Long = System.currentTimeMillis()
+        ): TurnCredentials {
+            val resp = credentialJson.decodeFromString<ServerResponse>(payload)
+            val username = requireCredentialField(resp.username, "username")
+            val password = requireTurnCredential(resp.password, resp.credential)
+            require(resp.ttl > 0) { "turn credential response ttl must be positive" }
+
+            val uris = preferredTurnUris(serverUris = resp.uris.orEmpty())
+            require(uris.isNotEmpty()) { "turn credential response did not include any TURN URI" }
+
+            val expiresAt = resp.expiresAt
+                ?.takeIf { it > 0L }
+                ?.let { raw ->
+                    if (raw >= 1_000_000_000_000L) raw else raw * 1000L
+                }
+                ?: (nowMillis + resp.ttl.toLong() * 1000L)
+            require(expiresAt > nowMillis) { "turn credential response is already expired" }
+
+            return TurnCredentials(
+                username = username,
+                password = password,
+                ttl = resp.ttl,
+                uris = uris,
+                expiresAtMillis = expiresAt
+            )
         }
-        return effective.sortedWith(
-            compareBy<String> { turnPriority(it) }
-                .thenBy { effective.indexOf(it) }
-        )
-    }
 
-    private fun normalizeTurnUris(uris: List<String>): List<String> {
-        val seen = linkedSetOf<String>()
-        return uris.mapNotNull { raw ->
-            val normalized = raw.trim()
-            if (normalized.isEmpty()) {
-                null
+        internal fun turnCredentialEndpoint(signalingServerOrigin: String?): String {
+            val rawOrigin = signalingServerOrigin?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return SkyBridgeServerConfig.turnCredentialEndpoint()
+            val canonicalOrigin = CurrentPathOriginPolicy.canonicalOrigin(rawOrigin)
+            return "$canonicalOrigin/api/turn/credentials"
+        }
+
+        private fun requireTurnCredential(password: String?, credential: String?): String {
+            val hasPassword = password != null
+            val hasCredential = credential != null
+            require(hasPassword || hasCredential) {
+                "turn credential response missing password"
+            }
+            if (hasPassword && hasCredential) {
+                val passwordValue = requireCredentialField(checkNotNull(password), "password")
+                val credentialValue = requireCredentialField(checkNotNull(credential), "credential")
+                require(passwordValue == credentialValue) {
+                    "turn credential response password and credential fields disagree"
+                }
+                return passwordValue
+            }
+            return if (hasPassword) {
+                requireCredentialField(checkNotNull(password), "password")
             } else {
-                val lower = normalized.lowercase()
-                if (!lower.startsWith("turn:") && !lower.startsWith("turns:")) {
-                    null
-                } else if (!seen.add(lower)) {
+                requireCredentialField(checkNotNull(credential), "credential")
+            }
+        }
+
+        private fun requireCredentialField(value: String, fieldName: String): String {
+            val trimmed = value.trim()
+            require(trimmed.isNotEmpty()) { "turn credential response missing $fieldName" }
+            require(trimmed == value) { "turn credential response $fieldName contains surrounding whitespace" }
+            return value
+        }
+
+        private fun preferredTurnUris(serverUris: List<String>): List<String> {
+            val effective = normalizeTurnUris(serverUris)
+            return effective.sortedWith(
+                compareBy<String> { turnPriority(it) }
+                    .thenBy { effective.indexOf(it) }
+            )
+        }
+
+        private fun normalizeTurnUris(uris: List<String>): List<String> {
+            val seen = linkedSetOf<String>()
+            return uris.mapNotNull { raw ->
+                val normalized = raw.trim()
+                if (normalized.isEmpty()) {
                     null
                 } else {
-                    normalized
+                    val lower = normalized.lowercase()
+                    if (!lower.startsWith("turn:") && !lower.startsWith("turns:")) {
+                        null
+                    } else if (!seen.add(lower)) {
+                        null
+                    } else {
+                        normalized
+                    }
                 }
             }
         }
-    }
 
-    private fun turnPriority(uri: String): Int {
-        val lower = uri.lowercase()
-        return when {
-            lower.startsWith("turns:") -> 0
-            "transport=tcp" in lower -> 1
-            else -> 2
+        private fun turnPriority(uri: String): Int {
+            val lower = uri.lowercase()
+            return when {
+                lower.startsWith("turns:") -> 0
+                "transport=tcp" in lower -> 1
+                else -> 2
+            }
         }
     }
 }

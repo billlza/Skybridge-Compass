@@ -22,16 +22,32 @@ import androidx.compose.ui.unit.dp
 import com.skybridge.compass.android.ui.theme.IOSParityTokens
 
 /**
- * Layout-safe glass surface tuned for iOS parity.
+ * Rendering strategy for SkyBridge glass surfaces.
  *
- * Intentionally avoids noisy texture layers that can create "mesh" artifacts on Android panels.
+ * Compose does not expose Apple Liquid Glass or a stable backdrop-sampling primitive. [Layered]
+ * therefore renders a deterministic tint/specular/rim stack behind content. [Reduced] keeps the
+ * same geometry while lowering decorative contrast for dense or accessibility-sensitive surfaces.
+ */
+enum class GlassRenderingQuality {
+    Layered,
+    Reduced
+}
+
+/**
+ * Layout-safe glass surface tuned to the shared Apple visual language.
+ *
+ * [opticalDepth] controls the strength of the simulated material; it is not a blur radius.
+ * [blurRadius] is retained only as a source-compatible alias for older callers and also does not
+ * request backdrop blur. This avoids pretending that Android RenderEffect can sample pixels behind
+ * a Compose subtree—it only blurs the subtree itself and would soften text and controls.
  */
 @Composable
 fun LiquidGlassSurface(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(IOSParityTokens.ShapeTokens.CardCornerRadius),
-    blurRadius: Dp = 24.dp,
-    enableRealBlur: Boolean = true,
+    opticalDepth: Dp = 24.dp,
+    blurRadius: Dp? = null,
+    renderingQuality: GlassRenderingQuality = GlassRenderingQuality.Layered,
     tintColor: Color = MaterialTheme.colorScheme.surface.copy(alpha = 0.35f),
     tintAlpha: Float? = null,
     shadowElevation: Dp = 0.dp,
@@ -45,47 +61,52 @@ fun LiquidGlassSurface(
     content: @Composable () -> Unit
 ) {
     val effectiveTint = tintAlpha?.let { tintColor.copy(alpha = it) } ?: tintColor
-    val blurFactor = ((blurRadius.value / 24f).coerceIn(0.55f, 1.75f)) * if (enableRealBlur) 1f else 0.86f
+    val qualityScale = if (renderingQuality == GlassRenderingQuality.Layered) 1f else 0.62f
+    val depth = blurRadius ?: opticalDepth
+    val depthFactor = (depth.value / 24f).coerceIn(0.45f, 1.55f) * qualityScale
 
     val borderBrush = Brush.linearGradient(
         colors = listOf(
-            Color.White.copy(alpha = (borderAlpha * 1.12f).coerceAtMost(0.28f)),
-            Color.White.copy(alpha = (borderAlpha * 0.58f).coerceAtMost(0.16f)),
+            Color.White.copy(alpha = (borderAlpha * 1.18f).coerceAtMost(0.30f)),
+            Color.White.copy(alpha = (borderAlpha * 0.56f).coerceAtMost(0.15f)),
             Color.Transparent
         ),
-        start = Offset(0f, 0f),
+        start = Offset.Zero,
         end = Offset(960f, 960f)
     )
-
     val topSpecularBrush = Brush.verticalGradient(
         colors = listOf(
-            Color.White.copy(alpha = (highlightAlpha * 1.28f * blurFactor).coerceAtMost(0.22f)),
-            Color.White.copy(alpha = (highlightAlpha * 0.72f * blurFactor).coerceAtMost(0.11f)),
+            Color.White.copy(alpha = (highlightAlpha * 1.25f * depthFactor).coerceAtMost(0.21f)),
+            Color.White.copy(alpha = (highlightAlpha * 0.46f * depthFactor).coerceAtMost(0.08f)),
             Color.Transparent
         )
     )
-
     val centerBloomBrush = Brush.radialGradient(
         colors = listOf(
-            Color.White.copy(alpha = (highlightAlpha * 0.58f * blurFactor).coerceAtMost(0.07f)),
+            Color.White.copy(alpha = (highlightAlpha * 0.50f * depthFactor).coerceAtMost(0.065f)),
             Color.Transparent
         ),
         radius = 960f
     )
-
-    val edgeSheenBrush = Brush.horizontalGradient(
+    val refractiveRimBrush = Brush.horizontalGradient(
         colors = listOf(
-            Color.White.copy(alpha = (edgeGlowAlpha * 0.82f).coerceAtMost(0.09f)),
+            IOSParityTokens.ColorTokens.CyanAccent.copy(alpha = (edgeGlowAlpha * 0.30f * depthFactor).coerceAtMost(0.035f)),
             Color.Transparent,
-            Color.Transparent,
-            Color.White.copy(alpha = (edgeGlowAlpha * 0.74f).coerceAtMost(0.08f))
+            IOSParityTokens.ColorTokens.PurpleAccent.copy(alpha = (edgeGlowAlpha * 0.26f * depthFactor).coerceAtMost(0.03f))
         )
     )
-
+    val edgeSheenBrush = Brush.horizontalGradient(
+        colors = listOf(
+            Color.White.copy(alpha = (edgeGlowAlpha * 0.78f * qualityScale).coerceAtMost(0.085f)),
+            Color.Transparent,
+            Color.Transparent,
+            Color.White.copy(alpha = (edgeGlowAlpha * 0.68f * qualityScale).coerceAtMost(0.075f))
+        )
+    )
     val bottomDepthBrush = Brush.verticalGradient(
         colors = listOf(
             Color.Transparent,
-            Color.Black.copy(alpha = (0.02f + highlightAlpha * 0.2f).coerceAtMost(0.07f))
+            Color.Black.copy(alpha = (0.018f + highlightAlpha * 0.18f * qualityScale).coerceAtMost(0.06f))
         )
     )
 
@@ -95,13 +116,15 @@ fun LiquidGlassSurface(
         .background(effectiveTint)
         .drawWithCache {
             onDrawWithContent {
-                drawContent()
+                // Material layers stay behind descendants so typography and controls remain crisp.
                 drawRect(topSpecularBrush)
                 drawRect(centerBloomBrush)
                 if (edgeGlowEnabled) {
+                    drawRect(refractiveRimBrush)
                     drawRect(edgeSheenBrush)
                 }
                 drawRect(bottomDepthBrush)
+                drawContent()
             }
         }
         .border(borderWidth, borderBrush, shape)

@@ -5,7 +5,9 @@ import com.skybridge.compass.shared.p2p.P2PHandshakeClient
 import com.skybridge.compass.shared.p2p.P2PHandshakeServer
 import com.skybridge.compass.shared.p2p.P2PHandshakeWire
 import com.skybridge.compass.shared.p2p.P2PProtocolSigningKeys
+import com.skybridge.compass.shared.p2p.P2PQPeriaptKem
 import com.skybridge.compass.shared.p2p.P2PSoa
+import com.skybridge.compass.shared.p2p.QPeriaptPlatformPolicy
 import com.skybridge.compass.shared.p2p.TrafficPaddingP2
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -70,6 +72,8 @@ class TcpControlSession internal constructor(
     @Volatile private var sessionKeys: P2PHandshakeWire.DerivedSessionKeys? = null
     @Volatile private var negotiatedSuiteWireId: Int = 0
     @Volatile private var soaPairKey: ByteArray? = null
+    @Volatile private var authenticatedPeerId: String? = peerIdHint
+    private val authenticatedPairingAttemptGate = AuthenticatedPairingAttemptGate()
 
     private val running = AtomicBoolean(false)
     private val pairingExchangeSent = AtomicBoolean(false)
@@ -86,7 +90,7 @@ class TcpControlSession internal constructor(
                 }
                 startReceiveLoop()
             } catch (t: Throwable) {
-                _events.tryEmit(TcpControlEvent.Failed(peerIdHint, t.message ?: "tcp session failed"))
+                _events.tryEmit(TcpControlEvent.Failed(currentPeerId(), t.message ?: "tcp session failed"))
                 close()
             }
         }
@@ -94,11 +98,12 @@ class TcpControlSession internal constructor(
 
     fun close() {
         running.set(false)
+        authenticatedPairingAttemptGate.clear()
         runCatching { readJob?.cancel() }
         soaPairKey?.let { SoaPeerSessionArbiter.shared.clearEstablished(it) }
         soaPairKey = null
         runCatching { socket.close() }
-        _events.tryEmit(TcpControlEvent.Disconnected(peerIdHint))
+        _events.tryEmit(TcpControlEvent.Disconnected(currentPeerId()))
     }
 
     suspend fun sendAppMessage(message: AppMessage) {
@@ -126,6 +131,7 @@ class TcpControlSession internal constructor(
         val peerKem = if (peerId != null) peerKemStore.load(peerId) else PeerKemKeyStore.PeerKemPublicKeys()
         val policyOverride = effectivePolicyOverride()
         val peerKemPublicKeys = P2PHandshakeClient.PeerKemPublicKeys(
+            qPeriaptPublicKey = peerKem.qPeriaptPublicKey,
             xWingPublicKey = peerKem.xWingPublicKey,
             mlKem768PublicKey = peerKem.mlKem768PublicKey
         )
@@ -233,7 +239,12 @@ class TcpControlSession internal constructor(
 
             sendMutex.withLock { LengthPrefixedFraming.writeFrame(output, result.clientFinishedToSend) }
 
-            onHandshakeEstablished(peerId = peerId, suiteWireId = result.negotiatedSuite.wireId.toInt(), keys = result.sessionKeys)
+            onHandshakeEstablished(
+                peerId = peerId,
+                suiteWireId = result.negotiatedSuite.wireId.toInt(),
+                keys = result.sessionKeys,
+                remoteProtocolIdentityFingerprint = result.remoteProtocolIdentityFingerprint
+            )
             outgoingPairKey?.let {
                 arbiter.markEstablished(it)
                 soaPairKey = it
@@ -252,22 +263,6 @@ class TcpControlSession internal constructor(
     }
 
     private suspend fun performHandshakeAsResponder() {
-        val peerId = peerIdHint
-        val policyOverride = effectivePolicyOverride()
-        val allowClassicBootstrap =
-            peerId != null && localIdentity.trustStore().isPeerPinned(peerId)
-        val effectiveHandshakePolicy = policyOverride.forTrustedClassicBootstrap(
-            enabled = allowClassicBootstrap
-        )
-        val kem = localIdentity.getOrCreateKemIdentityKeys()
-        val signKeys = localIdentity.getOrCreateProtocolSigningKeys()
-        val protocolSigningKeys = P2PProtocolSigningKeys(
-            ed25519PrivateKey = signKeys.ed25519PrivateKey,
-            ed25519PublicKeyRaw32 = signKeys.ed25519PublicRaw32,
-            mlDsa65PrivateKeyRaw = signKeys.mlDsa65PrivateKeyRaw,
-            mlDsa65PublicKeyRaw = signKeys.mlDsa65PublicKeyRaw
-        )
-
         val server = P2PHandshakeServer()
         val msgAFrame = readFrame()
         val msgA = HandshakePaddingP1.unwrapIfNeeded(TrafficPaddingP2.unwrapIfNeeded(msgAFrame, label = "rx"))
@@ -284,34 +279,51 @@ class TcpControlSession internal constructor(
             throw IllegalArgumentException("Unknown keyShare suite(s): ${decodedMsgA.unknownKeyShareSuiteWireIds}")
         }
 
-        val ext = P2PSoa.decodeFromExtensions(decodedMsgA.extensionsRaw)
-        if (ext != null) {
-            val localPeerId = P2PSoa.canonicalPeerIdBytes(localIdentity.deviceId())
-            val expectedRemotePeerId = ext.initiatorPeerId
-            val pairKey = P2PSoa.pairKey(localPeerId, expectedRemotePeerId)
-            val decision = arbiter.evaluateIncoming(
-                pairKey = pairKey,
-                remoteInitiatorPeerId = ext.initiatorPeerId,
-                remoteAttemptId = ext.attemptId,
-                targetPeerId = ext.targetPeerId,
-                expectedRemotePeerId = expectedRemotePeerId,
-                localPeerId = localPeerId
-            )
-            when (decision) {
-                SoaPeerSessionArbiter.IncomingDecision.Accept,
-                is SoaPeerSessionArbiter.IncomingDecision.AcceptAndSupersedeLocal -> {
-                    incomingPairKey = pairKey
-                }
-                SoaPeerSessionArbiter.IncomingDecision.RejectAlreadyConnected ->
-                    throw IllegalStateException("SOA: already connected")
-                SoaPeerSessionArbiter.IncomingDecision.RejectBinding ->
-                    throw IllegalStateException("SOA: binding rejected")
-                SoaPeerSessionArbiter.IncomingDecision.RejectRateLimited ->
-                    throw IllegalStateException("SOA: rate limited")
-                is SoaPeerSessionArbiter.IncomingDecision.RejectLocalWinner ->
-                    throw IllegalStateException("SOA: local winner")
+        val resolvedPeer = resolveInboundPeerIdentity(decodedMsgA)
+        val peerId = resolvedPeer.peerId
+        authenticatedPeerId = peerId
+
+        val localPeerId = P2PSoa.canonicalPeerIdBytes(localIdentity.deviceId())
+        val pairKey = P2PSoa.pairKey(localPeerId, resolvedPeer.remoteSoaPeerId)
+        val ext = resolvedPeer.soaExtension
+        val decision = arbiter.evaluateIncoming(
+            pairKey = pairKey,
+            remoteInitiatorPeerId = ext.initiatorPeerId,
+            remoteAttemptId = ext.attemptId,
+            targetPeerId = ext.targetPeerId,
+            expectedRemotePeerId = resolvedPeer.remoteSoaPeerId,
+            localPeerId = localPeerId
+        )
+        when (decision) {
+            SoaPeerSessionArbiter.IncomingDecision.Accept,
+            is SoaPeerSessionArbiter.IncomingDecision.AcceptAndSupersedeLocal -> {
+                incomingPairKey = pairKey
             }
+            SoaPeerSessionArbiter.IncomingDecision.RejectAlreadyConnected ->
+                throw IllegalStateException("SOA: already connected")
+            SoaPeerSessionArbiter.IncomingDecision.RejectBinding ->
+                throw IllegalStateException("SOA: binding rejected")
+            SoaPeerSessionArbiter.IncomingDecision.RejectRateLimited ->
+                throw IllegalStateException("SOA: rate limited")
+            is SoaPeerSessionArbiter.IncomingDecision.RejectLocalWinner ->
+                throw IllegalStateException("SOA: local winner")
         }
+
+        val policyOverride = effectivePolicyOverride()
+        val allowClassicBootstrap = localIdentity.trustStore().isPeerPinned(peerId)
+        val effectiveHandshakePolicy = policyOverride.forTrustedClassicBootstrap(
+            enabled = allowClassicBootstrap
+        )
+        val kem = localIdentity.getOrCreateKemIdentityKeys(
+            allowQPeriapt = effectiveHandshakePolicy.minimumTierRaw == P2PQPeriaptKem.MINIMUM_TIER_RAW
+        )
+        val signKeys = localIdentity.getOrCreateProtocolSigningKeys()
+        val protocolSigningKeys = P2PProtocolSigningKeys(
+            ed25519PrivateKey = signKeys.ed25519PrivateKey,
+            ed25519PublicKeyRaw32 = signKeys.ed25519PublicRaw32,
+            mlDsa65PrivateKeyRaw = signKeys.mlDsa65PrivateKeyRaw,
+            mlDsa65PublicKeyRaw = signKeys.mlDsa65PublicKeyRaw
+        )
 
         val resp = server.respond(
             rawMessageA = msgA,
@@ -319,8 +331,12 @@ class TcpControlSession internal constructor(
             trustStore = localIdentity.trustStore(),
             allowTrustOnFirstUse = false,
             options = P2PHandshakeServer.RespondOptions(
-                platformVersion = android.os.Build.VERSION.RELEASE,
+                platformVersion = QPeriaptPlatformPolicy.androidHandshakePlatformVersion(
+                    release = android.os.Build.VERSION.RELEASE,
+                    sdkInt = android.os.Build.VERSION.SDK_INT
+                ),
                 kemPrivateKeys = P2PHandshakeServer.KemPrivateKeys(
+                    qPeriaptPrivateKey = kem.qPeriaptPrivateKey,
                     xWingPrivateKey = kem.xWingPrivateKey,
                     mlKem768PrivateKey = kem.mlKem768PrivateKey
                 ),
@@ -341,17 +357,39 @@ class TcpControlSession internal constructor(
         val fin = HandshakePaddingP1.unwrapIfNeeded(TrafficPaddingP2.unwrapIfNeeded(finFrame, label = "rx"))
         require(server.verifyClientFinished(fin, resp.state.sessionKeys)) { "Client Finished MAC invalid" }
 
-        incomingPairKey?.let {
-            arbiter.markEstablished(it)
-            soaPairKey = it
-        }
-        onHandshakeEstablished(peerId = peerId, suiteWireId = P2PHandshakeWire.decodeMessageB(HandshakePaddingP1.unwrapIfNeeded(resp.messageBToSend)).selectedSuite.wireId.toInt(), keys = resp.state.sessionKeys)
+        arbiter.markEstablished(incomingPairKey)
+        soaPairKey = incomingPairKey
+        onHandshakeEstablished(
+            peerId = peerId,
+            suiteWireId = P2PHandshakeWire.decodeMessageB(
+                HandshakePaddingP1.unwrapIfNeeded(resp.messageBToSend)
+            ).selectedSuite.wireId.toInt(),
+            keys = resp.state.sessionKeys,
+            remoteProtocolIdentityFingerprint = resp.state.remoteProtocolIdentityFingerprint
+        )
         sendPairingIdentityExchangeIfNeeded(force = false)
     }
 
-    private suspend fun onHandshakeEstablished(peerId: String?, suiteWireId: Int, keys: P2PHandshakeWire.DerivedSessionKeys) {
-        sessionKeys = keys
-        negotiatedSuiteWireId = suiteWireId
+    private suspend fun onHandshakeEstablished(
+        peerId: String?,
+        suiteWireId: Int,
+        keys: P2PHandshakeWire.DerivedSessionKeys,
+        remoteProtocolIdentityFingerprint: String
+    ) {
+        if (authenticatedPairingAttemptGate.establishIfActive(
+                observedProtocolFingerprint = remoteProtocolIdentityFingerprint,
+                isActive = running::get,
+                onEstablished = {
+                    if (peerId != null) {
+                        authenticatedPeerId = peerId
+                    }
+                    sessionKeys = keys
+                    negotiatedSuiteWireId = suiteWireId
+                }
+            ) == null
+        ) {
+            return
+        }
         _events.tryEmit(TcpControlEvent.HandshakeEstablished(negotiatedSuiteWireId = suiteWireId, peerId = peerId))
     }
 
@@ -373,7 +411,7 @@ class TcpControlSession internal constructor(
             // Rekey support: allow receiving a new MessageA while already established (macOS strict PQC bootstrap).
             if (isLikelyMessageA(unpadded)) {
                 runCatching { performRekeyAsResponder(rawMessageA = unpadded) }
-                    .onFailure { _events.tryEmit(TcpControlEvent.Failed(peerIdHint, it.message ?: "rekey failed")) }
+                    .onFailure { _events.tryEmit(TcpControlEvent.Failed(currentPeerId(), it.message ?: "rekey failed")) }
                 continue
             }
 
@@ -384,7 +422,7 @@ class TcpControlSession internal constructor(
             if (env != null && env.kind == BusinessEnvelope.KIND_REMOTE_DESKTOP_FRAME) {
                 _events.tryEmit(
                     TcpControlEvent.RemoteDesktopFrameReceived(
-                        peerId = peerIdHint,
+                        peerId = currentPeerId(),
                         timestampNs = env.timestampNs,
                         payload = env.payload
                     )
@@ -392,13 +430,35 @@ class TcpControlSession internal constructor(
                 continue
             }
 
-            val msg = codec.decode(plaintext) ?: continue
+            val decoded = try {
+                codec.decodeAuthenticatedControl(plaintext)
+            } catch (_: AppMessageCodec.DecodeException) {
+                _events.tryEmit(
+                    TcpControlEvent.Failed(
+                        peerId = currentPeerId(),
+                        error = "malformed authenticated app-control payload"
+                    )
+                )
+                break
+            }
+            val msg = when (decoded) {
+                is AppMessageCodec.DecodeResult.Known -> decoded.message
+                is AppMessageCodec.DecodeResult.UnknownType -> {
+                    _events.tryEmit(
+                        TcpControlEvent.Failed(
+                            peerId = currentPeerId(),
+                            error = "unsupported authenticated app-control message: ${decoded.type}"
+                        )
+                    )
+                    break
+                }
+            }
             when (msg) {
                 is AppMessage.PairingIdentityExchange -> {
                     handlePairingIdentityExchange(msg.payload)
                 }
                 else -> {
-                    _events.tryEmit(TcpControlEvent.AppMessageReceived(peerId = peerIdHint, message = msg))
+                    _events.tryEmit(TcpControlEvent.AppMessageReceived(peerId = currentPeerId(), message = msg))
                 }
             }
         }
@@ -406,14 +466,22 @@ class TcpControlSession internal constructor(
     }
 
     private suspend fun performRekeyAsResponder(rawMessageA: ByteArray) {
-        val peerId = peerIdHint
+        val decodedMsgA = P2PHandshakeWire.decodeMessageA(rawMessageA)
+        val okSigA = P2PHandshakeWire.verifyMessageASignature(decodedMsgA, rawMessageAWithoutPadding = rawMessageA)
+        require(okSigA) { "MessageA signature invalid (rekey)" }
+        val resolvedPeer = resolveInboundPeerIdentity(decodedMsgA)
+        val peerId = resolvedPeer.peerId
+        val existingPeerId = requireNotNull(currentPeerId()) { "rekey requires an authenticated peer" }
+        require(peerId == existingPeerId) { "rekey peer identity mismatch" }
         val policyOverride = effectivePolicyOverride()
         val allowClassicBootstrap =
-            peerId != null && localIdentity.trustStore().isPeerPinned(peerId)
+            localIdentity.trustStore().isPeerPinned(peerId)
         val effectiveHandshakePolicy = policyOverride.forTrustedClassicBootstrap(
             enabled = allowClassicBootstrap
         )
-        val kem = localIdentity.getOrCreateKemIdentityKeys()
+        val kem = localIdentity.getOrCreateKemIdentityKeys(
+            allowQPeriapt = effectiveHandshakePolicy.minimumTierRaw == P2PQPeriaptKem.MINIMUM_TIER_RAW
+        )
         val signKeys = localIdentity.getOrCreateProtocolSigningKeys()
         val protocolSigningKeys = P2PProtocolSigningKeys(
             ed25519PrivateKey = signKeys.ed25519PrivateKey,
@@ -428,8 +496,12 @@ class TcpControlSession internal constructor(
             trustStore = localIdentity.trustStore(),
             allowTrustOnFirstUse = false,
             options = P2PHandshakeServer.RespondOptions(
-                platformVersion = android.os.Build.VERSION.RELEASE,
+                platformVersion = QPeriaptPlatformPolicy.androidHandshakePlatformVersion(
+                    release = android.os.Build.VERSION.RELEASE,
+                    sdkInt = android.os.Build.VERSION.SDK_INT
+                ),
                 kemPrivateKeys = P2PHandshakeServer.KemPrivateKeys(
+                    qPeriaptPrivateKey = kem.qPeriaptPrivateKey,
                     xWingPrivateKey = kem.xWingPrivateKey,
                     mlKem768PrivateKey = kem.mlKem768PrivateKey
                 ),
@@ -454,100 +526,110 @@ class TcpControlSession internal constructor(
             .selectedSuite
             .wireId
             .toInt()
-        onHandshakeEstablished(peerId = peerId, suiteWireId = suite, keys = resp.state.sessionKeys)
+        onHandshakeEstablished(
+            peerId = peerId,
+            suiteWireId = suite,
+            keys = resp.state.sessionKeys,
+            remoteProtocolIdentityFingerprint = resp.state.remoteProtocolIdentityFingerprint
+        )
     }
 
     private suspend fun handlePairingIdentityExchange(payload: AppMessage.PairingIdentityExchangePayload) {
-        val peerId = payload.deviceId.ifBlank { peerIdHint } ?: return
+        val attempt = authenticatedPairingAttemptGate.snapshot()
+            ?: throw IllegalStateException("authenticated product-session KEM authority is unavailable")
+        val observedProtocolFingerprint = attempt.observedProtocolFingerprint
+        val activePeerId = currentPeerId()
+        val peerId = payload.deviceId.ifBlank { activePeerId } ?: return
         val aliasIds = buildSet {
             add(peerId)
+            activePeerId?.let { add(it) }
             peerIdHint?.let { add(it) }
         }
         val trustedPeerStore = localIdentity.trustedPeerStore()
-        val existingRecord = aliasIds
-            .asSequence()
-            .mapNotNull { trustedPeerStore.findByKnownDeviceId(it) }
-            .firstOrNull()
-        val fingerprint = existingRecord?.protocolPublicKeyFingerprint
-            ?: aliasIds
-                .asSequence()
-                .mapNotNull { aliasId -> localIdentity.trustStore().loadPeerSigningFingerprint(aliasId) }
-                .firstOrNull()
-        val conflict = fingerprint?.let {
-            trustedPeerStore.evaluateCurrentPathBinding(
-                deviceId = peerId,
-                protocolPublicKeyFingerprint = it
+        val storeConflict = trustedPeerStore.corruptionConflictOrNull()
+        val exactExistingAuthority = if (storeConflict == null) {
+            trustedPeerStore.findExactVerifiedAuthorityReadOnly(
+                deviceIds = aliasIds,
+                protocolPublicKeyFingerprint = observedProtocolFingerprint
             )
+        } else {
+            null
         }
-        val alreadyTrusted = existingRecord != null ||
-            aliasIds.any { aliasId -> localIdentity.trustStore().isPeerPinned(aliasId) }
+        val conflict = storeConflict ?: aliasIds.asSequence()
+            .mapNotNull { deviceId ->
+                trustedPeerStore.evaluateCurrentPathBinding(
+                    deviceId = deviceId,
+                    protocolPublicKeyFingerprint = observedProtocolFingerprint
+                )
+            }
+            .firstOrNull()
         val request = PairingTrustRequest(
-            peerId = peerIdHint ?: peerId,
+            peerId = activePeerId ?: peerId,
             declaredDeviceId = peerId,
             deviceName = payload.deviceName,
             platform = payload.platform,
             modelName = payload.modelName,
             osVersion = payload.osVersion,
             chip = payload.chip,
-            protocolPublicKeyFingerprint = fingerprint,
+            protocolPublicKeyFingerprint = observedProtocolFingerprint,
             conflict = conflict
         )
+        // R7.5：已配对设备是否免交互批准由 `auto_trust_known_devices` 决定（PairingApprovalPolicy），
+        // 关闭时即使已有 exact product authority 也进入等待用户显式批准态。
         val decision = when {
             conflict != null -> {
-                PairingTrustManager.requestDecision(request)
-                PairingTrustDecision.DECLINE
+                val explicitDecision = PairingTrustManager.requestDecision(request)
+                if (conflict == PairingTrustConflict.DEVICE_ID_MIGRATION_REQUIRED) {
+                    explicitDecision
+                } else {
+                    PairingTrustDecision.DECLINE
+                }
             }
-            alreadyTrusted -> PairingTrustDecision.TRUST_ALWAYS
-            else -> PairingTrustManager.requestDecision(request)
-        }
-        if (decision == PairingTrustDecision.DECLINE) return
-
-        peerKemStore.save(peerId, payload.kemPublicKeys)
-        peerIdHint
-            ?.takeIf { it != peerId }
-            ?.let { aliasId -> peerKemStore.save(aliasId, payload.kemPublicKeys) }
-        if (decision == PairingTrustDecision.TRUST_ALWAYS) {
-            persistTrustedAliasFromPairingExchange(
-                declaredDeviceId = peerId,
-                payload = payload
+            else -> PairingTrustManager.requestDecision(
+                request = request,
+                isKnownDevice = exactExistingAuthority != null
             )
         }
-        sendPairingIdentityExchangeIfNeeded(force = true)
-        _events.tryEmit(TcpControlEvent.AppMessageReceived(peerId = peerIdHint, message = AppMessage.PairingIdentityExchange(payload)))
-    }
-
-    private fun persistTrustedAliasFromPairingExchange(
-        declaredDeviceId: String,
-        payload: AppMessage.PairingIdentityExchangePayload
-    ) {
-        val aliasIds = buildSet {
-            add(declaredDeviceId)
-            peerIdHint?.let { add(it) }
+        if (decision == PairingTrustDecision.DECLINE) return
+        val persistenceResult = authenticatedPairingAttemptGate.runIfCurrent(attempt) {
+            if (!running.get()) return@runIfCurrent AuthenticatedPairingPersistenceResult.SESSION_ONLY
+            AuthenticatedPairingPersistence(
+                trustedPeerStore = trustedPeerStore,
+                peerKemStore = peerKemStore
+            ).persistApprovedAttempt(
+                decision = decision,
+                declaredDeviceId = peerId,
+                aliasIds = aliasIds,
+                observedProtocolFingerprint = observedProtocolFingerprint,
+                deviceName = payload.deviceName?.trim()?.takeIf { it.isNotEmpty() },
+                protocolSigningAlgorithm = exactExistingAuthority?.protocolSigningAlgorithm,
+                kemPublicKeys = payload.kemPublicKeys,
+                platform = payload.platform,
+                osVersion = payload.osVersion
+            )
         }
-        val trustedPeerStore = localIdentity.trustedPeerStore()
-        val existingRecord = aliasIds
-            .asSequence()
-            .mapNotNull { trustedPeerStore.findByKnownDeviceId(it) }
-            .firstOrNull()
-        val fingerprint = existingRecord?.protocolPublicKeyFingerprint
-            ?: aliasIds
-                .asSequence()
-                .mapNotNull { aliasId -> localIdentity.trustStore().loadPeerSigningFingerprint(aliasId) }
-                .firstOrNull()
-            ?: return
-        trustedPeerStore.upsertCurrentPathAuthority(
-            deviceId = declaredDeviceId,
-            name = payload.deviceName?.trim()?.takeIf { it.isNotEmpty() } ?: existingRecord?.name,
-            protocolSigningAlgorithm = existingRecord?.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint = fingerprint,
-            aliasIds = aliasIds
-        )
+        if (persistenceResult == null) {
+            _events.tryEmit(
+                TcpControlEvent.Failed(
+                    peerId = currentPeerId(),
+                    error = "authenticated pairing attempt was replaced before approval"
+                )
+            )
+            return
+        }
+        if (!running.get()) return
+        sendPairingIdentityExchangeIfNeeded(force = true)
+        _events.tryEmit(TcpControlEvent.AppMessageReceived(peerId = currentPeerId(), message = AppMessage.PairingIdentityExchange(payload)))
     }
 
     private suspend fun sendPairingIdentityExchangeIfNeeded(force: Boolean) {
         if (!force && pairingExchangeSent.get()) return
         val now = SwiftDateSeconds.now()
-        val payload = localIdentity.buildPairingIdentityExchange(nowSwiftSeconds = now)
+        val policy = effectivePolicyOverride()
+        val payload = localIdentity.buildPairingIdentityExchange(
+            nowSwiftSeconds = now,
+            allowQPeriapt = policy.minimumTierRaw == P2PQPeriaptKem.MINIMUM_TIER_RAW
+        )
         sendAppMessage(AppMessage.PairingIdentityExchange(payload))
         pairingExchangeSent.set(true)
     }
@@ -568,6 +650,14 @@ class TcpControlSession internal constructor(
     private fun effectivePolicyOverride(): P2PHandshakePolicyOverride {
         return handshakePolicyOverride ?: localIdentity.defaultHandshakePolicyOverride()
     }
+
+    private fun currentPeerId(): String? = authenticatedPeerId ?: peerIdHint
+
+    private fun resolveInboundPeerIdentity(messageA: P2PHandshakeWire.MessageA): InboundTcpPeerIdentity =
+        InboundTcpPeerIdentityResolver(
+            trustedPeerStore = localIdentity.trustedPeerStore(),
+            localDeviceId = localIdentity.deviceId()
+        ).resolve(messageA)
 
     companion object {
         private val UUID_REGEX =

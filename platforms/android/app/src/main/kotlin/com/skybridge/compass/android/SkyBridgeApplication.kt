@@ -2,13 +2,18 @@ package com.skybridge.compass.android
 
 import android.app.Application
 import android.util.Log
+import com.skybridge.compass.android.data.cloud.CloudUserSettingsSyncManager
+import com.skybridge.compass.android.discovery.AndroidLocalNodeBootstrap
 import com.skybridge.compass.android.monitoring.AnrWatchdog
 import com.skybridge.compass.android.monitoring.CrashReporter
 import com.skybridge.compass.android.monitoring.FrameMetricsSampler
 import com.skybridge.compass.android.monitoring.PerformanceSampler
 import com.skybridge.compass.android.securityprompts.AndroidPairingTrustApprovalProvider
+import com.skybridge.compass.android.weather.WeatherAutoRefreshScheduler
+import com.skybridge.compass.core.data.RuntimePairingApprovalParametersSource
 import com.skybridge.compass.core.p2p.PairingTrustManager
 import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
 
 /**
  * SkyBridge Compass Android Application
@@ -17,6 +22,11 @@ import dagger.hilt.android.HiltAndroidApp
  */
 @HiltAndroidApp
 class SkyBridgeApplication : Application() {
+
+    @Inject lateinit var cloudSettingsSyncManager: CloudUserSettingsSyncManager
+    @Inject lateinit var androidLocalNodeBootstrap: AndroidLocalNodeBootstrap
+    @Inject lateinit var pairingApprovalParametersSource: RuntimePairingApprovalParametersSource
+    @Inject lateinit var weatherAutoRefreshScheduler: WeatherAutoRefreshScheduler
 
     private var anrWatchdog: AnrWatchdog? = null
     private var performanceSampler: PerformanceSampler? = null
@@ -31,9 +41,22 @@ class SkyBridgeApplication : Application() {
         // 初始化系统通知桥接（保证通知渠道创建与桥接注册）
         try {
             com.skybridge.compass.android.notifications.SystemNotifier.init(this)
-        } catch (_: Throwable) {}
+        } catch (t: Throwable) {
+            Log.w("SkyBridgeApp", "Failed to initialize system notifier", t)
+        }
         PairingTrustManager.approvalProvider = AndroidPairingTrustApprovalProvider(applicationContext)
+        // R7.5：把 `auto_trust_known_devices` 的读取面交给配对判定，使开关真正改变运行时行为。
+        PairingTrustManager.approvalParametersSource = pairingApprovalParametersSource
+        cloudSettingsSyncManager.start()
+        weatherAutoRefreshScheduler.start()
+        startLocalNodeDiscovery()
     }
+
+    /** Starts Bonjour presence only when the platform local-network gate is satisfied. */
+    fun startLocalNodeDiscovery(): Boolean = androidLocalNodeBootstrap.start()
+
+    /** Stops Bonjour publication and inbound LAN sessions after local-network access is revoked. */
+    fun stopLocalNodeDiscovery() = androidLocalNodeBootstrap.stop()
     
     private fun initializeApp() {
         // Crash/ANR 追踪 + 性能采样
@@ -48,10 +71,16 @@ class SkyBridgeApplication : Application() {
 
     override fun onTerminate() {
         super.onTerminate()
-        try {
-            anrWatchdog?.stopWatchdog()
-            performanceSampler?.stop()
-            frameMetricsSampler?.uninstall()
-        } catch (_: Throwable) {}
+        stopApplicationService("anrWatchdog") { anrWatchdog?.stopWatchdog() }
+        stopApplicationService("performanceSampler") { performanceSampler?.stop() }
+        stopApplicationService("frameMetricsSampler") { frameMetricsSampler?.uninstall() }
+        stopApplicationService("cloudSettingsSync") { cloudSettingsSyncManager.stop() }
+        stopApplicationService("androidLocalNode") { androidLocalNodeBootstrap.close() }
+    }
+
+    private fun stopApplicationService(name: String, stop: () -> Unit) {
+        runCatching(stop).onFailure { error ->
+            Log.w("SkyBridgeApp", "Failed to stop $name", error)
+        }
     }
 }

@@ -33,6 +33,7 @@ data class TransferCheckpoint(
 
     val ackedChunks: IntArray = intArrayOf(),
     val receivedChunks: IntArray = intArrayOf(),
+    val receivedChunkSha256HexByIndex: Map<Int, String> = emptyMap(),
 
     val completeReceived: Boolean = false,
     val lastStatus: String? = null,
@@ -80,5 +81,4 @@ data class TransferCheckpoint(
         )
     }
 }
-
 

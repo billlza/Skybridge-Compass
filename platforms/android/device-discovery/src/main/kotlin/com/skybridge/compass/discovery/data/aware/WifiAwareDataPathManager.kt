@@ -6,7 +6,6 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.aware.WifiAwareNetworkSpecifier
-import android.os.Build
 import kotlinx.coroutines.CompletableDeferred
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -24,13 +23,8 @@ class WifiAwareDataPathManager @Inject constructor(
      */
     suspend fun initiateDataPath(deviceId: String): Boolean {
         val ref = peerRegistry.get(deviceId) ?: return false
-        val networkSpecifier = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            WifiAwareNetworkSpecifier.Builder(ref.session, ref.peer)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            ref.session.createNetworkSpecifierOpen(ref.peer)
-        }
+        val networkSpecifier = WifiAwareNetworkSpecifier.Builder(ref.session, ref.peer)
+            .build()
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI_AWARE)
             .setNetworkSpecifier(networkSpecifier)

@@ -1,11 +1,15 @@
 package com.skybridge.compass.auth
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.jan.supabase.auth.status.SessionStatus
+import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -16,7 +20,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import javax.inject.Inject
 import com.skybridge.compass.shared.notifications.NotificationCenter
@@ -28,9 +32,18 @@ import com.skybridge.compass.supabase.SupabaseConfigException
 import com.skybridge.compass.supabase.SupabaseConfigLockedException
 import com.skybridge.compass.supabase.SupabaseConfigMissingException
 import com.skybridge.compass.supabase.SupabaseConfigValidationResult
+import com.skybridge.compass.android.data.SupabaseSessionAuthorityMismatchException
+import com.skybridge.compass.android.data.SupabaseSessionStoreCorruptionException
 import com.skybridge.compass.android.i18n.resolveLocalizedText
 
 enum class LoginMethod { EmailPassword, PhoneOtp, NebulaIdToken }
+
+enum class ProfileSyncStatus {
+    Idle,
+    Syncing,
+    Synced,
+    Failed
+}
 
 data class AuthUiState(
     val isAuthenticated: Boolean = false,
@@ -39,17 +52,27 @@ data class AuthUiState(
     val errorMessage: String? = null,
     val infoMessage: String? = null,
     val otpSent: Boolean = false,
-    val method: LoginMethod = LoginMethod.EmailPassword
+    val method: LoginMethod = LoginMethod.EmailPassword,
+    val profileSyncStatus: ProfileSyncStatus = ProfileSyncStatus.Idle,
+    val profileSyncMessage: String? = null
 )
 
 @OptIn(FlowPreview::class)
 @HiltViewModel
 class AuthViewModel @Inject constructor(
-    private val repository: AuthRepository
+    private val repository: AuthRepository,
+    httpClient: HttpClient,
+    json: Json
 ) : ViewModel() {
 
     private fun t(zh: String, en: String, ja: String): String =
         resolveLocalizedText(zh, en, ja)
+
+    /** Nebula OAuth 2.1 + PKCE launcher (mirrors iOS NebulaPublicClientOAuth). */
+    private val nebulaOAuth = NebulaPublicClientOAuth(httpClient, json)
+
+    /** Mirrors iOS `SkyBridgeServerConfig.hasNebulaConfiguration` for UI gating. */
+    val isNebulaConfigured: Boolean get() = NebulaOAuthConfig.isConfigured
 
     private val _uiState = MutableStateFlow(AuthUiState())
     val uiState: StateFlow<AuthUiState> = _uiState
@@ -72,15 +95,60 @@ class AuthViewModel @Inject constructor(
                         )
                     }
                     if (authed) {
+                        AccountStore.clearPrimaryAccount()
                         try {
-                            repository.getCurrentUserProfile()?.let { AccountStore.setPrimaryAccount(it) }
-                        } catch (_: Throwable) {
-                            /* ignore */
+                            val profile = repository.refreshCurrentAccountProfile()
+                            if (profile != null) {
+                                markProfileSyncSuccess()
+                            } else {
+                                recordProfileSyncFailure(
+                                    SupabaseProfileException(
+                                        kind = SupabaseProfileException.Kind.Unauthenticated,
+                                        message = t(
+                                            "当前会话没有可用的 Supabase access token。",
+                                            "The current session has no usable Supabase access token.",
+                                            "現在のセッションには使用可能な Supabase access token がありません。"
+                                        )
+                                    )
+                                )
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            recordProfileSyncFailure(e)
                         }
                     } else if (!guest) {
-                        try { AccountStore.clearPrimaryAccount() } catch (_: Throwable) {}
+                        AccountStore.clearPrimaryAccount()
+                        _uiState.update {
+                            it.copy(
+                                profileSyncStatus = ProfileSyncStatus.Idle,
+                                profileSyncMessage = null
+                            )
+                        }
                     }
                 }
+        }
+        viewModelScope.launch {
+            repository.credentialStateFailure.collect { failure ->
+                failure ?: return@collect
+                _uiState.update {
+                    it.copy(
+                        errorMessage = when (failure) {
+                            is AuthCredentialStateFailure.SessionPersistenceFailed -> t(
+                                "安全会话存储失败，当前登录已终止；请修复设备安全存储后重新登录。",
+                                "Secure session storage failed, so the current sign-in was ended. Repair device secure storage and sign in again.",
+                                "安全なセッション保存に失敗したため、現在のログインを終了しました。端末の安全なストレージを修復して再度ログインしてください。"
+                            )
+                            is AuthCredentialStateFailure.SessionCleanupFailed -> t(
+                                "无法确认已清除本机登录凭据；请勿将此设备视为已安全退出。",
+                                "Local sign-in credentials could not be confirmed as cleared. Do not treat this device as safely signed out.",
+                                "端末上のログイン資格情報が消去されたことを確認できません。この端末を安全にログアウト済みとは見なさないでください。"
+                            )
+                        },
+                        infoMessage = null
+                    )
+                }
+            }
         }
     }
 
@@ -93,8 +161,14 @@ class AuthViewModel @Inject constructor(
      */
     fun tryRestoreSession(forceRefresh: Boolean = true) {
         viewModelScope.launch {
-            runCatching {
+            try {
                 repository.loadSessionFromStorage(forceRefresh = forceRefresh)
+                warmUpProfileAsync()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                AccountStore.clearPrimaryAccount()
+                _uiState.update { it.copy(errorMessage = humanReadableError(error), infoMessage = null) }
             }
         }
     }
@@ -136,7 +210,6 @@ class AuthViewModel @Inject constructor(
                     _uiState.update {
                         it.copy(
                             loading = false,
-                            isAuthenticated = true,
                             isGuestMode = false,
                             errorMessage = null,
                             infoMessage = null
@@ -144,7 +217,9 @@ class AuthViewModel @Inject constructor(
                     }
                     lastError = null
                     break
-                } catch (e: Throwable) {
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
                     lastError = e
                     if (isTransientNetworkError(e) && attempt < maxAttempts - 1) {
                         // 指数退避：1s, 2s
@@ -158,7 +233,6 @@ class AuthViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     loading = false,
-                    isAuthenticated = it.isAuthenticated || lastError == null,
                     infoMessage = null,
                     errorMessage = lastError?.let { err -> humanReadableError(err) }
                 )
@@ -173,6 +247,7 @@ class AuthViewModel @Inject constructor(
             try {
                 when (repository.signUp(email, password)) {
                     SignUpOutcome.Authenticated -> {
+                        warmUpProfileAsync()
                         NotificationCenter.post(
                             NotificationEvent(
                                 title = t("欢迎登录", "Welcome Back", "ログインへようこそ"),
@@ -211,7 +286,9 @@ class AuthViewModel @Inject constructor(
                         }
                     }
                 }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e), infoMessage = null) }
             }
         }
@@ -241,7 +318,9 @@ class AuthViewModel @Inject constructor(
                         }
                     )
                 }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e)) }
             }
         }
@@ -269,14 +348,15 @@ class AuthViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         loading = false,
-                        isAuthenticated = true,
                         isGuestMode = false,
                         errorMessage = null,
                         infoMessage = null,
                         otpSent = false
                     )
                 }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e)) }
             }
         }
@@ -304,13 +384,73 @@ class AuthViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         loading = false,
-                        isAuthenticated = true,
                         isGuestMode = false,
                         errorMessage = null
                     )
                 }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e)) }
+            }
+        }
+    }
+
+    /**
+     * Full Nebula sign-in / sign-up via the system browser (OAuth 2.1 + PKCE), mirroring
+     * iOS `signInWithNebulaBrowser` / `registerWithNebulaBrowser`:
+     *  1. Launch Chrome Custom Tabs to the Nebula authorize URL (PKCE S256).
+     *  2. Capture the `skybridge://auth/nebula` redirect, exchange the code for an OIDC id_token.
+     *  3. Hand the id_token to Supabase (`grant_type=id_token`, provider=nebula) to establish the session.
+     *
+     * The whole OAuth dance is driven from here (ViewModel) — never inline in the Composable.
+     */
+    fun loginNebulaOAuth(context: Context, register: Boolean = false) {
+        if (!NebulaOAuthConfig.isConfigured) {
+            _uiState.update {
+                it.copy(
+                    loading = false,
+                    errorMessage = t(
+                        "Nebula 未配置：请先提供 NEBULA_BASE_URL 与 NEBULA_CLIENT_ID。",
+                        "Nebula is not configured. Provide NEBULA_BASE_URL and NEBULA_CLIENT_ID first.",
+                        "Nebula が未設定です。先に NEBULA_BASE_URL と NEBULA_CLIENT_ID を設定してください。"
+                    ),
+                    infoMessage = null
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            guestMode.value = false
+            _uiState.update { it.copy(loading = true, errorMessage = null, infoMessage = null) }
+            try {
+                val tokens = nebulaOAuth.authenticate(context, register)
+                // Reuse the existing token-consumer; provider stays "nebula" for Supabase id_token grant.
+                repository.loginWithNebulaIdToken(tokens.idToken, providerName = "nebula")
+                warmUpProfileAsync()
+                NotificationCenter.post(
+                    NotificationEvent(
+                        title = t("欢迎登录", "Welcome Back", "ログインへようこそ"),
+                        message = t(
+                            "Nebula 身份登录成功",
+                            "Nebula identity sign-in succeeded.",
+                            "Nebula ID でのログインに成功しました。"
+                        ),
+                        module = NotificationModule.AUTH,
+                        severity = NotificationSeverity.SUCCESS
+                    )
+                )
+                _uiState.update {
+                    it.copy(
+                        loading = false,
+                        isGuestMode = false,
+                        errorMessage = null
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e), infoMessage = null) }
             }
         }
     }
@@ -337,12 +477,13 @@ class AuthViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         loading = false,
-                        isAuthenticated = true,
                         isGuestMode = false,
                         errorMessage = null
                     )
                 }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e), infoMessage = null) }
             }
         }
@@ -367,7 +508,9 @@ class AuthViewModel @Inject constructor(
                         "已进入游客模式（云同步与账号功能已禁用）。",
                         "Guest mode is active. Cloud sync and account features are disabled.",
                         "ゲストモードに入りました。クラウド同期とアカウント機能は無効です。"
-                    )
+                    ),
+                    profileSyncStatus = ProfileSyncStatus.Idle,
+                    profileSyncMessage = null
                 )
             }
         }
@@ -377,25 +520,71 @@ class AuthViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 guestMode.value = false
-                repository.logout()
+                val outcome = repository.logout()
                 // 立即反映登出，避免因 debounce 延迟导致体验不一致
-                _uiState.update { it.copy(isAuthenticated = false, isGuestMode = false, infoMessage = null) }
+                val remoteWarning = when (outcome) {
+                    is SignOutOutcome.LocalOnlyAfterRemoteFailure -> t(
+                        "已在此设备安全退出；服务端会话撤销失败（${outcome.reason}），其访问令牌将在过期后失效。",
+                        "Signed out safely on this device. Server-side revocation failed (${outcome.reason}); its access token remains valid until expiry.",
+                        "この端末では安全にログアウトしました。サーバー側の失効に失敗しました（${outcome.reason}）。アクセストークンは有効期限まで有効です。"
+                    )
+                    is SignOutOutcome.LocalOnlyAfterClientCleanupFailure -> t(
+                        "本机持久化登录已清除，但认证客户端清理失败（${outcome.reason}）；请完全关闭应用后再继续。",
+                        "Persisted sign-in was cleared, but the auth client could not be cleaned up (${outcome.reason}). Fully close the app before continuing.",
+                        "保存されたログイン情報は消去されましたが、認証クライアントのクリーンアップに失敗しました（${outcome.reason}）。続行する前にアプリを完全に終了してください。"
+                    )
+                    is SignOutOutcome.LocalOnlyAfterRemoteAndClientCleanupFailure -> t(
+                        "本机持久化登录已清除，但服务端撤销失败（${outcome.remoteReason}），且认证客户端清理失败（${outcome.clientCleanupReason}）；请完全关闭应用，远端访问令牌仍可能有效至过期。",
+                        "Persisted sign-in was cleared, but server revocation failed (${outcome.remoteReason}) and auth-client cleanup failed (${outcome.clientCleanupReason}). Fully close the app; the remote access token may remain valid until expiry.",
+                        "保存されたログイン情報は消去されましたが、サーバー側の失効（${outcome.remoteReason}）と認証クライアントのクリーンアップ（${outcome.clientCleanupReason}）の両方に失敗しました。アプリを完全に終了してください。リモートのアクセストークンは有効期限まで有効な可能性があります。"
+                    )
+                    SignOutOutcome.LocalOnly,
+                    SignOutOutcome.RevokedRemotely -> null
+                }
+                _uiState.update {
+                    it.copy(
+                        isAuthenticated = false,
+                        isGuestMode = false,
+                        errorMessage = null,
+                        infoMessage = remoteWarning
+                    )
+                }
+                _uiState.update {
+                    it.copy(
+                        profileSyncStatus = ProfileSyncStatus.Idle,
+                        profileSyncMessage = null
+                    )
+                }
                 // 清空主账号
                 AccountStore.clearPrimaryAccount()
-            NotificationCenter.post(
-                NotificationEvent(
-                    title = t("已登出", "Signed Out", "ログアウト済み"),
-                    message = t(
-                        "您已退出 SkyBridge Compass",
-                        "You have signed out of SkyBridge Compass.",
-                        "SkyBridge Compass からログアウトしました。"
-                    ),
-                    module = NotificationModule.AUTH,
-                    severity = NotificationSeverity.INFO
+                NotificationCenter.post(
+                    NotificationEvent(
+                        title = t("已登出", "Signed Out", "ログアウト済み"),
+                        message = remoteWarning ?: t(
+                            "您已退出 SkyBridge Compass",
+                            "You have signed out of SkyBridge Compass.",
+                            "SkyBridge Compass からログアウトしました。"
+                        ),
+                        module = NotificationModule.AUTH,
+                        severity = if (remoteWarning == null) {
+                            NotificationSeverity.INFO
+                        } else {
+                            NotificationSeverity.WARNING
+                        }
+                    )
                 )
-            )
-            } catch (_: Throwable) {
-                // 忽略登出异常，保持幂等
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e), infoMessage = null) }
+                NotificationCenter.post(
+                    NotificationEvent(
+                        title = t("登出失败", "Sign Out Failed", "ログアウト失敗"),
+                        message = humanReadableError(e),
+                        module = NotificationModule.AUTH,
+                        severity = NotificationSeverity.ERROR
+                    )
+                )
             }
         }
     }
@@ -416,7 +605,9 @@ class AuthViewModel @Inject constructor(
                         )
                     )
                 }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, errorMessage = humanReadableError(e)) }
             }
         }
@@ -426,6 +617,10 @@ class AuthViewModel @Inject constructor(
         return repository.validateSupabaseConfiguration()
     }
 
+    fun refreshProfile() {
+        warmUpProfileAsync()
+    }
+
     private fun isTransientNetworkError(e: Throwable): Boolean =
         e is HttpRequestTimeoutException ||
         e is TimeoutCancellationException ||
@@ -433,13 +628,113 @@ class AuthViewModel @Inject constructor(
 
     private fun warmUpProfileAsync() {
         viewModelScope.launch {
-            val profile = withTimeoutOrNull(8_000L) { repository.getCurrentUserProfile() }
-            profile?.let { AccountStore.setPrimaryAccount(it) }
+            if (!guestMode.value) {
+                AccountStore.clearPrimaryAccount()
+            }
+            _uiState.update {
+                val previousProfileMessage = it.profileSyncMessage
+                it.copy(
+                    profileSyncStatus = ProfileSyncStatus.Syncing,
+                    profileSyncMessage = null,
+                    infoMessage = if (previousProfileMessage != null && it.infoMessage == previousProfileMessage) {
+                        null
+                    } else {
+                        it.infoMessage
+                    }
+                )
+            }
+            try {
+                val profile = withTimeout(8_000L) { repository.refreshCurrentAccountProfile() }
+                if (profile != null) {
+                    markProfileSyncSuccess()
+                } else {
+                    recordProfileSyncFailure(
+                        SupabaseProfileException(
+                            kind = SupabaseProfileException.Kind.Unauthenticated,
+                            message = t(
+                                "当前会话没有可用的 Supabase access token。",
+                                "The current session has no usable Supabase access token.",
+                                "現在のセッションには使用可能な Supabase access token がありません。"
+                            )
+                        )
+                    )
+                }
+            } catch (e: TimeoutCancellationException) {
+                recordProfileSyncFailure(e)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                recordProfileSyncFailure(e)
+            }
         }
+    }
+
+    private fun markProfileSyncSuccess() {
+        _uiState.update {
+            val previousProfileMessage = it.profileSyncMessage
+            it.copy(
+                profileSyncStatus = ProfileSyncStatus.Synced,
+                profileSyncMessage = null,
+                infoMessage = if (previousProfileMessage != null && it.infoMessage == previousProfileMessage) {
+                    null
+                } else {
+                    it.infoMessage
+                }
+            )
+        }
+    }
+
+    private fun recordProfileSyncFailure(error: Throwable) {
+        if (!guestMode.value) {
+            AccountStore.clearPrimaryAccount()
+        }
+        val detail = humanReadableError(error)
+        val message = t(
+            "登录成功，但云端资料同步失败：$detail",
+            "Signed in, but cloud profile sync failed: $detail",
+            "ログインしましたが、クラウドプロフィール同期に失敗しました: $detail"
+        )
+        _uiState.update { state ->
+            val updated = state.copy(
+                profileSyncStatus = ProfileSyncStatus.Failed,
+                profileSyncMessage = message
+            )
+            if (updated.errorMessage != null) updated else updated.copy(infoMessage = message)
+        }
+        NotificationCenter.post(
+            NotificationEvent(
+                title = t("资料同步失败", "Profile Sync Failed", "プロフィール同期失敗"),
+                message = message,
+                module = NotificationModule.AUTH,
+                severity = NotificationSeverity.WARNING
+            )
+        )
     }
 
     private fun humanReadableError(e: Throwable): String {
         return when (e) {
+            is SupabaseProfileException -> when (e.kind) {
+                SupabaseProfileException.Kind.Unauthenticated -> t(
+                    "未找到有效登录会话，请重新登录。",
+                    "No valid sign-in session was found. Sign in again.",
+                    "有効なログインセッションが見つかりません。再度ログインしてください。"
+                )
+                SupabaseProfileException.Kind.HttpStatus -> e.message ?: t(
+                    "云端资料请求失败。",
+                    "Cloud profile request failed.",
+                    "クラウドプロフィールリクエストに失敗しました。"
+                )
+                SupabaseProfileException.Kind.InvalidResponse -> e.message ?: t(
+                    "云端资料返回格式无效。",
+                    "Cloud profile returned an invalid response.",
+                    "クラウドプロフィールの応答形式が無効です。"
+                )
+                SupabaseProfileException.Kind.SessionUserMismatch -> t(
+                    "当前会话与云端用户不一致，请重新登录。",
+                    "The local session does not match the cloud user. Sign in again.",
+                    "ローカルセッションとクラウドユーザーが一致しません。再度ログインしてください。"
+                )
+            }
             is SupabaseConfigMissingException -> t(
                 "未配置 Supabase，请在设置中配置后再试。",
                 "Supabase is not configured. Configure it in Settings and try again.",
@@ -454,6 +749,37 @@ class AuthViewModel @Inject constructor(
                 "Supabase 配置异常",
                 "Supabase configuration error.",
                 "Supabase 設定エラーです。"
+            )
+            is SupabaseSessionAuthorityMismatchException -> if (e.suppressed.isNotEmpty()) {
+                t(
+                    "保存的登录会话属于旧版或另一个 Supabase 项目，但无法确认已从本机清除；请先修复设备安全存储。",
+                    "The saved session belongs to a legacy or different Supabase project, but could not be confirmed as cleared. Repair device secure storage first.",
+                    "保存されたセッションは旧形式または別の Supabase プロジェクトに属し、端末から消去されたことを確認できません。先に端末の安全なストレージを修復してください。"
+                )
+            } else {
+                t(
+                    "保存的登录会话属于旧版或另一个 Supabase 项目，请重新登录。",
+                    "The saved session belongs to a legacy or different Supabase project. Sign in again.",
+                    "保存されたセッションは旧形式または別の Supabase プロジェクトのものです。再度ログインしてください。"
+                )
+            }
+            is SupabaseSessionStoreCorruptionException -> if (e.suppressed.isNotEmpty()) {
+                t(
+                    "保存的登录会话已损坏，但无法确认已从本机清除；请先修复设备安全存储。",
+                    "The saved sign-in session is corrupted, but could not be confirmed as cleared. Repair device secure storage first.",
+                    "保存されたログインセッションは破損しており、端末から消去されたことを確認できません。先に端末の安全なストレージを修復してください。"
+                )
+            } else {
+                t(
+                    "保存的登录会话已损坏并被清除，请重新登录。",
+                    "The saved sign-in session was corrupted and has been cleared. Sign in again.",
+                    "保存されたログインセッションが破損していたため消去しました。再度ログインしてください。"
+                )
+            }
+            is NebulaIdentityException -> t(
+                "账号身份生成失败，请稍后重试。",
+                "Account identity generation failed. Please try again later.",
+                "アカウント ID の生成に失敗しました。しばらくしてからもう一度お試しください。"
             )
             is HttpRequestTimeoutException, is TimeoutCancellationException -> t(
                 "网络请求超时，请检查网络或稍后重试。",

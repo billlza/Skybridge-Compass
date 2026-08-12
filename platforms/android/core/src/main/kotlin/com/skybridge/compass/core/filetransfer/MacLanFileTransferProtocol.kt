@@ -1,5 +1,6 @@
 package com.skybridge.compass.core.filetransfer
 
+import com.skybridge.compass.shared.p2p.filetransfer.Base64ByteArraySerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.InputStream
@@ -9,7 +10,7 @@ import java.nio.ByteOrder
 
 /**
  * Pro-release compatible LAN file transfer protocol used by macOS/iOS FileTransferManager:
- * - Service: _skybridge-transfer._tcp (default port 8080)
+ * - Service: _skybridge-xfer._tcp (default port 8080)
  * - Frame: 8B header (u32 type BE + u32 len BE) + JSON payload (Swift JSONEncoder/Codable)
  * - MessageType: metadata=1, chunk=2, complete=3, receipt=4
  *
@@ -41,6 +42,7 @@ object MacLanFileTransferProtocol {
     @Serializable
     data class FileChunk(
         val index: Int,
+        @Serializable(with = Base64ByteArraySerializer::class)
         val data: ByteArray,
         val size: Int
     )
@@ -97,4 +99,3 @@ object MacLanFileTransferProtocol {
         output.flush()
     }
 }
-

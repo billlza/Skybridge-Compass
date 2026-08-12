@@ -1,203 +1,204 @@
 package com.skybridge.compass.android
 
-import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.navigation.compose.rememberNavController
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
+import androidx.navigation.testing.TestNavHostController
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.skybridge.compass.android.ui.navigation.SkyBridgeNavigation
-import com.skybridge.compass.android.ui.theme.SkyBridgeCompassTheme
+import com.skybridge.compass.android.data.APP_LANGUAGE_EN
+import com.skybridge.compass.android.data.APP_LANGUAGE_SYSTEM
+import com.skybridge.compass.android.i18n.AppLanguageRuntime
+import com.skybridge.compass.android.ui.navigation.NavigationSemantics
+import com.skybridge.compass.android.ui.navigation.Screen
+import com.skybridge.compass.core.data.database.AppDatabase
+import dagger.hilt.android.testing.HiltAndroidRule
+import dagger.hilt.android.testing.HiltAndroidTest
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import javax.inject.Inject
 
-/**
- * 导航系统UI测试
- */
+@HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
 class NavigationTest {
-    
-    @get:Rule
-    val composeTestRule = createComposeRule()
-    
-    @Test
-    fun navigation_startsWithDashboardScreen() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
-        }
-        
-        // 验证应用启动时显示Dashboard屏幕
-        composeTestRule
-            .onNodeWithText("SkyBridge Compass")
-            .assertIsDisplayed()
+
+    @Inject lateinit var database: AppDatabase
+
+    @get:Rule(order = -1)
+    val databaseCleanupRule = TestDatabaseCleanupRule {
+        if (::database.isInitialized) database else null
     }
-    
-    @Test
-    fun navigation_navigatesToDeviceDiscovery() {
+
+    @get:Rule(order = 0)
+    val hiltRule = HiltAndroidRule(this)
+
+    @get:Rule(order = 1)
+    val composeTestRule = createAndroidComposeRule<HiltTestActivity>()
+
+    private lateinit var navController: TestNavHostController
+
+    @Before
+    fun setUp() {
+        hiltRule.inject()
+        AppLanguageRuntime.applySetting(APP_LANGUAGE_EN)
         composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
+            AppNavigationTestHarness { navController = it }
         }
-        
-        // 点击设备发现卡片
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .performClick()
-        
-        // 验证导航到设备发现屏幕
         composeTestRule.waitForIdle()
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .assertIsDisplayed()
     }
-    
+
+    @After
+    fun tearDown() {
+        AppLanguageRuntime.applySetting(APP_LANGUAGE_SYSTEM)
+    }
+
     @Test
-    fun navigation_navigatesToScreenMirroring() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
+    fun navigation_startsAtDashboardWithHomeSelected() {
+        assertCurrentDestination(Screen.Dashboard.route)
+        assertSelectedTab(Screen.Dashboard.route)
+
+        listOf(
+            Screen.DeviceDiscovery.route,
+            Screen.FileTransfer.route,
+            Screen.RemoteControl.route,
+            Screen.Settings.route
+        ).forEach { route ->
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(route))
+                .assertIsNotSelected()
         }
-        
-        // 点击屏幕镜像卡片
-        composeTestRule
-            .onNodeWithText("屏幕镜像")
-            .performClick()
-        
-        // 验证导航到屏幕镜像屏幕
+    }
+
+    @Test
+    fun navigation_exposesFiveCurrentTopLevelTabs() {
+        listOf(
+            Screen.Dashboard.route,
+            Screen.DeviceDiscovery.route,
+            Screen.FileTransfer.route,
+            Screen.RemoteControl.route,
+            Screen.Settings.route
+        ).forEach { route ->
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(route))
+                .assertIsDisplayed()
+                .assertHasClickAction()
+        }
+    }
+
+    @Test
+    fun navigation_devicesTabUpdatesDestinationAndSelection() {
+        selectTab(Screen.DeviceDiscovery.route, Screen.DeviceDiscovery.route)
+    }
+
+    @Test
+    fun navigation_filesTabUpdatesPatternDestinationAndSelection() {
+        selectTab(Screen.FileTransfer.route, Screen.FileTransfer.routePattern)
+    }
+
+    @Test
+    fun navigation_remoteTabUpdatesPatternDestinationAndSelection() {
+        selectTab(Screen.RemoteControl.route, Screen.RemoteControl.routePattern)
+    }
+
+    @Test
+    fun navigation_settingsTabUpdatesDestinationAndSelection() {
+        selectTab(Screen.Settings.route, Screen.Settings.route)
+    }
+
+    @Test
+    fun navigation_dashboardSendFileActionSelectsFilesRoute() {
+        selectDashboardAction(
+            NavigationSemantics.ACTION_SEND_FILE,
+            Screen.FileTransfer.route,
+            Screen.FileTransfer.routePattern
+        )
+        assertSelectedTab(Screen.FileTransfer.route)
+    }
+
+    @Test
+    fun navigation_dashboardRemoteDesktopActionSelectsRemoteRoute() {
+        selectDashboardAction(
+            NavigationSemantics.ACTION_REMOTE_DESKTOP,
+            Screen.RemoteControl.route,
+            Screen.RemoteControl.routePattern
+        )
+        assertSelectedTab(Screen.RemoteControl.route)
+    }
+
+    @Test
+    fun navigation_backReturnsToDashboardAndRestoresHomeSelection() {
+        selectTab(Screen.DeviceDiscovery.route, Screen.DeviceDiscovery.route)
+
+        composeTestRule.runOnIdle {
+            assertTrue(navController.popBackStack())
+        }
         composeTestRule.waitForIdle()
-        composeTestRule
-            .onNodeWithText("屏幕镜像")
-            .assertIsDisplayed()
+
+        assertCurrentDestination(Screen.Dashboard.route)
+        assertSelectedTab(Screen.Dashboard.route)
     }
-    
+
     @Test
-    fun navigation_navigatesToRemoteControl() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
+    fun navigation_invalidRouteFailsWithoutChangingDestination() {
+        composeTestRule.runOnIdle {
+            assertThrows(IllegalArgumentException::class.java) {
+                navController.navigate("route-that-is-not-in-the-graph")
             }
+            assertEquals(Screen.Dashboard.route, navController.currentDestination?.route)
         }
-        
-        // 点击远程控制卡片
+        assertSelectedTab(Screen.Dashboard.route)
+    }
+
+    private fun selectTab(tabRoute: String, destinationRoute: String) {
         composeTestRule
-            .onNodeWithText("远程控制")
+            .onNodeWithTag(NavigationSemantics.bottomTab(tabRoute))
             .performClick()
-        
-        // 验证导航到远程控制屏幕
         composeTestRule.waitForIdle()
-        composeTestRule
-            .onNodeWithText("远程控制")
-            .assertIsDisplayed()
+
+        assertCurrentDestination(destinationRoute)
+        assertSelectedTab(tabRoute)
     }
-    
-    @Test
-    fun navigation_navigatesToSettings() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
-        }
-        
-        // 点击设置卡片
+
+    private fun selectDashboardAction(
+        actionId: String,
+        actionRoute: String,
+        destinationRoute: String
+    ) {
+        val tag = NavigationSemantics.dashboardAction(actionId, actionRoute)
         composeTestRule
-            .onNodeWithText("设置")
+            .onNodeWithTag(NavigationSemantics.DASHBOARD_SCROLL)
+            .performScrollToNode(hasTestTag(tag))
+        composeTestRule
+            .onNodeWithTag(tag)
+            .performScrollTo()
+            .assertIsDisplayed()
             .performClick()
-        
-        // 验证导航到设置屏幕
         composeTestRule.waitForIdle()
-        composeTestRule
-            .onNodeWithText("设置")
-            .assertIsDisplayed()
+
+        assertCurrentDestination(destinationRoute)
     }
-    
-    @Test
-    fun navigation_backNavigationWorks() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
+
+    private fun assertCurrentDestination(expectedRoute: String) {
+        composeTestRule.runOnIdle {
+            assertEquals(expectedRoute, navController.currentDestination?.route)
         }
-        
-        // 导航到设备发现
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .performClick()
-        
-        composeTestRule.waitForIdle()
-        
-        // 模拟返回按钮（在实际测试中可能需要使用不同的方法）
-        // 这里我们验证能够返回到Dashboard
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .assertIsDisplayed()
     }
-    
-    @Test
-    fun navigation_multipleNavigationsWork() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
-        }
-        
-        // 导航到设备发现
+
+    private fun assertSelectedTab(route: String) {
         composeTestRule
-            .onNodeWithText("设备发现")
-            .performClick()
-        
-        composeTestRule.waitForIdle()
-        
-        // 验证在设备发现屏幕
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .assertIsDisplayed()
-    }
-    
-    @Test
-    fun navigation_handlesInvalidRoutes() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
-        }
-        
-        // 验证应用不会因为无效路由而崩溃
-        // 应该始终显示有效的屏幕
-        composeTestRule
-            .onNodeWithText("SkyBridge Compass")
-            .assertIsDisplayed()
-    }
-    
-    @Test
-    fun navigation_preservesStateAcrossNavigation() {
-        composeTestRule.setContent {
-            SkyBridgeCompassTheme {
-                val navController = rememberNavController()
-                SkyBridgeNavigation(navController = navController)
-            }
-        }
-        
-        // 验证导航后状态保持
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .performClick()
-        
-        composeTestRule.waitForIdle()
-        
-        // 验证屏幕正确显示
-        composeTestRule
-            .onNodeWithText("设备发现")
-            .assertIsDisplayed()
+            .onNodeWithTag(NavigationSemantics.bottomTab(route))
+            .assertIsSelected()
     }
 }

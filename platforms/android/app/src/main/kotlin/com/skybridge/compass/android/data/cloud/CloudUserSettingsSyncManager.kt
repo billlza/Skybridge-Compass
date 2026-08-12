@@ -10,6 +10,9 @@ import com.skybridge.compass.auth.AuthRepository
 import com.skybridge.compass.core.data.NetworkSettings
 import com.skybridge.compass.core.data.NetworkSettingsStore
 import com.skybridge.compass.core.webrtc.SkyBridgeServerConfig
+import com.skybridge.compass.supabase.SupabaseConfigException
+import com.skybridge.compass.supabase.SupabasePostgrestUrls
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jan.supabase.auth.status.SessionStatus
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -17,26 +20,39 @@ import io.ktor.client.request.get
 import io.ktor.client.request.headers
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
+import io.ktor.http.isSuccess
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.time.Instant
+import javax.inject.Inject
+import javax.inject.Singleton
 
 /**
  * Cloud sync for settings (local DataStore remains source-of-truth).
@@ -47,18 +63,62 @@ import java.time.Instant
  * Requires Supabase table + RLS:
  * - docs/supabase/user_settings.sql
  */
-class CloudUserSettingsSyncManager(
-    private val appContext: Context,
-    private val authRepository: AuthRepository,
-    private val httpClient: HttpClient,
-    private val json: Json
+@Singleton
+class CloudUserSettingsSyncManager internal constructor(
+    private val authState: CloudSettingsAuthState,
+    private val remoteStore: CloudSettingsRemoteStore,
+    private val localStore: CloudSettingsLocalStore,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 ) {
-    private val scope = CoroutineScope(Dispatchers.Default)
     private var job: Job? = null
+    private val _syncStatus = MutableStateFlow<SyncStatus>(SyncStatus.Idle)
+    val syncStatus: StateFlow<SyncStatus> = _syncStatus.asStateFlow()
+
+    sealed interface SyncStatus {
+        data object Idle : SyncStatus
+        data object Running : SyncStatus
+        data object Synced : SyncStatus
+        data class Failed(val stage: String, val message: String) : SyncStatus
+    }
+
+    class CloudSettingsSyncException(
+        val stage: String,
+        detail: String,
+        val retryable: Boolean = true
+    ) : IllegalStateException("$stage: $detail")
+
+    @Inject
+    constructor(
+        @ApplicationContext appContext: Context,
+        authRepository: AuthRepository,
+        httpClient: HttpClient,
+        json: Json
+    ) : this(
+        appContext = appContext,
+        authState = AuthRepositoryCloudSettingsAuthState(authRepository),
+        httpClient = httpClient,
+        json = json
+    )
+
+    private constructor(
+        appContext: Context,
+        authState: CloudSettingsAuthState,
+        httpClient: HttpClient,
+        json: Json
+    ) : this(
+        authState = authState,
+        remoteStore = SupabaseCloudSettingsRemoteStore(
+            configProvider = { SupabaseConfigStore.requireConfig(appContext) },
+            authState = authState,
+            httpClient = httpClient,
+            json = json
+        ),
+        localStore = AndroidCloudSettingsLocalStore(appContext)
+    )
 
     @Serializable
     data class AppSettingsDto(
-        val darkMode: Boolean = false,
+        val darkMode: Boolean = true,
         val autoConnect: Boolean = true,
         val notificationsEnabled: Boolean = true,
         val rememberLogin: Boolean = false,
@@ -125,9 +185,9 @@ class CloudUserSettingsSyncManager(
         val encryptionEnabled: Boolean = true,
         val encryptionAlgorithm: String = "AES-256-GCM",
         val pqcEnabled: Boolean = true,
-        val enforcePqcHandshake: Boolean = false,
-        val allowClassicFallbackForCompatibility: Boolean = true,
-        val pqcMinimumTier: String = "classic",
+        val enforcePqcHandshake: Boolean = true,
+        val allowClassicFallbackForCompatibility: Boolean = false,
+        val pqcMinimumTier: String = "nativePQC",
         val requireSecureEnclavePoP: Boolean = false,
 
         val allowScreenMirroring: Boolean = true,
@@ -180,11 +240,12 @@ class CloudUserSettingsSyncManager(
         if (job != null) return
 
         job = scope.launch {
-            authRepository.sessionStatus
-                .collect { status ->
-                    when (status) {
-                        is SessionStatus.Authenticated -> startAuthedSync()
-                        else -> stopAuthedSync()
+            authState.authenticated
+                .collect { authenticated ->
+                    if (authenticated) {
+                        startAuthedSync()
+                    } else {
+                        stopAuthedSync()
                     }
                 }
         }
@@ -206,129 +267,234 @@ class CloudUserSettingsSyncManager(
     private fun startAuthedSync() {
         if (authedJob != null) return
 
-        authedJob = scope.launch {
-            // Pull once at auth (best-effort)
-            runCatching { pullAndApplyOnce() }
-
-            // Push local updates (debounced)
-            @OptIn(FlowPreview::class)
-            combine(
-                AppSettingsStore.observe(appContext),
-                NetworkSettingsStore.observe(appContext),
-                SecuritySettingsStore.observe(appContext)
-            ) { app, net, sec ->
-                SettingsSnapshot(
-                    app = AppSettingsDto.from(app),
-                    network = NetworkSettingsDto.from(net),
-                    security = SecuritySettingsDto.from(sec)
-                )
-            }
-                .debounce(900)
-                .collect { snap ->
-                    runCatching { pushSnapshot(snap) }
+        val launched = scope.launch {
+            var pullRetryJob: Job? = null
+            try {
+                _syncStatus.value = SyncStatus.Running
+                val pullResult = runSyncStage("pull") {
+                    pullAndApplyOnce()
                 }
+                if (!pullResult.succeeded && pullResult.retryable) {
+                    pullRetryJob = launchPullRetryJob()
+                }
+
+                // Push local updates (debounced)
+                @OptIn(FlowPreview::class)
+                localStore.snapshots()
+                    .debounce(900)
+                    .collect { snap ->
+                        val pushed = runSyncStage("push") {
+                            pushSnapshot(snap)
+                        }
+                        if (pushed.succeeded) {
+                            _syncStatus.value = SyncStatus.Synced
+                        }
+                    }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                recordSyncFailure(t, "sync")
+            } finally {
+                pullRetryJob?.cancel()
+            }
+        }
+        authedJob = launched
+        launched.invokeOnCompletion {
+            if (authedJob === launched) {
+                authedJob = null
+            }
         }
     }
 
-    private fun currentAuthHeaders(): Pair<String, Map<String, String>>? {
-        val config = runCatching { SupabaseConfigStore.requireConfig(appContext) }.getOrNull() ?: return null
-        val token = authRepository.currentAccessTokenOrNull() ?: return null
-        return config.url to mapOf(
-            HttpHeaders.Authorization to "Bearer $token",
-            "apikey" to config.anonKey
-        )
-    }
-
     private suspend fun pullAndApplyOnce() {
-        val (baseUrl, headersMap) = currentAuthHeaders() ?: return
-        val userId = authRepository.currentUserIdOrNull() ?: return
-        val url = "$baseUrl/rest/v1/user_settings?user_id=eq.$userId&select=settings_json,updated_at,schema_version&limit=1"
-
-        val bodyText = httpClient.get(url) {
-            headers { headersMap.forEach { (k, v) -> append(k, v) } }
-        }.body<String>()
-
-        // Supabase returns JSON array.
-        val arr = runCatching { json.parseToJsonElement(bodyText).jsonArray }.getOrNull() ?: return
-        val first = arr.firstOrNull()?.jsonObject ?: return
-        val settingsJson = first["settings_json"] ?: return
-
-        val snap = runCatching { json.decodeFromString(SettingsSnapshot.serializer(), settingsJson.toString()) }.getOrNull()
-            ?: return
-        val legacySchema = snap.schemaVersion < 2
+        val snap = remoteStore.pull() ?: return
         val securityDefaults = SecuritySettings()
+        try {
+            CloudSettingsPullPolicy.validateIncomingSnapshot(snap, securityDefaults)
+        } catch (violation: CloudSettingsPullPolicy.Violation) {
+            throw CloudSettingsSyncException(
+                stage = "pull",
+                detail = violation.message ?: "cloud settings policy violation",
+                retryable = false
+            )
+        }
 
-        // Apply to local stores (best-effort). Local remains source-of-truth; we only set if local looks default-ish.
-        // AppSettings
-        AppSettingsStore.setDarkMode(appContext, snap.app.darkMode)
-        AppSettingsStore.setAutoConnect(appContext, snap.app.autoConnect)
-        AppSettingsStore.setNotifications(appContext, snap.app.notificationsEnabled)
-        AppSettingsStore.setRememberLogin(appContext, snap.app.rememberLogin)
-        AppSettingsStore.setAppLanguage(appContext, snap.app.appLanguage)
-        AppSettingsStore.setUseDynamicColor(appContext, snap.app.useDynamicColor)
-        AppSettingsStore.setHapticFeedback(appContext, snap.app.hapticFeedback)
-        AppSettingsStore.setKeepScreenOn(appContext, snap.app.keepScreenOn)
-        AppSettingsStore.setBatteryOptimizationWarning(appContext, snap.app.showBatteryOptimizationWarning)
-
-        // Network settings
-        NetworkSettingsStore.setPortRange(appContext, snap.network.portRangeStart, snap.network.portRangeEnd)
-        NetworkSettingsStore.setDiscoveryTimeoutMs(appContext, snap.network.discoveryTimeoutMs)
-        NetworkSettingsStore.setMaxReconnectAttempts(appContext, snap.network.maxReconnectAttempts)
-        NetworkSettingsStore.setWebRtcEnabled(appContext, snap.network.webrtcEnabled)
-        NetworkSettingsStore.setWebRtcSignalingUrl(appContext, snap.network.webrtcSignalingUrl)
-        NetworkSettingsStore.setStunServers(appContext, snap.network.stunServers)
-        NetworkSettingsStore.setTurnServers(appContext, snap.network.turnServers)
-
-        // Security settings
-        SecuritySettingsStore.setRequirePairing(appContext, snap.security.requirePairing)
-        SecuritySettingsStore.setAutoTrustKnownDevices(appContext, snap.security.autoTrustKnownDevices)
-        SecuritySettingsStore.setPairingTimeoutSec(appContext, snap.security.pairingTimeoutSec)
-        SecuritySettingsStore.setEncryptionEnabled(appContext, snap.security.encryptionEnabled)
-        SecuritySettingsStore.setEncryptionAlgorithm(appContext, snap.security.encryptionAlgorithm)
-        SecuritySettingsStore.setPqcEnabled(appContext, snap.security.pqcEnabled)
-        SecuritySettingsStore.setEnforcePqcHandshake(
-            appContext,
-            if (legacySchema) securityDefaults.enforcePqcHandshake else snap.security.enforcePqcHandshake
-        )
-        SecuritySettingsStore.setAllowClassicFallbackForCompatibility(
-            appContext,
-            if (legacySchema) securityDefaults.allowClassicFallbackForCompatibility
-            else snap.security.allowClassicFallbackForCompatibility
-        )
-        SecuritySettingsStore.setPqcMinimumTier(
-            appContext,
-            if (legacySchema) securityDefaults.pqcMinimumTier else snap.security.pqcMinimumTier
-        )
-        SecuritySettingsStore.setRequireSecureEnclavePoP(
-            appContext,
-            if (legacySchema) securityDefaults.requireSecureEnclavePoP else snap.security.requireSecureEnclavePoP
-        )
-        SecuritySettingsStore.setAllowScreenMirroring(appContext, snap.security.allowScreenMirroring)
-        SecuritySettingsStore.setAllowFileTransfer(appContext, snap.security.allowFileTransfer)
-        SecuritySettingsStore.setAllowRemoteControl(appContext, snap.security.allowRemoteControl)
-        SecuritySettingsStore.setAutoAcceptTrustedDevices(appContext, snap.security.autoAcceptTrustedDevices)
-        SecuritySettingsStore.setConfirmOverwriteOnInbound(appContext, snap.security.confirmOverwriteOnInbound)
-        SecuritySettingsStore.setRemoteControlRequireConfirmation(appContext, snap.security.remoteControlRequireConfirmation)
-        SecuritySettingsStore.setAllowClipboardSync(appContext, snap.security.allowClipboardSync)
-        SecuritySettingsStore.setCollectAnalytics(appContext, snap.security.collectAnalytics)
-        SecuritySettingsStore.setShareUsageData(appContext, snap.security.shareUsageData)
-        SecuritySettingsStore.setShowDeviceName(appContext, snap.security.showDeviceName)
+        localStore.applySnapshotIfDefaults(snap, securityDefaults)
     }
 
     private suspend fun pushSnapshot(snapshot: SettingsSnapshot) {
-        val (baseUrl, headersMap) = currentAuthHeaders() ?: return
-        val userId = authRepository.currentUserIdOrNull() ?: return
-        val url = "$baseUrl/rest/v1/user_settings?on_conflict=user_id"
+        remoteStore.push(snapshot)
+    }
+
+    private data class SyncStageResult(
+        val succeeded: Boolean,
+        val retryable: Boolean
+    )
+
+    private suspend fun runSyncStage(stage: String, block: suspend () -> Unit): SyncStageResult =
+        try {
+            block()
+            SyncStageResult(succeeded = true, retryable = false)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            recordSyncFailure(t, stage)
+            SyncStageResult(
+                succeeded = false,
+                retryable = (t as? CloudSettingsSyncException)?.retryable ?: true
+            )
+        }
+
+    private fun launchPullRetryJob(): Job = scope.launch {
+        for (attempt in 1..MAX_PULL_RETRY_ATTEMPTS) {
+            delay(pullRetryDelayMillis(attempt))
+            val result = runSyncStage("pull") {
+                pullAndApplyOnce()
+            }
+            if (result.succeeded) {
+                _syncStatus.value = SyncStatus.Synced
+                return@launch
+            }
+            if (!result.retryable) {
+                return@launch
+            }
+        }
+    }
+
+    private fun recordSyncFailure(t: Throwable, fallbackStage: String) {
+        _syncStatus.value = when (t) {
+            is CloudSettingsSyncException -> SyncStatus.Failed(t.stage, t.message ?: t.stage)
+            else -> SyncStatus.Failed(fallbackStage, t.message ?: t.javaClass.simpleName)
+        }
+    }
+
+    internal companion object {
+        const val MAX_PULL_RETRY_ATTEMPTS = 3
+
+        fun pullRetryDelayMillis(attempt: Int): Long =
+            when (attempt) {
+                1 -> 1_000L
+                2 -> 5_000L
+                else -> 30_000L
+            }
+    }
+}
+
+internal interface CloudSettingsAuthState {
+    val authenticated: Flow<Boolean>
+    fun currentAccessTokenOrNull(): String?
+    fun currentUserIdOrNull(): String?
+}
+
+internal interface CloudSettingsRemoteStore {
+    suspend fun pull(): CloudUserSettingsSyncManager.SettingsSnapshot?
+    suspend fun push(snapshot: CloudUserSettingsSyncManager.SettingsSnapshot)
+}
+
+internal interface CloudSettingsLocalStore {
+    fun snapshots(): Flow<CloudUserSettingsSyncManager.SettingsSnapshot>
+    suspend fun applySnapshotIfDefaults(
+        snapshot: CloudUserSettingsSyncManager.SettingsSnapshot,
+        securityDefaults: SecuritySettings
+    )
+}
+
+private class AuthRepositoryCloudSettingsAuthState(
+    private val authRepository: AuthRepository
+) : CloudSettingsAuthState {
+    override val authenticated: Flow<Boolean> =
+        authRepository.sessionStatus
+            .map { it is SessionStatus.Authenticated }
+            .distinctUntilChanged()
+
+    override fun currentAccessTokenOrNull(): String? =
+        authRepository.currentAccessTokenOrNull()
+
+    override fun currentUserIdOrNull(): String? =
+        authRepository.currentUserIdOrNull()
+}
+
+internal class SupabaseCloudSettingsRemoteStore(
+    private val configProvider: () -> com.skybridge.compass.android.data.SupabaseConfig,
+    private val authState: CloudSettingsAuthState,
+    private val httpClient: HttpClient,
+    private val json: Json
+) : CloudSettingsRemoteStore {
+
+    override suspend fun pull(): CloudUserSettingsSyncManager.SettingsSnapshot? {
+        val (baseUrl, headersMap) = requireAuthHeaders("pull")
+        val userId = requireUserId("pull")
+        val url = SupabasePostgrestUrls.table(
+            baseUrl = baseUrl,
+            table = "user_settings",
+            query = mapOf(
+                "user_id" to "eq.$userId",
+                "select" to "settings_json,updated_at,schema_version",
+                "limit" to "1"
+            )
+        )
+
+        val response = httpClient.get(url) {
+            headers { headersMap.forEach { (k, v) -> append(k, v) } }
+        }
+        requireSuccessfulResponse(response, "pull")
+        val bodyText = response.body<String>()
+
+        val arr = runCatching { json.parseToJsonElement(bodyText).jsonArray }
+            .getOrElse {
+                throw CloudUserSettingsSyncManager.CloudSettingsSyncException(
+                    "pull",
+                    "invalid settings response JSON",
+                    retryable = false
+                )
+            }
+        val first = arr.firstOrNull()?.jsonObject ?: return null
+        val settingsJson = first["settings_json"]
+            ?: throw CloudUserSettingsSyncManager.CloudSettingsSyncException(
+                "pull",
+                "settings_json missing",
+                retryable = false
+            )
+        val rowSchemaVersion = first["schema_version"]?.jsonPrimitive?.intOrNull
+
+        val decoded = runCatching {
+            json.decodeFromString(
+                CloudUserSettingsSyncManager.SettingsSnapshot.serializer(),
+                settingsJson.toString()
+            )
+        }.getOrElse {
+            throw CloudUserSettingsSyncManager.CloudSettingsSyncException(
+                "pull",
+                "invalid settings snapshot JSON",
+                retryable = false
+            )
+        }
+        return rowSchemaVersion?.let { decoded.copy(schemaVersion = it) } ?: decoded
+    }
+
+    override suspend fun push(snapshot: CloudUserSettingsSyncManager.SettingsSnapshot) {
+        val (baseUrl, headersMap) = requireAuthHeaders("push")
+        val userId = requireUserId("push")
+        val url = SupabasePostgrestUrls.table(
+            baseUrl = baseUrl,
+            table = "user_settings",
+            query = mapOf("on_conflict" to "user_id")
+        )
 
         val payload = buildJsonObject {
             put("user_id", userId)
             put("schema_version", snapshot.schemaVersion)
-            // Store as real jsonb, not a JSON string.
-            put("settings_json", json.parseToJsonElement(json.encodeToString(SettingsSnapshot.serializer(), snapshot)))
+            put(
+                "settings_json",
+                json.parseToJsonElement(
+                    json.encodeToString(
+                        CloudUserSettingsSyncManager.SettingsSnapshot.serializer(),
+                        snapshot
+                    )
+                )
+            )
             put("updated_at", Instant.now().toString())
         }.toString()
 
-        httpClient.post(url) {
+        val response = httpClient.post(url) {
             contentType(ContentType.Application.Json)
             headers {
                 headersMap.forEach { (k, v) -> append(k, v) }
@@ -337,7 +503,137 @@ class CloudUserSettingsSyncManager(
             }
             setBody(payload)
         }
+        requireSuccessfulResponse(response, "push")
     }
 
-    companion object
+    private fun requireAuthHeaders(stage: String): Pair<String, Map<String, String>> {
+        val config = try {
+            configProvider()
+        } catch (error: SupabaseConfigException) {
+            throw CloudUserSettingsSyncManager.CloudSettingsSyncException(
+                stage,
+                "Supabase config unavailable: ${error.message ?: error.javaClass.simpleName}",
+                retryable = false
+            )
+        }
+        val token = authState.currentAccessTokenOrNull()
+            ?: throw CloudUserSettingsSyncManager.CloudSettingsSyncException(
+                stage,
+                "missing Supabase access token",
+                retryable = false
+            )
+        return config.url to mapOf(
+            HttpHeaders.Authorization to "Bearer $token",
+            "apikey" to config.anonKey
+        )
+    }
+
+    private fun requireUserId(stage: String): String =
+        authState.currentUserIdOrNull()
+            ?: throw CloudUserSettingsSyncManager.CloudSettingsSyncException(
+                stage,
+                "missing authenticated user id",
+                retryable = false
+            )
+
+    private fun requireSuccessfulResponse(response: HttpResponse, stage: String) {
+        if (!response.status.isSuccess()) {
+            throw CloudUserSettingsSyncManager.CloudSettingsSyncException(stage, "HTTP ${response.status.value}")
+        }
+    }
+}
+
+private class AndroidCloudSettingsLocalStore(
+    private val appContext: Context
+) : CloudSettingsLocalStore {
+
+    override fun snapshots(): Flow<CloudUserSettingsSyncManager.SettingsSnapshot> =
+        combine(
+            AppSettingsStore.observe(appContext),
+            NetworkSettingsStore.observe(appContext),
+            SecuritySettingsStore.observe(appContext)
+        ) { app, net, sec ->
+            CloudUserSettingsSyncManager.SettingsSnapshot(
+                app = CloudUserSettingsSyncManager.AppSettingsDto.from(app),
+                network = CloudUserSettingsSyncManager.NetworkSettingsDto.from(net),
+                security = CloudUserSettingsSyncManager.SecuritySettingsDto.from(sec)
+            )
+        }
+
+    override suspend fun applySnapshotIfDefaults(
+        snapshot: CloudUserSettingsSyncManager.SettingsSnapshot,
+        securityDefaults: SecuritySettings
+    ) {
+        val legacySchema = snapshot.schemaVersion < 2
+
+        // Apply cloud state only while the local group is still at defaults. Without local
+        // per-setting timestamps, this avoids stale cloud rows overwriting explicit local changes.
+        if (AppSettingsStore.observe(appContext).first() == AppSettings()) {
+            AppSettingsStore.setDarkMode(appContext, snapshot.app.darkMode)
+            AppSettingsStore.setAutoConnect(appContext, snapshot.app.autoConnect)
+            AppSettingsStore.setNotifications(appContext, snapshot.app.notificationsEnabled)
+            AppSettingsStore.setRememberLogin(appContext, snapshot.app.rememberLogin)
+            AppSettingsStore.setAppLanguage(appContext, snapshot.app.appLanguage)
+            AppSettingsStore.setUseDynamicColor(appContext, snapshot.app.useDynamicColor)
+            AppSettingsStore.setHapticFeedback(appContext, snapshot.app.hapticFeedback)
+            AppSettingsStore.setKeepScreenOn(appContext, snapshot.app.keepScreenOn)
+            AppSettingsStore.setBatteryOptimizationWarning(appContext, snapshot.app.showBatteryOptimizationWarning)
+        }
+
+        if (NetworkSettingsStore.observe(appContext).first() == NetworkSettings()) {
+            // R7.8：这三项已改为「先校验后写入」。云端快照里越界的历史值会被**拒绝**而不再被静默
+            // 钳制，此时本地保留默认值，避免把非法端口/窗口/次数当成用户设置落盘。
+            NetworkSettingsStore.setPortRange(appContext, snapshot.network.portRangeStart, snapshot.network.portRangeEnd)
+            NetworkSettingsStore.setDiscoveryTimeoutMs(appContext, snapshot.network.discoveryTimeoutMs)
+            NetworkSettingsStore.setMaxReconnectAttempts(appContext, snapshot.network.maxReconnectAttempts)
+            NetworkSettingsStore.setTlsStrictMode(appContext, snapshot.network.tlsStrictMode)
+            NetworkSettingsStore.setHandshakeEnabled(appContext, snapshot.network.handshakeEnabled)
+            NetworkSettingsStore.setEncryptionMode(appContext, snapshot.network.encryptionMode)
+            NetworkSettingsStore.setWebRtcEnabled(appContext, snapshot.network.webrtcEnabled)
+            NetworkSettingsStore.setWebRtcSignalingUrl(appContext, snapshot.network.webrtcSignalingUrl)
+            NetworkSettingsStore.setStunServers(appContext, snapshot.network.stunServers)
+            NetworkSettingsStore.setTurnServers(appContext, snapshot.network.turnServers)
+        }
+
+        if (SecuritySettingsStore.observe(appContext).first() == SecuritySettings()) {
+            SecuritySettingsStore.setRequirePairing(appContext, snapshot.security.requirePairing)
+            SecuritySettingsStore.setAutoTrustKnownDevices(appContext, snapshot.security.autoTrustKnownDevices)
+            SecuritySettingsStore.setPairingTimeoutSec(appContext, snapshot.security.pairingTimeoutSec)
+            SecuritySettingsStore.setEncryptionEnabled(appContext, snapshot.security.encryptionEnabled)
+            SecuritySettingsStore.setEncryptionAlgorithm(appContext, snapshot.security.encryptionAlgorithm)
+            SecuritySettingsStore.setPqcEnabled(appContext, snapshot.security.pqcEnabled)
+            SecuritySettingsStore.setEnforcePqcHandshake(
+                appContext,
+                if (legacySchema) securityDefaults.enforcePqcHandshake
+                else snapshot.security.enforcePqcHandshake
+            )
+            SecuritySettingsStore.setAllowClassicFallbackForCompatibility(
+                appContext,
+                if (legacySchema) securityDefaults.allowClassicFallbackForCompatibility
+                else snapshot.security.allowClassicFallbackForCompatibility
+            )
+            SecuritySettingsStore.setPqcMinimumTier(
+                appContext,
+                if (legacySchema) securityDefaults.pqcMinimumTier else snapshot.security.pqcMinimumTier
+            )
+            SecuritySettingsStore.setRequireSecureEnclavePoP(
+                appContext,
+                if (legacySchema) securityDefaults.requireSecureEnclavePoP
+                else snapshot.security.requireSecureEnclavePoP
+            )
+            SecuritySettingsStore.setAllowScreenMirroring(appContext, snapshot.security.allowScreenMirroring)
+            SecuritySettingsStore.setAllowFileTransfer(appContext, snapshot.security.allowFileTransfer)
+            SecuritySettingsStore.setAllowRemoteControl(appContext, snapshot.security.allowRemoteControl)
+            SecuritySettingsStore.setAutoAcceptTrustedDevices(appContext, snapshot.security.autoAcceptTrustedDevices)
+            SecuritySettingsStore.setConfirmOverwriteOnInbound(appContext, snapshot.security.confirmOverwriteOnInbound)
+            SecuritySettingsStore.setRemoteControlRequireConfirmation(
+                appContext,
+                snapshot.security.remoteControlRequireConfirmation
+            )
+            SecuritySettingsStore.setAllowClipboardSync(appContext, snapshot.security.allowClipboardSync)
+            SecuritySettingsStore.setCollectAnalytics(appContext, snapshot.security.collectAnalytics)
+            SecuritySettingsStore.setShareUsageData(appContext, snapshot.security.shareUsageData)
+            SecuritySettingsStore.setShowDeviceName(appContext, snapshot.security.showDeviceName)
+        }
+    }
 }

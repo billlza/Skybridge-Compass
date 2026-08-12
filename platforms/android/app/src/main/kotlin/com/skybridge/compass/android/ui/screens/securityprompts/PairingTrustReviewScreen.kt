@@ -91,4 +91,6 @@ private fun conflictText(conflict: PairingTrustConflict): String = when (conflic
         "This identity is quarantined and must be reverified before reuse."
     PairingTrustConflict.REVOKED_IDENTITY ->
         "This identity has been revoked and cannot be trusted."
+    PairingTrustConflict.TRUST_STORE_CORRUPTED ->
+        "The trusted-device store is corrupted. Repair trust storage before approving this peer."
 }

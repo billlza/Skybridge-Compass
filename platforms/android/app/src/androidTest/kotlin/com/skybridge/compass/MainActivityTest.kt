@@ -1,204 +1,318 @@
 package com.skybridge.compass
 
-import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import android.content.Context
+import android.content.Intent
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.test.core.app.ActivityScenario
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.skybridge.compass.android.MainActivity
+import com.skybridge.compass.android.TestDatabaseCleanupRule
+import com.skybridge.compass.android.data.APP_LANGUAGE_EN
+import com.skybridge.compass.android.data.AppSettingsStore
+import com.skybridge.compass.android.i18n.AppLanguageRuntime
+import com.skybridge.compass.android.notifications.SecurityPromptNotifier
+import com.skybridge.compass.android.securityprompts.SecurityPromptStore
+import com.skybridge.compass.android.ui.navigation.NavigationSemantics
+import com.skybridge.compass.android.ui.navigation.Screen
+import com.skybridge.compass.core.data.database.AppDatabase
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import javax.inject.Inject
 
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
 class MainActivityTest {
 
+    @Inject lateinit var database: AppDatabase
+
+    @get:Rule(order = -1)
+    val databaseCleanupRule = TestDatabaseCleanupRule {
+        if (::database.isInitialized) database else null
+    }
+
     @get:Rule(order = 0)
     val hiltRule = HiltAndroidRule(this)
 
     @get:Rule(order = 1)
-    val composeTestRule = createAndroidComposeRule<MainActivity>()
+    val composeTestRule = createEmptyComposeRule()
+
+    private lateinit var context: Context
+    private lateinit var previousLanguage: String
 
     @Before
-    fun setup() {
+    fun setUp() {
         hiltRule.inject()
-    }
-
-    @Test
-    fun testAppLaunchAndInitialScreen() {
-        // Verify app launches successfully
-        composeTestRule.onNodeWithText("SkyBridge Compass").assertIsDisplayed()
-        
-        // Verify bottom navigation is displayed
-        composeTestRule.onNodeWithContentDescription("Remote Control").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("File Transfer").assertIsDisplayed()
-    }
-
-    @Test
-    fun testNavigationBetweenModules() {
-        // Start on remote control screen (default)
-        composeTestRule.onNodeWithText("Remote Control").assertIsDisplayed()
-
-        // Navigate to file transfer
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        composeTestRule.onNodeWithText("File Transfer").assertIsDisplayed()
-
-        // Navigate back to remote control
-        composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
-        composeTestRule.onNodeWithText("Remote Control").assertIsDisplayed()
-    }
-
-    @Test
-    fun testRemoteControlModuleIntegration() {
-        // Ensure we're on remote control screen
-        composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
-
-        // Verify remote control specific elements
-        composeTestRule.onNodeWithText("Connect").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Device List").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Settings").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Statistics").assertIsDisplayed()
-
-        // Test device list interaction
-        composeTestRule.onNodeWithContentDescription("Device List").performClick()
-        // Device list dialog should appear (if devices are available)
-    }
-
-    @Test
-    fun testFileTransferModuleIntegration() {
-        // Navigate to file transfer screen
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-
-        // Verify file transfer specific elements
-        composeTestRule.onNodeWithText("Connect").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Device List").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Settings").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("Statistics").assertIsDisplayed()
-
-        // Test view navigation within file transfer
-        composeTestRule.onNodeWithText("Files").assertExists()
-        composeTestRule.onNodeWithText("Queue").assertExists()
-        composeTestRule.onNodeWithText("History").assertExists()
-    }
-
-    @Test
-    fun testPermissionHandling() {
-        // Test that permission requests are handled properly
-        // This would typically involve mocking permission states
-        
-        // Navigate to remote control
-        composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
-        
-        // Try to start a session (which would require permissions)
-        composeTestRule.onNodeWithText("Connect").performClick()
-        
-        // Verify that appropriate permission dialogs or messages appear
-        // This test would need to be expanded based on actual permission flow
-    }
-
-    @Test
-    fun testThemeAndStyling() {
-        // Verify that the app uses consistent theming
-        composeTestRule.onRoot().assertIsDisplayed()
-        
-        // Test dark/light theme switching if implemented
-        // This would require accessing theme toggle controls
-    }
-
-    @Test
-    fun testErrorHandling() {
-        // Test that errors are displayed properly across modules
-        
-        // Navigate to remote control
-        composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
-        
-        // Try to connect without proper setup (should show error)
-        composeTestRule.onNodeWithText("Connect").performClick()
-        
-        // Verify error handling (this would depend on actual error states)
-    }
-
-    @Test
-    fun testAppStateRestoration() {
-        // Test that app state is properly restored after configuration changes
-        
-        // Navigate to file transfer
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        
-        // Simulate configuration change (rotation)
-        composeTestRule.activity.recreate()
-        
-        // Verify that we're still on file transfer screen
-        composeTestRule.onNodeWithText("File Transfer").assertIsDisplayed()
-    }
-
-    @Test
-    fun testCrossModuleDataSharing() {
-        // Test that device connections are shared between modules
-        
-        // Start on remote control
-        composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
-        
-        // Simulate device connection (this would require mocking)
-        // Then navigate to file transfer and verify device is available there too
-        
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        
-        // Verify that connected devices are available in file transfer module
-    }
-
-    @Test
-    fun testBackgroundTaskHandling() {
-        // Test that background tasks (like file transfers) continue properly
-        
-        // Navigate to file transfer
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        
-        // Start a transfer (would require mocking)
-        // Navigate away and back to verify transfer continues
-        
-        composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        
-        // Verify transfer status is maintained
-    }
-
-    @Test
-    fun testAccessibilityFeatures() {
-        // Test that accessibility features work properly
-        
-        // Verify content descriptions are present
-        composeTestRule.onNodeWithContentDescription("Remote Control").assertIsDisplayed()
-        composeTestRule.onNodeWithContentDescription("File Transfer").assertIsDisplayed()
-        
-        // Test navigation with accessibility services
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        composeTestRule.onNodeWithContentDescription("Device List").assertIsDisplayed()
-    }
-
-    @Test
-    fun testPerformanceUnderLoad() {
-        // Test app performance with multiple operations
-        
-        // Rapidly switch between modules
-        repeat(5) {
-            composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-            composeTestRule.onNodeWithContentDescription("Remote Control").performClick()
+        composeTestRule.mainClock.autoAdvance = false
+        context = ApplicationProvider.getApplicationContext()
+        runBlocking {
+            previousLanguage = AppSettingsStore.observeAppLanguage(context).first()
+            AppSettingsStore.setAppLanguage(context, APP_LANGUAGE_EN)
         }
-        
-        // Verify app remains responsive
-        composeTestRule.onNodeWithText("Remote Control").assertIsDisplayed()
+        AppLanguageRuntime.applySetting(APP_LANGUAGE_EN)
+    }
+
+    @After
+    fun tearDown() {
+        runBlocking {
+            AppSettingsStore.setAppLanguage(context, previousLanguage)
+        }
+        AppLanguageRuntime.applySetting(previousLanguage)
     }
 
     @Test
-    fun testDeepLinkHandling() {
-        // Test that deep links work properly (if implemented)
-        // This would require setting up deep link intents
-        
-        // For now, just verify basic navigation works
-        composeTestRule.onNodeWithContentDescription("File Transfer").performClick()
-        composeTestRule.onNodeWithText("File Transfer").assertIsDisplayed()
+    fun mainActivity_forcedLoginModeShowsAuthGateAndHidesAppNavigation() {
+        withMainActivity(forceLoginScreen = true) {
+            composeTestRule.onNodeWithText("SkyBridge Compass").assertIsDisplayed()
+            composeTestRule.onNodeWithText("Sign-in Method").assertIsDisplayed()
+            topLevelRoutes.forEach { route ->
+                composeTestRule
+                    .onNodeWithTag(NavigationSemantics.bottomTab(route))
+                    .assertDoesNotExist()
+            }
+        }
+    }
+
+    @Test
+    fun mainActivity_debugVisualModeStartsAtCurrentDashboard() {
+        withMainActivity(forceVisualTestMode = true) {
+            assertDestination(Screen.Dashboard.route)
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(Screen.Dashboard.route))
+                .assertIsSelected()
+            composeTestRule.onNodeWithText("Sign-in Method").assertDoesNotExist()
+            topLevelRoutes.forEach { route ->
+                composeTestRule
+                    .onNodeWithTag(NavigationSemantics.bottomTab(route))
+                    .assertIsDisplayed()
+                    .assertHasClickAction()
+            }
+        }
+    }
+
+    @Test
+    fun mainActivity_filesTabOpensCurrentFileTransferDestination() {
+        withMainActivity(forceVisualTestMode = true) {
+            selectTopLevelDestination(Screen.FileTransfer.route)
+        }
+    }
+
+    @Test
+    fun mainActivity_remoteTabOpensCurrentRemoteControlDestination() {
+        withMainActivity(forceVisualTestMode = true) {
+            selectTopLevelDestination(Screen.RemoteControl.route)
+        }
+    }
+
+    @Test
+    fun mainActivity_debugNavigationIntentOpensRequestedCurrentDestination() {
+        withMainActivity(
+            forceVisualTestMode = true,
+            navRoute = Screen.Settings.route
+        ) {
+            assertDestination(Screen.Settings.route)
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(Screen.Settings.route))
+                .assertIsSelected()
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(Screen.Dashboard.route))
+                .assertIsNotSelected()
+        }
+    }
+
+    @Test
+    fun mainActivity_rejectsSecurityReviewIntentWithoutAnExactCurrentPrompt() {
+        withMainActivity(
+            forceVisualTestMode = true,
+            securityReviewKind = SecurityPromptNotifier.REVIEW_KIND_INBOUND_FILE,
+            securityReviewId = "00000000-0000-0000-0000-000000000099"
+        ) {
+            assertDestination(Screen.Dashboard.route)
+            composeTestRule.onNodeWithText("Incoming file transfer").assertDoesNotExist()
+        }
+    }
+
+    @Test
+    fun mainActivity_opensOnlyTheExactCurrentSecurityPrompt() {
+        val transferId = "00000000-0000-0000-0000-000000000098"
+        SecurityPromptStore.requestInboundDecision(
+            SecurityPromptStore.InboundFileTransferPrompt(
+                transferId = transferId,
+                fileName = "bounded-review.txt",
+                fileSizeBytes = 4,
+                senderDeviceId = "authenticated-peer"
+            )
+        )
+        try {
+            withMainActivity(
+                forceVisualTestMode = true,
+                securityReviewKind = SecurityPromptNotifier.REVIEW_KIND_INBOUND_FILE,
+                securityReviewId = transferId
+            ) {
+                waitForText("Incoming file transfer")
+                composeTestRule.onNodeWithText("Incoming file transfer").assertIsDisplayed()
+                composeTestRule
+                    .onNodeWithText("From: authenticated-peer\nFile: bounded-review.txt\nSize: 4 B\nSave to: Downloads")
+                    .assertIsDisplayed()
+            }
+        } finally {
+            SecurityPromptStore.resolveInbound(
+                transferId,
+                SecurityPromptStore.InboundFileTransferDecision.Decline
+            )
+        }
+    }
+
+    @Test
+    fun mainActivity_recreationRestoresSelectedTopLevelDestination() {
+        withMainActivity(forceVisualTestMode = true) { scenario ->
+            selectTopLevelDestination(Screen.FileTransfer.route)
+
+            scenario.recreate()
+
+            assertDestination(Screen.FileTransfer.route)
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(Screen.FileTransfer.route))
+                .assertIsSelected()
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(Screen.Dashboard.route))
+                .assertIsNotSelected()
+        }
+    }
+
+    @Test
+    fun mainActivity_currentTopLevelNavigationExposesTabAccessibilitySemantics() {
+        withMainActivity(forceVisualTestMode = true) {
+            topLevelRoutes.zip(topLevelLabels).forEach { (route, label) ->
+                composeTestRule
+                    .onNodeWithTag(NavigationSemantics.bottomTab(route))
+                    .assertHasClickAction()
+                    .assert(
+                        SemanticsMatcher.expectValue(
+                            SemanticsProperties.Role,
+                            Role.Tab
+                        )
+                    )
+                composeTestRule
+                    .onNodeWithContentDescription(label)
+                    .assertIsDisplayed()
+            }
+        }
+    }
+
+    @Test
+    fun mainActivity_repeatedTopLevelSwitchingEndsOnExactRequestedDestination() {
+        withMainActivity(forceVisualTestMode = true) {
+            listOf(
+                Screen.DeviceDiscovery.route,
+                Screen.Settings.route,
+                Screen.RemoteControl.route,
+                Screen.FileTransfer.route,
+                Screen.Dashboard.route
+            ).forEach(::selectTopLevelDestination)
+
+            assertDestination(Screen.Dashboard.route)
+            composeTestRule
+                .onNodeWithTag(NavigationSemantics.bottomTab(Screen.Dashboard.route))
+                .assertIsSelected()
+        }
+    }
+
+    private fun withMainActivity(
+        forceVisualTestMode: Boolean = false,
+        forceLoginScreen: Boolean = false,
+        navRoute: String? = null,
+        securityReviewKind: String? = null,
+        securityReviewId: String? = null,
+        assertions: (ActivityScenario<MainActivity>) -> Unit
+    ) {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            if (forceVisualTestMode) {
+                putExtra(MainActivity.EXTRA_FORCE_VISUAL_TEST_MODE, true)
+            }
+            if (forceLoginScreen) {
+                putExtra(MainActivity.EXTRA_FORCE_LOGIN_SCREEN, true)
+            }
+            if (navRoute != null) {
+                putExtra(MainActivity.EXTRA_NAV_ROUTE, navRoute)
+            }
+            if (securityReviewKind != null) {
+                putExtra(SecurityPromptNotifier.EXTRA_REVIEW_KIND, securityReviewKind)
+            }
+            if (securityReviewId != null) {
+                putExtra(SecurityPromptNotifier.EXTRA_REVIEW_ID, securityReviewId)
+            }
+        }
+
+        ActivityScenario.launch<MainActivity>(intent).use { scenario ->
+            composeTestRule.mainClock.advanceTimeByFrame()
+            composeTestRule.waitForIdle()
+            assertions(scenario)
+        }
+    }
+
+    private fun selectTopLevelDestination(route: String) {
+        composeTestRule
+            .onNodeWithTag(NavigationSemantics.bottomTab(route))
+            .performClick()
+        assertDestination(route)
+        composeTestRule
+            .onNodeWithTag(NavigationSemantics.bottomTab(route))
+            .assertIsSelected()
+    }
+
+    private fun assertDestination(route: String) {
+        val destinationTag = NavigationSemantics.destination(route)
+        composeTestRule.waitUntil(timeoutMillis = 10_000) {
+            composeTestRule.mainClock.advanceTimeByFrame()
+            composeTestRule
+                .onAllNodesWithTag(destinationTag)
+                .fetchSemanticsNodes()
+                .size == 1
+        }
+        composeTestRule.onNodeWithTag(destinationTag).assertIsDisplayed()
+    }
+
+    private fun waitForText(text: String) {
+        composeTestRule.waitUntil(timeoutMillis = 10_000) {
+            composeTestRule.mainClock.advanceTimeByFrame()
+            composeTestRule
+                .onAllNodesWithText(text)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+    }
+
+    private companion object {
+        val topLevelRoutes = listOf(
+            Screen.Dashboard.route,
+            Screen.DeviceDiscovery.route,
+            Screen.FileTransfer.route,
+            Screen.RemoteControl.route,
+            Screen.Settings.route
+        )
+
+        val topLevelLabels = listOf("Home", "Devices", "Files", "Remote", "Settings")
     }
 }

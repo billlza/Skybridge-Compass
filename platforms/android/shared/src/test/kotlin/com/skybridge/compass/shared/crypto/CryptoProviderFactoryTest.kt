@@ -2,6 +2,7 @@ package com.skybridge.compass.shared.crypto
 
 import com.skybridge.compass.shared.crypto.models.CryptoSuite
 import com.skybridge.compass.shared.crypto.providers.ClassicCryptoProvider
+import com.skybridge.compass.shared.p2p.P2PCryptoSuite
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
@@ -87,6 +88,20 @@ class CryptoProviderFactoryTest : FunSpec({
         // Classic suites should always be present
         supportedSuites.contains(CryptoSuite.X25519_ED25519) shouldBe true
         supportedSuites.contains(CryptoSuite.P256_ECDSA) shouldBe true
+    }
+
+    test("Q-Periapt stays explicit beta and out of production suite iteration") {
+        CryptoSuite.fromWireId(0x0011u) shouldBe CryptoSuite.Q_PERIAPT_CONTEXT_BOUND
+        CryptoSuite.ALL_SUITES.contains(CryptoSuite.Q_PERIAPT_CONTEXT_BOUND) shouldBe false
+        CryptoSuite.EXPLICIT_BETA_SUITES shouldBe listOf(CryptoSuite.Q_PERIAPT_CONTEXT_BOUND)
+    }
+
+    test("P2P and provider suite wire IDs stay aligned for shared suites") {
+        CryptoSuite.Q_PERIAPT_CONTEXT_BOUND.wireId shouldBe P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND.wireId
+        CryptoSuite.X_WING_ML_DSA.wireId shouldBe P2PCryptoSuite.X_WING.wireId
+        CryptoSuite.ML_KEM_768_ML_DSA_65.wireId shouldBe P2PCryptoSuite.MLKEM_768.wireId
+        CryptoSuite.X25519_ED25519.wireId shouldBe P2PCryptoSuite.X25519.wireId
+        CryptoSuite.P256_ECDSA.wireId shouldBe P2PCryptoSuite.P256.wireId
     }
     
     /**

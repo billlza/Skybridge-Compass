@@ -20,6 +20,7 @@ class P2PHandshakeClient(
     private val secureRandom: SecureRandom = SecureRandom()
 ) {
     data class PeerKemPublicKeys(
+        val qPeriaptPublicKey: ByteArray? = null,
         val xWingPublicKey: ByteArray? = null,
         val mlKem768PublicKey: ByteArray? = null
     )
@@ -36,7 +37,15 @@ class P2PHandshakeClient(
          * instead of generating fresh identity keys, so TOFU pinning remains stable across
          * reconnects.
          */
-        val protocolSigningKeys: P2PProtocolSigningKeys? = null
+        val protocolSigningKeys: P2PProtocolSigningKeys? = null,
+        /**
+         * Optional structured downgrade-audit sink. When a classic fallback is taken, the
+         * handshake routes the decision through the canonical [PolicyGate] taxonomy
+         * (mirrors `rust/crates/skybridge-core/src/policy.rs`) and emits a structured,
+         * replayable [DowngradeEvent] here. Leaving this null preserves the legacy
+         * bare-boolean behavior, so existing callers are unaffected.
+         */
+        val downgradeAuditSink: ((DowngradeEvent) -> Unit)? = null
     )
 
     data class InitiatorState(
@@ -50,13 +59,21 @@ class P2PHandshakeClient(
         val offeredSuites: List<P2PCryptoSuite>,
         val handshakePolicy: P2PHandshakePolicy,
         val allowClassicBootstrapForTrustedPeer: Boolean = false,
-        val pqcSharedSecret32: ByteArray? = null
+        val pqcSharedSecret32: ByteArray? = null,
+        /**
+         * The structured downgrade-audit record emitted when this handshake took a
+         * classic fallback under a fallback-eligible reason; null when no auditable
+         * downgrade occurred. Mirrors the canonical [DowngradeEvent].
+         */
+        val downgradeEvent: DowngradeEvent? = null
     )
 
     data class Result(
         val sessionKeys: P2PHandshakeWire.DerivedSessionKeys,
         val negotiatedSuite: P2PCryptoSuite,
-        val clientFinishedToSend: ByteArray
+        val clientFinishedToSend: ByteArray,
+        /** Fingerprint whose MessageB signature and configured pin were verified for this result. */
+        val remoteProtocolIdentityFingerprint: String
     )
 
     fun start(): Pair<InitiatorState, ByteArray> {
@@ -71,6 +88,7 @@ class P2PHandshakeClient(
         )
         val runtimeSupport = RuntimeSupport(
             liboqsAvailable = AndroidPQCCryptoProvider.isAvailable(),
+            qPeriaptAvailable = P2PQPeriaptKem.isAvailable(),
             xWingAvailable = P2PXWingKem.isAvailable()
         )
         val plan = resolveSuitePlan(
@@ -81,6 +99,7 @@ class P2PHandshakeClient(
             allowClassicBootstrapForTrustedPeer = options.allowClassicBootstrapForTrustedPeer
         )
 
+        var downgradeEvent: DowngradeEvent? = null
         if (plan.usedClassicFallback) {
             require(
                 options.peerIdForFallbackCooldown == null || options.fallbackCooldownStore != null
@@ -88,17 +107,69 @@ class P2PHandshakeClient(
                 "fallbackCooldownStore is required when peerIdForFallbackCooldown is provided"
             }
             if (options.peerIdForFallbackCooldown != null && options.fallbackCooldownStore != null) {
-                val decision = P2PHandshakeWire.evaluateClassicFallbackCooldown(
-                    peerId = options.peerIdForFallbackCooldown,
-                    fallbackCooldownStore = options.fallbackCooldownStore
-                )
-                require(decision.allowed) {
-                    "Classic fallback cooldown active for peer=${options.peerIdForFallbackCooldown}; retry in ${decision.remainingMillis} ms"
+                if (options.allowClassicBootstrapForTrustedPeer) {
+                    // Bootstrap-assisted: a one-time classic CONTROL channel for paired
+                    // KEM-key recovery is permitted even under a strict posture (mirrors
+                    // policy.rs `allowsBootstrapControlChannel`). This is NOT a business
+                    // downgrade, so it bypasses the business-fallback policy gate but
+                    // still consumes the per-peer 300 s cooldown via the shared store.
+                    val decision = P2PHandshakeWire.evaluateClassicFallbackCooldown(
+                        peerId = options.peerIdForFallbackCooldown,
+                        fallbackCooldownStore = options.fallbackCooldownStore
+                    )
+                    require(decision.allowed) {
+                        "Classic fallback cooldown active for peer=${options.peerIdForFallbackCooldown}; retry in ${decision.remainingMillis} ms"
+                    }
+                    P2PHandshakeWire.recordClassicFallback(
+                        peerId = options.peerIdForFallbackCooldown,
+                        fallbackCooldownStore = options.fallbackCooldownStore
+                    )
+                } else {
+                    // Route the downgrade through the canonical PolicyGate taxonomy
+                    // (mirrors rust/crates/skybridge-core/src/policy.rs). The gate reuses
+                    // the same FallbackCooldownStore so the 300 s/peer cooldown has a
+                    // single source of truth, and it both enforces the cooldown and mints
+                    // a structured, replayable DowngradeEvent on authorization.
+                    val gate = PolicyGate(
+                        policy = DowngradePolicy.fromHandshakePolicy(normalizedPolicy),
+                        cooldownStore = options.fallbackCooldownStore
+                    )
+                    // This call site is reached only because a preferred PQC/X-Wing tier
+                    // was unavailable for this peer (no usable PQC suite), which is the
+                    // fallback-eligible SUITE_NEGOTIATION_FAILED reason. Timeouts and auth
+                    // failures never reach here and are structurally ineligible.
+                    val decision = gate.authorizeDowngrade(
+                        peer = options.peerIdForFallbackCooldown,
+                        fromSuite = preferredPqcSuiteFor(platformVersion),
+                        toSuite = plan.selectedSuite,
+                        reason = FallbackReason.SUITE_NEGOTIATION_FAILED,
+                        transcriptAnchor = clientNonce
+                    )
+                    when (decision) {
+                        is DowngradeDecision.Allowed -> {
+                            downgradeEvent = decision.event
+                            options.downgradeAuditSink?.invoke(decision.event)
+                        }
+                        is DowngradeDecision.DeniedRateLimited ->
+                            throw IllegalStateException(
+                                "Classic fallback cooldown active for peer=${options.peerIdForFallbackCooldown}; retry in ${decision.remainingMillis} ms"
+                            )
+                        is DowngradeDecision.DeniedByPolicy ->
+                            throw IllegalStateException(
+                                "Classic fallback denied by policy posture ${gate.policy} for peer=${options.peerIdForFallbackCooldown}"
+                            )
+                        is DowngradeDecision.DeniedReasonIneligible ->
+                            throw IllegalStateException(
+                                "Classic fallback reason ${decision.reason.diagnosticCode} is not fallback-eligible"
+                            )
+                        // Not reachable from this call site (it uses authorizeDowngrade,
+                        // not the user-approved gate), but the taxonomy is exhaustive.
+                        DowngradeDecision.DeniedUserNotAuthorized ->
+                            throw IllegalStateException(
+                                "Classic fallback denied: user did not authorize downgrade for peer=${options.peerIdForFallbackCooldown}"
+                            )
+                    }
                 }
-                P2PHandshakeWire.recordClassicFallback(
-                    peerId = options.peerIdForFallbackCooldown,
-                    fallbackCooldownStore = options.fallbackCooldownStore
-                )
             }
         }
 
@@ -111,9 +182,19 @@ class P2PHandshakeClient(
             platformVersion = platformVersion,
             providerTypeRaw = plan.providerTypeRaw
         )
-        val policy = normalizedPolicy
+        val policy = normalizedPolicy.copy(minimumTierRaw = plan.minimumTierRaw)
 
         val startMaterial = when (plan.selectedSuite) {
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND -> buildQPeriaptStartMaterial(
+                clientNonce = clientNonce,
+                capabilities = caps,
+                policy = policy,
+                peerQPeriaptPublicKey = requireNotNull(options.peerKemPublicKeys.qPeriaptPublicKey) {
+                    "Q-Periapt selected but peer Q-Periapt public key is missing"
+                },
+                protocolSigningKeys = options.protocolSigningKeys,
+                messageAExtensionsRaw = options.messageAExtensionsRaw
+            )
             P2PCryptoSuite.X25519 -> buildClassicStartMaterial(
                 clientNonce = clientNonce,
                 capabilities = caps,
@@ -157,7 +238,8 @@ class P2PHandshakeClient(
             offeredSuites = listOf(plan.selectedSuite),
             handshakePolicy = policy,
             allowClassicBootstrapForTrustedPeer = options.allowClassicBootstrapForTrustedPeer,
-            pqcSharedSecret32 = startMaterial.pqcSharedSecret32
+            pqcSharedSecret32 = startMaterial.pqcSharedSecret32,
+            downgradeEvent = downgradeEvent
         )
 
         // Pro release may wrap with SBP1; we always wrap for compatibility.
@@ -170,7 +252,7 @@ class P2PHandshakeClient(
             rawMessageB = rawMessageB,
             peerIdForTrust = null,
             trustStore = null,
-            allowTrustOnFirstUse = true
+            allowTrustOnFirstUse = false
         )
     }
 
@@ -179,7 +261,7 @@ class P2PHandshakeClient(
         rawMessageB: ByteArray,
         peerIdForTrust: String?,
         trustStore: P2PHandshakeWire.TrustStore?,
-        allowTrustOnFirstUse: Boolean = true
+        allowTrustOnFirstUse: Boolean = false
     ): Result {
         val msgB = P2PHandshakeWire.decodeMessageB(rawMessageB)
 
@@ -196,6 +278,9 @@ class P2PHandshakeClient(
 
         val negotiatedSuite = (msgB.selectedSuite as? P2PCryptoSuiteId.Known)?.suite
             ?: throw IllegalArgumentException("Unknown suite ${msgB.selectedSuite.wireId}")
+        require(state.offeredSuites.any { it.wireId == msgB.selectedSuite.wireId }) {
+            "MessageB selected a suite that was not offered by this initiator attempt"
+        }
         enforcePolicyForNegotiatedSuite(
             policy = state.handshakePolicy,
             negotiatedSuite = negotiatedSuite,
@@ -238,6 +323,7 @@ class P2PHandshakeClient(
             }
             P2PCryptoSuite.MLKEM_768,
             P2PCryptoSuite.MLKEM_768_FS_COMPAT,
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND,
             P2PCryptoSuite.X_WING -> {
                 val ss = state.pqcSharedSecret32
                     ?: error("Missing precomputed PQC shared secret for negotiated suite")
@@ -250,8 +336,15 @@ class P2PHandshakeClient(
             }
             P2PCryptoSuite.P256 -> error("P256 suite is not supported by this client")
         }
-        // Validate deterministic payload shape for compatibility.
-        runCatching { P2PCryptoCapabilities.deterministicDecode(payload) }
+        // Validate deterministic payload shape for compatibility. Do not treat a malformed payload
+        // as an empty/unknown peer state; it is part of the signed handshake transcript.
+        val responderCapabilities = P2PCryptoCapabilities.deterministicDecode(payload)
+        if (negotiatedSuite == P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND) {
+            QPeriaptPlatformPolicy.requireHandshakePeerEligible(
+                capabilities = responderCapabilities,
+                peerRole = "responder"
+            )
+        }
 
         val keys = P2PHandshakeWire.deriveSessionKeys(
             roleIsInitiator = true,
@@ -267,7 +360,13 @@ class P2PHandshakeClient(
             direction = P2PHandshakeWire.FinishedDirection.INITIATOR_TO_RESPONDER,
             sessionKeys = keys
         )
-        return Result(sessionKeys = keys, negotiatedSuite = negotiatedSuite, clientFinishedToSend = HandshakePaddingP1.wrap(clientFinished))
+        return Result(
+            sessionKeys = keys,
+            negotiatedSuite = negotiatedSuite,
+            clientFinishedToSend = HandshakePaddingP1.wrap(clientFinished),
+            remoteProtocolIdentityFingerprint =
+                P2PHandshakeWire.computePeerSigningFingerprint(msgB.identityPublicKeys)
+        )
     }
 
     fun verifyResponderFinished(rawFinished: ByteArray, sessionKeys: P2PHandshakeWire.DerivedSessionKeys): Boolean {
@@ -430,8 +529,61 @@ class P2PHandshakeClient(
         )
     }
 
+    private fun buildQPeriaptStartMaterial(
+        clientNonce: ByteArray,
+        capabilities: P2PCryptoCapabilities,
+        policy: P2PHandshakePolicy,
+        peerQPeriaptPublicKey: ByteArray,
+        protocolSigningKeys: P2PProtocolSigningKeys?,
+        messageAExtensionsRaw: ByteArray
+    ): StartMaterial {
+        require(peerQPeriaptPublicKey.size == P2PQPeriaptKem.QPERIAPT_PUBLIC_KEY_SIZE) {
+            "Invalid peer Q-Periapt public key length: ${peerQPeriaptPublicKey.size}"
+        }
+
+        val pqcProvider = AndroidPQCCryptoProvider()
+        val encap = P2PQPeriaptKem.encapsulate(
+            recipientPublicKey = peerQPeriaptPublicKey,
+            pqcProvider = pqcProvider
+        )
+        val (idPrivRaw, idPubRaw) = if (protocolSigningKeys?.mlDsa65PrivateKeyRaw != null &&
+            protocolSigningKeys.mlDsa65PublicKeyRaw != null
+        ) {
+            protocolSigningKeys.mlDsa65PrivateKeyRaw to protocolSigningKeys.mlDsa65PublicKeyRaw
+        } else {
+            P2PHandshakeWire.generateMlDsa65IdentityKeyPair()
+        }
+        val identityKeys = P2PIdentityPublicKeys.Keys(
+            protocolPublicKey = idPubRaw,
+            protocolAlgorithm = P2PIdentityPublicKeys.ProtocolAlgorithm.ML_DSA_65,
+            secureEnclavePublicKey = null
+        )
+        val msgA = P2PHandshakeWire.encodeMessageAWithRawSigningKey(
+            supportedSuites = listOf(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND),
+            keyShares = listOf(
+                P2PHandshakeWire.KeyShare(P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND, encap.ciphertext)
+            ),
+            clientNonce32 = clientNonce,
+            capabilities = capabilities,
+            policy = policy,
+            identityKeys = identityKeys,
+            identitySigningPrivateKeyRaw = idPrivRaw,
+            extensionsRaw = messageAExtensionsRaw
+        )
+        return StartMaterial(
+            messageA = msgA,
+            identityPrivateKey = null,
+            identityPrivateKeyRaw = idPrivRaw,
+            identityAlgorithm = P2PIdentityPublicKeys.ProtocolAlgorithm.ML_DSA_65,
+            identityPublicRaw32 = idPubRaw,
+            x25519KeyPair = null,
+            pqcSharedSecret32 = encap.sharedSecret32
+        )
+    }
+
     private data class RuntimeSupport(
         val liboqsAvailable: Boolean,
+        val qPeriaptAvailable: Boolean,
         val xWingAvailable: Boolean
     )
 
@@ -452,18 +604,27 @@ class P2PHandshakeClient(
         policy: P2PHandshakePolicy,
         allowClassicBootstrapForTrustedPeer: Boolean
     ): ResolvedSuitePlan {
-        val platformMajor = parsePlatformMajorVersion(platformVersion)
-        val preferredTiers = when {
-            platformMajor != null && platformMajor >= 16 ->
-                listOf(SuiteTier.X_WING, SuiteTier.PQC, SuiteTier.CLASSIC)
-            platformMajor != null && platformMajor in 13..15 ->
-                listOf(SuiteTier.PQC, SuiteTier.CLASSIC)
-            else ->
-                listOf(SuiteTier.CLASSIC)
+        val requestedMinimumTier = parseMinimumTier(policy.minimumTierRaw)
+        val qPeriaptExplicit = requestedMinimumTier == SuiteTier.Q_PERIAPT
+        if (qPeriaptExplicit) {
+            QPeriaptPlatformPolicy.requireLocalAndroidSupported(platformVersion)
         }
-        val minimumTier = parseMinimumTier(policy.minimumTierRaw)
+        val peerSupportsMlKemOnly =
+            peerKemPublicKeys.mlKem768PublicKey != null && peerKemPublicKeys.xWingPublicKey == null
+        val minimumTier = when {
+            requestedMinimumTier == SuiteTier.X_WING &&
+                runtimeSupport.liboqsAvailable &&
+                (!runtimeSupport.xWingAvailable || peerSupportsMlKemOnly) -> SuiteTier.PQC
+            else -> requestedMinimumTier
+        }
+        val preferredTiers =
+            if (qPeriaptExplicit) {
+                listOf(SuiteTier.Q_PERIAPT)
+            } else {
+                listOf(SuiteTier.X_WING, SuiteTier.PQC, SuiteTier.CLASSIC)
+            }
 
-        if (allowClassicBootstrapForTrustedPeer) {
+        if (allowClassicBootstrapForTrustedPeer && !qPeriaptExplicit) {
             return ResolvedSuitePlan(
                 selectedSuite = P2PCryptoSuite.X25519,
                 usedClassicFallback = preferredTiers.any { it != SuiteTier.CLASSIC },
@@ -475,32 +636,63 @@ class P2PHandshakeClient(
             )
         }
 
-        val selectedTier = preferredTiers.firstOrNull { tier ->
-            val tierAllowed = when (tier) {
+        // Suite negotiation is an explicit set intersection followed by a
+        // priority-ordered selection within that intersection (R4.3).
+        //
+        // A tier is in the mutually-supported set iff the local runtime supports it
+        // AND the peer declared the corresponding KEM public key. CLASSIC is always
+        // mutually supported (both sides always speak x25519).
+        fun tierMutuallySupported(tier: SuiteTier): Boolean = when (tier) {
+            SuiteTier.Q_PERIAPT ->
+                runtimeSupport.qPeriaptAvailable && peerKemPublicKeys.qPeriaptPublicKey != null
+            SuiteTier.X_WING ->
+                runtimeSupport.xWingAvailable && peerKemPublicKeys.xWingPublicKey != null
+            SuiteTier.PQC ->
+                runtimeSupport.liboqsAvailable && peerKemPublicKeys.mlKem768PublicKey != null
+            SuiteTier.CLASSIC -> true
+        }
+
+        val mutuallySupportedTiers = preferredTiers.filter { tierMutuallySupported(it) }
+
+        // Empty intersection → classify as "no common suite" and terminate (R4.3/R4.4).
+        // Note: when !qPeriaptExplicit, CLASSIC is always in preferredTiers and always
+        // mutually supported, so an empty intersection here implies a qPeriaptExplicit
+        // request whose sole tier (Q_PERIAPT) did not intersect.
+        if (mutuallySupportedTiers.isEmpty()) {
+            throw HandshakeNegotiationException(
+                HandshakeFailure.SuiteIntersectionEmpty(
+                    "no common suite for policy(minimum=${policy.minimumTierRaw}, " +
+                        "requirePqc=${policy.requirePqc}, allowClassicFallback=${policy.allowClassicFallback})"
+                )
+            )
+        }
+
+        // Select the highest-priority tier within the intersection that policy permits.
+        val selectedTier = mutuallySupportedTiers.firstOrNull { tier ->
+            when (tier) {
                 SuiteTier.CLASSIC ->
-                    allowClassicBootstrapForTrustedPeer ||
+                    (allowClassicBootstrapForTrustedPeer && !qPeriaptExplicit) ||
                         (!policy.requirePqc &&
                             policy.allowClassicFallback &&
                             tier.rank >= minimumTier.rank)
                 else -> tier.rank >= minimumTier.rank
             }
-            if (!tierAllowed) return@firstOrNull false
-
-            when (tier) {
-                SuiteTier.X_WING ->
-                    runtimeSupport.xWingAvailable && peerKemPublicKeys.xWingPublicKey != null
-                SuiteTier.PQC ->
-                    runtimeSupport.liboqsAvailable && peerKemPublicKeys.mlKem768PublicKey != null
-                SuiteTier.CLASSIC -> true
-            }
         }
 
         val resolvedTier = selectedTier ?: run {
-            if (allowClassicBootstrapForTrustedPeer) {
+            if (allowClassicBootstrapForTrustedPeer && !qPeriaptExplicit) {
                 SuiteTier.CLASSIC
             } else {
-                throw IllegalStateException(
-                    "No compatible suite for policy(minimum=${policy.minimumTierRaw}, requirePqc=${policy.requirePqc}, allowClassicFallback=${policy.allowClassicFallback})"
+                // The intersection is non-empty but no member survives the policy
+                // constraints (min-tier / requirePqc / allowClassicFallback). Per R4.3
+                // this terminates the handshake as "no common suite".
+                throw HandshakeNegotiationException(
+                    HandshakeFailure.SuiteIntersectionEmpty(
+                        "no policy-permitted suite in intersection " +
+                            "${mutuallySupportedTiers.map { it.name }} for policy(" +
+                            "minimum=${policy.minimumTierRaw}, requirePqc=${policy.requirePqc}, " +
+                            "allowClassicFallback=${policy.allowClassicFallback})"
+                    )
                 )
             }
         }
@@ -509,22 +701,31 @@ class P2PHandshakeClient(
             resolvedTier == SuiteTier.CLASSIC && preferredTiers.any { it != SuiteTier.CLASSIC }
 
         return when (resolvedTier) {
+            SuiteTier.Q_PERIAPT -> ResolvedSuitePlan(
+                selectedSuite = P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND,
+                usedClassicFallback = usedClassicFallback,
+                minimumTierRaw = P2PQPeriaptKem.MINIMUM_TIER_RAW,
+                supportedKem = listOf(P2PQPeriaptKem.KEM_CAPABILITY_NAME),
+                supportedSignatures = listOf("ml-dsa-65"),
+                supportedAuthProfiles = listOf(QPeriaptPlatformPolicy.AUTH_PROFILE),
+                providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_QPERIAPT
+            )
             SuiteTier.X_WING -> ResolvedSuitePlan(
                 selectedSuite = P2PCryptoSuite.X_WING,
                 usedClassicFallback = usedClassicFallback,
                 minimumTierRaw = "nativePQC",
-                supportedKem = listOf("x-wing", "mlkem-768", "x25519"),
-                supportedSignatures = listOf("ml-dsa-65", "ed25519"),
-                supportedAuthProfiles = listOf("hybrid", "pqc", "classic"),
+                supportedKem = listOf("x-wing", "mlkem-768"),
+                supportedSignatures = listOf("ml-dsa-65"),
+                supportedAuthProfiles = listOf("hybrid", "pqc"),
                 providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_CRYPTO_KIT_PQC
             )
             SuiteTier.PQC -> ResolvedSuitePlan(
                 selectedSuite = P2PCryptoSuite.MLKEM_768,
                 usedClassicFallback = usedClassicFallback,
                 minimumTierRaw = "liboqsPQC",
-                supportedKem = listOf("mlkem-768", "x25519"),
-                supportedSignatures = listOf("ml-dsa-65", "ed25519"),
-                supportedAuthProfiles = listOf("pqc", "classic"),
+                supportedKem = listOf("mlkem-768"),
+                supportedSignatures = listOf("ml-dsa-65"),
+                supportedAuthProfiles = listOf("pqc"),
                 providerTypeRaw = P2PHandshakeWire.PROVIDER_TYPE_LIBOQS
             )
             SuiteTier.CLASSIC -> ResolvedSuitePlan(
@@ -540,9 +741,11 @@ class P2PHandshakeClient(
     }
 
     private fun parseMinimumTier(raw: String): SuiteTier = when (raw.trim()) {
+        P2PQPeriaptKem.MINIMUM_TIER_RAW, "q-periapt", "qperiapt" -> SuiteTier.Q_PERIAPT
         "nativePQC", "x-wing", "xwing", "strictXWing" -> SuiteTier.X_WING
         "liboqsPQC", "pqc", "mlkem", "ml-kem" -> SuiteTier.PQC
-        else -> SuiteTier.CLASSIC
+        "classic" -> SuiteTier.CLASSIC
+        else -> throw IllegalArgumentException("Unsupported handshake minimum tier: $raw")
     }
 
     private fun normalizePolicy(policy: P2PHandshakePolicy, platformVersion: String): P2PHandshakePolicy {
@@ -552,12 +755,16 @@ class P2PHandshakeClient(
             platformMajor != null && platformMajor >= 13 -> "liboqsPQC"
             else -> "classic"
         }
-        val normalizedTier = when (parseMinimumTier(policy.minimumTierRaw)) {
+        val requested = policy.minimumTierRaw.trim()
+        val normalizedTier = if (requested.isBlank()) {
+            defaultTier
+        } else when (parseMinimumTier(requested)) {
+            SuiteTier.Q_PERIAPT -> P2PQPeriaptKem.MINIMUM_TIER_RAW
             SuiteTier.X_WING -> "nativePQC"
             SuiteTier.PQC -> "liboqsPQC"
             SuiteTier.CLASSIC -> "classic"
         }
-        return policy.copy(minimumTierRaw = if (policy.minimumTierRaw.isBlank()) defaultTier else normalizedTier)
+        return policy.copy(minimumTierRaw = normalizedTier)
     }
 
     private fun enforceIdentityAlgorithmBinding(
@@ -566,6 +773,7 @@ class P2PHandshakeClient(
     ) {
         val expected = when (suite) {
             P2PCryptoSuite.X25519 -> P2PIdentityPublicKeys.ProtocolAlgorithm.ED25519
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND,
             P2PCryptoSuite.MLKEM_768,
             P2PCryptoSuite.X_WING ->
                 P2PIdentityPublicKeys.ProtocolAlgorithm.ML_DSA_65
@@ -584,6 +792,7 @@ class P2PHandshakeClient(
         allowClassicBootstrapForTrustedPeer: Boolean
     ) {
         val negotiatedTier = when (negotiatedSuite) {
+            P2PCryptoSuite.Q_PERIAPT_CONTEXT_BOUND -> SuiteTier.Q_PERIAPT
             P2PCryptoSuite.X_WING -> SuiteTier.X_WING
             P2PCryptoSuite.MLKEM_768 -> SuiteTier.PQC
             P2PCryptoSuite.X25519 -> SuiteTier.CLASSIC
@@ -592,7 +801,11 @@ class P2PHandshakeClient(
                 error("Unsupported negotiated suite: ${negotiatedSuite.name}")
         }
         val minimumTier = parseMinimumTier(policy.minimumTierRaw)
-        require(negotiatedTier.rank >= minimumTier.rank || (allowClassicBootstrapForTrustedPeer && negotiatedTier == SuiteTier.CLASSIC)) {
+        val classicBootstrapAllowed =
+            allowClassicBootstrapForTrustedPeer &&
+                minimumTier != SuiteTier.Q_PERIAPT &&
+                negotiatedTier == SuiteTier.CLASSIC
+        require(negotiatedTier.rank >= minimumTier.rank || classicBootstrapAllowed) {
             "Negotiated suite ${negotiatedSuite.name} is below minimum tier ${policy.minimumTierRaw}"
         }
         if (negotiatedTier == SuiteTier.CLASSIC) {
@@ -610,7 +823,17 @@ class P2PHandshakeClient(
         return token.toIntOrNull()
     }
 
+    /**
+     * The PQC suite this Android 16+ platform would have preferred before falling back to
+     * classic, recorded as the `from_suite` of a [DowngradeEvent].
+     */
+    private fun preferredPqcSuiteFor(platformVersion: String): P2PCryptoSuite {
+        val major = parsePlatformMajorVersion(platformVersion)
+        return if (major != null && major >= 16) P2PCryptoSuite.X_WING else P2PCryptoSuite.MLKEM_768
+    }
+
     private enum class SuiteTier {
+        Q_PERIAPT,
         X_WING,
         PQC,
         CLASSIC;
@@ -620,6 +843,7 @@ class P2PHandshakeClient(
                 CLASSIC -> 0
                 PQC -> 1
                 X_WING -> 2
+                Q_PERIAPT -> 3
             }
     }
 
@@ -628,6 +852,7 @@ class P2PHandshakeClient(
             platformVersion: String,
             liboqsAvailable: Boolean,
             xWingAvailable: Boolean,
+            qPeriaptAvailable: Boolean = false,
             peerKemPublicKeys: PeerKemPublicKeys,
             policy: P2PHandshakePolicy = P2PHandshakePolicy.DEFAULT,
             allowClassicBootstrapForTrustedPeer: Boolean = false
@@ -637,6 +862,7 @@ class P2PHandshakeClient(
                 platformVersion = platformVersion,
                 runtimeSupport = RuntimeSupport(
                     liboqsAvailable = liboqsAvailable,
+                    qPeriaptAvailable = qPeriaptAvailable,
                     xWingAvailable = xWingAvailable
                 ),
                 peerKemPublicKeys = peerKemPublicKeys,

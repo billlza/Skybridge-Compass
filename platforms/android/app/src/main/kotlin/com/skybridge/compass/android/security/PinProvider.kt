@@ -17,6 +17,7 @@ import java.security.KeyFactory
 import java.security.PublicKey
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
+import java.util.Base64 as JavaBase64
 
 private val Context.pinRegistryDataStore by preferencesDataStore(name = "pin_registry")
 
@@ -57,16 +58,11 @@ class PinProviderImpl(
     override suspend fun buildCertificatePinner(context: Context): CertificatePinner? {
         val prefs = context.pinRegistryDataStore.data.first()
         val pinsJson = prefs[KEY_PINS_JSON] ?: return null
-        val payload = runCatching { json.decodeFromString(RemotePinPayload.serializer(), pinsJson) }.getOrNull()
-            ?: return null
+        val payload = parseAndValidateRemotePinPayload(json, pinsJson)
         if (payload.hosts.isEmpty()) return null
         val builder = CertificatePinner.Builder()
         payload.hosts.forEach { hostPins ->
-            // Validate pin format: must start with "sha256/" and base64-encoded value after
-            val validated = hostPins.pins.filter { it.startsWith("sha256/") && it.length > 8 }
-            if (validated.isNotEmpty()) {
-                builder.add(hostPins.host, *validated.toTypedArray())
-            }
+            builder.add(hostPins.host, *validatedCertificatePins(hostPins).toTypedArray())
         }
         return builder.build()
     }
@@ -74,7 +70,7 @@ class PinProviderImpl(
     override suspend fun updateFromTrustedJson(context: Context, payloadJson: String): Result<Unit> {
         // Externally verified payloads can be accepted after sanity parse
         return try {
-            json.decodeFromString(RemotePinPayload.serializer(), payloadJson)
+            parseAndValidateRemotePinPayload(json, payloadJson)
             // Save new pins, keeping previous for rollback on failure
             val prev = context.pinRegistryDataStore.data.first()[KEY_PINS_JSON]
             try {
@@ -103,7 +99,7 @@ class PinProviderImpl(
                 return Result.failure(IllegalStateException("Remote pins signature invalid"))
             }
             // Accept payload (verified or dev-override)
-            json.decodeFromString(RemotePinPayload.serializer(), payload) // sanity
+            parseAndValidateRemotePinPayload(json, payload)
             val prev = context.pinRegistryDataStore.data.first()[KEY_PINS_JSON]
             try {
                 context.pinRegistryDataStore.edit { it[KEY_PINS_JSON] = payload }
@@ -148,5 +144,26 @@ class PinProviderImpl(
         } catch (_: Exception) {
             null
         }
+    }
+}
+
+internal fun parseAndValidateRemotePinPayload(json: Json, payloadJson: String): RemotePinPayload {
+    val payload = json.decodeFromString(RemotePinPayload.serializer(), payloadJson)
+    payload.hosts.forEach(::validatedCertificatePins)
+    return payload
+}
+
+internal fun validatedCertificatePins(hostPins: HostPins): List<String> {
+    val host = hostPins.host.trim()
+    require(host.isNotEmpty()) { "pin registry host is blank" }
+    require(hostPins.pins.isNotEmpty()) { "pin registry host $host has no certificate pins" }
+    return hostPins.pins.map { pin ->
+        require(pin.startsWith("sha256/")) { "pin registry host $host has unsupported pin algorithm" }
+        val digest = pin.removePrefix("sha256/")
+        val decoded = runCatching { JavaBase64.getDecoder().decode(digest) }.getOrElse {
+            throw IllegalArgumentException("pin registry host $host has invalid sha256 pin base64", it)
+        }
+        require(decoded.size == 32) { "pin registry host $host has sha256 pin length ${decoded.size}, expected 32" }
+        pin
     }
 }

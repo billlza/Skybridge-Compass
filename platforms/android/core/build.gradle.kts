@@ -1,19 +1,19 @@
 plugins {
-    id("com.android.library")
-    id("com.google.devtools.ksp")
-    id("dagger.hilt.android.plugin")
-    id("org.jetbrains.kotlin.plugin.serialization")
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.hilt.android)
+    alias(libs.plugins.kotlin.serialization)
     id("kotlin-parcelize")
     // Kotlin 2.0+ Compose Gradle 插件（Android Compose 必需）
-    id("org.jetbrains.kotlin.plugin.compose")
+    alias(libs.plugins.kotlin.compose)
 }
 
 android {
     namespace = "com.skybridge.compass.core"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
-        minSdk = 33
+        minSdk = 36
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
@@ -47,11 +47,14 @@ android {
     }
 
     lint {
-        targetSdk = 36
+        targetSdk = 37
     }
 
     testOptions {
-        targetSdk = 36
+        targetSdk = 37
+        unitTests.all {
+            it.useJUnitPlatform()
+        }
     }
 
     // 使用 Kotlin Compose 插件后不再需要 legacy 的 composeOptions
@@ -64,57 +67,64 @@ kotlin {
     jvmToolchain(21)
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        freeCompilerArgs.add("-Xannotation-default-target=param-property")
     }
 }
 
 dependencies {
-    implementation(project(":shared"))
-    implementation("androidx.core:core-ktx:1.18.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
-    implementation("androidx.security:security-crypto:1.1.0")
+    implementation(project.dependencies.project(":shared"))
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.security.crypto)
 
-    implementation(platform("androidx.compose:compose-bom:2026.03.00"))
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.ui:ui-graphics")
-    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
 
     // Hilt (core applies Hilt Gradle plugin)
-    implementation("com.google.dagger:hilt-android:2.59.2")
-    ksp("com.google.dagger:hilt-compiler:2.59.2")
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
 
     // Coroutines (Flow API used in DAO/Repository)
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation(libs.kotlinx.coroutines.core)
 
     // Room (runtime + Kotlin extensions)
-    implementation("androidx.room:room-runtime:2.8.4")
-    implementation("androidx.room:room-ktx:2.8.4")
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
     // Room code generation via KSP
-    ksp("androidx.room:room-compiler:2.8.4")
+    ksp(libs.androidx.room.compiler)
 
     // Serialization
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.10.0")
+    implementation(libs.kotlinx.serialization.json)
 
     // Ktor (used by NetworkManager)
-    implementation("io.ktor:ktor-client-core:3.4.1")
-    implementation("io.ktor:ktor-client-android:3.4.1")
-    implementation("io.ktor:ktor-client-okhttp:3.4.1")
-    implementation("io.ktor:ktor-client-content-negotiation:3.4.1")
-    implementation("io.ktor:ktor-serialization-kotlinx-json:3.4.1")
-    implementation("io.ktor:ktor-client-websockets:3.4.1")
-    implementation("androidx.datastore:datastore-preferences:1.2.1")
+    implementation(libs.ktor.client.core)
+    implementation(libs.ktor.client.android)
+    implementation(libs.ktor.client.okhttp)
+    implementation(libs.ktor.client.content.negotiation)
+    implementation(libs.ktor.serialization.kotlinx.json)
+    implementation(libs.ktor.client.websockets)
+    implementation(libs.androidx.datastore.preferences)
 
-    // WebRTC (DataChannel / ICE) for cross-network file transfer interop with macOS/iOS Pro release
-    // NOTE: Version pinned for reproducible builds.
-    implementation("com.infobip:google-webrtc:1.0.45036")
+    // WebRTC types are compile-only here; the application owns and audits the packaged AAR.
+    compileOnly(libs.google.webrtc)
 
     // Testing
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    testImplementation(libs.junit4)
+    testImplementation(libs.junit.jupiter.api)
+    testRuntimeOnly(libs.junit.jupiter.engine)
+    testRuntimeOnly(libs.junit.vintage.engine)
+    testRuntimeOnly(libs.junit.platform.launcher)
+    testRuntimeOnly(libs.slf4j.nop)
+    testImplementation(libs.kotlinx.coroutines.test)
+    // 属性测试（Epic 9 的 Property 9–16）。与 :device-discovery / :file-transfer / :shared 同一组合。
+    testImplementation(libs.kotest.runner.junit5)
+    testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.kotest.property)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.espresso.core)
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
