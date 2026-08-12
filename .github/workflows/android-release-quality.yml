@@ -84,6 +84,7 @@ jobs:
             scripts/lib/strict_gradle_output.sh \
             scripts/tests/test_android_release_aab_gate.sh \
             scripts/tests/test_release_artifact_preflight.sh \
+            scripts/tests/test_tracked_liboqs_build_contract.sh \
             scripts/tests/test_viewer_only_packaging_gate.sh
           shellcheck -x -S warning \
             scripts/check_android_packaged_placeholders.sh \
@@ -92,9 +93,11 @@ jobs:
             scripts/lib/strict_gradle_output.sh \
             scripts/tests/test_android_release_aab_gate.sh \
             scripts/tests/test_release_artifact_preflight.sh \
+            scripts/tests/test_tracked_liboqs_build_contract.sh \
             scripts/tests/test_viewer_only_packaging_gate.sh
           bash scripts/tests/test_android_release_aab_gate.sh
           bash scripts/tests/test_release_artifact_preflight.sh
+          bash scripts/tests/test_tracked_liboqs_build_contract.sh
           bash scripts/tests/test_viewer_only_packaging_gate.sh
 
       - name: Run full zero-warning Android matrix
