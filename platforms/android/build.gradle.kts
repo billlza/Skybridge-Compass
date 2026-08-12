@@ -28,7 +28,10 @@ abstract class ByteBuddyAgentArgumentProvider : CommandLineArgumentProvider {
     abstract val agentJar: RegularFileProperty
 
     override fun asArguments(): Iterable<String> =
-        listOf("-javaagent:${agentJar.get().asFile.absolutePath}")
+        listOf(
+            "-Xshare:off",
+            "-javaagent:${agentJar.get().asFile.absolutePath}",
+        )
 }
 
 fun Project.configureMockKByteBuddyAgent(unitTest: UnitTest) {

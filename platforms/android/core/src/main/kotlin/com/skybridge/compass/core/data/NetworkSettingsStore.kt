@@ -47,7 +47,6 @@ object NetworkSettingsStore {
     private val KEY_ENCRYPTION_MODE = stringPreferencesKey("encryption_mode")
     private val KEY_STUN_SERVERS = stringPreferencesKey("stun_servers_csv")
     private val KEY_TURN_SERVERS = stringPreferencesKey("turn_servers_csv")
-    private val KEY_CERT_PINS_JSON = stringPreferencesKey("certificate_pins_json")
     private val KEY_WEBRTC_ENABLED = booleanPreferencesKey("webrtc_enabled")
     private val KEY_WEBRTC_SIGNALING_URL = stringPreferencesKey("webrtc_signaling_url")
 
@@ -235,16 +234,6 @@ object NetworkSettingsStore {
         require(servers.any { it.isNotBlank() }) { "TURN server list cannot be blank" }
         val csv = NetworkEndpointPolicy.normalizeTurnServers(servers).joinToString(",")
         context.networkSettingsDataStore.edit { it[KEY_TURN_SERVERS] = csv }
-    }
-
-    // 证书固定 JSON（与 PinProvider 结构兼容）
-    fun observeCertificatePinsJson(context: Context): Flow<String?> =
-        context.networkSettingsDataStore.data
-            .catch { rethrowPreferenceReadFailure(it) }
-            .map { it[KEY_CERT_PINS_JSON] }
-
-    suspend fun setCertificatePinsJson(context: Context, pinsJson: String) {
-        context.networkSettingsDataStore.edit { it[KEY_CERT_PINS_JSON] = pinsJson }
     }
 
     private fun parseCsv(value: String?): List<String>? {

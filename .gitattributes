@@ -1,0 +1,6 @@
+/Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg text eol=lf
+/platforms/android/scripts/generate_android_launcher_icons.py text eol=lf
+/platforms/android/app/launcher-icon-generation.json text eol=lf
+/platforms/android/app/src/main/res/drawable/ic_launcher_background.xml text eol=lf
+/platforms/android/app/src/main/res/mipmap-anydpi/ic_launcher.xml text eol=lf
+/platforms/android/app/src/main/res/mipmap-anydpi/ic_launcher_round.xml text eol=lf

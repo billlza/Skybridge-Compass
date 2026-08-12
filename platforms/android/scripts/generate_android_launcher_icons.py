@@ -8,7 +8,9 @@ import hashlib
 import io
 import json
 import os
+import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -65,12 +67,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-experimental-source",
         action="store_true",
-        help="Permit --source to point outside the canonical macOS AppIconMaster.png pipeline.",
+        help="Permit generation from a source outside the canonical AppIconMaster.svg pipeline.",
     )
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Regenerate into a temporary directory and fail if checked-in Android icon resources drift.",
+        help=(
+            "Verify the committed launcher resource structure and its source/generator/asset "
+            "generation binding without rerasterizing across platform-specific renderers."
+        ),
     )
     parser.add_argument(
         "--write-preview",
@@ -114,11 +119,18 @@ def expected_output_paths(res_dir: Path) -> list[Path]:
     ]
 
 
+def bound_resource_paths(res_dir: Path) -> list[Path]:
+    return expected_output_paths(res_dir) + [
+        res_dir / "drawable" / "ic_launcher_background.xml",
+        res_dir / "mipmap-anydpi" / "ic_launcher.xml",
+        res_dir / "mipmap-anydpi" / "ic_launcher_round.xml",
+    ]
+
+
 def asset_set_sha256(res_dir: Path, paths: list[Path]) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths):
-        if path.is_symlink() or not path.is_file():
-            raise RuntimeError(f"launcher icon asset must be a regular file: {path}")
+        require_single_link_regular_file(path, "launcher icon asset")
         relative = path.relative_to(res_dir).as_posix().encode("utf-8")
         digest.update(relative)
         digest.update(b"\0")
@@ -128,7 +140,7 @@ def asset_set_sha256(res_dir: Path, paths: list[Path]) -> str:
 
 
 def expected_generation_manifest(source_path: Path, res_dir: Path) -> dict[str, object]:
-    outputs = expected_output_paths(res_dir)
+    resources = bound_resource_paths(res_dir)
     return {
         "schemaVersion": GENERATION_MANIFEST_SCHEMA_VERSION,
         "purpose": GENERATION_MANIFEST_PURPOSE,
@@ -136,7 +148,7 @@ def expected_generation_manifest(source_path: Path, res_dir: Path) -> dict[str, 
         "sourceSha256": sha256(source_path),
         "generator": GENERATOR_PATH.relative_to(MAC_RELEASE_ROOT).as_posix(),
         "generatorSha256": sha256(GENERATOR_PATH),
-        "assetSetSha256": asset_set_sha256(res_dir, outputs),
+        "assetSetSha256": asset_set_sha256(res_dir, resources),
     }
 
 
@@ -156,10 +168,10 @@ def validate_generation_manifest_payload(
 
 
 def verify_generation_manifest(source_path: Path, res_dir: Path) -> None:
-    if GENERATION_MANIFEST.is_symlink() or not GENERATION_MANIFEST.is_file():
-        raise RuntimeError(
-            f"missing regular launcher icon generation manifest: {GENERATION_MANIFEST}"
-        )
+    require_single_link_regular_file(
+        GENERATION_MANIFEST,
+        "launcher icon generation manifest",
+    )
     if GENERATION_MANIFEST.stat().st_size > 16 * 1024:
         raise RuntimeError("launcher icon generation manifest exceeds 16 KiB")
     try:
@@ -187,9 +199,15 @@ def write_generation_manifest(source_path: Path, res_dir: Path) -> None:
             temporary_path = Path(handle.name)
             handle.write(content)
             handle.flush()
+            os.fchmod(handle.fileno(), 0o644)
             os.fsync(handle.fileno())
-        temporary_path.chmod(0o644)
         temporary_path.replace(GENERATION_MANIFEST)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_descriptor = os.open(GENERATION_MANIFEST.parent, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
@@ -431,7 +449,8 @@ def verify_outputs(res_dir: Path, paths: list[Path]) -> None:
         extra = sorted(actual - expected)
         raise RuntimeError(f"unexpected output set; missing={missing}; extra={extra}")
     for path in sorted(paths):
-        if path.is_symlink() or not path.is_file() or path.stat().st_size <= 0:
+        require_single_link_regular_file(path, "generated launcher icon")
+        if path.stat().st_size <= 0:
             raise RuntimeError(f"invalid generated icon: {path}")
         density = path.parent.name.removeprefix("drawable-")
         expected_size = DENSITIES[density]
@@ -491,8 +510,7 @@ def verify_resource_contract(res_dir: Path) -> None:
     }
     for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
         path = res_dir / "mipmap-anydpi" / name
-        if not path.is_file():
-            raise FileNotFoundError(f"missing adaptive icon XML: {path}")
+        require_single_link_regular_file(path, "adaptive icon XML")
         root = ET.parse(path).getroot()
         if root.tag != "adaptive-icon":
             raise RuntimeError(f"{path} root must be adaptive-icon; got {root.tag}")
@@ -501,25 +519,155 @@ def verify_resource_contract(res_dir: Path) -> None:
             raise RuntimeError(f"{path} has unexpected adaptive icon layers: {layers}")
 
     background = res_dir / "drawable" / "ic_launcher_background.xml"
-    if not background.is_file():
-        raise FileNotFoundError(f"missing launcher background XML: {background}")
+    require_single_link_regular_file(background, "launcher background XML")
+    background_root = ET.parse(background).getroot()
+    if background_root.tag != "vector":
+        raise RuntimeError(f"{background} root must be vector; got {background_root.tag}")
+    expected_vector_attributes = {
+        ANDROID_NS + "width": "108dp",
+        ANDROID_NS + "height": "108dp",
+        ANDROID_NS + "viewportWidth": "108",
+        ANDROID_NS + "viewportHeight": "108",
+    }
+    if background_root.attrib != expected_vector_attributes:
+        raise RuntimeError(f"{background} has unexpected vector bounds")
+    expected_background_paths = [
+        {
+            ANDROID_NS + "fillColor": "#F9FDFE",
+            ANDROID_NS + "pathData": "M0,0h108v108h-108z",
+        },
+        {
+            ANDROID_NS + "fillColor": "#FFFFFF",
+            ANDROID_NS + "fillAlpha": "0.86",
+            ANDROID_NS + "pathData": "M0,0 H108 V36 C92,31 74,28 54,28 C34,28 16,31 0,36 Z",
+        },
+        {
+            ANDROID_NS + "fillColor": "#E8F7FD",
+            ANDROID_NS + "fillAlpha": "0.92",
+            ANDROID_NS + "pathData": "M0,65 H108 V108 H0 Z",
+        },
+    ]
+    if [child.attrib for child in background_root] != expected_background_paths:
+        raise RuntimeError(f"{background} has unexpected vector path content")
 
     legacy_launcher_pngs = sorted(res_dir.glob("mipmap-*/ic_launcher*.png"))
     if legacy_launcher_pngs:
         raise RuntimeError(f"unexpected legacy launcher PNG resources create a second icon pipeline: {legacy_launcher_pngs}")
 
 
+def require_single_link_regular_file(path: Path, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise FileNotFoundError(f"missing {label}: {path}") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError(f"{label} must be a single-link regular file: {path}")
+
+
+def require_real_directory(path: Path, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise RuntimeError(f"unable to inspect {label}: {path}") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError(f"{label} must be a real directory: {path}")
+
+
+def validate_copy_target(target_res_dir: Path, target_path: Path) -> None:
+    try:
+        target_path.relative_to(target_res_dir)
+    except ValueError as error:
+        raise RuntimeError(f"launcher icon target escapes resource directory: {target_path}") from error
+    require_real_directory(target_res_dir, "launcher icon resource directory")
+    require_real_directory(target_path.parent, "launcher icon density directory")
+    try:
+        metadata = target_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise RuntimeError(f"unable to inspect launcher icon target: {target_path}") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError(
+            f"launcher icon target must be a single-link regular file: {target_path}"
+        )
+
+
+def atomic_copy_generated_output(source_path: Path, target_path: Path) -> None:
+    source_metadata = source_path.lstat()
+    if (
+        stat.S_ISLNK(source_metadata.st_mode)
+        or not stat.S_ISREG(source_metadata.st_mode)
+        or source_metadata.st_nlink != 1
+    ):
+        raise RuntimeError(f"generated launcher icon must be a single-link regular file: {source_path}")
+    content = source_path.read_bytes()
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor = os.open(target_path.parent, directory_flags)
+    temporary_name: str | None = None
+    try:
+        for _ in range(16):
+            candidate = f".{target_path.name}.{secrets.token_hex(8)}"
+            try:
+                temporary_descriptor = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_descriptor,
+                )
+            except FileExistsError:
+                continue
+            temporary_name = candidate
+            break
+        else:
+            raise RuntimeError(f"unable to allocate launcher icon temporary file: {target_path}")
+
+        with os.fdopen(temporary_descriptor, "wb", closefd=True) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o644)
+            os.fsync(handle.fileno())
+        os.replace(
+            temporary_name,
+            target_path.name,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        temporary_name = None
+        os.fsync(parent_descriptor)
+    finally:
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except FileNotFoundError:
+                pass
+        os.close(parent_descriptor)
+
+
 def copy_generated_outputs(staged_res_dir: Path, target_res_dir: Path) -> list[Path]:
-    copied: list[Path] = []
+    pairs: list[tuple[Path, Path]] = []
     for density in DENSITIES:
         for name in ("ic_launcher_foreground.png", "ic_launcher_monochrome.png"):
             relative = Path(f"drawable-{density}") / name
-            source_path = staged_res_dir / relative
-            target_path = target_res_dir / relative
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, target_path)
-            copied.append(target_path)
-    return copied
+            pairs.append((staged_res_dir / relative, target_res_dir / relative))
+
+    # Validate the complete destination set before the first write so a bad
+    # target cannot leave a partially updated launcher asset group.
+    for source_path, target_path in pairs:
+        if source_path.is_symlink() or not source_path.is_file():
+            raise RuntimeError(f"missing regular generated launcher icon: {source_path}")
+        validate_copy_target(target_res_dir, target_path)
+
+    for source_path, target_path in pairs:
+        atomic_copy_generated_output(source_path, target_path)
+    return [target for _, target in pairs]
 
 
 def main() -> int:
@@ -527,6 +675,8 @@ def main() -> int:
     source_path = args.source.resolve(strict=True)
     verify_source_path_policy(source_path, args.allow_experimental_source)
     is_canonical_source = source_path == DEFAULT_CANONICAL_ICON.resolve(strict=True)
+    if args.check and not is_canonical_source:
+        raise ValueError("--check only verifies the committed canonical AppIconMaster.svg binding")
     source_hash = sha256(source_path)
     verify_resource_contract(RES_DIR)
 

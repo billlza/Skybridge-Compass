@@ -957,6 +957,7 @@ val checkLauncherIcons = tasks.register<Exec>("checkLauncherIcons") {
     description = "Verify launcher asset structure and its generation binding to the canonical SVG source."
     workingDir = rootProject.projectDir
     environment("PYTHONDONTWRITEBYTECODE", "1")
+    environment("PYTHONWARNINGS", "error")
     commandLine("python3", "scripts/generate_android_launcher_icons.py", "--check")
 }
 

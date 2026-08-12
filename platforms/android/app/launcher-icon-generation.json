@@ -1,7 +1,7 @@
 {
-  "assetSetSha256": "51d4bc49fd137be72093ce0382f0c4d7d38d0824401c54ef683c819d431ce77c",
+  "assetSetSha256": "1ff0d21eca4260d41cd5c6b198bf69089c0bbea1608996ee005fcb116083623a",
   "generator": "platforms/android/scripts/generate_android_launcher_icons.py",
-  "generatorSha256": "16aa911441b0265b56bce8168390496e462c6a601e13d1cdcfd3b992ee48abf6",
+  "generatorSha256": "3ff0b752dcc4a8ebfd83012d541a59d926ddc0b408501fa5364b7987989b2cae",
   "purpose": "detect-accidental-launcher-asset-drift",
   "schemaVersion": 1,
   "source": "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg",

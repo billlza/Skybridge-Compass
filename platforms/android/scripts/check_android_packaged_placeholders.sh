@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/source_provenance.sh"
 source "$ROOT_DIR/scripts/lib/repository_layout.sh"
 source "$ROOT_DIR/scripts/lib/android_packaging_policy.sh"
+# shellcheck source=scripts/lib/strict_gradle_output.sh
+source "$ROOT_DIR/scripts/lib/strict_gradle_output.sh"
 RELEASE_REPO_ROOT="$(skybridge_canonical_release_root "$ROOT_DIR")"
 MODE="formal"
 APK_PATH=""
@@ -172,7 +174,13 @@ skybridge_append_git_source_binding "$ENV_FILE" android "$RELEASE_REPO_ROOT"
 
 if [[ "$MODE" == "diagnostic-debug" ]]; then
   echo "Building diagnostic debug APK (not release evidence)..."
-  "$ROOT_DIR/gradlew" :app:assembleDebug >/dev/null
+  DIAGNOSTIC_BUILD_LOG="$RUN_DIR/diagnostic-build.log"
+  "$ROOT_DIR/gradlew" --no-daemon --warning-mode=fail :app:assembleDebug \
+    >"$DIAGNOSTIC_BUILD_LOG" 2>&1 || {
+    sed -n '1,240p' "$DIAGNOSTIC_BUILD_LOG" >&2
+    exit 1
+  }
+  skybridge_require_zero_warning_tool_log "$DIAGNOSTIC_BUILD_LOG"
 fi
 
 if [[ ! -f "$APK_PATH" ]]; then
@@ -306,6 +314,12 @@ status=0
 	  echo "Signing: $SIGNING_FILE"
 	  echo
 	  echo "[forbidden]"
+	  if android_packaging_forbidden_placeholder_key_present "$CONTENTS_FILE"; then
+	    echo "FAIL packaged deprecated placeholder pin-verification key"
+	    status=1
+	  else
+	    echo "OK absent deprecated placeholder pin-verification key"
+	  fi
 	  for class_name in "${FORBIDDEN_HOST_CLASSES[@]}"; do
 	    mapped_name="${class_name//\//.}"
 	    if [[ "$MODE" == "formal" ]]; then

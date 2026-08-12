@@ -4,15 +4,4 @@
     <base-config cleartextTrafficPermitted="false">
         <certificateTransparency enabled="true"/>
     </base-config>
-
-    <!-- Static pinning: add your domains and SPKI pins here
-         Example:
-         <domain-config>
-             <domain includeSubdomains="true">api.example.com</domain>
-             <pin-set expiration="2026-01-01">
-                 <pin digest="SHA-256" value="sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="/>
-                 <pin digest="SHA-256" value="sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="/>
-             </pin-set>
-         </domain-config>
-    -->
 </network-security-config>

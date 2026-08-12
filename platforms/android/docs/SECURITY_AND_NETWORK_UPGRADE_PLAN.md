@@ -105,7 +105,7 @@ val ktorClient = HttpClient(Android) {
 - 性能：压力测试与稳定性回归（长时间运行）。
 
 ## 落地路线图
-- 0–7 天：文件传输 AES-GCM + Keystore；WS/HTTP 强制 TLS + 证书固定；远控改为 AES-GCM。
+- 0–7 天：文件传输 AES-GCM + Keystore；WS/HTTP 强制 TLS；远控改为 AES-GCM。
 - 8–14 天：统一握手与会话密钥协商；统一重试；UDP 可靠性增强；WebRTC 配置 STUN/TURN。
 - 15–21 天：性能基准与压力测试；触觉反馈策略完善与自适应。
 - 22–30 天：安全一致性测试、篡改/重放、断点续传；结构化日志与端到端追踪。
@@ -119,9 +119,9 @@ val ktorClient = HttpClient(Android) {
   - `FileTransferService.kt`：分块加密封装与解包；校验流更新。
   - `FileTransferNetworkServiceImpl.kt`：消息封包/解包与校验；保留压缩但建议 Brotli/Zstd 对比评估。
 - `network`：
-  - `NetworkManager.kt` / `NetworkClientImpl.kt`：启用严格 TLS、证书固定；主机名校验。
+  - `NetworkManager.kt` / `NetworkClientImpl.kt`：启用严格 TLS 与主机名校验；证书固定需先设计可信配置、重叠轮换和恢复流程。
 - `shared`：
-  - `NetworkSettingsStore.kt`：新增 `stun_servers`、`turn_servers`、`certificate_pins`、`tls_strict_mode`、`handshake_enabled`、`encryption_mode`。
+  - `NetworkSettingsStore.kt`：新增 `stun_servers`、`turn_servers`、`tls_strict_mode`、`handshake_enabled`、`encryption_mode`。
 
 ## 风险与兼容
 - 旧会话与新消息头兼容需版本协商；
@@ -131,25 +131,25 @@ val ktorClient = HttpClient(Android) {
 ## 验收标准
 - 加密：所有数据通道消息具备 AEAD 保护（随机 nonce、有效 tag）。
 - 握手：完成认证与会话密钥生成，支持轮换与失败回退。
-- TLS：HTTP/WS 强制 TLS；证书固定与受限 TLS 生效。
+- TLS：HTTP/WS 强制 TLS，禁用明文并启用受支持平台的证书透明度；证书固定须待可信配置与轮换设计完成。
 - 可靠性：UDP 丢包场景下稳定；重试与回退策略一致化。
 - 测试：安全、协议、性能三类测试通过；长时间运行稳定。
 
 ---
 
 ## 实施进度追踪（当前仓库）
-- [x] `NetworkSettingsStore` 已包含：`stun_servers`、`turn_servers`、`certificate_pins`、`tls_strict_mode`、`handshake_enabled`、`encryption_mode`。
+- [x] `NetworkSettingsStore` 已包含：`stun_servers`、`turn_servers`、`tls_strict_mode`、`handshake_enabled`、`encryption_mode`。
 - [x] BuildConfig 已注入 `SUPABASE_URL` 与 `SUPABASE_ANON_KEY`（客户端仅使用 Anon Key）。
 - [ ] 文件传输：`FileEncryptionService` 替换为 AES-GCM（Keystore），分块加密与解包。
 - [ ] 远控：AES/CBC → AES/GCM，统一消息头与 AEAD；会话握手与密钥轮换。
-- [ ] TLS：OkHttp/Ktor 启用证书固定与受限 TLS；主机名严格校验。
+- [ ] TLS：平台 TLS、全局禁明文和证书透明度已启用；证书固定仍需可信 provisioning、重叠轮换与失败恢复设计后再落地。
 - [ ] 可靠性：UDP(RUDP) 增强与统一重试；WebRTC STUN/TURN 配置落地。
 - [ ] 监控与测试：安全/协议/性能测试与长时间稳定性跑批。
 
 ## 下一步计划（本迭代）
 - 优先完成文件传输 AES-GCM 与 Keystore 集成，闭环端到端加密路径。
 - 在远控网络层引入握手与统一消息头；替换 AES/GCM。
-- 接入证书固定并统一 TLS 配置；提供配置与回退策略。
+- 先设计证书固定的可信 provisioning、重叠轮换与失败恢复，再接入统一 TLS 配置；不得用占位密钥或静默回退。
 - 为 UDP 路径加 RUDP 组件；补齐 STUN/TURN 管理界面与默认值。
 - 加入仪表与回归测试（Macrobenchmark + Instrumentation）。
 

@@ -7,6 +7,8 @@ AUDIT_SCRIPT="$ROOT_DIR/scripts/check_android_packaged_placeholders.sh"
 RUNBOOK="$ROOT_DIR/docs/REAL_DEVICE_INTEROP_RUNBOOK.md"
 # shellcheck source=scripts/lib/android_packaging_policy.sh
 source "$ROOT_DIR/scripts/lib/android_packaging_policy.sh"
+# shellcheck source=scripts/lib/strict_gradle_output.sh
+source "$ROOT_DIR/scripts/lib/strict_gradle_output.sh"
 
 if [[ -z "${ANDROID_HOME:-}" && -z "${ANDROID_SDK_ROOT:-}" && \
       -d "$HOME/Library/Android/sdk" ]]; then
@@ -43,8 +45,9 @@ rg -Fq 'viewer/client only' "$RUNBOOK" || fail 'runbook viewer boundary is missi
 if command -v java >/dev/null 2>&1; then
   release_runtime="${TMPDIR:-/tmp}/skybridge-release-runtime.$$.txt"
   trap 'rm -f "$release_runtime"' EXIT
-  "$ROOT_DIR/gradlew" --no-daemon :app:dependencies \
-    --configuration releaseRuntimeClasspath >"$release_runtime"
+  "$ROOT_DIR/gradlew" --no-daemon --warning-mode=fail :app:dependencies \
+    --configuration releaseRuntimeClasspath >"$release_runtime" 2>&1
+  skybridge_require_zero_warning_tool_log "$release_runtime"
   if rg -q 'project :remote-control|:remote-control:' "$release_runtime"; then
     fail 'resolved releaseRuntimeClasspath still contains the Android host module'
   fi
@@ -52,6 +55,15 @@ fi
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-viewer-gate.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"; rm -f "${release_runtime:-}"' EXIT
+
+printf '%s\n' 'res/raw/pins_public_key.pem' >"$TMP_DIR/archive-contents.txt"
+android_packaging_forbidden_placeholder_key_present "$TMP_DIR/archive-contents.txt" || {
+  fail 'packaging policy did not reject the deprecated APK placeholder key'
+}
+printf '%s\n' 'base/res/raw/pins_public_key.pem' >"$TMP_DIR/archive-contents.txt"
+android_packaging_forbidden_placeholder_key_present "$TMP_DIR/archive-contents.txt" || {
+  fail 'packaging policy did not reject the deprecated AAB placeholder key'
+}
 
 printf "uses-permission: name='android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION'\n" \
   >"$TMP_DIR/permissions.txt"

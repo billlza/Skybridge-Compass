@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd -P)"
+# shellcheck source=scripts/lib/strict_gradle_output.sh
+source "$ROOT_DIR/scripts/lib/strict_gradle_output.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-release-preflight.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -15,6 +17,7 @@ GRADLE=(
   --no-daemon
   --no-configuration-cache
   --console=plain
+  --warning-mode=fail
 )
 RUNTIME_ENV=(
   "SUPABASE_URL=https://release-preflight.invalid"
@@ -173,5 +176,16 @@ grep -Fq 'KEY_ALIAS must identify a private-key entry' "$invalid_alias_output" |
   sed -n '1,200p' "$invalid_alias_output" >&2
   fail 'invalid alias failure was not explicit'
 }
+
+printf '%s\n' 'clean Gradle output' >"$TMP_DIR/strict-clean-fixture.txt"
+skybridge_require_zero_warning_tool_log "$TMP_DIR/strict-clean-fixture.txt"
+printf '%s\n' 'OpenJDK 64-Bit Server VM warning: test fixture' >"$TMP_DIR/strict-warning-fixture.log"
+if skybridge_require_zero_warning_tool_log "$TMP_DIR/strict-warning-fixture.log" >/dev/null 2>&1; then
+  fail 'strict output scanner accepted a JVM warning fixture'
+fi
+
+while IFS= read -r tool_log; do
+  skybridge_require_zero_warning_tool_log "$tool_log"
+done < <(find "$TMP_DIR" -maxdepth 1 -type f -name '*.txt' -print)
 
 echo 'release artifact preflight tests passed'

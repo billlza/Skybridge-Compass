@@ -1,15 +1,10 @@
 package com.skybridge.compass.android.di
 
-import android.content.Context
 import com.skybridge.compass.BuildConfig
-import com.skybridge.compass.R
-import com.skybridge.compass.android.security.PinProvider
-import com.skybridge.compass.android.security.PinProviderImpl
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
-import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Singleton
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
@@ -19,45 +14,22 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.serialization.kotlinx.json.json
-import kotlinx.coroutines.runBlocking
 import java.util.concurrent.TimeUnit
 
 @Module
 @InstallIn(SingletonComponent::class)
 object NetworkModule {
 
-    @Provides
-    @Singleton
-    fun providePinProvider(
-        @ApplicationContext context: Context,
-        json: Json
-    ): PinProvider =
-        PinProviderImpl(
-            json = json,
-            allowUnverifiedPinsInDebug = BuildConfig.DEBUG,
-            publicKeyPem = readRawResourceText(context, R.raw.pins_public_key)
-        )
-
     /**
      * 提供OkHttp客户端
      */
     @Provides
     @Singleton
-    fun provideOkHttpClient(
-        @ApplicationContext context: Context,
-        pinProvider: PinProvider
-    ): OkHttpClient {
+    fun provideOkHttpClient(): OkHttpClient {
         val builder = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-        
-        // Add certificate pinning if available
-        runBlocking {
-            pinProvider.buildCertificatePinner(context)?.let { pinner ->
-                builder.certificatePinner(pinner)
-            }
-        }
         
         // Add logging in debug builds
         if (BuildConfig.DEBUG) {
@@ -106,9 +78,5 @@ object NetworkModule {
             isLenient = true
             prettyPrint = BuildConfig.DEBUG
         }
-    }
-
-    private fun readRawResourceText(context: Context, resId: Int): String {
-        return context.resources.openRawResource(resId).bufferedReader().use { it.readText().trim() }
     }
 }

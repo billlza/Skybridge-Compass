@@ -397,6 +397,13 @@ status=0
   fi
   echo
   echo "[viewer/client-only boundary]"
+  if android_packaging_forbidden_placeholder_key_present "$AAB_CONTENTS_FILE" || \
+      android_packaging_forbidden_placeholder_key_present "$APK_CONTENTS_FILE"; then
+    echo "FAIL deprecated placeholder pin-verification key is packaged"
+    status=1
+  else
+    echo "OK deprecated placeholder pin-verification key absent from AAB and universal APK"
+  fi
   if android_r8_original_class_prefix_present \
       "$MAPPING_PATH" 'com.skybridge.compass.remotecontrol.'; then
     echo "FAIL R8 mapping contains classes from the excluded :remote-control module"

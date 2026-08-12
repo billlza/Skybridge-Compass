@@ -6,6 +6,14 @@ android_packaging_forbidden_permission_present() {
   rg -q "uses-permission: name='$permission_name'( |$)" "$permissions_file"
 }
 
+android_packaging_forbidden_placeholder_key_present() {
+  local archive_contents_file="$1"
+  rg -Fqx \
+    -e 'res/raw/pins_public_key.pem' \
+    -e 'base/res/raw/pins_public_key.pem' \
+    "$archive_contents_file"
+}
+
 android_packaging_forbidden_manifest_surface_present() {
   local manifest_tree="$1"
   if rg -q \
