@@ -50,13 +50,13 @@ jobs:
         run: |
           set -euo pipefail
           set +o pipefail
-          yes | sdkmanager --licenses >/dev/null
+          yes 2>/dev/null | sdkmanager --licenses >/dev/null
           license_status=${PIPESTATUS[1]}
           set -o pipefail
           (( license_status == 0 ))
           sdkmanager \
             "platform-tools" \
-            "platforms;android-37" \
+            "platforms;android-37.0" \
             "build-tools;37.0.0" \
             "ndk;30.0.14904198" \
             "cmake;3.22.1"
