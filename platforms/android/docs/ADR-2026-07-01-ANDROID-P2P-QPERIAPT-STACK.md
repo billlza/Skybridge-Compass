@@ -256,3 +256,25 @@ round. The `2.60` vs `2.60.1` difference is a pre-existing catalog state
 rather than an increment produced by this round's upgrade work; it is
 noted here for completeness and is not claimed as a change performed by
 this task.
+
+## 2026-08-13 dependency version increments
+
+The zero-warning release gate resolved fresh upstream metadata on its
+Ubuntu runner and identified stable dependency updates. A subsequent clean
+lint pass exposed the KSP build-plugin update as the only remaining issue.
+The version catalog remains the single source of truth; no compatibility
+layer or lint suppression was introduced.
+
+| Coordinate | Previous version | Upgraded version | Upstream release notes |
+| --- | --- | --- | --- |
+| `androidx.appcompat:appcompat` | 1.7.1 | 1.8.0 | https://developer.android.com/jetpack/androidx/releases/appcompat#1.8.0 |
+| `androidx.compose:compose-bom` | 2026.06.01 | 2026.08.00 | https://developer.android.com/develop/ui/compose/bom/bom-mapping |
+| `androidx.fragment:fragment-ktx` | 1.8.9 | 1.9.0 | https://developer.android.com/jetpack/androidx/releases/fragment#1.9.0 |
+| `io.github.webrtc-sdk:android` | 144.7559.09 | 144.7559.12 | https://github.com/webrtc-sdk/android/releases/tag/v144.7559.12 |
+| `com.google.devtools.ksp` | 2.3.10 | 2.3.11 | https://github.com/google/ksp/releases/tag/2.3.11 |
+
+The WebRTC coordinate remains strictly pinned and continues through the
+existing Java/JNI closure, four-ABI, manifest, and payload validation. These
+build checks detect packaging incompatibility; they do not replace the
+source-bound Samsung 4 KiB/API 37 16 KiB native runtime gate or the physical
+Android/Apple selected-ICE and bidirectional durable-transfer receipt.
