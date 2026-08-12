@@ -112,6 +112,9 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
         self.assertIn('SAMSUNG_TEST_PACKAGE_STATE="untouched"', self.runner)
         self.assertIn('API37_TEST_PACKAGE_STATE="untouched"', self.runner)
         self.assertIn("test package existed before this run", self.runner)
+        self.assertIn('"$query_status" == "1" && ! -s "$output"', self.runner)
+        self.assertIn('"$query_status" == "1" && ! -s "$path_output"', self.runner)
+        self.assertIn('"$query_status" == "1" && ! -s "$verify_output"', self.runner)
         self.assertIn("ownership_ambiguous", self.runner)
         self.assertIn("refusing uninstall", self.runner)
 

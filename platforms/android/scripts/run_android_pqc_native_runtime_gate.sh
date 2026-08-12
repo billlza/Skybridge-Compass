@@ -455,8 +455,16 @@ require_test_package_absent() {
   local serial="$2"
   local phase="$3"
   local output="$PRIVATE_DIR/${profile}-test-package-preflight.txt"
+  local query_status=0
 
-  capture_adb "$profile" "$serial" "$output" shell pm path "$TEST_PACKAGE" >/dev/null
+  if "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$output" 2>&1; then
+    query_status=0
+  else
+    query_status=$?
+  fi
+  if [[ "$query_status" != "0" && ! ( "$query_status" == "1" && ! -s "$output" ) ]]; then
+    fail "$profile test package query failed during $phase"
+  fi
   if [[ ! -s "$output" ]]; then
     set_test_package_state "$serial" baseline_absent
     return
@@ -481,6 +489,7 @@ reconcile_and_remove_run_test_package() {
   local remote_path=""
   local digest_value=""
   local success_count=""
+  local query_status=0
 
   state="$(test_package_state "$serial")" || {
     echo "$profile cleanup refused an unexpected adb serial during $phase" >&2
@@ -494,7 +503,12 @@ reconcile_and_remove_run_test_package() {
       ;;
   esac
 
-  if ! "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$path_output" 2>&1; then
+  if "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$path_output" 2>&1; then
+    query_status=0
+  else
+    query_status=$?
+  fi
+  if [[ "$query_status" != "0" && ! ( "$query_status" == "1" && ! -s "$path_output" ) ]]; then
     set_test_package_state "$serial" ownership_ambiguous
     echo "$profile could not reconcile the test package during $phase; refusing uninstall" >&2
     return 1
@@ -552,7 +566,12 @@ reconcile_and_remove_run_test_package() {
     echo "$profile owned test-package uninstall had an invalid terminal result during $phase" >&2
     return 1
   fi
-  if ! "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$verify_output" 2>&1 \
+  if "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$verify_output" 2>&1; then
+    query_status=0
+  else
+    query_status=$?
+  fi
+  if [[ "$query_status" != "0" && ! ( "$query_status" == "1" && ! -s "$verify_output" ) ]] \
       || [[ -s "$verify_output" ]]; then
     set_test_package_state "$serial" ownership_ambiguous
     echo "$profile could not prove test-package absence after $phase" >&2

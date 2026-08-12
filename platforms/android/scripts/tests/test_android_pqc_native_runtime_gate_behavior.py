@@ -247,7 +247,8 @@ def shell_command(
         )
         if package is not None:
             print(f"package:{package['path']}")
-        return 0
+            return 0
+        return 1
 
     if command[:1] == ["sha256sum"] and len(command) == 2:
         remote_path = command[1]
