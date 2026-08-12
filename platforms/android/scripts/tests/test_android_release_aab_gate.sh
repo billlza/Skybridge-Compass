@@ -267,9 +267,15 @@ printf '%s\n' \
 expect_failure 'duplicate R8 class mapping' \
   android_r8_mapped_class_name "$TMP_DIR/duplicate-mapping.txt" 'com.example.Forbidden'
 
-LLVM_OBJDUMP="$HOME/Library/Android/sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-objdump"
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+case "$(uname -s)" in
+  Darwin) NDK_HOST_PREBUILT="darwin-x86_64" ;;
+  Linux) NDK_HOST_PREBUILT="linux-x86_64" ;;
+  *) fail "unsupported NDK host operating system: $(uname -s)" ;;
+esac
+LLVM_OBJDUMP="$SDK_ROOT/ndk/30.0.14904198/toolchains/llvm/prebuilt/$NDK_HOST_PREBUILT/bin/llvm-objdump"
 [[ -x "$LLVM_OBJDUMP" ]] || fail 'fixed NDK 30.0.14904198 llvm-objdump is unavailable'
-ZIPALIGN="$HOME/Library/Android/sdk/build-tools/37.0.0/zipalign"
+ZIPALIGN="$SDK_ROOT/build-tools/37.0.0/zipalign"
 [[ -x "$ZIPALIGN" ]] || fail 'fixed Build Tools 37.0.0 zipalign is unavailable'
 android_audit_apk_elf_page_alignment \
   "$TMP_DIR/aligned-elf.apk" "$LLVM_OBJDUMP" "$TMP_DIR/aligned-elf-report.txt"

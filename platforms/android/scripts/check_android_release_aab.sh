@@ -316,7 +316,12 @@ AAPT="${ANDROID_AAPT:-$BUILD_TOOLS_DIR/aapt}"
 APKSIGNER="${ANDROID_APKSIGNER:-$BUILD_TOOLS_DIR/apksigner}"
 ZIPALIGN="${ANDROID_ZIPALIGN:-$BUILD_TOOLS_DIR/zipalign}"
 NDK_VERSION="30.0.14904198"
-LLVM_OBJDUMP="${ANDROID_LLVM_OBJDUMP:-$SDK_ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-objdump}"
+case "$(uname -s)" in
+  Darwin) NDK_HOST_PREBUILT="darwin-x86_64" ;;
+  Linux) NDK_HOST_PREBUILT="linux-x86_64" ;;
+  *) fail "unsupported NDK host operating system: $(uname -s)" ;;
+esac
+LLVM_OBJDUMP="${ANDROID_LLVM_OBJDUMP:-$SDK_ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/$NDK_HOST_PREBUILT/bin/llvm-objdump}"
 [[ -x "$AAPT" ]] || fail "aapt 37.0.0 is unavailable: $AAPT"
 [[ -x "$APKSIGNER" ]] || fail "apksigner 37.0.0 is unavailable: $APKSIGNER"
 [[ -x "$ZIPALIGN" ]] || fail "zipalign 37.0.0 is unavailable: $ZIPALIGN"

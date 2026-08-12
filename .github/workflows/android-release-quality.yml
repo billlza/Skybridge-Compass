@@ -1,0 +1,137 @@
+name: android-release-quality
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/android-release-quality.yml"
+      - "platforms/android/**"
+      - "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg"
+  push:
+    branches:
+      - main
+      - "release/android-*"
+    paths:
+      - ".github/workflows/android-release-quality.yml"
+      - "platforms/android/**"
+      - "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: platforms/android
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Install fixed Android toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +o pipefail
+          yes | sdkmanager --licenses >/dev/null
+          license_status=${PIPESTATUS[1]}
+          set -o pipefail
+          (( license_status == 0 ))
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-37" \
+            "build-tools;37.0.0" \
+            "ndk;30.0.14904198" \
+            "cmake;3.22.1"
+          java -version
+          sdkmanager --list_installed
+
+      - name: Validate release gate contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          bash -n \
+            scripts/check_android_packaged_placeholders.sh \
+            scripts/check_android_release_aab.sh \
+            scripts/tests/test_android_release_aab_gate.sh \
+            scripts/tests/test_release_artifact_preflight.sh \
+            scripts/tests/test_viewer_only_packaging_gate.sh
+          shellcheck -x -S warning \
+            scripts/check_android_packaged_placeholders.sh \
+            scripts/check_android_release_aab.sh \
+            scripts/lib/android_packaging_policy.sh \
+            scripts/tests/test_android_release_aab_gate.sh \
+            scripts/tests/test_release_artifact_preflight.sh \
+            scripts/tests/test_viewer_only_packaging_gate.sh
+          bash scripts/tests/test_android_release_aab_gate.sh
+          bash scripts/tests/test_release_artifact_preflight.sh
+          bash scripts/tests/test_viewer_only_packaging_gate.sh
+
+      - name: Run full zero-warning Android matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew \
+            --no-daemon \
+            --no-parallel \
+            --max-workers=2 \
+            --rerun-tasks \
+            --warning-mode all \
+            :shared:testDebugUnitTest \
+            :core:testDebugUnitTest \
+            :device-discovery:testDebugUnitTest \
+            :remote-control:testDebugUnitTest \
+            :file-transfer:testDebugUnitTest \
+            :app:testDebugUnitTest \
+            :shared:lintDebug \
+            :core:lintDebug \
+            :device-discovery:lintDebug \
+            :remote-control:lintDebug \
+            :file-transfer:lintDebug \
+            :app:lintDebug \
+            :app:assembleDebug \
+            :app:assembleDebugAndroidTest \
+            :app:compileReleaseKotlin
+          if find . -path '*/build/test-results/testDebugUnitTest/TEST-*.xml' \
+              -type f -exec rg -l '<failure|<error' {} + | rg -q .; then
+            echo "Android unit-test XML contains a failure or error." >&2
+            exit 1
+          fi
+          if find . -path '*/build/reports/lint-results-debug.xml' \
+              -type f -exec rg -l '<issue' {} + | rg -q .; then
+            echo "Android lint XML contains at least one issue." >&2
+            exit 1
+          fi
+
+      - name: Inspect the diagnostic viewer artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_dir="$RUNNER_TEMP/android-packaging-audit"
+          scripts/check_android_packaged_placeholders.sh \
+            --mode diagnostic-debug \
+            --run-dir "$audit_dir"
+          "$ANDROID_HOME/build-tools/37.0.0/zipalign" \
+            -c -P 16 -v 4 \
+            app/build/outputs/apk/debug/app-debug.apk
+          git -C "$GITHUB_WORKSPACE" diff --check
+          [[ -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain --untracked-files=all)" ]]
