@@ -19,10 +19,19 @@ required_markers=(
   'OQS_DIST_BUILD OFF'
   'KEM_ml_kem_768;SIG_ml_dsa_65'
   'LIBOQS_AVAILABLE=1'
+  '-Werror=implicit-int-conversion'
 )
 for marker in "${required_markers[@]}"; do
   rg -F --quiet -- "$marker" "$cmake_file"
 done
+
+keccak_source="$liboqs_source/src/common/sha3/xkcp_low/KeccakP-1600/plain-64bits/KeccakP-1600-opt64.c"
+[[ -f "$keccak_source" ]]
+if rg --quiet -- '= ~(?:data|output)\[' "$keccak_source"; then
+  printf 'tracked liboqs Keccak byte complement must use an explicit byte conversion\n' >&2
+  exit 1
+fi
+[[ "$(rg -c --fixed-strings '(unsigned char)~' "$keccak_source")" == "3" ]]
 
 for forbidden in 'STATIC IMPORTED' 'IMPORTED_LOCATION' 'liboqs.a' 'LIBOQS_AVAILABLE=0'; do
   if rg -F --quiet -- "$forbidden" "$cmake_file"; then

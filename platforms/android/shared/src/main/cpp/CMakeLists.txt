@@ -33,6 +33,11 @@ set(
 )
 add_subdirectory("${LIBOQS_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/liboqs")
 set(LIBOQS_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/liboqs/include")
+target_compile_options(
+    xkcp_low_keccakp_1600_plain64
+    PRIVATE
+    -Werror=implicit-int-conversion
+)
 
 # Create the shared library
 add_library(${PROJECT_NAME} SHARED
