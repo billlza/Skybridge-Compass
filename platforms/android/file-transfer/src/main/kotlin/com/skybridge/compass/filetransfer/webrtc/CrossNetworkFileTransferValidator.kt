@@ -200,4 +200,5 @@ internal object CrossNetworkFileTransferValidator {
         val consumedBeforeLast = chunkIndex.toLong() * metadata.chunkSize.toLong()
         return (metadata.fileSize - consumedBeforeLast).toInt()
     }
+
 }

@@ -65,15 +65,14 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
         self.assertIn('export ANDROID_HOME="$GRADLE_SDK_ROOT"', self.runner)
         self.assertIn('export ANDROID_SDK_ROOT="$GRADLE_SDK_ROOT"', self.runner)
         self.assertIn('install --no-streaming -r -t "$APP_APK"', self.runner)
-        self.assertIn('install --no-streaming -r -t "$TEST_APK"', self.runner)
+        self.assertIn('install --no-streaming -t "$TEST_APK"', self.runner)
+        self.assertNotIn('install --no-streaming -r -t "$TEST_APK"', self.runner)
         self.assertIn('"$ADB_BIN" -s "$serial"', self.runner)
-        adb_invocations = re.findall(
-            r'(?m)^\s*(?:if ! )?"\$ADB_BIN"[^\n]*',
+        self.assertNotRegex(
             self.runner,
-        )
-        self.assertGreater(len(adb_invocations), 0)
-        self.assertTrue(
-            all('"$ADB_BIN" -s "$serial"' in invocation for invocation in adb_invocations),
+            re.compile(
+                r'"\$ADB_BIN"\s+(?:shell|install|uninstall|get-state|get-serialno)\b'
+            ),
         )
         self.assertIn("the two runtime profiles require distinct serials", self.runner)
         self.assertNotIn("${manufacturer,,}", self.runner)
@@ -106,15 +105,14 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
         for pattern in destructive_target_patterns:
             self.assertNotRegex(self.runner, pattern)
         self.assertIn('install --no-streaming -r -t "$APP_APK"', self.runner)
-        self.assertIn('uninstall "$TEST_PACKAGE"', self.runner)
+        self.assertIn("android_remove_owned_package", self.runner)
         self.assertNotIn("TEST_PACKAGE_TOUCHED", self.runner)
         self.assertNotIn("best_effort_remove_test_package", self.runner)
         self.assertIn('SAMSUNG_TEST_PACKAGE_STATE="untouched"', self.runner)
         self.assertIn('API37_TEST_PACKAGE_STATE="untouched"', self.runner)
-        self.assertIn("test package existed before this run", self.runner)
-        self.assertIn('"$query_status" == "1" && ! -s "$output"', self.runner)
-        self.assertIn('"$query_status" == "1" && ! -s "$path_output"', self.runner)
-        self.assertIn('"$query_status" == "1" && ! -s "$verify_output"', self.runner)
+        self.assertIn("android_require_package_absent", self.runner)
+        self.assertIn("android_require_package_process_absent", self.runner)
+        self.assertIn("appeared after an unconfirmed install", self.runner)
         self.assertIn("ownership_ambiguous", self.runner)
         self.assertIn("refusing uninstall", self.runner)
 
@@ -125,23 +123,27 @@ class NativePqcRuntimeGateContractTests(unittest.TestCase):
         )
         profile = self.runner[profile_start:profile_end]
         app_install = profile.index('install --no-streaming -r -t "$APP_APK"')
+        process_preflight = profile.index("android_require_package_process_absent")
         install_boundary = profile.index(
             'require_test_package_absent "$profile" "$serial" "test install boundary"',
         )
         attempted = profile.index('set_test_package_state "$serial" install_attempted')
-        test_install = profile.index('install --no-streaming -r -t "$TEST_APK"')
+        test_install = profile.index('install --no-streaming -t "$TEST_APK"')
+        install_success = profile.index(
+            'require_install_success "$prefix-test-install.txt"',
+        )
         test_digest = profile.index(
             'require_installed_apk_digest "$profile" "$serial" "$TEST_PACKAGE"',
         )
         owned = profile.index('set_test_package_state "$serial" owned_installed')
-        normal_cleanup = profile.index(
-            'reconcile_and_remove_run_test_package "$profile" "$serial" "normal completion"',
-        )
+        normal_cleanup = profile.index("remove_run_test_package_after_target_exit")
+        self.assertLess(process_preflight, app_install)
         self.assertLess(app_install, install_boundary)
         self.assertLess(install_boundary, attempted)
         self.assertLess(attempted, test_install)
-        self.assertLess(test_install, test_digest)
-        self.assertLess(test_digest, owned)
+        self.assertLess(test_install, install_success)
+        self.assertLess(install_success, owned)
+        self.assertLess(owned, test_digest)
         self.assertLess(owned, normal_cleanup)
 
         samsung_preflight = self.runner.index(

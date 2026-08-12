@@ -32,7 +32,10 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
         self.decoder = decoder
     }
 
-    func load() -> Value? {
+    func load(migrationPolicy: MigrationPolicy = .migrateLegacyValue) -> Value? {
+        if migrationPolicy == .readLegacyValueWithoutMutation {
+            return try? loadExistingReadOnly()
+        }
         switch location {
         case let .userDefaults(key):
             guard let data = defaults.data(forKey: key) else { return nil }
@@ -51,11 +54,45 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
                 return nil
             }
 
-            if (try? save(migratedValue)) != nil {
-                defaults.removeObject(forKey: legacyUserDefaultsKey)
+            if migrationPolicy == .migrateLegacyValue {
+                if (try? save(migratedValue)) != nil {
+                    defaults.removeObject(forKey: legacyUserDefaultsKey)
+                }
             }
 
             return migratedValue
+        }
+    }
+
+    enum MigrationPolicy: Sendable {
+        case migrateLegacyValue
+        case readLegacyValueWithoutMutation
+    }
+
+    /// Reads the canonical value without creating directories or repairing/migrating storage.
+    /// Legacy data is consulted only when the canonical file is truly absent; a present but
+    /// unreadable or malformed canonical file is a hard failure.
+    func loadExistingReadOnly() throws -> Value? {
+        switch location {
+        case let .userDefaults(key):
+            guard let data = defaults.data(forKey: key) else { return nil }
+            return try decoder.decode(Value.self, from: data)
+
+        case let .protectedApplicationSupport(path, legacyUserDefaultsKey):
+            let url = try existingURL(for: path)
+            var isDirectory = ObjCBool(false)
+            if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+                guard !isDirectory.boolValue else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                let data = try Data(contentsOf: url)
+                return try decoder.decode(Value.self, from: data)
+            }
+            guard let legacyUserDefaultsKey,
+                  let legacyData = defaults.data(forKey: legacyUserDefaultsKey) else {
+                return nil
+            }
+            return try decoder.decode(Value.self, from: legacyData)
         }
     }
 
@@ -95,6 +132,20 @@ struct CodablePersistenceStore<Value: Codable>: @unchecked Sendable {
 
     private func resolvedURL(for relativePath: String) throws -> URL {
         try applicationSupportBaseURL().appendingPathComponent(relativePath, isDirectory: false)
+    }
+
+    private func existingURL(for relativePath: String) throws -> URL {
+        guard let base = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+        return base
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent(rootDirectoryName, isDirectory: true)
+            .appendingPathComponent(relativePath, isDirectory: false)
     }
 
     private func applicationSupportBaseURL() throws -> URL {

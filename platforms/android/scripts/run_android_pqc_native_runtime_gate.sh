@@ -229,7 +229,7 @@ cleanup() {
     state="$(test_package_state "$SAMSUNG_SERIAL")"
     case "$state" in
       install_attempted|owned_installed)
-        reconcile_and_remove_run_test_package \
+        remove_run_test_package_after_target_exit \
           "samsung-api36-4k" "$SAMSUNG_SERIAL" "failure cleanup" || test_cleanup_status=1
         ;;
       ownership_ambiguous)
@@ -246,7 +246,7 @@ cleanup() {
     state="$(test_package_state "$API37_SERIAL")"
     case "$state" in
       install_attempted|owned_installed)
-        reconcile_and_remove_run_test_package \
+        remove_run_test_package_after_target_exit \
           "api37-16k" "$API37_SERIAL" "failure cleanup" || test_cleanup_status=1
         ;;
       ownership_ambiguous)
@@ -411,12 +411,9 @@ single_line() {
 require_install_success() {
   local input="$1"
   local label="$2"
-  local success_count=""
-  success_count="$(tr -d '\r' <"$input" | LC_ALL=C awk '$0 == "Success" { count++ } END { print count + 0 }')"
-  [[ "$success_count" == "1" ]] || fail "$label did not report exactly one success"
-  if LC_ALL=C rg -n '(?i:failure|error:)' "$input" >/dev/null; then
-    fail "$label also reported a failure"
-  fi
+  local output=""
+  output="$(<"$input")" || fail "$label output could not be read"
+  android_require_exact_success_output "$output" "$label" || fail "$label terminal was invalid"
 }
 
 require_installed_apk_digest() {
@@ -454,25 +451,11 @@ require_test_package_absent() {
   local profile="$1"
   local serial="$2"
   local phase="$3"
-  local output="$PRIVATE_DIR/${profile}-test-package-preflight.txt"
-  local query_status=0
 
-  if "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$output" 2>&1; then
-    query_status=0
-  else
-    query_status=$?
-  fi
-  if [[ "$query_status" != "0" && ! ( "$query_status" == "1" && ! -s "$output" ) ]]; then
-    fail "$profile test package query failed during $phase"
-  fi
-  if [[ ! -s "$output" ]]; then
-    set_test_package_state "$serial" baseline_absent
-    return
-  fi
-  if rg -q '^package:' "$output"; then
-    fail "$profile test package existed before this run during $phase; remove it explicitly before retrying"
-  fi
-  fail "$profile test package query returned unexpected output during $phase"
+  android_require_package_absent "$ADB_BIN" "$serial" "$TEST_PACKAGE" || {
+    fail "$profile test package was present or unverifiable during $phase; remove a preexisting package explicitly before retrying"
+  }
+  set_test_package_state "$serial" baseline_absent
 }
 
 reconcile_and_remove_run_test_package() {
@@ -480,104 +463,52 @@ reconcile_and_remove_run_test_package() {
   local serial="$2"
   local phase="$3"
   local state=""
-  local phase_slug="${phase// /-}"
-  local path_output="$PRIVATE_DIR/${profile}-test-path-${phase_slug}.txt"
-  local digest_output="$PRIVATE_DIR/${profile}-test-digest-${phase_slug}.txt"
-  local uninstall_output="$PRIVATE_DIR/${profile}-test-uninstall-${phase_slug}.txt"
-  local verify_output="$PRIVATE_DIR/${profile}-test-verify-absent-${phase_slug}.txt"
-  local package_value=""
-  local remote_path=""
-  local digest_value=""
-  local success_count=""
   local query_status=0
 
   state="$(test_package_state "$serial")" || {
     echo "$profile cleanup refused an unexpected adb serial during $phase" >&2
     return 1
   }
-  case "$state" in
-    install_attempted|owned_installed) ;;
-    *)
-      echo "$profile cleanup refused non-owned test-package state $state during $phase" >&2
+  if [[ "$state" == "install_attempted" ]]; then
+    if android_installed_package_path "$ADB_BIN" "$serial" "$TEST_PACKAGE" >/dev/null; then
+      set_test_package_state "$serial" ownership_ambiguous
+      echo "$profile test package appeared after an unconfirmed install during $phase; refusing uninstall" >&2
       return 1
-      ;;
-  esac
-
-  if "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$path_output" 2>&1; then
-    query_status=0
-  else
-    query_status=$?
-  fi
-  if [[ "$query_status" != "0" && ! ( "$query_status" == "1" && ! -s "$path_output" ) ]]; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile could not reconcile the test package during $phase; refusing uninstall" >&2
-    return 1
-  fi
-  package_value="$(tr -d '\r' <"$path_output")"
-  if [[ -z "$package_value" ]]; then
-    if [[ "$state" == "install_attempted" ]]; then
+    else
+      query_status=$?
+    fi
+    if (( query_status == 2 )); then
       set_test_package_state "$serial" cleaned
       return 0
     fi
     set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile owned test package disappeared before $phase" >&2
+    echo "$profile could not prove test-package absence after an unconfirmed install during $phase; refusing uninstall" >&2
     return 1
   fi
-  if [[ "$package_value" == *$'\n'* ]] \
-      || [[ ! "$package_value" =~ ^package:(/data/app/[A-Za-z0-9_./=+~-]+/base\.apk)$ ]]; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile test-package path was not one canonical base APK during $phase; refusing uninstall" >&2
+  if [[ "$state" != "owned_installed" ]]; then
+    echo "$profile cleanup refused non-owned test-package state $state during $phase" >&2
     return 1
   fi
-  remote_path="${BASH_REMATCH[1]}"
-  if [[ "$remote_path" == *"/../"* || "$remote_path" == *"/./"* ]]; then
+  if ! android_remove_owned_package \
+      "$ADB_BIN" "$serial" "$TEST_PACKAGE" "$TEST_APK_SHA256"; then
     set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile test-package path was non-canonical during $phase; refusing uninstall" >&2
-    return 1
-  fi
-  if ! "$ADB_BIN" -s "$serial" shell sha256sum "$remote_path" >"$digest_output" 2>&1; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile could not hash the test package during $phase; refusing uninstall" >&2
-    return 1
-  fi
-  digest_value="$(tr -d '\r' <"$digest_output")"
-  if [[ "$digest_value" == *$'\n'* ]] \
-      || [[ ! "$digest_value" =~ ^([0-9a-f]{64})[[:space:]]+([^[:space:]]+)$ ]] \
-      || [[ "${BASH_REMATCH[1]}" != "$TEST_APK_SHA256" ]] \
-      || [[ "${BASH_REMATCH[2]}" != "$remote_path" ]]; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile test-package bytes were not owned by this run during $phase; refusing uninstall" >&2
-    return 1
-  fi
-
-  set_test_package_state "$serial" owned_installed
-  if ! "$ADB_BIN" -s "$serial" uninstall "$TEST_PACKAGE" >"$uninstall_output" 2>&1; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile owned test-package uninstall failed during $phase" >&2
-    return 1
-  fi
-  success_count="$(
-    tr -d '\r' <"$uninstall_output" |
-      LC_ALL=C awk '$0 == "Success" { count++ } END { print count + 0 }'
-  )"
-  if [[ "$success_count" != "1" ]] \
-      || LC_ALL=C rg -n '(?i:failure|error:)' "$uninstall_output" >/dev/null; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile owned test-package uninstall had an invalid terminal result during $phase" >&2
-    return 1
-  fi
-  if "$ADB_BIN" -s "$serial" shell pm path "$TEST_PACKAGE" >"$verify_output" 2>&1; then
-    query_status=0
-  else
-    query_status=$?
-  fi
-  if [[ "$query_status" != "0" && ! ( "$query_status" == "1" && ! -s "$verify_output" ) ]] \
-      || [[ -s "$verify_output" ]]; then
-    set_test_package_state "$serial" ownership_ambiguous
-    echo "$profile could not prove test-package absence after $phase" >&2
+    echo "$profile could not remove the confirmed run-owned test package during $phase" >&2
     return 1
   fi
   set_test_package_state "$serial" cleaned
+}
+
+remove_run_test_package_after_target_exit() {
+  local profile="$1"
+  local serial="$2"
+  local phase="$3"
+
+  if ! android_require_package_process_absent \
+      "$ADB_BIN" "$serial" "$APP_PACKAGE"; then
+    echo "$profile main app process is active or unverifiable during $phase; refusing concurrent test-package cleanup" >&2
+    return 1
+  fi
+  reconcile_and_remove_run_test_package "$profile" "$serial" "$phase"
 }
 
 run_profile() {
@@ -629,17 +560,20 @@ run_profile() {
   fi
 
   require_test_package_absent "$profile" "$serial" "profile preflight"
+  android_require_package_process_absent "$ADB_BIN" "$serial" "$APP_PACKAGE" || {
+    fail "$profile main app process must be closed normally before overlay installation"
+  }
   capture_adb "$profile" "$serial" "$prefix-app-install.txt" \
     install --no-streaming -r -t "$APP_APK" >/dev/null
   require_install_success "$prefix-app-install.txt" "$profile app APK installation"
   require_test_package_absent "$profile" "$serial" "test install boundary"
   set_test_package_state "$serial" install_attempted
   capture_adb "$profile" "$serial" "$prefix-test-install.txt" \
-    install --no-streaming -r -t "$TEST_APK" >/dev/null
+    install --no-streaming -t "$TEST_APK" >/dev/null
   require_install_success "$prefix-test-install.txt" "$profile test APK installation"
+  set_test_package_state "$serial" owned_installed
 
   require_installed_apk_digest "$profile" "$serial" "$TEST_PACKAGE" "$TEST_APK_SHA256" "$profile-test"
-  set_test_package_state "$serial" owned_installed
   require_installed_apk_digest "$profile" "$serial" "$APP_PACKAGE" "$APP_APK_SHA256" "$profile-app"
   capture_adb "$profile" "$serial" "$prefix-instrumentation-list.txt" \
     shell pm list instrumentation >/dev/null
@@ -659,7 +593,7 @@ run_profile() {
   if rg -Fq -- "$serial" "$prefix-instrumentation.txt"; then
     fail "$profile instrumentation output exposed a device serial"
   fi
-  reconcile_and_remove_run_test_package "$profile" "$serial" "normal completion" || {
+  remove_run_test_package_after_target_exit "$profile" "$serial" "normal completion" || {
     fail "$profile could not remove the run-owned test package"
   }
 }

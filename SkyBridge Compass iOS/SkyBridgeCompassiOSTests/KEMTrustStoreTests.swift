@@ -68,4 +68,129 @@ final class KEMTrustStoreTests: XCTestCase {
         XCTAssertEqual(fromRawId[.mlkem768], keyInfo.publicKey)
         XCTAssertEqual(fromEndpointAlias[.mlkem768], keyInfo.publicKey)
     }
+
+    func testExactExistingAdmissionDoesNotRewritePersistentStore() async throws {
+        let suiteName = "KEMTrustStoreReadOnlyTests.\(UUID().uuidString)"
+        guard let writerDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        writerDefaults.removePersistentDomain(forName: suiteName)
+
+        let storageKey = "kem_trust_store.read_only.tests.v1"
+        let deviceId = "peer-\(UUID().uuidString)"
+        let keyInfo = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwing.wireId,
+            publicKey: Data(repeating: 0xC3, count: 64)
+        )
+        let store = KEMTrustStore(storageKey: storageKey, userDefaults: writerDefaults)
+        await store.upsert(deviceId: deviceId, kemPublicKeys: [keyInfo])
+        guard let beforeDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to reopen isolated UserDefaults suite")
+            return
+        }
+        let persistedBefore = beforeDefaults.data(forKey: storageKey)
+
+        try await store.requireExactExisting(deviceId: deviceId, kemPublicKeys: [keyInfo])
+        await store.upsert(deviceId: deviceId, kemPublicKeys: [keyInfo])
+
+        guard let afterDefaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to reopen isolated UserDefaults suite")
+            return
+        }
+        XCTAssertEqual(afterDefaults.data(forKey: storageKey), persistedBefore)
+    }
+
+    func testExactExistingAdmissionRejectsMissingAndChangedKeys() async throws {
+        let suiteName = "KEMTrustStoreAdmissionTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = KEMTrustStore(
+            storageKey: "kem_trust_store.admission.tests.v1",
+            userDefaults: defaults
+        )
+        let deviceId = "peer-\(UUID().uuidString)"
+        let trusted = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwing.wireId,
+            publicKey: Data(repeating: 0x11, count: 64)
+        )
+        await store.upsert(deviceId: deviceId, kemPublicKeys: [trusted])
+
+        do {
+            try await store.requireExactExisting(
+                deviceId: deviceId,
+                kemPublicKeys: [
+                    KEMPublicKeyInfo(
+                        suiteWireId: CryptoSuite.xwing.wireId,
+                        publicKey: Data(repeating: 0x22, count: 64)
+                    )
+                ]
+            )
+            XCTFail("Expected a changed key to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? KEMTrustStore.ExistingTrustAdmissionError,
+                .storedKeyMismatch(CryptoSuite.xwing.wireId)
+            )
+        }
+
+        do {
+            try await store.requireExactExisting(
+                deviceId: deviceId,
+                kemPublicKeys: [
+                    KEMPublicKeyInfo(
+                        suiteWireId: CryptoSuite.mlkem768.wireId,
+                        publicKey: Data(repeating: 0x33, count: 64)
+                    )
+                ]
+            )
+            XCTFail("Expected a missing suite key to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? KEMTrustStore.ExistingTrustAdmissionError,
+                .storedKeySetMismatch
+            )
+        }
+    }
+
+    func testExactExistingAdmissionRejectsPresentedKeySubset() async throws {
+        let suiteName = "KEMTrustStoreSubsetAdmissionTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Unable to create isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = KEMTrustStore(
+            storageKey: "kem_trust_store.subset.admission.tests.v1",
+            userDefaults: defaults
+        )
+        let deviceId = "peer-\(UUID().uuidString)"
+        let xwing = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.xwing.wireId,
+            publicKey: Data(repeating: 0x41, count: 64)
+        )
+        let mlkem = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.mlkem768.wireId,
+            publicKey: Data(repeating: 0x42, count: 64)
+        )
+        await store.upsert(deviceId: deviceId, kemPublicKeys: [xwing, mlkem])
+
+        do {
+            try await store.requireExactExisting(
+                deviceId: deviceId,
+                kemPublicKeys: [xwing]
+            )
+            XCTFail("Expected a reduced key set to fail closed")
+        } catch {
+            XCTAssertEqual(
+                error as? KEMTrustStore.ExistingTrustAdmissionError,
+                .storedKeySetMismatch
+            )
+        }
+    }
 }

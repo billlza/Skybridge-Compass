@@ -456,15 +456,21 @@ final class HandshakeContextTests: XCTestCase {
             signatureProvider: provider
         )
         
-        let initiatorKey = P256.Signing.PrivateKey()
-        let initiatorCallback = P256SigningCallback(privateKeyRawRepresentation: initiatorKey.rawRepresentation)
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let initiatorSecureEnclaveKey = P256.Signing.PrivateKey()
+        let initiatorSecureEnclaveCallback = P256SigningCallback(
+            privateKeyRawRepresentation: initiatorSecureEnclaveKey.rawRepresentation
+        )
         let policy = HandshakePolicy(requireSecureEnclavePoP: true)
         
         let messageA = try await initiator.buildMessageA(
-            identityKeyHandle: .callback(initiatorCallback),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(
+                initiatorSigningKey.publicKey.bytes,
+                algorithm: .ed25519
+            ),
             policy: policy,
-            secureEnclaveKeyHandle: .callback(initiatorCallback)
+            secureEnclaveKeyHandle: .callback(initiatorSecureEnclaveCallback)
         )
         
         do {
@@ -503,30 +509,42 @@ final class HandshakeContextTests: XCTestCase {
             signatureProvider: provider
         )
         
-        let initiatorKey = P256.Signing.PrivateKey()
-        let responderKey = P256.Signing.PrivateKey()
-        let initiatorCallback = P256SigningCallback(privateKeyRawRepresentation: initiatorKey.rawRepresentation)
-        let responderCallback = P256SigningCallback(privateKeyRawRepresentation: responderKey.rawRepresentation)
+        let initiatorSigningKey = try await provider.generateKeyPair(for: .signing)
+        let responderSigningKey = try await provider.generateKeyPair(for: .signing)
+        let initiatorSecureEnclaveKey = P256.Signing.PrivateKey()
+        let responderSecureEnclaveKey = P256.Signing.PrivateKey()
+        let initiatorSecureEnclaveCallback = P256SigningCallback(
+            privateKeyRawRepresentation: initiatorSecureEnclaveKey.rawRepresentation
+        )
+        let responderSecureEnclaveCallback = P256SigningCallback(
+            privateKeyRawRepresentation: responderSecureEnclaveKey.rawRepresentation
+        )
         let policy = HandshakePolicy(requireSecureEnclavePoP: true)
         
         let messageA = try await initiator.buildMessageA(
-            identityKeyHandle: .callback(initiatorCallback),
-            identityPublicKey: encodeIdentityPublicKey(initiatorKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(initiatorSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(
+                initiatorSigningKey.publicKey.bytes,
+                algorithm: .ed25519
+            ),
             policy: policy,
-            secureEnclaveKeyHandle: .callback(initiatorCallback)
+            secureEnclaveKeyHandle: .callback(initiatorSecureEnclaveCallback)
         )
         
         try await responder.processMessageA(
             messageA,
             policy: policy,
-            secureEnclavePublicKey: initiatorKey.publicKey.derRepresentation
+            secureEnclavePublicKey: initiatorSecureEnclaveKey.publicKey.derRepresentation
         )
         
         let buildResult = try await responder.buildMessageB(
-            identityKeyHandle: .callback(responderCallback),
-            identityPublicKey: encodeIdentityPublicKey(responderKey.publicKey.derRepresentation, algorithm: .p256ECDSA),
+            identityKeyHandle: .softwareKey(responderSigningKey.privateKey.bytes),
+            identityPublicKey: encodeIdentityPublicKey(
+                responderSigningKey.publicKey.bytes,
+                algorithm: .ed25519
+            ),
             policy: policy,
-            secureEnclaveKeyHandle: .callback(responderCallback)
+            secureEnclaveKeyHandle: .callback(responderSecureEnclaveCallback)
         )
         let messageB = buildResult.message
         buildResult.sharedSecret.zeroize()

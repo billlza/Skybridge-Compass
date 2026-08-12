@@ -10,6 +10,7 @@ import Foundation
 import Network
 import CryptoKit
 import ActivityKit
+import Darwin
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -310,6 +311,19 @@ public class FileTransferManager: ObservableObject {
     private let maxMessageBytes: Int = 2_000_000
     private let queue = DispatchQueue(label: "com.skybridge.filetransfer", qos: .userInitiated)
 
+    private struct FormalInteropRun {
+        let runRef: String
+        let androidToPeerTransferID: String
+        let peerToAndroidTransferID: String
+        let directoryURL: URL
+        var sessionRef: String?
+        var owner: CrossNetworkFileTransferSessionOwner?
+        var inboundResult: Result<URL, FormalInteropFileTransferError>?
+        var outboundFixtureURL: URL?
+    }
+
+    private var formalInteropRun: FormalInteropRun?
+
     private var inFlightTransferCount: Int = 0
     private var transferWaiters: [CheckedContinuation<Void, Never>] = []
     private var lastProgressEventAtByTransferId: [String: Date] = [:]
@@ -339,6 +353,321 @@ public class FileTransferManager: ObservableObject {
         try? fileManager.createDirectory(at: downloadsDirectory, withIntermediateDirectories: true)
         
         loadHistory()
+    }
+
+    // MARK: - Formal physical interoperability seam
+
+    func prepareFormalInteropRun(
+        runRef: String,
+        androidToPeerTransferID: String,
+        peerToAndroidTransferID: String
+    ) throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["SKYBRIDGE_SMOKE_ROLE"] == "ios-client",
+              environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1",
+              environment["SKYBRIDGE_SMOKE_EXPECT_BIDIRECTIONAL_FILE_TRANSFER"] == "1",
+              formalInteropRun == nil,
+              Self.isCanonicalSHA256(runRef),
+              Self.isCanonicalTransferID(androidToPeerTransferID),
+              Self.isCanonicalTransferID(peerToAndroidTransferID),
+              androidToPeerTransferID != peerToAndroidTransferID else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let directory = caches.appendingPathComponent(
+            "skybridge-formal-interop-\(runRef)",
+            isDirectory: true
+        )
+        guard !fileManager.fileExists(atPath: directory.path) else {
+            throw FormalInteropFileTransferError.runDirectoryAlreadyExists
+        }
+        try CrossNetworkInboundFileCommitter.ensureDurableDirectory(directory)
+        formalInteropRun = FormalInteropRun(
+            runRef: runRef,
+            androidToPeerTransferID: androidToPeerTransferID,
+            peerToAndroidTransferID: peerToAndroidTransferID,
+            directoryURL: directory,
+            sessionRef: nil,
+            owner: nil,
+            inboundResult: nil,
+            outboundFixtureURL: nil
+        )
+    }
+
+    func bindFormalInteropSession(
+        sessionRef: String,
+        owner: CrossNetworkFileTransferSessionOwner
+    ) throws {
+        guard Self.isCanonicalSHA256(sessionRef), var run = formalInteropRun else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        if let existing = run.sessionRef, existing != sessionRef {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        if let existingOwner = run.owner, existingOwner != owner {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        run.sessionRef = sessionRef
+        run.owner = owner
+        formalInteropRun = run
+    }
+
+    func formalInteropInboundDirectoryURL() -> URL? {
+        formalInteropRun?.directoryURL
+    }
+
+    func admitFormalInteropInboundMetadata(
+        transferID: String,
+        fileName: String,
+        fileSize: Int64,
+        senderDeviceID: String?,
+        authenticatedPeerDeviceID: String?,
+        sessionRef: String,
+        owner: CrossNetworkFileTransferSessionOwner
+    ) throws {
+        guard var run = formalInteropRun else { return }
+        let expectedPayload = try Self.formalInteropPayload(
+            direction: "android-to-peer",
+            runRef: run.runRef,
+            sessionRef: sessionRef,
+            transferID: run.androidToPeerTransferID
+        )
+        let expectedPeer = ProcessInfo.processInfo.environment["SKYBRIDGE_PQC_PEER_DEVICE_ID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard transferID == run.androidToPeerTransferID,
+              fileName == Self.formalInteropFileName(
+                direction: "android-to-peer",
+                runRef: run.runRef
+              ),
+              fileSize == Int64(expectedPayload.count),
+              senderDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              authenticatedPeerDeviceID == expectedPeer,
+              Self.isCanonicalSHA256(sessionRef),
+              owner.sessionID.isEmpty == false else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        if let existingSessionRef = run.sessionRef, existingSessionRef != sessionRef {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        if let existingOwner = run.owner, existingOwner != owner {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        run.sessionRef = sessionRef
+        run.owner = owner
+        formalInteropRun = run
+    }
+
+    func formalInteropInboundCompletionURL(transferID: String) throws -> URL? {
+        guard let run = formalInteropRun,
+              transferID == run.androidToPeerTransferID else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        switch run.inboundResult {
+        case .success(let url): return url
+        case .failure(let error): throw error
+        case nil: return nil
+        }
+    }
+
+    func createAndSendFormalInteropPayload(
+        _ payload: Data,
+        transferID: String,
+        fileName: String,
+        expectedPeerDeviceID: String
+    ) async throws -> FormalInteropOutboundEvidence {
+        guard !payload.isEmpty,
+              var run = formalInteropRun,
+              run.sessionRef != nil,
+              let requiredOwner = run.owner,
+              transferID == run.peerToAndroidTransferID,
+              fileName == Self.formalInteropFileName(
+                direction: "peer-to-android",
+                runRef: run.runRef
+              ),
+              crossNetwork.remoteDeviceId == expectedPeerDeviceID,
+              case .connected = crossNetwork.state else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        let identity = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+        guard !identity.deviceId.isEmpty else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+
+        let temporary = try CrossNetworkInboundFileCommitter.createExclusiveTemporaryFile(
+            in: run.directoryURL
+        )
+        do {
+            try temporary.handle.write(contentsOf: payload)
+            try CrossNetworkInboundFileCommitter.synchronizeAndClose(temporary.handle)
+            let fixtureURL = try CrossNetworkInboundFileCommitter.commitWithoutReplacing(
+                temporaryURL: temporary.url,
+                in: run.directoryURL,
+                preferredFileName: fileName
+            )
+            run.outboundFixtureURL = fixtureURL
+            formalInteropRun = run
+
+            let digest = Data(SHA256.hash(data: payload))
+            let hashString = digest.map { String(format: "%02x", $0) }.joined()
+            let chunkSize = 16 * 1024
+            let transfer = FileTransfer(
+                id: transferID,
+                fileName: fileName,
+                fileSize: Int64(payload.count),
+                fileType: .document,
+                isIncoming: false,
+                remotePeer: expectedPeerDeviceID,
+                localPath: fixtureURL.path
+            )
+            let metadata = FileMetadata(
+                transferId: transferID,
+                fileName: fileName,
+                fileSize: Int64(payload.count),
+                fileHash: hashString,
+                chunkSize: chunkSize,
+                mimeType: "text/plain",
+                compression: nil,
+                totalChunks: Int(ceil(Double(payload.count) / Double(chunkSize))),
+                senderDeviceId: identity.deviceId
+            )
+            let peer = DiscoveredDevice(
+                id: expectedPeerDeviceID,
+                name: expectedPeerDeviceID,
+                modelName: "Android",
+                platform: .android,
+                osVersion: "unknown"
+            )
+            let outboundContext = try crossNetwork.makeFileTransferOutboundContext()
+            guard outboundContext.owner == requiredOwner else {
+                throw FormalInteropFileTransferError.invalidBinding
+            }
+            try await sendFileOverWebRTC(
+                from: fixtureURL,
+                transfer: transfer,
+                metadata: metadata,
+                to: peer,
+                requiredOutboundContext: outboundContext
+            )
+            try crossNetwork.validateFileTransferOutboundContext(outboundContext)
+            return FormalInteropOutboundEvidence(
+                fixtureURL: fixtureURL,
+                bytes: payload.count,
+                sha256: digest
+            )
+        } catch {
+            try? temporary.handle.close()
+            try? fileManager.removeItem(at: temporary.url)
+            throw error
+        }
+    }
+
+    func cleanupPreparedFormalInteropRunOwnedArtifacts(runRef: String) throws {
+        guard let run = formalInteropRun,
+              run.runRef == runRef else {
+            throw FormalInteropFileTransferError.unavailable
+        }
+        guard run.sessionRef == nil,
+              run.owner == nil,
+              run.inboundResult == nil,
+              run.outboundFixtureURL == nil else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        try cleanupFormalInteropRunOwnedArtifacts(run)
+    }
+
+    func cleanupQuiescedFormalInteropRunOwnedArtifacts(
+        runRef: String,
+        requiredOwner: CrossNetworkFileTransferSessionOwner
+    ) throws {
+        guard let run = formalInteropRun,
+              run.runRef == runRef,
+              run.owner == requiredOwner else {
+            throw FormalInteropFileTransferError.unavailable
+        }
+        try cleanupFormalInteropRunOwnedArtifacts(run)
+    }
+
+    private func cleanupFormalInteropRunOwnedArtifacts(_ run: FormalInteropRun) throws {
+        let expectedNames = Set([
+            Self.formalInteropFileName(direction: "android-to-peer", runRef: run.runRef),
+            Self.formalInteropFileName(direction: "peer-to-android", runRef: run.runRef),
+        ])
+        let children = try fileManager.contentsOfDirectory(
+            at: run.directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        )
+        for child in children {
+            let values = try child.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            let isOwnedPartial = child.lastPathComponent.hasPrefix(".skybridge-receive-")
+                && child.lastPathComponent.hasSuffix(".partial")
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true,
+                  expectedNames.contains(child.lastPathComponent) || isOwnedPartial else {
+                throw FormalInteropFileTransferError.unexpectedRunArtifact
+            }
+            try fileManager.removeItem(at: child)
+        }
+        guard (try fileManager.contentsOfDirectory(atPath: run.directoryURL.path)).isEmpty else {
+            throw FormalInteropFileTransferError.cleanupFailed
+        }
+        let removeResult = run.directoryURL.path.withCString { Darwin.rmdir($0) }
+        guard removeResult == 0 else {
+            throw FormalInteropFileTransferError.cleanupFailed
+        }
+        let parentPath = run.directoryURL.deletingLastPathComponent().path
+        let parentDescriptor = parentPath.withCString {
+            Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard parentDescriptor >= 0 else {
+            throw FormalInteropFileTransferError.cleanupFailed
+        }
+        defer { _ = Darwin.close(parentDescriptor) }
+        guard Darwin.fsync(parentDescriptor) == 0 else {
+            throw FormalInteropFileTransferError.cleanupFailed
+        }
+        guard !fileManager.fileExists(atPath: run.directoryURL.path) else {
+            throw FormalInteropFileTransferError.cleanupFailed
+        }
+        formalInteropRun = nil
+    }
+
+    static func formalInteropFileName(direction: String, runRef: String) -> String {
+        precondition(direction == "android-to-peer" || direction == "peer-to-android")
+        precondition(isCanonicalSHA256(runRef))
+        return "\(direction)-\(runRef.prefix(16)).txt"
+    }
+
+    static func formalInteropPayload(
+        direction: String,
+        runRef: String,
+        sessionRef: String,
+        transferID: String
+    ) throws -> Data {
+        guard direction == "android-to-peer" || direction == "peer-to-android",
+              isCanonicalSHA256(runRef),
+              isCanonicalSHA256(sessionRef),
+              isCanonicalTransferID(transferID) else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        return Data(
+            (
+                "skybridge-formal-p2p-file-v1\n"
+                    + "direction=\(direction)\n"
+                    + "runRef=\(runRef)\n"
+                    + "sessionRef=\(sessionRef)\n"
+                    + "transferId=\(transferID)\n"
+            ).utf8
+        )
+    }
+
+    private static func isCanonicalSHA256(_ value: String) -> Bool {
+        value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
+    }
+
+    private static func isCanonicalTransferID(_ value: String) -> Bool {
+        value.utf8.count == 36
+            && UUID(uuidString: value)?.uuidString.lowercased() == value
     }
     
     // MARK: - Public Methods
@@ -974,13 +1303,24 @@ public class FileTransferManager: ObservableObject {
         from url: URL,
         transfer: FileTransfer,
         metadata: FileMetadata,
-        to device: DiscoveredDevice
+        to device: DiscoveredDevice,
+        requiredOutboundContext: CrossNetworkFileTransferOutboundContext? = nil
     ) async throws {
+        let outboundContext = try requiredOutboundContext
+            ?? crossNetwork.makeFileTransferOutboundContext()
         // Use a smaller chunk size for DataChannel to keep per-message size stable.
         let dcChunkSize = min(64 * 1024, max(8 * 1024, metadata.chunkSize))
         let totalChunks = Int(ceil(Double(metadata.fileSize) / Double(dcChunkSize)))
         
-        let senderDeviceId = KeychainManager.shared.getOrGenerateDeviceId()
+        let senderDeviceId: String
+        if let formalRun = formalInteropRun,
+           transfer.id == formalRun.peerToAndroidTransferID {
+            senderDeviceId = try await ExistingReadOnlyIdentityMaterialProvider
+                .loadProtocolIdentity()
+                .deviceId
+        } else {
+            senderDeviceId = KeychainManager.shared.getOrGenerateDeviceId()
+        }
         let senderDeviceName: String? = {
             #if canImport(UIKit)
             return UIDevice.current.name
@@ -1000,10 +1340,10 @@ public class FileTransferManager: ObservableObject {
             totalChunks: totalChunks,
             mimeType: metadata.mimeType
         )
-        try await crossNetwork.sendFileTransferMessage(meta)
-        _ = try await crossNetwork.waitForFileTransferAck(
-            transferId: transfer.id,
-            op: .metadataAck,
+        _ = try await crossNetwork.sendFileTransferMessageAndWait(
+            meta,
+            expectedOperation: .metadataAck,
+            requiredOwner: outboundContext.owner,
             timeoutSeconds: 15
         )
         
@@ -1041,26 +1381,35 @@ public class FileTransferManager: ObservableObject {
                 chunkSha256: Data(SHA256.hash(data: chunkData)),
                 rawSize: rawSize
             )
-            try await crossNetwork.sendFileTransferMessage(msg)
-            
             let ack: CrossNetworkFileTransferMessage = try await { () async throws -> CrossNetworkFileTransferMessage in
-                var lastError: Error?
-                for _ in 0..<3 {
+                let retryPolicy = CrossNetworkFileTransferCompletionRetryPolicy(maximumAttempts: 3)
+                var completedAttempts = 0
+                while true {
+                    completedAttempts += 1
                     do {
-                        return try await crossNetwork.waitForFileTransferAck(
-                            transferId: transfer.id,
-                            op: .chunkAck,
-                            chunkIndex: chunkIndex,
+                        return try await crossNetwork.sendFileTransferMessageAndWait(
+                            msg,
+                            expectedOperation: .chunkAck,
+                            expectedChunkIndex: chunkIndex,
+                            requiredOwner: outboundContext.owner,
                             timeoutSeconds: 20
                         )
                     } catch {
-                        lastError = error
-                        // Best-effort resend: safe because receiver writes at fixed offset.
-                        try? await crossNetwork.sendFileTransferMessage(msg)
+                        let failure: CrossNetworkFileTransferCompletionAttemptFailure
+                        switch error {
+                        case CrossNetworkWebRTCManager.FileTransferWaitError.timeout:
+                            failure = .timeout
+                        case CrossNetworkWebRTCManager.FileTransferWaitError.transientSend:
+                            failure = .transientSend
+                        default:
+                            failure = .terminal
+                        }
+                        guard retryPolicy.permitsRetry(
+                            after: failure,
+                            completedAttempts: completedAttempts
+                        ) else { throw error }
                     }
                 }
-                if let lastError { throw lastError }
-                throw FileTransferError.networkError("chunk ack retries exhausted")
             }()
             
             // Use receiver-reported progress if present (more accurate than "sent").
@@ -1072,6 +1421,7 @@ public class FileTransferManager: ObservableObject {
             chunkIndex += 1
             
             await updateProgress(transfer.id, transferredBytes: sentBytes, totalBytes: metadata.fileSize)
+            try crossNetwork.validateFileTransferOutboundContext(outboundContext)
         }
         
         let fileSha256 = Data(fileHasher.finalize())
@@ -1081,10 +1431,15 @@ public class FileTransferManager: ObservableObject {
             receivedBytes: metadata.fileSize,
             fileSha256: fileSha256
         )
-        try await crossNetwork.sendFileTransferMessage(done)
-        _ = try await crossNetwork.waitForFileTransferAck(
-            transferId: transfer.id,
-            op: .completeAck,
+        let completionExpectation = try CrossNetworkFileTransferCompletionAckExpectation(
+            transferID: transfer.id,
+            receivedBytes: metadata.fileSize,
+            fileSHA256: fileSha256
+        )
+        _ = try await crossNetwork.sendFileTransferCompletionAndWait(
+            done,
+            expectation: completionExpectation,
+            requiredOwner: outboundContext.owner,
             timeoutSeconds: 20
         )
     }
@@ -2036,6 +2391,20 @@ public class FileTransferManager: ObservableObject {
         fromPeerName: String,
         destinationURL: URL? = nil
     ) {
+        if var formalRun = formalInteropRun,
+           transferId == formalRun.androidToPeerTransferID {
+            guard fileName == Self.formalInteropFileName(
+                direction: "android-to-peer",
+                runRef: formalRun.runRef
+            ), fileSize > 0 else {
+                formalRun.inboundResult = .failure(.invalidBinding)
+                formalInteropRun = formalRun
+                return
+            }
+            formalRun.inboundResult = nil
+            formalInteropRun = formalRun
+            return
+        }
         if activeTransfers.contains(where: { $0.id == transferId }) { return }
         
         let transfer = FileTransfer(
@@ -2082,6 +2451,25 @@ public class FileTransferManager: ObservableObject {
         error: String? = nil,
         destinationURL: URL? = nil
     ) {
+        if var formalRun = formalInteropRun,
+           transferId == formalRun.androidToPeerTransferID {
+            if success,
+               let destinationURL,
+               destinationURL.deletingLastPathComponent().standardizedFileURL
+                == formalRun.directoryURL.standardizedFileURL,
+               destinationURL.lastPathComponent == Self.formalInteropFileName(
+                direction: "android-to-peer",
+                runRef: formalRun.runRef
+               ) {
+                formalRun.inboundResult = .success(destinationURL)
+            } else {
+                formalRun.inboundResult = .failure(
+                    .inboundFailed(error ?? "missing exact durable destination")
+                )
+            }
+            formalInteropRun = formalRun
+            return
+        }
         if let destinationURL {
             upsertLocalPath(destinationURL.path, for: transferId)
         }
@@ -2185,6 +2573,32 @@ public class FileTransferManager: ObservableObject {
         let historyToSave = Array(transferHistory.prefix(100))
         try? Self.historyStore.save(historyToSave)
     }
+}
+
+enum FormalInteropFileTransferError: Error, LocalizedError {
+    case unavailable
+    case invalidBinding
+    case runDirectoryAlreadyExists
+    case inboundFailed(String)
+    case unexpectedRunArtifact
+    case cleanupFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: return "formal interop file transfer is unavailable"
+        case .invalidBinding: return "formal interop binding is invalid"
+        case .runDirectoryAlreadyExists: return "formal interop run directory already exists"
+        case .inboundFailed(let message): return "formal interop inbound transfer failed: \(message)"
+        case .unexpectedRunArtifact: return "formal interop run directory contains an unexpected artifact"
+        case .cleanupFailed: return "formal interop run-owned artifact cleanup failed"
+        }
+    }
+}
+
+struct FormalInteropOutboundEvidence {
+    let fixtureURL: URL
+    let bytes: Int
+    let sha256: Data
 }
 
 @available(iOS 17.0, *)

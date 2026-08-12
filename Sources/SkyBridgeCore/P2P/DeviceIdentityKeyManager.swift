@@ -110,6 +110,7 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
     case signatureFailed(String)
     case verificationFailed
     case keyRotationFailed(String)
+    case existingIdentityRequired(String)
     
     public var errorDescription: String? {
         switch self {
@@ -131,6 +132,8 @@ public enum DeviceIdentityKeyError: Error, LocalizedError, Sendable {
             return "Signature verification failed"
         case .keyRotationFailed(let reason):
             return "Key rotation failed: \(reason)"
+        case .existingIdentityRequired(let reason):
+            return "Existing identity required: \(reason)"
         }
     }
 }
@@ -221,7 +224,12 @@ public actor DeviceIdentityKeyManager {
     
  // MARK: - Initialization
     
-    private init() {}
+    private let kemStorageNamespace: String
+
+    init(kemStorageNamespace: String = "production") {
+        precondition(!kemStorageNamespace.isEmpty, "KEM storage namespace must not be empty")
+        self.kemStorageNamespace = kemStorageNamespace
+    }
     
  // MARK: - Public Methods
     
@@ -240,6 +248,9 @@ public actor DeviceIdentityKeyManager {
         }
         
  // 创建新密钥
+        if requiresExistingIdentityWithoutMutation {
+            throw DeviceIdentityKeyError.existingIdentityRequired("P-256 identity key is missing")
+        }
         let keyInfo = try await createNewIdentityKey()
         cachedKeyInfo = keyInfo
         return keyInfo
@@ -258,6 +269,9 @@ public actor DeviceIdentityKeyManager {
         }
         
  // 生成新的设备 ID
+        if requiresExistingIdentityWithoutMutation {
+            return ""
+        }
         let newId = UUID().uuidString
         saveDeviceId(newId)
         _deviceId = newId
@@ -356,6 +370,9 @@ public actor DeviceIdentityKeyManager {
         }
         
  // 创建新密钥
+        if requiresExistingIdentityWithoutMutation {
+            throw DeviceIdentityKeyError.existingIdentityRequired("Ed25519 protocol signing key is missing")
+        }
         let keyPair = try createProtocolSigningKey()
         cachedProtocolSigningKey = keyPair
         return (publicKey: keyPair.publicKey, keyHandle: .softwareKey(keyPair.privateKey))
@@ -435,6 +452,9 @@ public actor DeviceIdentityKeyManager {
         }
         
  // 尝试迁移旧密钥
+        if requiresExistingIdentityWithoutMutation {
+            return nil
+        }
         try await migrateExistingIdentityKey()
         
  // 再次尝试加载
@@ -548,6 +568,11 @@ public actor DeviceIdentityKeyManager {
             return (publicKey: record.publicKey, privateKey: SecureBytes(data: record.privateKey))
         }
         
+        if requiresExistingIdentityWithoutMutation {
+            throw DeviceIdentityKeyError.existingIdentityRequired(
+                "KEM identity key is missing for suite \(storageSuite.wireId) tier \(provider.tier.rawValue)"
+            )
+        }
         let keyPair = try await provider.generateKeyPair(for: .keyExchange)
         let record = KEMIdentityKeyRecord(
             suiteWireId: storageSuite.wireId,
@@ -944,11 +969,13 @@ public actor DeviceIdentityKeyManager {
             return record
         }
         
- // 兼容旧数据：无 tier 的记录。若密钥长度匹配当前 provider，则迁移。
+ // 兼容旧数据：无 tier 的记录。正式只读验收只能复用，不能迁移写入。
         let legacyAccount = kemAccount(suiteWireId: suiteWireId, tier: nil)
         if let legacyRecord = try loadKEMKeyRecord(account: legacyAccount),
            kemRecordMatchesProvider(legacyRecord, suiteWireId: suiteWireId, tier: tier) {
-            try saveKEMKeyRecord(legacyRecord, tier: tier)
+            if !requiresExistingIdentityWithoutMutation {
+                try saveKEMKeyRecord(legacyRecord, tier: tier)
+            }
             return legacyRecord
         }
         
@@ -963,7 +990,7 @@ public actor DeviceIdentityKeyManager {
         
         let account = kemAccount(suiteWireId: record.suiteWireId, tier: tier)
         if Self.useInMemoryKeychain {
-            let key = KeychainConstants.kemService + "|" + account
+            let key = inMemoryKEMKey(account: account)
             Self.inMemoryKEMLock.lock()
             Self.inMemoryKEMStore[key] = data
             Self.inMemoryKEMLock.unlock()
@@ -999,7 +1026,7 @@ public actor DeviceIdentityKeyManager {
 
     private func loadKEMKeyRecord(account: String) throws -> KEMIdentityKeyRecord? {
         if Self.useInMemoryKeychain {
-            let key = KeychainConstants.kemService + "|" + account
+            let key = inMemoryKEMKey(account: account)
             Self.inMemoryKEMLock.lock()
             let data = Self.inMemoryKEMStore[key]
             Self.inMemoryKEMLock.unlock()
@@ -1028,6 +1055,10 @@ public actor DeviceIdentityKeyManager {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
         return try decoder.decode(KEMIdentityKeyRecord.self, from: data)
+    }
+
+    private func inMemoryKEMKey(account: String) -> String {
+        kemStorageNamespace + "|" + KeychainConstants.kemService + "|" + account
     }
 
     private func kemRecordMatchesProvider(
@@ -1243,9 +1274,17 @@ public actor DeviceIdentityKeyManager {
         }
         
  // 创建新密钥
+        if requiresExistingIdentityWithoutMutation {
+            throw DeviceIdentityKeyError.existingIdentityRequired("ML-DSA-65 protocol signing key is missing")
+        }
         let keyPair = try await createMLDSASigningKey()
         cachedMLDSASigningKey = keyPair
         return (publicKey: keyPair.publicKey, keyHandle: .softwareKey(keyPair.privateKey))
+    }
+
+    private var requiresExistingIdentityWithoutMutation: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
     }
     
  /// 创建 ML-DSA-65 协议签名密钥

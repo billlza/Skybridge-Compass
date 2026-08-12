@@ -231,7 +231,13 @@ public class P2PConnectionManager: ObservableObject {
     private var discoveryCancellables = Set<AnyCancellable>()
     
     private init() {
-        pairingPolicyByPeerId = Self.pairingPolicyStore.load() ?? [:]
+        let existingTrustOnly = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
+        pairingPolicyByPeerId = Self.pairingPolicyStore.load(
+            migrationPolicy: existingTrustOnly
+                ? .readLegacyValueWithoutMutation
+                : .migrateLegacyValue
+        ) ?? [:]
 
         if let unsupported = IOSDeviceSupportGate.currentUnsupportedDevice() {
             SkyBridgeLogger.shared.warning(

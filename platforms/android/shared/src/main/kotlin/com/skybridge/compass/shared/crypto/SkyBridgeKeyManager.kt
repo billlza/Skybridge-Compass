@@ -44,6 +44,32 @@ class SkyBridgeKeyManager(private val context: Context) {
         // AES-GCM parameters
         private const val GCM_TAG_LENGTH = 128
         private const val GCM_IV_LENGTH = 12
+
+        internal fun requireExistingSecretKeyEntry(keyStore: KeyStore, alias: String): SecretKey {
+            val aliasPresent = keyStore.containsAlias(alias)
+            val entry = if (aliasPresent) keyStore.getEntry(alias, null) else null
+            return requireExistingSecretKeyEntry(alias, aliasPresent, entry)
+        }
+
+        internal fun requireExistingSecretKeyEntry(
+            alias: String,
+            aliasPresent: Boolean,
+            entry: KeyStore.Entry?
+        ): SecretKey {
+            if (!aliasPresent) {
+                throw KeyStorageException(
+                    alias = alias,
+                    message = "Existing PQC wrapping key is missing"
+                )
+            }
+            if (entry is KeyStore.SecretKeyEntry) {
+                return entry.secretKey
+            }
+            throw KeyStorageException(
+                alias = alias,
+                message = "Existing PQC wrapping key has the wrong entry type"
+            )
+        }
     }
     
     private val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { 
@@ -186,6 +212,20 @@ class SkyBridgeKeyManager(private val context: Context) {
             )
         }
     }
+
+    private fun getExistingWrappingKey(): SecretKey {
+        try {
+            return requireExistingSecretKeyEntry(keyStore, PQC_WRAPPING_KEY_ALIAS)
+        } catch (e: KeyStorageException) {
+            throw e
+        } catch (e: Exception) {
+            throw KeyStorageException(
+                alias = PQC_WRAPPING_KEY_ALIAS,
+                message = "Failed to retrieve existing PQC wrapping key: ${e.message}",
+                cause = e
+            )
+        }
+    }
     
     /**
      * Stores a PQC key pair encrypted with AES-256-GCM.
@@ -249,6 +289,20 @@ class SkyBridgeKeyManager(private val context: Context) {
      * _Requirements: 7.2, 7.5_
      */
     fun retrievePQCKeyPair(alias: String): KeyPair? {
+        return retrievePQCKeyPair(alias, allowWrappingKeyCreation = true)
+    }
+
+    /**
+     * Retrieves an existing PQC key pair without creating any Android Keystore material.
+     *
+     * This is the only retrieval API permitted in formal read-only diagnostics. If encrypted
+     * key records exist but their wrapping key is absent or invalid, retrieval fails closed.
+     */
+    fun retrieveExistingPQCKeyPair(alias: String): KeyPair? {
+        return retrievePQCKeyPair(alias, allowWrappingKeyCreation = false)
+    }
+
+    private fun retrievePQCKeyPair(alias: String, allowWrappingKeyCreation: Boolean): KeyPair? {
         try {
             // Check if key exists
             val publicKeyB64 = prefs.getString(alias + SUFFIX_PUBLIC, null) ?: return null
@@ -265,7 +319,11 @@ class SkyBridgeKeyManager(private val context: Context) {
             val iv = Base64.decode(ivB64, Base64.NO_WRAP)
             
             // Get wrapping key and decrypt private key
-            val wrappingKey = getOrCreateWrappingKey()
+            val wrappingKey = if (allowWrappingKeyCreation) {
+                getOrCreateWrappingKey()
+            } else {
+                getExistingWrappingKey()
+            }
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, wrappingKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
             

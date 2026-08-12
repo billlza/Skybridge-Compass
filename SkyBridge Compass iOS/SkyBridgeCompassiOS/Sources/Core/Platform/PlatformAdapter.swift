@@ -9,9 +9,161 @@
 import Foundation
 import CryptoKit
 import Network
+import Security
 #if canImport(OQSRAII)
 import OQSRAII
 #endif
+
+@available(iOS 17.0, *)
+struct ExistingReadOnlyProtocolIdentityMaterial: Sendable {
+    let deviceId: String
+    let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+    let protocolPublicKey: Data
+    let protocolSigningKeyHandle: SigningKeyHandle
+}
+
+@available(iOS 17.0, *)
+enum ExistingReadOnlyIdentityMaterialProvider {
+    enum MaterialError: LocalizedError, Equatable {
+        case modeNotEnabled
+        case missingPQCRequirement
+        case invalidPQCRequirement(String)
+        case missingExpectedPQCSuite
+        case invalidExpectedPQCSuite(String)
+        case missingCurrentPathDeviceId
+        case signingAlgorithmMismatch
+        case bindingMismatch
+        case signingKeyValidationFailed
+        case pqcProviderUnavailable
+        case missingPQCIdentity
+
+        var errorDescription: String? {
+            switch self {
+            case .modeNotEnabled:
+                return "Existing-read-only identity mode is not enabled"
+            case .missingPQCRequirement:
+                return "Formal smoke PQC requirement is missing"
+            case .invalidPQCRequirement:
+                return "Formal smoke PQC requirement must be 0 or 1"
+            case .missingExpectedPQCSuite:
+                return "Formal smoke expected PQC suite is missing"
+            case .invalidExpectedPQCSuite:
+                return "Formal smoke expected PQC suite is unsupported"
+            case .missingCurrentPathDeviceId:
+                return "Existing current-path device identity is missing"
+            case .signingAlgorithmMismatch:
+                return "Current-path and handshake signing algorithms do not match"
+            case .bindingMismatch:
+                return "Current-path binding does not match canonical protocol identity"
+            case .signingKeyValidationFailed:
+                return "Existing protocol signing key pair is inconsistent"
+            case .pqcProviderUnavailable:
+                return "Required PQC provider is unavailable"
+            case .missingPQCIdentity:
+                return "Existing PQC identity material is missing"
+            }
+        }
+    }
+
+    static var isEnabled: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
+    }
+
+    static func requirePQCFromEnvironment() throws -> Bool {
+        guard isEnabled else { throw MaterialError.modeNotEnabled }
+        guard let raw = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_REQUIRE_PQC"] else {
+            throw MaterialError.missingPQCRequirement
+        }
+        switch raw {
+        case "0": return false
+        case "1": return true
+        default: throw MaterialError.invalidPQCRequirement(raw)
+        }
+    }
+
+    static func protocolSigningAlgorithm(requirePQC: Bool) -> ProtocolSigningAlgorithm {
+        requirePQC ? .mlDSA65 : .ed25519
+    }
+
+    static func requiredPQCSuite(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> CryptoSuite {
+        guard let raw = environment["SKYBRIDGE_SMOKE_EXPECTED_SUITE_WIRE_ID"] else {
+            throw MaterialError.missingExpectedPQCSuite
+        }
+        switch raw {
+        case "0x0101": return .mlkem768
+        default: throw MaterialError.invalidExpectedPQCSuite(raw)
+        }
+    }
+
+    static func requireExistingDeviceId(_ rawDeviceId: String?) throws -> String {
+        guard let deviceId = rawDeviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !deviceId.isEmpty else {
+            throw MaterialError.missingCurrentPathDeviceId
+        }
+        return deviceId
+    }
+
+    static func loadProtocolIdentity() async throws -> ExistingReadOnlyProtocolIdentityMaterial {
+        let requirePQC = try requirePQCFromEnvironment()
+        let algorithm = protocolSigningAlgorithm(requirePQC: requirePQC)
+        let deviceId = try requireExistingDeviceId(KeychainManager.shared.loadDeviceId())
+        guard let existingKey = try SkyBridgeiOSCore.loadExistingIdentityKeyReadOnly(
+            algorithm: algorithm
+        ) else {
+            throw MaterialError.signingKeyValidationFailed
+        }
+        let publicKey = existingKey.publicKey
+        let keyHandle = existingKey.keyHandle
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: algorithm)
+        let validationMessage = Data("skybridge.existing-read-only.identity.v1".utf8)
+        let signature = try await signatureProvider.sign(validationMessage, key: keyHandle)
+        guard try await signatureProvider.verify(
+            validationMessage,
+            signature: signature,
+            publicKey: publicKey
+        ) else {
+            throw MaterialError.signingKeyValidationFailed
+        }
+        return ExistingReadOnlyProtocolIdentityMaterial(
+            deviceId: deviceId,
+            protocolSigningAlgorithm: algorithm,
+            protocolPublicKey: publicKey,
+            protocolSigningKeyHandle: keyHandle
+        )
+    }
+
+    static func requireBindingMatchesCanonicalIdentity(
+        material: ExistingReadOnlyProtocolIdentityMaterial,
+        deviceId: String,
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKey: Data
+    ) throws {
+        guard material.deviceId == deviceId,
+              material.protocolSigningAlgorithm == protocolSigningAlgorithm,
+              material.protocolPublicKey == protocolPublicKey else {
+            throw MaterialError.bindingMismatch
+        }
+    }
+
+    static func loadPQCIdentityPublicKeys() async throws -> [KEMPublicKeyInfo] {
+        guard try requirePQCFromEnvironment() else { return [] }
+        let suite = try requiredPQCSuite()
+        let provider = CryptoProviderFactory.make(policy: .requirePQC)
+        guard provider.supportedSuites.contains(suite) else {
+            throw MaterialError.pqcProviderUnavailable
+        }
+        let (publicKey, _) = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(
+            for: suite,
+            provider: provider
+        )
+        guard !publicKey.isEmpty else { throw MaterialError.missingPQCIdentity }
+        return [KEMPublicKeyInfo(suiteWireId: suite.wireId, publicKey: publicKey)]
+    }
+}
 
 // MARK: - SkyBridgeiOSCore
 
@@ -97,8 +249,18 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     
     /// 加载或创建身份密钥
     private func loadOrCreateIdentityKey(algorithm: ProtocolSigningAlgorithm) async throws {
+        if ExistingReadOnlyIdentityMaterialProvider.isEnabled {
+            let material = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+            guard material.protocolSigningAlgorithm == algorithm else {
+                throw ExistingReadOnlyIdentityMaterialProvider.MaterialError.signingAlgorithmMismatch
+            }
+            identityKeyHandle = material.protocolSigningKeyHandle
+            identityPublicKey = material.protocolPublicKey
+            return
+        }
+
         // 尝试从 Keychain 加载
-        if let existingKey = try? loadIdentityKeyFromKeychain(algorithm: algorithm) {
+        if let existingKey = try? Self.loadExistingIdentityKeyReadOnly(algorithm: algorithm) {
             if await isIdentityKeyUsable(
                 keyHandle: existingKey.keyHandle,
                 publicKey: existingKey.publicKey,
@@ -147,20 +309,31 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
     
     // MARK: - Keychain Helpers
     
-    private func loadIdentityKeyFromKeychain(algorithm: ProtocolSigningAlgorithm) throws -> (keyHandle: SigningKeyHandle, publicKey: Data)? {
+    static func loadExistingIdentityKeyReadOnly(
+        algorithm: ProtocolSigningAlgorithm
+    ) throws -> (keyHandle: SigningKeyHandle, publicKey: Data)? {
         let tag = "com.skybridge.identity.\(algorithm.rawValue)"
         
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrApplicationTag as String: tag.data(using: .utf8)!,
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
         ]
         
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
-        guard status == errSecSuccess, let keyData = result as? Data else {
+        if status == errSecItemNotFound {
             return nil
+        }
+        guard status == errSecSuccess,
+              let matches = result as? [Data],
+              matches.count == 1,
+              let keyData = matches.first else {
+            throw SkyBridgeError.handshakeFailed(
+                reason: "Existing protocol identity is missing, ambiguous, or unreadable"
+            )
         }
         
         // 解析存储的数据（格式: privateKey || publicKey）
@@ -180,7 +353,7 @@ public final class SkyBridgeiOSCore: @unchecked Sendable {
         }
     }
 
-    private func mldsaPublicKeyLength() -> Int {
+    private static func mldsaPublicKeyLength() -> Int {
         #if canImport(OQSRAII)
         let oqsLength = oqs_raii_mldsa65_public_key_length()
         if oqsLength > 0 {

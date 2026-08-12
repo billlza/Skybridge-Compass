@@ -20,6 +20,7 @@ import com.skybridge.compass.core.filetransfer.MacLanFileTransferClient
 import com.skybridge.compass.core.webrtc.CrossNetworkWebRtcTransportAdapter
 import com.skybridge.compass.core.webrtc.SkyBridgeWebRtcConnectionManager
 import com.skybridge.compass.filetransfer.webrtc.WebRtcFileTransferController
+import com.skybridge.compass.filetransfer.webrtc.InboundFileDestinationPolicy
 import com.skybridge.compass.shared.webrtc.WebRtcAppSecureEnvelope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -70,7 +71,7 @@ class FileTransferViewModel @Inject constructor(
                 webrtc = transport,
                 appContext = appContext,
                 inboundApprovalProvider = inboundApprovalProvider,
-                saveAcceptedInboundToDownloads = true
+                inboundFileDestinationPolicy = InboundFileDestinationPolicy.DOWNLOADS
             )
         }
     }

@@ -6,6 +6,12 @@ import Foundation
 public actor P2PKEMIdentityKeyStore {
     public static let shared = P2PKEMIdentityKeyStore()
 
+    public enum ExistingIdentityError: Error, Equatable, Sendable {
+        case missingKeyPair(UInt16)
+        case incompleteKeyPair(UInt16)
+        case noExistingPQCIdentity
+    }
+
     private let keychain = KeychainManager.shared
 
     private init() {}
@@ -18,9 +24,17 @@ public actor P2PKEMIdentityKeyStore {
         let pubId = "p2p.kem.public.\(storageSuite.wireId)"
         let privId = "p2p.kem.private.\(storageSuite.wireId)"
 
-        if let priv = try? keychain.loadPrivateKey(identifier: privId),
-           let pub = try? keychain.loadPublicKey(identifier: pubId) {
+        let storedPrivateKey = try? keychain.loadPrivateKey(identifier: privId)
+        let storedPublicKey = try? keychain.loadPublicKey(identifier: pubId)
+        if let priv = storedPrivateKey, let pub = storedPublicKey {
             return (publicKey: pub, privateKey: SecureBytes(data: priv))
+        }
+
+        if requiresExistingIdentityWithoutMutation {
+            if storedPrivateKey != nil || storedPublicKey != nil {
+                throw ExistingIdentityError.incompleteKeyPair(storageSuite.wireId)
+            }
+            throw ExistingIdentityError.missingKeyPair(storageSuite.wireId)
         }
 
         let pair = try await provider.generateKeyPair(for: .keyExchange)
@@ -50,12 +64,21 @@ public actor P2PKEMIdentityKeyStore {
         }
         #endif
 
-        return bySuiteWireId
+        let keys: [KEMPublicKeyInfo] = bySuiteWireId
             .keys
             .sorted()
-            .compactMap { suiteWireId in
+            .compactMap { suiteWireId -> KEMPublicKeyInfo? in
                 guard let publicKey = bySuiteWireId[suiteWireId] else { return nil }
                 return KEMPublicKeyInfo(suiteWireId: suiteWireId, publicKey: publicKey)
             }
+        if requiresExistingIdentityWithoutMutation, keys.isEmpty {
+            throw ExistingIdentityError.noExistingPQCIdentity
+        }
+        return keys
+    }
+
+    private var requiresExistingIdentityWithoutMutation: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
     }
 }

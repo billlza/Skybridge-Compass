@@ -121,7 +121,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
 
         controller.sendBytesAsFilesBatch(singleItem("a.txt"), batchId = SHARED_BATCH_ID)
         val transferA = transport.messages.single { it.op == CrossNetworkFileTransferOp.metadata }.transferId
-        controller.handleIncoming(ownerA, completeAck(transferA))
+        controller.handleIncoming(ownerA, completeAck(transport, transferA))
         withTimeout(TIMEOUT_MS) { store.saveStaged.await() }
 
         val ownerB = transport.replaceTestSecureOwner()
@@ -140,7 +140,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
         val transferB = transport.messages
             .last { it.op == CrossNetworkFileTransferOp.metadata }
             .transferId
-        controller.handleIncoming(ownerB, completeAck(transferB))
+        controller.handleIncoming(ownerB, completeAck(transport, transferB))
 
         val completed = withTimeout(TIMEOUT_MS) {
             store.awaitStatus(CURRENT_OWNER_BATCH_ID, BatchManifestEntry.Status.COMPLETED)
@@ -161,7 +161,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
         val outboundTransferId = transport.messages
             .single { it.op == CrossNetworkFileTransferOp.metadata }
             .transferId
-        controller.handleIncoming(owner, completeAck(outboundTransferId))
+        controller.handleIncoming(owner, completeAck(transport, outboundTransferId))
         withTimeout(TIMEOUT_MS) { store.saveStaged.await() }
 
         val callback = isolatedAsync {
@@ -218,7 +218,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
 
         controller.sendBytesAsFilesBatch(singleItem("cancel.txt"), batchId = DELETE_RACE_BATCH_ID)
         val transferId = transport.messages.single { it.op == CrossNetworkFileTransferOp.metadata }.transferId
-        controller.handleIncoming(owner, completeAck(transferId))
+        controller.handleIncoming(owner, completeAck(transport, transferId))
         withTimeout(TIMEOUT_MS) { store.saveStaged.await() }
 
         val deleting = isolatedAsyncUndispatched {
@@ -243,7 +243,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
         controller.deleteBatchEntry(DELETE_FIRST_BATCH_ID, transferId)
         val savesAfterDelete = store.saveInvocations.get()
 
-        controller.handleIncoming(owner, completeAck(transferId))
+        controller.handleIncoming(owner, completeAck(transport, transferId))
 
         assertEquals(BatchManifestEntry.Status.CANCELLED, store.status(DELETE_FIRST_BATCH_ID))
         assertEquals(savesAfterDelete, store.saveInvocations.get(), "late ACK must not enter the closed entry lane")
@@ -258,7 +258,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
 
         controller.sendBytesAsFilesBatch(singleItem("delete-batch.txt"), batchId = DELETE_BATCH_ID)
         val transferId = transport.messages.single { it.op == CrossNetworkFileTransferOp.metadata }.transferId
-        controller.handleIncoming(owner, completeAck(transferId))
+        controller.handleIncoming(owner, completeAck(transport, transferId))
         withTimeout(TIMEOUT_MS) { store.saveStaged.await() }
 
         val deleting = isolatedAsyncUndispatched { controller.deleteBatch(DELETE_BATCH_ID) }
@@ -274,7 +274,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
 
         assertEquals(null, store.status(DELETE_BATCH_ID))
         val savesAfterDelete = store.saveInvocations.get()
-        controller.handleIncoming(owner, completeAck(transferId))
+        controller.handleIncoming(owner, completeAck(transport, transferId))
         controller.handleIncoming(
             owner,
             inboundMetadata(
@@ -367,7 +367,7 @@ class WebRtcFileTransferBatchManifestOwnerTest {
 
         assertTrue(collision is IllegalStateException)
         assertTrue(transportB.messages.isEmpty())
-        controllerA.handleIncoming(ownerA, completeAck(transferA))
+        controllerA.handleIncoming(ownerA, completeAck(transportA, transferA))
         val durable = withTimeout(TIMEOUT_MS) {
             awaitStatus(storeB, SHARED_DIRECTORY_BATCH_ID, BatchManifestEntry.Status.COMPLETED)
         }
@@ -414,13 +414,23 @@ class WebRtcFileTransferBatchManifestOwnerTest {
         ),
     )
 
-    private fun completeAck(transferId: String): ByteArray = json.encodeToString(
-        CrossNetworkFileTransferMessage.serializer(),
-        CrossNetworkFileTransferMessage(
-            op = CrossNetworkFileTransferOp.completeAck,
-            transferId = transferId,
-        ),
-    ).encodeToByteArray()
+    private fun completeAck(
+        transport: ManifestTransport,
+        transferId: String,
+    ): ByteArray {
+        val complete = transport.messages.last {
+            it.op == CrossNetworkFileTransferOp.complete && it.transferId == transferId
+        }
+        return json.encodeToString(
+            CrossNetworkFileTransferMessage.serializer(),
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.completeAck,
+                transferId = transferId,
+                receivedBytes = complete.receivedBytes,
+                fileSha256 = complete.fileSha256,
+            ),
+        ).encodeToByteArray()
+    }
 
     private fun inboundMetadata(transferId: String, batchId: String): ByteArray = json.encodeToString(
         CrossNetworkFileTransferMessage.serializer(),

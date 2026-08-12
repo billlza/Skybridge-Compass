@@ -296,6 +296,12 @@ extension WebRTCSession {
 
 @available(iOS 17.0, *)
 public final class WebRTCSession: NSObject, @unchecked Sendable {
+    public struct SelectedICECandidateEvidence: Equatable, Sendable {
+        public let route: String
+        public let localCandidateType: String
+        public let remoteCandidateType: String
+        public let networkProtocol: String
+    }
     public enum Role: Sendable { case offerer, answerer }
     
     public struct ICEConfig: Sendable {
@@ -1010,6 +1016,65 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
     }
 
+    public func selectedICECandidateEvidence() async -> SelectedICECandidateEvidence? {
+        let statistics: [String: RTCStatistics] = await withCheckedContinuation { continuation in
+            guard let peerConnection else {
+                continuation.resume(returning: [:])
+                return
+            }
+            peerConnection.statistics { report in
+                continuation.resume(returning: report.statistics)
+            }
+        }
+        let selectedPairIDs = statistics.values.compactMap { statistic -> String? in
+            guard statistic.type == "transport" else { return nil }
+            return Self.statisticsString(statistic.values["selectedCandidatePairId"])
+        }
+        guard Set(selectedPairIDs).count == 1,
+              let selectedPairID = selectedPairIDs.first,
+              let pair = statistics[selectedPairID],
+              pair.type == "candidate-pair",
+              Self.statisticsString(pair.values["state"]) == "succeeded",
+              let localID = Self.statisticsString(pair.values["localCandidateId"]),
+              let remoteID = Self.statisticsString(pair.values["remoteCandidateId"]),
+              let local = statistics[localID],
+              let remote = statistics[remoteID],
+              local.type == "local-candidate",
+              remote.type == "remote-candidate",
+              let localType = Self.canonicalCandidateType(
+                Self.statisticsString(local.values["candidateType"])
+              ),
+              let remoteType = Self.canonicalCandidateType(
+                Self.statisticsString(remote.values["candidateType"])
+              ) else {
+            return nil
+        }
+        let route = localType == "relay" || remoteType == "relay" ? "relay" : "direct"
+        let networkProtocol = Self.statisticsString(local.values["protocol"])?
+            .lowercased() ?? "unknown"
+        guard networkProtocol == "udp" || networkProtocol == "tcp" else { return nil }
+        return SelectedICECandidateEvidence(
+            route: route,
+            localCandidateType: localType,
+            remoteCandidateType: remoteType,
+            networkProtocol: networkProtocol
+        )
+    }
+
+    private static func statisticsString(_ value: NSObject?) -> String? {
+        guard let raw = value as? NSString else { return nil }
+        let string = String(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        return string.isEmpty ? nil : string
+    }
+
+    private static func canonicalCandidateType(_ value: String?) -> String? {
+        guard let value = value?.lowercased(),
+              ["host", "srflx", "prflx", "relay"].contains(value) else {
+            return nil
+        }
+        return value
+    }
+
     private func resolveRemoteVideoReceiver() -> RTCRtpReceiver? {
         if let remoteVideoReceiver {
             remoteVideoReceiver.delegate = self
@@ -1213,6 +1278,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
 
         try await gate.run {
+            try Task.checkCancellation()
             var framed = Data()
             var length = UInt32(payload.count).bigEndian
             framed.append(Data(bytes: &length, count: 4))
@@ -1230,6 +1296,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     timeout: drainTimeout,
                     channel: channel
                 )
+                try Task.checkCancellation()
                 let end = min(offset + maxChunkBytes, framed.count)
                 let chunk = Data(framed[offset..<end])
                 try send(chunk, over: channel)
@@ -1242,6 +1309,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 timeout: drainTimeout,
                 channel: channel
             )
+            try Task.checkCancellation()
         }
     }
 

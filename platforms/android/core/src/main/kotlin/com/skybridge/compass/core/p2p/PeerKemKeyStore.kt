@@ -9,6 +9,8 @@ import androidx.security.crypto.MasterKey
 import com.skybridge.compass.shared.p2p.P2PCryptoSuite
 import com.skybridge.compass.shared.p2p.QPeriaptPlatformPolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.security.KeyStore
+import java.nio.file.Files
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.Locale
@@ -175,7 +177,8 @@ fun interface PeerKemPublicKeySource {
 class PeerKemKeyStore internal constructor(
     private val prefsProvider: () -> SharedPreferences,
     private val trustedPeerStoreProvider: () -> TrustedPeerStore,
-    private val currentTimeMillis: () -> Long
+    private val currentTimeMillis: () -> Long,
+    private val mutationAllowed: Boolean = true
 ) : PeerKemPublicKeySource {
     @Inject
     constructor(
@@ -185,7 +188,8 @@ class PeerKemKeyStore internal constructor(
         trustedPeerStoreProvider = {
             LocalP2PIdentity(appContext.applicationContext).trustedPeerStore()
         },
-        currentTimeMillis = System::currentTimeMillis
+        currentTimeMillis = System::currentTimeMillis,
+        mutationAllowed = true
     )
 
     data class PeerKemPublicKeys(
@@ -773,6 +777,12 @@ class PeerKemKeyStore internal constructor(
         operation: String,
         mutate: (SharedPreferences.Editor) -> Unit
     ) {
+        if (!mutationAllowed) {
+            throw PeerKemKeyStorePersistenceException(
+                message = "formal acceptance peer KEM store is read-only",
+                rollbackConfirmed = true
+            )
+        }
         val previous = try {
             snapshotPreferences(expected.keys)
         } catch (snapshotFailure: RuntimeException) {
@@ -989,6 +999,21 @@ class PeerKemKeyStore internal constructor(
         )
         private const val PREFS_NAME = "skybridge_peer_kem_keys"
 
+        fun existingReadOnly(appContext: Context): PeerKemKeyStore {
+            val context = appContext.applicationContext
+            return PeerKemKeyStore(
+                prefsProvider = { createExistingEncryptedPreferences(context) },
+                trustedPeerStoreProvider = {
+                    LocalP2PIdentity(
+                        context,
+                        LocalP2PIdentity.StorageMode.ENCRYPTED_EXISTING_ONLY
+                    ).trustedPeerStore()
+                },
+                currentTimeMillis = System::currentTimeMillis,
+                mutationAllowed = false
+            )
+        }
+
         private fun createEncryptedPreferences(appContext: Context): SharedPreferences =
             EncryptedSharedPreferences.create(
                 appContext,
@@ -997,5 +1022,35 @@ class PeerKemKeyStore internal constructor(
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
+
+        private fun createExistingEncryptedPreferences(appContext: Context): SharedPreferences {
+            val preferencesDirectory = java.io.File(appContext.dataDir, "shared_prefs")
+            val preferencesFile = java.io.File(preferencesDirectory, "$PREFS_NAME.xml")
+            check(
+                preferencesFile.canonicalFile.parentFile == preferencesDirectory.canonicalFile &&
+                    preferencesFile.isFile &&
+                    !Files.isSymbolicLink(preferencesFile.toPath()) &&
+                    preferencesFile.length() > 0L
+            ) {
+                "Existing-only peer KEM encrypted preferences are missing"
+            }
+            val rawPreferences = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            check(
+                rawPreferences.contains(ENCRYPTED_PREFS_KEY_KEYSET) &&
+                    rawPreferences.contains(ENCRYPTED_PREFS_VALUE_KEYSET)
+            ) {
+                "Existing-only peer KEM encrypted preference keysets are missing"
+            }
+            val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            check(keyStore.containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
+                "Existing-only peer KEM store is missing the encrypted-preferences master key"
+            }
+            return createEncryptedPreferences(appContext)
+        }
+
+        private const val ENCRYPTED_PREFS_KEY_KEYSET =
+            "__androidx_security_crypto_encrypted_prefs_key_keyset__"
+        private const val ENCRYPTED_PREFS_VALUE_KEYSET =
+            "__androidx_security_crypto_encrypted_prefs_value_keyset__"
     }
 }

@@ -23,11 +23,17 @@ public protocol HandshakeKEMIdentityStore: Sendable {
 }
 
 struct DefaultHandshakeKEMIdentityStore: HandshakeKEMIdentityStore, Sendable {
+    private let manager: DeviceIdentityKeyManager
+
+    init(manager: DeviceIdentityKeyManager = .shared) {
+        self.manager = manager
+    }
+
     func getOrCreateKEMIdentityKey(
         for suite: CryptoSuite,
         provider: any CryptoProvider
     ) async throws -> HandshakeKEMIdentityMaterial {
-        let keyRecord = try await DeviceIdentityKeyManager.shared.getOrCreateKEMIdentityKey(
+        let keyRecord = try await manager.getOrCreateKEMIdentityKey(
             for: suite,
             provider: provider
         )

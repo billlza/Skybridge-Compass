@@ -114,6 +114,330 @@ require_android16_device() {
   fi
 }
 
+android_require_exact_device() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local state=""
+  local self_serial=""
+
+  if [[ ! "$device_serial" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+    echo "Android target must be an explicit safe adb serial" >&2
+    return 1
+  fi
+  state="$("$adb_bin" -s "$device_serial" get-state 2>/dev/null | tr -d '\r')" || {
+    echo "Unable to query Android device state for $device_serial" >&2
+    return 1
+  }
+  if [[ "$state" != "device" ]]; then
+    echo "Android target is not in adb device state: $device_serial" >&2
+    return 1
+  fi
+  self_serial="$("$adb_bin" -s "$device_serial" get-serialno 2>/dev/null | tr -d '\r')" || {
+    echo "Unable to query Android transport identity for $device_serial" >&2
+    return 1
+  }
+  if [[ "$self_serial" == *$'\n'* || "$self_serial" != "$device_serial" ]]; then
+    echo "Android adb transport resolved a different serial" >&2
+    return 1
+  fi
+}
+
+android_collect_samsung_4k_device_binding() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local manufacturer=""
+  local manufacturer_lower=""
+  local model=""
+  local release=""
+  local sdk=""
+  local abi=""
+  local qemu=""
+  local page_size=""
+  local identifier_refs=""
+
+  android_require_exact_device "$adb_bin" "$device_serial" || return 1
+  manufacturer="$(android_device_prop "$adb_bin" "$device_serial" ro.product.manufacturer)" || return 1
+  manufacturer_lower="$(printf '%s' "$manufacturer" | tr '[:upper:]' '[:lower:]')"
+  model="$(android_device_prop "$adb_bin" "$device_serial" ro.product.model)" || return 1
+  release="$(android_device_prop "$adb_bin" "$device_serial" ro.build.version.release)" || return 1
+  sdk="$(android_device_prop "$adb_bin" "$device_serial" ro.build.version.sdk)" || return 1
+  abi="$(android_device_prop "$adb_bin" "$device_serial" ro.product.cpu.abi)" || return 1
+  qemu="$(android_device_prop "$adb_bin" "$device_serial" ro.kernel.qemu)" || return 1
+  page_size="$(
+    "$adb_bin" -s "$device_serial" shell getconf PAGESIZE 2>/dev/null | tr -d '\r\n'
+  )" || {
+    echo "Unable to query Android kernel page size from $device_serial" >&2
+    return 1
+  }
+
+  require_android16_device "$release" "$sdk" || return 1
+  if [[ "$manufacturer_lower" != "samsung" ]]; then
+    echo "Formal physical interop requires the selected Samsung device" >&2
+    return 1
+  fi
+  if [[ -z "$model" || "$model" == *$'\n'* || ${#model} -gt 128 ]]; then
+    echo "Samsung model identity is missing or malformed" >&2
+    return 1
+  fi
+  if [[ "$abi" != "arm64-v8a" || "$qemu" != "0" || "$page_size" != "4096" ]]; then
+    echo "Formal physical interop requires physical arm64 Samsung/4096-byte-page identity" >&2
+    return 1
+  fi
+  identifier_refs="$(python3 - "$device_serial" "$model" <<'PY'
+import hashlib
+import sys
+
+for value in sys.argv[1:]:
+    print(hashlib.sha256(value.encode("utf-8")).hexdigest()[:16])
+PY
+)" || return 1
+  if [[ "$identifier_refs" != *$'\n'* ]]; then
+    echo "Unable to derive distinct Android device identifier references" >&2
+    return 1
+  fi
+
+  printf '%s\n' \
+    "schema_version=1" \
+    "profile=samsung-physical-4k" \
+    "serial_ref=sha256:${identifier_refs%%$'\n'*}" \
+    "model_ref=sha256:${identifier_refs#*$'\n'}" \
+    "manufacturer=samsung" \
+    "release=$release" \
+    "sdk=$sdk" \
+    "abi=$abi" \
+    "qemu=$qemu" \
+    "page_size=$page_size"
+}
+
+android_installed_package_path() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local package_name="$3"
+  local package_output=""
+  local payload=""
+  local remote_status=""
+
+  if [[ ! "$package_name" =~ ^[A-Za-z][A-Za-z0-9._]{0,254}$ ]]; then
+    echo "Android package name is invalid" >&2
+    return 1
+  fi
+  if ! package_output="$(
+    "$adb_bin" -s "$device_serial" shell sh -c \
+      "'output=\$(pm path \"$package_name\" 2>/dev/null); status=\$?; printf \"%s\\n__SKYBRIDGE_REMOTE_STATUS__=%s\\n\" \"\$output\" \"\$status\"'" \
+      2>/dev/null | tr -d '\r'
+  )"; then
+    echo "Unable to query installed Android package: $package_name" >&2
+    return 1
+  fi
+  if [[ "$package_output" != *$'\n__SKYBRIDGE_REMOTE_STATUS__='* ]] \
+    || (( $(awk 'BEGIN { count = 0 } /^__SKYBRIDGE_REMOTE_STATUS__=/ { count += 1 } END { print count }' <<<"$package_output") != 1 )); then
+    echo "Installed Android package query omitted its remote status" >&2
+    return 1
+  fi
+  remote_status="${package_output##*$'\n__SKYBRIDGE_REMOTE_STATUS__='}"
+  payload="${package_output%$'\n__SKYBRIDGE_REMOTE_STATUS__='*}"
+  if [[ ! "$remote_status" =~ ^[0-9]+$ ]] || (( remote_status > 255 )); then
+    echo "Installed Android package query returned an invalid remote status" >&2
+    return 1
+  fi
+  if (( remote_status == 1 )) && [[ -z "$payload" ]]; then
+    return 2
+  fi
+  if (( remote_status != 0 )); then
+    echo "Unable to query installed Android package: $package_name" >&2
+    return 1
+  fi
+  if [[ -z "$payload" || "$payload" == *$'\n'* ]] \
+    || [[ ! "$payload" =~ ^package:(/data/app/[A-Za-z0-9_./=+~-]+/base\.apk)$ ]]; then
+    echo "Installed Android package path is not one canonical base APK: $package_name" >&2
+    return 1
+  fi
+  local remote_path="${BASH_REMATCH[1]}"
+  if [[ "$remote_path" == *"/../"* || "$remote_path" == *"/./"* ]]; then
+    echo "Installed Android package path is not canonical: $package_name" >&2
+    return 1
+  fi
+  printf '%s\n' "$remote_path"
+}
+
+android_require_package_absent() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local package_name="$3"
+  local query_status=0
+
+  if android_installed_package_path "$adb_bin" "$device_serial" "$package_name" >/dev/null; then
+    echo "Android package existed before this run: $package_name" >&2
+    return 1
+  else
+    query_status=$?
+  fi
+  if (( query_status == 2 )); then
+    return 0
+  fi
+  return "$query_status"
+}
+
+android_require_package_process_absent() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local package_name="$3"
+  local process_output=""
+  local payload=""
+  local remote_status=""
+
+  if [[ ! "$package_name" =~ ^[A-Za-z][A-Za-z0-9._]{0,254}$ ]]; then
+    echo "Android package name is invalid" >&2
+    return 1
+  fi
+  if ! process_output="$(
+    "$adb_bin" -s "$device_serial" shell sh -c \
+      "'output=\$(pidof \"$package_name\" 2>/dev/null); status=\$?; printf \"%s\\n__SKYBRIDGE_REMOTE_STATUS__=%s\\n\" \"\$output\" \"\$status\"'" \
+      2>/dev/null | tr -d '\r'
+  )"; then
+    echo "Unable to prove Android package process absence: $package_name" >&2
+    return 1
+  fi
+  if [[ "$process_output" != *$'\n__SKYBRIDGE_REMOTE_STATUS__='* ]] \
+    || (( $(awk 'BEGIN { count = 0 } /^__SKYBRIDGE_REMOTE_STATUS__=/ { count += 1 } END { print count }' <<<"$process_output") != 1 )); then
+    echo "Android process query omitted its remote status: $package_name" >&2
+    return 1
+  fi
+  remote_status="${process_output##*$'\n__SKYBRIDGE_REMOTE_STATUS__='}"
+  payload="${process_output%$'\n__SKYBRIDGE_REMOTE_STATUS__='*}"
+  if [[ ! "$remote_status" =~ ^[0-9]+$ ]] || (( remote_status > 255 )); then
+    echo "Android process query returned an invalid remote status: $package_name" >&2
+    return 1
+  fi
+  if (( remote_status == 1 )) && [[ -z "$payload" ]]; then
+    return 0
+  fi
+  if (( remote_status != 0 )) || [[ ! "$payload" =~ ^[1-9][0-9]*(\ [1-9][0-9]*)*$ ]]; then
+    echo "Unable to prove Android package process absence: $package_name" >&2
+    return 1
+  fi
+  echo "Android package is already running; close it normally before retrying: $package_name" >&2
+  return 1
+}
+
+android_require_exact_success_output() {
+  local output="$1"
+  local label="$2"
+
+  case "$output" in
+    Success|$'Success\r') return 0 ;;
+    *)
+      echo "$label did not report one exact success terminal" >&2
+      return 1
+      ;;
+  esac
+}
+
+android_require_installed_apk_digest() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local package_name="$3"
+  local expected_digest="$4"
+  local remote_path=""
+  local digest_output=""
+
+  if [[ ! "$expected_digest" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Expected Android APK digest is malformed" >&2
+    return 1
+  fi
+  remote_path="$(android_installed_package_path "$adb_bin" "$device_serial" "$package_name")" || return 1
+  digest_output="$("$adb_bin" -s "$device_serial" shell sha256sum "$remote_path" 2>/dev/null | tr -d '\r')" || {
+    echo "Unable to hash installed Android package: $package_name" >&2
+    return 1
+  }
+  if [[ "$digest_output" == *$'\n'* ]] \
+    || [[ ! "$digest_output" =~ ^([0-9a-f]{64})[[:space:]]+([^[:space:]]+)$ ]] \
+    || [[ "${BASH_REMATCH[1]}" != "$expected_digest" ]] \
+    || [[ "${BASH_REMATCH[2]}" != "$remote_path" ]]; then
+    echo "Installed Android package bytes do not match the selected APK: $package_name" >&2
+    return 1
+  fi
+}
+
+android_collect_installed_apk_binding() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local package_name="$3"
+  local expected_digest="$4"
+  local field_prefix="$5"
+  local remote_path=""
+  local digest_output=""
+  local identifier_refs=""
+
+  if [[ ! "$field_prefix" =~ ^[a-z][a-z0-9_]{0,31}$ ]]; then
+    echo "Installed APK binding field prefix is invalid" >&2
+    return 1
+  fi
+  android_require_exact_device "$adb_bin" "$device_serial" || return 1
+  android_require_installed_apk_digest \
+    "$adb_bin" "$device_serial" "$package_name" "$expected_digest" || return 1
+  remote_path="$(android_installed_package_path "$adb_bin" "$device_serial" "$package_name")" \
+    || return 1
+  digest_output="$(
+    "$adb_bin" -s "$device_serial" shell sha256sum "$remote_path" 2>/dev/null | tr -d '\r'
+  )" || return 1
+  if [[ "$digest_output" == *$'\n'* ]] \
+    || [[ ! "$digest_output" =~ ^([0-9a-f]{64})[[:space:]]+([^[:space:]]+)$ ]] \
+    || [[ "${BASH_REMATCH[1]}" != "$expected_digest" ]] \
+    || [[ "${BASH_REMATCH[2]}" != "$remote_path" ]]; then
+    echo "Installed APK binding changed while it was captured: $package_name" >&2
+    return 1
+  fi
+  identifier_refs="$(python3 - "$device_serial" "$remote_path" <<'PY'
+import hashlib
+import sys
+
+for value in sys.argv[1:]:
+    print(hashlib.sha256(value.encode("utf-8")).hexdigest()[:16])
+PY
+)" || return 1
+  if [[ "$identifier_refs" != *$'\n'* ]]; then
+    echo "Unable to derive installed APK identifier references" >&2
+    return 1
+  fi
+  printf '%s\n' \
+    "${field_prefix}_package=$package_name" \
+    "${field_prefix}_sha256=$expected_digest" \
+    "${field_prefix}_serial_ref=sha256:${identifier_refs%%$'\n'*}" \
+    "${field_prefix}_remote_path_ref=sha256:${identifier_refs#*$'\n'}"
+}
+
+android_remove_owned_package() {
+  local adb_bin="$1"
+  local device_serial="$2"
+  local package_name="$3"
+  local expected_digest="$4"
+  local uninstall_output=""
+  local verify_status=0
+
+  android_require_installed_apk_digest \
+    "$adb_bin" "$device_serial" "$package_name" "$expected_digest" || {
+    echo "Refusing Android package cleanup because ownership is unverifiable: $package_name" >&2
+    return 1
+  }
+  uninstall_output="$("$adb_bin" -s "$device_serial" uninstall "$package_name" 2>&1)" || {
+    echo "Unable to uninstall the run-owned Android package: $package_name" >&2
+    return 1
+  }
+  android_require_exact_success_output \
+    "$uninstall_output" "run-owned Android package uninstall" || return 1
+  if android_installed_package_path "$adb_bin" "$device_serial" "$package_name" >/dev/null; then
+    echo "Run-owned Android package remains installed after cleanup: $package_name" >&2
+    return 1
+  else
+    verify_status=$?
+  fi
+  if (( verify_status != 2 )); then
+    echo "Run-owned Android package absence is unverifiable after cleanup: $package_name" >&2
+    return 1
+  fi
+}
+
 require_macos26_host() {
   local product_version=""
   local major=""

@@ -3,8 +3,805 @@ import CryptoKit
 import Network
 @testable import SkyBridgeCompass_iOS
 
+private actor FormalDisconnectReplacementBarrierHarness {
+    private var replacementIsInstalled = false
+    private var detachedContinuation: CheckedContinuation<Void, Never>?
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func disconnectCapturedResources() async -> Bool {
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+            detachedContinuation?.resume()
+            detachedContinuation = nil
+        }
+        return CrossNetworkDisconnectPostcondition.hasNoReplacement(
+            signalingIsPresent: replacementIsInstalled,
+            sessionIsPresent: replacementIsInstalled,
+            sessionIDIsPresent: replacementIsInstalled,
+            fileTransferOwnerIsPresent: replacementIsInstalled
+        )
+    }
+
+    func waitUntilDetached() async {
+        if releaseContinuation != nil { return }
+        await withCheckedContinuation { detachedContinuation = $0 }
+    }
+
+    func installReplacementAndRelease() {
+        replacementIsInstalled = true
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class FormalInteropTerminalBindingTests: XCTestCase {
+    private enum CleanupTestError: Error {
+        case staleOwner
+    }
+
+    private func owner(keyEpoch: UUID = UUID()) throws -> CrossNetworkFileTransferSessionOwner {
+        try CrossNetworkFileTransferSessionOwner(
+            sessionID: "formal-session",
+            generation: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            keyEpoch: keyEpoch
+        )
+    }
+
+    private let selectedICE = WebRTCSession.SelectedICECandidateEvidence(
+        route: "direct",
+        localCandidateType: "host",
+        remoteCandidateType: "host",
+        networkProtocol: "udp"
+    )
+
+    func testFormalTerminalBindingAcceptsOnlyTheFrozenOwnerAndEvidence() throws {
+        let frozenOwner = try owner(
+            keyEpoch: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        )
+        let binding = FormalInteropTerminalBinding(
+            owner: frozenOwner,
+            sessionID: "formal-session",
+            negotiatedSuite: "ML-KEM-768",
+            suiteWireID: "0x0101",
+            selectedICE: selectedICE,
+            peerDeviceID: "android-peer"
+        )
+        XCTAssertNoThrow(
+            try binding.validate(
+                currentOwner: frozenOwner,
+                currentSessionID: "formal-session",
+                currentNegotiatedSuite: "ML-KEM-768",
+                currentSuiteWireID: "0x0101",
+                currentSelectedICE: selectedICE,
+                currentPeerDeviceID: "android-peer"
+            )
+        )
+    }
+
+    func testFormalTerminalBindingRejectsReplacementEpochAndEvidenceDrift() throws {
+        let frozenOwner = try owner(
+            keyEpoch: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        )
+        let binding = FormalInteropTerminalBinding(
+            owner: frozenOwner,
+            sessionID: "formal-session",
+            negotiatedSuite: "ML-KEM-768",
+            suiteWireID: "0x0101",
+            selectedICE: selectedICE,
+            peerDeviceID: "android-peer"
+        )
+        let replacementOwner = try owner(
+            keyEpoch: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        )
+        XCTAssertThrowsError(
+            try binding.validate(
+                currentOwner: replacementOwner,
+                currentSessionID: "formal-session",
+                currentNegotiatedSuite: "ML-KEM-768",
+                currentSuiteWireID: "0x0101",
+                currentSelectedICE: selectedICE,
+                currentPeerDeviceID: "android-peer"
+            )
+        )
+        XCTAssertThrowsError(
+            try binding.validate(
+                currentOwner: frozenOwner,
+                currentSessionID: "replacement-session",
+                currentNegotiatedSuite: "ML-KEM-768",
+                currentSuiteWireID: "0x0101",
+                currentSelectedICE: WebRTCSession.SelectedICECandidateEvidence(
+                    route: "relay",
+                    localCandidateType: "relay",
+                    remoteCandidateType: "relay",
+                    networkProtocol: "tcp"
+                ),
+                currentPeerDeviceID: "other-peer"
+            )
+        )
+    }
+
+    func testFormalCleanupQuiescesExactOwnerBeforeRemovingArtifacts() async throws {
+        let cleanupAuthority = FormalInteropCleanupAuthority.outbound(
+            runRef: String(repeating: "a", count: 64),
+            CrossNetworkFileTransferOutboundContext(owner: try owner())
+        )
+        var events: [String] = []
+
+        try await FormalInteropCleanupCoordinator.execute(
+            authority: cleanupAuthority,
+            quiesce: { authority in
+                XCTAssertEqual(authority, cleanupAuthority)
+                events.append("quiesce")
+            },
+            removeOwnedArtifacts: { authority in
+                XCTAssertEqual(authority, cleanupAuthority)
+                events.append("remove")
+            }
+        )
+
+        XCTAssertEqual(events, ["quiesce", "remove"])
+    }
+
+    func testFormalCleanupDoesNotRemoveArtifactsForReplacementOwner() async throws {
+        let cleanupAuthority = FormalInteropCleanupAuthority.outbound(
+            runRef: String(repeating: "b", count: 64),
+            CrossNetworkFileTransferOutboundContext(owner: try owner())
+        )
+        var events: [String] = []
+
+        do {
+            try await FormalInteropCleanupCoordinator.execute(
+                authority: cleanupAuthority,
+                quiesce: { _ in
+                    events.append("quiesce")
+                    throw CleanupTestError.staleOwner
+                },
+                removeOwnedArtifacts: { _ in events.append("remove") }
+            )
+            XCTFail("replacement owner must fail cleanup")
+        } catch CleanupTestError.staleOwner {
+            XCTAssertEqual(events, ["quiesce"])
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testPreparedOnlyCleanupUsesThePrebindAuthority() async throws {
+        let cleanupAuthority = FormalInteropCleanupAuthority.preparedOnly(
+            runRef: String(repeating: "c", count: 64)
+        )
+        var events: [String] = []
+
+        try await FormalInteropCleanupCoordinator.execute(
+            authority: cleanupAuthority,
+            quiesce: { authority in
+                XCTAssertEqual(authority, cleanupAuthority)
+                events.append("require-no-active-connection")
+            },
+            removeOwnedArtifacts: { authority in
+                XCTAssertEqual(authority, cleanupAuthority)
+                events.append("remove-empty-run")
+            }
+        )
+
+        XCTAssertEqual(events, ["require-no-active-connection", "remove-empty-run"])
+    }
+
+    func testSuspendedDisconnectDetectsReplacementBeforeArtifactRemoval() async {
+        let harness = FormalDisconnectReplacementBarrierHarness()
+        let disconnect = Task { await harness.disconnectCapturedResources() }
+        await harness.waitUntilDetached()
+        await harness.installReplacementAndRelease()
+
+        let noReplacement = await disconnect.value
+
+        XCTAssertFalse(noReplacement)
+    }
+}
+
+private actor IOSInboundContextBarrierHarness {
+    private let captured: CrossNetworkFileTransferInboundContextIdentity
+    private var current: CrossNetworkFileTransferInboundContextIdentity
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+    private var didMutate = false
+
+    init(captured: CrossNetworkFileTransferInboundContextIdentity) {
+        self.captured = captured
+        self.current = captured
+    }
+
+    func runSuspendedOldHandler() async {
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+            enteredContinuation?.resume()
+            enteredContinuation = nil
+        }
+        if captured.isCurrent(owner: captured.owner, current: current) { didMutate = true }
+    }
+
+    func waitUntilSuspended() async {
+        if releaseContinuation != nil { return }
+        await withCheckedContinuation { enteredContinuation = $0 }
+    }
+
+    func replace(with identity: CrossNetworkFileTransferInboundContextIdentity) {
+        current = identity
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func mutationObserved() -> Bool { didMutate }
+}
+
+private actor IOSCancellableSendBarrierHarness {
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+    private var sentPacketCount = 0
+
+    func sendAfterBarrier() async throws {
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+            enteredContinuation?.resume()
+            enteredContinuation = nil
+        }
+        try Task.checkCancellation()
+        sentPacketCount += 1
+    }
+
+    func waitUntilBlocked() async {
+        if releaseContinuation != nil { return }
+        await withCheckedContinuation { enteredContinuation = $0 }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+
+    func packetCount() -> Int { sentPacketCount }
+}
+
+private actor IOSAcknowledgementOwnerBarrierHarness {
+    enum HarnessError: Error { case staleOwner }
+
+    private var currentOwner: CrossNetworkFileTransferSessionOwner
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+    private var enteredContinuation: CheckedContinuation<Void, Never>?
+
+    init(owner: CrossNetworkFileTransferSessionOwner) { currentOwner = owner }
+
+    func resumeAcknowledgementThenValidate(
+        requiredOwner: CrossNetworkFileTransferSessionOwner
+    ) async throws {
+        await withCheckedContinuation { continuation in
+            releaseContinuation = continuation
+            enteredContinuation?.resume()
+            enteredContinuation = nil
+        }
+        guard currentOwner == requiredOwner else { throw HarnessError.staleOwner }
+    }
+
+    func waitUntilAcknowledgementResumed() async {
+        if releaseContinuation != nil { return }
+        await withCheckedContinuation { enteredContinuation = $0 }
+    }
+
+    func rotate(to owner: CrossNetworkFileTransferSessionOwner) { currentOwner = owner }
+
+    func releaseCaller() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+@available(iOS 17.0, *)
+final class CrossNetworkFileTransferCompletionAcknowledgementTests: XCTestCase {
+    func testCompletionAcknowledgementBindsDurableResult() throws {
+        let digest = Data(repeating: 0xA5, count: 32)
+
+        let acknowledgement = try CrossNetworkFileTransferMessage.completeAcknowledgement(
+            transferId: "123e4567-e89b-12d3-a456-426614174000",
+            receivedBytes: 4096,
+            fileSha256: digest
+        )
+
+        XCTAssertEqual(acknowledgement.op, .completeAck)
+        XCTAssertEqual(
+            acknowledgement.transferId,
+            "123e4567-e89b-12d3-a456-426614174000"
+        )
+        XCTAssertEqual(acknowledgement.receivedBytes, 4096)
+        XCTAssertEqual(acknowledgement.fileSha256, digest)
+    }
+
+    func testCompletionAcknowledgementRejectsMalformedEvidence() {
+        XCTAssertThrowsError(
+            try CrossNetworkFileTransferMessage.completeAcknowledgement(
+                transferId: "  ",
+                receivedBytes: 0,
+                fileSha256: Data(repeating: 0, count: 32)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkFileTransferCompletionAcknowledgementError,
+                .emptyTransferID
+            )
+        }
+        XCTAssertThrowsError(
+            try CrossNetworkFileTransferMessage.completeAcknowledgement(
+                transferId: "123e4567-e89b-12d3-a456-426614174000",
+                receivedBytes: -1,
+                fileSha256: Data(repeating: 0, count: 32)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkFileTransferCompletionAcknowledgementError,
+                .negativeReceivedBytes
+            )
+        }
+        XCTAssertThrowsError(
+            try CrossNetworkFileTransferMessage.completeAcknowledgement(
+                transferId: "123e4567-e89b-12d3-a456-426614174000",
+                receivedBytes: 0,
+                fileSha256: Data(repeating: 0, count: 31)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkFileTransferCompletionAcknowledgementError,
+                .invalidFileSHA256Length(31)
+            )
+        }
+        XCTAssertThrowsError(
+            try CrossNetworkFileTransferMessage.completeAcknowledgement(
+                transferId: "transfer-1",
+                receivedBytes: 1,
+                fileSha256: Data(repeating: 0, count: 32)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkFileTransferCompletionAcknowledgementError,
+                .invalidTransferID
+            )
+        }
+    }
+
+    func testCompletionExpectationRequiresExactEvidence() throws {
+        let transferID = "123e4567-e89b-12d3-a456-426614174000"
+        let digest = Data(repeating: 0x5A, count: 32)
+        let expectation = try CrossNetworkFileTransferCompletionAckExpectation(
+            transferID: transferID,
+            receivedBytes: 4096,
+            fileSHA256: digest
+        )
+
+        XCTAssertNoThrow(
+            try expectation.validate(
+                .init(
+                    op: .completeAck,
+                    transferId: transferID,
+                    receivedBytes: 4096,
+                    fileSha256: digest
+                )
+            )
+        )
+        XCTAssertThrowsError(
+            try expectation.validate(
+                .init(
+                    op: .completeAck,
+                    transferId: transferID,
+                    receivedBytes: 4095,
+                    fileSha256: digest
+                )
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? CrossNetworkFileTransferCompletionEvidenceError,
+                .receivedBytesMismatch(expected: 4096, actual: 4095)
+            )
+        }
+    }
+
+    func testWaiterRegistryRejectsLateOwnerAndOldToken() throws {
+        let transferID = "123e4567-e89b-12d3-a456-426614174000"
+        let oldOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        )
+        let currentOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        )
+        let ack = CrossNetworkFileTransferMessage(op: .metadataAck, transferId: transferID)
+        var registry = CrossNetworkFileTransferWaiterRegistry()
+        let oldToken = try registry.arm(
+            owner: currentOwner,
+            transferID: transferID,
+            operation: .metadataAck,
+            chunkIndex: nil
+        )
+
+        XCTAssertNil(registry.consume(owner: oldOwner, message: ack))
+        XCTAssertTrue(registry.remove(oldToken))
+        let retryToken = try registry.arm(
+            owner: currentOwner,
+            transferID: transferID,
+            operation: .metadataAck,
+            chunkIndex: nil
+        )
+        XCTAssertFalse(registry.remove(oldToken))
+        XCTAssertEqual(registry.consume(owner: currentOwner, message: ack), retryToken)
+    }
+
+    func testCompletionReplayIsExactOwnerBoundAndCapacityBounded() throws {
+        let owner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: UUID()
+        )
+        let transferID = "123e4567-e89b-12d3-a456-426614174000"
+        let secondTransferID = "223e4567-e89b-12d3-a456-426614174000"
+        let digest = Data(repeating: 0x6B, count: 32)
+        let request = CrossNetworkFileTransferMessage(
+            op: .complete,
+            transferId: transferID,
+            receivedBytes: 1024,
+            fileSha256: digest
+        )
+        let fingerprint = try CrossNetworkFileTransferCompletionRequestFingerprint(message: request)
+        let acknowledgement = try CrossNetworkFileTransferMessage.completeAcknowledgement(
+            transferId: transferID,
+            receivedBytes: 1024,
+            fileSha256: digest
+        )
+        var cache = CrossNetworkFileTransferCompletionReplayCache(capacity: 1, timeToLive: 60)
+
+        XCTAssertEqual(try cache.reserve(owner: owner, transferID: transferID), .reserved)
+        try cache.recordCompletion(
+            owner: owner,
+            fingerprint: fingerprint,
+            acknowledgement: acknowledgement
+        )
+        XCTAssertEqual(cache.lookup(owner: owner, fingerprint: fingerprint), .replay(acknowledgement))
+        XCTAssertEqual(
+            try cache.reserve(owner: owner, transferID: secondTransferID),
+            .capacityExceeded
+        )
+    }
+
+    func testDroppedFirstAcknowledgementRetriesExactCompletionAndCommitsOnce() throws {
+        let owner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: UUID(),
+            keyEpoch: UUID()
+        )
+        let transferID = "123e4567-e89b-12d3-a456-426614174000"
+        let digest = Data(repeating: 0x7A, count: 32)
+        let request = CrossNetworkFileTransferMessage(
+            op: .complete,
+            transferId: transferID,
+            receivedBytes: 2048,
+            fileSha256: digest
+        )
+        let fingerprint = try CrossNetworkFileTransferCompletionRequestFingerprint(message: request)
+        let acknowledgement = try CrossNetworkFileTransferMessage.completeAcknowledgement(
+            transferId: transferID,
+            receivedBytes: 2048,
+            fileSha256: digest
+        )
+        let expectation = try CrossNetworkFileTransferCompletionAckExpectation(
+            transferID: transferID,
+            receivedBytes: 2048,
+            fileSHA256: digest
+        )
+        let policy = CrossNetworkFileTransferCompletionRetryPolicy(maximumAttempts: 2)
+        var registry = CrossNetworkFileTransferWaiterRegistry()
+        var replay = CrossNetworkFileTransferCompletionReplayCache(capacity: 1, timeToLive: 60)
+        var commitCount = 0
+        var accepted: CrossNetworkFileTransferMessage?
+
+        XCTAssertEqual(try replay.reserve(owner: owner, transferID: transferID), .reserved)
+        for attempt in 1...policy.maximumAttempts {
+            let token = try registry.arm(
+                owner: owner,
+                transferID: transferID,
+                operation: .completeAck,
+                chunkIndex: nil
+            )
+            let response: CrossNetworkFileTransferMessage
+            switch replay.lookup(owner: owner, fingerprint: fingerprint) {
+            case .active:
+                let prepared = try replay.prepareCompletion(
+                    owner: owner,
+                    fingerprint: fingerprint,
+                    acknowledgement: acknowledgement
+                )
+                commitCount += 1
+                XCTAssertTrue(replay.commitPreparedCompletion(prepared))
+                response = acknowledgement
+            case .replay(let cached):
+                response = cached
+            default:
+                return XCTFail("unexpected receiver replay state")
+            }
+
+            if attempt == 1 {
+                XCTAssertTrue(registry.remove(token))
+                XCTAssertTrue(policy.permitsRetry(after: .timeout, completedAttempts: attempt))
+                continue
+            }
+            XCTAssertEqual(registry.consume(owner: owner, message: response), token)
+            try expectation.validate(response)
+            accepted = response
+        }
+
+        XCTAssertEqual(commitCount, 1)
+        XCTAssertEqual(accepted, acknowledgement)
+        XCTAssertFalse(policy.permitsRetry(after: .terminal, completedAttempts: 1))
+    }
+
+    func testKeyEpochRejectsLateAcknowledgement() throws {
+        let generation = UUID()
+        let oldOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let newOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let transferID = "123e4567-e89b-12d3-a456-426614174000"
+        let acknowledgement = CrossNetworkFileTransferMessage(
+            op: .metadataAck,
+            transferId: transferID
+        )
+        var registry = CrossNetworkFileTransferWaiterRegistry()
+        let oldToken = try registry.arm(
+            owner: oldOwner,
+            transferID: transferID,
+            operation: .metadataAck,
+            chunkIndex: nil
+        )
+
+        XCTAssertNil(registry.consume(owner: newOwner, message: acknowledgement))
+        XCTAssertTrue(registry.remove(oldToken))
+    }
+
+    func testSuspendedOldHandlerCannotOverwriteReplacementContext() async throws {
+        let generation = UUID()
+        let transferID = "123e4567-e89b-12d3-a456-426614174000"
+        let oldOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let newOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let oldContext = try CrossNetworkFileTransferInboundContextIdentity(
+            owner: oldOwner,
+            transferID: transferID
+        )
+        let replacement = try CrossNetworkFileTransferInboundContextIdentity(
+            owner: newOwner,
+            transferID: transferID
+        )
+        let harness = IOSInboundContextBarrierHarness(captured: oldContext)
+        let oldHandler = Task { await harness.runSuspendedOldHandler() }
+
+        await harness.waitUntilSuspended()
+        await harness.replace(with: replacement)
+        await harness.release()
+        await oldHandler.value
+        let mutationObserved = await harness.mutationObserved()
+        XCTAssertFalse(mutationObserved)
+    }
+
+    func testCancellationNeverRetriesAndBlockedSendEmitsNoLatePacket() async {
+        let harness = IOSCancellableSendBarrierHarness()
+        let sendTask = Task { try await harness.sendAfterBarrier() }
+        await harness.waitUntilBlocked()
+        sendTask.cancel()
+        await harness.release()
+
+        do {
+            try await sendTask.value
+            XCTFail("cancelled send unexpectedly succeeded")
+        } catch is CancellationError {
+            // Expected terminal outcome.
+        } catch {
+            XCTFail("unexpected cancellation error: \(error)")
+        }
+        let packetCount = await harness.packetCount()
+        XCTAssertEqual(packetCount, 0)
+        let policy = CrossNetworkFileTransferCompletionRetryPolicy(maximumAttempts: 2)
+        XCTAssertFalse(policy.permitsRetry(after: .terminal, completedAttempts: 1))
+    }
+
+    func testAcknowledgementReturnRevalidatesKeyEpoch() async throws {
+        let generation = UUID()
+        let oldOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let newOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let harness = IOSAcknowledgementOwnerBarrierHarness(owner: oldOwner)
+        let caller = Task {
+            try await harness.resumeAcknowledgementThenValidate(requiredOwner: oldOwner)
+        }
+        await harness.waitUntilAcknowledgementResumed()
+        await harness.rotate(to: newOwner)
+        await harness.releaseCaller()
+
+        do {
+            try await caller.value
+            XCTFail("old-epoch acknowledgement unexpectedly returned success")
+        } catch IOSAcknowledgementOwnerBarrierHarness.HarnessError.staleOwner {
+            // Expected exact-owner rejection.
+        }
+    }
+
+    func testOutboundContextRejectsRotationBeforeMetadataAndComplete() throws {
+        let generation = UUID()
+        let oldOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let newOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: generation,
+            keyEpoch: UUID()
+        )
+        let context = CrossNetworkFileTransferOutboundContext(owner: oldOwner)
+        var sentMetadata = 0
+        var sentComplete = 0
+
+        XCTAssertThrowsError(try context.validate(currentOwner: newOwner))
+        if (try? context.validate(currentOwner: newOwner)) != nil { sentMetadata += 1 }
+        XCTAssertNoThrow(try context.validate(currentOwner: oldOwner))
+        XCTAssertThrowsError(try context.validate(currentOwner: newOwner))
+        if (try? context.validate(currentOwner: newOwner)) != nil { sentComplete += 1 }
+        XCTAssertEqual(sentMetadata, 0)
+        XCTAssertEqual(sentComplete, 0)
+    }
+
+    func testDisconnectRevokesContextBeforeSignalingCloseSuspends() async throws {
+        let owner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: "session-a",
+            generation: UUID(),
+            keyEpoch: UUID()
+        )
+        let context = CrossNetworkFileTransferOutboundContext(owner: owner)
+        var currentOwner: CrossNetworkFileTransferSessionOwner? = owner
+        var responseTaskCancelled = false
+        var sentPacketCount = 0
+
+        currentOwner = nil
+        responseTaskCancelled = true
+        await Task.yield()
+
+        XCTAssertNil(currentOwner)
+        XCTAssertTrue(responseTaskCancelled)
+        XCTAssertThrowsError(try context.validate(currentOwner: currentOwner))
+        if (try? context.validate(currentOwner: currentOwner)) != nil { sentPacketCount += 1 }
+        XCTAssertEqual(sentPacketCount, 0)
+    }
+}
+
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
+    func testExplicitMLKEMPreferenceOverridesPersistedXWingPreference() throws {
+        let suiteName = "CryptoProviderFactoryTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "Settings.PreferXWingHybrid")
+
+        XCTAssertEqual(
+            CryptoProviderFactory.nativeSuitePreferenceForTesting(
+                environment: ["SB_PQC_PREFERRED_SUITE": "mlkem"],
+                defaults: defaults
+            ),
+            "mlkem"
+        )
+    }
+
+    @MainActor
+    func testFormalSmokeSuiteLabelsMapToCanonicalWireIdentifiers() {
+        XCTAssertEqual(LocalWebRTCSmokeHarness.canonicalSuiteWireID("ML-KEM-768"), "0x0101")
+        XCTAssertEqual(LocalWebRTCSmokeHarness.canonicalSuiteWireID("unknown"), "unknown")
+    }
+
+    func testExistingReadOnlyIdentityPolicyBindsAdmissionAndHandshakeAlgorithms() {
+        XCTAssertEqual(
+            ExistingReadOnlyIdentityMaterialProvider.protocolSigningAlgorithm(requirePQC: false),
+            .ed25519
+        )
+        XCTAssertEqual(
+            ExistingReadOnlyIdentityMaterialProvider.protocolSigningAlgorithm(requirePQC: true),
+            .mlDSA65
+        )
+    }
+
+    func testExistingReadOnlyIdentityRequiresOnlyTheFormalMLKEMSuite() throws {
+        XCTAssertEqual(
+            try ExistingReadOnlyIdentityMaterialProvider.requiredPQCSuite(
+                environment: ["SKYBRIDGE_SMOKE_EXPECTED_SUITE_WIRE_ID": "0x0101"]
+            ),
+            .mlkem768
+        )
+        XCTAssertThrowsError(
+            try ExistingReadOnlyIdentityMaterialProvider.requiredPQCSuite(
+                environment: ["SKYBRIDGE_SMOKE_EXPECTED_SUITE_WIRE_ID": "0x0001"]
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ExistingReadOnlyIdentityMaterialProvider.MaterialError,
+                .invalidExpectedPQCSuite("0x0001")
+            )
+        }
+    }
+
+    func testExistingReadOnlyIdentityPolicyRequiresExistingDeviceId() throws {
+        XCTAssertThrowsError(
+            try ExistingReadOnlyIdentityMaterialProvider.requireExistingDeviceId(nil)
+        ) { error in
+            XCTAssertEqual(
+                error as? ExistingReadOnlyIdentityMaterialProvider.MaterialError,
+                .missingCurrentPathDeviceId
+            )
+        }
+        XCTAssertEqual(
+            try ExistingReadOnlyIdentityMaterialProvider.requireExistingDeviceId(" device-a "),
+            "device-a"
+        )
+    }
+
+    func testExistingReadOnlyIdentityPolicyRejectsBindingDrift() throws {
+        let publicKey = Data(repeating: 0x5A, count: 32)
+        let material = ExistingReadOnlyProtocolIdentityMaterial(
+            deviceId: "device-a",
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKey: publicKey,
+            protocolSigningKeyHandle: .softwareKey(Data(repeating: 0xA5, count: 32))
+        )
+
+        XCTAssertNoThrow(
+            try ExistingReadOnlyIdentityMaterialProvider.requireBindingMatchesCanonicalIdentity(
+                material: material,
+                deviceId: "device-a",
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKey: publicKey
+            )
+        )
+        XCTAssertThrowsError(
+            try ExistingReadOnlyIdentityMaterialProvider.requireBindingMatchesCanonicalIdentity(
+                material: material,
+                deviceId: "device-a",
+                protocolSigningAlgorithm: .mlDSA65,
+                protocolPublicKey: publicKey
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ExistingReadOnlyIdentityMaterialProvider.MaterialError,
+                .bindingMismatch
+            )
+        }
+    }
+
     func testLANRemoteControlTrustResolverCollapsesEquivalentDuplicateRecords() {
         let device = DiscoveredDevice(
             id: "bonjour:Lza的MacBook Pro@local.",
@@ -528,6 +1325,82 @@ final class RegressionHardeningTests: XCTestCase {
         XCTAssertEqual(store.load(), expected)
         XCTAssertNil(defaults.data(forKey: legacyKey))
         XCTAssertEqual(store.load(), expected)
+
+        try? store.remove()
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    @MainActor
+    func testCodablePersistenceStoreCanReadLegacyDefaultsWithoutMigration() throws {
+        let suiteName = "RegressionHardeningReadOnlyTests.\(UUID().uuidString)"
+        let legacyKey = "legacy.persistence.read-only.payload"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+
+        let protectedPath = "Tests/\(UUID().uuidString).json"
+        let store = CodablePersistenceStore<[String]>(
+            location: .protectedApplicationSupport(
+                path: protectedPath,
+                legacyUserDefaultsKey: legacyKey
+            ),
+            rootDirectoryName: "SkyBridgeStateReadOnlyTests",
+            defaults: defaults
+        )
+        let expected = ["existing", "trust"]
+        let encoded = try JSONEncoder().encode(expected)
+        defaults.set(encoded, forKey: legacyKey)
+
+        XCTAssertEqual(
+            store.load(migrationPolicy: .readLegacyValueWithoutMutation),
+            expected
+        )
+        XCTAssertEqual(defaults.data(forKey: legacyKey), encoded)
+
+        try? store.remove()
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    @MainActor
+    func testReadOnlyPersistenceRejectsCorruptCanonicalWithoutFallingBackToLegacy() throws {
+        let suiteName = "RegressionHardeningCorruptPrimaryTests.\(UUID().uuidString)"
+        let legacyKey = "legacy.persistence.corrupt-primary.payload"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        let rootDirectoryName = "SkyBridgeStateCorruptPrimaryTests"
+        let protectedPath = "Tests/\(UUID().uuidString).json"
+        let store = CodablePersistenceStore<[String]>(
+            location: .protectedApplicationSupport(
+                path: protectedPath,
+                legacyUserDefaultsKey: legacyKey
+            ),
+            rootDirectoryName: rootDirectoryName,
+            defaults: defaults
+        )
+        let legacy = try JSONEncoder().encode(["stale", "legacy"])
+        defaults.set(legacy, forKey: legacyKey)
+        try store.save(["canonical"])
+
+        let base = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: false
+        )
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.skybridge.compass"
+        let canonicalURL = base
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent(rootDirectoryName, isDirectory: true)
+            .appendingPathComponent(protectedPath, isDirectory: false)
+        try Data("{corrupt-primary".utf8).write(to: canonicalURL, options: .atomic)
+        let primaryBefore = try Data(contentsOf: canonicalURL)
+
+        XCTAssertThrowsError(try store.loadExistingReadOnly())
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), primaryBefore)
+        XCTAssertEqual(defaults.data(forKey: legacyKey), legacy)
 
         try? store.remove()
         defaults.removePersistentDomain(forName: suiteName)

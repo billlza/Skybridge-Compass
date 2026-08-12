@@ -70,6 +70,10 @@ class TrustedPeerStorePersistenceException(
 class TrustedPeerStore(
     private val prefs: SharedPreferences
 ) {
+    internal data class ExistingAuthorityReadOnlyAdmission(
+        val exactAuthority: TrustedPeerRecord?,
+        val conflict: PairingTrustConflict?
+    )
     private data class StoreSnapshot(
         val recordsJson: String?,
         val corruptionFlagPresent: Boolean,
@@ -234,6 +238,72 @@ class TrustedPeerStore(
                     record.protocolPublicKeyFingerprint == normalizedFingerprint
             }
         }
+    }
+
+    /**
+     * Atomically classify all aliases and resolve one exact existing product authority without
+     * repairing or clearing integrity markers. A pre-existing marker is authoritative corruption
+     * even when the record JSON remains parseable.
+     */
+    internal fun evaluateExactExistingAuthorityReadOnly(
+        deviceIds: Collection<String>,
+        protocolPublicKeyFingerprint: String
+    ): ExistingAuthorityReadOnlyAdmission = synchronized(PROCESS_LOCK) {
+        if (prefs.getBoolean(KEY_CORRUPTED, false)) {
+            return@synchronized ExistingAuthorityReadOnlyAdmission(
+                exactAuthority = null,
+                conflict = PairingTrustConflict.TRUST_STORE_CORRUPTED
+            )
+        }
+        val normalizedDeviceIds = buildList {
+            for (rawDeviceId in deviceIds) {
+                val normalized = normalizeDeviceId(rawDeviceId)
+                    ?: return@synchronized ExistingAuthorityReadOnlyAdmission(
+                        null,
+                        PairingTrustConflict.IDENTITY_CONFLICT
+                    )
+                add(normalized)
+            }
+        }.distinct()
+        val normalizedFingerprint = normalizeFingerprint(protocolPublicKeyFingerprint)
+            ?: return@synchronized ExistingAuthorityReadOnlyAdmission(
+                null,
+                PairingTrustConflict.IDENTITY_CONFLICT
+            )
+        if (normalizedDeviceIds.isEmpty()) {
+            return@synchronized ExistingAuthorityReadOnlyAdmission(
+                null,
+                PairingTrustConflict.IDENTITY_CONFLICT
+            )
+        }
+        val records = try {
+            loadAllLocked(updateIntegrityMarkers = false)
+        } catch (_: TrustedPeerStoreCorruptionException) {
+            return@synchronized ExistingAuthorityReadOnlyAdmission(
+                null,
+                PairingTrustConflict.TRUST_STORE_CORRUPTED
+            )
+        }
+        val conflict = normalizedDeviceIds.asSequence()
+            .mapNotNull { deviceId ->
+                evaluateCurrentPathBinding(records, deviceId, normalizedFingerprint)
+            }
+            .firstOrNull()
+        if (conflict != null) {
+            return@synchronized ExistingAuthorityReadOnlyAdmission(null, conflict)
+        }
+        val resolved = normalizedDeviceIds.map { deviceId ->
+            records.firstOrNull { record -> record.resolves(deviceId) }
+                ?: return@synchronized ExistingAuthorityReadOnlyAdmission(null, null)
+        }
+        val canonical = resolved.first()
+        val exact = canonical.takeIf { record ->
+            resolved.all { it == canonical } &&
+                record.lifecycleState == TrustedPeerLifecycleState.ACTIVE &&
+                record.verificationOrigin == TrustedPeerVerificationOrigin.AUTHENTICATED_PRODUCT_V1 &&
+                record.protocolPublicKeyFingerprint == normalizedFingerprint
+        }
+        ExistingAuthorityReadOnlyAdmission(exact, null)
     }
 
     fun currentPathTrustRecord(fingerprint: String): TrustedPeerRecord? {

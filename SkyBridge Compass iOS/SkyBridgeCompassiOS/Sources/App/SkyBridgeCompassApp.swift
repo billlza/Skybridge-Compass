@@ -1,5 +1,6 @@
 import SwiftUI
 import ActivityKit
+import CryptoKit
 #if os(iOS)
 import UserNotifications
 import UIKit
@@ -195,6 +196,10 @@ struct SkyBridgeCompassApp: App {
         isUITesting || isRunningUnderXCTest
     }
 
+    private var isSmokeHarnessEnabled: Bool {
+        LocalWebRTCSmokeHarness.shared.isEnabled || LocalP2PSmokeHarness.shared.isEnabled
+    }
+
     private var shouldDisableAnimationsForUITests: Bool {
         ProcessInfo.processInfo.arguments.contains("UITEST_DISABLE_ANIMATIONS")
     }
@@ -239,7 +244,7 @@ struct SkyBridgeCompassApp: App {
                             }
                         }
                         .onChange(of: localizationManager.currentLanguage) { _, _ in
-                            guard !shouldSkipInteractiveStartup else { return }
+                            guard !shouldSkipInteractiveStartup, !isSmokeHarnessEnabled else { return }
                             configureNotifications()
                         }
                 }
@@ -271,14 +276,14 @@ struct SkyBridgeCompassApp: App {
         // 请求必要的权限
         if shouldSkipInteractiveStartup {
             SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过交互式权限弹窗")
-        } else if LocalWebRTCSmokeHarness.shared.isEnabled || LocalP2PSmokeHarness.shared.isEnabled {
+        } else if isSmokeHarnessEnabled {
             SkyBridgeLogger.shared.info("🧪 Local WebRTC smoke: 跳过交互式权限弹窗")
         } else {
             requestPermissions()
         }
         
         // 配置通知
-        if !shouldSkipInteractiveStartup {
+        if !shouldSkipInteractiveStartup, !isSmokeHarnessEnabled {
             configureNotifications()
         }
         
@@ -404,6 +409,12 @@ struct SkyBridgeCompassApp: App {
     private func initializeServices() async {
         if shouldSkipInteractiveStartup {
             SkyBridgeLogger.shared.info("🧪 Test host mode: 跳过后台服务初始化")
+            return
+        }
+        if isSmokeHarnessEnabled {
+            SkyBridgeLogger.shared.info("🧪 Smoke harness mode: 仅启动显式 smoke 路径")
+            await LocalP2PSmokeHarness.shared.startIfNeeded()
+            await LocalWebRTCSmokeHarness.shared.startIfNeeded()
             return
         }
 
@@ -552,6 +563,7 @@ struct SkyBridgeCompassApp: App {
     }
 
     private func handleScenePhaseChange(_ phase: ScenePhase) async {
+        guard !isSmokeHarnessEnabled else { return }
         let settings = SettingsManager.instance
 
         switch phase {
@@ -890,7 +902,7 @@ private final class LocalP2PSmokeHarness {
 
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
-        await preseedPeerKEMTrustIfNeeded(reporter: reporter)
+        guard await preseedPeerKEMTrustIfNeeded(reporter: reporter) else { return }
 
         guard !targetDeviceID.isEmpty else {
             reporter.append("failed stage=bootstrap error=missing_target_device_id")
@@ -1074,9 +1086,9 @@ private final class LocalP2PSmokeHarness {
         return data
     }
 
-    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async {
+    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async -> Bool {
         guard let peerDeviceID = environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") else {
-            return
+            return true
         }
 
         var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
@@ -1107,23 +1119,98 @@ private final class LocalP2PSmokeHarness {
 
         let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
         guard !keys.isEmpty else {
-            reporter.append("pqc-preseed skipped device=\(Self.sanitize(peerDeviceID)) reason=missing_keys")
-            return
+            reporter.append("failed stage=pqc-preseed error=missing_keys")
+            return false
         }
 
-        await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
+        do {
+            if smokeRequiresExistingTrustWithoutMutation {
+                try await KEMTrustStore.shared.requireExactExisting(
+                    deviceId: peerDeviceID,
+                    kemPublicKeys: keys
+                )
+            } else {
+                await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
+            }
+        } catch {
+            reporter.append("failed stage=pqc-preseed error=existing_trust_mismatch")
+            return false
+        }
         let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
-        reporter.append("pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites)")
+        reporter.append(
+            "pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites) mode=\(smokeRequiresExistingTrustWithoutMutation ? "existing-read-only" : "persistent")"
+        )
+        return true
     }
 
     private static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
+
 }
 
 @available(iOS 17.0, *)
 @MainActor
-private final class LocalWebRTCSmokeHarness {
+struct FormalInteropTerminalBinding: Equatable {
+    let owner: CrossNetworkFileTransferSessionOwner
+    let sessionID: String
+    let negotiatedSuite: String
+    let suiteWireID: String
+    let selectedICE: WebRTCSession.SelectedICECandidateEvidence
+    let peerDeviceID: String
+
+    func validate(
+        currentOwner: CrossNetworkFileTransferSessionOwner,
+        currentSessionID: String,
+        currentNegotiatedSuite: String,
+        currentSuiteWireID: String,
+        currentSelectedICE: WebRTCSession.SelectedICECandidateEvidence,
+        currentPeerDeviceID: String?
+    ) throws {
+        guard currentOwner == owner,
+              currentSessionID == sessionID,
+              currentNegotiatedSuite == negotiatedSuite,
+              currentSuiteWireID == suiteWireID,
+              currentSelectedICE == selectedICE,
+              currentPeerDeviceID?.trimmingCharacters(in: .whitespacesAndNewlines) == peerDeviceID else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+enum FormalInteropCleanupAuthority: Equatable {
+    case preparedOnly(runRef: String)
+    case connection(runRef: String, CrossNetworkFormalInteropConnectionContext)
+    case outbound(runRef: String, CrossNetworkFileTransferOutboundContext)
+
+    var runRef: String {
+        switch self {
+        case .preparedOnly(let runRef),
+             .connection(let runRef, _),
+             .outbound(let runRef, _):
+            return runRef
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+enum FormalInteropCleanupCoordinator {
+    static func execute(
+        authority: FormalInteropCleanupAuthority,
+        quiesce: (FormalInteropCleanupAuthority) async throws -> Void,
+        removeOwnedArtifacts: (FormalInteropCleanupAuthority) throws -> Void
+    ) async throws {
+        try await quiesce(authority)
+        try removeOwnedArtifacts(authority)
+    }
+}
+
+@available(iOS 17.0, *)
+@MainActor
+final class LocalWebRTCSmokeHarness {
     static let shared = LocalWebRTCSmokeHarness()
     private static let xwingSuiteWireID: UInt16 = 0x0001
     private static let mlkem768SuiteWireID: UInt16 = 0x0101
@@ -1155,10 +1242,59 @@ private final class LocalWebRTCSmokeHarness {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_HANDSHAKE_ONLY"] == "1"
     }
 
+    private var expectsBidirectionalFileTransfer: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_BIDIRECTIONAL_FILE_TRANSFER"] == "1"
+    }
+
     private func environmentValue(_ name: String) -> String? {
         guard let raw = ProcessInfo.processInfo.environment[name] else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func smokeRunRefForEvidence() throws -> String? {
+        guard let value = environmentValue("SKYBRIDGE_SMOKE_RUN_REF") else {
+            if smokeRequiresExistingTrustWithoutMutation {
+                throw SmokeEvidenceError.invalidRunReference
+            }
+            return nil
+        }
+        guard value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+            throw SmokeEvidenceError.invalidRunReference
+        }
+        return value
+    }
+
+    private func sessionRef(_ sessionID: String) -> String {
+        SHA256.hash(data: Data(sessionID.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
+    private enum SmokeEvidenceError: Error {
+        case invalidRunReference
+    }
+
+    private func existingSmokeIdentityMaterialDigest() async throws -> String {
+        let identity = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+        let kemKeys = try await ExistingReadOnlyIdentityMaterialProvider.loadPQCIdentityPublicKeys()
+
+        var canonical = Data("SkyBridge-Smoke-Identity-Material-v2\n".utf8)
+        func appendField(_ name: String, _ value: Data) {
+            canonical.append(Data("\(name):\(value.count):".utf8))
+            canonical.append(value)
+            canonical.append(0x0A)
+        }
+        appendField("device-id", Data(identity.deviceId.utf8))
+        appendField(
+            "protocol-signing-algorithm",
+            Data(identity.protocolSigningAlgorithm.rawValue.utf8)
+        )
+        appendField("protocol-signing-public", identity.protocolPublicKey)
+        for key in kemKeys.sorted(by: { $0.suiteWireId < $1.suiteWireId }) {
+            appendField(String(format: "kem-public-%04x", key.suiteWireId), key.publicKey)
+        }
+        return Data(SHA256.hash(data: canonical)).map { String(format: "%02x", $0) }.joined()
     }
 
     func startIfNeeded() async {
@@ -1167,21 +1303,92 @@ private final class LocalWebRTCSmokeHarness {
 
         let reporter = SmokeStatusReporter(statusURL: statusURL())
         reporter.reset()
-        await exportLocalPQCIdentityIfNeeded(reporter: reporter)
-        await preseedPeerKEMTrustIfNeeded(reporter: reporter)
+        let smokeRunRef: String?
+        do {
+            smokeRunRef = try smokeRunRefForEvidence()
+        } catch {
+            reporter.append("failed stage=bootstrap error=invalid_run_reference")
+            return
+        }
+        let existingIdentityDigest: String?
+        if smokeRequiresExistingTrustWithoutMutation {
+            do {
+                let digest = try await existingSmokeIdentityMaterialDigest()
+                existingIdentityDigest = digest
+                reporter.append("identity-material phase=before digest=\(digest)")
+            } catch {
+                reporter.append("failed stage=identity-preflight error=missing_or_inconsistent_existing_identity")
+                return
+            }
+        } else {
+            existingIdentityDigest = nil
+        }
+        guard await exportLocalPQCIdentityIfNeeded(reporter: reporter) else { return }
+        guard await preseedPeerKEMTrustIfNeeded(reporter: reporter) else { return }
 
         let manager = CrossNetworkWebRTCManager.instance
         await manager.disconnect()
+        var formalCleanupAuthority: FormalInteropCleanupAuthority?
+        if expectsBidirectionalFileTransfer {
+            guard smokeRequiresExistingTrustWithoutMutation,
+                  let runRef = smokeRunRef,
+                  let androidToPeerTransferID = environmentValue(
+                    "SKYBRIDGE_SMOKE_ANDROID_TO_PEER_TRANSFER_ID"
+                  ),
+                  let peerToAndroidTransferID = environmentValue(
+                    "SKYBRIDGE_SMOKE_PEER_TO_ANDROID_TRANSFER_ID"
+                  ) else {
+                reporter.append("failed stage=file-transfer-bootstrap error=missing_formal_binding")
+                return
+            }
+            do {
+                try FileTransferManager.instance.prepareFormalInteropRun(
+                    runRef: runRef,
+                    androidToPeerTransferID: androidToPeerTransferID,
+                    peerToAndroidTransferID: peerToAndroidTransferID
+                )
+                formalCleanupAuthority = .preparedOnly(runRef: runRef)
+                reporter.append("file-transfer-run prepared runRef=\(runRef)")
+            } catch {
+                reporter.append("failed stage=file-transfer-bootstrap error=invalid_formal_binding")
+                return
+            }
+        }
 
         switch role {
         case "ios-client":
             reporter.append("boot role=ios-client")
             guard !connectCode.isEmpty else {
+                if let authority = formalCleanupAuthority {
+                    _ = await cleanupFormalInteropRun(
+                        manager: manager,
+                        reporter: reporter,
+                        authority: authority
+                    )
+                    formalCleanupAuthority = nil
+                }
                 reporter.append("failed stage=bootstrap error=missing_connect_code")
                 return
             }
-            reporter.append("connect \(connectCode)")
+            reporter.append("connect <redacted>")
             await manager.connect(withCode: connectCode)
+            if let preparedAuthority = formalCleanupAuthority {
+                do {
+                    formalCleanupAuthority = .connection(
+                        runRef: preparedAuthority.runRef,
+                        try manager.makeFormalInteropConnectionContext()
+                    )
+                } catch {
+                    do {
+                        try manager.requireNoActiveFormalInteropConnection()
+                    } catch {
+                        reporter.append(
+                            "failed stage=file-transfer-cleanup error=connection_owner_unavailable"
+                        )
+                        return
+                    }
+                }
+            }
         case "ios-host":
             reporter.append("boot role=ios-host")
             guard let code = await manager.generateConnectionCode(), !code.isEmpty else {
@@ -1202,6 +1409,7 @@ private final class LocalWebRTCSmokeHarness {
         var lastRekeyEvent = ""
         var heartbeatStarted = false
         var streamConfigurationSent = false
+        var bidirectionalTransferStarted = false
 
         while Date() < deadline {
             let stateDescription = String(describing: manager.state)
@@ -1223,6 +1431,14 @@ private final class LocalWebRTCSmokeHarness {
             }
 
             if case .failed(let message) = manager.state {
+                if let authority = formalCleanupAuthority {
+                    _ = await cleanupFormalInteropRun(
+                        manager: manager,
+                        reporter: reporter,
+                        authority: authority
+                    )
+                    formalCleanupAuthority = nil
+                }
                 reporter.append("failed stage=handshake error=\(Self.sanitize(message))")
                 return
             }
@@ -1244,7 +1460,7 @@ private final class LocalWebRTCSmokeHarness {
                 }
             }
 
-            if role == "ios-client" {
+            if role == "ios-client", !expectsBidirectionalFileTransfer {
                 let successDescriptor: (width: Int, height: Int, bytes: Int, transport: String)? = {
                     if let screenData = manager.lastScreenData {
                         return (
@@ -1322,6 +1538,7 @@ private final class LocalWebRTCSmokeHarness {
             }
 
             if role == "ios-client",
+               !expectsBidirectionalFileTransfer,
                expectsPQCRekey,
                case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness,
                negotiatedSuite.caseInsensitiveCompare("X-Wing") == .orderedSame,
@@ -1334,10 +1551,181 @@ private final class LocalWebRTCSmokeHarness {
             }
 
             if role == "ios-client",
-               expectsHandshakeOnly,
+               expectsBidirectionalFileTransfer,
+               !bidirectionalTransferStarted,
                case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness {
+                bidirectionalTransferStarted = true
+                let canonicalSuiteWireID = Self.canonicalSuiteWireID(negotiatedSuite)
+                guard canonicalSuiteWireID == "0x0101",
+                      let runRef = smokeRunRef,
+                      let androidToPeerTransferID = environmentValue(
+                        "SKYBRIDGE_SMOKE_ANDROID_TO_PEER_TRANSFER_ID"
+                      ),
+                      let peerToAndroidTransferID = environmentValue(
+                        "SKYBRIDGE_SMOKE_PEER_TO_ANDROID_TRANSFER_ID"
+                      ),
+                      let expectedPeerDeviceID = environmentValue(
+                        "SKYBRIDGE_PQC_PEER_DEVICE_ID"
+                      ) else {
+                    if let authority = formalCleanupAuthority {
+                        _ = await cleanupFormalInteropRun(
+                            manager: manager,
+                            reporter: reporter,
+                            authority: authority
+                        )
+                        formalCleanupAuthority = nil
+                    }
+                    reporter.append("failed stage=file-transfer error=formal_binding_or_suite_mismatch")
+                    return
+                }
+                let sessionRef = sessionRef(sessionId)
+                do {
+                    let outboundContext = try manager.makeFileTransferOutboundContext()
+                    formalCleanupAuthority = .outbound(
+                        runRef: runRef,
+                        outboundContext
+                    )
+                    try FileTransferManager.instance.bindFormalInteropSession(
+                        sessionRef: sessionRef,
+                        owner: outboundContext.owner
+                    )
+                    let selectedICE = try await manager.formalSelectedICECandidateEvidence(
+                        requiredOwner: outboundContext.owner
+                    )
+                    let terminalBinding = FormalInteropTerminalBinding(
+                        owner: outboundContext.owner,
+                        sessionID: sessionId,
+                        negotiatedSuite: negotiatedSuite,
+                        suiteWireID: canonicalSuiteWireID,
+                        selectedICE: selectedICE,
+                        peerDeviceID: expectedPeerDeviceID
+                    )
+                    let evidence = try await runBidirectionalFormalFileTransfer(
+                        runRef: runRef,
+                        sessionRef: sessionRef,
+                        androidToPeerTransferID: androidToPeerTransferID,
+                        peerToAndroidTransferID: peerToAndroidTransferID,
+                        expectedPeerDeviceID: expectedPeerDeviceID,
+                        timeoutSeconds: timeoutSeconds
+                    )
+                    let selectedICEAfter = try await manager.formalSelectedICECandidateEvidence(
+                        requiredOwner: outboundContext.owner
+                    )
+                    guard selectedICEAfter == selectedICE else {
+                        throw FormalInteropFileTransferError.invalidBinding
+                    }
+                    let holdSeconds = min(
+                        30,
+                        max(
+                            1,
+                            Double(
+                                ProcessInfo.processInfo.environment[
+                                    "SKYBRIDGE_SMOKE_HOLD_AFTER_SUCCESS_SECONDS"
+                                ] ?? ""
+                            ) ?? 5
+                        )
+                    )
+                    try await Task.sleep(for: .seconds(holdSeconds))
+                    try manager.validateFileTransferOutboundContext(outboundContext)
+                    let terminalOutboundContext = try manager.makeFileTransferOutboundContext()
+                    let terminalSelectedICE = try await manager.formalSelectedICECandidateEvidence(
+                        requiredOwner: outboundContext.owner
+                    )
+                    guard case .handshakeComplete(
+                            let terminalSessionID,
+                            let terminalNegotiatedSuite
+                          ) = manager.readiness else {
+                        throw FormalInteropFileTransferError.invalidBinding
+                    }
+                    try terminalBinding.validate(
+                        currentOwner: terminalOutboundContext.owner,
+                        currentSessionID: terminalSessionID,
+                        currentNegotiatedSuite: terminalNegotiatedSuite,
+                        currentSuiteWireID: Self.canonicalSuiteWireID(terminalNegotiatedSuite),
+                        currentSelectedICE: terminalSelectedICE,
+                        currentPeerDeviceID: manager.remoteDeviceId
+                    )
+                    try manager.validateFormalFileTransferPeer(
+                        requiredOwner: outboundContext.owner,
+                        expectedDeviceID: expectedPeerDeviceID
+                    )
+                    guard let cleanupAuthority = formalCleanupAuthority,
+                          await cleanupFormalInteropRun(
+                        manager: manager,
+                        reporter: reporter,
+                        authority: cleanupAuthority
+                    ) else {
+                        formalCleanupAuthority = nil
+                        reporter.append("failed stage=file-transfer-cleanup error=run_owned_cleanup_failed")
+                        return
+                    }
+                    formalCleanupAuthority = nil
+                    if let existingIdentityDigest {
+                        let afterDigest = try await existingSmokeIdentityMaterialDigest()
+                        guard afterDigest == existingIdentityDigest else {
+                            reporter.append("failed stage=identity-freeze error=identity_material_changed")
+                            return
+                        }
+                        reporter.append("identity-material phase=after digest=\(afterDigest)")
+                    }
+                    reporter.append(
+                        "success session_ref=\(sessionRef) "
+                            + "runRef=\(runRef) "
+                            + "suite=\(Self.sanitize(negotiatedSuite)) "
+                            + "suiteWireId=\(canonicalSuiteWireID) "
+                            + "selectedIceRoute=\(selectedICE.route) "
+                            + "selectedIceLocalType=\(selectedICE.localCandidateType) "
+                            + "selectedIceRemoteType=\(selectedICE.remoteCandidateType) "
+                            + "selectedIceProtocol=\(selectedICE.networkProtocol) "
+                            + "handshakeOnly=0 bidirectionalFileTransfer=true "
+                            + "androidToPeerTransferId=\(androidToPeerTransferID) "
+                            + "androidToPeerBytes=\(evidence.androidToPeerBytes) "
+                            + "androidToPeerSha256=\(evidence.androidToPeerSHA256) "
+                            + "androidToPeerDurableStorage=caches "
+                            + "androidToPeerCompleteAck=true "
+                            + "peerToAndroidTransferId=\(peerToAndroidTransferID) "
+                            + "peerToAndroidBytes=\(evidence.peerToAndroidBytes) "
+                            + "peerToAndroidSha256=\(evidence.peerToAndroidSHA256) "
+                            + "peerToAndroidCompleteAck=true "
+                            + "iosRunOwnedPayloadCleaned=true"
+                    )
+                    return
+                } catch {
+                    if let authority = formalCleanupAuthority {
+                        _ = await cleanupFormalInteropRun(
+                            manager: manager,
+                            reporter: reporter,
+                            authority: authority
+                        )
+                        formalCleanupAuthority = nil
+                    }
+                    reporter.append("failed stage=file-transfer error=bidirectional_transfer_failed")
+                    return
+                }
+            }
+
+            if role == "ios-client",
+               expectsHandshakeOnly,
+               !expectsBidirectionalFileTransfer,
+               case .handshakeComplete(let sessionId, let negotiatedSuite) = manager.readiness {
+                if let existingIdentityDigest {
+                    do {
+                        let afterDigest = try await existingSmokeIdentityMaterialDigest()
+                        guard afterDigest == existingIdentityDigest else {
+                            reporter.append("failed stage=identity-freeze error=identity_material_changed")
+                            return
+                        }
+                        reporter.append("identity-material phase=after digest=\(afterDigest)")
+                    } catch {
+                        reporter.append("failed stage=identity-freeze error=identity_material_unreadable")
+                        return
+                    }
+                }
                 reporter.append(
-                    "success session=\(sessionId) suite=\(Self.sanitize(negotiatedSuite)) handshakeOnly=1"
+                    "success session_ref=\(sessionRef(sessionId)) "
+                        + "runRef=\(smokeRunRef ?? "diagnostic-unbound") "
+                        + "suite=\(Self.sanitize(negotiatedSuite)) "
+                        + "suiteWireId=\(Self.canonicalSuiteWireID(negotiatedSuite)) handshakeOnly=1"
                 )
                 return
             }
@@ -1363,7 +1751,142 @@ private final class LocalWebRTCSmokeHarness {
             try? await Task.sleep(for: .milliseconds(250))
         }
 
+        if let authority = formalCleanupAuthority {
+            _ = await cleanupFormalInteropRun(
+                manager: manager,
+                reporter: reporter,
+                authority: authority
+            )
+            formalCleanupAuthority = nil
+        }
         reporter.append("failed stage=timeout error=ios_smoke_timeout")
+    }
+
+    private func cleanupFormalInteropRun(
+        manager: CrossNetworkWebRTCManager,
+        reporter: SmokeStatusReporter,
+        authority: FormalInteropCleanupAuthority
+    ) async -> Bool {
+        do {
+            try await FormalInteropCleanupCoordinator.execute(
+                authority: authority,
+                quiesce: { authority in
+                    switch authority {
+                    case .preparedOnly:
+                        try manager.requireNoActiveFormalInteropConnection()
+                    case .connection(_, let context):
+                        try await manager.disconnectFormalInteropSession(
+                            requiredContext: context
+                        )
+                    case .outbound(_, let context):
+                        try await manager.disconnectFormalInteropSession(
+                            requiredOwner: context.owner
+                        )
+                    }
+                },
+                removeOwnedArtifacts: { authority in
+                    switch authority {
+                    case .preparedOnly(let runRef), .connection(let runRef, _):
+                        try FileTransferManager.instance
+                            .cleanupPreparedFormalInteropRunOwnedArtifacts(runRef: runRef)
+                    case .outbound(let runRef, let context):
+                        try FileTransferManager.instance
+                            .cleanupQuiescedFormalInteropRunOwnedArtifacts(
+                                runRef: runRef,
+                                requiredOwner: context.owner
+                            )
+                    }
+                }
+            )
+            reporter.append("file-transfer-cleanup outcome=run-owned-only")
+            return true
+        } catch {
+            reporter.append("file-transfer-cleanup outcome=failed")
+            return false
+        }
+    }
+
+    private struct BidirectionalFileTransferEvidence {
+        let androidToPeerBytes: Int
+        let androidToPeerSHA256: String
+        let peerToAndroidBytes: Int
+        let peerToAndroidSHA256: String
+    }
+
+    private func runBidirectionalFormalFileTransfer(
+        runRef: String,
+        sessionRef: String,
+        androidToPeerTransferID: String,
+        peerToAndroidTransferID: String,
+        expectedPeerDeviceID: String,
+        timeoutSeconds: Double
+    ) async throws -> BidirectionalFileTransferEvidence {
+        let inboundPayload = try FileTransferManager.formalInteropPayload(
+            direction: "android-to-peer",
+            runRef: runRef,
+            sessionRef: sessionRef,
+            transferID: androidToPeerTransferID
+        )
+        let inboundName = FileTransferManager.formalInteropFileName(
+            direction: "android-to-peer",
+            runRef: runRef
+        )
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var inboundURL: URL?
+        while Date() < deadline {
+            if let completed = try FileTransferManager.instance
+                .formalInteropInboundCompletionURL(transferID: androidToPeerTransferID) {
+                inboundURL = completed
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let inboundURL,
+              inboundURL.lastPathComponent == inboundName else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        let inboundValues = try inboundURL.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        )
+        guard inboundValues.isRegularFile == true,
+              inboundValues.isSymbolicLink != true else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        let committedInbound = try Data(contentsOf: inboundURL, options: .mappedIfSafe)
+        guard committedInbound == inboundPayload else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        let inboundDigest = Data(SHA256.hash(data: committedInbound))
+
+        let outboundPayload = try FileTransferManager.formalInteropPayload(
+            direction: "peer-to-android",
+            runRef: runRef,
+            sessionRef: sessionRef,
+            transferID: peerToAndroidTransferID
+        )
+        let outboundName = FileTransferManager.formalInteropFileName(
+            direction: "peer-to-android",
+            runRef: runRef
+        )
+        let outboundEvidence = try await FileTransferManager.instance
+            .createAndSendFormalInteropPayload(
+                outboundPayload,
+                transferID: peerToAndroidTransferID,
+                fileName: outboundName,
+                expectedPeerDeviceID: expectedPeerDeviceID
+            )
+        guard outboundEvidence.bytes == outboundPayload.count,
+              outboundEvidence.sha256 == Data(SHA256.hash(data: outboundPayload)) else {
+            throw FormalInteropFileTransferError.invalidBinding
+        }
+        return BidirectionalFileTransferEvidence(
+            androidToPeerBytes: committedInbound.count,
+            androidToPeerSHA256: inboundDigest.map { String(format: "%02x", $0) }.joined(),
+            peerToAndroidBytes: outboundEvidence.bytes,
+            peerToAndroidSHA256: outboundEvidence.sha256
+                .map { String(format: "%02x", $0) }
+                .joined()
+        )
     }
 
     private func statusURL() -> URL? {
@@ -1403,6 +1926,9 @@ private final class LocalWebRTCSmokeHarness {
         if let explicit = environmentValue("SKYBRIDGE_DEVICE_ID") {
             return explicit
         }
+        if smokeRequiresExistingTrustWithoutMutation {
+            return KeychainManager.shared.loadDeviceId() ?? ""
+        }
         return KeychainManager.shared.getOrGenerateDeviceId()
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1419,9 +1945,9 @@ private final class LocalWebRTCSmokeHarness {
         return data
     }
 
-    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async {
+    private func preseedPeerKEMTrustIfNeeded(reporter: SmokeStatusReporter) async -> Bool {
         guard let peerDeviceID = environmentValue("SKYBRIDGE_PQC_PEER_DEVICE_ID") else {
-            return
+            return true
         }
 
         var keysBySuite: [UInt16: KEMPublicKeyInfo] = [:]
@@ -1452,17 +1978,32 @@ private final class LocalWebRTCSmokeHarness {
 
         let keys = keysBySuite.keys.sorted().compactMap { keysBySuite[$0] }
         guard !keys.isEmpty else {
-            reporter.append("pqc-preseed skipped device=\(Self.sanitize(peerDeviceID)) reason=missing_keys")
-            return
+            reporter.append("failed stage=pqc-preseed error=missing_keys")
+            return false
         }
 
-        await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
+        do {
+            if smokeRequiresExistingTrustWithoutMutation {
+                try await KEMTrustStore.shared.requireExactExisting(
+                    deviceId: peerDeviceID,
+                    kemPublicKeys: keys
+                )
+            } else {
+                await KEMTrustStore.shared.upsert(deviceId: peerDeviceID, kemPublicKeys: keys)
+            }
+        } catch {
+            reporter.append("failed stage=pqc-preseed error=existing_trust_mismatch")
+            return false
+        }
         let suites = keys.map { String(format: "0x%04x", $0.suiteWireId) }.joined(separator: ",")
-        reporter.append("pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites)")
+        reporter.append(
+            "pqc-preseed device=\(Self.sanitize(peerDeviceID)) suites=\(suites) mode=\(smokeRequiresExistingTrustWithoutMutation ? "existing-read-only" : "persistent")"
+        )
+        return true
     }
 
-    private func exportLocalPQCIdentityIfNeeded(reporter: SmokeStatusReporter) async {
-        guard let reportURL = pqcReportURL() else { return }
+    private func exportLocalPQCIdentityIfNeeded(reporter: SmokeStatusReporter) async -> Bool {
+        guard let reportURL = pqcReportURL() else { return true }
 
         struct LocalPQCReport: Encodable {
             struct PublicKeyEntry: Encodable {
@@ -1475,9 +2016,18 @@ private final class LocalWebRTCSmokeHarness {
         }
 
         do {
-            let keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            let deviceId: String
+            let keys: [KEMPublicKeyInfo]
+            if smokeRequiresExistingTrustWithoutMutation {
+                let identity = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+                deviceId = identity.deviceId
+                keys = try await ExistingReadOnlyIdentityMaterialProvider.loadPQCIdentityPublicKeys()
+            } else {
+                deviceId = resolvedLocalDeviceID()
+                keys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            }
             let report = LocalPQCReport(
-                deviceId: resolvedLocalDeviceID(),
+                deviceId: deviceId,
                 keys: keys.map { key in
                     LocalPQCReport.PublicKeyEntry(
                         suiteWireId: key.suiteWireId,
@@ -1492,8 +2042,10 @@ private final class LocalWebRTCSmokeHarness {
             reporter.append(
                 "pqc-report device=\(Self.sanitize(report.deviceId)) keys=\(report.keys.count) file=\(reportURL.lastPathComponent)"
             )
+            return true
         } catch {
             reporter.append("failed stage=pqc-report error=\(Self.sanitize(error.localizedDescription))")
+            return false
         }
     }
 
@@ -1548,6 +2100,23 @@ private final class LocalWebRTCSmokeHarness {
     private static func sanitize(_ value: String) -> String {
         value.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
     }
+
+    static func canonicalSuiteWireID(_ suiteLabel: String) -> String {
+        let suite = suiteLabel.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        switch suite {
+        case "X-WING": return "0x0001"
+        case "ML-KEM-768": return "0x0101"
+        case "ML-KEM-768-FS": return "0x0102"
+        case "X25519": return "0x1001"
+        case "P-256": return "0x1002"
+        default: return "unknown"
+        }
+    }
+}
+
+private var smokeRequiresExistingTrustWithoutMutation: Bool {
+    ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+        && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
 }
 
 @available(iOS 17.0, *)

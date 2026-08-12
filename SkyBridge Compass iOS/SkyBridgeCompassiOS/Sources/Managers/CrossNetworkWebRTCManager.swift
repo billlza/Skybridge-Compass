@@ -1152,7 +1152,7 @@ extension CrossNetworkWebRTCManager {
 @available(iOS 17.0, *)
 @MainActor
 public final class CrossNetworkWebRTCManager: ObservableObject {
-    
+
     public enum State: Sendable, Equatable {
         case idle
         case connecting(sessionId: String)
@@ -1225,8 +1225,28 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         if !envID.isEmpty {
             return envID
         }
+        if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil,
+           ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1" {
+            return KeychainManager.shared.loadDeviceId() ?? ""
+        }
         return KeychainManager.shared.getOrGenerateDeviceId()
     }()
+    private var requiresExistingTrustWithoutMutation: Bool {
+        ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
+    }
+    private var requiresFormalBidirectionalInterop: Bool {
+        requiresExistingTrustWithoutMutation
+            && ProcessInfo.processInfo.environment[
+                "SKYBRIDGE_SMOKE_EXPECT_BIDIRECTIONAL_FILE_TRANSFER"
+            ] == "1"
+    }
+
+    private func requireFormalInteropSessionNotRetired() throws {
+        guard !requiresFormalBidirectionalInterop || !formalInteropSessionRetired else {
+            throw FileTransferWaitError.staleSession
+        }
+    }
     private var currentPathExpectedRemoteAuthorityBySessionId: [String: CurrentPathRemoteAuthorityCompat] = [:]
     private var currentPathSignalingOriginBySessionId: [String: String] = [:]
     private var handshakeDriver: HandshakeDriver?
@@ -1263,8 +1283,35 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var nextRemotePeerPingID: UInt64 = 1
     private var inFlightScannedConnectLink: String?
     
-    // File transfer waiters (transferId|op|chunkIndex -> continuation)
-    private var fileTransferWaiters: [String: CheckedContinuation<CrossNetworkFileTransferMessage, Error>] = [:]
+    private final class FileTransferWaiter {
+        let token: CrossNetworkFileTransferWaiterToken
+        let continuation: CheckedContinuation<CrossNetworkFileTransferMessage, Error>
+        let completionExpectation: CrossNetworkFileTransferCompletionAckExpectation?
+        var sendTask: Task<Void, Never>?
+
+        init(
+            token: CrossNetworkFileTransferWaiterToken,
+            continuation: CheckedContinuation<CrossNetworkFileTransferMessage, Error>,
+            completionExpectation: CrossNetworkFileTransferCompletionAckExpectation?
+        ) {
+            self.token = token
+            self.continuation = continuation
+            self.completionExpectation = completionExpectation
+        }
+    }
+    private var fileTransferWaiterRegistry = CrossNetworkFileTransferWaiterRegistry()
+    private var fileTransferWaitersByTokenID: [UUID: FileTransferWaiter] = [:]
+    private struct FileTransferResponseTask {
+        let owner: CrossNetworkFileTransferSessionOwner
+        let task: Task<Bool, Never>
+    }
+    private var fileTransferResponseTasksByID: [UUID: FileTransferResponseTask] = [:]
+    private var activeFileTransferSessionOwner: CrossNetworkFileTransferSessionOwner?
+    private var formalInteropSessionRetired = false
+    private var inboundCompletionReplayCache = CrossNetworkFileTransferCompletionReplayCache(
+        capacity: 256,
+        timeToLive: 5 * 60
+    )
 
     private struct SessionSnapshotMetadata: Sendable {
         let snapshotToken: UUID
@@ -1275,6 +1322,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var sessionSnapshotMetadataBySessionId: [String: SessionSnapshotMetadata] = [:]
 
     private struct InboundFileTransferState {
+        let contextIdentity: CrossNetworkFileTransferInboundContextIdentity
         let transferId: String
         let fileName: String
         let fileSize: Int64
@@ -1283,10 +1331,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let senderDeviceId: String
         let senderDeviceName: String
         let tempURL: URL
-        let finalURL: URL
         let handle: FileHandle
         var receivedBytes: Int64
         var completeRequestedAt: Date? = nil
+        var completionFingerprint: CrossNetworkFileTransferCompletionRequestFingerprint? = nil
         var expectedFileSha256: Data? = nil
         var expectedMerkleRoot: Data? = nil
         var expectedMerkleSig: Data? = nil
@@ -1297,14 +1345,18 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var inboundFileTransfers: [String: InboundFileTransferState] = [:]
     private var inboundFileTransferCompleteTimers: [String: Task<Void, Never>] = [:]
     
-    private enum FileTransferWaitError: LocalizedError {
+    enum FileTransferWaitError: LocalizedError {
         case timeout
         case cancelled
+        case staleSession
+        case transientSend(String)
         
         var errorDescription: String? {
             switch self {
             case .timeout: return "跨网文件传输等待超时"
             case .cancelled: return "跨网文件传输已取消"
+            case .staleSession: return "跨网文件传输会话已失效"
+            case .transientSend(let message): return "跨网文件传输发送失败: \(message)"
             }
         }
     }
@@ -1509,12 +1561,26 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
     }
 
-    private func currentPathLocalBinding() throws -> ProtocolIdentityBindingCompat {
+    private func currentPathLocalBinding() async throws -> ProtocolIdentityBindingCompat {
+        if requiresExistingTrustWithoutMutation {
+            let material = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+            guard localDeviceId == material.deviceId else {
+                throw ExistingReadOnlyIdentityMaterialProvider.MaterialError.bindingMismatch
+            }
+            return try ProtocolIdentityBindingCompat(
+                deviceId: material.deviceId,
+                protocolSigningAlgorithm: material.protocolSigningAlgorithm,
+                protocolPublicKeyBytes: material.protocolPublicKey
+            )
+        }
+
         let tag = "CrossNetwork.CurrentPath.Authority.Ed25519"
         let keychain = KeychainManager.shared
         let publicKey: Data
-        if let existing = keychain.loadCurve25519SigningPublicKey(tag: tag) {
-            publicKey = existing.rawRepresentation
+        if let existingPublic = keychain.loadCurve25519SigningPublicKey(tag: tag),
+           let existingPrivate = keychain.loadCurve25519SigningPrivateKey(tag: tag),
+           existingPrivate.publicKey.rawRepresentation == existingPublic.rawRepresentation {
+            publicKey = existingPublic.rawRepresentation
         } else if let generated = keychain.generateCurve25519SigningKeypair(tag: tag) {
             publicKey = generated.public.rawRepresentation
         } else {
@@ -1531,6 +1597,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         deviceId: String,
         protocolPublicKeyFingerprint: String
     ) throws {
+        if requiresExistingTrustWithoutMutation {
+            try TrustedDeviceStore.shared.requireExactExistingCurrentPathAuthority(
+                deviceId: deviceId,
+                protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
+            )
+        }
         if let conflict = TrustedDeviceStore.shared.evaluateCurrentPathBinding(
             deviceId: deviceId,
             protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
@@ -1550,6 +1622,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func persistCurrentPathTrust(sessionId: String) {
         guard let authority = currentPathExpectedRemoteAuthorityBySessionId[sessionId] else { return }
+        if requiresExistingTrustWithoutMutation {
+            appendSmokeTrace("trust-persistence skipped reason=existing-trust-only")
+            return
+        }
         TrustedDeviceStore.shared.upsertCurrentPathAuthority(
             deviceId: authority.deviceId,
             name: authority.deviceName ?? authority.deviceId,
@@ -1569,6 +1645,27 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
     private func requestAdmissionLease(for binding: ProtocolIdentityBindingCompat) async throws -> SignalServerClientCompat.AdmissionLease {
         let challenge = try await signalServer.requestAdmissionChallenge(binding: binding)
+        if requiresExistingTrustWithoutMutation {
+            let material = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+            try ExistingReadOnlyIdentityMaterialProvider.requireBindingMatchesCanonicalIdentity(
+                material: material,
+                deviceId: binding.deviceId,
+                protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+                protocolPublicKey: binding.protocolPublicKeyBytes
+            )
+            let signatureProvider = ProtocolSignatureProviderSelector.select(
+                for: material.protocolSigningAlgorithm
+            )
+            let signature = try await signatureProvider.sign(
+                challenge.signaturePayload(),
+                key: material.protocolSigningKeyHandle
+            )
+            return try await signalServer.completeAdmission(
+                challenge: challenge,
+                binding: binding,
+                signature: signature
+            )
+        }
         let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
         guard let privateKey = KeychainManager.shared.loadCurve25519SigningPrivateKey(tag: signatureKeyTag) else {
             throw NSError(domain: "CrossNetworkWebRTCManager", code: 14, userInfo: [NSLocalizedDescriptionKey: "missing current-path signing key"])
@@ -1612,10 +1709,14 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public func connect(withCode rawCode: String) async {
         disarmIdleConnectionReminder(clearPrompt: true)
         do {
+            try requireFormalInteropSessionNotRetired()
             let code = try normalizeConnectionCode(rawCode)
-            let localBinding = try currentPathLocalBinding()
+            let localBinding = try await currentPathLocalBinding()
+            try requireFormalInteropSessionNotRetired()
             let admission = try await requestAdmissionLease(for: localBinding)
+            try requireFormalInteropSessionNotRetired()
             let lookup = try await signalServer.lookupConnectionCode(admissionToken: admission.token, code: code)
+            try requireFormalInteropSessionNotRetired()
             let canonicalOrigin = try validateCurrentPathOrigin(lookup.signalingServerOrigin)
             try enforceCurrentPathTrustBinding(
                 deviceId: lookup.initiatorDeviceId,
@@ -1671,7 +1772,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                activeConnectionCodeLeaseMode != requestedLeaseMode {
                 await disconnect()
             }
-            let localBinding = try currentPathLocalBinding()
+            let localBinding = try await currentPathLocalBinding()
             let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
@@ -1740,7 +1841,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     public func generateConnectLink(validDuration: TimeInterval = 300) async -> String? {
         disarmIdleConnectionReminder(clearPrompt: true)
         do {
-            let localBinding = try currentPathLocalBinding()
+            let localBinding = try await currentPathLocalBinding()
             let admission = try await requestAdmissionLease(for: localBinding)
             #if canImport(UIKit)
             let localDeviceName = UIDevice.current.name
@@ -1755,11 +1856,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             webrtcSignalingAuthTokenBySessionId[lease.sessionID] = lease.sessionToken
             webrtcTurnAdmissionTokenBySessionId[lease.sessionID] = lease.turnAdmissionToken
             currentPathSignalingOriginBySessionId[lease.sessionID] = canonicalOrigin
-
-            let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
-            guard let privateKey = KeychainManager.shared.loadCurve25519SigningPrivateKey(tag: signatureKeyTag) else {
-                throw NSError(domain: "CrossNetworkWebRTCManager", code: 13, userInfo: [NSLocalizedDescriptionKey: "missing current-path signing key"])
-            }
 
             let qrData = DynamicQRCodeData(
                 version: 6,
@@ -1778,7 +1874,36 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 signatureTimestampMs: Int64(Date().timeIntervalSince1970 * 1000),
                 expiresAt: Date().addingTimeInterval(validDuration)
             )
-            let signature = try privateKey.signature(for: buildCanonicalQRCodePayload(for: qrData))
+            let canonicalQRCodePayload = buildCanonicalQRCodePayload(for: qrData)
+            let signature: Data
+            if requiresExistingTrustWithoutMutation {
+                let material = try await ExistingReadOnlyIdentityMaterialProvider.loadProtocolIdentity()
+                try ExistingReadOnlyIdentityMaterialProvider.requireBindingMatchesCanonicalIdentity(
+                    material: material,
+                    deviceId: localBinding.deviceId,
+                    protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
+                    protocolPublicKey: localBinding.protocolPublicKeyBytes
+                )
+                let signatureProvider = ProtocolSignatureProviderSelector.select(
+                    for: material.protocolSigningAlgorithm
+                )
+                signature = try await signatureProvider.sign(
+                    canonicalQRCodePayload,
+                    key: material.protocolSigningKeyHandle
+                )
+            } else {
+                let signatureKeyTag = "CrossNetwork.CurrentPath.Authority.Ed25519"
+                guard let privateKey = KeychainManager.shared.loadCurve25519SigningPrivateKey(
+                    tag: signatureKeyTag
+                ) else {
+                    throw NSError(
+                        domain: "CrossNetworkWebRTCManager",
+                        code: 13,
+                        userInfo: [NSLocalizedDescriptionKey: "missing current-path signing key"]
+                    )
+                }
+                signature = try privateKey.signature(for: canonicalQRCodePayload)
+            }
             let signed = DynamicQRCodeData(
                 version: qrData.version,
                 sessionID: qrData.sessionID,
@@ -1838,24 +1963,41 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     }
     
     public func disconnect(clearSnapshot: Bool = true) async {
+        _ = await disconnectAndRequireNoReplacement(clearSnapshot: clearSnapshot)
+    }
+
+    @discardableResult
+    private func disconnectAndRequireNoReplacement(clearSnapshot: Bool) async -> Bool {
+        // Detach every manager-owned connection resource before the first suspension. A previous
+        // implementation awaited `signaling.close()` while the old session was still installed in
+        // these properties; MainActor reentrancy could then let a replacement connection arrive and
+        // be cleared by the old disconnect when that await resumed.
+        let detachedSignaling = signaling
+        let detachedSession = session
+        let detachedInboundQueue = inboundQueue
+        let detachedScreenInboundQueue = screenInboundQueue
+
+        invalidateFileTransferKeyEpoch(errorMessage: "Session closed during file transfer")
+        sessionKeys = nil
         disarmIdleConnectionReminder(clearPrompt: true)
         suppressSignalingRecovery = true
-        defer { suppressSignalingRecovery = false }
         for (_, task) in signalingRecoveryTasksBySessionId {
             task.cancel()
         }
         signalingRecoveryTasksBySessionId.removeAll()
-        if let signaling {
-            await signaling.close()
-        }
         signaling = nil
         signalingShardKey = nil
         signalingHealth = .healthy
         signalingGenerationBySessionId.removeAll()
         activeSignalingHandleBySessionId.removeAll()
-        session?.close()
         session = nil
         currentSessionId = nil
+        inboundQueue = nil
+        screenInboundQueue = nil
+        receiveTask?.cancel()
+        receiveTask = nil
+        screenReceiveTask?.cancel()
+        screenReceiveTask = nil
         lastScreenData = nil
 #if canImport(WebRTC)
         installRemoteVideoTrack(nil)
@@ -1900,20 +2042,6 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         inboundRekeyResponderSessionIds.removeAll()
         strictPQCRequestedBySessionId.removeAll()
         lastPairingIdentityExchangeSentAtByPeerId.removeAll()
-        failAllFileTransferWaiters(FileTransferWaitError.cancelled)
-        cleanupInboundFileTransfers()
-        if let inboundQueue {
-            await inboundQueue.finish()
-        }
-        inboundQueue = nil
-        if let screenInboundQueue {
-            await screenInboundQueue.finish()
-        }
-        screenInboundQueue = nil
-        receiveTask?.cancel()
-        receiveTask = nil
-        screenReceiveTask?.cancel()
-        screenReceiveTask = nil
         if clearSnapshot {
             activeSessionReconnectTimeoutTask?.cancel()
             activeSessionReconnectTimeoutTask = nil
@@ -1922,6 +2050,26 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
         state = .idle
         readiness = .idle
+        detachedSession?.close()
+        suppressSignalingRecovery = false
+
+        // Only captured resources are touched after this point. A replacement connection may now
+        // safely install its own signaling/session/queues while these old resources finish closing.
+        if let detachedSignaling {
+            await detachedSignaling.close()
+        }
+        if let detachedInboundQueue {
+            await detachedInboundQueue.finish()
+        }
+        if let detachedScreenInboundQueue {
+            await detachedScreenInboundQueue.finish()
+        }
+        return CrossNetworkDisconnectPostcondition.hasNoReplacement(
+            signalingIsPresent: signaling != nil,
+            sessionIsPresent: session != nil,
+            sessionIDIsPresent: currentSessionId != nil,
+            fileTransferOwnerIsPresent: activeFileTransferSessionOwner != nil
+        )
     }
 
 #if canImport(WebRTC)
@@ -3122,12 +3270,61 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         remoteDesktopHeartbeatTask = nil
     }
 
-    private func cleanupInboundFileTransfers() {
+    private func cleanupInboundFileTransfers(errorMessage: String? = nil) {
+        for task in inboundFileTransferCompleteTimers.values {
+            task.cancel()
+        }
+        inboundFileTransferCompleteTimers.removeAll()
         for (_, st) in inboundFileTransfers {
             try? st.handle.close()
             try? FileManager.default.removeItem(at: st.tempURL)
+            if let errorMessage {
+                FileTransferManager.instance.completeExternalInboundTransfer(
+                    transferId: st.transferId,
+                    success: false,
+                    error: errorMessage
+                )
+            }
         }
         inboundFileTransfers.removeAll()
+    }
+
+    private func transitionFileTransferKeyEpoch(
+        sessionId: String,
+        sourceSession: WebRTCSession
+    ) throws {
+        guard currentSessionId == sessionId,
+              session === sourceSession,
+              let sessionGeneration = sessionSnapshotMetadataBySessionId[sessionId]?.snapshotToken else {
+            throw FileTransferWaitError.staleSession
+        }
+        invalidateFileTransferKeyEpoch(errorMessage: "Session key changed during file transfer")
+        activeFileTransferSessionOwner = try CrossNetworkFileTransferSessionOwner(
+            sessionID: sessionId,
+            generation: sessionGeneration,
+            keyEpoch: UUID()
+        )
+    }
+
+    private func invalidateFileTransferKeyEpoch(errorMessage: String) {
+        guard let oldOwner = activeFileTransferSessionOwner else { return }
+        let tokens = fileTransferWaiterRegistry.remove(owner: oldOwner)
+        for token in tokens {
+            guard let waiter = fileTransferWaitersByTokenID.removeValue(forKey: token.id) else {
+                continue
+            }
+            waiter.sendTask?.cancel()
+            waiter.continuation.resume(throwing: FileTransferWaitError.staleSession)
+        }
+        let responseTaskIDs = fileTransferResponseTasksByID.compactMap { id, entry in
+            entry.owner == oldOwner ? id : nil
+        }
+        for id in responseTaskIDs {
+            fileTransferResponseTasksByID.removeValue(forKey: id)?.task.cancel()
+        }
+        inboundCompletionReplayCache.remove(owner: oldOwner)
+        activeFileTransferSessionOwner = nil
+        cleanupInboundFileTransfers(errorMessage: errorMessage)
     }
     
     // MARK: - Internals
@@ -3438,7 +3635,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             SkyBridgeLogger.shared.debug("ℹ️ iOS QR 仅完成内容完整性校验；设备来源认证仍依赖后续握手/pinning")
             return qr
         }
-        let localBinding = try currentPathLocalBinding()
+        let localBinding = try await currentPathLocalBinding()
         let admission = try await requestAdmissionLease(for: localBinding)
         let redeemed = try await signalServer.redeemSession(
             admissionToken: admission.token,
@@ -3691,6 +3888,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         source: ActiveSessionSnapshotSource,
         role: WebRTCSession.Role
     ) async throws {
+        try requireFormalInteropSessionNotRetired()
         if currentSessionId == sessionId {
             switch state {
             case .connecting(let activeSessionId) where activeSessionId == sessionId:
@@ -3709,6 +3907,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         if signaling != nil || session != nil || currentSessionId != nil {
             await disconnect()
+            try requireFormalInteropSessionNotRetired()
             if let preservedSignalingToken {
                 webrtcSignalingAuthTokenBySessionId[sessionId] = preservedSignalingToken
             }
@@ -3723,6 +3922,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
         }
 
+        try requireFormalInteropSessionNotRetired()
         currentSessionId = sessionId
         state = .connecting(sessionId: sessionId)
         readiness = .idle
@@ -3752,6 +3952,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         // 1) WebSocket signaling
         do {
             try await ensureSignalingConnected(shardKey: sessionId)
+            try requireFormalInteropSessionNotRetired()
         } catch {
             applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
             state = .failed(error.localizedDescription)
@@ -3774,11 +3975,13 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let ice = await CrossNetworkServerConfig.dynamicICEConfig(
             turnAdmissionToken: webrtcTurnAdmissionTokenBySessionId[sessionId]
         )
+        try requireFormalInteropSessionNotRetired()
         appendSmokeTrace(
             "ice session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer") stun=\(ice.stunURL.isEmpty ? 0 : 1) turnUrls=\(ice.turnURLs.count) turnCreds=\((ice.turnUsername.isEmpty || ice.turnPassword.isEmpty) ? 0 : 1)"
         )
         
         let s = WebRTCSession(sessionId: sessionId, localDeviceId: localId, role: role, ice: ice)
+        try requireFormalInteropSessionNotRetired()
         self.session = s
         s.onTrace = { [weak self] line in
             self?.appendSmokeTrace("webrtc \(line)")
@@ -3972,6 +4175,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
         }
 
+        try requireFormalInteropSessionNotRetired()
         try s.start()
         appendSmokeTrace("session-started session=\(sessionId) role=\(role == .offerer ? "offerer" : "answerer")")
 
@@ -3983,6 +4187,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         // 3) Join room + heartbeat to mask websocket timing jitters.
         await sendEnvelope(WebRTCSignalingEnvelope(sessionId: sessionId, from: localId, type: .join, payload: nil), retries: 2)
+        try requireFormalInteropSessionNotRetired()
         startJoinHeartbeat(sessionId: sessionId, localId: localId, signaling: signaling)
         if role == .offerer {
             startOfferResendLoop(sessionId: sessionId, localId: localId, signaling: signaling)
@@ -4060,40 +4265,276 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 // MARK: - WebRTC file transfer helpers (iOS)
 
 @available(iOS 17.0, *)
+struct CrossNetworkFormalInteropConnectionContext: Equatable, Sendable {
+    let sessionID: String
+    let sessionGeneration: UUID
+}
+
+@available(iOS 17.0, *)
+enum CrossNetworkDisconnectPostcondition {
+    static func hasNoReplacement(
+        signalingIsPresent: Bool,
+        sessionIsPresent: Bool,
+        sessionIDIsPresent: Bool,
+        fileTransferOwnerIsPresent: Bool
+    ) -> Bool {
+        !signalingIsPresent
+            && !sessionIsPresent
+            && !sessionIDIsPresent
+            && !fileTransferOwnerIsPresent
+    }
+}
+
+@available(iOS 17.0, *)
+extension CrossNetworkWebRTCManager {
+    func makeFormalInteropConnectionContext() throws -> CrossNetworkFormalInteropConnectionContext {
+        guard let sessionID = currentSessionId,
+              let generation = sessionSnapshotMetadataBySessionId[sessionID]?.snapshotToken else {
+            throw FileTransferWaitError.staleSession
+        }
+        return CrossNetworkFormalInteropConnectionContext(
+            sessionID: sessionID,
+            sessionGeneration: generation
+        )
+    }
+
+    func requireNoActiveFormalInteropConnection() throws {
+        guard currentSessionId == nil,
+              session == nil,
+              signaling == nil,
+              activeFileTransferSessionOwner == nil else {
+            throw FileTransferWaitError.staleSession
+        }
+    }
+
+    func disconnectFormalInteropSession(
+        requiredContext: CrossNetworkFormalInteropConnectionContext
+    ) async throws {
+        guard currentSessionId == requiredContext.sessionID,
+              sessionSnapshotMetadataBySessionId[requiredContext.sessionID]?.snapshotToken
+                == requiredContext.sessionGeneration else {
+            throw FileTransferWaitError.staleSession
+        }
+        formalInteropSessionRetired = true
+        guard await disconnectAndRequireNoReplacement(clearSnapshot: true) else {
+            throw FileTransferWaitError.staleSession
+        }
+    }
+
+    func disconnectFormalInteropSession(
+        requiredOwner: CrossNetworkFileTransferSessionOwner
+    ) async throws {
+        guard activeFileTransferSessionOwner == requiredOwner,
+              currentSessionId == requiredOwner.sessionID,
+              sessionSnapshotMetadataBySessionId[requiredOwner.sessionID]?.snapshotToken
+                == requiredOwner.sessionGeneration else {
+            throw FileTransferWaitError.staleSession
+        }
+        formalInteropSessionRetired = true
+        guard await disconnectAndRequireNoReplacement(clearSnapshot: true) else {
+            throw FileTransferWaitError.staleSession
+        }
+    }
+}
+
+@available(iOS 17.0, *)
 public extension CrossNetworkWebRTCManager {
+    func makeFileTransferOutboundContext() throws -> CrossNetworkFileTransferOutboundContext {
+        guard let owner = activeFileTransferSessionOwner,
+              currentSessionId == owner.sessionID,
+              session != nil,
+              sessionKeys != nil else {
+            throw FileTransferWaitError.staleSession
+        }
+        return CrossNetworkFileTransferOutboundContext(owner: owner)
+    }
+
+    func formalSelectedICECandidateEvidence(
+        requiredOwner: CrossNetworkFileTransferSessionOwner
+    ) async throws -> WebRTCSession.SelectedICECandidateEvidence {
+        guard activeFileTransferSessionOwner == requiredOwner,
+              let sourceSession = session,
+              currentSessionId == requiredOwner.sessionID else {
+            throw FileTransferWaitError.staleSession
+        }
+        guard let evidence = await sourceSession.selectedICECandidateEvidence() else {
+            throw FileTransferWaitError.transientSend("selected ICE candidate pair unavailable")
+        }
+        guard activeFileTransferSessionOwner == requiredOwner,
+              session === sourceSession,
+              currentSessionId == requiredOwner.sessionID else {
+            throw FileTransferWaitError.staleSession
+        }
+        return evidence
+    }
+
+    func validateFileTransferOutboundContext(
+        _ context: CrossNetworkFileTransferOutboundContext
+    ) throws {
+        guard activeFileTransferSessionOwner == context.owner,
+              currentSessionId == context.owner.sessionID,
+              session != nil,
+              sessionKeys != nil else {
+            throw FileTransferWaitError.staleSession
+        }
+    }
+
+    func validateFormalFileTransferPeer(
+        requiredOwner: CrossNetworkFileTransferSessionOwner,
+        expectedDeviceID: String
+    ) throws {
+        let canonicalExpected = expectedDeviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonicalExpected.isEmpty,
+              activeFileTransferSessionOwner == requiredOwner,
+              currentSessionId == requiredOwner.sessionID,
+              remoteDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines) == canonicalExpected else {
+            throw FileTransferWaitError.staleSession
+        }
+    }
+
     func sendFileTransferMessage(_ message: CrossNetworkFileTransferMessage) async throws {
         guard let session, let keys = sessionKeys else { throw RemoteDesktopError.disconnected }
         let data = try JSONEncoder().encode(message)
         let encrypted = try encrypt(plaintext: data, with: keys)
         let padded = TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-file")
-        try await sendFramed(padded, over: session)
+        do {
+            try await sendFramed(padded, over: session)
+        } catch is CancellationError {
+            throw FileTransferWaitError.cancelled
+        } catch {
+            throw FileTransferWaitError.transientSend(error.localizedDescription)
+        }
     }
     
-    func waitForFileTransferAck(
-        transferId: String,
-        op: CrossNetworkFileTransferOp,
-        chunkIndex: Int? = nil,
+    func sendFileTransferMessageAndWait(
+        _ message: CrossNetworkFileTransferMessage,
+        expectedOperation: CrossNetworkFileTransferOp,
+        expectedChunkIndex: Int? = nil,
+        completionExpectation: CrossNetworkFileTransferCompletionAckExpectation? = nil,
+        requiredOwner: CrossNetworkFileTransferSessionOwner? = nil,
         timeoutSeconds: TimeInterval = 20
     ) async throws -> CrossNetworkFileTransferMessage {
-        let key = fileTransferWaiterKey(transferId: transferId, op: op, chunkIndex: chunkIndex)
-        if fileTransferWaiters[key] != nil {
-            // Prevent accidental double-waits on the same key.
-            throw FileTransferWaitError.cancelled
+        guard let session, let owner = activeFileTransferSessionOwner,
+              currentSessionId == owner.sessionID,
+              requiredOwner == nil || requiredOwner == owner else {
+            throw FileTransferWaitError.staleSession
         }
-        
-        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<CrossNetworkFileTransferMessage, Error>) in
-            fileTransferWaiters[key] = c
-            
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    try await Task.sleep(for: .seconds(timeoutSeconds))
-                } catch {
-                    return
+        let token = try fileTransferWaiterRegistry.arm(
+            owner: owner,
+            transferID: message.transferId,
+            operation: expectedOperation,
+            chunkIndex: expectedChunkIndex
+        )
+
+        let response = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<CrossNetworkFileTransferMessage, Error>) in
+                let waiter = FileTransferWaiter(
+                    token: token,
+                    continuation: continuation,
+                    completionExpectation: completionExpectation
+                )
+                fileTransferWaitersByTokenID[token.id] = waiter
+
+                let sendTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        try Task.checkCancellation()
+                        guard self.currentSessionId == owner.sessionID,
+                              self.session === session,
+                              self.activeFileTransferSessionOwner == owner else {
+                            throw FileTransferWaitError.staleSession
+                        }
+                        try await self.sendFileTransferMessage(message)
+                        try Task.checkCancellation()
+                        guard self.currentSessionId == owner.sessionID,
+                              self.session === session,
+                              self.activeFileTransferSessionOwner == owner else {
+                            throw FileTransferWaitError.staleSession
+                        }
+                    } catch {
+                        let terminalError: Error = error is CancellationError
+                            ? FileTransferWaitError.cancelled
+                            : error
+                        self.finishFileTransferWaiter(
+                            token: token,
+                            result: .failure(terminalError),
+                            cancelSendTask: false
+                        )
+                    }
                 }
-                // Timeout: if still pending, resume with error.
-                if let pending = self.fileTransferWaiters.removeValue(forKey: key) {
-                    pending.resume(throwing: FileTransferWaitError.timeout)
+                waiter.sendTask = sendTask
+
+                Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: .seconds(timeoutSeconds)) } catch { return }
+                    self?.finishFileTransferWaiter(
+                        token: token,
+                        result: .failure(FileTransferWaitError.timeout)
+                    )
+                }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.finishFileTransferWaiter(
+                    token: token,
+                    result: .failure(FileTransferWaitError.cancelled)
+                )
+            }
+        }
+        guard currentSessionId == owner.sessionID,
+              self.session === session,
+              activeFileTransferSessionOwner == owner else {
+            throw FileTransferWaitError.staleSession
+        }
+        return response
+    }
+
+    func sendFileTransferCompletionAndWait(
+        _ message: CrossNetworkFileTransferMessage,
+        expectation: CrossNetworkFileTransferCompletionAckExpectation,
+        requiredOwner: CrossNetworkFileTransferSessionOwner,
+        timeoutSeconds: TimeInterval = 20
+    ) async throws -> CrossNetworkFileTransferMessage {
+        let fingerprint = try CrossNetworkFileTransferCompletionRequestFingerprint(message: message)
+        let requestExpectation = try CrossNetworkFileTransferCompletionAckExpectation(
+            transferID: fingerprint.transferID,
+            receivedBytes: fingerprint.receivedBytes,
+            fileSHA256: fingerprint.fileSHA256
+        )
+        guard requestExpectation == expectation else {
+            throw CrossNetworkFileTransferCompletionEvidenceError.fileSHA256Mismatch
+        }
+        guard activeFileTransferSessionOwner == requiredOwner else {
+            throw FileTransferWaitError.staleSession
+        }
+
+        let retryPolicy = CrossNetworkFileTransferCompletionRetryPolicy(maximumAttempts: 2)
+        var completedAttempts = 0
+        while true {
+            completedAttempts += 1
+            do {
+                return try await sendFileTransferMessageAndWait(
+                    message,
+                    expectedOperation: .completeAck,
+                    completionExpectation: expectation,
+                    requiredOwner: requiredOwner,
+                    timeoutSeconds: timeoutSeconds
+                )
+            } catch {
+                let failure: CrossNetworkFileTransferCompletionAttemptFailure
+                switch error {
+                case FileTransferWaitError.timeout:
+                    failure = .timeout
+                case FileTransferWaitError.transientSend:
+                    failure = .transientSend
+                default:
+                    failure = .terminal
+                }
+                guard retryPolicy.permitsRetry(
+                    after: failure,
+                    completedAttempts: completedAttempts
+                ) else {
+                    throw error
                 }
             }
         }
@@ -4102,78 +4543,83 @@ public extension CrossNetworkWebRTCManager {
 
 @available(iOS 17.0, *)
 private extension CrossNetworkWebRTCManager {
-    func fileTransferWaiterKey(transferId: String, op: CrossNetworkFileTransferOp, chunkIndex: Int?) -> String {
-        let idx = chunkIndex ?? -1
-        return "\(transferId)|\(op.rawValue)|\(idx)"
-    }
-    
-    func handleInboundFileTransferWire(_ msg: CrossNetworkFileTransferMessage) {
-        // Resume any waiter matching (transferId, op, chunkIndex).
-        let key = fileTransferWaiterKey(transferId: msg.transferId, op: msg.op, chunkIndex: msg.chunkIndex)
-        if let waiter = fileTransferWaiters.removeValue(forKey: key) {
-            waiter.resume(returning: msg)
+    func finishFileTransferWaiter(
+        token: CrossNetworkFileTransferWaiterToken,
+        result: Result<CrossNetworkFileTransferMessage, Error>,
+        cancelSendTask: Bool = true
+    ) {
+        guard fileTransferWaiterRegistry.remove(token),
+              let waiter = fileTransferWaitersByTokenID.removeValue(forKey: token.id) else {
             return
         }
-        
-        // Also allow acks without chunkIndex to be awaited.
-        let keyNoIdx = fileTransferWaiterKey(transferId: msg.transferId, op: msg.op, chunkIndex: nil)
-        if let waiter = fileTransferWaiters.removeValue(forKey: keyNoIdx) {
-            waiter.resume(returning: msg)
+        if cancelSendTask { waiter.sendTask?.cancel() }
+        waiter.continuation.resume(with: result)
+    }
+
+    func handleInboundFileTransferWire(
+        _ message: CrossNetworkFileTransferMessage,
+        owner: CrossNetworkFileTransferSessionOwner
+    ) {
+        guard let token = fileTransferWaiterRegistry.consume(owner: owner, message: message),
+              let waiter = fileTransferWaitersByTokenID.removeValue(forKey: token.id) else {
             return
+        }
+        waiter.sendTask?.cancel()
+        do {
+            if let expectation = waiter.completionExpectation {
+                try expectation.validate(message)
+            }
+            waiter.continuation.resume(returning: message)
+        } catch {
+            waiter.continuation.resume(throwing: error)
         }
     }
     
     func failAllFileTransferWaiters(_ error: Error) {
-        let waiters = fileTransferWaiters
-        fileTransferWaiters.removeAll()
-        for (_, c) in waiters {
-            c.resume(throwing: error)
+        guard let owner = activeFileTransferSessionOwner else { return }
+        let tokens = fileTransferWaiterRegistry.remove(owner: owner)
+        for token in tokens {
+            guard let waiter = fileTransferWaitersByTokenID.removeValue(forKey: token.id) else {
+                continue
+            }
+            waiter.sendTask?.cancel()
+            waiter.continuation.resume(throwing: error)
         }
     }
 
-    func failFileTransferWaiters(transferId: String, message: String) {
-        let keys = fileTransferWaiters.keys.filter { $0.hasPrefix("\(transferId)|") }
-        for key in keys {
-            if let waiter = fileTransferWaiters.removeValue(forKey: key) {
-                waiter.resume(throwing: FileTransferError.transferFailed(message))
+    func failFileTransferWaiters(
+        owner: CrossNetworkFileTransferSessionOwner,
+        transferID: String,
+        message: String
+    ) {
+        let tokens = fileTransferWaiterRegistry.remove(owner: owner, transferID: transferID)
+        for token in tokens {
+            guard let waiter = fileTransferWaitersByTokenID.removeValue(forKey: token.id) else {
+                continue
             }
+            waiter.sendTask?.cancel()
+            waiter.continuation.resume(
+                throwing: FileTransferError.transferFailed(message)
+            )
         }
     }
     
     // MARK: - Inbound file transfer (macOS -> iOS)
     
     func downloadsDirectoryURL() -> URL {
+        if let formalDirectory = FileTransferManager.instance.formalInteropInboundDirectoryURL() {
+            return formalDirectory
+        }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = docs.appendingPathComponent("Downloads", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
     
-    func sanitizeFileName(_ name: String) -> String {
-        let last = (name as NSString).lastPathComponent
-        let trimmed = last.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "SkyBridgeFile" : trimmed
-    }
-    
-    func makeUniqueDestinationURL(baseDir: URL, fileName: String) -> URL {
-        let safe = sanitizeFileName(fileName)
-        let ext = (safe as NSString).pathExtension
-        let stem = (safe as NSString).deletingPathExtension
-        
-        var candidate = baseDir.appendingPathComponent(safe)
-        var idx = 1
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            let altName: String
-            if ext.isEmpty {
-                altName = "\(stem) (\(idx))"
-            } else {
-                altName = "\(stem) (\(idx)).\(ext)"
-            }
-            candidate = baseDir.appendingPathComponent(altName)
-            idx += 1
-        }
-        return candidate
-    }
+    private var maximumInboundFileBytes: Int64 { 16 * 1024 * 1024 * 1024 }
+    private var maximumInboundTransferCount: Int { 4 }
+    private var maximumInboundChunkCount: Int { 65_536 }
+    private var minimumInboundChunkSize: Int { 8 * 1024 }
+    private var maximumInboundChunkSize: Int { 512 * 1024 }
 
     private func expectedInboundChunkCount(fileSize: Int64, chunkSize: Int) -> Int? {
         guard chunkSize > 0 else { return nil }
@@ -4184,18 +4630,25 @@ private extension CrossNetworkWebRTCManager {
     }
 
     private func validateInboundMetadata(fileName: String, fileSize: Int64, chunkSize: Int, totalChunks: Int) -> String? {
-        guard !fileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return "Invalid metadata (empty fileName)"
+        let trimmedFileName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedFileName == fileName,
+              !fileName.isEmpty,
+              fileName != ".",
+              fileName != "..",
+              fileName.utf8.count <= 220,
+              !fileName.contains("/"),
+              !fileName.contains("\\"),
+              !fileName.contains("\0") else {
+            return "Invalid metadata (unsafe fileName)"
         }
-        guard fileSize >= 0 else {
-            return "Invalid metadata (negative fileSize)"
+        guard fileSize > 0, fileSize <= maximumInboundFileBytes else {
+            return "Invalid metadata (fileSize out of range)"
         }
-        let maxInboundChunkSize = 512 * 1024
-        guard chunkSize > 0, chunkSize <= maxInboundChunkSize else {
+        guard chunkSize >= minimumInboundChunkSize, chunkSize <= maximumInboundChunkSize else {
             return "Invalid metadata (chunkSize out of range)"
         }
-        guard totalChunks >= 0 else {
-            return "Invalid metadata (negative totalChunks)"
+        guard totalChunks > 0, totalChunks <= maximumInboundChunkCount else {
+            return "Invalid metadata (totalChunks out of range)"
         }
         guard let expectedTotalChunks = expectedInboundChunkCount(fileSize: fileSize, chunkSize: chunkSize),
               expectedTotalChunks == totalChunks else {
@@ -4221,36 +4674,210 @@ private extension CrossNetworkWebRTCManager {
             && state.expectedMerkleSig != nil
             && state.expectedMerkleSigAlg == CrossNetworkMerkleAuthCompat.signatureAlgV1
     }
-    
-    func handleInboundFileTransferFromMac(_ msg: CrossNetworkFileTransferMessage) async {
-	        guard let keys = sessionKeys else { return }
 
-	        func sha256File(_ url: URL) -> Data? {
-	            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
-	            defer { try? handle.close() }
-	            var hasher = SHA256()
-	            while true {
-                let chunk = handle.readData(ofLength: 256 * 1024)
-                if chunk.isEmpty { break }
-                hasher.update(data: chunk)
+    private enum InboundFileFinalizationError: LocalizedError {
+        case incompleteFile
+        case completionEvidenceMismatch
+        case merkleRootMismatch
+        case unknownMerkleSignatureAlgorithm
+        case merkleSignatureMismatch
+        case fileSHA256Unavailable
+        case fileSHA256Mismatch
+
+        var errorDescription: String? {
+            switch self {
+            case .incompleteFile: return "Incomplete file"
+            case .completionEvidenceMismatch: return "Completion evidence mismatch"
+            case .merkleRootMismatch: return "merkle root mismatch"
+            case .unknownMerkleSignatureAlgorithm: return "unknown merkle sig alg"
+            case .merkleSignatureMismatch: return "merkle signature mismatch"
+            case .fileSHA256Unavailable: return "file sha256 unavailable"
+            case .fileSHA256Mismatch: return "file sha256 mismatch"
             }
-            return Data(hasher.finalize())
         }
-        
-        func sendAck(_ ack: CrossNetworkFileTransferMessage, label: String) async {
-            do {
-                try await sendFileTransferMessage(ack)
-            } catch {
-                // Best-effort; ignore.
-                _ = label
-                _ = keys
+    }
+
+    private struct FinalizedInboundFile {
+        let committedURL: URL
+        let acknowledgement: CrossNetworkFileTransferMessage
+    }
+
+    private func sha256File(at url: URL) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = handle.readData(ofLength: 256 * 1024)
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return Data(hasher.finalize())
+    }
+
+    private func finalizeInboundFile(
+        _ state: InboundFileTransferState,
+        owner: CrossNetworkFileTransferSessionOwner,
+        receiveKey: Data,
+        fingerprint: CrossNetworkFileTransferCompletionRequestFingerprint
+    ) throws -> FinalizedInboundFile {
+        guard state.receivedBytes == state.fileSize,
+              state.chunkHashes.count == state.totalChunks,
+              state.receivedChunkSizes.count == state.totalChunks else {
+            throw InboundFileFinalizationError.incompleteFile
+        }
+        guard fingerprint.transferID == state.transferId,
+              fingerprint.receivedBytes == state.fileSize,
+              fingerprint.fileSHA256 == state.expectedFileSha256,
+              fingerprint.merkleRoot == state.expectedMerkleRoot,
+              fingerprint.merkleRootSignature == state.expectedMerkleSig,
+              fingerprint.merkleRootSignatureAlgorithm == state.expectedMerkleSigAlg else {
+            throw InboundFileFinalizationError.completionEvidenceMismatch
+        }
+
+        try CrossNetworkInboundFileCommitter.synchronizeAndClose(state.handle)
+
+        if let expectedMerkleRoot = fingerprint.merkleRoot {
+            let leaves = (0..<state.totalChunks).compactMap { state.chunkHashes[$0] }
+            guard leaves.count == state.totalChunks,
+                  CrossNetworkMerkleCompat.root(leaves: leaves) == expectedMerkleRoot else {
+                throw InboundFileFinalizationError.merkleRootMismatch
             }
+            if fingerprint.merkleRootSignature != nil || fingerprint.merkleRootSignatureAlgorithm != nil {
+                guard let signature = fingerprint.merkleRootSignature,
+                      fingerprint.merkleRootSignatureAlgorithm == CrossNetworkMerkleAuthCompat.signatureAlgV1 else {
+                    throw InboundFileFinalizationError.unknownMerkleSignatureAlgorithm
+                }
+                let preimage = CrossNetworkMerkleAuthCompat.preimage(
+                    transferId: state.transferId,
+                    merkleRoot: expectedMerkleRoot,
+                    fileSha256: fingerprint.fileSHA256
+                )
+                let expectedSignature = CrossNetworkMerkleAuthCompat.hmacSha256(
+                    key: receiveKey,
+                    data: preimage
+                )
+                guard signature == expectedSignature else {
+                    throw InboundFileFinalizationError.merkleSignatureMismatch
+                }
+            }
+        } else if fingerprint.merkleRootSignature != nil
+                    || fingerprint.merkleRootSignatureAlgorithm != nil {
+            throw InboundFileFinalizationError.completionEvidenceMismatch
+        }
+
+        guard let actualFileSHA256 = sha256File(at: state.tempURL) else {
+            throw InboundFileFinalizationError.fileSHA256Unavailable
+        }
+        guard actualFileSHA256 == fingerprint.fileSHA256 else {
+            throw InboundFileFinalizationError.fileSHA256Mismatch
+        }
+        let acknowledgement = try CrossNetworkFileTransferMessage.completeAcknowledgement(
+            transferId: state.transferId,
+            receivedBytes: state.receivedBytes,
+            fileSha256: actualFileSHA256
+        )
+        let preparedCompletion = try inboundCompletionReplayCache.prepareCompletion(
+            owner: owner,
+            fingerprint: fingerprint,
+            acknowledgement: acknowledgement
+        )
+        let committedURL = try CrossNetworkInboundFileCommitter.commitWithoutReplacing(
+            temporaryURL: state.tempURL,
+            in: state.tempURL.deletingLastPathComponent(),
+            preferredFileName: state.fileName
+        )
+        precondition(
+            inboundCompletionReplayCache.commitPreparedCompletion(preparedCompletion),
+            "completion replay transition changed during synchronous durable commit"
+        )
+        return FinalizedInboundFile(
+            committedURL: committedURL,
+            acknowledgement: acknowledgement
+        )
+    }
+
+    private func terminallyFailInboundFile(
+        _ state: InboundFileTransferState,
+        errorMessage: String
+    ) {
+        try? state.handle.close()
+        try? FileManager.default.removeItem(at: state.tempURL)
+        inboundCompletionReplayCache.tombstoneActive(
+            owner: state.contextIdentity.owner,
+            transferID: state.transferId
+        )
+        guard inboundFileTransfers[state.transferId]?.contextIdentity == state.contextIdentity else {
+            return
+        }
+        inboundFileTransfers.removeValue(forKey: state.transferId)
+        inboundFileTransferCompleteTimers[state.transferId]?.cancel()
+        inboundFileTransferCompleteTimers.removeValue(forKey: state.transferId)
+        FileTransferManager.instance.completeExternalInboundTransfer(
+            transferId: state.transferId,
+            success: false,
+            error: errorMessage
+        )
+    }
+
+    func handleInboundFileTransferFromMac(
+        _ msg: CrossNetworkFileTransferMessage,
+        sessionId: String,
+        sourceSession: WebRTCSession
+    ) async {
+            guard let owner = activeFileTransferSessionOwner,
+                  owner.sessionID == sessionId,
+                  currentSessionId == sessionId,
+                  session === sourceSession,
+                  let keys = sessionKeys else { return }
+
+        @discardableResult
+        func sendAck(_ ack: CrossNetworkFileTransferMessage, label: String) async -> Bool {
+            let taskID = UUID()
+            let task = Task { @MainActor [weak self] () -> Bool in
+                guard let self else { return false }
+                do {
+                    try Task.checkCancellation()
+                    guard self.activeFileTransferSessionOwner == owner,
+                          self.currentSessionId == sessionId,
+                          self.session === sourceSession,
+                          self.sessionKeys != nil else {
+                        return false
+                    }
+                    let data = try JSONEncoder().encode(ack)
+                    let encrypted = try self.encrypt(plaintext: data, with: keys)
+                    let padded = TrafficPadding.wrapIfEnabled(encrypted, label: "tx/webrtc-file")
+                    try await self.sendFramed(padded, over: sourceSession)
+                    try Task.checkCancellation()
+                    guard self.activeFileTransferSessionOwner == owner,
+                          self.currentSessionId == sessionId,
+                          self.session === sourceSession else {
+                        return false
+                    }
+                    return true
+                } catch is CancellationError {
+                    return false
+                } catch {
+                    self.appendSmokeTrace(
+                        "file-transfer-ack-failed label=\(label) errorType=\(String(describing: type(of: error)))"
+                    )
+                    return false
+                }
+            }
+            fileTransferResponseTasksByID[taskID] = FileTransferResponseTask(
+                owner: owner,
+                task: task
+            )
+            let result = await task.value
+            if fileTransferResponseTasksByID[taskID]?.owner == owner {
+                fileTransferResponseTasksByID.removeValue(forKey: taskID)
+            }
+            return result
         }
         
         switch msg.op {
         case .metadata:
-            // Idempotent: allow re-sending metadata for the same transferId (resume).
-            if inboundFileTransfers[msg.transferId] != nil {
+            if let existing = inboundFileTransfers[msg.transferId],
+               existing.contextIdentity.owner == owner {
                 await sendAck(.init(op: .metadataAck, transferId: msg.transferId), label: "metaAck")
                 return
             }
@@ -4273,19 +4900,73 @@ private extension CrossNetworkWebRTCManager {
                 await sendAck(.init(op: .error, transferId: msg.transferId, message: validationError), label: "metaError")
                 return
             }
-            
-            // Prepare paths
-            let baseDir = downloadsDirectoryURL()
-            let finalURL = makeUniqueDestinationURL(baseDir: baseDir, fileName: fileName)
-            let tempURL = baseDir.appendingPathComponent(".skybridge-\(msg.transferId).partial")
-            _ = FileManager.default.createFile(atPath: tempURL.path, contents: nil)
+            do {
+                let formalSessionRef = SHA256.hash(data: Data(sessionId.utf8))
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+                try FileTransferManager.instance.admitFormalInteropInboundMetadata(
+                    transferID: msg.transferId,
+                    fileName: fileName,
+                    fileSize: fileSize,
+                    senderDeviceID: msg.senderDeviceId,
+                    authenticatedPeerDeviceID: remoteDeviceId,
+                    sessionRef: formalSessionRef,
+                    owner: owner
+                )
+            } catch {
+                await sendAck(
+                    .init(
+                        op: .error,
+                        transferId: msg.transferId,
+                        message: "Unexpected formal inbound transfer metadata"
+                    ),
+                    label: "metaError"
+                )
+                return
+            }
+            let inboundBytes = inboundFileTransfers.values.reduce(Int64(0)) { $0 + $1.fileSize }
+            guard inboundFileTransfers.count < maximumInboundTransferCount,
+                  inboundBytes <= maximumInboundFileBytes - fileSize else {
+                await sendAck(
+                    .init(op: .error, transferId: msg.transferId, message: "Inbound transfer capacity exceeded"),
+                    label: "metaError"
+                )
+                return
+            }
             
             do {
-                let handle = try FileHandle(forWritingTo: tempURL)
+                try CrossNetworkInboundFileCommitter.requireCanonicalTransferID(msg.transferId)
+                let reservation = try inboundCompletionReplayCache.reserve(
+                    owner: owner,
+                    transferID: msg.transferId
+                )
+                guard reservation == .reserved else {
+                    await sendAck(
+                        .init(
+                            op: .error,
+                            transferId: msg.transferId,
+                            message: reservation == .capacityExceeded
+                                ? "Inbound transfer capacity exceeded"
+                                : "Transfer identifier already used"
+                        ),
+                        label: "metaError"
+                    )
+                    return
+                }
+                let baseDir = downloadsDirectoryURL()
+                try CrossNetworkInboundFileCommitter.ensureDurableDirectory(baseDir)
+                let temporaryFile = try CrossNetworkInboundFileCommitter.createExclusiveTemporaryFile(
+                    in: baseDir
+                )
                 let senderId = msg.senderDeviceId ?? (remoteDeviceId ?? "mac")
                 let senderName = msg.senderDeviceName ?? (remoteDeviceName ?? "macOS")
+                let contextIdentity = try CrossNetworkFileTransferInboundContextIdentity(
+                    owner: owner,
+                    transferID: msg.transferId
+                )
                 
                 inboundFileTransfers[msg.transferId] = InboundFileTransferState(
+                    contextIdentity: contextIdentity,
                     transferId: msg.transferId,
                     fileName: fileName,
                     fileSize: fileSize,
@@ -4293,9 +4974,8 @@ private extension CrossNetworkWebRTCManager {
                     totalChunks: totalChunks,
                     senderDeviceId: senderId,
                     senderDeviceName: senderName,
-                    tempURL: tempURL,
-                    finalURL: finalURL,
-                    handle: handle,
+                    tempURL: temporaryFile.url,
+                    handle: temporaryFile.handle,
                     receivedBytes: 0
                 )
                 
@@ -4305,17 +4985,22 @@ private extension CrossNetworkWebRTCManager {
                     fileName: fileName,
                     fileSize: fileSize,
                     fromPeerName: senderName,
-                    destinationURL: finalURL
+                    destinationURL: nil
                 )
                 
                 await sendAck(.init(op: .metadataAck, transferId: msg.transferId), label: "metaAck")
             } catch {
+                inboundCompletionReplayCache.releaseActive(
+                    owner: owner,
+                    transferID: msg.transferId
+                )
                 await sendAck(.init(op: .error, transferId: msg.transferId, message: "Open temp file failed"), label: "metaError")
             }
             
         case .chunk:
             guard let idx = msg.chunkIndex, let data = msg.chunkData else { return }
-            guard var st = inboundFileTransfers[msg.transferId] else {
+            guard var st = inboundFileTransfers[msg.transferId],
+                  st.contextIdentity.owner == owner else {
                 await sendAck(.init(op: .error, transferId: msg.transferId, message: "Unknown transferId"), label: "chunkError")
                 return
             }
@@ -4371,98 +5056,33 @@ private extension CrossNetworkWebRTCManager {
                 
                 // If complete was already requested earlier, finalize once we have enough.
                 if st.completeRequestedAt != nil && st.receivedBytes >= st.fileSize {
-                    do { try st.handle.close() } catch {}
                     do {
-                        if let expectedMerkle = st.expectedMerkleRoot {
-                            let leaves: [Data] = (0..<st.totalChunks).compactMap { st.chunkHashes[$0] }
-                            if leaves.count != st.totalChunks || CrossNetworkMerkleCompat.root(leaves: leaves) != expectedMerkle {
-                                FileTransferManager.instance.completeExternalInboundTransfer(
-                                    transferId: st.transferId,
-                                    success: false,
-                                    error: "merkle root mismatch"
-                                )
-                                try? FileManager.default.removeItem(at: st.tempURL)
-                                inboundFileTransfers.removeValue(forKey: st.transferId)
-                                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                                await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle root mismatch"), label: "completeError")
-                                return
-                            }
-
-                            if let sig = st.expectedMerkleSig {
-                                if st.expectedMerkleSigAlg != CrossNetworkMerkleAuthCompat.signatureAlgV1 {
-                                    FileTransferManager.instance.completeExternalInboundTransfer(
-                                        transferId: st.transferId,
-                                        success: false,
-                                        error: "unknown merkle sig alg"
-                                    )
-                                    try? FileManager.default.removeItem(at: st.tempURL)
-                                    inboundFileTransfers.removeValue(forKey: st.transferId)
-                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                                    await sendAck(.init(op: .error, transferId: st.transferId, message: "unknown merkle sig alg"), label: "completeError")
-                                    return
-                                }
-                                let pre = CrossNetworkMerkleAuthCompat.preimage(
-                                    transferId: st.transferId,
-                                    merkleRoot: expectedMerkle,
-                                    fileSha256: st.expectedFileSha256
-                                )
-                                let expectSig = CrossNetworkMerkleAuthCompat.hmacSha256(key: keys.receiveKey, data: pre)
-                                if sig != expectSig {
-                                    FileTransferManager.instance.completeExternalInboundTransfer(
-                                        transferId: st.transferId,
-                                        success: false,
-                                        error: "merkle signature mismatch"
-                                    )
-                                    try? FileManager.default.removeItem(at: st.tempURL)
-                                    inboundFileTransfers.removeValue(forKey: st.transferId)
-                                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                                    await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle signature mismatch"), label: "completeError")
-                                    return
-                                }
-                            }
+                        guard let fingerprint = st.completionFingerprint else {
+                            throw CrossNetworkFileTransferCompletionReplayError.missingActiveReservation
                         }
-
-                        if let expected = st.expectedFileSha256, let actual = sha256File(st.tempURL), actual != expected {
-                            FileTransferManager.instance.completeExternalInboundTransfer(
-                                transferId: st.transferId,
-                                success: false,
-                                error: "file sha256 mismatch"
-                            )
-                            try? FileManager.default.removeItem(at: st.tempURL)
-                            inboundFileTransfers.removeValue(forKey: st.transferId)
-                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                            await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
-                            return
-                        }
-                        if FileManager.default.fileExists(atPath: st.finalURL.path) {
-                            try? FileManager.default.removeItem(at: st.finalURL)
-                        }
-                        try FileManager.default.moveItem(at: st.tempURL, to: st.finalURL)
+                        let finalized = try finalizeInboundFile(
+                            st,
+                            owner: owner,
+                            receiveKey: keys.receiveKey,
+                            fingerprint: fingerprint
+                        )
+                        inboundFileTransfers.removeValue(forKey: st.transferId)
+                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
                         FileTransferManager.instance.completeExternalInboundTransfer(
                             transferId: st.transferId,
                             success: true,
-                            destinationURL: st.finalURL
+                            destinationURL: finalized.committedURL
                         )
-                        inboundFileTransfers.removeValue(forKey: st.transferId)
-                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                        await sendAck(.init(op: .completeAck, transferId: st.transferId), label: "completeAck")
+                        await sendAck(finalized.acknowledgement, label: "completeAck")
                         return
                     } catch {
-                        FileTransferManager.instance.completeExternalInboundTransfer(
-                            transferId: st.transferId,
-                            success: false,
-                            error: "Save failed"
+                        let message = error.localizedDescription
+                        terminallyFailInboundFile(st, errorMessage: message)
+                        await sendAck(
+                            .init(op: .error, transferId: st.transferId, message: message),
+                            label: "completeError"
                         )
-                        try? FileManager.default.removeItem(at: st.tempURL)
-                        inboundFileTransfers.removeValue(forKey: st.transferId)
-                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                        await sendAck(.init(op: .error, transferId: st.transferId, message: "Save failed"), label: "completeError")
                         return
                     }
                 }
@@ -4472,65 +5092,116 @@ private extension CrossNetworkWebRTCManager {
                     label: "chunkAck"
                 )
             } catch {
-                FileTransferManager.instance.completeExternalInboundTransfer(
-                    transferId: msg.transferId,
-                    success: false,
-                    error: error.localizedDescription
-                )
-                try? st.handle.close()
-                try? FileManager.default.removeItem(at: st.tempURL)
-                inboundFileTransfers.removeValue(forKey: msg.transferId)
+                terminallyFailInboundFile(st, errorMessage: error.localizedDescription)
                 await sendAck(.init(op: .error, transferId: msg.transferId, message: "Write failed"), label: "chunkError")
             }
             
         case .complete:
-            guard var st = inboundFileTransfers[msg.transferId] else { return }
-
-            // Capture expected full-file hash (optional, backward compatible).
-            if st.expectedFileSha256 == nil { st.expectedFileSha256 = msg.fileSha256 }
-            if st.expectedMerkleRoot == nil { st.expectedMerkleRoot = msg.merkleRoot }
-            if st.expectedMerkleSig == nil { st.expectedMerkleSig = msg.merkleRootSignature }
-            if st.expectedMerkleSigAlg == nil { st.expectedMerkleSigAlg = msg.merkleRootSignatureAlg }
-            guard hasRequiredIntegrityProof(st) else {
-                try? st.handle.close()
-                try? FileManager.default.removeItem(at: st.tempURL)
-                inboundFileTransfers.removeValue(forKey: st.transferId)
-                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                FileTransferManager.instance.completeExternalInboundTransfer(
-                    transferId: st.transferId,
-                    success: false,
-                    error: "missing integrity proof"
+            let fingerprint: CrossNetworkFileTransferCompletionRequestFingerprint
+            do {
+                fingerprint = try CrossNetworkFileTransferCompletionRequestFingerprint(message: msg)
+            } catch {
+                await sendAck(
+                    .init(op: .error, transferId: msg.transferId, message: "Invalid completion evidence"),
+                    label: "completeError"
                 )
+                return
+            }
+
+            switch inboundCompletionReplayCache.lookup(owner: owner, fingerprint: fingerprint) {
+            case .replay(let acknowledgement):
+                await sendAck(acknowledgement, label: "completeAckReplay")
+                return
+            case .mismatch, .tombstone:
+                await sendAck(
+                    .init(op: .error, transferId: msg.transferId, message: "Completion evidence mismatch"),
+                    label: "completeError"
+                )
+                return
+            case .missing:
+                await sendAck(
+                    .init(op: .error, transferId: msg.transferId, message: "Unknown transferId"),
+                    label: "completeError"
+                )
+                return
+            case .active:
+                break
+            }
+            guard var st = inboundFileTransfers[msg.transferId],
+                  st.contextIdentity.owner == owner else {
+                inboundCompletionReplayCache.tombstoneActive(
+                    owner: owner,
+                    transferID: msg.transferId
+                )
+                await sendAck(
+                    .init(op: .error, transferId: msg.transferId, message: "Unknown transferId"),
+                    label: "completeError"
+                )
+                return
+            }
+
+            if let priorFingerprint = st.completionFingerprint,
+               priorFingerprint != fingerprint {
+                terminallyFailInboundFile(st, errorMessage: "Completion evidence mismatch")
+                await sendAck(
+                    .init(op: .error, transferId: st.transferId, message: "Completion evidence mismatch"),
+                    label: "completeError"
+                )
+                return
+            }
+            st.completionFingerprint = fingerprint
+
+            st.expectedFileSha256 = fingerprint.fileSHA256
+            st.expectedMerkleRoot = fingerprint.merkleRoot
+            st.expectedMerkleSig = fingerprint.merkleRootSignature
+            st.expectedMerkleSigAlg = fingerprint.merkleRootSignatureAlgorithm
+            guard hasRequiredIntegrityProof(st) else {
+                terminallyFailInboundFile(st, errorMessage: "missing integrity proof")
                 await sendAck(.init(op: .error, transferId: st.transferId, message: "missing integrity proof"), label: "completeError")
                 return
             }
             
             if st.receivedBytes < st.fileSize {
                 // Optional NACK: request missing chunks (backward compatible).
-                let missing = (0..<st.totalChunks).filter { st.chunkHashes[$0] == nil }
-                if !missing.isEmpty {
-                    await sendAck(.init(op: .chunkAck, transferId: st.transferId, missingChunks: Array(missing.prefix(512)), message: "missingChunks"), label: "missingChunks")
-                }
-
-                // Don't fail immediately; mark complete requested and wait for retransmits.
+                let missing = Array(
+                    (0..<st.totalChunks).lazy.filter { st.chunkHashes[$0] == nil }.prefix(512)
+                )
+                // Persist the immutable completion request before any suspension. A later chunk may
+                // now safely observe it and finalize without an old handler overwriting its state.
                 if st.completeRequestedAt == nil { st.completeRequestedAt = Date() }
                 inboundFileTransfers[st.transferId] = st
+                if !missing.isEmpty {
+                    await sendAck(.init(op: .chunkAck, transferId: st.transferId, missingChunks: missing, message: "missingChunks"), label: "missingChunks")
+                }
+
+                guard activeFileTransferSessionOwner == owner,
+                      currentSessionId == sessionId,
+                      session === sourceSession,
+                      let current = inboundFileTransfers[st.transferId],
+                      st.contextIdentity.isCurrent(
+                        owner: owner,
+                        current: current.contextIdentity
+                      ) else {
+                    return
+                }
                 
                 if inboundFileTransferCompleteTimers[st.transferId] == nil {
                     inboundFileTransferCompleteTimers[st.transferId] = Task { [weak self] in
                         try? await Task.sleep(for: .seconds(10))
-                        guard let self else { return }
-                        if let cur = self.inboundFileTransfers[st.transferId], cur.receivedBytes < cur.fileSize {
-                            do { try cur.handle.close() } catch {}
-                            try? FileManager.default.removeItem(at: cur.tempURL)
-                            self.inboundFileTransfers.removeValue(forKey: cur.transferId)
-                            self.inboundFileTransferCompleteTimers[cur.transferId]?.cancel()
-                            self.inboundFileTransferCompleteTimers.removeValue(forKey: cur.transferId)
-                            FileTransferManager.instance.completeExternalInboundTransfer(
-                                transferId: cur.transferId,
-                                success: false,
-                                error: "Incomplete file (timeout)"
+                        guard let self,
+                              !Task.isCancelled,
+                              self.activeFileTransferSessionOwner == owner,
+                              self.currentSessionId == sessionId,
+                              self.session === sourceSession else { return }
+                        if let cur = self.inboundFileTransfers[st.transferId],
+                           st.contextIdentity.isCurrent(
+                            owner: owner,
+                            current: cur.contextIdentity
+                           ),
+                           cur.receivedBytes < cur.fileSize {
+                            self.terminallyFailInboundFile(
+                                cur,
+                                errorMessage: "Incomplete file (timeout)"
                             )
                         }
                     }
@@ -4538,122 +5209,45 @@ private extension CrossNetworkWebRTCManager {
                 return
             }
             
-            do { try st.handle.close() } catch {}
-            
             do {
-                if let expectedMerkle = st.expectedMerkleRoot {
-                    let leaves: [Data] = (0..<st.totalChunks).compactMap { st.chunkHashes[$0] }
-                    if leaves.count != st.totalChunks || CrossNetworkMerkleCompat.root(leaves: leaves) != expectedMerkle {
-                        FileTransferManager.instance.completeExternalInboundTransfer(
-                            transferId: st.transferId,
-                            success: false,
-                            error: "merkle root mismatch"
-                        )
-                        try? FileManager.default.removeItem(at: st.tempURL)
-                        inboundFileTransfers.removeValue(forKey: st.transferId)
-                        inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                        inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                        await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle root mismatch"), label: "completeError")
-                        return
-                    }
-
-                    if let sig = st.expectedMerkleSig {
-                        if st.expectedMerkleSigAlg != CrossNetworkMerkleAuthCompat.signatureAlgV1 {
-                            FileTransferManager.instance.completeExternalInboundTransfer(
-                                transferId: st.transferId,
-                                success: false,
-                                error: "unknown merkle sig alg"
-                            )
-                            try? FileManager.default.removeItem(at: st.tempURL)
-                            inboundFileTransfers.removeValue(forKey: st.transferId)
-                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                            await sendAck(.init(op: .error, transferId: st.transferId, message: "unknown merkle sig alg"), label: "completeError")
-                            return
-                        }
-                        let pre = CrossNetworkMerkleAuthCompat.preimage(
-                            transferId: st.transferId,
-                            merkleRoot: expectedMerkle,
-                            fileSha256: st.expectedFileSha256
-                        )
-                        let expectSig = CrossNetworkMerkleAuthCompat.hmacSha256(key: keys.receiveKey, data: pre)
-                        if sig != expectSig {
-                            FileTransferManager.instance.completeExternalInboundTransfer(
-                                transferId: st.transferId,
-                                success: false,
-                                error: "merkle signature mismatch"
-                            )
-                            try? FileManager.default.removeItem(at: st.tempURL)
-                            inboundFileTransfers.removeValue(forKey: st.transferId)
-                            inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                            inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                            await sendAck(.init(op: .error, transferId: st.transferId, message: "merkle signature mismatch"), label: "completeError")
-                            return
-                        }
-                    }
-                }
-
-                if let expected = st.expectedFileSha256, let actual = sha256File(st.tempURL), actual != expected {
-                    FileTransferManager.instance.completeExternalInboundTransfer(
-                        transferId: st.transferId,
-                        success: false,
-                        error: "file sha256 mismatch"
-                    )
-                    try? FileManager.default.removeItem(at: st.tempURL)
-                    inboundFileTransfers.removeValue(forKey: st.transferId)
-                    inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                    inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                    await sendAck(.init(op: .error, transferId: st.transferId, message: "file sha256 mismatch"), label: "completeError")
-                    return
-                }
-                if FileManager.default.fileExists(atPath: st.finalURL.path) {
-                    try? FileManager.default.removeItem(at: st.finalURL)
-                }
-                try FileManager.default.moveItem(at: st.tempURL, to: st.finalURL)
-                
+                let finalized = try finalizeInboundFile(
+                    st,
+                    owner: owner,
+                    receiveKey: keys.receiveKey,
+                    fingerprint: fingerprint
+                )
+                inboundFileTransfers.removeValue(forKey: st.transferId)
+                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
+                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
                 FileTransferManager.instance.completeExternalInboundTransfer(
                     transferId: st.transferId,
                     success: true,
-                    destinationURL: st.finalURL
+                    destinationURL: finalized.committedURL
                 )
-                inboundFileTransfers.removeValue(forKey: st.transferId)
-                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                
-                await sendAck(.init(op: .completeAck, transferId: st.transferId), label: "completeAck")
+                await sendAck(finalized.acknowledgement, label: "completeAck")
             } catch {
-                FileTransferManager.instance.completeExternalInboundTransfer(
-                    transferId: st.transferId,
-                    success: false,
-                    error: "Save failed"
+                let message = error.localizedDescription
+                terminallyFailInboundFile(st, errorMessage: message)
+                await sendAck(
+                    .init(op: .error, transferId: st.transferId, message: message),
+                    label: "completeError"
                 )
-                try? FileManager.default.removeItem(at: st.tempURL)
-                inboundFileTransfers.removeValue(forKey: st.transferId)
-                inboundFileTransferCompleteTimers[st.transferId]?.cancel()
-                inboundFileTransferCompleteTimers.removeValue(forKey: st.transferId)
-                await sendAck(.init(op: .error, transferId: st.transferId, message: "Save failed"), label: "completeError")
             }
             
         case .cancel:
             if let st = inboundFileTransfers[msg.transferId] {
-                try? st.handle.close()
-                try? FileManager.default.removeItem(at: st.tempURL)
-                inboundFileTransfers.removeValue(forKey: msg.transferId)
-                FileTransferManager.instance.completeExternalInboundTransfer(
-                    transferId: msg.transferId,
-                    success: false,
-                    error: msg.message ?? "Cancelled"
-                )
+                terminallyFailInboundFile(st, errorMessage: msg.message ?? "Cancelled")
             }
             
         case .metadataAck, .chunkAck, .completeAck:
             // These are acks for iOS->macOS sending.
-            handleInboundFileTransferWire(msg)
+            handleInboundFileTransferWire(msg, owner: owner)
             
         case .error:
             // Fail any pending iOS->macOS sender waits for this transfer immediately.
             failFileTransferWaiters(
-                transferId: msg.transferId,
+                owner: owner,
+                transferID: msg.transferId,
                 message: msg.message ?? "remote error"
             )
         }
@@ -4751,7 +5345,9 @@ private extension CrossNetworkWebRTCManager {
     ) async {
         do {
             let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
-            let strictPQCRequested = shouldRequestStrictPQC(compatibilityModeEnabled: compatibilityModeEnabled)
+            let strictPQCRequested = requiresExistingTrustWithoutMutation
+                ? try ExistingReadOnlyIdentityMaterialProvider.requirePQCFromEnvironment()
+                : shouldRequestStrictPQC(compatibilityModeEnabled: compatibilityModeEnabled)
             strictPQCRequestedBySessionId[sessionId] = strictPQCRequested
             let capability = CryptoProviderFactory.detectCapability()
             var peerIdCandidates: [String] = []
@@ -4781,7 +5377,9 @@ private extension CrossNetworkWebRTCManager {
             }
             let hasTrustedPeerKEMKey = !trustedPeerKEMKeys.isEmpty
             let selection: CryptoProviderFactory.SelectionPolicy
-            if !hasTrustedPeerKEMKey {
+            if requiresExistingTrustWithoutMutation, !strictPQCRequested {
+                selection = .classicOnly
+            } else if !hasTrustedPeerKEMKey {
                 if strictPQCRequested {
                     let message =
                         "严格 PQC 已启用，但跨网对端缺少已信任的 KEM 公钥；当前已拒绝 classic bootstrap。peer=\(peerDeviceId)"
@@ -4860,6 +5458,7 @@ private extension CrossNetworkWebRTCManager {
             } catch {
                 self.handshakeDriver = nil
                 if !strictPQCRequested,
+                   !requiresExistingTrustWithoutMutation,
                    hasTrustedPeerKEMKey,
                    selection != .classicOnly,
                    Self.shouldRetryClassicBootstrap(after: error) {
@@ -4885,6 +5484,10 @@ private extension CrossNetworkWebRTCManager {
                 return
             }
 
+            try self.transitionFileTransferKeyEpoch(
+                sessionId: sessionId,
+                sourceSession: session
+            )
             self.sessionKeys = keys
             self.handshakeDriver = nil
             if self.currentSessionId == sessionId {
@@ -4965,6 +5568,9 @@ private extension CrossNetworkWebRTCManager {
                 self.state = .failed(self.lastError ?? "WebRTC handshake failed")
                 self.readiness = .idle
                 self.handshakeDriver = nil
+                self.invalidateFileTransferKeyEpoch(
+                    errorMessage: "Session handshake failed during file transfer"
+                )
                 self.sessionKeys = nil
                 self.handshakeStartedSessionIds.remove(sessionId)
                 self.rekeyInProgressSessionIds.remove(sessionId)
@@ -5185,6 +5791,16 @@ private extension CrossNetworkWebRTCManager {
                 )
                 return
             }
+            guard let sourceSession = session else { return }
+            do {
+                try transitionFileTransferKeyEpoch(
+                    sessionId: sessionId,
+                    sourceSession: sourceSession
+                )
+            } catch {
+                lastRekeyEvent = "failed stale file-transfer key epoch"
+                return
+            }
             sessionKeys = keys
             handshakeDriver = nil
             inboundRekeyResponderSessionIds.remove(sessionId)
@@ -5262,7 +5878,12 @@ private extension CrossNetworkWebRTCManager {
             return
         }
 
-        let kemKeys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+        let kemKeys: [KEMPublicKeyInfo]
+        if requiresExistingTrustWithoutMutation {
+            kemKeys = try await ExistingReadOnlyIdentityMaterialProvider.loadPQCIdentityPublicKeys()
+        } else {
+            kemKeys = try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+        }
         guard !kemKeys.isEmpty else { return }
 
         let message = AppMessage.pairingIdentityExchange(.init(
@@ -5297,8 +5918,47 @@ private extension CrossNetworkWebRTCManager {
         switch message {
         case .pairingIdentityExchange(let payload):
             noteRemoteAppActivity(sessionId: sessionId)
-            await KEMTrustStore.shared.upsert(deviceId: payload.deviceId, kemPublicKeys: payload.kemPublicKeys)
-            await KEMTrustStore.shared.upsert(deviceId: peerDeviceId, kemPublicKeys: payload.kemPublicKeys)
+            do {
+                if requiresExistingTrustWithoutMutation {
+                    try await KEMTrustStore.shared.requireExactExisting(
+                        deviceId: payload.deviceId,
+                        kemPublicKeys: payload.kemPublicKeys
+                    )
+                    try await KEMTrustStore.shared.requireExactExisting(
+                        deviceId: peerDeviceId,
+                        kemPublicKeys: payload.kemPublicKeys
+                    )
+                    appendSmokeTrace("kem-trust-admission accepted mode=existing-read-only")
+                } else {
+                    await KEMTrustStore.shared.upsert(
+                        deviceId: payload.deviceId,
+                        kemPublicKeys: payload.kemPublicKeys
+                    )
+                    await KEMTrustStore.shared.upsert(
+                        deviceId: peerDeviceId,
+                        kemPublicKeys: payload.kemPublicKeys
+                    )
+                }
+            } catch {
+                let message = "existing peer KEM trust is missing or changed"
+                appendSmokeTrace(
+                    "kem-trust-admission failed mode=existing-read-only errorType=\(String(describing: type(of: error)))"
+                )
+                lastError = message
+                applyActiveSessionDisconnect(sessionId: sessionId, kind: .explicit)
+                state = .failed(message)
+                readiness = .idle
+                handshakeDriver = nil
+                invalidateFileTransferKeyEpoch(
+                    errorMessage: "Session trust changed during file transfer"
+                )
+                sessionKeys = nil
+                handshakeStartedSessionIds.remove(sessionId)
+                rekeyInProgressSessionIds.remove(sessionId)
+                rekeyCompletedSessionIds.remove(sessionId)
+                strictPQCRequestedBySessionId.removeValue(forKey: sessionId)
+                return
+            }
             if remoteDeviceId == nil || remoteDeviceId?.hasPrefix("webrtc-") == true {
                 remoteDeviceId = payload.deviceId
                 updatePreparedSessionSnapshot(
@@ -5503,6 +6163,13 @@ private extension CrossNetworkWebRTCManager {
                 "🔁 WebRTC rekey start: session=\(sessionId), trigger=\(trigger), peer=\(selectedPeerId), policy=\(selection.rawValue)"
             )
             let rekeyed = try await driver.initiateHandshake(with: peer)
+            guard currentSessionId == sessionId, self.session === session else {
+                throw FileTransferWaitError.staleSession
+            }
+            try transitionFileTransferKeyEpoch(
+                sessionId: sessionId,
+                sourceSession: session
+            )
             sessionKeys = rekeyed
             rekeyCompletedSessionIds.insert(sessionId)
             lastRekeyEvent = "complete suite=\(rekeyed.negotiatedSuite.rawValue)"
@@ -5684,7 +6351,11 @@ private extension CrossNetworkWebRTCManager {
 
         if let fileTransfer = try? JSONDecoder().decode(CrossNetworkFileTransferMessage.self, from: plaintext),
            fileTransfer.version == 1 {
-            await handleInboundFileTransferFromMac(fileTransfer)
+            await handleInboundFileTransferFromMac(
+                fileTransfer,
+                sessionId: sessionId,
+                sourceSession: session
+            )
             return true
         }
 

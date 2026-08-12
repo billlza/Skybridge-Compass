@@ -124,19 +124,32 @@ public enum CryptoProviderFactory {
         hasAppleXWingRuntimeSupport
     }
 
-    private static func nativeSuitePreference() -> NativeSuitePreference {
-        if let raw = ProcessInfo.processInfo.environment["SB_PQC_PREFERRED_SUITE"]?
+    private static func nativeSuitePreference(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaults: UserDefaults = .standard
+    ) -> NativeSuitePreference {
+        if let raw = environment["SB_PQC_PREFERRED_SUITE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-           raw == "xwing" || raw == "hybrid" {
-            return .xwing
+            .lowercased() {
+            switch raw {
+            case "xwing", "hybrid": return .xwing
+            case "mlkem", "ml-kem", "mlkem768", "ml-kem-768": return .mlkem
+            default: break
+            }
         }
 
-        if UserDefaults.standard.bool(forKey: "Settings.PreferXWingHybrid") {
+        if defaults.bool(forKey: "Settings.PreferXWingHybrid") {
             return .xwing
         }
 
         return .mlkem
+    }
+
+    static func nativeSuitePreferenceForTesting(
+        environment: [String: String],
+        defaults: UserDefaults
+    ) -> String {
+        nativeSuitePreference(environment: environment, defaults: defaults).rawValue
     }
 
     private static func makeAppleNativeProvider() -> any CryptoProvider {

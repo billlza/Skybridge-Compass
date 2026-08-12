@@ -61,6 +61,85 @@ final class CurrentPathTrustedDeviceStoreTests: XCTestCase {
         XCTAssertEqual(trusted?.protocolPublicKeyFingerprint, String(repeating: "c", count: 64))
     }
 
+    func testExactExistingCurrentPathAuthorityRequiresMatchingDeviceAndFingerprint() throws {
+        let fingerprint = String(repeating: "7", count: 64)
+        TrustedDeviceStore.shared.upsertCurrentPathAuthority(
+            deviceId: "device-alpha-1234",
+            name: "Alpha",
+            protocolSigningAlgorithm: "Ed25519",
+            protocolPublicKeyFingerprint: fingerprint
+        )
+
+        XCTAssertNoThrow(
+            try TrustedDeviceStore.shared.requireExactExistingCurrentPathAuthority(
+                deviceId: "device-alpha-1234",
+                protocolPublicKeyFingerprint: fingerprint
+            )
+        )
+        XCTAssertThrowsError(
+            try TrustedDeviceStore.shared.requireExactExistingCurrentPathAuthority(
+                deviceId: "device-beta-5678",
+                protocolPublicKeyFingerprint: fingerprint
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TrustedDeviceStore.ExistingCurrentPathTrustAdmissionError,
+                .deviceIDMismatch
+            )
+        }
+        XCTAssertThrowsError(
+            try TrustedDeviceStore.shared.requireExactExistingCurrentPathAuthority(
+                deviceId: "device-alpha-1234",
+                protocolPublicKeyFingerprint: String(repeating: "8", count: 64)
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TrustedDeviceStore.ExistingCurrentPathTrustAdmissionError,
+                .missingAuthority
+            )
+        }
+    }
+
+    func testExactExistingCurrentPathAuthorityRejectsDuplicateFingerprintAuthorities() {
+        let fingerprint = String(repeating: "9", count: 64)
+        TrustedDeviceStore.shared.mergeFromCloud(
+            [
+                .init(
+                    id: "device-alpha-1234",
+                    name: "Alpha",
+                    platform: .iOS,
+                    ipAddress: nil,
+                    protocolSigningAlgorithm: "Ed25519",
+                    protocolPublicKeyFingerprint: fingerprint,
+                    currentDeviceId: "device-alpha-1234",
+                    knownDeviceIds: ["device-alpha-1234"]
+                ),
+                .init(
+                    id: "device-beta-5678",
+                    name: "Beta",
+                    platform: .macOS,
+                    ipAddress: nil,
+                    protocolSigningAlgorithm: "Ed25519",
+                    protocolPublicKeyFingerprint: fingerprint,
+                    currentDeviceId: "device-beta-5678",
+                    knownDeviceIds: ["device-beta-5678"]
+                ),
+            ]
+        )
+
+        XCTAssertThrowsError(
+            try TrustedDeviceStore.shared.requireExactExistingCurrentPathAuthority(
+                deviceId: "device-alpha-1234",
+                protocolPublicKeyFingerprint: fingerprint
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? TrustedDeviceStore.ExistingCurrentPathTrustAdmissionError,
+                .ambiguousAuthority
+            )
+        }
+    }
+
     func testCanonicalTrustedDeviceIdFallsBackToUniqueTrustedNameForDiscoveryDevice() {
         TrustedDeviceStore.shared.upsertCurrentPathAuthority(
             deviceId: "device-mac-stable",

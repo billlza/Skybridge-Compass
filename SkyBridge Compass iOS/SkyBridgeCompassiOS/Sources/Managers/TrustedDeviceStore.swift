@@ -21,6 +21,15 @@ public final class TrustedDeviceStore: ObservableObject {
         case revokedIdentity
     }
 
+    public enum ExistingCurrentPathTrustAdmissionError: Error, Equatable, Sendable {
+        case invalidDeviceID
+        case invalidFingerprint
+        case missingAuthority
+        case deviceIDMismatch
+        case ambiguousAuthority
+        case unreadableStore
+    }
+
     public struct TrustedDevice: Codable, Identifiable, Sendable, Equatable {
         public let id: String // 建议使用 discovery TXT 的 uuid / 或配对 deviceId
         public var name: String
@@ -59,6 +68,7 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     @Published public private(set) var trustedDevices: [TrustedDevice] = []
+    private var existingTrustLoadFailed = false
 
     private static let trustedDevicesStore = CodablePersistenceStore<[TrustedDevice]>(
         location: .protectedApplicationSupport(
@@ -151,6 +161,39 @@ public final class TrustedDeviceStore: ObservableObject {
         }
 
         return nil
+    }
+
+    public func requireExactExistingCurrentPathAuthority(
+        deviceId: String,
+        protocolPublicKeyFingerprint: String
+    ) throws {
+        guard !existingTrustLoadFailed else {
+            throw ExistingCurrentPathTrustAdmissionError.unreadableStore
+        }
+        let candidates = Set(PeerIdentityAliasResolver.lookupCandidates(for: deviceId))
+        guard !candidates.isEmpty else {
+            throw ExistingCurrentPathTrustAdmissionError.invalidDeviceID
+        }
+        guard let normalized = normalizedFingerprint(protocolPublicKeyFingerprint) else {
+            throw ExistingCurrentPathTrustAdmissionError.invalidFingerprint
+        }
+        let fingerprintMatches = trustedDevices.filter {
+            $0.protocolPublicKeyFingerprint == normalized
+        }
+        guard fingerprintMatches.count <= 1 else {
+            throw ExistingCurrentPathTrustAdmissionError.ambiguousAuthority
+        }
+        guard let record = fingerprintMatches.first,
+              (record.currentPathLifecycleState ?? .active) == .active else {
+            throw ExistingCurrentPathTrustAdmissionError.missingAuthority
+        }
+        let aliasMatches = trustedDevices.filter { matches($0, candidates: candidates) }
+        guard aliasMatches.count <= 1 else {
+            throw ExistingCurrentPathTrustAdmissionError.ambiguousAuthority
+        }
+        guard aliasMatches.first == record else {
+            throw ExistingCurrentPathTrustAdmissionError.deviceIDMismatch
+        }
     }
 
     public func trust(_ device: DiscoveredDevice) {
@@ -391,7 +434,19 @@ public final class TrustedDeviceStore: ObservableObject {
     }
 
     private func load() {
-        trustedDevices = Self.trustedDevicesStore.load() ?? []
+        let existingTrustOnly = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
+            && ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1"
+        existingTrustLoadFailed = false
+        if existingTrustOnly {
+            do {
+                trustedDevices = try Self.trustedDevicesStore.loadExistingReadOnly() ?? []
+            } catch {
+                trustedDevices = []
+                existingTrustLoadFailed = true
+            }
+        } else {
+            trustedDevices = Self.trustedDevicesStore.load() ?? []
+        }
     }
 
     private func save() {

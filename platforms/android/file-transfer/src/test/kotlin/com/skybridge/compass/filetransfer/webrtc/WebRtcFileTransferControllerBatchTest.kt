@@ -137,10 +137,10 @@ class WebRtcFileTransferControllerBatchTest {
             .map { it.transferId }
         assertEquals(2, transferIds.size)
 
-        sender.handleIncoming(encode(CrossNetworkFileTransferMessage(op = CrossNetworkFileTransferOp.completeAck, transferId = transferIds[0])))
+        sender.handleIncoming(completeAck(transferIds[0], "aaaa".encodeToByteArray()))
         assertEquals(0.5, sender.batchProgress.value.fraction, 1e-9)
 
-        sender.handleIncoming(encode(CrossNetworkFileTransferMessage(op = CrossNetworkFileTransferOp.completeAck, transferId = transferIds[1])))
+        sender.handleIncoming(completeAck(transferIds[1], "bbbb".encodeToByteArray()))
         assertEquals(1.0, sender.batchProgress.value.fraction, 1e-9)
         assertEquals(2, sender.batchProgress.value.completedCount)
         assertTrue(sender.batchProgress.value.isTerminal)
@@ -190,7 +190,8 @@ class WebRtcFileTransferControllerBatchTest {
         transport.messages
             .filter { it.op == CrossNetworkFileTransferOp.metadata && it.relativePath != "docs/bad.txt" }
             .forEach { meta ->
-                sender.handleIncoming(encode(CrossNetworkFileTransferMessage(op = CrossNetworkFileTransferOp.completeAck, transferId = meta.transferId)))
+                val payload = items.single { it.relativePath == meta.relativePath }.bytes
+                sender.handleIncoming(completeAck(meta.transferId, payload))
             }
         val finalProgress = sender.batchProgress.value
         assertEquals(2, finalProgress.completedCount)
@@ -200,6 +201,15 @@ class WebRtcFileTransferControllerBatchTest {
 
     private fun encode(message: CrossNetworkFileTransferMessage): ByteArray =
         json.encodeToString(CrossNetworkFileTransferMessage.serializer(), message).encodeToByteArray()
+
+    private fun completeAck(transferId: String, payload: ByteArray): ByteArray = encode(
+        CrossNetworkFileTransferMessage(
+            op = CrossNetworkFileTransferOp.completeAck,
+            transferId = transferId,
+            receivedBytes = payload.size.toLong(),
+            fileSha256 = sha256(payload),
+        ),
+    )
 
     private fun sha256(bytes: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(bytes)

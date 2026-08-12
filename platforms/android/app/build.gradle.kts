@@ -574,6 +574,17 @@ nativePqcGateTestApplicationId?.let { configuredApplicationId ->
         "skybridgeNativePqcGateTestApplicationId must select the dedicated native-PQC test package"
     }
 }
+val iosWebRtcSmokeTestApplicationId = providers
+    .gradleProperty("skybridgeIosWebRtcSmokeTestApplicationId")
+    .orNull
+iosWebRtcSmokeTestApplicationId?.let { configuredApplicationId ->
+    require(configuredApplicationId == "com.skybridge.compass.debug.ioswebrtc.test") {
+        "skybridgeIosWebRtcSmokeTestApplicationId must select the dedicated iOS-WebRTC smoke test package"
+    }
+}
+require(nativePqcGateTestApplicationId == null || iosWebRtcSmokeTestApplicationId == null) {
+    "only one dedicated instrumentation test package may be selected for a build"
+}
 android {
     namespace = "com.skybridge.compass"
     compileSdk = 37
@@ -587,6 +598,7 @@ android {
 
         testInstrumentationRunner = "com.skybridge.compass.android.HiltTestRunner"
         nativePqcGateTestApplicationId?.let { testApplicationId = it }
+        iosWebRtcSmokeTestApplicationId?.let { testApplicationId = it }
         vectorDrawables {
             useSupportLibrary = true
         }

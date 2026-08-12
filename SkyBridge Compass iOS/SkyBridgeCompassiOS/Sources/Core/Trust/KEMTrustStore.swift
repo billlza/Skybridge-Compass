@@ -6,6 +6,15 @@ import Foundation
 public actor KEMTrustStore {
     public static let shared = KEMTrustStore()
 
+    public enum ExistingTrustAdmissionError: Error, Equatable, Sendable {
+        case invalidDeviceID
+        case emptyKeySet
+        case conflictingPresentedKey(UInt16)
+        case missingStoredKey(UInt16)
+        case storedKeyMismatch(UInt16)
+        case storedKeySetMismatch
+    }
+
     private struct StoredPeer: Codable, Sendable {
         var keys: [UInt16: Data] // suiteWireId -> publicKey
         var updatedAt: Date
@@ -28,14 +37,66 @@ public actor KEMTrustStore {
         let candidates = PeerIdentityAliasResolver.lookupCandidates(for: deviceId)
         guard !candidates.isEmpty else { return }
 
+        var changed = false
         for candidate in candidates {
             var dict: [UInt16: Data] = cache[candidate]?.keys ?? [:]
+            var candidateChanged = cache[candidate] == nil
             for keyInfo in kemPublicKeys {
-                dict[keyInfo.suiteWireId] = keyInfo.publicKey
+                if dict[keyInfo.suiteWireId] != keyInfo.publicKey {
+                    dict[keyInfo.suiteWireId] = keyInfo.publicKey
+                    candidateChanged = true
+                }
             }
-            cache[candidate] = StoredPeer(keys: dict, updatedAt: Date())
+            if candidateChanged {
+                cache[candidate] = StoredPeer(keys: dict, updatedAt: Date())
+                changed = true
+            }
         }
-        save()
+        if changed {
+            save()
+        }
+    }
+
+    public func requireExactExisting(
+        deviceId: String,
+        kemPublicKeys: [KEMPublicKeyInfo]
+    ) throws {
+        let candidates = PeerIdentityAliasResolver.lookupCandidates(for: deviceId)
+        guard !candidates.isEmpty else {
+            throw ExistingTrustAdmissionError.invalidDeviceID
+        }
+        guard !kemPublicKeys.isEmpty else {
+            throw ExistingTrustAdmissionError.emptyKeySet
+        }
+
+        var presentedKeys: [UInt16: Data] = [:]
+        for keyInfo in kemPublicKeys {
+            if let existing = presentedKeys[keyInfo.suiteWireId], existing != keyInfo.publicKey {
+                throw ExistingTrustAdmissionError.conflictingPresentedKey(keyInfo.suiteWireId)
+            }
+            presentedKeys[keyInfo.suiteWireId] = keyInfo.publicKey
+        }
+
+        let storedKeySets = candidates.compactMap { candidate in
+            cache[candidate]?.keys
+        }
+        guard let firstStoredKeySet = storedKeySets.first else {
+            throw ExistingTrustAdmissionError.missingStoredKey(
+                presentedKeys.keys.sorted().first ?? 0
+            )
+        }
+        guard storedKeySets.allSatisfy({ $0 == firstStoredKeySet }),
+              Set(firstStoredKeySet.keys) == Set(presentedKeys.keys) else {
+            throw ExistingTrustAdmissionError.storedKeySetMismatch
+        }
+        for (wireID, presentedKey) in presentedKeys {
+            guard let storedKey = firstStoredKeySet[wireID] else {
+                throw ExistingTrustAdmissionError.missingStoredKey(wireID)
+            }
+            guard storedKey == presentedKey else {
+                throw ExistingTrustAdmissionError.storedKeyMismatch(wireID)
+            }
+        }
     }
 
     public func kemPublicKeys(for deviceId: String) -> [CryptoSuite: Data] {

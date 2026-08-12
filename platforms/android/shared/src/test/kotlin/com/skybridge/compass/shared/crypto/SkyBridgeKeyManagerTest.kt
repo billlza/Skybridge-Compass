@@ -4,6 +4,7 @@ import com.skybridge.compass.shared.crypto.models.CryptoSuite
 import com.skybridge.compass.shared.crypto.models.KeyMaterial
 import com.skybridge.compass.shared.crypto.models.KeyPair
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.property.Arb
 import io.kotest.property.arbitrary.byte
@@ -12,6 +13,9 @@ import io.kotest.property.arbitrary.element
 import io.kotest.property.arbitrary.int
 import io.kotest.property.arbitrary.string
 import io.kotest.property.checkAll
+import java.security.KeyStore
+import java.security.PublicKey
+import java.security.cert.Certificate
 
 /**
  * Property-based tests for SkyBridgeKeyManager.
@@ -22,6 +26,30 @@ import io.kotest.property.checkAll
  * in a JVM environment.
  */
 class SkyBridgeKeyManagerTest : FunSpec({
+    test("existing-only wrapping key lookup does not create a missing alias") {
+        val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+        }
+        val alias = "missing-pqc-wrapper"
+
+        shouldThrow<KeyStorageException> {
+            SkyBridgeKeyManager.requireExistingSecretKeyEntry(keyStore, alias)
+        }
+        keyStore.containsAlias(alias) shouldBe false
+    }
+
+    test("existing-only wrapping key lookup rejects a non-secret entry") {
+        val alias = "wrong-pqc-wrapper-type"
+        val entry = KeyStore.TrustedCertificateEntry(TestCertificate())
+
+        shouldThrow<KeyStorageException> {
+            SkyBridgeKeyManager.requireExistingSecretKeyEntry(
+                alias = alias,
+                aliasPresent = true,
+                entry = entry
+            )
+        }
+    }
     
     /**
      * **Feature: android-pqc-crypto, Property 12: PQC key storage round-trip**
@@ -153,3 +181,15 @@ class SkyBridgeKeyManagerTest : FunSpec({
         }
     }
 })
+
+private class TestCertificate : Certificate("test") {
+    override fun getEncoded(): ByteArray = byteArrayOf(0x01)
+    override fun verify(key: PublicKey) = Unit
+    override fun verify(key: PublicKey, sigProvider: String) = Unit
+    override fun toString(): String = "TestCertificate"
+    override fun getPublicKey(): PublicKey = object : PublicKey {
+        override fun getAlgorithm(): String = "test"
+        override fun getFormat(): String = "RAW"
+        override fun getEncoded(): ByteArray = byteArrayOf(0x01)
+    }
+}

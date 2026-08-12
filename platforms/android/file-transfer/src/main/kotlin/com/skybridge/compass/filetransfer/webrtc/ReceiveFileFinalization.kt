@@ -1,6 +1,7 @@
 package com.skybridge.compass.filetransfer.webrtc
 
 import java.io.RandomAccessFile
+import java.nio.channels.FileChannel
 
 /** Flush/close transaction that must succeed before a received file can be delivered. */
 internal data class ReceiveFileFinalizationCloseResult(
@@ -14,6 +15,13 @@ internal fun closeReceiveFileForFinalization(
 ): ReceiveFileFinalizationCloseResult = performReceiveFileFinalizationClose(
     sync = { file.fd.sync() },
     close = file::close
+)
+
+internal fun closeReceiveFileForFinalization(
+    channel: FileChannel
+): ReceiveFileFinalizationCloseResult = performReceiveFileFinalizationClose(
+    sync = { channel.force(true) },
+    close = channel::close
 )
 
 internal fun performReceiveFileFinalizationClose(

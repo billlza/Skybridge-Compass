@@ -96,3 +96,111 @@ skybridge_append_git_source_binding() {
     echo "${field_prefix}_git_clean=$git_clean"
   } >>"$output_file"
 }
+
+skybridge_require_frozen_git_source() {
+  local source_path="$1"
+  local expected_commit="$2"
+  local phase="$3"
+  local git_root=""
+  local actual_commit=""
+  local worktree_status=""
+
+  if [[ ! "$expected_commit" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Expected source commit must be a full lowercase Git revision during $phase" >&2
+    return 1
+  fi
+  git_root="$(git -C "$source_path" rev-parse --show-toplevel 2>/dev/null)" || {
+    echo "Unable to resolve the Git worktree during $phase" >&2
+    return 1
+  }
+  actual_commit="$(git -C "$git_root" rev-parse --verify HEAD 2>/dev/null)" || {
+    echo "Unable to resolve the source revision during $phase" >&2
+    return 1
+  }
+  if [[ "$actual_commit" != "$expected_commit" ]]; then
+    echo "Source revision changed or does not match during $phase" >&2
+    return 1
+  fi
+  worktree_status="$(git -C "$git_root" status --porcelain=v1 --untracked-files=all)" || {
+    echo "Unable to inspect the source tree during $phase" >&2
+    return 1
+  }
+  if [[ -n "$worktree_status" ]]; then
+    echo "Physical interop evidence requires a clean frozen source tree during $phase" >&2
+    return 1
+  fi
+}
+
+skybridge_collect_frozen_git_binding() {
+  local source_path="$1"
+  local expected_commit="$2"
+  local phase="$3"
+  local git_root=""
+  local tree_oid=""
+
+  case "$phase" in
+    before|after) ;;
+    *) echo "Frozen source phase must be before or after" >&2; return 1 ;;
+  esac
+  skybridge_require_frozen_git_source \
+    "$source_path" "$expected_commit" "source binding $phase" || return 1
+  git_root="$(git -C "$source_path" rev-parse --show-toplevel)" || return 1
+  tree_oid="$(git -C "$git_root" rev-parse "${expected_commit}^{tree}")" || return 1
+  if [[ ! "$tree_oid" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "Frozen source tree identity is malformed" >&2
+    return 1
+  fi
+  printf '%s\n' \
+    "schema_version=1" \
+    "phase=$phase" \
+    "source_commit=$expected_commit" \
+    "source_tree=$tree_oid" \
+    "worktree_clean=true"
+}
+
+skybridge_acquire_device_lock() {
+  local source_path="$1"
+  local device_kind="$2"
+  local device_identifier="$3"
+  local common_git_dir=""
+  local identifier_digest=""
+  local lock_dir=""
+
+  if [[ ! "$device_kind" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || [[ -z "$device_identifier" ]]; then
+    echo "Invalid device lock identity" >&2
+    return 1
+  fi
+  common_git_dir="$(git -C "$source_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || {
+    echo "Unable to resolve the common Git directory for the device lock" >&2
+    return 1
+  }
+  if [[ "$common_git_dir" != /* || ! -d "$common_git_dir" || -L "$common_git_dir" ]]; then
+    echo "The common Git directory is not a trusted absolute directory" >&2
+    return 1
+  fi
+  identifier_digest="$(python3 - "$device_identifier" <<'PY'
+import hashlib
+import sys
+
+print(hashlib.sha256(sys.argv[1].encode("utf-8")).hexdigest())
+PY
+)" || return 1
+  lock_dir="$common_git_dir/skybridge-${device_kind}-${identifier_digest}.lock"
+  if ! mkdir -m 0700 -- "$lock_dir" 2>/dev/null; then
+    echo "Another smoke run owns the $device_kind device lock" >&2
+    return 1
+  fi
+  printf '%s\n' "$lock_dir"
+}
+
+skybridge_release_device_lock() {
+  local lock_dir="$1"
+  if [[ -z "$lock_dir" ]]; then
+    return 0
+  fi
+  if [[ "$lock_dir" != /* || "$lock_dir" != *.lock || ! -d "$lock_dir" || -L "$lock_dir" ]]; then
+    echo "Refusing to release an invalid device lock" >&2
+    return 1
+  fi
+  rmdir -- "$lock_dir"
+}

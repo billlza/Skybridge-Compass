@@ -120,6 +120,45 @@ class WebRtcSessionExactOwnerWiringTest {
     }
 
     @Test
+    fun existingTrustOnlyPathUsesReadOnlyAuthorityAndKemWithoutPersistence() {
+        val source = managerSource()
+        val pairingStart = source.indexOf("private suspend fun processIncomingPairingIdentityExchangeLocked(")
+        val pairingEnd = source.indexOf("private suspend fun sendPairingIdentityExchangeIfNeeded(", pairingStart)
+        require(pairingStart >= 0 && pairingEnd > pairingStart) {
+            "pairing persistence source block not found"
+        }
+        val pairingBody = source.substring(pairingStart, pairingEnd)
+        val existingOnlyStart = pairingBody.indexOf("if (diagnosticsConfig.existingTrustOnly)")
+        val normalPathStart = pairingBody.indexOf(
+            "val storeConflict = trustedPeerStore.corruptionConflictOrNull()",
+            existingOnlyStart
+        )
+        val normalDecisionStart = pairingBody.indexOf("val decision = when", normalPathStart)
+        require(existingOnlyStart >= 0 && normalPathStart > existingOnlyStart && normalDecisionStart > normalPathStart) {
+            "existing-trust-only branch not found before the mutating approval path"
+        }
+        val existingOnlyBody = pairingBody.substring(existingOnlyStart, normalPathStart)
+
+        assertTrue(existingOnlyBody.contains("evaluateExactExistingAuthorityReadOnly("))
+        assertTrue(existingOnlyBody.contains("admission.exactAuthority == null"))
+        assertTrue(existingOnlyBody.contains("peerKemStore.loadVerifiedReadOnly(peerId)"))
+        assertTrue(existingOnlyBody.contains("existingKem.hasSamePeerKemMaterial(presentedKem)"))
+        assertTrue(existingOnlyBody.contains("sendPairingIdentityExchangeIfNeeded(owner, force = true)"))
+        assertFalse(existingOnlyBody.contains("PairingTrustManager.requestDecision("))
+        assertFalse(existingOnlyBody.contains("AuthenticatedPairingPersistence("))
+        assertFalse(existingOnlyBody.contains("peerKemStore.save"))
+        assertFalse(existingOnlyBody.contains("corruptionConflictOrNull()"))
+        assertFalse(existingOnlyBody.contains("evaluateCurrentPathBinding("))
+
+        val initialKemStart = source.indexOf("private fun initialPeerKem(")
+        val initialKemEnd = source.indexOf("private fun currentPendingJoinBootstrapKeys(", initialKemStart)
+        val initialKemBody = source.substring(initialKemStart, initialKemEnd)
+        assertTrue(initialKemBody.contains("val persisted = normalizedPeerId?.let(::loadPeerKem)"))
+        assertTrue(initialKemBody.contains("if (diagnosticsConfig.existingTrustOnly)"))
+        assertTrue(initialKemBody.contains("return persisted"))
+    }
+
+    @Test
     fun sessionOnlyKemIsClearedOnReplacementTerminalStateAndSuccessfulRekey() {
         val source = managerSource()
         assertTrue(source.contains("private val authenticatedSessionPeerKemStore = AuthenticatedSessionPeerKemStore()"))

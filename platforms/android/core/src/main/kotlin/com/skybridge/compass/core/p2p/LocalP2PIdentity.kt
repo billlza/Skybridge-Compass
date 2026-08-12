@@ -27,9 +27,11 @@ import com.skybridge.compass.shared.platform.AndroidPlatformMetadata
 import com.skybridge.compass.core.webrtc.AndroidRemoteVideoFormats
 import java.math.BigInteger
 import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.interfaces.ECPublicKey
+import java.nio.file.Files
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -61,6 +63,7 @@ class LocalP2PIdentity(
 
     enum class StorageMode {
         ENCRYPTED,
+        ENCRYPTED_EXISTING_ONLY,
         ISOLATED_PLAINTEXT_TEST
     }
 
@@ -87,6 +90,9 @@ class LocalP2PIdentity(
     fun deviceId(): String {
         val existing = prefs.getString(KEY_DEVICE_ID, null)
         if (!existing.isNullOrBlank()) return existing
+        check(storageMode != StorageMode.ENCRYPTED_EXISTING_ONLY) {
+            "Existing-only identity is missing the device identifier"
+        }
         val created = UUID.randomUUID().toString()
         prefs.edit {
             putString(KEY_DEVICE_ID, created)
@@ -101,15 +107,25 @@ class LocalP2PIdentity(
      */
     fun pubKeyFingerprint(): String {
         val cached = prefs.getString(KEY_PUBKEY_FP, null)
+        if (storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY) {
+            return requireMatchingExistingP256Fingerprint(
+                cachedFingerprint = cached,
+                keyPair = keyManager.getDeviceIdentityKey()
+            )
+        }
         if (!cached.isNullOrBlank()) return cached
 
-        val kp = keyManager.getDeviceIdentityKey() ?: keyManager.generateDeviceIdentityKey()
+        val kp = keyManager.getDeviceIdentityKey() ?: run {
+            keyManager.generateDeviceIdentityKey()
+        }
         val pub = kp.public as? ECPublicKey
             ?: return ""
         val raw = uncompressedP256Point(pub)
         val fp = sha256HexLower(raw)
-        prefs.edit {
-            putString(KEY_PUBKEY_FP, fp)
+        if (storageMode != StorageMode.ENCRYPTED_EXISTING_ONLY) {
+            prefs.edit {
+                putString(KEY_PUBKEY_FP, fp)
+            }
         }
         return fp
     }
@@ -136,6 +152,9 @@ class LocalP2PIdentity(
                 requireNotNull(inMemoryEd25519PrivateKey) to requireNotNull(inMemoryEd25519PublicRaw32)
             }
 
+            storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY ->
+                error("Existing-only identity is missing Ed25519 signing keys")
+
             else -> {
                 val (priv, pubRaw32) = P2PHandshakeWire.generateEd25519IdentityKeyPair()
                 val privBytes = priv.encoded
@@ -159,6 +178,8 @@ class LocalP2PIdentity(
             val mlPubB64 = prefs.getString(KEY_MLDSA65_PUB_RAW_B64, null)
             if (!mlPrivB64.isNullOrBlank() && !mlPubB64.isNullOrBlank()) {
                 Base64.decode(mlPrivB64, Base64.NO_WRAP) to Base64.decode(mlPubB64, Base64.NO_WRAP)
+            } else if (storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY) {
+                error("Existing-only identity is missing ML-DSA-65 signing keys")
             } else if (AndroidPQCCryptoProvider.isAvailable()) {
                 val provider = AndroidPQCCryptoProvider()
                 val kp = kotlinx.coroutines.runBlocking { provider.generateKeyPair(KeyUsage.SIGNING) }
@@ -272,7 +293,15 @@ class LocalP2PIdentity(
         generator: () -> KeyPair
     ): KeyPair? {
         return try {
-            keyManager.retrievePQCKeyPair(alias)?.also { validateKemKeyPair(alias, suite, it) } ?: run {
+            val existing = if (storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY) {
+                keyManager.retrieveExistingPQCKeyPair(alias)
+            } else {
+                keyManager.retrievePQCKeyPair(alias)
+            }
+            existing?.also { validateKemKeyPair(alias, suite, it) } ?: run {
+                check(storageMode != StorageMode.ENCRYPTED_EXISTING_ONLY) {
+                    "Existing-only identity is missing KEM keypair for $alias"
+                }
                 val kp = generator()
                 validateKemKeyPair(alias, suite, kp)
                 keyManager.storePQCKeyPair(kp, alias)
@@ -381,14 +410,24 @@ class LocalP2PIdentity(
             minimumTierRaw = "nativePQC"
         )
 
-    fun trustStore(): P2PHandshakeWire.TrustStore = PrefsTrustStore(prefs)
+    fun trustStore(): P2PHandshakeWire.TrustStore =
+        if (storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY) {
+            FormalAcceptancePrefsTrustStore(prefs)
+        } else {
+            PrefsTrustStore(prefs)
+        }
 
     fun formalAcceptanceTrustStore(): P2PHandshakeWire.TrustStore =
         FormalAcceptancePrefsTrustStore(prefs)
 
     fun trustedPeerStore(): TrustedPeerStore = TrustedPeerStore(prefs)
 
-    fun fallbackCooldownStore(): P2PHandshakeWire.FallbackCooldownStore = PrefsFallbackCooldownStore(prefs)
+    fun fallbackCooldownStore(): P2PHandshakeWire.FallbackCooldownStore =
+        if (storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY) {
+            FormalAcceptanceFallbackCooldownStore(prefs)
+        } else {
+            PrefsFallbackCooldownStore(prefs)
+        }
 
     companion object {
         private const val PREFS_NAME = "skybridge_p2p_identity"
@@ -413,6 +452,29 @@ class LocalP2PIdentity(
             if (storageMode == StorageMode.ISOLATED_PLAINTEXT_TEST) {
                 context.getSharedPreferences("${PREFS_NAME}_smoke", Context.MODE_PRIVATE)
             } else {
+                if (storageMode == StorageMode.ENCRYPTED_EXISTING_ONLY) {
+                    val preferencesDirectory = java.io.File(context.dataDir, "shared_prefs")
+                    val preferencesFile = java.io.File(preferencesDirectory, "$PREFS_NAME.xml")
+                    check(
+                        preferencesFile.canonicalFile.parentFile == preferencesDirectory.canonicalFile &&
+                            preferencesFile.isFile &&
+                            !Files.isSymbolicLink(preferencesFile.toPath()) &&
+                            preferencesFile.length() > 0L
+                    ) {
+                        "Existing-only identity encrypted preferences are missing"
+                    }
+                    val rawPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    check(
+                        rawPreferences.contains(ENCRYPTED_PREFS_KEY_KEYSET) &&
+                            rawPreferences.contains(ENCRYPTED_PREFS_VALUE_KEYSET)
+                    ) {
+                        "Existing-only identity encrypted preference keysets are missing"
+                    }
+                    val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+                    check(keyStore.containsAlias(MasterKey.DEFAULT_MASTER_KEY_ALIAS)) {
+                        "Existing-only identity is missing the encrypted-preferences master key"
+                    }
+                }
                 EncryptedSharedPreferences.create(
                     context,
                     PREFS_NAME,
@@ -423,6 +485,29 @@ class LocalP2PIdentity(
                     EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
                 )
             }
+
+        private const val ENCRYPTED_PREFS_KEY_KEYSET =
+            "__androidx_security_crypto_encrypted_prefs_key_keyset__"
+        private const val ENCRYPTED_PREFS_VALUE_KEYSET =
+            "__androidx_security_crypto_encrypted_prefs_value_keyset__"
+
+        internal fun requireMatchingExistingP256Fingerprint(
+            cachedFingerprint: String?,
+            keyPair: java.security.KeyPair?
+        ): String {
+            check(!cachedFingerprint.isNullOrBlank()) {
+                "Existing-only identity is missing the cached P-256 discovery fingerprint"
+            }
+            val existing = keyPair
+                ?: error("Existing-only identity is missing the P-256 discovery key")
+            val publicKey = existing.public as? ECPublicKey
+                ?: error("Existing-only identity P-256 discovery key has an invalid public key type")
+            val computed = sha256HexLower(uncompressedP256Point(publicKey))
+            check(cachedFingerprint == computed) {
+                "Existing-only identity cached P-256 fingerprint does not match the existing key"
+            }
+            return computed
+        }
 
         private fun sha256HexLower(data: ByteArray): String {
             val digest = MessageDigest.getInstance("SHA-256").digest(data)
@@ -553,6 +638,24 @@ internal class PrefsFallbackCooldownStore(
         val sb = StringBuilder(d.size * 2)
         for (b in d) sb.append(String.format("%02x", b))
         return sb.toString()
+    }
+}
+
+internal class FormalAcceptanceFallbackCooldownStore(
+    private val prefs: android.content.SharedPreferences
+) : P2PHandshakeWire.FallbackCooldownStore {
+    override fun loadLastClassicFallbackAtMillis(peerId: String): Long? {
+        val value = prefs.getLong("fallback_${peerId.sha256Key()}", Long.MIN_VALUE)
+        return if (value == Long.MIN_VALUE) null else value
+    }
+
+    override fun saveLastClassicFallbackAtMillis(peerId: String, unixTimeMillis: Long) {
+        error("formal acceptance fallback cooldown store is read-only")
+    }
+
+    private fun String.sha256Key(): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(toByteArray(Charsets.UTF_8))
+        return digest.joinToString(separator = "") { byte -> "%02x".format(byte) }
     }
 }
 

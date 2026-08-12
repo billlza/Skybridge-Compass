@@ -28,3 +28,15 @@ sealed interface InboundFileTransferDecision {
 fun interface InboundFileTransferApprovalProvider {
     suspend fun requestDecision(request: InboundFileTransferApprovalRequest): InboundFileTransferDecision
 }
+
+/** Storage destination selected explicitly by the composition root for accepted inbound files. */
+enum class InboundFileDestinationPolicy {
+    /** Small receives stay in memory and are emitted as bytes. */
+    IN_MEMORY,
+
+    /** Product UI flow persists an approved receive through MediaStore Downloads. */
+    DOWNLOADS,
+
+    /** Formal/dedicated flows commit inside the calling app's private data directory. */
+    APP_PRIVATE_DURABLE,
+}

@@ -6,5 +6,6 @@ data class WebRtcDiagnosticsConfig(
     val keepAliveHeartbeat: Boolean = false,
     val ignoreClassicFallbackCooldown: Boolean = false,
     val immediateHandshake: Boolean = false,
-    val forceRelayIce: Boolean = false
+    val forceRelayIce: Boolean = false,
+    val existingTrustOnly: Boolean = false
 )

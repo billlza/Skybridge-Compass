@@ -77,6 +77,8 @@ class ProgressMonotonicityPropertyTest : FunSpec({
             val bytesByTransferId = metadatas.associate { meta ->
                 meta.transferId to items.single { it.relativePath == meta.relativePath }.bytes.size.toLong()
             }
+            val completionEvidence = transport.messagesOf(CrossNetworkFileTransferOp.complete)
+                .associateBy { it.transferId }
 
             // 构造确认序列：全部真实确认（乱序）+ 随机重复 + 随机陌生 id 干扰。
             val realAcks = metadatas.map { it.transferId }.shuffled(random)
@@ -95,11 +97,14 @@ class ProgressMonotonicityPropertyTest : FunSpec({
             var previousFraction = 0.0
 
             sequence.forEach { transferId ->
+                val complete = completionEvidence[transferId]
                 controller.handleIncoming(
                     encodeFt(
                         CrossNetworkFileTransferMessage(
                             op = CrossNetworkFileTransferOp.completeAck,
                             transferId = transferId,
+                            receivedBytes = complete?.receivedBytes,
+                            fileSha256 = complete?.fileSha256,
                         )
                     )
                 )

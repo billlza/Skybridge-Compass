@@ -116,11 +116,16 @@ class BatchFailureIsolationPropertyTest : FunSpec({
 
             // (4)(5) 确认全部存活条目后：逐文件结果齐备、失败数量正确、进度只计成功字节。
             metadatas.forEach { meta ->
+                val complete = transport.messages.single {
+                    it.op == CrossNetworkFileTransferOp.complete && it.transferId == meta.transferId
+                }
                 controller.handleIncoming(
                     encodeFt(
                         CrossNetworkFileTransferMessage(
                             op = CrossNetworkFileTransferOp.completeAck,
                             transferId = meta.transferId,
+                            receivedBytes = complete.receivedBytes,
+                            fileSha256 = complete.fileSha256,
                         )
                     )
                 )

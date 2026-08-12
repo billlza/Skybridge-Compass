@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.security.MessageDigest
+import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -107,6 +108,161 @@ class WebRtcFileTransferControllerControlFlowTest {
     }
 
     @Test
+    fun sendBytesAsFile_doesNotAcceptCompletionAcknowledgementBeforeCompleteDispatch() = runTest {
+        val transport = RecordingTransport()
+        lateinit var sender: WebRtcFileTransferController
+        val payload = "early acknowledgement must not complete".encodeToByteArray()
+        val transferId = UUID.randomUUID().toString()
+        var injected = false
+        transport.onFileTransferMessage = { message ->
+            if (!injected && message.op == CrossNetworkFileTransferOp.chunk) {
+                injected = true
+                sender.handleIncoming(
+                    encode(
+                        CrossNetworkFileTransferMessage(
+                            op = CrossNetworkFileTransferOp.completeAck,
+                            transferId = transferId,
+                            receivedBytes = payload.size.toLong(),
+                            fileSha256 = sha256(payload),
+                        ),
+                    ),
+                )
+            }
+        }
+        sender = WebRtcFileTransferController(transport, json = json)
+
+        sender.sendBytesAsFile(
+            transferId = transferId,
+            fileName = "early.bin",
+            mimeType = "application/octet-stream",
+            bytes = payload,
+            chunkSize = 8,
+        )
+
+        assertTrue(injected)
+        assertFalse(sender.isOperationAcknowledged(transferId))
+        assertEquals("sent complete", sender.progress.value.lastStatus)
+
+        sender.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.completeAck,
+                    transferId = transferId,
+                    receivedBytes = payload.size.toLong(),
+                    fileSha256 = sha256(payload),
+                ),
+            ),
+        )
+        assertTrue(sender.isOperationAcknowledged(transferId))
+        assertEquals("send complete acknowledged", sender.progress.value.lastStatus)
+    }
+
+    @Test
+    fun sendBytesAsFile_rejectsMissingOrMismatchedCompletionEvidence() = runTest {
+        val payload = "completion evidence".encodeToByteArray()
+        val digest = sha256(payload)
+        val invalidEvidence = listOf(
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.completeAck,
+                transferId = "placeholder",
+            ),
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.completeAck,
+                transferId = "placeholder",
+                receivedBytes = payload.size.toLong() + 1,
+                fileSha256 = digest,
+            ),
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.completeAck,
+                transferId = "placeholder",
+                receivedBytes = payload.size.toLong(),
+                fileSha256 = digest.copyOf(31),
+            ),
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.completeAck,
+                transferId = "placeholder",
+                receivedBytes = payload.size.toLong(),
+                fileSha256 = digest.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() },
+            ),
+        )
+
+        invalidEvidence.forEach { invalid ->
+            val transport = RecordingTransport()
+            val checkpoints = RecordingCheckpointStore()
+            val sender = WebRtcFileTransferController(
+                transport,
+                json = json,
+                checkpointStore = checkpoints,
+            )
+            val transferId = UUID.randomUUID().toString()
+            sender.sendBytesAsFile(
+                transferId = transferId,
+                fileName = "evidence.bin",
+                mimeType = "application/octet-stream",
+                bytes = payload,
+                chunkSize = 8,
+            )
+
+            sender.handleIncoming(encode(invalid.copy(transferId = transferId)))
+            withTimeout(2_000) {
+                while (checkpoints.deleteCount.get() == 0) yield()
+            }
+
+            assertFalse(sender.isOperationAcknowledged(transferId))
+            assertEquals(
+                "send failed: invalid complete acknowledgement evidence",
+                sender.progress.value.lastStatus,
+            )
+        }
+    }
+
+    @Test
+    fun sendBytesAsFile_peerErrorCleansBufferedSendAndCannotBeOverwrittenByCaller() = runTest {
+        val transport = RecordingTransport()
+        val checkpoints = RecordingCheckpointStore()
+        lateinit var sender: WebRtcFileTransferController
+        val transferId = UUID.randomUUID().toString()
+        transport.onFileTransferMessage = { message ->
+            if (message.op == CrossNetworkFileTransferOp.complete) {
+                sender.handleIncoming(
+                    encode(
+                        CrossNetworkFileTransferMessage(
+                            op = CrossNetworkFileTransferOp.error,
+                            transferId = transferId,
+                            message = "receiver rejected completion",
+                        ),
+                    ),
+                )
+            }
+        }
+        sender = WebRtcFileTransferController(
+            transport,
+            json = json,
+            checkpointStore = checkpoints,
+        )
+
+        val failure = runCatching {
+            sender.sendBytesAsFile(
+                transferId = transferId,
+                fileName = "rejected.bin",
+                mimeType = "application/octet-stream",
+                bytes = "buffered payload".encodeToByteArray(),
+                chunkSize = 8,
+            )
+        }.exceptionOrNull()
+        withTimeout(2_000) {
+            while (checkpoints.deleteCount.get() == 0) yield()
+        }
+
+        assertTrue(failure is IllegalStateException)
+        assertEquals(
+            "send failed: peer error: receiver rejected completion",
+            sender.progress.value.lastStatus,
+        )
+        assertFalse(sender.isOperationAcknowledged(transferId))
+    }
+
+    @Test
     fun handleIncoming_acceptsAppleStyleCompleteWithFileSha256Only() = runTest {
         val transport = RecordingTransport()
         val receiver = WebRtcFileTransferController(
@@ -171,6 +327,75 @@ class WebRtcFileTransferControllerControlFlowTest {
         val completeAck = transport.messages.single { it.op == CrossNetworkFileTransferOp.completeAck }
         assertEquals(payload.size.toLong(), completeAck.receivedBytes)
         assertArrayEquals(sha256(payload), completeAck.fileSha256)
+    }
+
+    @Test
+    fun handleIncoming_appPrivatePolicyCommitsBeforeAcknowledgingActualBytesAndDigest() = runTest {
+        val parent = Files.createTempDirectory("skybridge-controller-private-")
+        try {
+            val committer = AppPrivateInboundFileCommitter(parent.resolve("inbound").toFile())
+            val transport = RecordingTransport()
+            val receiver = WebRtcFileTransferController(
+                webrtc = transport,
+                json = json,
+                inboundApprovalProvider = acceptingApprovalProvider(),
+                inboundFileDestinationPolicy = InboundFileDestinationPolicy.APP_PRIVATE_DURABLE,
+                appPrivateInboundFileCommitterOverride = committer,
+            )
+            val transferId = UUID.randomUUID().toString()
+            val payload = "durable app-private payload".encodeToByteArray()
+            val received = async { receiver.receivedFiles.first() }
+            yield()
+
+            receiver.handleIncoming(
+                encode(
+                    CrossNetworkFileTransferMessage(
+                        op = CrossNetworkFileTransferOp.metadata,
+                        transferId = transferId,
+                        fileName = "payload.bin",
+                        fileSize = payload.size.toLong(),
+                        chunkSize = payload.size,
+                        totalChunks = 1,
+                        mimeType = "application/octet-stream",
+                    ),
+                ),
+            )
+            receiver.handleIncoming(
+                encode(
+                    CrossNetworkFileTransferMessage(
+                        op = CrossNetworkFileTransferOp.chunk,
+                        transferId = transferId,
+                        chunkIndex = 0,
+                        chunkData = payload,
+                        chunkSha256 = sha256(payload),
+                        rawSize = payload.size,
+                    ),
+                ),
+            )
+            receiver.handleIncoming(
+                encode(
+                    CrossNetworkFileTransferMessage(
+                        op = CrossNetworkFileTransferOp.complete,
+                        transferId = transferId,
+                        fileSha256 = sha256(payload),
+                    ),
+                ),
+            )
+
+            val completed = withTimeout(2_000) { received.await() }
+            val committedPath = checkNotNull(completed.localPath)
+            assertEquals(null, completed.bytes)
+            assertArrayEquals(payload, Files.readAllBytes(java.nio.file.Path.of(committedPath)))
+            assertFalse(committedPath.endsWith(".partial"))
+
+            val completeAck = transport.messages.single {
+                it.op == CrossNetworkFileTransferOp.completeAck
+            }
+            assertEquals(payload.size.toLong(), completeAck.receivedBytes)
+            assertArrayEquals(sha256(payload), completeAck.fileSha256)
+        } finally {
+            parent.toFile().deleteRecursively()
+        }
     }
 
     @Test
@@ -314,6 +539,7 @@ class WebRtcFileTransferControllerControlFlowTest {
         val ops = mutableListOf<CrossNetworkFileTransferOp>()
         val messages = mutableListOf<CrossNetworkFileTransferMessage>()
         val rawPayloads = mutableListOf<String>()
+        var onFileTransferMessage: ((CrossNetworkFileTransferMessage) -> Unit)? = null
 
         override fun hasSessionKeys(): Boolean = true
         override fun authenticatedPeerDeviceId(): String = "trusted-peer"
@@ -341,6 +567,7 @@ class WebRtcFileTransferControllerControlFlowTest {
                 )
                 messages += message
                 ops += message.op
+                onFileTransferMessage?.invoke(message)
             }
             peer?.onData?.invoke(bytes)
             return true

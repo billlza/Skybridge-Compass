@@ -273,6 +273,7 @@ class SkyBridgeWebRtcConnectionManager(
     private val appContext: Context,
     private val networkSettingsOverrideProvider: (suspend () -> NetworkSettings?)? = null,
     private val localIdentityProvider: (() -> LocalP2PIdentity)? = null,
+    private val peerKemStoreProvider: (() -> PeerKemKeyStore)? = null,
     private val userAuthContextProvider: (suspend () -> SignalServerClient.UserAuthContext?)? = null,
     private val localBusinessIdentityProvider: (() -> LocalPeerBusinessIdentity?)? = null,
     private val productSessionAuthorityStore: ProductSessionAuthorityStore? = null,
@@ -359,7 +360,9 @@ class SkyBridgeWebRtcConnectionManager(
     private val localIdentity: LocalP2PIdentity by lazy {
         localIdentityProvider?.invoke() ?: LocalP2PIdentity(appContext)
     }
-    private val peerKemStore: PeerKemKeyStore by lazy { PeerKemKeyStore(appContext) }
+    private val peerKemStore: PeerKemKeyStore by lazy {
+        peerKemStoreProvider?.invoke() ?: PeerKemKeyStore(appContext)
+    }
     private val appMessageCodec: AppMessageCodec = AppMessageCodec()
     private val routeBindingConsumer: AuthenticatedRouteBindingConsumer? =
         productSessionAuthorityStore?.let(::AuthenticatedRouteBindingConsumer)
@@ -1065,7 +1068,11 @@ class SkyBridgeWebRtcConnectionManager(
     /** Returns true once the current peer has published PQC bootstrap material into the local alias store. */
     fun hasBootstrappedPeerKemForCurrentPeer(): Boolean {
         val owner = sessionOwnerGate.current()
-        val pending = owner?.let { currentPendingJoinBootstrapKeys(it, currentPeerId()) }
+        val pending = if (diagnosticsConfig.existingTrustOnly) {
+            null
+        } else {
+            owner?.let { currentPendingJoinBootstrapKeys(it, currentPeerId()) }
+        }
         if (
             pending?.qPeriaptPublicKey != null ||
             pending?.xWingPublicKey != null ||
@@ -1074,7 +1081,7 @@ class SkyBridgeWebRtcConnectionManager(
             return true
         }
         return currentPeerKemCandidateIds().any { peerId ->
-            val peerKem = peerKemStore.load(peerId)
+            val peerKem = loadPeerKem(peerId)
             peerKem.qPeriaptPublicKey != null ||
                 peerKem.xWingPublicKey != null ||
                 peerKem.mlKem768PublicKey != null
@@ -1084,13 +1091,15 @@ class SkyBridgeWebRtcConnectionManager(
     /** Returns true once the current peer has published Q-Periapt bootstrap material. */
     fun hasBootstrappedPeerQPeriaptForCurrentPeer(): Boolean {
         val owner = sessionOwnerGate.current()
-        if (owner?.let { currentPendingJoinBootstrapKeys(it, currentPeerId()) }
+        if (!diagnosticsConfig.existingTrustOnly && owner?.let {
+                currentPendingJoinBootstrapKeys(it, currentPeerId())
+            }
                 ?.qPeriaptPublicKey != null
         ) {
             return true
         }
         return currentPeerKemCandidateIds().any { peerId ->
-            peerKemStore.load(peerId).qPeriaptPublicKey != null
+            loadPeerKem(peerId).qPeriaptPublicKey != null
         }
     }
 
@@ -1101,6 +1110,13 @@ class SkyBridgeWebRtcConnectionManager(
         }
         return candidateIds
     }
+
+    private fun loadPeerKem(peerId: String): PeerKemKeyStore.PeerKemPublicKeys =
+        if (diagnosticsConfig.existingTrustOnly) {
+            peerKemStore.loadVerifiedReadOnly(peerId)
+        } else {
+            peerKemStore.load(peerId)
+        }
 
     fun debugKickoffHandshakeNow() {
         val owner = sessionOwnerGate.current() ?: return
@@ -2705,7 +2721,6 @@ class SkyBridgeWebRtcConnectionManager(
             snapshot.remoteSignalingId?.let { add(it) }
         }
         val trustedPeerStore = localIdentity.trustedPeerStore()
-        val storeConflict = trustedPeerStore.corruptionConflictOrNull()
         val currentAuthority = snapshot.expectedAuthority
         if (currentAuthority != null &&
             !currentAuthority.protocolPublicKeyFingerprint.equals(
@@ -2716,6 +2731,54 @@ class SkyBridgeWebRtcConnectionManager(
             failSecureTransport(owner, "authenticated product-session authority binding changed")
             return
         }
+        if (diagnosticsConfig.existingTrustOnly) {
+            val admission = trustedPeerStore.evaluateExactExistingAuthorityReadOnly(
+                deviceIds = aliasIds,
+                protocolPublicKeyFingerprint = observedProtocolFingerprint
+            )
+            if (admission.conflict != null || admission.exactAuthority == null) {
+                failSecureTransport(owner, "formal diagnostic requires exact existing peer trust")
+                return
+            }
+            val presentedKem = try {
+                PeerKemKeyStoreRecords.materialize(
+                    kemPublicKeys = payload.kemPublicKeys,
+                    platform = payload.platform,
+                    osVersion = payload.osVersion
+                )
+            } catch (_: IllegalArgumentException) {
+                failSecureTransport(owner, "formal diagnostic peer KEM material is invalid")
+                return
+            }
+            val existingKem = try {
+                peerKemStore.loadVerifiedReadOnly(peerId)
+            } catch (_: RuntimeException) {
+                failSecureTransport(owner, "formal diagnostic existing peer KEM trust is unreadable")
+                return
+            }
+            if (!existingKem.hasSamePeerKemMaterial(presentedKem)) {
+                failSecureTransport(owner, "formal diagnostic peer KEM trust is missing or changed")
+                return
+            }
+            var admitted = false
+            val current = runIfCurrentSession(owner) {
+                if (observedHandshakeAuthority == observedAuthority) {
+                    remoteDeviceId = peerId
+                    admitted = true
+                }
+            }
+            if (!current || !admitted) {
+                failSecureTransport(
+                    owner,
+                    "formal diagnostic pairing attempt was replaced before existing-trust admission"
+                )
+                return
+            }
+            sendPairingIdentityExchangeIfNeeded(owner, force = true)
+            maybeStartPqcRekey(owner, trigger = "existing_pairing_identity_exchange")
+            return
+        }
+        val storeConflict = trustedPeerStore.corruptionConflictOrNull()
         val exactExistingAuthority = if (storeConflict == null) {
             trustedPeerStore.findExactVerifiedAuthorityReadOnly(
                 deviceIds = aliasIds,
@@ -3212,8 +3275,11 @@ class SkyBridgeWebRtcConnectionManager(
         peerId: String?
     ): PeerKemKeyStore.PeerKemPublicKeys {
         val normalizedPeerId = peerId?.trim()?.takeIf { it.isNotEmpty() }
-        val persisted = normalizedPeerId?.let(peerKemStore::load)
+        val persisted = normalizedPeerId?.let(::loadPeerKem)
             ?: PeerKemKeyStore.PeerKemPublicKeys()
+        if (diagnosticsConfig.existingTrustOnly) {
+            return persisted
+        }
         val pending = currentPendingJoinBootstrapKeys(owner, normalizedPeerId)
             ?: return persisted
         return PeerKemKeyStore.PeerKemPublicKeys(

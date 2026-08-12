@@ -783,7 +783,7 @@ public struct FileTransfer: Identifiable, Codable, Sendable {
     public var localPath: String?
     
     public init(
-        id: String = UUID().uuidString,
+        id: String = UUID().uuidString.lowercased(),
         fileName: String,
         fileSize: Int64,
         fileType: FileType = .other,

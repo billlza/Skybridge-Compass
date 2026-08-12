@@ -116,6 +116,8 @@ class DeliveryRequiresCompleteAckPropertyTest : FunSpec({
                     CrossNetworkFileTransferMessage(
                         op = CrossNetworkFileTransferOp.completeAck,
                         transferId = transferId,
+                        receivedBytes = payload.size.toLong(),
+                        fileSha256 = sha256(payload),
                     )
                 )
             )
@@ -181,7 +183,8 @@ class DeliveryRequiresCompleteAckPropertyTest : FunSpec({
                 // 以 error 结束：批内状态为 FAILED，绝不计入已送达。
                 controller.batchProgress.value.completedCount shouldBe 0
                 controller.batchProgress.value.failedCount shouldBe 1
-                (controller.progress.value.lastStatus?.startsWith("peer error") == true) shouldBe true
+                controller.progress.value.lastStatus shouldBe
+                    "send failed: peer error: merkle root mismatch"
                 errorCases++
             } else {
                 // 对端完全沉默：既无 completeAck 也无 error ⇒ 仍呈现为进行中。

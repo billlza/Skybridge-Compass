@@ -121,6 +121,69 @@ class TrustedPeerStoreRoundTripTest {
     }
 
     @Test
+    fun exactExistingAdmissionIsAtomicReadOnlyAndPreservesCorruptionMarker() {
+        val prefs = InMemorySharedPreferences()
+        val store = TrustedPeerStore(prefs)
+        store.upsertVerifiedCurrentPathAuthority(
+            deviceId = macDeviceId,
+            protocolPublicKeyFingerprint = macFingerprint
+        )
+        prefs.edit()
+            .putBoolean(TrustedPeerStore.KEY_CORRUPTED, true)
+            .putString(TrustedPeerStore.KEY_CORRUPTION_DETAIL, "existing marker")
+            .apply()
+        val before = prefs.all.toMap()
+
+        val admission = store.evaluateExactExistingAuthorityReadOnly(
+            deviceIds = listOf(macDeviceId),
+            protocolPublicKeyFingerprint = macFingerprint
+        )
+
+        assertNull(admission.exactAuthority)
+        assertEquals(PairingTrustConflict.TRUST_STORE_CORRUPTED, admission.conflict)
+        assertEquals(before, prefs.all)
+    }
+
+    @Test
+    fun exactExistingAdmissionDoesNotCreateCorruptionMarkerForMalformedRecords() {
+        val prefs = InMemorySharedPreferences()
+        prefs.edit()
+            .putString(TrustedPeerStore.KEY_RECORDS_JSON, "{not-json")
+            .apply()
+        val before = prefs.all.toMap()
+
+        val admission = TrustedPeerStore(prefs).evaluateExactExistingAuthorityReadOnly(
+            deviceIds = listOf(macDeviceId),
+            protocolPublicKeyFingerprint = macFingerprint
+        )
+
+        assertNull(admission.exactAuthority)
+        assertEquals(PairingTrustConflict.TRUST_STORE_CORRUPTED, admission.conflict)
+        assertEquals(before, prefs.all)
+        assertFalse(prefs.contains(TrustedPeerStore.KEY_CORRUPTED))
+    }
+
+    @Test
+    fun exactExistingAdmissionReturnsOneProductAuthorityWithoutMutation() {
+        val prefs = InMemorySharedPreferences()
+        val store = TrustedPeerStore(prefs)
+        store.upsertVerifiedCurrentPathAuthority(
+            deviceId = macDeviceId,
+            protocolPublicKeyFingerprint = macFingerprint
+        )
+        val before = prefs.all.toMap()
+
+        val admission = store.evaluateExactExistingAuthorityReadOnly(
+            deviceIds = listOf(macDeviceId),
+            protocolPublicKeyFingerprint = macFingerprint
+        )
+
+        assertNotNull(admission.exactAuthority)
+        assertNull(admission.conflict)
+        assertEquals(before, prefs.all)
+    }
+
+    @Test
     fun readOnlyIncludingInactivePreservesExistingCorruptionMarkerWithValidJson() {
         val prefs = InMemorySharedPreferences()
         writeRecords(

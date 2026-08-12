@@ -716,6 +716,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         precondition(maxChunkBytes > 0, "maxChunkBytes must be greater than zero")
 
         try await gate.run {
+            try Task.checkCancellation()
             var framed = Data()
             var length = UInt32(payload.count).bigEndian
             framed.append(Data(bytes: &length, count: 4))
@@ -733,6 +734,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     timeout: drainTimeout,
                     channel: channel
                 )
+                try Task.checkCancellation()
                 let end = min(offset + maxChunkBytes, framed.count)
                 let chunk = Data(framed[offset..<end])
                 try send(chunk, over: channel)
@@ -745,6 +747,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 timeout: drainTimeout,
                 channel: channel
             )
+            try Task.checkCancellation()
         }
     }
 

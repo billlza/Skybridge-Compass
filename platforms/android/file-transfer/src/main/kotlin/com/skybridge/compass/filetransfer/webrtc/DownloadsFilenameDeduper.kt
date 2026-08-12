@@ -35,15 +35,26 @@ object DownloadsFilenameDeduper {
     ): String {
         if (!nameExists(desiredName)) return desiredName
 
+        for (i in 1..MAX_SUFFIX) {
+            val candidate = collisionCandidate(desiredName, i)
+            if (!nameExists(candidate)) return candidate
+        }
+        val (base, ext) = splitName(desiredName)
+        return "$base-${timestampProvider()}${ext?.let { ".$it" }.orEmpty()}"
+    }
+
+    internal fun collisionCandidate(desiredName: String, collisionIndex: Int): String {
+        require(collisionIndex >= 0) { "collision index must be non-negative" }
+        if (collisionIndex == 0) return desiredName
+        val (base, ext) = splitName(desiredName)
+        return if (ext == null) "$base ($collisionIndex)" else "$base ($collisionIndex).$ext"
+    }
+
+    private fun splitName(desiredName: String): Pair<String, String?> {
         val dot = desiredName.lastIndexOf('.')
         val hasExt = dot > 0 && dot < desiredName.lastIndex
         val base = if (hasExt) desiredName.substring(0, dot) else desiredName
-        val ext = if (hasExt) desiredName.substring(dot + 1) else ""
-
-        for (i in 1..MAX_SUFFIX) {
-            val candidate = if (hasExt) "$base ($i).$ext" else "$base ($i)"
-            if (!nameExists(candidate)) return candidate
-        }
-        return "$base-${timestampProvider()}${if (hasExt) ".$ext" else ""}"
+        val ext = if (hasExt) desiredName.substring(dot + 1) else null
+        return base to ext
     }
 }

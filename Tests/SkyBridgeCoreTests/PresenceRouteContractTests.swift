@@ -113,7 +113,7 @@ final class PresenceRouteContractTests: XCTestCase {
         XCTAssertEqual(resolved.transferPort, 9528)
     }
 
-    func testResolveInboundPresenceRouteFallsBackToEndpointAddressWhenDiscoveryLags() {
+    func testResolveInboundPresenceRouteDoesNotInventAnUnboundTransferPort() {
         let resolved = P2PDiscoveryService.resolveInboundPresenceRoute(
             peerId: "id:\(UUID().uuidString.lowercased())",
             endpointLabel: "peer:10.0.0.42",
@@ -122,6 +122,6 @@ final class PresenceRouteContractTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved.displayAddress, "10.0.0.42")
-        XCTAssertEqual(resolved.transferPort, 8080)
+        XCTAssertEqual(resolved.transferPort, 0)
     }
 }

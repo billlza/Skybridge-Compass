@@ -30,9 +30,8 @@ import java.util.UUID
  * 任务 11.12。属性分两半，分别覆盖发送侧与接收侧的续传起点：
  *
  * **发送侧（经真实入口 [WebRtcFileTransferController.resumeSendFromCheckpoint]）**：
- * 对任意"已确认分块集合"，续传首轮重发的分块集合**恰好**是其补集——已确认的分块一个都不重传
- * （R5.6"不重传已确认的分块"），未确认的一个都不漏；且续传仍会重发 metadata 与 complete 以推动
- * 对端定案，并注册发送上下文使定向 NACK 仍只补发被点名的那一块。
+ * wire 不携带 attempt generation，恢复必须生成 fresh transferId，旧 ACK 对新 id 没有权限；因此
+ * 首轮从 0 重发全部块。此性质以额外带宽换取 delayed ACK 无法把新 generation 误判送达。
  *
  * **接收侧（经真实入口 [ResumeReceivePlanner.restoreContiguousPrefix]）**：
  * 恢复出的前缀长度**恰好**是分块对齐的部分文件长度所代表的连续块数，起点即"最后一个校验通过的
@@ -50,7 +49,7 @@ class ResumeStartPointPropertyTest : FunSpec({
         Arb.int(1..24),
     ) { chunkSize, chunks -> chunkSize to chunks }
 
-    test("Property 28 (发送侧): 续传只重发未确认分块，起点即最后一个已确认边界") {
+    test("Property 28 (发送侧): fresh-id 恢复从零重发且隔离旧 ACK") {
         var noneAcked = 0
         var someAcked = 0
         var allAcked = 0
@@ -82,27 +81,25 @@ class ResumeStartPointPropertyTest : FunSpec({
                 totalChunks = chunks,
             ).copy(ackedChunks = acked.toIntArray())
 
-            controller.resumeSendFromCheckpoint(
+            val recoveryId = controller.resumeSendFromCheckpoint(
                 checkpoint = checkpoint,
                 owner = TestWebRtcSecureOperationOwner,
                 mimeType = "application/octet-stream",
                 openStream = { ByteArrayInputStream(payload) },
             )
 
-            // 核心断言：首轮重发的分块集合 == 未确认分块集合（补集），逐元素相等。
+            recoveryId shouldBe UUID.fromString(recoveryId).toString()
+            (recoveryId == transferId) shouldBe false
             val resentIndices = transport.messagesOf(CrossNetworkFileTransferOp.chunk)
                 .mapNotNull { it.chunkIndex }
-            val expectedResend = (0 until chunks).filterNot { it in acked }
-            resentIndices shouldBe expectedResend
-
-            // 已确认的分块一个都没被重传。
-            resentIndices.none { it in acked } shouldBe true
+            resentIndices shouldBe (0 until chunks).toList()
 
             // 续传仍重发 metadata 与 complete（推动对端定案），且分块字节与原文一致。
             transport.messagesOf(CrossNetworkFileTransferOp.metadata)
-                .any { it.transferId == transferId } shouldBe true
+                .any { it.transferId == recoveryId } shouldBe true
             transport.messagesOf(CrossNetworkFileTransferOp.complete)
-                .any { it.transferId == transferId } shouldBe true
+                .any { it.transferId == recoveryId } shouldBe true
+            transport.messages.none { it.transferId == transferId } shouldBe true
             transport.messagesOf(CrossNetworkFileTransferOp.chunk).forEach { message ->
                 val index = requireNotNull(message.chunkIndex)
                 val data = requireNotNull(message.chunkData)
@@ -120,7 +117,7 @@ class ResumeStartPointPropertyTest : FunSpec({
                 encodeFt(
                     CrossNetworkFileTransferMessage(
                         op = CrossNetworkFileTransferOp.chunkAck,
-                        transferId = transferId,
+                        transferId = recoveryId,
                         missingChunks = intArrayOf(nackTarget),
                         message = "missingChunks",
                     )
@@ -137,7 +134,7 @@ class ResumeStartPointPropertyTest : FunSpec({
             }
 
             // 测试卫生（在全部断言之后）：释放本次迭代的补发循环。
-            controller.cancel(transferId)
+            controller.cancel(recoveryId)
         }
 
         // 非空真保证：未确认/部分确认/全确认三个分支都被走到。

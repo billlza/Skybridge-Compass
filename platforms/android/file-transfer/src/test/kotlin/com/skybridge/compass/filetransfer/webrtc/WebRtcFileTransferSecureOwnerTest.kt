@@ -45,7 +45,10 @@ class WebRtcFileTransferSecureOwnerTest {
         val ownerB = transport.replaceTestSecureOwner()
         assertFalse(ownerA === ownerB)
 
-        controller.handleIncoming(ownerA, message(CrossNetworkFileTransferOp.completeAck, transferA))
+        controller.handleIncoming(
+            ownerA,
+            completeAck(transferA, "alpha".encodeToByteArray()),
+        )
         controller.handleIncoming(
             ownerA,
             message(
@@ -68,11 +71,7 @@ class WebRtcFileTransferSecureOwnerTest {
         )
         controller.handleIncoming(
             ownerB,
-            message(
-                op = CrossNetworkFileTransferOp.completeAck,
-                transferId = transferB,
-                receivedBytes = 5,
-            ),
+            completeAck(transferB, "bravo".encodeToByteArray()),
         )
 
         assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
@@ -146,11 +145,7 @@ class WebRtcFileTransferSecureOwnerTest {
 
         controller.handleIncoming(
             ownerB,
-            message(
-                op = CrossNetworkFileTransferOp.completeAck,
-                transferId = transferB,
-                receivedBytes = 5,
-            ),
+            completeAck(transferB, "new!!".encodeToByteArray()),
         )
         assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
     }
@@ -216,6 +211,17 @@ class WebRtcFileTransferSecureOwnerTest {
             receivedBytes = receivedBytes,
         ),
     ).encodeToByteArray()
+
+    private fun completeAck(transferId: String, payload: ByteArray): ByteArray =
+        json.encodeToString(
+            CrossNetworkFileTransferMessage.serializer(),
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.completeAck,
+                transferId = transferId,
+                receivedBytes = payload.size.toLong(),
+                fileSha256 = MessageDigest.getInstance("SHA-256").digest(payload),
+            ),
+        ).encodeToByteArray()
 
     private fun metadata(transferId: String, fileName: String, bytes: ByteArray): ByteArray =
         json.encodeToString(

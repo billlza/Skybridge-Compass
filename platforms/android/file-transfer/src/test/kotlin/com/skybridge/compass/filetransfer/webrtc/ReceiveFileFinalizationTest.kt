@@ -2,6 +2,9 @@ package com.skybridge.compass.filetransfer.webrtc
 
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
+import java.nio.file.StandardOpenOption
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -39,6 +42,27 @@ class ReceiveFileFinalizationTest {
 
             assertTrue(result.isSuccessful)
             assertEquals(byteArrayOf(1, 2, 3).toList(), file.readBytes().toList())
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun exclusiveFileChannelIsForcedAndClosedBeforeCommitEligibility() {
+        val file = File.createTempFile("skybridge-channel-finalization-", ".partial")
+        try {
+            val channel = FileChannel.open(
+                file.toPath(),
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE,
+            )
+            channel.write(ByteBuffer.wrap(byteArrayOf(4, 5, 6)))
+
+            val result = closeReceiveFileForFinalization(channel)
+
+            assertTrue(result.isSuccessful)
+            assertFalse(channel.isOpen)
+            assertEquals(byteArrayOf(4, 5, 6).toList(), file.readBytes().toList())
         } finally {
             file.delete()
         }

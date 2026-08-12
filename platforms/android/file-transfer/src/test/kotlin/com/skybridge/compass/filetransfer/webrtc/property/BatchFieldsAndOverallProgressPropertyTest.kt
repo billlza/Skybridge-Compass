@@ -117,11 +117,14 @@ class BatchFieldsAndOverallProgressPropertyTest : FunSpec({
             // 以随机顺序确认各文件，验证整体进度与确认顺序无关、只与已确认字节数有关。
             val shuffledMetas = metadatas.shuffled(random)
             shuffledMetas.forEachIndexed { confirmedCount, meta ->
+                val complete = completes.single { it.transferId == meta.transferId }
                 controller.handleIncoming(
                     encodeFt(
                         CrossNetworkFileTransferMessage(
                             op = CrossNetworkFileTransferOp.completeAck,
                             transferId = meta.transferId,
+                            receivedBytes = complete.receivedBytes,
+                            fileSha256 = complete.fileSha256,
                         )
                     )
                 )

@@ -324,15 +324,27 @@ public actor KeychainManager {
     }
     
     // MARK: - Device Identity
+
+    /// Loads the existing stable device identifier without creating or updating Keychain state.
+    public nonisolated func loadDeviceId() -> String? {
+        let service = "SkyBridge.Identity"
+        let account = "DeviceUUID"
+        guard let data = exportKey(service: service, account: account),
+              let value = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
     
     /// 获取或生成设备 ID
     public nonisolated func getOrGenerateDeviceId() -> String {
         let service = "SkyBridge.Identity"
         let account = "DeviceUUID"
         
-        if let data = exportKey(service: service, account: account),
-           let uuidString = String(data: data, encoding: .utf8) {
-            return uuidString
+        if let existing = loadDeviceId() {
+            return existing
         }
         
         let newUUID = UUID().uuidString

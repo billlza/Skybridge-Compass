@@ -7,10 +7,14 @@ import com.skybridge.compass.filetransfer.webrtc.resume.TransferCheckpointStore
 import com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferMessage
 import com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferOp
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -140,6 +144,156 @@ class CheckpointMutationQueueTest {
         assertEquals(listOf(transferId), store.deletedTransferIds)
     }
 
+    @Test
+    fun lateCheckpointDeleteFailureCannotOverwriteAcknowledgedTerminalProgress() = runBlocking {
+        val store = DelayedFailingDeleteStore()
+        val transport = PropertyRecordingTransport()
+        val controller = controller(store, transport)
+        val transferId = UUID.randomUUID().toString()
+        val payload = byteArrayOf(0x2A)
+
+        controller.sendBytesAsFile(
+            transferId = transferId,
+            fileName = "late-delete.bin",
+            bytes = payload,
+            chunkSize = 1,
+        )
+        controller.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.completeAck,
+                    transferId = transferId,
+                    receivedBytes = 1,
+                    fileSha256 = java.security.MessageDigest.getInstance("SHA-256").digest(payload),
+                ),
+            ),
+        )
+        assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
+        withTimeout(TEST_TIMEOUT_MS) { store.deleteStarted.await() }
+        store.releaseDelete.complete(Unit)
+        withTimeout(TEST_TIMEOUT_MS) {
+            while (!store.failureThrown.isCompleted) yield()
+        }
+        repeat(5) { yield() }
+
+        assertTrue(controller.isOperationAcknowledged(transferId))
+        assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
+    }
+
+    @Test
+    fun oldOwnerLateCheckpointFailureCannotFailReplacementAttemptWithSameTransferId() = runBlocking {
+        val store = BlockingSecondSaveFailureStore()
+        val transport = PropertyRecordingTransport()
+        val controller = controller(store, transport)
+        val transferId = UUID.randomUUID().toString()
+
+        controller.sendBytesAsFile(
+            transferId = transferId,
+            fileName = "owner-a.bin",
+            bytes = byteArrayOf(0x2A),
+            chunkSize = 1,
+        )
+        val ownerA = transport.currentTestSecureOwner()
+        controller.handleIncoming(
+            ownerA,
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.chunkAck,
+                    transferId = transferId,
+                    chunkIndex = 0,
+                ),
+            ),
+        )
+        withTimeout(TEST_TIMEOUT_MS) { store.secondSaveStarted.await() }
+
+        val ownerB = transport.replaceTestSecureOwner()
+        val localDeletion = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.deleteCheckpoint(transferId)
+        }
+        val sendsBeforeB = transport.messages.size
+        val sendB = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.sendBytesAsFile(
+                transferId = transferId,
+                fileName = "owner-b.bin",
+                bytes = byteArrayOf(0x33),
+                chunkSize = 1,
+            )
+        }
+        withTimeout(TEST_TIMEOUT_MS) {
+            while (!controller.isCurrentOperation(transferId)) yield()
+        }
+        val progressBeforeLateFailure = controller.progress.value
+        val messagesBeforeLateFailure = transport.messages.size
+
+        store.releaseSecondSave.complete(Unit)
+        val typed = withTimeout(TEST_TIMEOUT_MS) {
+            controller.checkpointMutationFailure.first { it?.owner === ownerA }
+        }
+        withTimeout(TEST_TIMEOUT_MS) { store.thirdSaveStarted.await() }
+
+        assertSame(ownerA, typed?.owner)
+        assertTrue(typed?.attemptGeneration != null)
+        assertFalse(ownerA === ownerB)
+        assertTrue(controller.isCurrentOperation(transferId))
+        assertEquals(progressBeforeLateFailure, controller.progress.value)
+        assertEquals(messagesBeforeLateFailure, transport.messages.size)
+
+        store.releaseThirdSave.complete(Unit)
+        withTimeout(TEST_TIMEOUT_MS) { sendB.await() }
+        withTimeout(TEST_TIMEOUT_MS) { localDeletion.await() }
+        assertEquals("sent complete", controller.progress.value.lastStatus)
+        assertTrue(transport.messages.drop(sendsBeforeB).all { it.transferId == transferId })
+        assertFalse(controller.progress.value.lastStatus?.contains("synthetic owner A") == true)
+    }
+
+    @Test
+    fun oldOwnerSuccessfulDeleteCallbackCannotRemoveReplacementCheckpointBinding() = runBlocking {
+        val store = BlockingFirstDeleteStore()
+        val transport = PropertyRecordingTransport()
+        val controller = controller(store, transport)
+        val transferId = UUID.randomUUID().toString()
+        val payload = byteArrayOf(0x2A)
+
+        controller.sendBytesAsFile(transferId, "owner-a.bin", bytes = payload, chunkSize = 1)
+        val ownerA = transport.currentTestSecureOwner()
+        controller.handleIncoming(
+            ownerA,
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.completeAck,
+                    transferId = transferId,
+                    receivedBytes = 1,
+                    fileSha256 = java.security.MessageDigest.getInstance("SHA-256").digest(payload),
+                ),
+            ),
+        )
+        withTimeout(TEST_TIMEOUT_MS) { store.firstDeleteStarted.await() }
+
+        transport.replaceTestSecureOwner()
+        val localDeletion = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.deleteCheckpoint(transferId)
+        }
+        val sendB = async(start = CoroutineStart.UNDISPATCHED) {
+            controller.sendBytesAsFile(
+                transferId,
+                "owner-b.bin",
+                bytes = byteArrayOf(0x33),
+                chunkSize = 1,
+            )
+        }
+        withTimeout(TEST_TIMEOUT_MS) {
+            while (!controller.isCurrentOperation(transferId)) yield()
+        }
+
+        store.releaseFirstDelete.complete(Unit)
+        withTimeout(TEST_TIMEOUT_MS) { localDeletion.await() }
+        withTimeout(TEST_TIMEOUT_MS) { sendB.await() }
+
+        assertTrue(controller.isCurrentOperation(transferId))
+        assertEquals("sent complete", controller.progress.value.lastStatus)
+        assertEquals(transferId, store.load(transferId)?.transferId)
+    }
+
     private fun controller(
         store: TransferCheckpointStore,
         transport: PropertyRecordingTransport = PropertyRecordingTransport(),
@@ -265,6 +419,76 @@ class CheckpointMutationQueueTest {
             releaseDelete.await()
             deletedTransferIds += transferId
             deleteCompleted.complete(Unit)
+        }
+    }
+
+    private class DelayedFailingDeleteStore : EmptyCheckpointStore() {
+        private val checkpoints = ConcurrentHashMap<String, TransferCheckpoint>()
+        val deleteStarted = CompletableDeferred<Unit>()
+        val releaseDelete = CompletableDeferred<Unit>()
+        val failureThrown = CompletableDeferred<Unit>()
+
+        override suspend fun load(transferId: String): TransferCheckpoint? = checkpoints[transferId]
+
+        override suspend fun save(checkpoint: TransferCheckpoint) {
+            checkpoints[checkpoint.transferId] = checkpoint
+        }
+
+        override suspend fun delete(transferId: String) {
+            deleteStarted.complete(Unit)
+            releaseDelete.await()
+            failureThrown.complete(Unit)
+            throw IOException("synthetic late delete failure")
+        }
+    }
+
+    private class BlockingSecondSaveFailureStore : EmptyCheckpointStore() {
+        private val saveInvocations = AtomicInteger()
+        private val checkpoints = ConcurrentHashMap<String, TransferCheckpoint>()
+        val secondSaveStarted = CompletableDeferred<Unit>()
+        val releaseSecondSave = CompletableDeferred<Unit>()
+        val thirdSaveStarted = CompletableDeferred<Unit>()
+        val releaseThirdSave = CompletableDeferred<Unit>()
+
+        override suspend fun load(transferId: String): TransferCheckpoint? = checkpoints[transferId]
+
+        override suspend fun save(checkpoint: TransferCheckpoint) {
+            val invocation = saveInvocations.incrementAndGet()
+            if (invocation == 2) {
+                secondSaveStarted.complete(Unit)
+                releaseSecondSave.await()
+                throw IOException("synthetic owner A late save failure")
+            }
+            if (invocation == 3) {
+                thirdSaveStarted.complete(Unit)
+                releaseThirdSave.await()
+            }
+            checkpoints[checkpoint.transferId] = checkpoint
+        }
+
+        override suspend fun delete(transferId: String) {
+            checkpoints.remove(transferId)
+        }
+    }
+
+    private class BlockingFirstDeleteStore : EmptyCheckpointStore() {
+        private val deleteInvocations = AtomicInteger()
+        private val checkpoints = ConcurrentHashMap<String, TransferCheckpoint>()
+        val firstDeleteStarted = CompletableDeferred<Unit>()
+        val releaseFirstDelete = CompletableDeferred<Unit>()
+
+        override suspend fun load(transferId: String): TransferCheckpoint? = checkpoints[transferId]
+
+        override suspend fun save(checkpoint: TransferCheckpoint) {
+            checkpoints[checkpoint.transferId] = checkpoint
+        }
+
+        override suspend fun delete(transferId: String) {
+            if (deleteInvocations.incrementAndGet() == 1) {
+                firstDeleteStarted.complete(Unit)
+                releaseFirstDelete.await()
+            }
+            checkpoints.remove(transferId)
         }
     }
 

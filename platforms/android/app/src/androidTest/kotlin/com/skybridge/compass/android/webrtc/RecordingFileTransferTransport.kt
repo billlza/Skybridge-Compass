@@ -22,7 +22,8 @@ import java.util.Collections
 internal class RecordingFileTransferTransport(
     private val delegate: CrossNetworkWebRtcTransportAdapter,
     private val json: Json,
-    private val expectedTransferId: String,
+    private val expectedOutboundTransferId: String,
+    private val expectedInboundTransferId: String?,
     private val preflightOwner: WebRtcSecureOperationOwner
 ) : CrossNetworkWebRtcTransportAdapter {
     constructor(
@@ -33,12 +34,29 @@ internal class RecordingFileTransferTransport(
     ) : this(
         delegate = AndroidCrossNetworkWebRtcTransportAdapter(manager),
         json = json,
-        expectedTransferId = expectedTransferId,
+        expectedOutboundTransferId = expectedTransferId,
+        expectedInboundTransferId = null,
+        preflightOwner = preflightOwner
+    )
+
+    constructor(
+        manager: SkyBridgeWebRtcConnectionManager,
+        json: Json,
+        expectedOutboundTransferId: String,
+        expectedInboundTransferId: String,
+        preflightOwner: WebRtcSecureOperationOwner
+    ) : this(
+        delegate = AndroidCrossNetworkWebRtcTransportAdapter(manager),
+        json = json,
+        expectedOutboundTransferId = expectedOutboundTransferId,
+        expectedInboundTransferId = expectedInboundTransferId,
         preflightOwner = preflightOwner
     )
 
     private val outboundOps = Collections.synchronizedList(mutableListOf<CrossNetworkFileTransferOp>())
     private val inboundOps = Collections.synchronizedList(mutableListOf<CrossNetworkFileTransferOp>())
+    private val reverseInboundOps = Collections.synchronizedList(mutableListOf<CrossNetworkFileTransferOp>())
+    private val reverseOutboundAcks = Collections.synchronizedList(mutableListOf<CrossNetworkFileTransferOp>())
     private val transferOwnerLock = Any()
     private var transferOwner: WebRtcSecureOperationOwner? = null
     val completeAck = CompletableDeferred<CrossNetworkFileTransferMessage>()
@@ -80,9 +98,7 @@ internal class RecordingFileTransferTransport(
         delegate.onSecurePacketData = { owner, bytes, packetType ->
             if (packetType == WebRtcAppSecureEnvelope.PacketType.FILE_TRANSFER) {
                 handler(owner, bytes)
-                if (owner === exactFileTransferOwnerOrNull()) {
-                    recordInbound(bytes)
-                }
+                recordInbound(owner, bytes)
             }
         }
     }
@@ -194,15 +210,35 @@ internal class RecordingFileTransferTransport(
         inboundOps.toList()
     }
 
-    private fun recordInbound(bytes: ByteArray) {
-        val message = decodeMessage(bytes) ?: return
-        if (message.transferId != expectedTransferId) return
-        inboundOps += message.op
-        if (message.op == CrossNetworkFileTransferOp.completeAck) {
-            completeAck.complete(message)
+    fun reverseInboundOpsSnapshot(): List<CrossNetworkFileTransferOp> = synchronized(reverseInboundOps) {
+        reverseInboundOps.toList()
+    }
+
+    fun reverseOutboundAcksSnapshot(): List<CrossNetworkFileTransferOp> =
+        synchronized(reverseOutboundAcks) {
+            reverseOutboundAcks.toList()
         }
-        if (message.op == CrossNetworkFileTransferOp.error) {
-            peerError.complete(message)
+
+    private fun recordInbound(owner: WebRtcSecureOperationOwner, bytes: ByteArray) {
+        val message = decodeMessage(bytes) ?: return
+        when (message.transferId) {
+            expectedOutboundTransferId -> {
+                if (owner !== exactFileTransferOwnerOrNull()) return
+                inboundOps += message.op
+                if (message.op == CrossNetworkFileTransferOp.completeAck) {
+                    completeAck.complete(message)
+                }
+                if (message.op == CrossNetworkFileTransferOp.error) {
+                    peerError.complete(message)
+                }
+            }
+
+            expectedInboundTransferId -> {
+                check(owner === preflightOwner) {
+                    "Inbound formal file transfer crossed a secure-owner replacement"
+                }
+                reverseInboundOps += message.op
+            }
         }
     }
 
@@ -210,8 +246,18 @@ internal class RecordingFileTransferTransport(
         val message = checkNotNull(decodeMessage(bytes)) {
             "File-transfer smoke emitted an invalid outbound payload"
         }
-        check(message.transferId == expectedTransferId) {
-            "File-transfer smoke emitted a payload for an unexpected transfer"
+        check(
+            message.transferId == expectedOutboundTransferId ||
+                message.transferId == expectedInboundTransferId
+        ) {
+            "File-transfer smoke emitted a payload for an unexpected transfer: ${message.transferId}"
+        }
+        if (message.transferId == expectedInboundTransferId) {
+            check(owner === preflightOwner) {
+                "Inbound formal acknowledgement crossed a secure-owner replacement"
+            }
+            reverseOutboundAcks += message.op
+            return
         }
         synchronized(transferOwnerLock) {
             val currentOwner = transferOwner

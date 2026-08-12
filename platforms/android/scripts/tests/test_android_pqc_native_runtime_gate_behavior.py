@@ -84,6 +84,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,29 @@ def install(
     local_digest = sha256(local_path)
 
     if package_kind == "test":
+        if "-r" in command:
+            record(
+                serial=serial,
+                operation="install",
+                package=package_kind,
+                outcome="unsafe_replace_flag",
+            )
+            print("Failure [FIXTURE_REPLACE_FORBIDDEN]", file=sys.stderr)
+            return 30
+        if serial in scenario.get("race_preinstall_test", []):
+            packages[package_name] = {
+                "path": remote_path,
+                "sha256": local_digest,
+            }
+            save_state(state)
+            record(
+                serial=serial,
+                operation="install",
+                package=package_kind,
+                outcome="race_preexisting",
+            )
+            print("Failure [INSTALL_FAILED_ALREADY_EXISTS]", file=sys.stderr)
+            return 30
         behavior = scenario.get("test_install", {}).get(serial, "success")
         if behavior == "fail_absent":
             record(
@@ -209,7 +233,18 @@ def install(
         package=package_kind,
         outcome="success",
     )
-    print("Success")
+    terminal = scenario.get("test_install_terminal", {}).get(serial, "Success") \
+        if package_kind == "test" else "Success"
+    if terminal == "success_warning":
+        print("Success")
+        print("warning: unexpected fixture output")
+    elif terminal == "success_unknown":
+        print("Success")
+        print("unexpected-terminal")
+    elif terminal == "Success":
+        print("Success")
+    else:
+        raise ValueError(f"unsupported install terminal: {terminal}")
     return 0
 
 
@@ -220,6 +255,39 @@ def shell_command(
     scenario: dict[str, Any],
 ) -> int:
     device = state["devices"][serial]
+    if command[:2] == ["sh", "-c"] and len(command) == 3:
+        script = command[2]
+        package_match = re.search(r'(?:pm path|pidof) \\"([^\"]+)\\"', script)
+        if package_match is None:
+            package_match = re.search(r'(?:pm path|pidof) "([^\"]+)"', script)
+        if package_match is None:
+            record(serial=serial, operation="unsupported_remote_script", script=script)
+            return 60
+        package_name = package_match.group(1)
+        if "pm path" in script:
+            package = installed_package(device, package_name)
+            record(
+                serial=serial,
+                operation="query_package",
+                package=package_name,
+                present=package is not None,
+            )
+            if package is not None:
+                print(f"package:{package['path']}")
+                print("__SKYBRIDGE_REMOTE_STATUS__=0")
+            else:
+                print()
+                print("__SKYBRIDGE_REMOTE_STATUS__=1")
+            return 0
+        record(
+            serial=serial,
+            operation="query_process",
+            package=package_name,
+            present=False,
+        )
+        print()
+        print("__SKYBRIDGE_REMOTE_STATUS__=1")
+        return 0
     if command == ["getprop", "ro.build.version.sdk"]:
         print(device["api"])
         return 0
@@ -608,7 +676,7 @@ class NativePqcRuntimeGateBehaviorTests(unittest.TestCase):
         result = harness.run()
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("test package existed before this run", result.stderr)
+        self.assertIn("package existed before this run", result.stderr)
         self.assertEqual(harness.matching_events("install"), [])
         self.assertEqual(harness.matching_events("uninstall"), [])
         self.assertIsNotNone(harness.installed_test_package(SAMSUNG_SERIAL))
@@ -653,7 +721,7 @@ class NativePqcRuntimeGateBehaviorTests(unittest.TestCase):
             1,
         )
 
-    def test_nonzero_test_install_with_same_digest_removes_only_run_owned_package(self) -> None:
+    def test_nonzero_test_install_with_same_digest_refuses_ambiguous_cleanup(self) -> None:
         harness = self.harness(
             scenario={"test_install": {API37_SERIAL: "fail_same"}}
         )
@@ -661,8 +729,10 @@ class NativePqcRuntimeGateBehaviorTests(unittest.TestCase):
         result = harness.run()
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assert_test_uninstalls(harness, samsung=1, api37=1)
-        self.assertIsNone(harness.installed_test_package(API37_SERIAL))
+        self.assertIn("unconfirmed install", result.stderr)
+        self.assertIn("refusing uninstall", result.stderr)
+        self.assert_test_uninstalls(harness, samsung=1, api37=0)
+        self.assertIsNotNone(harness.installed_test_package(API37_SERIAL))
 
     def test_nonzero_test_install_with_different_digest_refuses_uninstall(self) -> None:
         harness = self.harness(
@@ -672,12 +742,46 @@ class NativePqcRuntimeGateBehaviorTests(unittest.TestCase):
         result = harness.run()
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("not owned by this run", result.stderr)
+        self.assertIn("unconfirmed install", result.stderr)
         self.assertIn("refusing uninstall", result.stderr)
         self.assert_test_uninstalls(harness, samsung=1, api37=0)
         package = harness.installed_test_package(API37_SERIAL)
         self.assertIsNotNone(package)
         self.assertEqual(package["sha256"], "f" * 64)
+
+    def test_preflight_install_race_never_replaces_or_uninstalls_other_package(self) -> None:
+        harness = self.harness(
+            scenario={"race_preinstall_test": [API37_SERIAL]}
+        )
+
+        result = harness.run()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("unconfirmed install", result.stderr)
+        self.assertIn("refusing uninstall", result.stderr)
+        self.assert_test_uninstalls(harness, samsung=1, api37=0)
+        self.assertIsNotNone(harness.installed_test_package(API37_SERIAL))
+        race_events = harness.matching_events(
+            "install", serial=API37_SERIAL, package="test", outcome="race_preexisting"
+        )
+        self.assertEqual(len(race_events), 1)
+
+    def test_extra_install_terminal_is_ambiguous_and_never_auto_uninstalled(self) -> None:
+        for terminal in ("success_warning", "success_unknown"):
+            with self.subTest(terminal=terminal):
+                harness = self.harness(
+                    scenario={
+                        "test_install_terminal": {SAMSUNG_SERIAL: terminal}
+                    }
+                )
+
+                result = harness.run()
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("terminal was invalid", result.stderr)
+                self.assertIn("unconfirmed install", result.stderr)
+                self.assert_test_uninstalls(harness, samsung=0, api37=0)
+                self.assertIsNotNone(harness.installed_test_package(SAMSUNG_SERIAL))
 
     def test_second_instrumentation_failure_cleans_only_current_owned_package(self) -> None:
         harness = self.harness(

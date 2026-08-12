@@ -6,6 +6,10 @@ on:
       - ".gitattributes"
       - ".github/workflows/android-release-quality.yml"
       - "platforms/android/**"
+      - "SkyBridge Compass iOS/**"
+      - "Sources/SkyBridgeCore/**"
+      - "Sources/SkyBridgeProtocolCore/**"
+      - "Tests/SkyBridgeCoreTests/**"
       - "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg"
   push:
     branches:
@@ -15,6 +19,10 @@ on:
       - ".gitattributes"
       - ".github/workflows/android-release-quality.yml"
       - "platforms/android/**"
+      - "SkyBridge Compass iOS/**"
+      - "Sources/SkyBridgeCore/**"
+      - "Sources/SkyBridgeProtocolCore/**"
+      - "Tests/SkyBridgeCoreTests/**"
       - "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg"
 
 permissions:
@@ -82,12 +90,26 @@ jobs:
           python3 -W error -B scripts/tests/test_android_pqc_native_runtime_evidence.py
           python3 -W error -B scripts/tests/test_android_pqc_native_runtime_gate_behavior.py
           python3 -W error -B scripts/tests/test_android_pqc_native_runtime_gate_contract.py
+          python3 -W error -B scripts/tests/test_validate_android_ios_physical_evidence.py
+          python3 -W error -B scripts/tests/test_android_ios_physical_runner_contract.py
+          python3 -W error -B scripts/tests/test_validate_ios_copy_absence.py
+          python3 -W error -B scripts/tests/test_webrtc_smoke_process_ownership.py
+          python3 -W error -B -m py_compile \
+            scripts/lib/webrtc_smoke_process_ownership.py \
+            scripts/validate_android_ios_physical_evidence.py \
+            scripts/validate_ios_copy_absence.py
           bash -n \
             scripts/check_android_packaged_placeholders.sh \
             scripts/check_android_release_aab.sh \
             scripts/lib/strict_gradle_output.sh \
             scripts/run_android_pqc_native_runtime_gate.sh \
+            scripts/run_android_ios_webrtc_offer_smoke.sh \
+            scripts/lib/android_env.sh \
+            scripts/lib/real_device_ios_process_ownership.sh \
+            scripts/lib/repository_layout.sh \
+            scripts/lib/source_provenance.sh \
             scripts/tests/test_android_release_aab_gate.sh \
+            scripts/tests/test_android_env_device_helpers.sh \
             scripts/tests/test_release_artifact_preflight.sh \
             scripts/tests/test_tracked_liboqs_build_contract.sh \
             scripts/tests/test_viewer_only_packaging_gate.sh
@@ -95,13 +117,20 @@ jobs:
             scripts/check_android_packaged_placeholders.sh \
             scripts/check_android_release_aab.sh \
             scripts/lib/android_packaging_policy.sh \
+            scripts/lib/android_env.sh \
+            scripts/lib/real_device_ios_process_ownership.sh \
+            scripts/lib/repository_layout.sh \
+            scripts/lib/source_provenance.sh \
             scripts/lib/strict_gradle_output.sh \
+            scripts/run_android_ios_webrtc_offer_smoke.sh \
             scripts/run_android_pqc_native_runtime_gate.sh \
             scripts/tests/test_android_release_aab_gate.sh \
+            scripts/tests/test_android_env_device_helpers.sh \
             scripts/tests/test_release_artifact_preflight.sh \
             scripts/tests/test_tracked_liboqs_build_contract.sh \
             scripts/tests/test_viewer_only_packaging_gate.sh
           bash scripts/tests/test_android_release_aab_gate.sh
+          bash scripts/tests/test_android_env_device_helpers.sh
           bash scripts/tests/test_release_artifact_preflight.sh
           bash scripts/tests/test_tracked_liboqs_build_contract.sh
           bash scripts/tests/test_viewer_only_packaging_gate.sh

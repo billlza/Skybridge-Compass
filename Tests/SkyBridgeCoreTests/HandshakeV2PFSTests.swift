@@ -160,6 +160,23 @@ final class HandshakeV2PFSTests: XCTestCase {
         await initiator.zeroize()
         await responder.zeroize()
     }
+
+    func testPairingAdvertisementAndHandshakeUseSameCanonicalKEMIdentity() async throws {
+        let provider = MockPQCProvider(supportedSuites: [.mlkem768MLDSA65])
+        let manager = DeviceIdentityKeyManager(
+            kemStorageNamespace: "HandshakeV2PFSTests.\(UUID().uuidString)"
+        )
+        let pairingKeys = try await manager
+            .pairingIdentityKEMPublicKeys(using: provider)
+        let pairingKey = try XCTUnwrap(
+            pairingKeys.first { $0.suiteWireId == CryptoSuite.mlkem768MLDSA65.wireId }
+        )
+
+        let handshakeMaterial = try await DefaultHandshakeKEMIdentityStore(manager: manager)
+            .getOrCreateKEMIdentityKey(for: .mlkem768MLDSA65, provider: provider)
+
+        XCTAssertEqual(handshakeMaterial.publicKey, pairingKey.publicKey)
+    }
 }
 
 @available(macOS 14.0, iOS 17.0, *)
