@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 
+# Rust build output for the portable reference implementation.
+implementation/target/
+
 paper/*.aux
 paper/*.bbl
 paper/*.blg

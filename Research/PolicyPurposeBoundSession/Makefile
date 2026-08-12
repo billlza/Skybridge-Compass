@@ -23,6 +23,7 @@ metadata-check:
 test:
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest -v \
 		artifact.test_validate_claim_ledger \
+		artifact.test_validate_experiment_evidence \
 		submission.test_validate_manuscript_metadata
 
 pdf: metadata-check
