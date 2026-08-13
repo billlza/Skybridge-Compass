@@ -339,7 +339,172 @@ This runtime gate does not replace AAB `PAGE_ALIGNMENT_16K`, ELF `PT_LOAD`
 alignment, release signing, Play distribution identity, or cross-platform
 protocol acceptance.
 
-## Procedure 1: Android Instrumentation Smoke vs macOS WebRTC Smoke Host
+## Procedure 0D: Formal Physical Samsung <-> macOS WebRTC Interoperability
+
+Purpose:
+
+- Prove that the exact Android and macOS source revision completes one real
+  ML-KEM-768 (`0x0101`) WebRTC session on the selected physical Samsung
+  API 36 / 4K device
+- Prove two distinct, deterministic, non-empty file payloads in opposite
+  directions, with exact byte count/SHA-256, receiver-side durable commit, and
+  the exact `completeAck`
+- Preserve the already-installed Android app's preferences, package UID,
+  identity, peer KEM, pairing, and trust material; preserve macOS identity and
+  signed trust material
+- Bind the receipt to the selected ICE route/candidate types/protocol, the same
+  run/session, exact APKs, exact macOS host executable, and one clean source
+  commit
+
+This is the only automated Android <-> macOS WebRTC lane in this repository
+that may produce formal interoperability evidence. The older
+`run_android_apple_webrtc_smoke.sh` and `run_android_mac_lan_remote_smoke.sh`
+scripts remain compatibility/diagnostic tools. Their logs are not accepted as
+formal P2P, durable bidirectional transfer, identity-freeze, or paper evidence.
+
+### Preconditions
+
+- The selected source worktree is clean and `HEAD` is the explicit expected
+  40-hex revision. The runner builds Android APKs and `FormalMacWebRTCHost`
+  once from that revision and freezes their byte hashes before and after the
+  transaction. `Package.resolved` must be tracked by that revision; the host
+  build uses `--disable-automatic-resolution`, so dependency drift is a hard
+  failure rather than an ignored source change.
+- The Samsung target is an explicit ADB serial and reports Samsung, physical
+  `arm64-v8a`, API exactly `36`, and kernel page size exactly `4096`.
+- `com.skybridge.compass.debug` is already installed, is normally closed, and
+  contains the existing identity, ML-KEM, peer KEM, and exact trusted macOS
+  peer material. Missing/corrupt/duplicate/revoked state fails closed. Do not
+  repair it by clearing data or pairing inside this lane.
+- The corresponding macOS identity and exact signed Android trust record/KEM
+  already exist. The formal host never calls the create/migrate/pairing write
+  paths and never persists the supplied auth session.
+- The signaling endpoint is a reachable, credential-free `wss://` URL. Provide
+  a currently usable JWT whose total `iat`-to-`exp` lifetime is no more than
+  15 minutes in a current-user-owned `0600`, single-link regular file under a
+  current-user-owned `0700` directory. The token value is never passed in argv,
+  printed, or copied into public evidence.
+
+Prepare the credential file without putting the token in shell history. One
+safe pattern is to create a private directory, then have an already-authorized
+credential helper write the file directly. Do not use `echo <token>` in a
+recorded terminal session.
+
+### Command
+
+```bash
+EXPECTED_SOURCE_COMMIT="$(git -C "$RELEASE_REPO_ROOT" rev-parse HEAD)"
+SAMSUNG_API36_SERIAL="<exact-physical-Samsung-adb-serial>"
+SIGNALING_WSS_URL="wss://<signaling-authority>/<websocket-path>"
+SHORT_JWT_FILE="/absolute/private/0700-directory/short-jwt"
+TENANT_ID="<exact-token-tenant>"
+MAC_FORMAL_EVIDENCE_DIR="$ANDROID_ROOT/build/interop/android-mac-webrtc-formal/current"
+
+bash scripts/run_android_mac_webrtc_formal_smoke.sh \
+  --device "$SAMSUNG_API36_SERIAL" \
+  --signaling-wss-url "$SIGNALING_WSS_URL" \
+  --token-file "$SHORT_JWT_FILE" \
+  --tenant-id "$TENANT_ID" \
+  --expected-source-commit "$EXPECTED_SOURCE_COMMIT" \
+  --run-dir "$MAC_FORMAL_EVIDENCE_DIR"
+```
+
+The requested run directory must not exist. The runner creates it as a
+current-user-owned `0700` directory. Token/auth/code files are created with
+`O_EXCL | O_NOFOLLOW`, mode `0600`, one hard link, bounded stable reads, and
+inode-exact unlink followed by parent-directory `fsync`.
+
+### Non-destructive Android transaction
+
+- Before the APK overlay, the runner requires the main process to be absent,
+  captures the package UID, and uses read-only `run-as` to record raw size and
+  SHA-256 for `skybridge_p2p_identity.xml`, `skybridge_pqc_keys.xml`, and
+  `skybridge_peer_kem_keys.xml`.
+- The final merged debug manifest is checked before installation. An enabled
+  or disabled receiver for `MY_PACKAGE_REPLACED`, `PACKAGE_REPLACED`,
+  `PACKAGE_ADDED`, or `PACKAGE_CHANGED` rejects the run because package-manager
+  enabled-state overrides could otherwise execute product code during the
+  overlay gap.
+- The main APK is installed only with `adb install --no-streaming -r -t`.
+  The runner never uninstalls it, clears its data, or force-stops it. A signing
+  or version incompatibility therefore remains a visible failure.
+- The dedicated instrumentation package is
+  `com.skybridge.compass.debug.macwebrtc.test`. It must be absent at preflight
+  and is installed without `-r`. The runner gains cleanup ownership only after
+  an exact install transcript and exact device-side APK digest. Ambiguous
+  ownership is preserved for inspection, never guessed.
+- The instrumentation reuses
+  `AppleReleaseInteropOffererAppInstrumentationTest`; there is no second test
+  harness or protocol implementation. Persistent target-app identity and trust
+  are existing-only/read-only. Only run-owned auth/code and inbound payload
+  storage live in the dedicated test package.
+- After both exact processes are quiescent, only the run-owned test package and
+  exact run files are removed. The package UID and three raw preference
+  snapshots must equal their pre-overlay values before a receipt is eligible.
+
+### Typed acceptance receipt
+
+The only success artifact is:
+
+`build/interop/android-mac-webrtc-formal/<run>/android-mac-formal-evidence.json`
+
+The validator rejects duplicate or unknown JSON fields, non-exact types,
+non-finite values, trailing content, a failure result, or an existing receipt
+path. It requires all of the following:
+
+- the same clean commit/tree before and after the transaction
+- the same app APK, dedicated test APK, installed APK digests, Samsung binding,
+  and `FormalMacWebRTCHost` executable before and after
+- one exact host child PID/executable/start token/audit token; no pre-existing
+  process using that executable; exact child exit before cleanup
+- the same run reference and 64-hex session reference on both peers
+- suite `ML-KEM-768`, wire ID `0x0101`, and a selected ICE route of `direct` or
+  `relay` whose local/remote candidate types are each one of
+  `host|srflx|prflx|relay` and whose protocol is `udp|tcp`; `UNKNOWN` is rejected
+- two different canonical UUIDs and the exact canonical payload for
+  `android-to-peer` and `peer-to-android`; both peers report identical non-zero
+  bytes and SHA-256
+- receiver-side durable commit and `completeAck` in both directions
+- Android identity/trust state unchanged both inside instrumentation and from
+  the earlier pre-overlay snapshot; macOS identity/trust state unchanged
+- run-owned inbound payload removed, Android main process absent, exact macOS
+  child absent, dedicated test package removed, auth/code files removed, and no
+  token/code value in runtime logs
+
+The receipt's SHA-256 values are Level 1 accidental mismatch/corruption checks,
+not a signature or remote attestation claim. A successful selected ICE record
+proves the selected route/type/protocol classification observed by the frozen
+session owner; it does not prove a particular Wi-Fi access point or candidate
+pair identifier. A build, unit test, native-PQC runtime gate, legacy smoke log,
+or receipt from another commit is not a substitute for this physical receipt.
+
+### No-device regression checks
+
+```bash
+python3 -W error -B scripts/tests/test_android_mac_webrtc_formal_runner_contract.py
+python3 -W error -B scripts/tests/test_validate_android_mac_webrtc_formal_evidence.py
+python3 -W error -m py_compile \
+  scripts/validate_android_mac_webrtc_formal_evidence.py \
+  scripts/tests/test_android_mac_webrtc_formal_runner_contract.py \
+  scripts/tests/test_validate_android_mac_webrtc_formal_evidence.py
+bash -n scripts/run_android_mac_webrtc_formal_smoke.sh
+shellcheck -x -P . scripts/run_android_mac_webrtc_formal_smoke.sh
+swift build -c debug --disable-automatic-resolution \
+  --product FormalMacWebRTCHost -Xswiftc -warnings-as-errors
+./gradlew \
+  --no-daemon \
+  --no-parallel \
+  --max-workers=2 \
+  --rerun-tasks \
+  --warning-mode all \
+  -PskybridgeMacWebRtcFormalTestApplicationId=com.skybridge.compass.debug.macwebrtc.test \
+  :app:compileDebugAndroidTestKotlin \
+  :app:assembleDebug \
+  :app:assembleDebugAndroidTest
+./gradlew --stop
+```
+
+## Procedure 1: Legacy Android Instrumentation vs macOS WebRTC Diagnostic Host
 
 Purpose:
 
@@ -347,6 +512,10 @@ Purpose:
 - Validate server-issued connection code join flow
 - Validate app-layer session keys are established
 - Validate PQC smoke can be run without silently forcing `classicOnly`
+
+This procedure is retained for development compatibility only. It is not
+formal physical-device or publication evidence and does not supersede
+Procedure 0D.
 
 ### Required parameters
 

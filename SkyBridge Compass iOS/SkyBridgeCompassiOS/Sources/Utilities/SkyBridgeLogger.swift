@@ -55,27 +55,54 @@ public final class SkyBridgeLogger: @unchecked Sendable {
     }
     
     public func info(_ message: String) {
-        logger.info("\(message, privacy: .public)")
-        LogStore.shared.append(level: .info, category: category, message: message)
-        echo(level: .info, message: message)
+        publish(level: .info, message: message)
     }
     
     public func debug(_ message: String) {
-        logger.debug("\(message, privacy: .public)")
-        LogStore.shared.append(level: .debug, category: category, message: message)
-        echo(level: .debug, message: message)
+        publish(level: .debug, message: message)
     }
     
     public func warning(_ message: String) {
-        logger.warning("\(message, privacy: .public)")
-        LogStore.shared.append(level: .warning, category: category, message: message)
-        echo(level: .warning, message: message)
+        publish(level: .warning, message: message)
     }
     
     public func error(_ message: String) {
-        logger.error("\(message, privacy: .public)")
-        LogStore.shared.append(level: .error, category: category, message: message)
-        echo(level: .error, message: message)
+        publish(level: .error, message: message)
+    }
+
+    private func publish(level: LogLevel, message: String) {
+        let persistedMessage = Self.runtimeMessage(
+            message,
+            environment: ProcessInfo.processInfo.environment
+        )
+        switch level {
+        case .debug: logger.debug("\(persistedMessage, privacy: .public)")
+        case .info: logger.info("\(persistedMessage, privacy: .public)")
+        case .warning: logger.warning("\(persistedMessage, privacy: .public)")
+        case .error: logger.error("\(persistedMessage, privacy: .public)")
+        }
+        LogStore.shared.append(level: level, category: category, message: persistedMessage)
+        echo(level: level, message: persistedMessage)
+    }
+
+    static func runtimeMessage(
+        _ message: String,
+        environment: [String: String]
+    ) -> String {
+        guard environment["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"] == "1" else {
+            return message
+        }
+        let rawEvent = message.prefix { !$0.isWhitespace }
+        let event = rawEvent.unicodeScalars.prefix(64).map { scalar -> Character in
+            let value = scalar.value
+            let allowed = (48...57).contains(value) ||
+                (65...90).contains(value) ||
+                (97...122).contains(value) ||
+                scalar == "-" || scalar == "_" || scalar == "."
+            return allowed ? Character(String(scalar)) : "_"
+        }
+        let category = event.isEmpty ? "unknown" : String(event)
+        return "event=\(category) details=<redacted>"
     }
 
     private func echo(level: LogLevel, message: String) {

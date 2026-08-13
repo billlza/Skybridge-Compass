@@ -268,6 +268,9 @@ class AppleReleaseInteropOffererAppInstrumentationTest {
                     manager = manager,
                     secureOwner = result.owner
                 )
+                check(manager.hasExistingTrustPeerKemAdmission(result.owner)) {
+                    "Exact peer-KEM admission changed during the post-success hold"
+                }
                 check(terminalRoute == completionRoute) {
                     "Selected route changed during the post-success hold"
                 }
@@ -483,36 +486,41 @@ private suspend fun sendFileToAppleResponder(
     androidToPeerTransferId: String,
     peerToAndroidTransferId: String?,
 ): OffererFileTransferResult = coroutineScope {
-    val peerMetadataReady = withTimeoutOrNull(fileTransferTimeoutSeconds * 1000L) {
-        while (manager.authenticatedPeerMetadata.value?.deviceId.isNullOrBlank()) {
+    val preflightOwner = withTimeoutOrNull(fileTransferTimeoutSeconds * 1000L) {
+        while (true) {
             when (val state = manager.state.value) {
                 is SkyBridgeWebRtcConnectionManager.State.Failed ->
                     error(
-                        "WebRTC failed while waiting for authenticated peer metadata: " +
+                        "WebRTC failed while waiting for exact peer-KEM admission: " +
                             "${state.message}; signaling=${manager.signalingStatus.value.lastEvent}"
                     )
 
                 else -> Unit
             }
+            val candidate = manager.currentSecureOperationOwner()
+            if (
+                candidate != null &&
+                !manager.authenticatedPeerMetadata.value?.deviceId.isNullOrBlank() &&
+                manager.hasExistingTrustPeerKemAdmission(candidate)
+            ) {
+                return@withTimeoutOrNull candidate
+            }
             delay(100L)
         }
-        true
-    } ?: false
-    if (!peerMetadataReady) {
-        error(
-            "Timed out waiting for authenticated peer metadata before iOS file transfer; " +
-                "managerState=${manager.state.value} " +
-                "signaling=${manager.signalingStatus.value.lastEvent}"
-        )
-    }
+        error("unreachable peer-KEM admission wait loop exited")
+    } ?: error(
+        "Timed out waiting for exact peer-KEM admission before Apple file transfer; " +
+            "managerState=${manager.state.value} " +
+            "signaling=${manager.signalingStatus.value.lastEvent}"
+    )
 
     val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
     val transferId = androidToPeerTransferId
-    val preflightOwner = checkNotNull(manager.currentSecureOperationOwner()) {
-        "File-transfer smoke has no current secure owner after route admission"
-    }
     val sessionRef = manager.requireEstablishedSessionRef()
     routeExpectation.requireAdmittedAtCompletion(manager, preflightOwner)
+    check(manager.hasExistingTrustPeerKemAdmission(preflightOwner)) {
+        "File-transfer smoke lost its exact peer-KEM admission before transport attachment"
+    }
     val transfer = if (peerToAndroidTransferId == null) {
         RecordingFileTransferTransport(
             manager = manager,
@@ -755,6 +763,10 @@ private suspend fun sendFileToAppleResponder(
             ),
             peerToAndroidEvidence.outboundAcks,
         )
+    }
+
+    check(manager.hasExistingTrustPeerKemAdmission(preflightOwner)) {
+        "File-transfer smoke lost its exact peer-KEM admission before completion"
     }
 
     OffererFileTransferResult(

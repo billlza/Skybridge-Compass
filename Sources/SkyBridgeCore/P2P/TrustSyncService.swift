@@ -446,7 +446,7 @@ public final class TrustSyncService: ObservableObject {
         }
         
  // 创建撤销记录
-        let dataToSign = try createDataToSign(for: existing, revoked: true)
+        let dataToSign = try Self.createDataToSign(for: existing, revoked: true)
         let signature = try await keyManager.sign(data: dataToSign)
         let revokedRecord = existing.revoked(signature: signature)
         
@@ -506,6 +506,119 @@ public final class TrustSyncService: ObservableObject {
             guard record.lifecycleState == .active else { return false }
             return record.currentPathAuthorityFingerprint == normalized
         }
+    }
+
+    /// Resolves one exact, signed, active peer authority directly from Keychain for the formal
+    /// Android -> macOS lane.
+    ///
+    /// The read deliberately bypasses `localCache` and the UserDefaults fallback. A malformed
+    /// item, duplicate authority, revoked/inactive authority, legacy unsigned binding, or missing
+    /// ML-KEM-768 key is a terminal error. Nothing is migrated or persisted.
+    public nonisolated static func requireExactExistingFormalPeerTrust(
+        deviceID: String,
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String
+    ) async throws -> FormalMacPeerTrustMaterial {
+        guard protocolSigningAlgorithm == .mlDSA65,
+              let normalizedDeviceID = try? ProtocolIdentityBinding.normalizedDeviceId(deviceID),
+              ProtocolIdentityBinding.isValidFingerprint(protocolPublicKeyFingerprint) else {
+            throw FormalMacInteropError.missingExactPeerTrust
+        }
+        let records = try loadFormalTrustRecordsDirectlyFromKeychain()
+        let normalizedFingerprint = protocolPublicKeyFingerprint.lowercased()
+        let record = try requireExactFormalPeerTrustRecord(
+            records: records,
+            deviceID: normalizedDeviceID,
+            protocolPublicKeyFingerprint: normalizedFingerprint
+        )
+        guard let protocolPublicKey = record.protocolPublicKey,
+              let kemPublicKey = record.kemPublicKeys?.first(where: {
+                $0.suiteWireId == FormalMacInteropCapability.suiteWireID
+              })?.publicKey else {
+            throw FormalMacInteropError.corruptPeerTrust
+        }
+
+        let keyManager = DeviceIdentityKeyManager.shared
+        let localIdentity = try await keyManager.requireExistingIdentityKeyReadOnly()
+        let signedPayload = try createDataToSign(for: record, revoked: false)
+        guard try await keyManager.verify(
+            data: signedPayload,
+            signature: record.signature,
+            publicKey: localIdentity.publicKey
+        ) else {
+            throw FormalMacInteropError.corruptPeerTrust
+        }
+        return FormalMacPeerTrustMaterial(
+            deviceID: normalizedDeviceID,
+            protocolSigningAlgorithm: .mlDSA65,
+            protocolPublicKeyFingerprint: normalizedFingerprint,
+            protocolPublicKey: protocolPublicKey,
+            kemPublicKey: kemPublicKey
+        )
+    }
+
+    nonisolated static func requireExactFormalPeerTrustRecord(
+        records: [TrustRecord],
+        deviceID: String,
+        protocolPublicKeyFingerprint: String
+    ) throws -> TrustRecord {
+        let normalizedDeviceID = try ProtocolIdentityBinding.normalizedDeviceId(deviceID)
+        guard ProtocolIdentityBinding.isValidFingerprint(protocolPublicKeyFingerprint) else {
+            throw FormalMacInteropError.missingExactPeerTrust
+        }
+        let normalizedFingerprint = protocolPublicKeyFingerprint.lowercased()
+        let related = records.filter { record in
+            record.deviceId == normalizedDeviceID
+                || record.currentDeviceId == normalizedDeviceID
+                || record.knownDeviceIds.contains(normalizedDeviceID)
+                || record.currentPathAuthorityFingerprint == normalizedFingerprint
+        }
+        guard !related.isEmpty else { throw FormalMacInteropError.missingExactPeerTrust }
+        if related.contains(where: {
+            $0.isTombstone || $0.isExpired || $0.lifecycleState != .active
+        }) {
+            throw FormalMacInteropError.revokedPeerTrust
+        }
+
+        let exact = related.filter { record in
+            record.deviceId == normalizedDeviceID
+                && record.currentDeviceId == normalizedDeviceID
+                && record.currentPathAuthorityFingerprint == normalizedFingerprint
+        }
+        guard exact.count == 1, let record = exact.first else {
+            throw exact.isEmpty
+                ? FormalMacInteropError.missingExactPeerTrust
+                : FormalMacInteropError.duplicatePeerTrust
+        }
+        // An exact row does not make a conflicting row harmless. The formal authority is the
+        // bijection (deviceID, signing fingerprint); any second active record sharing either side
+        // is ambiguous and must fail rather than selecting the convenient exact match.
+        guard related.count == 1 else {
+            throw FormalMacInteropError.duplicatePeerTrust
+        }
+        guard record.protocolSigningAlgorithm == .mlDSA65,
+              let protocolPublicKey = record.protocolPublicKey,
+              protocolPublicKey.count == 1_952,
+              ProtocolIdentityBinding.computeFingerprint(
+                algorithm: .mlDSA65,
+                publicKeyBytes: protocolPublicKey
+              ) == normalizedFingerprint,
+              record.signatureAlgorithm == .mlDSA65 else {
+            throw FormalMacInteropError.corruptPeerTrust
+        }
+
+        let kemKeys = record.kemPublicKeys ?? []
+        let canonicalKEM = kemKeys.filter {
+            $0.suiteWireId == FormalMacInteropCapability.suiteWireID
+        }
+        guard canonicalKEM.count == 1,
+              let kemPublicKey = canonicalKEM.first?.publicKey,
+              kemPublicKey.count == 1_184,
+              Set(kemKeys.map(\.suiteWireId)).count == kemKeys.count else {
+            throw FormalMacInteropError.corruptPeerTrust
+        }
+
+        return record
     }
 
     public func evaluateCurrentPathBinding(
@@ -872,7 +985,7 @@ public final class TrustSyncService: ObservableObject {
         }
 #endif
 
-        let dataToSign = try createDataToSign(for: record, revoked: false)
+        let dataToSign = try Self.createDataToSign(for: record, revoked: false)
         let signature = try await keyManager.sign(data: dataToSign)
         
         return TrustRecord(
@@ -951,7 +1064,10 @@ public final class TrustSyncService: ObservableObject {
     }
     
  /// 创建待签名数据
-    private func createDataToSign(for record: TrustRecord, revoked: Bool) throws -> Data {
+    nonisolated private static func createDataToSign(
+        for record: TrustRecord,
+        revoked: Bool
+    ) throws -> Data {
         var encoder = DeterministicEncoder()
         encoder.encode(record.deviceId)
         encoder.encode(record.pubKeyFP)
@@ -980,7 +1096,7 @@ public final class TrustSyncService: ObservableObject {
         encoder.encode(record.currentDeviceIdMetadata) { enc, value in
             enc.encode(value)
         }
-        encoder.encode(canonicalKnownDeviceIds(for: record)) { enc, values in
+        encoder.encode(Self.canonicalKnownDeviceIds(for: record)) { enc, values in
             enc.encode(values)
         }
         encoder.encode(record.lifecycleStateMetadata?.rawValue) { enc, value in
@@ -1017,7 +1133,7 @@ public final class TrustSyncService: ObservableObject {
         return encoder.finalize()
     }
 
-    private func canonicalKnownDeviceIds(for record: TrustRecord) -> [String]? {
+    nonisolated private static func canonicalKnownDeviceIds(for record: TrustRecord) -> [String]? {
         guard let knownDeviceIds = record.knownDeviceIdsMetadata, !knownDeviceIds.isEmpty else {
             return nil
         }
@@ -1166,6 +1282,43 @@ public final class TrustSyncService: ObservableObject {
         let dataItems = items.compactMap { $0[kSecValueData as String] as? Data }
         return decodeTrustRecords(from: dataItems, decoder: decoder)
     }
+
+    nonisolated private static func loadFormalTrustRecordsDirectlyFromKeychain() throws -> [TrustRecord] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainConstants.service,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+            kSecReturnAttributes as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var rawResult: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &rawResult)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess,
+              let items = rawResult as? [[String: Any]] else {
+            throw FormalMacInteropError.corruptPeerTrust
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        var seenAccounts = Set<String>()
+        var records: [TrustRecord] = []
+        records.reserveCapacity(items.count)
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  account.hasPrefix(KeychainConstants.recordPrefix),
+                  seenAccounts.insert(account).inserted,
+                  let data = item[kSecValueData as String] as? Data else {
+                throw FormalMacInteropError.duplicatePeerTrust
+            }
+            do {
+                records.append(try decoder.decode(TrustRecord.self, from: data))
+            } catch {
+                throw FormalMacInteropError.corruptPeerTrust
+            }
+        }
+        return records
+    }
     
     private func decodeTrustRecords(from dataItems: [Data], decoder: JSONDecoder = {
         let decoder = JSONDecoder()
@@ -1259,7 +1412,7 @@ public final class TrustSyncService: ObservableObject {
  /// 验证记录签名
     public func verifyRecordSignature(_ record: TrustRecord) async throws -> Bool {
         let signerPublicKey = try await keyManager.getOrCreateIdentityKey().publicKey
-        let currentPayload = try createDataToSign(for: record, revoked: record.isTombstone)
+        let currentPayload = try Self.createDataToSign(for: record, revoked: record.isTombstone)
         if try await keyManager.verify(
             data: currentPayload,
             signature: record.signature,

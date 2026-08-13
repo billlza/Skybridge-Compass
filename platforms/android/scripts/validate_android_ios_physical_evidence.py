@@ -30,6 +30,11 @@ SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
 EXPECTED_BUNDLE_ID = "com.skybridge.compass.ios"
 EXPECTED_ANDROID_APP_PACKAGE = "com.skybridge.compass.debug"
 EXPECTED_ANDROID_TEST_PACKAGE = "com.skybridge.compass.debug.ioswebrtc.test"
+EXPECTED_ANDROID_TEST_CLASS = (
+    "com.skybridge.compass.android.webrtc."
+    "AppleReleaseInteropOffererAppInstrumentationTest"
+)
+EXPECTED_ANDROID_TEST_METHOD = "hostsCodeForAppleResponderUsingAppProcess"
 SUITE_WIRE_ID_PATTERN = re.compile(r"0x[0-9a-f]{4}\Z", re.ASCII)
 ANDROID_SUITE_NAMES = {
     "0x0001": "X_WING",
@@ -52,6 +57,75 @@ IOS_STATUS_TERMINAL_PATTERN = re.compile(
     r"(success session_ref=\S+(?: \S+=\S+)+)$",
     re.ASCII,
 )
+
+
+def _require_android_instrumentation_contract(text: str) -> None:
+    lines = text.splitlines()
+    status_events: list[tuple[dict[str, str], int, int]] = []
+    pending_status: dict[str, str] = {}
+    terminal_codes: list[tuple[int, int]] = []
+    result_lines: list[tuple[str, int]] = []
+    for line_index, line in enumerate(lines):
+        if line.startswith("INSTRUMENTATION_STATUS: "):
+            assignment = line.removeprefix("INSTRUMENTATION_STATUS: ")
+            if "=" not in assignment:
+                _fail("Android instrumentation status contains a bare field")
+            key, value = assignment.split("=", 1)
+            if not key or key in pending_status:
+                _fail("Android instrumentation status contains an empty or duplicate field")
+            pending_status[key] = value
+        elif line.startswith("INSTRUMENTATION_STATUS_CODE: "):
+            code_text = line.removeprefix("INSTRUMENTATION_STATUS_CODE: ")
+            if re.fullmatch(r"-?[0-9]+", code_text) is None or not pending_status:
+                _fail("Android instrumentation status terminal is malformed")
+            status_events.append((pending_status, int(code_text), line_index))
+            pending_status = {}
+        elif line.startswith("INSTRUMENTATION_CODE: "):
+            code_text = line.removeprefix("INSTRUMENTATION_CODE: ")
+            if re.fullmatch(r"-?[0-9]+", code_text) is None:
+                _fail("Android instrumentation terminal code is malformed")
+            terminal_codes.append((int(code_text), line_index))
+        elif line.startswith("INSTRUMENTATION_RESULT: "):
+            result_lines.append(
+                (line.removeprefix("INSTRUMENTATION_RESULT: "), line_index)
+            )
+    if pending_status:
+        _fail("Android instrumentation status block is unterminated")
+    identity = {
+        "class": EXPECTED_ANDROID_TEST_CLASS,
+        "current": "1",
+        "id": "AndroidJUnitRunner",
+        "numtests": "1",
+        "test": EXPECTED_ANDROID_TEST_METHOD,
+    }
+    expected_events = [
+        ({**identity, "stream": ""}, 1),
+        ({**identity, "stream": "."}, 0),
+    ]
+    success_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("SB-ANDROID-APP-OFFER success ")
+    ]
+    ok_indexes = [index for index, line in enumerate(lines) if line == "OK (1 test)"]
+    if (
+        [(fields, code) for fields, code, _ in status_events] != expected_events
+        or len(terminal_codes) != 1
+        or terminal_codes[0][0] != -1
+        or len(result_lines) != 1
+        or result_lines[0][0] != "stream="
+        or len(success_indexes) != 1
+        or len(ok_indexes) != 1
+        or not (
+            status_events[0][2]
+            < success_indexes[0]
+            < status_events[1][2]
+            < result_lines[0][1]
+            < ok_indexes[0]
+            < terminal_codes[0][1]
+        )
+    ):
+        _fail("Android instrumentation did not run one exact canonical test sequence")
 
 
 def _canonical_transfer_id(value: object, label: str) -> str:
@@ -895,6 +969,7 @@ def validate_receipt(arguments: argparse.Namespace) -> dict[str, Any]:
     android_instrumentation = _load_text(
         arguments.android_instrumentation, "Android instrumentation output"
     )
+    _require_android_instrumentation_contract(android_instrumentation)
     storage_marker = (
         "SB-ANDROID-APP-OFFER storage=dedicated-test-package "
         f"package={EXPECTED_ANDROID_TEST_PACKAGE}"

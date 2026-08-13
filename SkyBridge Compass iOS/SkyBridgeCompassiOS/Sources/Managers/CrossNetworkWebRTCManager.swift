@@ -9,6 +9,38 @@ import UIKit
 import UserNotifications
 #endif
 
+private final class IOSSignalingMainActorDeliveryQueue: @unchecked Sendable {
+    typealias Operation = @MainActor @Sendable () -> Void
+
+    private let lock = NSLock()
+    private var pending: [Operation] = []
+    private var draining = false
+
+    func enqueue(_ operation: @escaping Operation) {
+        let shouldStart: Bool = lock.withLock {
+            pending.append(operation)
+            guard !draining else { return false }
+            draining = true
+            return true
+        }
+        guard shouldStart else { return }
+        Task { @MainActor [weak self] in self?.drain() }
+    }
+
+    @MainActor
+    private func drain() {
+        while let operation = lock.withLock({ () -> Operation? in
+            guard !pending.isEmpty else {
+                draining = false
+                return nil
+            }
+            return pending.removeFirst()
+        }) {
+            operation()
+        }
+    }
+}
+
 // MARK: - iOS-local server config (file-local, to avoid target membership issues)
 
 // MARK: - iOS-local crypto helpers (file-local, to avoid target membership issues)
@@ -1205,9 +1237,21 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var signalingShardKey: String?
     private let signalServer = SignalServerClientCompat()
     private let signalingRetryController = SignalingRetryController()
-    private var signalingRecoveryTasksBySessionId: [String: Task<Void, Never>] = [:]
+    private struct SignalingRecoveryTask {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private var signalingRecoveryTasksBySessionId: [String: SignalingRecoveryTask] = [:]
     private var signalingGenerationBySessionId: [String: Int] = [:]
     private var activeSignalingHandleBySessionId: [String: WebSocketSignalingClient.SignalingHandleID] = [:]
+    private struct SignalingTransition: Equatable {
+        let id: UUID
+        let targetSessionID: String
+    }
+    private var signalingTransition: SignalingTransition?
+    private var signalingTransitionWaiters: [
+        UUID: [CheckedContinuation<Void, any Error>]
+    ] = [:]
     private enum SignalingHealth: Equatable {
         case healthy
         case degradedRecoverable
@@ -1240,6 +1284,23 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             && ProcessInfo.processInfo.environment[
                 "SKYBRIDGE_SMOKE_EXPECT_BIDIRECTIONAL_FILE_TRANSFER"
             ] == "1"
+    }
+
+    /// Formal traces preserve only a bounded event category. The connection code is the session
+    /// identifier, peer identifiers are persistent authority, and server errors are untrusted;
+    /// none of those values may reach a run evidence or runtime logging sink.
+    nonisolated static func formalSmokeTraceLine(_ line: String) -> String {
+        let rawEvent = line.prefix { !$0.isWhitespace }
+        let event = rawEvent.unicodeScalars.prefix(64).map { scalar -> Character in
+            let value = scalar.value
+            let allowed = (48...57).contains(value) ||
+                (65...90).contains(value) ||
+                (97...122).contains(value) ||
+                scalar == "-" || scalar == "_" || scalar == "."
+            return allowed ? Character(String(scalar)) : "_"
+        }
+        let category = event.isEmpty ? "unknown" : String(event)
+        return "event=\(category) details=<redacted>"
     }
 
     private func requireFormalInteropSessionNotRetired() throws {
@@ -1977,12 +2038,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         let detachedInboundQueue = inboundQueue
         let detachedScreenInboundQueue = screenInboundQueue
 
+        if let signalingTransition {
+            cancelSignalingTransition(signalingTransition)
+        }
         invalidateFileTransferKeyEpoch(errorMessage: "Session closed during file transfer")
         sessionKeys = nil
         disarmIdleConnectionReminder(clearPrompt: true)
         suppressSignalingRecovery = true
-        for (_, task) in signalingRecoveryTasksBySessionId {
-            task.cancel()
+        for (_, recovery) in signalingRecoveryTasksBySessionId {
+            recovery.task.cancel()
         }
         signalingRecoveryTasksBySessionId.removeAll()
         signaling = nil
@@ -2486,65 +2550,216 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         return components.url ?? wsURL
     }
 
+    private func waitForSignalingTransition(_ transition: SignalingTransition) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            signalingTransitionWaiters[transition.id, default: []].append(continuation)
+        }
+    }
+
+    private func finishSignalingTransition(
+        _ transition: SignalingTransition,
+        result: Result<Void, any Error>
+    ) {
+        guard signalingTransition == transition else { return }
+        signalingTransition = nil
+        let waiters = signalingTransitionWaiters.removeValue(forKey: transition.id) ?? []
+        for waiter in waiters {
+            waiter.resume(with: result)
+        }
+    }
+
+    private func cancelSignalingTransition(_ transition: SignalingTransition) {
+        if signalingTransition == transition {
+            signalingTransition = nil
+        }
+        let waiters = signalingTransitionWaiters.removeValue(forKey: transition.id) ?? []
+        for waiter in waiters {
+            waiter.resume(throwing: CancellationError())
+        }
+    }
+
+    private func requireSignalingTransition(
+        _ transition: SignalingTransition,
+        client: WebSocketSignalingClient? = nil
+    ) throws {
+        try Task.checkCancellation()
+        guard signalingTransition == transition,
+              signalingShardKey == transition.targetSessionID,
+              client == nil || signaling === client else {
+            throw CancellationError()
+        }
+    }
+
+    private func requireCurrentSignalingInstallation(
+        _ client: WebSocketSignalingClient,
+        sessionID: String
+    ) throws {
+        try Task.checkCancellation()
+        guard signaling === client, signalingShardKey == sessionID else {
+            throw CancellationError()
+        }
+    }
+
+    private func isCurrentSignalingRecoveryTask(sessionID: String, id: UUID) -> Bool {
+        signalingRecoveryTasksBySessionId[sessionID]?.id == id
+    }
+
+    private func finishSignalingRecoveryTask(sessionID: String, id: UUID) {
+        guard isCurrentSignalingRecoveryTask(sessionID: sessionID, id: id) else { return }
+        signalingRecoveryTasksBySessionId.removeValue(forKey: sessionID)
+    }
+
     private func ensureSignalingConnected(shardKey: String? = nil) async throws {
         let effectiveShardKey = (shardKey ?? currentSessionId)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedShardKey = (effectiveShardKey?.isEmpty == false) ? effectiveShardKey : nil
-
-        if let signaling, signalingShardKey != normalizedShardKey {
-            let previousShardKey = signalingShardKey
-            appendSmokeTrace("signaling reset shard=\(signalingShardKey ?? "-")->\(normalizedShardKey ?? "-")")
-            await signaling.close()
-            self.signaling = nil
-            signalingShardKey = nil
-            signalingHealth = .healthy
-            if let previousShardKey {
-                signalingGenerationBySessionId.removeValue(forKey: previousShardKey)
-                activeSignalingHandleBySessionId.removeValue(forKey: previousShardKey)
-            }
-        }
-
-        if let signaling {
-            try await signaling.connectOrThrow()
-            return
-        }
-
         guard let sessionId = normalizedShardKey else {
             throw WebSocketSignalingClient.SignalingError.notConnected
         }
 
         let wsURL = try signalingURL(shardKey: sessionId)
-        let newSignaling = WebSocketSignalingClient(url: wsURL, sessionId: sessionId, generation: 0)
-        signaling = newSignaling
-        signalingShardKey = sessionId
-        signalingHealth = .healthy
 
-        await newSignaling.setOnTrace { [weak self] (line: String) in
-            Task { @MainActor in
-                guard let self, self.signaling === newSignaling else { return }
-                self.appendSmokeTrace("ws \(line)")
+        try Task.checkCancellation()
+        if let transition = signalingTransition,
+           transition.targetSessionID == sessionId {
+            try await waitForSignalingTransition(transition)
+            try Task.checkCancellation()
+            guard signalingTransition == nil,
+                  signalingShardKey == sessionId,
+                  signaling != nil else {
+                throw CancellationError()
             }
+            return
         }
-        await newSignaling.setOnEnvelope { [weak self] (env: WebRTCSignalingEnvelope) in
-            Task { @MainActor in
-                guard let self, self.signaling === newSignaling else { return }
-                self.handleEnvelope(env)
+
+        try Task.checkCancellation()
+        if let supersededTransition = signalingTransition {
+            cancelSignalingTransition(supersededTransition)
+        }
+
+        try Task.checkCancellation()
+        let transition = SignalingTransition(id: UUID(), targetSessionID: sessionId)
+        signalingTransition = transition
+        let previousSessionID = signalingShardKey
+        let existingTargetClient = previousSessionID == sessionId ? signaling : nil
+        let detachedClient = existingTargetClient == nil ? signaling : nil
+
+        if detachedClient != nil {
+            signaling = nil
+        }
+        signalingShardKey = sessionId
+        if existingTargetClient == nil {
+            signalingHealth = .healthy
+            activeSignalingHandleBySessionId[sessionId] = nil
+        }
+
+        var candidate = existingTargetClient
+        do {
+            try requireSignalingTransition(transition)
+            if let detachedClient {
+                appendSmokeTrace(
+                    "signaling reset shard=\(RemoteConnectionLogRedaction.session(previousSessionID ?? ""))->\(RemoteConnectionLogRedaction.session(sessionId))"
+                )
+                await detachedClient.close()
+                try requireSignalingTransition(transition)
             }
-        }
-        await newSignaling.setOnServerFrame { [weak self] (frame: WebSocketSignalingClient.SignalingServerFrame) in
-            Task { @MainActor in
-                guard let self, self.signaling === newSignaling else { return }
-                self.handleServerFrame(frame)
+
+            if candidate == nil {
+                let generation = signalingGeneration(for: sessionId) + 1
+                signalingGenerationBySessionId[sessionId] = generation
+                let newSignaling = WebSocketSignalingClient(
+                    url: wsURL,
+                    sessionId: sessionId,
+                    generation: generation
+                )
+                candidate = newSignaling
+                let deliveryQueue = IOSSignalingMainActorDeliveryQueue()
+
+                await newSignaling.setOnTrace { [weak self, weak newSignaling] (line: String) in
+                    guard let newSignaling else { return }
+                    deliveryQueue.enqueue { @MainActor [weak self] in
+                        guard let self,
+                              self.signaling === newSignaling,
+                              self.signalingShardKey == sessionId else { return }
+                        self.appendSmokeTrace("ws \(line)")
+                    }
+                }
+                try requireSignalingTransition(transition)
+
+                await newSignaling.setOnEnvelope { [weak self, weak newSignaling] handle, env in
+                    guard let newSignaling else { return }
+                    deliveryQueue.enqueue { @MainActor [weak self] in
+                        guard let self,
+                              self.signaling === newSignaling,
+                              self.signalingShardKey == sessionId,
+                              self.activeSignalingHandleBySessionId[sessionId] == handle,
+                              handle.sessionId == sessionId,
+                              env.sessionId == sessionId else { return }
+                        self.handleEnvelope(env)
+                    }
+                }
+                try requireSignalingTransition(transition)
+
+                await newSignaling.setOnServerFrame { [weak self, weak newSignaling] handle, frame in
+                    guard let newSignaling else { return }
+                    deliveryQueue.enqueue { @MainActor [weak self] in
+                        guard let self,
+                              self.signaling === newSignaling,
+                              self.signalingShardKey == sessionId,
+                              self.activeSignalingHandleBySessionId[sessionId] == handle,
+                              handle.sessionId == sessionId,
+                              frame.sessionId == nil || frame.sessionId == sessionId else { return }
+                        self.handleServerFrame(frame)
+                    }
+                }
+                try requireSignalingTransition(transition)
+
+                await newSignaling.setOnLifecycleEvent { [weak self, weak newSignaling] event in
+                    guard let newSignaling else { return }
+                    deliveryQueue.enqueue { @MainActor [weak self] in
+                        guard let self,
+                              self.signaling === newSignaling,
+                              self.signalingShardKey == sessionId else { return }
+                        self.handleSignalingLifecycleEvent(event, sessionId: sessionId)
+                    }
+                }
+                try requireSignalingTransition(transition)
+                signaling = newSignaling
             }
-        }
-        await newSignaling.setOnLifecycleEvent { [weak self] (event: WebSocketSignalingClient.SignalingLifecycleEvent) in
-            Task { @MainActor in
-                guard let self, self.signaling === newSignaling else { return }
-                self.handleSignalingLifecycleEvent(event, sessionId: sessionId)
+
+            guard let candidate else {
+                throw WebSocketSignalingClient.SignalingError.notConnected
             }
+            try requireSignalingTransition(transition, client: candidate)
+            appendSmokeTrace(
+                "signaling connect shard=\(RemoteConnectionLogRedaction.session(sessionId)) url=\(WebSocketSignalingClient.redactedURLString(wsURL))"
+            )
+            try await candidate.connectOrThrow()
+            try requireSignalingTransition(transition, client: candidate)
+            finishSignalingTransition(transition, result: .success(()))
+        } catch {
+            let lostAuthority = signalingTransition != transition
+            if let candidate {
+                if !lostAuthority,
+                   signaling === candidate,
+                   signalingShardKey == sessionId {
+                    signaling = nil
+                    activeSignalingHandleBySessionId[sessionId] = nil
+                    signalingHealth = .healthy
+                }
+                await candidate.close()
+            }
+            if signalingTransition == transition {
+                if signaling == nil, signalingShardKey == sessionId {
+                    signalingShardKey = nil
+                }
+                finishSignalingTransition(transition, result: .failure(error))
+            }
+            if lostAuthority {
+                throw CancellationError()
+            }
+            throw error
         }
-        appendSmokeTrace("signaling connect shard=\(sessionId) url=\(WebSocketSignalingClient.redactedURLString(wsURL))")
-        try await newSignaling.connectOrThrow()
     }
 
     private func signalingGeneration(for sessionId: String) -> Int {
@@ -2680,7 +2895,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         )
         appendSmokeTrace("tx \(describeEnvelope(authorizedEnvelope)) retries=\(retries)")
         if shouldDeferRecovery {
-            guard let signaling else {
+            guard let signaling,
+                  signalingShardKey == authorizedEnvelope.sessionId else {
                 signalingHealth = .degradedRecoverable
                 appendSmokeTrace(
                     "tx-suppressed-detached \(describeEnvelope(authorizedEnvelope)) phase=missing_client"
@@ -2692,6 +2908,10 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             }
 
             let lifecyclePhase = await signaling.currentLifecyclePhase()
+            guard (try? requireCurrentSignalingInstallation(
+                signaling,
+                sessionID: authorizedEnvelope.sessionId
+            )) != nil else { return }
             guard lifecyclePhase == .bound else {
                 signalingHealth = .degradedRecoverable
                 appendSmokeTrace(
@@ -2705,9 +2925,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
             do {
                 try await signaling.send(authorizedEnvelope)
+                try requireCurrentSignalingInstallation(
+                    signaling,
+                    sessionID: authorizedEnvelope.sessionId
+                )
                 appendSmokeTrace("tx-ok \(describeEnvelope(authorizedEnvelope))")
                 return
             } catch {
+                guard signaling === self.signaling,
+                      signalingShardKey == authorizedEnvelope.sessionId else { return }
                 signalingHealth = .degradedRecoverable
                 appendSmokeTrace(
                     "tx-suppressed-detached \(describeEnvelope(authorizedEnvelope)) phase=\(lifecyclePhase.rawValue) error=\(error.localizedDescription)"
@@ -2722,17 +2948,37 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             try await signalingRetryController.sendWithRetry(
                 retries: retries,
                 reconnectIfNeeded: { [weak self] in
-                    try? await self?.signaling?.connectOrThrow()
+                    guard let self else { return }
+                    guard self.signalingShardKey == nil
+                            || self.signalingShardKey == authorizedEnvelope.sessionId else {
+                        return
+                    }
+                    try? await self.ensureSignalingConnected(
+                        shardKey: authorizedEnvelope.sessionId
+                    )
+                    guard self.signalingShardKey == authorizedEnvelope.sessionId else { return }
                 },
                 send: { [weak self] in
                     guard let self else { throw CancellationError() }
+                    guard self.signalingShardKey == nil
+                            || self.signalingShardKey == authorizedEnvelope.sessionId else {
+                        throw CancellationError()
+                    }
                     try await self.ensureSignalingConnected(shardKey: authorizedEnvelope.sessionId)
-                    guard let signaling = self.signaling else {
+                    guard let signaling = self.signaling,
+                          self.signalingShardKey == authorizedEnvelope.sessionId else {
                         throw WebSocketSignalingClient.SignalingError.notConnected
                     }
                     try await signaling.send(authorizedEnvelope)
+                    try self.requireCurrentSignalingInstallation(
+                        signaling,
+                        sessionID: authorizedEnvelope.sessionId
+                    )
                 }
             )
+            guard signalingShardKey == authorizedEnvelope.sessionId else {
+                throw CancellationError()
+            }
             appendSmokeTrace("tx-ok \(describeEnvelope(authorizedEnvelope))")
         } catch SignalingRetryControllerError.invalidWebSocketURL {
             lastError = "信令服务 URL 无效"
@@ -2915,46 +3161,74 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private func scheduleSignalingRecovery(for sessionId: String, tokenExpired: Bool = false) -> Bool {
         guard shouldScheduleSignalingRecovery(for: sessionId) else { return false }
         if let existingTask = signalingRecoveryTasksBySessionId[sessionId],
-           !existingTask.isCancelled {
+           !existingTask.task.isCancelled {
             return false
         }
-        signalingRecoveryTasksBySessionId[sessionId] = Task { @MainActor [weak self] in
+        let recoveryID = UUID()
+        let recoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                self.finishSignalingRecoveryTask(sessionID: sessionId, id: recoveryID)
+            }
             let maxAttempts = tokenExpired ? 1 : 3
             for attempt in 0..<maxAttempts where !Task.isCancelled {
-                if attempt > 0 {
-                    try? await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
-                }
                 do {
+                    try Task.checkCancellation()
+                    guard self.isCurrentSignalingRecoveryTask(
+                        sessionID: sessionId,
+                        id: recoveryID
+                    ) else { return }
+                    if attempt > 0 {
+                        try await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
+                        try Task.checkCancellation()
+                        guard self.isCurrentSignalingRecoveryTask(
+                            sessionID: sessionId,
+                            id: recoveryID
+                        ) else { return }
+                    }
                     try await self.ensureSignalingConnected(shardKey: sessionId)
+                    try Task.checkCancellation()
+                    guard self.isCurrentSignalingRecoveryTask(
+                        sessionID: sessionId,
+                        id: recoveryID
+                    ) else { return }
                     if self.signalingShardKey == sessionId {
                         self.signalingHealth = .healthy
                         SkyBridgeLogger.shared.info(
                             "♻️ signaling recovery succeeded: session=\(sessionId) attempt=\(attempt + 1) summary=\(self.remoteDesktopRecoveryDebugSummary())"
                         )
                     }
-                    self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionId)
                     return
                 } catch is CancellationError {
-                    self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionId)
                     SkyBridgeLogger.shared.debug(
                         "ℹ️ signaling recovery cancelled: session=\(sessionId) attempt=\(attempt + 1)"
                     )
                     return
                 } catch {
+                    guard self.isCurrentSignalingRecoveryTask(
+                        sessionID: sessionId,
+                        id: recoveryID
+                    ), !Task.isCancelled else { return }
                     SkyBridgeLogger.shared.error(
                         "⚠️ signaling recovery failed: session=\(sessionId) attempt=\(attempt + 1) err=\(error.localizedDescription) summary=\(self.remoteDesktopRecoveryDebugSummary())"
                     )
                 }
             }
+            guard self.isCurrentSignalingRecoveryTask(
+                sessionID: sessionId,
+                id: recoveryID
+            ), !Task.isCancelled else { return }
             if tokenExpired, self.isTransportEstablished(for: sessionId) {
                 self.signalingHealth = .degradedFatal
                 SkyBridgeLogger.shared.error(
                     "❌ signaling recovery exhausted after token expiry: session=\(sessionId) summary=\(self.remoteDesktopRecoveryDebugSummary())"
                 )
             }
-            self.signalingRecoveryTasksBySessionId.removeValue(forKey: sessionId)
         }
+        signalingRecoveryTasksBySessionId[sessionId] = SignalingRecoveryTask(
+            id: recoveryID,
+            task: recoveryTask
+        )
         return true
     }
 
@@ -6672,6 +6946,13 @@ private extension CrossNetworkWebRTCManager {
 
     nonisolated func appendSmokeTrace(_ line: String) {
         guard ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil else { return }
+        let persistedLine = if ProcessInfo.processInfo.environment[
+            "SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY"
+        ] == "1" {
+            Self.formalSmokeTraceLine(line)
+        } else {
+            line
+        }
         let fileName = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_STATUS_BASENAME"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? "skybridge-smoke-status.log"
         guard !fileName.isEmpty,
@@ -6679,7 +6960,7 @@ private extension CrossNetworkWebRTCManager {
             return
         }
         let url = baseCaches.appendingPathComponent("\(fileName).trace.log")
-        let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(line)\n"
+        let formatted = "[\(ISO8601DateFormatter().string(from: Date()))] \(persistedLine)\n"
         guard let data = formatted.data(using: .utf8) else { return }
         if FileManager.default.fileExists(atPath: url.path),
            let handle = try? FileHandle(forWritingTo: url) {

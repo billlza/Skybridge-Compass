@@ -746,7 +746,7 @@ public actor HandshakeDriver {
         metricsCollector.recordStart()
 
         do {
-            SkyBridgeLogger.p2p.info("🧪 mac handleMessageA start peer=\(peer.deviceId, privacy: .public) bytes=\(data.count, privacy: .public)")
+            SkyBridgeLogger.p2p.info("🧪 mac handleMessageA start peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public) bytes=\(data.count, privacy: .public)")
             let messageA = try HandshakeMessageA.decode(from: data)
             let resolvedIdentity = try await resolveIdentity()
 
@@ -769,7 +769,7 @@ public actor HandshakeDriver {
 
             // 处理 MessageA
             do {
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public)")
                 if policy.requireSecureEnclavePoP, resolvedIdentity.secureEnclaveKeyHandle == nil {
                     throw HandshakeError.failed(.secureEnclavePoPRequired)
                 }
@@ -787,7 +787,7 @@ public actor HandshakeDriver {
                     secureEnclavePublicKey: pinnedSEPublicKey,
                     rawSignaturePreimage: rawSignaturePreimage
                 )
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA done peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA processMessageA done peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public)")
             } catch {
                 await handleHandshakeError(error, context: ctx)
                 return
@@ -840,7 +840,7 @@ public actor HandshakeDriver {
             let messageB: HandshakeMessageB
             let messageBSecret: SecureBytes
             do {
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public)")
  // 获取用于签名的私钥
                 let result = try await ctx.buildMessageB(
                     identityKeyHandle: resolvedIdentity.identityKeyHandle,
@@ -850,7 +850,7 @@ public actor HandshakeDriver {
                 )
                 messageB = result.message
                 messageBSecret = result.sharedSecret
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB done peer=\(peer.deviceId, privacy: .public) suite=\(messageB.selectedSuite.rawValue, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA buildMessageB done peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public) suite=\(messageB.selectedSuite.rawValue, privacy: .public)")
             } catch {
                 await handleHandshakeError(error, context: ctx)
                 return
@@ -864,7 +864,7 @@ public actor HandshakeDriver {
                         "📤 Handshake MessageB: total=\(padded.count) bytes, suite=\(messageB.selectedSuite.rawValue)"
                     )
                 }
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA sendMessageB peer=\(peer.deviceId, privacy: .public) bytes=\(padded.count, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA sendMessageB peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public) bytes=\(padded.count, privacy: .public)")
                 try await transport.send(to: peer, data: padded)
             } catch {
                 await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
@@ -874,9 +874,9 @@ public actor HandshakeDriver {
  // 响应方在发送 MessageB 后完成
             let sessionKeys: SessionKeys
             do {
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys peer=\(peer.deviceId, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public)")
                 sessionKeys = try await ctx.finalizeResponderSessionKeys(sharedSecret: messageBSecret)
-                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys done peer=\(peer.deviceId, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public)")
+                SkyBridgeLogger.p2p.info("🧪 mac handleMessageA finalizeResponderKeys done peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public)")
             } catch {
                 await handleHandshakeError(error, context: ctx)
                 return
@@ -1144,9 +1144,8 @@ public actor HandshakeDriver {
         case .waitingFinished(_, let sessionKeys, let expectingFrom):
             guard verifyFinished(finished, sessionKeys: sessionKeys, expectingFrom: expectingFrom) else {
                 let expectedDirection: HandshakeFinished.Direction = (expectingFrom == .initiator) ? .initiatorToResponder : .responderToInitiator
-                let transcriptPrefix = hexString(Data(sessionKeys.transcriptHash.prefix(8)))
                 SkyBridgeLogger.p2p.error(
-                    "❌ Finished MAC verify failed: peer=\(peer.deviceId, privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) expectedDirection=\(expectedDirection.rawValue, privacy: .public) gotDirection=\(finished.direction.rawValue, privacy: .public) transcriptHashPrefix=\(transcriptPrefix, privacy: .public)"
+                    "❌ Finished MAC verify failed: peer=\(RemoteConnectionLogRedaction.peer(peer.deviceId), privacy: .public) suite=\(sessionKeys.negotiatedSuite.rawValue, privacy: .public) expectedDirection=\(expectedDirection.rawValue, privacy: .public) gotDirection=\(finished.direction.rawValue, privacy: .public)"
                 )
                 await transitionToFailed(.keyConfirmationFailed, negotiatedSuite: sessionKeys.negotiatedSuite)
                 return
@@ -1489,7 +1488,4 @@ public actor HandshakeDriver {
         return Data(bytes)
     }
 
-    private nonisolated func hexString(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
-    }
 }

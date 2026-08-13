@@ -217,8 +217,20 @@ class PhysicalEvidenceTests(unittest.TestCase):
             + "\n",
         )
         stdout = self.text_file("stdout.log", "prefix\n" + success + "\n")
+        instrumentation_status = (
+            "INSTRUMENTATION_STATUS: class="
+            "com.skybridge.compass.android.webrtc."
+            "AppleReleaseInteropOffererAppInstrumentationTest\n"
+            "INSTRUMENTATION_STATUS: current=1\n"
+            "INSTRUMENTATION_STATUS: id=AndroidJUnitRunner\n"
+            "INSTRUMENTATION_STATUS: numtests=1\n"
+            "INSTRUMENTATION_STATUS: test=hostsCodeForAppleResponderUsingAppProcess\n"
+        )
         instrumentation = self.text_file(
             "instrumentation.log",
+            instrumentation_status
+            + "INSTRUMENTATION_STATUS: stream=\n"
+            "INSTRUMENTATION_STATUS_CODE: 1\n"
             "SB-ANDROID-APP-OFFER storage=dedicated-test-package "
             "package=com.skybridge.compass.debug.ioswebrtc.test\n"
             f"SB-ANDROID-APP-OFFER sensitive-state phase=before digest={identity_digest}\n"
@@ -240,7 +252,13 @@ class PhysicalEvidenceTests(unittest.TestCase):
             "peerToAndroidOutboundAcks=metadataAck,chunkAck,completeAck "
             "androidRunOwnedPayloadCleaned=true\n"
             f"SB-ANDROID-APP-OFFER sensitive-state phase=after digest={identity_digest}\n"
-            "OK (1 test)\n",
+            + instrumentation_status
+            + "INSTRUMENTATION_STATUS: stream=.\n"
+            "INSTRUMENTATION_STATUS_CODE: 0\n"
+            "INSTRUMENTATION_RESULT: stream=\n"
+            "Time: 0.125\n\n"
+            "OK (1 test)\n"
+            "INSTRUMENTATION_CODE: -1\n",
         )
         app_apk = self.text_file(
             "app-apk.properties",
@@ -579,7 +597,26 @@ class PhysicalEvidenceTests(unittest.TestCase):
         arguments.android_instrumentation.write_text(duplicate, encoding="utf-8")
         with self.assertRaisesRegex(
             physical_evidence.PhysicalEvidenceError,
-            "exactly one app-offer success terminal",
+            "canonical test sequence",
+        ):
+            physical_evidence.validate_receipt(arguments)
+
+    def test_receipt_rejects_spliced_android_instrumentation_sequence(self) -> None:
+        arguments = self.receipt_arguments()
+        spliced = (
+            "INSTRUMENTATION_STATUS: class=com.example.UnrelatedTest\n"
+            "INSTRUMENTATION_STATUS: current=1\n"
+            "INSTRUMENTATION_STATUS: id=AndroidJUnitRunner\n"
+            "INSTRUMENTATION_STATUS: numtests=1\n"
+            "INSTRUMENTATION_STATUS: test=otherTest\n"
+            "INSTRUMENTATION_STATUS_CODE: 0\n"
+            "INSTRUMENTATION_CODE: 0\n"
+            + arguments.android_instrumentation.read_text(encoding="utf-8")
+        )
+        arguments.android_instrumentation.write_text(spliced, encoding="utf-8")
+        with self.assertRaisesRegex(
+            physical_evidence.PhysicalEvidenceError,
+            "canonical test sequence",
         ):
             physical_evidence.validate_receipt(arguments)
 

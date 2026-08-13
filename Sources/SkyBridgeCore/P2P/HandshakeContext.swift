@@ -366,14 +366,12 @@ public actor HandshakeContext {
         let signature = try await signHandshakeData(dataToSign, identityKeyHandle: identityKeyHandle)
         if ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil {
             let suiteSummary = supportedSuites.map(\.rawValue).joined(separator: ",")
-            let preimageDigest = SHA256.hash(data: dataToSign).map { String(format: "%02x", $0) }.joined().prefix(16)
             let identitySummary = (try? IdentityPublicKeys.decodeWithLegacyFallback(from: identityPublicKey))
             print(
                 "🧪 mac tx MessageA suites=\(suiteSummary) " +
                 "sigAlg=\(identitySummary?.protocolAlgorithm.rawValue ?? "unknown") " +
                 "pubBytes=\(identitySummary?.protocolPublicKey.count ?? identityPublicKey.count) " +
-                "sigBytes=\(signature.count) " +
-                "preimageSha256=\(preimageDigest)"
+                "sigBytes=\(signature.count)"
             )
         }
         let seSigPreimage = messageA.secureEnclaveSignaturePreimage
@@ -450,8 +448,6 @@ public actor HandshakeContext {
         }
 
         let canonicalPreimage = messageA.signaturePreimage
-        let canonicalDigest = SHA256.hash(data: canonicalPreimage).map { String(format: "%02x", $0) }.joined().prefix(16)
-        let rawDigest = rawSignaturePreimage.map { SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined().prefix(16) }
 
  // 验证签名
         var isValid = try await verifyHandshakeData(
@@ -460,7 +456,7 @@ public actor HandshakeContext {
             publicKey: identityKeys.protocolPublicKey
         )
         SkyBridgeLogger.p2p.info(
-            "🧪 processMessageA verify canonical alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) sigBytes=\(messageA.signature.count, privacy: .public) pubBytes=\(identityKeys.protocolPublicKey.count, privacy: .public) preimageSha256=\(canonicalDigest, privacy: .public) ok=\(isValid, privacy: .public)"
+            "🧪 processMessageA verify canonical alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) sigBytes=\(messageA.signature.count, privacy: .public) pubBytes=\(identityKeys.protocolPublicKey.count, privacy: .public) ok=\(isValid, privacy: .public)"
         )
 
         if !isValid,
@@ -472,7 +468,7 @@ public actor HandshakeContext {
                 publicKey: identityKeys.protocolPublicKey
             )
             SkyBridgeLogger.p2p.info(
-                "🧪 processMessageA verify raw alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) preimageSha256=\(rawDigest ?? "n/a", privacy: .public) ok=\(rawValid, privacy: .public)"
+                "🧪 processMessageA verify raw alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) ok=\(rawValid, privacy: .public)"
             )
             if rawValid {
                 SkyBridgeLogger.p2p.warning(
@@ -480,10 +476,6 @@ public actor HandshakeContext {
                 )
                 isValid = true
             }
-        } else if let rawDigest {
-            SkyBridgeLogger.p2p.info(
-                "🧪 processMessageA raw preimage matches canonical alg=\(identityKeys.protocolAlgorithm.rawValue, privacy: .public) preimageSha256=\(rawDigest, privacy: .public)"
-            )
         }
 
         guard isValid else {
@@ -623,17 +615,10 @@ public actor HandshakeContext {
         let responderShare: Data
         let sealedBox: HPKESealedBox
         let sharedSecretForSession: SecureBytes
-        let smokePQCLoggingEnabled = ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_ROLE"] != nil
 
         if suite.isPQC {
             guard let sharedSecret = kemSharedSecrets[suite] else {
                 throw HandshakeError.invalidState("Missing KEM shared secret for \(suite.rawValue)")
-            }
-            if smokePQCLoggingEnabled {
-                let staticDigest = SHA256.hash(data: sharedSecret.noCopyData()).prefix(8)
-                    .map { String(format: "%02x", $0) }
-                    .joined()
-                print("🧪 mac tx MessageB staticSecretSha256=\(staticDigest) suite=\(suite.rawValue)")
             }
 
             let payloadSecret: SecureBytes
@@ -650,38 +635,11 @@ public actor HandshakeContext {
                     ephemeralSecret: responderContribution.sharedSecret,
                     suite: suite
                 )
-                if smokePQCLoggingEnabled {
-                    let sessionDigest = SHA256.hash(data: payloadSecret.noCopyData()).prefix(8)
-                        .map { String(format: "%02x", $0) }
-                        .joined()
-                    let payloadKey = HKDF<SHA256>.deriveKey(
-                        inputKeyMaterial: SymmetricKey(data: payloadSecret),
-                        salt: transcriptHashA,
-                        info: Data("handshake-payload".utf8),
-                        outputByteCount: 32
-                    )
-                    let payloadKeyDigest = payloadKey.withUnsafeBytes { raw in
-                        SHA256.hash(data: Data(raw)).prefix(8).map { String(format: "%02x", $0) }.joined()
-                    }
-                    print("🧪 mac tx MessageB sessionSecretSha256=\(sessionDigest) payloadKeySha256=\(payloadKeyDigest) suite=\(suite.rawValue)")
-                }
                 responderContribution.sharedSecret.zeroize()
                 sharedSecret.zeroize()
             } else {
                 responderShare = Data()
                 payloadSecret = sharedSecret
-                if smokePQCLoggingEnabled {
-                    let payloadKey = HKDF<SHA256>.deriveKey(
-                        inputKeyMaterial: SymmetricKey(data: payloadSecret),
-                        salt: transcriptHashA,
-                        info: Data("handshake-payload".utf8),
-                        outputByteCount: 32
-                    )
-                    let payloadKeyDigest = payloadKey.withUnsafeBytes { raw in
-                        SHA256.hash(data: Data(raw)).prefix(8).map { String(format: "%02x", $0) }.joined()
-                    }
-                    print("🧪 mac tx MessageB payloadKeySha256=\(payloadKeyDigest) suite=\(suite.rawValue)")
-                }
             }
 
             let payloadData = (try? localCapabilities.deterministicEncode()) ?? Data()

@@ -22,6 +22,35 @@ public protocol HandshakeKEMIdentityStore: Sendable {
     ) async throws -> HandshakeKEMIdentityMaterial
 }
 
+/// Immutable KEM identity used by a one-shot, existing-only formal session.
+public struct StaticHandshakeKEMIdentityStore: HandshakeKEMIdentityStore, Sendable {
+    private let suiteWireID: UInt16
+    private let material: HandshakeKEMIdentityMaterial
+
+    public init(
+        suiteWireID: UInt16,
+        publicKey: Data,
+        privateKey: SecureBytes
+    ) {
+        self.suiteWireID = suiteWireID
+        self.material = HandshakeKEMIdentityMaterial(
+            publicKey: publicKey,
+            privateKey: privateKey
+        )
+    }
+
+    public func getOrCreateKEMIdentityKey(
+        for suite: CryptoSuite,
+        provider: any CryptoProvider
+    ) async throws -> HandshakeKEMIdentityMaterial {
+        guard suite.wireId == suiteWireID,
+              provider.tier == .liboqsPQC else {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+        return material
+    }
+}
+
 struct DefaultHandshakeKEMIdentityStore: HandshakeKEMIdentityStore, Sendable {
     private let manager: DeviceIdentityKeyManager
 

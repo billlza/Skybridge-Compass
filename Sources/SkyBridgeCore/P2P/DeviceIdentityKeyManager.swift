@@ -255,6 +255,43 @@ public actor DeviceIdentityKeyManager {
         cachedKeyInfo = keyInfo
         return keyInfo
     }
+
+    /// Read-only access to the existing P-256 management identity used to verify signed trust
+    /// records. Unlike `getOrCreateIdentityKey`, absence or corruption is terminal.
+    public func requireExistingIdentityKeyReadOnly() async throws -> DeviceIdentityKeyInfo {
+        guard !Self.useInMemoryKeychain,
+              let encoded = try loadExactlyOneFormalGenericPassword(
+                service: KeychainConstants.service,
+                account: "keyInfo"
+              ),
+              let storedDeviceData = try loadExactlyOneFormalGenericPassword(
+                service: KeychainConstants.service,
+                account: KeychainConstants.deviceIdKey
+              ),
+              let storedDeviceID = String(data: storedDeviceData, encoding: .utf8) else {
+            throw FormalMacInteropError.missingExistingIdentity
+        }
+        let existing: DeviceIdentityKeyInfo
+        do {
+            existing = try JSONDecoder().decode(DeviceIdentityKeyInfo.self, from: encoded)
+        } catch {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+        guard existing.keyType == .p256Signing,
+              existing.deviceId == storedDeviceID,
+              (try? ProtocolIdentityBinding.normalizedDeviceId(existing.deviceId)) == existing.deviceId,
+              existing.pubKeyFP == computePublicKeyFingerprint(existing.publicKey) else {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+
+        let privateKey = try requireExactlyOneFormalIdentityPrivateKey()
+        guard let publicKey = SecKeyCopyPublicKey(privateKey),
+              let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, nil) as Data?,
+              publicKeyData == existing.publicKey else {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+        return existing
+    }
     
  /// 获取设备 ID
     public func getDeviceId() async -> String {
@@ -598,6 +635,79 @@ public actor DeviceIdentityKeyManager {
         return record.publicKey
     }
 
+    /// Loads and validates the canonical identity used by the formal Android -> macOS lane.
+    ///
+    /// This entry point is intentionally separate from every get-or-create path. It reads only the
+    /// tiered ML-KEM-768 record (legacy untiered records are rejected), performs signature/KEM
+    /// consistency checks, and never generates, migrates, saves, or deletes key material.
+    public func requireExistingFormalMacIdentity() async throws -> FormalMacLocalIdentityMaterial {
+        guard !Self.useInMemoryKeychain,
+              let rawDeviceIDData = try loadExactlyOneFormalGenericPassword(
+                service: KeychainConstants.service,
+                account: KeychainConstants.deviceIdKey
+              ),
+              let rawDeviceID = String(data: rawDeviceIDData, encoding: .utf8),
+              let deviceID = try? ProtocolIdentityBinding.normalizedDeviceId(rawDeviceID) else {
+            throw FormalMacInteropError.missingExistingIdentity
+        }
+
+        guard let protocolPublicKey = try loadExactlyOneFormalGenericPassword(
+                service: KeychainConstants.mldsaService,
+                account: KeychainConstants.mldsaPublicKeyAccount
+              ),
+              let protocolPrivateKey = try loadExactlyOneFormalGenericPassword(
+                service: KeychainConstants.mldsaService,
+                account: KeychainConstants.mldsaSecretKeyAccount
+              ),
+              protocolPublicKey.count == 1_952,
+              protocolPrivateKey.count == 4_032 || protocolPrivateKey.count == 64 else {
+            throw FormalMacInteropError.missingExistingIdentity
+        }
+        let signatureProvider = ProtocolSignatureProviderSelector.select(for: .mlDSA65)
+        let validationMessage = Data("skybridge.formal-mac.existing-identity.v1".utf8)
+        let signingHandle = SigningKeyHandle.softwareKey(protocolPrivateKey)
+        let signature = try await signatureProvider.sign(validationMessage, key: signingHandle)
+        guard try await signatureProvider.verify(
+            validationMessage,
+            signature: signature,
+            publicKey: protocolPublicKey
+        ) else {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+
+        let provider = OQSPQCCryptoProvider()
+        guard provider.supportedSuites.contains(where: {
+            $0.canonicalKEMSuite.wireId == FormalMacInteropCapability.suiteWireID
+        }),
+        let kem = try loadExactlyOneFormalKEMKeyRecord(
+            account: kemAccount(
+                suiteWireId: FormalMacInteropCapability.suiteWireID,
+                tier: .liboqsPQC
+            )
+        ),
+        kem.suiteWireId == FormalMacInteropCapability.suiteWireID,
+        kem.publicKey.count == 1_184,
+        kem.privateKey.count == 2_400 else {
+            throw FormalMacInteropError.missingExistingIdentity
+        }
+        let encapsulated = try await provider.kemEncapsulate(recipientPublicKey: kem.publicKey)
+        let decapsulated = try await provider.kemDecapsulate(
+            encapsulatedKey: encapsulated.encapsulatedKey,
+            privateKey: SecureBytes(data: kem.privateKey)
+        )
+        guard encapsulated.sharedSecret.data == decapsulated.data else {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+
+        return FormalMacLocalIdentityMaterial(
+            deviceID: deviceID,
+            protocolPublicKey: protocolPublicKey,
+            protocolSigningKeyHandle: signingHandle,
+            kemPublicKey: kem.publicKey,
+            kemPrivateKey: SecureBytes(data: kem.privateKey)
+        )
+    }
+
     public nonisolated static func pairingIdentityAdvertisedPQCSuites(
         using provider: any CryptoProvider
     ) -> [CryptoSuite] {
@@ -897,6 +1007,76 @@ public actor DeviceIdentityKeyManager {
         }
         
         return keyInfo
+    }
+
+    /// Returns the only visible value for an exact generic-password primary key.
+    /// The formal lane never uses `kSecMatchLimitOne`: a second synchronizable/non-synchronizable
+    /// item is an ambiguous authority and therefore a terminal error.
+    private func loadExactlyOneFormalGenericPassword(
+        service: String,
+        account: String
+    ) throws -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrSynchronizable as String: kSecAttrSynchronizableAny,
+            kSecReturnData as String: kCFBooleanTrue as Any,
+            kSecReturnAttributes as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var rawResult: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &rawResult)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess,
+              let items = rawResult as? [[String: Any]],
+              items.count == 1,
+              let item = items.first,
+              item[kSecAttrService as String] as? String == service,
+              item[kSecAttrAccount as String] as? String == account,
+              let data = item[kSecValueData as String] as? Data else {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
+        return data
+    }
+
+    private func requireExactlyOneFormalIdentityPrivateKey() throws -> SecKey {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: KeychainConstants.signingKeyTag.utf8Data,
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
+            kSecReturnRef as String: kCFBooleanTrue as Any,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var rawResult: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &rawResult)
+        guard status == errSecSuccess,
+              let values = rawResult as? [AnyObject],
+              values.count == 1,
+              let value = values.first,
+              CFGetTypeID(value) == SecKeyGetTypeID() else {
+            throw status == errSecItemNotFound
+                ? FormalMacInteropError.missingExistingIdentity
+                : FormalMacInteropError.inconsistentExistingIdentity
+        }
+        return unsafeDowncast(value, to: SecKey.self)
+    }
+
+    private func loadExactlyOneFormalKEMKeyRecord(
+        account: String
+    ) throws -> KEMIdentityKeyRecord? {
+        guard let data = try loadExactlyOneFormalGenericPassword(
+            service: KeychainConstants.kemService,
+            account: account
+        ) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970
+        do {
+            return try decoder.decode(KEMIdentityKeyRecord.self, from: data)
+        } catch {
+            throw FormalMacInteropError.inconsistentExistingIdentity
+        }
     }
     
  /// 获取私钥引用

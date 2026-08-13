@@ -84,6 +84,72 @@ internal class AuthenticatedSessionPeerKemBindingException : IllegalStateExcepti
     "authenticated session KEM material does not match the exact session binding"
 )
 
+/**
+ * One exact-key-epoch admission marker for the read-only formal lane.
+ *
+ * The marker is installed only after the remote pairing exchange matches the existing authority
+ * and KEM records and the local reply is sent through the same secure-operation capability.
+ * Reference identity is intentional: wire messages carry no local generation identifier, so an
+ * admission from an earlier key epoch must never authorize a replacement epoch.
+ */
+internal class ExistingTrustPeerKemAdmissionState {
+    private val lock = Any()
+    private var sentOwner: WebRtcSecureOperationOwner? = null
+    private var sendConfirmed = false
+    private var admittedOwner: WebRtcSecureOperationOwner? = null
+
+    fun beginSend(owner: WebRtcSecureOperationOwner) = synchronized(lock) {
+        sentOwner = owner
+        sendConfirmed = false
+        admittedOwner = null
+    }
+
+    /**
+     * Finish the exact send. A re-entrant peer response is stronger delivery evidence than a
+     * false transport return, so an admission that won while the send was in flight is retained.
+     */
+    fun finishSend(owner: WebRtcSecureOperationOwner, transportDelivered: Boolean): Boolean =
+        synchronized(lock) {
+            if (sentOwner !== owner) return@synchronized false
+            if (transportDelivered) {
+                sendConfirmed = true
+                return@synchronized true
+            }
+            if (admittedOwner === owner) {
+                sendConfirmed = true
+                return@synchronized true
+            }
+            sentOwner = null
+            sendConfirmed = false
+            false
+        }
+
+    fun isSendConfirmed(owner: WebRtcSecureOperationOwner): Boolean = synchronized(lock) {
+        sentOwner === owner && sendConfirmed
+    }
+
+    fun wasSentBy(owner: WebRtcSecureOperationOwner): Boolean = synchronized(lock) {
+        sentOwner === owner
+    }
+
+    fun install(owner: WebRtcSecureOperationOwner) = synchronized(lock) {
+        check(sentOwner === owner) {
+            "peer-KEM admission requires one exchange sent by the exact key epoch"
+        }
+        admittedOwner = owner
+    }
+
+    fun isCurrent(owner: WebRtcSecureOperationOwner): Boolean = synchronized(lock) {
+        admittedOwner === owner
+    }
+
+    fun clear() = synchronized(lock) {
+        sentOwner = null
+        sendConfirmed = false
+        admittedOwner = null
+    }
+}
+
 internal enum class AuthenticatedSessionPeerKemLifecycleEvent {
     OWNER_STARTED,
     DURABLE_MATERIAL_COMMITTED,
@@ -355,6 +421,7 @@ class SkyBridgeWebRtcConnectionManager(
     private val authenticatedSessionPeerKemStore = AuthenticatedSessionPeerKemStore()
     private val selectedRouteStore = OwnerBoundWebRtcRouteStore()
     private val secureOperationOwnerState = WebRtcSecureOperationOwnerState()
+    private val existingTrustPeerKemAdmissionState = ExistingTrustPeerKemAdmissionState()
 
     private var session: WebRtcSession? = null
     private val localIdentity: LocalP2PIdentity by lazy {
@@ -984,6 +1051,14 @@ class SkyBridgeWebRtcConnectionManager(
     fun isCurrentSecureOperationOwner(owner: WebRtcSecureOperationOwner): Boolean =
         withCurrentSecureOperationOwner(owner, false) { _, _ -> true }
 
+    /** True only after this exact formal key epoch completed the read-only peer-KEM exchange. */
+    fun hasExistingTrustPeerKemAdmission(owner: WebRtcSecureOperationOwner): Boolean =
+        diagnosticsConfig.existingTrustOnly &&
+            withCurrentSecureOperationOwner(owner, false) { _, _ ->
+                existingTrustPeerKemAdmissionState.isCurrent(owner) &&
+                    existingTrustPeerKemAdmissionState.isSendConfirmed(owner)
+            }
+
     /** Key readiness for one exact session incarnation; stale owners always fail closed. */
     fun hasSessionKeys(owner: ProductSessionOwner): Boolean {
         var hasKeys = false
@@ -1256,6 +1331,7 @@ class SkyBridgeWebRtcConnectionManager(
                     SecureSessionKeyLifecycle.wipeKeyMaterial(sessionKeys)
                     sessionKeys = null
                     secureOperationOwnerState.clear()
+                    existingTrustPeerKemAdmissionState.clear()
                     resetSecureEnvelopeState()
                     negotiatedSuite = null
                     inboundFrames.reset()
@@ -1271,6 +1347,7 @@ class SkyBridgeWebRtcConnectionManager(
             SecureSessionKeyLifecycle.wipeKeyMaterial(sessionKeys)
             sessionKeys = null
             secureOperationOwnerState.clear()
+            existingTrustPeerKemAdmissionState.clear()
             resetSecureEnvelopeState()
             negotiatedSuite = null
             _authenticatedPeerMetadata.value = null
@@ -1651,6 +1728,7 @@ class SkyBridgeWebRtcConnectionManager(
         SecureSessionKeyLifecycle.wipeKeyMaterial(sessionKeys)
         sessionKeys = null
         secureOperationOwnerState.clear()
+        existingTrustPeerKemAdmissionState.clear()
         resetSecureEnvelopeState()
         negotiatedSuite = null
         _authenticatedPeerMetadata.value = null
@@ -1731,6 +1809,7 @@ class SkyBridgeWebRtcConnectionManager(
             SecureSessionKeyLifecycle.wipeKeyMaterial(sessionKeys)
             sessionKeys = null
             secureOperationOwnerState.clear()
+            existingTrustPeerKemAdmissionState.clear()
             resetSecureEnvelopeState()
             negotiatedSuite = null
             initiatorHandshake = null
@@ -2065,6 +2144,9 @@ class SkyBridgeWebRtcConnectionManager(
             val openedEnvelope = envelopeResult?.getOrNull()
             val plain = openedEnvelope?.payload
             if (plain != null) {
+                val secureOwner = checkNotNull(secureOperationOwnerState.current(owner, keys)) {
+                    "WebRTC secure payload has no current key-epoch owner"
+                }
                 if (openedEnvelope.packetType == WebRtcAppSecureEnvelope.PacketType.APP_CONTROL) {
                     val decoded = decodeAuthenticatedAppControl(owner, plain) ?: return
                     val app = when (decoded) {
@@ -2082,8 +2164,10 @@ class SkyBridgeWebRtcConnectionManager(
                             "SB-WEBRTC",
                             "pairingExchangeRecv session=${redactLogIdentifier(sessionId)} deviceId=${redactLogIdentifier(app.payload.deviceId)} keys=${app.payload.kemPublicKeys.size}"
                         )
-                        updateAuthenticatedPeerMetadata(app.payload)
-                        handlePairingIdentityExchange(owner, app.payload)
+                        if (!diagnosticsConfig.existingTrustOnly) {
+                            updateAuthenticatedPeerMetadata(app.payload)
+                        }
+                        handlePairingIdentityExchange(owner, secureOwner, app.payload)
                         return
                     }
                     if (app is AppMessage.Heartbeat) {
@@ -2101,9 +2185,6 @@ class SkyBridgeWebRtcConnectionManager(
                         )
                         return
                     }
-                }
-                val secureOwner = checkNotNull(secureOperationOwnerState.current(owner, keys)) {
-                    "WebRTC secure payload has no current key-epoch owner"
                 }
                 onSecurePacketData?.invoke(secureOwner, plain, openedEnvelope.packetType)
                 onOwnedPacketData?.invoke(owner, plain, openedEnvelope.packetType)
@@ -2490,7 +2571,10 @@ class SkyBridgeWebRtcConnectionManager(
                 owner = owner,
                 protocolFingerprint = remoteProtocolIdentityFingerprint
             )
-            secureOperationOwnerState.replace(owner, keys)
+            val secureOwner = secureOperationOwnerState.replace(owner, keys)
+            existingTrustPeerKemAdmissionState.clear()
+            pairingExchangeSent = false
+            lastSentPairingExchangeFingerprint = null
             if (pendingJoinBootstrapKem?.owner == owner) {
                 pendingJoinBootstrapKem = null
             }
@@ -2519,7 +2603,13 @@ class SkyBridgeWebRtcConnectionManager(
                 lastEvent = "handshake established: ${suite?.name ?: "unknown"}"
             )
 
-            scope.launch { sendPairingIdentityExchangeIfNeeded(owner, force = false) }
+            scope.launch {
+                sendPairingIdentityExchangeIfNeeded(
+                    owner = owner,
+                    force = false,
+                    secureOwner = secureOwner,
+                )
+            }
             startAppHeartbeatLoop(owner)
             scope.launch { maybeStartPqcRekey(owner, trigger = "post_handshake") }
         }
@@ -2622,10 +2712,11 @@ class SkyBridgeWebRtcConnectionManager(
 
     private fun handlePairingIdentityExchange(
         owner: ProductSessionOwner,
+        secureOwner: WebRtcSecureOperationOwner,
         payload: AppMessage.PairingIdentityExchangePayload
     ) {
         scope.launch {
-            processIncomingPairingIdentityExchange(owner, payload)
+            processIncomingPairingIdentityExchange(owner, secureOwner, payload)
         }
     }
 
@@ -2678,13 +2769,15 @@ class SkyBridgeWebRtcConnectionManager(
 
     private suspend fun processIncomingPairingIdentityExchange(
         owner: ProductSessionOwner,
+        secureOwner: WebRtcSecureOperationOwner,
         payload: AppMessage.PairingIdentityExchangePayload
     ) = pairingIdentityExchangeMutex.withLock {
-        processIncomingPairingIdentityExchangeLocked(owner, payload)
+        processIncomingPairingIdentityExchangeLocked(owner, secureOwner, payload)
     }
 
     private suspend fun processIncomingPairingIdentityExchangeLocked(
         owner: ProductSessionOwner,
+        secureOwner: WebRtcSecureOperationOwner,
         payload: AppMessage.PairingIdentityExchangePayload
     ) {
         var attemptSnapshot: PairingPersistenceAttemptSnapshot? = null
@@ -2703,7 +2796,7 @@ class SkyBridgeWebRtcConnectionManager(
             return
         }
         val snapshot = attemptSnapshot ?: run {
-            failSecureTransport(owner, "authenticated product-session KEM authority is unavailable")
+            failSecureOperation(secureOwner, "authenticated product-session KEM authority is unavailable")
             return
         }
         val observedAuthority = snapshot.observedAuthority
@@ -2712,7 +2805,7 @@ class SkyBridgeWebRtcConnectionManager(
         val peerId = AuthenticatedPairingBindingNormalization.peerId(
             payload.deviceId.ifBlank { priorPeerId } ?: return
         ) ?: run {
-            failSecureTransport(owner, "authenticated peer identifier is invalid")
+            failSecureOperation(secureOwner, "authenticated peer identifier is invalid")
             return
         }
         val aliasIds = buildSet {
@@ -2728,7 +2821,7 @@ class SkyBridgeWebRtcConnectionManager(
                 ignoreCase = true
             )
         ) {
-            failSecureTransport(owner, "authenticated product-session authority binding changed")
+            failSecureOperation(secureOwner, "authenticated product-session authority binding changed")
             return
         }
         if (diagnosticsConfig.existingTrustOnly) {
@@ -2737,7 +2830,7 @@ class SkyBridgeWebRtcConnectionManager(
                 protocolPublicKeyFingerprint = observedProtocolFingerprint
             )
             if (admission.conflict != null || admission.exactAuthority == null) {
-                failSecureTransport(owner, "formal diagnostic requires exact existing peer trust")
+                failSecureOperation(secureOwner, "formal diagnostic requires exact existing peer trust")
                 return
             }
             val presentedKem = try {
@@ -2747,17 +2840,17 @@ class SkyBridgeWebRtcConnectionManager(
                     osVersion = payload.osVersion
                 )
             } catch (_: IllegalArgumentException) {
-                failSecureTransport(owner, "formal diagnostic peer KEM material is invalid")
+                failSecureOperation(secureOwner, "formal diagnostic peer KEM material is invalid")
                 return
             }
             val existingKem = try {
                 peerKemStore.loadVerifiedReadOnly(peerId)
             } catch (_: RuntimeException) {
-                failSecureTransport(owner, "formal diagnostic existing peer KEM trust is unreadable")
+                failSecureOperation(secureOwner, "formal diagnostic existing peer KEM trust is unreadable")
                 return
             }
             if (!existingKem.hasSamePeerKemMaterial(presentedKem)) {
-                failSecureTransport(owner, "formal diagnostic peer KEM trust is missing or changed")
+                failSecureOperation(secureOwner, "formal diagnostic peer KEM trust is missing or changed")
                 return
             }
             var admitted = false
@@ -2768,13 +2861,24 @@ class SkyBridgeWebRtcConnectionManager(
                 }
             }
             if (!current || !admitted) {
-                failSecureTransport(
-                    owner,
+                failSecureOperation(
+                    secureOwner,
                     "formal diagnostic pairing attempt was replaced before existing-trust admission"
                 )
                 return
             }
-            sendPairingIdentityExchangeIfNeeded(owner, force = true)
+            if (
+                !isCurrentSecureOperationOwner(secureOwner) ||
+                !existingTrustPeerKemAdmissionState.wasSentBy(secureOwner)
+            ) {
+                failSecureOperation(
+                    secureOwner,
+                    "formal diagnostic pairing response has no exact-epoch request"
+                )
+                return
+            }
+            existingTrustPeerKemAdmissionState.install(secureOwner)
+            updateAuthenticatedPeerMetadata(payload)
             maybeStartPqcRekey(owner, trigger = "existing_pairing_identity_exchange")
             return
         }
@@ -2822,7 +2926,7 @@ class SkyBridgeWebRtcConnectionManager(
         }
         if (decision == PairingTrustDecision.DECLINE) return
         if (!sessionOwnerGate.isCurrent(owner) || observedHandshakeAuthority != observedAuthority) {
-            failSecureTransport(owner, "authenticated pairing attempt was replaced before approval")
+            failSecureOperation(secureOwner, "authenticated pairing attempt was replaced before approval")
             return
         }
 
@@ -2875,7 +2979,7 @@ class SkyBridgeWebRtcConnectionManager(
         }
         if (!committed) return
         persistenceFailure?.let { failure ->
-            failSecureTransport(owner, failure)
+            failSecureOperation(secureOwner, failure)
             return
         }
         persistenceOutcome ?: return
@@ -2886,11 +2990,13 @@ class SkyBridgeWebRtcConnectionManager(
 
     private suspend fun sendPairingIdentityExchangeIfNeeded(
         owner: ProductSessionOwner,
-        force: Boolean
-    ) {
-        if (!sessionOwnerGate.isCurrent(owner)) return
-        if (!pqcEnabled) return
-        if (sessionKeys == null) return
+        force: Boolean,
+        secureOwner: WebRtcSecureOperationOwner? = null,
+    ): Boolean {
+        if (!sessionOwnerGate.isCurrent(owner)) return false
+        if (!pqcEnabled) return false
+        if (sessionKeys == null) return false
+        if (secureOwner != null && !isCurrentSecureOperationOwner(secureOwner)) return false
         val now = SwiftDateSeconds.now()
         val policy = effectivePolicyOverride()
         val businessIdentity = localBusinessIdentity()
@@ -2903,17 +3009,34 @@ class SkyBridgeWebRtcConnectionManager(
         )
         val payloadFingerprint = pairingExchangeFingerprint(payload)
         val payloadChanged = payloadFingerprint != lastSentPairingExchangeFingerprint
-        if (!force && pairingExchangeSent && !payloadChanged) return
+        if (!force && pairingExchangeSent && !payloadChanged) return true
         Log.i(
             "SB-WEBRTC",
             "pairingExchangeSend session=${redactLogIdentifier(currentSessionId)} deviceId=${redactLogIdentifier(payload.deviceId)} keys=${payload.kemPublicKeys.size} force=$force changed=$payloadChanged"
         )
-        runIfCurrentSession(owner) {
-            if (send(appMessageCodec.encode(AppMessage.PairingIdentityExchange(payload)))) {
+        val encoded = appMessageCodec.encode(AppMessage.PairingIdentityExchange(payload))
+        val formalExactOwner = secureOwner?.takeIf { diagnosticsConfig.existingTrustOnly }
+        formalExactOwner?.let(existingTrustPeerKemAdmissionState::beginSend)
+        val transportSent = if (secureOwner == null) {
+            send(owner, encoded)
+        } else {
+            send(secureOwner, encoded)
+        }
+        val sent = if (formalExactOwner == null) {
+            transportSent
+        } else {
+            existingTrustPeerKemAdmissionState.finishSend(
+                owner = formalExactOwner,
+                transportDelivered = transportSent,
+            )
+        }
+        if (sent) {
+            runIfCurrentSession(owner) {
                 pairingExchangeSent = true
                 lastSentPairingExchangeFingerprint = payloadFingerprint
             }
         }
+        return sent
     }
 
     private fun startAppHeartbeatLoop(owner: ProductSessionOwner) {

@@ -4,26 +4,28 @@ on:
   pull_request:
     paths:
       - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/android-release-quality.yml"
+      - "Package.swift"
+      - "Package.resolved"
       - "platforms/android/**"
       - "SkyBridge Compass iOS/**"
-      - "Sources/SkyBridgeCore/**"
-      - "Sources/SkyBridgeProtocolCore/**"
-      - "Tests/SkyBridgeCoreTests/**"
-      - "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg"
+      - "Sources/**"
+      - "Tests/**"
   push:
     branches:
       - main
       - "release/android-*"
     paths:
       - ".gitattributes"
+      - ".gitignore"
       - ".github/workflows/android-release-quality.yml"
+      - "Package.swift"
+      - "Package.resolved"
       - "platforms/android/**"
       - "SkyBridge Compass iOS/**"
-      - "Sources/SkyBridgeCore/**"
-      - "Sources/SkyBridgeProtocolCore/**"
-      - "Tests/SkyBridgeCoreTests/**"
-      - "Sources/SkyBridgeCompassApp/Resources/AppIconMaster.svg"
+      - "Sources/**"
+      - "Tests/**"
 
 permissions:
   contents: read
@@ -92,10 +94,13 @@ jobs:
           python3 -W error -B scripts/tests/test_android_pqc_native_runtime_gate_contract.py
           python3 -W error -B scripts/tests/test_validate_android_ios_physical_evidence.py
           python3 -W error -B scripts/tests/test_android_ios_physical_runner_contract.py
+          python3 -W error -B scripts/tests/test_validate_android_mac_webrtc_formal_evidence.py
+          python3 -W error -B scripts/tests/test_android_mac_webrtc_formal_runner_contract.py
           python3 -W error -B scripts/tests/test_validate_ios_copy_absence.py
           python3 -W error -B scripts/tests/test_webrtc_smoke_process_ownership.py
           python3 -W error -B -m py_compile \
             scripts/lib/webrtc_smoke_process_ownership.py \
+            scripts/validate_android_mac_webrtc_formal_evidence.py \
             scripts/validate_android_ios_physical_evidence.py \
             scripts/validate_ios_copy_absence.py
           bash -n \
@@ -103,6 +108,7 @@ jobs:
             scripts/check_android_release_aab.sh \
             scripts/lib/strict_gradle_output.sh \
             scripts/run_android_pqc_native_runtime_gate.sh \
+            scripts/run_android_mac_webrtc_formal_smoke.sh \
             scripts/run_android_ios_webrtc_offer_smoke.sh \
             scripts/lib/android_env.sh \
             scripts/lib/real_device_ios_process_ownership.sh \
@@ -122,6 +128,7 @@ jobs:
             scripts/lib/repository_layout.sh \
             scripts/lib/source_provenance.sh \
             scripts/lib/strict_gradle_output.sh \
+            scripts/run_android_mac_webrtc_formal_smoke.sh \
             scripts/run_android_ios_webrtc_offer_smoke.sh \
             scripts/run_android_pqc_native_runtime_gate.sh \
             scripts/tests/test_android_release_aab_gate.sh \
@@ -187,3 +194,63 @@ jobs:
             app/build/outputs/apk/debug/app-debug.apk
           git -C "$GITHUB_WORKSPACE" diff --check
           [[ -z "$(git -C "$GITHUB_WORKSPACE" status --porcelain --untracked-files=all)" ]]
+
+  formal-mac-quality:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Verify fixed Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          [[ "$(sw_vers -productVersion)" == 26.* ]]
+          xcodebuild -version | grep -Eq '^Xcode 26\.'
+          swift --version | grep -Eq 'Swift version 6\.3([ .]|$)'
+
+      - name: Build and test formal macOS interoperability
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files --error-unmatch Package.resolved >/dev/null
+          swift build \
+            --disable-automatic-resolution \
+            --product FormalMacWebRTCHost \
+            -Xswiftc -warnings-as-errors
+          swift test \
+            --disable-automatic-resolution \
+            -Xswiftc -warnings-as-errors \
+            --filter FormalMacInteropTests
+          swift test \
+            --disable-automatic-resolution \
+            -Xswiftc -warnings-as-errors
+          git diff --exit-code -- Package.swift Package.resolved
+          git diff --check
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+
+      - name: Compile the independent iOS application target
+        shell: bash
+        run: |
+          set -euo pipefail
+          ios_log="$RUNNER_TEMP/ios-build-for-testing.log"
+          xcodebuild \
+            -project "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj" \
+            -scheme "SkyBridgeCompass-iOS" \
+            -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-ios" \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+            build-for-testing 2>&1 | tee "$ios_log"
+          if grep -Eiq '(^|[[:space:]])(warning|error):' "$ios_log"; then
+            echo "iOS build emitted a warning or error diagnostic" >&2
+            exit 1
+          fi
+          git diff --check
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]

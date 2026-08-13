@@ -30,7 +30,10 @@ DerivedData/
 .swiftpm_module_cache/
 .swiftpm-cache/
 .swiftpm-module-cache/
-Package.resolved
+# Formal macOS interoperability builds are source-bound. Keep the exact SwiftPM
+# graph under version control so CI and physical receipts do not resolve a
+# different WebRTC or protocol dependency for the same source revision.
+!Package.resolved
 Packages/
 Package.pins
 .swift_test_output.txt

@@ -165,6 +165,8 @@ public actor WebSocketSignalingClient {
     private var isSocketOpen: Bool = false
     private var hasEverBound: Bool = false
     private var isConnectingSequence: Bool = false
+    private var isClosingSequence: Bool = false
+    private var connectionEpoch: UInt64 = 0
     private var connectWaiters: [CheckedContinuation<Void, Error>] = []
     private var terminalErrorsByHandle: [SignalingHandleID: Error] = [:]
     private var lastBoundHandle: SignalingHandleID?
@@ -176,8 +178,8 @@ public actor WebSocketSignalingClient {
 
     private var nativeClient: NativeWebSocketClient?
 
-    public var onEnvelope: (@Sendable (WebRTCSignalingEnvelope) -> Void)?
-    public var onServerFrame: (@Sendable (SignalingServerFrame) -> Void)?
+    public var onEnvelope: (@Sendable (SignalingHandleID, WebRTCSignalingEnvelope) -> Void)?
+    public var onServerFrame: (@Sendable (SignalingHandleID, SignalingServerFrame) -> Void)?
     public var onLifecycleEvent: (@Sendable (SignalingLifecycleEvent) -> Void)?
 
     public init(url: URL, sessionId: String, generation: Int) {
@@ -204,11 +206,15 @@ public actor WebSocketSignalingClient {
         self.nativeFallbackEnabled = nativeFallbackEnabled
     }
 
-    public func setOnEnvelope(_ handler: (@Sendable (WebRTCSignalingEnvelope) -> Void)?) {
+    public func setOnEnvelope(
+        _ handler: (@Sendable (SignalingHandleID, WebRTCSignalingEnvelope) -> Void)?
+    ) {
         onEnvelope = handler
     }
 
-    public func setOnServerFrame(_ handler: (@Sendable (SignalingServerFrame) -> Void)?) {
+    public func setOnServerFrame(
+        _ handler: (@Sendable (SignalingHandleID, SignalingServerFrame) -> Void)?
+    ) {
         onServerFrame = handler
     }
 
@@ -220,11 +226,14 @@ public actor WebSocketSignalingClient {
         do {
             try await connectOrThrow()
         } catch {
-            logger.error("❌ signaling websocket connect failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("❌ signaling websocket connect failed: \(RemoteConnectionLogRedaction.error(error), privacy: .public)")
         }
     }
 
     public func connectOrThrow(timeout: Duration? = nil) async throws {
+        guard !isClosingSequence else {
+            throw SignalingError.notConnected
+        }
         if isBound {
             return
         }
@@ -247,36 +256,11 @@ public actor WebSocketSignalingClient {
     }
 
     public func close() async {
-        if let currentHandle {
-            emitLifecycle(
-                phase: .closing,
-                handleId: currentHandle,
-                errorDescription: nil,
-                failureClass: nil,
-                serverFrameType: nil
-            )
-        }
-
-        isBound = false
-        isSocketOpen = false
-        lifecyclePhase = .closed
-        terminalErrorsByHandle.removeAll()
+        guard let closeSequence = beginCloseSequence() else { return }
 
         await cleanupURLSessionTransport()
         await cleanupNativeTransport()
-
-        if let currentHandle {
-            emitLifecycle(
-                phase: .closed,
-                handleId: currentHandle,
-                errorDescription: nil,
-                failureClass: nil,
-                serverFrameType: nil
-            )
-        }
-
-        currentHandle = nil
-        failConnectWaiters(with: SignalingError.notConnected)
+        finishCloseSequence(closeSequence)
     }
 
     public func send(_ envelope: WebRTCSignalingEnvelope) async throws {
@@ -337,10 +321,15 @@ public actor WebSocketSignalingClient {
     }
 
     private func performConnectSequence(timeout: Duration) async throws {
+        let epoch = connectionEpoch
         let attempts = transportAttempts()
         var lastError: Error = SignalingError.connectTimedOut
 
         for attempt in attempts {
+            try Task.checkCancellation()
+            guard connectionEpoch == epoch, !isClosingSequence else {
+                throw CancellationError()
+            }
             let handleId = reserveNextHandleId(for: attempt.backend)
             currentHandle = handleId
             isBound = false
@@ -358,7 +347,7 @@ public actor WebSocketSignalingClient {
             )
 
             logger.info(
-                "🔌 signaling connect attempt: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                "🔌 signaling connect attempt: session=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
             )
 
             do {
@@ -369,8 +358,14 @@ public actor WebSocketSignalingClient {
                     try await connectViaNative(handleId: handleId, proxyBypass: proxyBypass, timeout: timeout)
                 }
 
+                guard connectionEpoch == epoch,
+                      !isClosingSequence,
+                      currentHandle == handleId else {
+                    throw CancellationError()
+                }
+
                 logger.info(
-                    "✅ signaling backend pinned after bound: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
+                    "✅ signaling backend pinned after bound: session=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
                 )
                 lastBoundHandle = handleId
                 return
@@ -378,16 +373,21 @@ public actor WebSocketSignalingClient {
                 lastError = error
                 if error is CancellationError {
                     logger.debug(
-                        "ℹ️ signaling connect attempt cancelled: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
+                        "ℹ️ signaling connect attempt cancelled: session=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public)"
                     )
                 } else {
                     logger.error(
-                        "❌ signaling connect attempt failed: session=\(self.sessionId, privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+                        "❌ signaling connect attempt failed: session=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(attempt.label, privacy: .public) err=\(RemoteConnectionLogRedaction.error(error), privacy: .public)"
                     )
                 }
-                await cleanupTransport(for: attempt.backend)
                 if currentHandle == handleId {
                     currentHandle = nil
+                    isBound = false
+                    isSocketOpen = false
+                }
+                await cleanupTransport(for: attempt.backend)
+                guard connectionEpoch == epoch, !isClosingSequence else {
+                    throw CancellationError()
                 }
             }
         }
@@ -576,11 +576,58 @@ public actor WebSocketSignalingClient {
         }
     }
 
-    private func handleSocketOpen(handleId: SignalingHandleID) {
-        if currentHandle == handleId {
-            isSocketOpen = true
-            lifecyclePhase = .socketOpen
+    private struct CloseSequence {
+        let epoch: UInt64
+        let handle: SignalingHandleID?
+    }
+
+    /// Revokes callback authority synchronously. No transport cleanup is allowed to suspend until
+    /// this state has been installed, so queued callbacks from the captured handle are stale.
+    private func beginCloseSequence() -> CloseSequence? {
+        guard !isClosingSequence else { return nil }
+        isClosingSequence = true
+        connectionEpoch &+= 1
+        let closeSequence = CloseSequence(epoch: connectionEpoch, handle: currentHandle)
+        currentHandle = nil
+        isBound = false
+        isSocketOpen = false
+        lifecyclePhase = .closing
+        terminalErrorsByHandle.removeAll()
+        if let handle = closeSequence.handle {
+            emitLifecycle(
+                phase: .closing,
+                handleId: handle,
+                errorDescription: nil,
+                failureClass: nil,
+                serverFrameType: nil
+            )
         }
+        return closeSequence
+    }
+
+    private func finishCloseSequence(_ closeSequence: CloseSequence) {
+        guard isClosingSequence, connectionEpoch == closeSequence.epoch else { return }
+        if let handle = closeSequence.handle {
+            emitLifecycle(
+                phase: .closed,
+                handleId: handle,
+                errorDescription: nil,
+                failureClass: nil,
+                serverFrameType: nil
+            )
+        }
+        lifecyclePhase = .closed
+        isClosingSequence = false
+        failConnectWaiters(with: SignalingError.notConnected)
+        onEnvelope = nil
+        onServerFrame = nil
+        onLifecycleEvent = nil
+    }
+
+    private func handleSocketOpen(handleId: SignalingHandleID) {
+        guard currentHandle == handleId else { return }
+        isSocketOpen = true
+        lifecyclePhase = .socketOpen
         emitLifecycle(
             phase: .socketOpen,
             handleId: handleId,
@@ -588,15 +635,21 @@ public actor WebSocketSignalingClient {
             failureClass: nil,
             serverFrameType: nil
         )
-        logger.info("✅ signaling websocket open: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+        logger.info("✅ signaling websocket open: session=\(RemoteConnectionLogRedaction.session(handleId.sessionId), privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
     }
 
     private func handleText(handleId: SignalingHandleID, text: String) {
+        guard currentHandle == handleId else {
+            logger.debug(
+                "ℹ️ dropping stale signaling message: session=\(RemoteConnectionLogRedaction.session(handleId.sessionId), privacy: .public) generation=\(handleId.generation, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)"
+            )
+            return
+        }
         switch Self.parseInboundText(text) {
         case .envelope(let env):
-            onEnvelope?(env)
+            onEnvelope?(handleId, env)
         case .serverFrame(let frame):
-            onServerFrame?(frame)
+            onServerFrame?(handleId, frame)
             if frame.type == "bound" {
                 if currentHandle == handleId {
                     isSocketOpen = true
@@ -611,7 +664,7 @@ public actor WebSocketSignalingClient {
                     failureClass: nil,
                     serverFrameType: frame.type
                 )
-                logger.info("✅ signaling server bound: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+                logger.info("✅ signaling server bound: session=\(RemoteConnectionLogRedaction.session(handleId.sessionId), privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
                 return
             }
 
@@ -631,7 +684,7 @@ public actor WebSocketSignalingClient {
                     failureClass: failureClass,
                     serverFrameType: frame.type
                 )
-                logger.error("❌ signaling server error: \(reason, privacy: .public)")
+                logger.error("❌ signaling server error: \(RemoteConnectionLogRedaction.untrustedText(reason), privacy: .public)")
             } else {
                 emitLifecycle(
                     phase: lifecyclePhase,
@@ -640,19 +693,18 @@ public actor WebSocketSignalingClient {
                     failureClass: nil,
                     serverFrameType: frame.type
                 )
-                logger.debug("ℹ️ signaling server frame: type=\(frame.type, privacy: .public)")
+                logger.debug("ℹ️ signaling server frame: type=\(RemoteConnectionLogRedaction.untrustedText(frame.type), privacy: .public)")
             }
         case .unknown:
-            logger.debug("ignoring non-envelope message: \(text.prefix(200), privacy: .public)")
+            logger.debug("ignoring non-envelope message: \(RemoteConnectionLogRedaction.untrustedText(text), privacy: .public)")
         }
     }
 
     private func handleClosed(handleId: SignalingHandleID, errorDescription: String) async {
-        if currentHandle == handleId {
-            isSocketOpen = false
-            isBound = false
-            lifecyclePhase = .closed
-        }
+        guard currentHandle == handleId else { return }
+        isSocketOpen = false
+        isBound = false
+        lifecyclePhase = .closed
         terminalErrorsByHandle[handleId] = SignalingError.notConnected
         emitLifecycle(
             phase: .closed,
@@ -661,15 +713,14 @@ public actor WebSocketSignalingClient {
             failureClass: .transientNetwork,
             serverFrameType: nil
         )
-        logger.info("⏹️ signaling websocket closed: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
+        logger.info("⏹️ signaling websocket closed: session=\(RemoteConnectionLogRedaction.session(handleId.sessionId), privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public)")
     }
 
     private func handleErrored(handleId: SignalingHandleID, error: Error) async {
-        if currentHandle == handleId {
-            isSocketOpen = false
-            isBound = false
-            lifecyclePhase = .failed
-        }
+        guard currentHandle == handleId else { return }
+        isSocketOpen = false
+        isBound = false
+        lifecyclePhase = .failed
         terminalErrorsByHandle[handleId] = error
         let failureClass = Self.classifyTransportError(error)
         emitLifecycle(
@@ -680,7 +731,7 @@ public actor WebSocketSignalingClient {
             serverFrameType: nil
         )
         logger.error(
-            "❌ signaling websocket error: session=\(handleId.sessionId, privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public) err=\(error.localizedDescription, privacy: .public)"
+            "❌ signaling websocket error: session=\(RemoteConnectionLogRedaction.session(handleId.sessionId), privacy: .public) backend=\(handleId.backend.rawValue, privacy: .public) err=\(RemoteConnectionLogRedaction.error(error), privacy: .public)"
         )
     }
 
@@ -724,10 +775,11 @@ public actor WebSocketSignalingClient {
     }
 
     private func cleanupNativeTransport() async {
-        if let nativeClient {
-            await nativeClient.close()
-        }
+        let detachedClient = nativeClient
         nativeClient = nil
+        if let detachedClient {
+            await detachedClient.close()
+        }
     }
 
     private static func classifyServerError(_ reason: String) -> SignalingFailureClass {
@@ -816,6 +868,36 @@ extension WebSocketSignalingClient {
 
     internal func testOnlyTransportAttemptLabels() -> [String] {
         transportAttempts().map(\.label)
+    }
+
+    internal func testOnlyInstallCurrentHandle(_ handleId: SignalingHandleID) {
+        currentHandle = handleId
+    }
+
+    internal func testOnlyHandleText(handleId: SignalingHandleID, text: String) {
+        handleText(handleId: handleId, text: text)
+    }
+
+    internal func testOnlyHandleSocketOpen(handleId: SignalingHandleID) {
+        handleSocketOpen(handleId: handleId)
+    }
+
+    internal func testOnlyHandleClosed(handleId: SignalingHandleID) async {
+        await handleClosed(handleId: handleId, errorDescription: "test close")
+    }
+
+    internal func testOnlyHandleErrored(handleId: SignalingHandleID) async {
+        await handleErrored(handleId: handleId, error: SignalingError.notConnected)
+    }
+
+    /// Runs the exact production close state transition with an injected suspension in place of
+    /// transport cleanup, allowing deterministic verification of queued callback rejection.
+    internal func testOnlyCloseDuringSuspendedCleanup(
+        _ suspension: @Sendable () async -> Void
+    ) async {
+        guard let closeSequence = beginCloseSequence() else { return }
+        await suspension()
+        finishCloseSequence(closeSequence)
     }
 
     internal static func testOnlyNoProxyConnectionProxyDictionary() -> [AnyHashable: Any] {

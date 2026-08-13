@@ -474,7 +474,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         onRemoteVideoTrack = nil
 #endif
         onReady = nil
-        logger.info("⏹️ WebRTCSession closed sessionId=\(self.sessionId, privacy: .public)")
+        logger.info("⏹️ WebRTCSession closed sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
     }
     
     deinit {
@@ -506,7 +506,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         if let stunURL = Self.normalizedICEURL(ice.stunURL), stunURL.hasPrefix("stun:") {
             servers.append(RTCIceServer(urlStrings: [stunURL]))
         } else {
-            logger.warning("⚠️ Invalid STUN URL. sessionId=\(self.sessionId, privacy: .public)")
+            logger.warning("⚠️ Invalid STUN URL. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
         }
 
         let turnURLs = ice.turnURLs.compactMap(Self.normalizedICEURL)
@@ -525,15 +525,15 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             if !turnUsername.isEmpty, !turnPassword.isEmpty {
                 servers.append(RTCIceServer(urlStrings: validTurnURLs, username: turnUsername, credential: turnPassword))
             } else {
-                logger.warning("⚠️ TURN credentials missing, degraded to STUN-only. sessionId=\(self.sessionId, privacy: .public)")
+                logger.warning("⚠️ TURN credentials missing, degraded to STUN-only. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
             }
         } else if !ice.turnURLs.isEmpty {
-            logger.warning("⚠️ Invalid TURN URLs. sessionId=\(self.sessionId, privacy: .public)")
+            logger.warning("⚠️ Invalid TURN URLs. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
         }
 
         if servers.isEmpty {
             servers.append(RTCIceServer(urlStrings: [Self.publicFallbackSTUNURL]))
-            logger.warning("⚠️ No valid ICE servers, fallback to public STUN. sessionId=\(self.sessionId, privacy: .public)")
+            logger.warning("⚠️ No valid ICE servers, fallback to public STUN. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
         }
 
         return servers
@@ -565,7 +565,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: ["DtlsSrtpKeyAgreement": "true"])
         guard let pc = factory.peerConnection(with: config, constraints: constraints, delegate: self) else {
-            logger.error("❌ RTCPeerConnection creation failed: sessionId=\(self.sessionId, privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
+            logger.error("❌ RTCPeerConnection creation failed: sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) iceServerCount=\(config.iceServers.count, privacy: .public)")
             sslHeld = false
             WebRTCSSL.release()
             throw WebRTCError.peerConnectionCreationFailed
@@ -586,7 +586,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             onTrace?("start-answerer session=\(sessionId) iceServers=\(config.iceServers.count)")
         }
         
-        logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(self.sessionId, privacy: .public)")
+        logger.info("✅ WebRTCSession started role=\(String(describing: self.role), privacy: .public) sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
 #else
         throw WebRTCError.webRTCNotAvailable
 #endif
@@ -698,7 +698,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let normalizedOffer = Self.normalizedRemoteSDP(sdp)
         if hasRemoteDescription || isSettingRemoteDescription {
             absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp, traceLabel: "duplicate-offer")
-            logger.debug("ℹ️ ignore duplicate remote offer. sessionId=\(self.sessionId, privacy: .public)")
+            logger.debug("ℹ️ ignore duplicate remote offer. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
             onTrace?("set-remote-offer ignored duplicate session=\(sessionId)")
             return
         }
@@ -707,7 +707,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             hasRemoteDescription = true
             absorbRemoteICECandidatesFromSDP(normalizedOffer.sdp, traceLabel: "existing-offer")
             flushPendingRemoteICECandidates()
-            logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
+            logger.debug("ℹ️ remote offer already applied; ignore. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
             onTrace?("set-remote-offer ignored existing session=\(sessionId)")
             return
         }
@@ -722,7 +722,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             guard let self else { return }
             self.isSettingRemoteDescription = false
             if let error {
-                self.logger.error("❌ setRemoteOffer failed: \(error.localizedDescription, privacy: .public)")
+                self.logger.error("❌ setRemoteOffer failed: \(RemoteConnectionLogRedaction.error(error), privacy: .public)")
                 self.onTrace?("set-remote-offer failed session=\(self.sessionId) error=\(error.localizedDescription)")
                 return
             }
@@ -745,7 +745,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             hasRemoteDescription = true
             absorbRemoteICECandidatesFromSDP(normalizedAnswer.sdp, traceLabel: "duplicate-answer")
             flushPendingRemoteICECandidates()
-            logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(self.sessionId, privacy: .public)")
+            logger.debug("ℹ️ ignore duplicate remote answer. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
             onTrace?("set-remote-answer ignored duplicate session=\(sessionId)")
             return
         }
@@ -767,11 +767,11 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     self.flushPendingRemoteICECandidates()
                     self.inspectRemoteVideoTrackIfAvailable(peerConnection: pc)
                     self.scheduleRemoteVideoTrackInspection(peerConnection: pc, reason: "set-remote-answer-stable")
-                    self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(self.sessionId, privacy: .public)")
+                    self.logger.debug("ℹ️ remote answer already applied; ignore. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
                     self.onTrace?("set-remote-answer ignored stable session=\(self.sessionId)")
                     return
                 }
-                self.logger.error("❌ setRemoteAnswer failed: \(error.localizedDescription, privacy: .public)")
+                self.logger.error("❌ setRemoteAnswer failed: \(RemoteConnectionLogRedaction.error(error), privacy: .public)")
                 self.onTrace?("set-remote-answer failed session=\(self.sessionId) error=\(error.localizedDescription)")
                 return
             }
@@ -790,7 +790,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         guard trackRemoteICECandidateIfNeeded(cand) else { return }
         guard hasRemoteDescription else {
             pendingRemoteICECandidates.append(cand)
-            logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(self.sessionId, privacy: .public) pending=\(self.pendingRemoteICECandidates.count, privacy: .public)")
+            logger.debug("⏳ queue remote ICE candidate until remote description is set. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) pending=\(self.pendingRemoteICECandidates.count, privacy: .public)")
             onTrace?("queue-remote-ice session=\(sessionId) pending=\(pendingRemoteICECandidates.count)")
             return
         }
@@ -817,7 +817,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pc.add(candidate) { [weak self] error in
             guard let self else { return }
             if let error {
-                self.logger.error("⚠️ addIceCandidate failed: \(error.localizedDescription, privacy: .public)")
+                self.logger.error("⚠️ addIceCandidate failed: \(RemoteConnectionLogRedaction.error(error), privacy: .public)")
             }
         }
     }
@@ -828,7 +828,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
 
         let pending = pendingRemoteICECandidates
         pendingRemoteICECandidates.removeAll(keepingCapacity: false)
-        logger.info("🔄 applying queued remote ICE candidates. sessionId=\(self.sessionId, privacy: .public) count=\(pending.count, privacy: .public)")
+        logger.info("🔄 applying queued remote ICE candidates. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) count=\(pending.count, privacy: .public)")
         for candidate in pending {
             addRemoteICECandidateInternal(candidate)
         }
@@ -849,7 +849,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         }
 
         guard absorbed > 0 else { return }
-        logger.info("🔄 absorbed ICE candidates from duplicate SDP. sessionId=\(self.sessionId, privacy: .public) count=\(absorbed, privacy: .public)")
+        logger.info("🔄 absorbed ICE candidates from duplicate SDP. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) count=\(absorbed, privacy: .public)")
         onTrace?("absorb-remote-ice session=\(sessionId) source=\(traceLabel) count=\(absorbed)")
     }
 
@@ -887,7 +887,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
            !incomingTrackId.isEmpty,
            isTrackRebind {
             logger.info(
-                "🔁 rebind remote native video track after receiver replaced backing instance. sessionId=\(self.sessionId, privacy: .public) trackId=\(incomingTrackId, privacy: .public)"
+                "🔁 rebind remote native video track after receiver replaced backing instance. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) trackId=\(incomingTrackId, privacy: .public)"
             )
             onTrace?("remote-video-track rebind session=\(sessionId) trackId=\(incomingTrackId)")
         }
@@ -896,7 +896,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didEmitRemoteVideoFrameEvidence = isTrackRebind ? didEmitRemoteVideoFrameEvidence : false
         remoteVideoTrack = track
         if track != nil {
-            logger.info("🎬 detected remote native video track. sessionId=\(self.sessionId, privacy: .public)")
+            logger.info("🎬 detected remote native video track. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
             remoteVideoTrackInspectionTask?.cancel()
             remoteVideoTrackInspectionTask = nil
             startRemoteVideoFrameEvidenceObservation()
@@ -954,7 +954,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 if now.timeIntervalSince(lastProbeLogAt) >= 1.0 {
                     lastProbeLogAt = now
                     self.logger.debug(
-                        "📈 remote native video receiver stats probe. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
+                        "📈 remote native video receiver stats probe. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) \(snapshot.summary, privacy: .public)"
                     )
                     self.onTrace?(
                         "remote-video-stats session=\(self.sessionId) \(snapshot.summary)"
@@ -973,7 +973,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                 self.didEmitRemoteVideoFrameEvidence = true
                 self.remoteVideoFrameEvidenceTask = nil
                 self.logger.info(
-                    "🎬 remote native video receiver stats confirmed first frame. sessionId=\(self.sessionId, privacy: .public) \(snapshot.summary, privacy: .public)"
+                    "🎬 remote native video receiver stats confirmed first frame. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) \(snapshot.summary, privacy: .public)"
                 )
                 self.onTrace?(
                     "remote-video-frame-evidence session=\(self.sessionId) source=receiver-stats \(snapshot.summary)"
@@ -1125,7 +1125,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     return
                 }
             }
-            self.logger.debug("ℹ️ remote native video track still unavailable after inspection. sessionId=\(self.sessionId, privacy: .public) reason=\(reason, privacy: .public)")
+            self.logger.debug("ℹ️ remote native video track still unavailable after inspection. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) reason=\(RemoteConnectionLogRedaction.untrustedText(reason), privacy: .public)")
             self.onTrace?("remote-video-track inspection-timeout session=\(self.sessionId) reason=\(reason)")
         }
     }
@@ -1420,7 +1420,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pc.offer(for: constraints) { [weak self] sdp, error in
             guard let self else { return }
             if let error {
-                self.logger.error("❌ offer failed: \(error.localizedDescription, privacy: .public)")
+                self.logger.error("❌ offer failed: \(RemoteConnectionLogRedaction.error(error), privacy: .public)")
                 self.onTrace?("create-offer failed session=\(self.sessionId) error=\(error.localizedDescription)")
                 return
             }
@@ -1429,7 +1429,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             pc.setLocalDescription(sdp) { [weak self] err in
                 guard let self else { return }
                 if let err {
-                    self.logger.error("❌ setLocalDescription(offer) failed: \(err.localizedDescription, privacy: .public)")
+                    self.logger.error("❌ setLocalDescription(offer) failed: \(RemoteConnectionLogRedaction.error(err), privacy: .public)")
                     self.onTrace?("set-local-offer failed session=\(self.sessionId) error=\(err.localizedDescription)")
                     return
                 }
@@ -1453,7 +1453,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         pc.answer(for: constraints) { [weak self] sdp, error in
             guard let self else { return }
             if let error {
-                self.logger.error("❌ answer failed: \(error.localizedDescription, privacy: .public)")
+                self.logger.error("❌ answer failed: \(RemoteConnectionLogRedaction.error(error), privacy: .public)")
                 self.onTrace?("create-answer failed session=\(self.sessionId) error=\(error.localizedDescription)")
                 return
             }
@@ -1462,7 +1462,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             pc.setLocalDescription(sdp) { [weak self] err in
                 guard let self else { return }
                 if let err {
-                    self.logger.error("❌ setLocalDescription(answer) failed: \(err.localizedDescription, privacy: .public)")
+                    self.logger.error("❌ setLocalDescription(answer) failed: \(RemoteConnectionLogRedaction.error(err), privacy: .public)")
                     self.onTrace?("set-local-answer failed session=\(self.sessionId) error=\(err.localizedDescription)")
                     return
                 }
@@ -1479,7 +1479,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         let sdp = localDescription.sdp
         guard !sdp.isEmpty, sdp != lastEmittedLocalSDP else { return }
         lastEmittedLocalSDP = sdp
-        logger.info("🔁 emitting gathered local description. sessionId=\(self.sessionId, privacy: .public) role=\(String(describing: self.role), privacy: .public)")
+        logger.info("🔁 emitting gathered local description. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public) role=\(String(describing: self.role), privacy: .public)")
         onTrace?("emit-complete-local-description session=\(sessionId) role=\(String(describing: role)) bytes=\(sdp.utf8.count)")
         switch role {
         case .offerer:
@@ -1682,7 +1682,7 @@ extension WebRTCSession: RTCRtpReceiverDelegate {
         didReceiveFirstPacketFor mediaType: RTCRtpMediaType
     ) {
         guard mediaType == .video else { return }
-        logger.info("📡 remote native video receiver got first RTP packet. sessionId=\(self.sessionId, privacy: .public)")
+        logger.info("📡 remote native video receiver got first RTP packet. sessionId=\(RemoteConnectionLogRedaction.session(self.sessionId), privacy: .public)")
         onTrace?("remote-video-first-packet session=\(sessionId)")
         onRemoteVideoFirstPacket?()
     }

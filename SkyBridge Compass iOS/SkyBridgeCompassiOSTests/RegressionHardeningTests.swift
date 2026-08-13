@@ -704,6 +704,130 @@ final class CrossNetworkFileTransferCompletionAcknowledgementTests: XCTestCase {
 
 @available(iOS 17.0, *)
 final class RegressionHardeningTests: XCTestCase {
+    func testRemoteConnectionDiagnosticsRedactSessionTextAndErrorDetails() {
+        let secret = "CONNECTION-CODE-1234"
+        XCTAssertEqual(RemoteConnectionLogRedaction.session(secret), "<redacted>")
+        XCTAssertEqual(RemoteConnectionLogRedaction.untrustedText(secret), "<redacted>")
+        XCTAssertEqual(RemoteConnectionLogRedaction.peer(secret), "<redacted>")
+        XCTAssertFalse(RemoteConnectionLogRedaction.error(TestDiagnosticError.secret(secret)).contains(secret))
+        XCTAssertEqual(RemoteConnectionLogRedaction.session(""), "<empty>")
+    }
+
+    func testIndependentSignalingCopyRejectsStaleHandlesAndRedactsTrace() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SkyBridgeCompassiOS")
+            .appendingPathComponent("Sources/Core/RemoteConnection/WebRTC/WebSocketSignalingClient.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let handlerStart = try XCTUnwrap(source.range(of: "private func handleText(handleId:"))
+        let handlerTail = source[handlerStart.lowerBound...]
+        let guardRange = try XCTUnwrap(handlerTail.range(of: "guard currentHandle == handleId else"))
+        let deliveryRange = try XCTUnwrap(handlerTail.range(of: "switch Self.parseInboundText(text)"))
+
+        XCTAssertLessThan(
+            handlerTail.distance(from: handlerTail.startIndex, to: guardRange.lowerBound),
+            handlerTail.distance(from: handlerTail.startIndex, to: deliveryRange.lowerBound)
+        )
+        XCTAssertTrue(handlerTail.contains("drop-stale-message session="))
+        XCTAssertFalse(source.contains("send session=\\(envelope.sessionId)"))
+        XCTAssertFalse(source.contains("from=\\(envelope.from)"))
+        XCTAssertFalse(source.contains("recv-envelope session=\\(env.sessionId)"))
+        XCTAssertFalse(source.contains("err=\\(error.localizedDescription)"))
+        XCTAssertFalse(source.contains("reason=\\(errorDescription)"))
+        XCTAssertTrue(source.contains("private var connectionEpoch: UInt64 = 0"))
+        XCTAssertTrue(source.contains("connectionEpoch &+= 1"))
+        XCTAssertTrue(source.contains("onEnvelope = nil"))
+
+        let closeStart = try XCTUnwrap(source.range(of: "public func close() async"))
+        let closeTail = source[closeStart.lowerBound...]
+        let retireHandle = try XCTUnwrap(closeTail.range(of: "currentHandle = nil"))
+        let cleanupAwait = try XCTUnwrap(closeTail.range(of: "await cleanupURLSessionTransport()"))
+        XCTAssertLessThan(
+            closeTail.distance(from: closeTail.startIndex, to: retireHandle.lowerBound),
+            closeTail.distance(from: closeTail.startIndex, to: cleanupAwait.lowerBound)
+        )
+        for handler in ["handleSocketOpen", "handleText", "handleClosed", "handleErrored"] {
+            let handlerRange = try XCTUnwrap(source.range(of: "private func \(handler)"))
+            let tail = source[handlerRange.lowerBound...]
+            let end = tail.firstIndex(of: "}") ?? tail.endIndex
+            XCTAssertTrue(tail[..<end].contains("guard currentHandle == handleId else"))
+        }
+
+        let managerURL = sourceURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Managers/CrossNetworkWebRTCManager.swift")
+        let manager = try String(contentsOf: managerURL, encoding: .utf8)
+        XCTAssertTrue(manager.contains("IOSSignalingMainActorDeliveryQueue"))
+        XCTAssertTrue(manager.contains("[weak self, weak newSignaling]"))
+        XCTAssertTrue(manager.contains("activeSignalingHandleBySessionId[sessionId] == handle"))
+    }
+
+    func testFormalSmokeTraceRetainsOnlyBoundedEventCategory() {
+        let secret = "FORMAL-CODE-1234"
+        let peer = "persistent-peer-identity"
+        let error = "server says token=secret"
+        let sanitized = CrossNetworkWebRTCManager.formalSmokeTraceLine(
+            "tx-fail session=\(secret) peer=\(peer) error=\(error)"
+        )
+
+        XCTAssertEqual(sanitized, "event=tx-fail details=<redacted>")
+        XCTAssertFalse(sanitized.contains(secret))
+        XCTAssertFalse(sanitized.contains(peer))
+        XCTAssertFalse(sanitized.contains(error))
+        XCTAssertEqual(
+            CrossNetworkWebRTCManager.formalSmokeTraceLine("!bad event"),
+            "event=_bad details=<redacted>"
+        )
+        XCTAssertLessThanOrEqual(
+            CrossNetworkWebRTCManager.formalSmokeTraceLine(String(repeating: "x", count: 512))
+                .split(separator: " ")[0]
+                .count,
+            "event=".count + 64
+        )
+    }
+
+    func testExistingOnlyRuntimeLoggerRedactsEverySinkMessage() {
+        let raw = "tx-fail session=FORMAL-CODE peer=persistent-id error=token-secret"
+        XCTAssertEqual(
+            SkyBridgeLogger.runtimeMessage(
+                raw,
+                environment: ["SKYBRIDGE_SMOKE_EXISTING_TRUST_ONLY": "1"]
+            ),
+            "event=tx-fail details=<redacted>"
+        )
+        XCTAssertEqual(
+            SkyBridgeLogger.runtimeMessage(raw, environment: [:]),
+            raw,
+            "normal product diagnostics must keep their existing behavior"
+        )
+    }
+
+    func testIndependentSignalingCopyRejectsStaleHandlesBeforeDelivery() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("SkyBridgeCompassiOS")
+            .appendingPathComponent("Sources/Core/RemoteConnection/WebRTC/WebSocketSignalingClient.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let handlerStart = try XCTUnwrap(source.range(of: "private func handleText(handleId:"))
+        let handlerTail = source[handlerStart.lowerBound...]
+        let guardRange = try XCTUnwrap(handlerTail.range(of: "guard currentHandle == handleId else"))
+        let deliveryRange = try XCTUnwrap(handlerTail.range(of: "switch Self.parseInboundText(text)"))
+
+        XCTAssertLessThan(
+            handlerTail.distance(from: handlerTail.startIndex, to: guardRange.lowerBound),
+            handlerTail.distance(from: handlerTail.startIndex, to: deliveryRange.lowerBound)
+        )
+        XCTAssertTrue(handlerTail.contains("drop-stale-message session="))
+        XCTAssertFalse(handlerTail.contains("recv-envelope session=\\(env.sessionId)"))
+        XCTAssertFalse(handlerTail.contains("from=\\(env.from)"))
+        XCTAssertFalse(handlerTail.contains("error=\\(frame.error"))
+    }
+
     func testExplicitMLKEMPreferenceOverridesPersistedXWingPreference() throws {
         let suiteName = "CryptoProviderFactoryTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -734,6 +858,10 @@ final class RegressionHardeningTests: XCTestCase {
             ExistingReadOnlyIdentityMaterialProvider.protocolSigningAlgorithm(requirePQC: true),
             .mlDSA65
         )
+    }
+
+    private enum TestDiagnosticError: Error {
+        case secret(String)
     }
 
     func testExistingReadOnlyIdentityRequiresOnlyTheFormalMLKEMSuite() throws {
