@@ -25,6 +25,9 @@ APP_PACKAGING_ENTITLEMENTS="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/SkyBridgeC
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 WIDGET_EXT_NAME="SkyBridgeCompassWidgetsExtension"
 BG_SRC_PNG="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Resources/AppIcon.png"
+PACKAGE_RESOLVED="$PROJECT_ROOT/Package.resolved"
+NATIVE_DEPENDENCY_LOCK="$PROJECT_ROOT/Config/native-dependencies.lock.json"
+LIBOQS_PROVENANCE="$PROJECT_ROOT/Sources/Vendor/liboqs.provenance.json"
 
 # ============================================================================
 # 辅助函数
@@ -57,8 +60,20 @@ log_step "步骤 1: 构建主应用 (SwiftPM)"
 
 cd "$PROJECT_ROOT"
 
+if [ ! -f "$PACKAGE_RESOLVED" ] || [ -L "$PACKAGE_RESOLVED" ]; then
+    log_error "Package.resolved 必须是仓库中的普通文件"
+    exit 1
+fi
+PACKAGE_RESOLVED_SHA256="$(shasum -a 256 "$PACKAGE_RESOLVED" | awk '{ print $1 }')"
+
+log_info "验证原生依赖来源与构建输入..."
+python3 -W error -B "$PROJECT_ROOT/Scripts/native_vendor_provenance.py" verify \
+    --repository-root "$PROJECT_ROOT" \
+    --lock "$NATIVE_DEPENDENCY_LOCK" \
+    --provenance "$LIBOQS_PROVENANCE"
+
 log_info "清理旧构建..."
-swift package clean 2>/dev/null || true
+swift package clean
 
 log_info "检测 Apple PQC SDK 可用性（用于编译期开关 HAS_APPLE_PQC_SDK）..."
 SDK_VER="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo "")"
@@ -72,7 +87,12 @@ else
 fi
 
 log_info "构建 Release 版本..."
-swift build -c release
+swift build --disable-automatic-resolution -c release
+
+if [ "$(shasum -a 256 "$PACKAGE_RESOLVED" | awk '{ print $1 }')" != "$PACKAGE_RESOLVED_SHA256" ]; then
+    log_error "构建期间 Package.resolved 发生变化"
+    exit 1
+fi
 
 log_success "主应用构建完成"
 
@@ -155,15 +175,15 @@ done
 log_success "App Bundle 创建完成"
 
 # ============================================================================
-# 步骤 2.5: FreeRDP 依赖处理（XCFramework）
+# 步骤 2.5: FreeRDP 运行时依赖边界
 # ============================================================================
 
-log_step "步骤 2.5: FreeRDP 依赖处理（XCFramework）"
+log_step "步骤 2.5: FreeRDP 运行时依赖边界"
 
 # 说明：
-# 已切换到 Sources/Vendor 下的 FreeRDP/WinPR/FreeRDPClient XCFramework（静态库）
-# 不需要再嵌入 Homebrew dylib，避免 macOS 版本不匹配告警。
-log_info "已使用 XCFramework（静态库），无需嵌入 Homebrew dylib"
+# FreeRDPBridge 通过 dlopen/dlsym 使用系统外部运行时；SwiftPM 不再声明未实际链接的
+# FreeRDP/WinPR 静态 XCFramework。此脚本既不打包也不验证该可选运行时能力。
+log_info "FreeRDP 是未随包交付的可选外部运行时；本构建不验证该能力"
 
 # ============================================================================
 # 步骤 3: 构建 Widget Extension

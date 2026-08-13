@@ -27,10 +27,8 @@
 
 ## Vendor And Local Packages
 
-- `LocalPackages/WebRTCLocal`
 - `LocalPackages/OQSRAIILocal`
-- `Vendor/WebRTC`
-- `Vendor/liboqs.xcframework`
+- `../Sources/Vendor/liboqs.xcframework`（macOS / iOS 共用、带 provenance）
 
 ## Notes
 

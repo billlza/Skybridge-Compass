@@ -68,24 +68,12 @@ let package = Package(
         // ASN.1/DER 解析库：用于 PEM/PKCS#8 私钥解析（Ed25519）
         .package(url: "https://github.com/apple/swift-asn1", from: "1.6.0"),
         // WebRTC (ICE / DataChannel) - 跨网连接基础设施（走 STUN/TURN）
-        .package(url: "https://github.com/stasel/WebRTC", from: "141.0.0")
+        .package(url: "https://github.com/stasel/WebRTC", exact: "141.0.0")
     ],
     targets: [
         .binaryTarget(
             name: "liboqs",
             path: "Sources/Vendor/liboqs.xcframework"
-        ),
-        .binaryTarget(
-            name: "FreeRDP",
-            path: "Sources/Vendor/FreeRDP.xcframework"
-        ),
-        .binaryTarget(
-            name: "WinPR",
-            path: "Sources/Vendor/WinPR.xcframework"
-        ),
-        .binaryTarget(
-            name: "FreeRDPClient",
-            path: "Sources/Vendor/FreeRDPClient.xcframework"
         ),
         .target(
             name: "OQSRAII",
@@ -99,7 +87,10 @@ let package = Package(
         ),
         .target(
             name: "FreeRDPBridge",
-            dependencies: ["WinPR", "FreeRDP", "FreeRDPClient"],
+            // The bridge resolves the installed FreeRDP runtime with dlopen/dlsym.
+            // Static archives here would be a second, unused ABI source and would not
+            // represent the actual runtime dependency closure.
+            dependencies: [],
             path: "Sources/FreeRDPBridge",
             publicHeadersPath: "include",
             cSettings: [

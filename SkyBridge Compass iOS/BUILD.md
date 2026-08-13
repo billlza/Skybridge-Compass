@@ -10,8 +10,8 @@
 - Apple 开发者账号（用于真机测试）
 
 ### 依赖项
-- WebRTC Swift Package（Xcode 会自动解析）
-- liboqs（可选：若你要在 iOS 17-25 上实现 PQC-only，需要提供 iOS 架构的 liboqs XCFramework）
+- WebRTC Swift Package（精确锁定到仓库中的 resolved revision；正式构建禁用自动解析）
+- 仓库根目录 `Sources/Vendor/liboqs.xcframework`（macOS / iOS 共用，来源和 recipe 输入由 provenance 校验）
 
 ## 🚀 快速开始
 
@@ -195,27 +195,22 @@ xcodebuild test \
 
 ## 🔐 PQC 加密配置
 
-### 使用 liboqs (可选)
+### 重建或升级 liboqs
 
-如果要替换当前仓库中的 `Vendor/liboqs.xcframework`，可以自行重新编译并覆盖 vendored 产物：
+仓库根目录中的 liboqs XCFramework 是必需构建依赖，由锁定的来源、工具链与构建参数生成。不要直接替换二进制；升级时应先评审并更新 native dependency lock（包括精确工具链与 recipe-input SHA-256），再运行受审构建脚本生成新的产物与 provenance：
 
 ```bash
-# 下载 liboqs
-git clone https://github.com/open-quantum-safe/liboqs.git
-cd liboqs
-
-# 构建 iOS 版本
-mkdir build-ios && cd build-ios
-cmake .. -DCMAKE_TOOLCHAIN_FILE=../cmake/ios.toolchain.cmake
-make
-
-# 将编译产物整理成 xcframework 后替换当前 vendored 版本
-# 目标位置示例：
-#   SkyBridge Compass iOS/Vendor/liboqs.xcframework
+cd "<repository-root>"
+Scripts/build_liboqs_xcframework.sh
+python3 -W error -B Scripts/native_vendor_provenance.py verify \
+  --repository-root . \
+  --lock Config/native-dependencies.lock.json \
+  --provenance Sources/Vendor/liboqs.provenance.json
 ```
 
 说明：
-- 当前工程已经通过本地 vendor / local package 路径接入 liboqs 相关依赖
+- macOS 与 iOS 共用 `Sources/Vendor/liboqs.xcframework`，避免平行二进制来源
+- WebRTC 使用精确版本的 Swift Package 依赖，不再依赖本机忽略的 XCFramework
 - 不再使用旧文档里 `Shared/Libraries/` 这类目录布局
 
 ## 📚 更多资源

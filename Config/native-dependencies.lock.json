@@ -1,0 +1,44 @@
+{
+  "schema_version": 3,
+  "families": {
+    "liboqs": {
+      "sources": [
+        {
+          "name": "liboqs",
+          "version": "0.16.0",
+          "ref": "0.16.0",
+          "commit": "5a1a854b0dc9f2141bdc771c555ee60c37950183",
+          "repository": "https://github.com/open-quantum-safe/liboqs.git",
+          "git_tree": "8e0a3a68b247f821ed535a141aa896a7fda59d2d",
+          "source_archive_sha256": "2a469ff48e73c9cd78c2f7752465ca7a066582fbaa9185f52b4725783218d39d"
+        }
+      ],
+      "build_inputs": {
+        "architectures": "macos-arm64;ios-arm64;ios-simulator-arm64;ios-simulator-x86_64",
+        "build_type": "Release",
+        "distribution_build": "true",
+        "downstream_patch": "Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch@6de373115afcf5cb01a2075ec49cb5609db2970cb582fbfb17e2b4c8653cf177",
+        "enabled_algorithms": "KEM_ml_kem_768;KEM_ml_kem_1024;SIG_ml_dsa_65;SIG_ml_dsa_87",
+        "ios_deployment_target": "17.0",
+        "linkage": "static",
+        "macos_deployment_target": "14.0",
+        "openssl": "false"
+      },
+      "recipe_inputs": {
+        "Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch": "6de373115afcf5cb01a2075ec49cb5609db2970cb582fbfb17e2b4c8653cf177",
+        "Scripts/liboqs.module.modulemap": "311bca7884091b46981705d131ea044ff7223012dbd2ee58ce97ffa3ad671289",
+        "Scripts/liboqs_version_probe.c": "b560df2674c80c2a76190c0017fac7f44ac6d91d7ec70e0a9034e7f6e4de185b",
+        "Scripts/merge_liboqs_simulator_headers.py": "f1615c96da28e9c1f8e3176ae5a8c4c1f4587aeff3c243929aa4dfc744dc1f1b",
+        "Scripts/native_source_helpers.sh": "51a94489699524a83b64ee0956e8d3d4245579e32f5286edd41e3f45305d5fdb",
+        "Scripts/native_vendor_provenance.py": "d4506f6ef299538ac42a31108580c79a4b9a6318e4268f9fef58a93b73793912"
+      },
+      "toolchain": {
+        "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+        "cmake": "cmake version 4.3.3",
+        "macos_sdk": "26.5",
+        "ninja": "1.13.2",
+        "xcode": "Xcode 26.6; Build version 17F113"
+      }
+    }
+  }
+}

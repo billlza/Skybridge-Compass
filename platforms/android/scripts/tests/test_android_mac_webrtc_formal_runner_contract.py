@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -13,17 +14,44 @@ from pathlib import Path
 ANDROID_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = ANDROID_ROOT.parents[1]
 RUNNER_PATH = ANDROID_ROOT / "scripts/run_android_mac_webrtc_formal_smoke.sh"
+IOS_RUNNER_PATH = ANDROID_ROOT / "scripts/run_android_ios_webrtc_offer_smoke.sh"
 VALIDATOR_PATH = ANDROID_ROOT / "scripts/validate_android_mac_webrtc_formal_evidence.py"
 GRADLE_PATH = ANDROID_ROOT / "app/build.gradle.kts"
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/android-release-quality.yml"
+MAC_PACKAGING_PATH = REPOSITORY_ROOT / "Scripts/build_with_widgets.sh"
+ROOT_PACKAGE_PATH = REPOSITORY_ROOT / "Package.swift"
+IOS_PACKAGE_PATH = REPOSITORY_ROOT / "SkyBridge Compass iOS/Package.swift"
+IOS_OQS_PACKAGE_PATH = (
+    REPOSITORY_ROOT / "SkyBridge Compass iOS/LocalPackages/OQSRAIILocal/Package.swift"
+)
+IOS_PROJECT_YAML_PATH = REPOSITORY_ROOT / "SkyBridge Compass iOS/project.yml"
+IOS_PROJECT_PATH = (
+    REPOSITORY_ROOT
+    / "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj"
+)
+NATIVE_LOCK_PATH = REPOSITORY_ROOT / "Config/native-dependencies.lock.json"
+LIBOQS_PROVENANCE_PATH = REPOSITORY_ROOT / "Sources/Vendor/liboqs.provenance.json"
+APPLE_PACKAGE_LOCK_PATHS = (
+    REPOSITORY_ROOT / "Package.resolved",
+    REPOSITORY_ROOT / "SkyBridge Compass iOS/Package.resolved",
+    REPOSITORY_ROOT
+    / "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+)
 OFFERER_PATH = (
     ANDROID_ROOT
     / "app/src/androidTest/kotlin/com/skybridge/compass/android/webrtc/AppleReleaseInteropOffererAppInstrumentationTest.kt"
 )
 RUNNER = RUNNER_PATH.read_text(encoding="utf-8")
+IOS_RUNNER = IOS_RUNNER_PATH.read_text(encoding="utf-8")
 VALIDATOR = VALIDATOR_PATH.read_text(encoding="utf-8")
 GRADLE = GRADLE_PATH.read_text(encoding="utf-8")
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
+MAC_PACKAGING = MAC_PACKAGING_PATH.read_text(encoding="utf-8")
+ROOT_PACKAGE = ROOT_PACKAGE_PATH.read_text(encoding="utf-8")
+IOS_PACKAGE = IOS_PACKAGE_PATH.read_text(encoding="utf-8")
+IOS_OQS_PACKAGE = IOS_OQS_PACKAGE_PATH.read_text(encoding="utf-8")
+IOS_PROJECT_YAML = IOS_PROJECT_YAML_PATH.read_text(encoding="utf-8")
+IOS_PROJECT = IOS_PROJECT_PATH.read_text(encoding="utf-8")
 
 
 def bash_function(name: str) -> str:
@@ -33,6 +61,145 @@ def bash_function(name: str) -> str:
 
 
 class MacFormalRunnerContractTests(unittest.TestCase):
+    def test_apple_binary_dependencies_are_single_source_and_provenance_bound(self) -> None:
+        for obsolete_target in ("FreeRDP", "WinPR", "FreeRDPClient"):
+            self.assertNotIn(f'name: "{obsolete_target}"', ROOT_PACKAGE)
+            self.assertNotIn(
+                f'path: "Sources/Vendor/{obsolete_target}.xcframework"',
+                ROOT_PACKAGE,
+            )
+        self.assertRegex(
+            ROOT_PACKAGE,
+            r'name: "FreeRDPBridge",(?:.|\n){0,400}?dependencies: \[\]',
+        )
+        self.assertIn(
+            '.package(url: "https://github.com/stasel/WebRTC", exact: "141.0.0")',
+            ROOT_PACKAGE,
+        )
+        self.assertIn(
+            '.package(url: "https://github.com/stasel/WebRTC", exact: "141.0.0")',
+            IOS_PACKAGE,
+        )
+        self.assertNotIn('path: "Vendor/WebRTC/WebRTC.xcframework"', IOS_PACKAGE)
+        self.assertIn(
+            'path: "../../../Sources/Vendor/liboqs.xcframework"',
+            IOS_OQS_PACKAGE,
+        )
+        self.assertIn("url: https://github.com/stasel/WebRTC", IOS_PROJECT_YAML)
+        self.assertIn("exactVersion: 141.0.0", IOS_PROJECT_YAML)
+        self.assertNotIn("WebRTCLocal", IOS_PROJECT_YAML)
+        self.assertIn(
+            'XCRemoteSwiftPackageReference "WebRTC"',
+            IOS_PROJECT,
+        )
+        self.assertIn("kind = exactVersion;", IOS_PROJECT)
+        self.assertIn("version = 141.0.0;", IOS_PROJECT)
+        self.assertNotIn("WebRTCLocal", IOS_PROJECT)
+        self.assertGreaterEqual(
+            IOS_RUNNER.count("-disableAutomaticPackageResolution"),
+            2,
+        )
+        self.assertGreaterEqual(
+            IOS_RUNNER.count("-onlyUsePackageVersionsFromResolvedFile"),
+            2,
+        )
+
+        for obsolete_path in (
+            REPOSITORY_ROOT / "Scripts/build_freerdp_xcframework.sh",
+            REPOSITORY_ROOT / "Scripts/enable_freerdp_xcframework_in_spm.sh",
+            REPOSITORY_ROOT / "Sources/Vendor/FreeRDP.xcframework",
+            REPOSITORY_ROOT / "Sources/Vendor/FreeRDPClient.xcframework",
+            REPOSITORY_ROOT / "Sources/Vendor/WinPR.xcframework",
+            REPOSITORY_ROOT / "Sources/Vendor/liboqs.xcframework.20260217191650.bak",
+            REPOSITORY_ROOT / "SkyBridge Compass iOS/LocalPackages/WebRTCLocal",
+            REPOSITORY_ROOT / "SkyBridge Compass iOS/Vendor/liboqs.xcframework",
+            REPOSITORY_ROOT / "SkyBridge Compass iOS/Vendor/WebRTC/WebRTC.xcframework",
+        ):
+            self.assertFalse(obsolete_path.exists(), str(obsolete_path))
+
+        dependency_lock = json.loads(NATIVE_LOCK_PATH.read_text(encoding="utf-8"))
+        provenance = json.loads(LIBOQS_PROVENANCE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(dependency_lock["schema_version"], 3)
+        self.assertEqual(set(dependency_lock["families"]), {"liboqs"})
+        locked_source = dependency_lock["families"]["liboqs"]["sources"]
+        self.assertEqual(len(locked_source), 1)
+        self.assertEqual(locked_source[0]["version"], "0.16.0")
+        self.assertRegex(locked_source[0]["commit"], r"^[0-9a-f]{40}$")
+        expected_recipe_inputs = {
+            "Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch",
+            "Scripts/liboqs.module.modulemap",
+            "Scripts/liboqs_version_probe.c",
+            "Scripts/merge_liboqs_simulator_headers.py",
+            "Scripts/native_source_helpers.sh",
+            "Scripts/native_vendor_provenance.py",
+        }
+        locked_recipe_inputs = dependency_lock["families"]["liboqs"]["recipe_inputs"]
+        self.assertEqual(set(locked_recipe_inputs), expected_recipe_inputs)
+        self.assertTrue(
+            all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in locked_recipe_inputs.values())
+        )
+        self.assertEqual(provenance["family"], "liboqs")
+        self.assertEqual(provenance["schema_version"], 3)
+        self.assertEqual(provenance["build"]["recipe_inputs"], locked_recipe_inputs)
+        self.assertEqual(
+            {binary["path"] for binary in provenance["binaries"]},
+            {
+                "Sources/Vendor/liboqs.xcframework/macos-arm64/liboqs.a",
+                "Sources/Vendor/liboqs.xcframework/ios-arm64/liboqs.a",
+                "Sources/Vendor/liboqs.xcframework/ios-arm64_x86_64-simulator/liboqs.a",
+            },
+        )
+
+        resolved_webrtc_pins = []
+        for lock_path in APPLE_PACKAGE_LOCK_PATHS:
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            pins = [pin for pin in lock["pins"] if pin["identity"] == "webrtc"]
+            self.assertEqual(len(pins), 1, str(lock_path))
+            pin = pins[0]
+            resolved_webrtc_pins.append(
+                (pin["kind"], pin["location"], pin["state"])
+            )
+        self.assertTrue(
+            all(pin == resolved_webrtc_pins[0] for pin in resolved_webrtc_pins),
+            resolved_webrtc_pins,
+        )
+        self.assertEqual(
+            resolved_webrtc_pins[0],
+            (
+                "remoteSourceControl",
+                "https://github.com/stasel/WebRTC",
+                {
+                    "revision": "117d290e37742ea3a792a345f8ba1ec268eb7090",
+                    "version": "141.0.0",
+                },
+            ),
+        )
+
+        self.assertIn('- "Scripts/**"', WORKFLOW)
+        self.assertIn('- "Config/**"', WORKFLOW)
+        self.assertIn('"SkyBridge Compass iOS/Package.resolved"', WORKFLOW)
+        self.assertIn("-disableAutomaticPackageResolution", WORKFLOW)
+        self.assertIn("-onlyUsePackageVersionsFromResolvedFile", WORKFLOW)
+        provenance_gate = WORKFLOW.index("Scripts/test_native_vendor_provenance.py")
+        host_build = WORKFLOW.index("swift build", provenance_gate)
+        self.assertLess(provenance_gate, host_build)
+        for rebuild_input in (
+            "Scripts/build_liboqs_xcframework.sh",
+            "Scripts/native_source_helpers.sh",
+            "Scripts/native_vendor_provenance.py",
+            "Scripts/test_native_vendor_provenance.py",
+            "Scripts/liboqs.module.modulemap",
+            "Scripts/liboqs_version_probe.c",
+            "Scripts/merge_liboqs_simulator_headers.py",
+            "Scripts/test_merge_liboqs_simulator_headers.py",
+            "Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch",
+        ):
+            self.assertIn(rebuild_input, WORKFLOW)
+        self.assertIn("native_vendor_provenance.py\" verify", MAC_PACKAGING)
+        self.assertIn("--disable-automatic-resolution -c release", MAC_PACKAGING)
+        self.assertIn("PACKAGE_RESOLVED_SHA256", MAC_PACKAGING)
+        self.assertNotIn("swift package clean 2>/dev/null || true", MAC_PACKAGING)
+
     def test_apple_toolchain_probe_captures_complete_version_output(self) -> None:
         self.assertIn('xcode_version="$(xcodebuild -version)"', WORKFLOW)
         self.assertIn('swift_version="$(swift --version)"', WORKFLOW)

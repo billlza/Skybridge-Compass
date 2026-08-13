@@ -263,7 +263,7 @@ browser = dbus.Interface(
 | Windows | 10+ | liboqs | ✓ | ✓ | TPM 2.0** |
 | Linux | Any | liboqs | ✓ | ✓ | TPM 2.0** |
 
-*iOS liboqs requires static linking; not currently bundled
+*iOS liboqs uses the repository's shared, provenance-bound static XCFramework.
 **TPM PQC support varies by hardware
 
 ### 3.2 Library Version Requirements
@@ -272,7 +272,7 @@ browser = dbus.Interface(
 |---------|-----------------|--------|--------|-------|
 | CryptoKit | macOS/iOS 26 | 768, 1024 | 65, 87 | Native Apple |
 | BouncyCastle | 1.79 | 512-1024 | 44-87 | Java/Kotlin |
-| liboqs | 0.12.0 | 768 | 65 | FIPS 203/204 |
+| liboqs | 0.16.0 | 768, 1024 | 65, 87 | Repository-pinned minimal FIPS 203/204 build |
 | OpenSSL | 3.5.0 | 768 | 65 | Via provider |
 | oqs-provider | 0.8.0 | 768 | 65 | For OpenSSL 3.x |
 

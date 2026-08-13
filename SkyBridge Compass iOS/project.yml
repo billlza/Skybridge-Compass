@@ -12,8 +12,9 @@ settings:
     SWIFT_VERSION: "6.0"
 
 packages:
-  WebRTCLocal:
-    path: LocalPackages/WebRTCLocal
+  WebRTC:
+    url: https://github.com/stasel/WebRTC
+    exactVersion: 141.0.0
   OQSRAIILocal:
     path: LocalPackages/OQSRAIILocal
 
@@ -72,7 +73,7 @@ targets:
         buildPhase: resources
     dependencies:
       - sdk: AppIntents.framework
-      - package: WebRTCLocal
+      - package: WebRTC
         product: WebRTC
       - package: OQSRAIILocal
         product: OQSRAII

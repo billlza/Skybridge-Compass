@@ -58,6 +58,12 @@ rebuild-oqs-openssl-final14-env/
 out/
 *.o
 *.a
+# The formal Apple build consumes one reviewed, source-bound liboqs XCFramework.
+# Keep only its three exact platform archives under version control; all other
+# static archives remain ignored build outputs.
+!Sources/Vendor/liboqs.xcframework/macos-arm64/liboqs.a
+!Sources/Vendor/liboqs.xcframework/ios-arm64/liboqs.a
+!Sources/Vendor/liboqs.xcframework/ios-arm64_x86_64-simulator/liboqs.a
 *.dylib
 *.framework
 

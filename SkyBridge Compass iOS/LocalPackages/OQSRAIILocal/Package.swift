@@ -12,7 +12,7 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "liboqs",
-            path: "../../Vendor/liboqs.xcframework"
+            path: "../../../Sources/Vendor/liboqs.xcframework"
         ),
         .target(
             name: "OQSRAII",

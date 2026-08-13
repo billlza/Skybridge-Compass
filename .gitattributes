@@ -4,3 +4,7 @@
 /platforms/android/app/src/main/res/drawable/ic_launcher_background.xml text eol=lf
 /platforms/android/app/src/main/res/mipmap-anydpi/ic_launcher.xml text eol=lf
 /platforms/android/app/src/main/res/mipmap-anydpi/ic_launcher_round.xml text eol=lf
+/Sources/Vendor/liboqs.xcframework/macos-arm64/liboqs.a binary
+/Sources/Vendor/liboqs.xcframework/ios-arm64/liboqs.a binary
+/Sources/Vendor/liboqs.xcframework/ios-arm64_x86_64-simulator/liboqs.a binary
+/Scripts/Patches/*.patch -whitespace

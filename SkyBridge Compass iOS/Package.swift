@@ -39,18 +39,15 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(path: "LocalPackages/OQSRAIILocal")
+        .package(path: "LocalPackages/OQSRAIILocal"),
+        .package(url: "https://github.com/stasel/WebRTC", exact: "141.0.0")
     ],
     targets: [
-        .binaryTarget(
-            name: "WebRTC",
-            path: "Vendor/WebRTC/WebRTC.xcframework"
-        ),
         // MARK: - iOS 主应用目标
         .target(
             name: "SkyBridgeCompassiOS",
             dependencies: [
-                "WebRTC",
+                .product(name: "WebRTC", package: "WebRTC"),
                 .product(name: "OQSRAII", package: "OQSRAIILocal")
             ],
             path: "SkyBridgeCompassiOS",

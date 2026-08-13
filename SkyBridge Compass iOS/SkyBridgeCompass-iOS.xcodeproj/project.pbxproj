@@ -195,7 +195,6 @@
 		6F1CC7B506C8E76656604ADA /* SignatureProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignatureProvider.swift; sourceTree = "<group>"; };
 		708048CCAF3C9A5F66CD6BC9 /* SkyBridgeCompassApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeCompassApp.swift; sourceTree = "<group>"; };
 		7091B30AA7A2A4E924E8B127 /* SkyBridgeWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyBridgeWidget.swift; sourceTree = "<group>"; };
-		725E41D48A59618B3CC4B80B /* WebRTCLocal */ = {isa = PBXFileReference; lastKnownFileType = folder; name = WebRTCLocal; path = LocalPackages/WebRTCLocal; sourceTree = SOURCE_ROOT; };
 		74C91A71B2D7745DA114BC0D /* StatCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatCardView.swift; sourceTree = "<group>"; };
 		792EB22C85FB5D5DB239368C /* CoreTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreTypes.swift; sourceTree = "<group>"; };
 		7A0305E276D18233D04F43A8 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -479,7 +478,6 @@
 			isa = PBXGroup;
 			children = (
 				0B7D6FA64D317615E7792E07 /* OQSRAIILocal */,
-				725E41D48A59618B3CC4B80B /* WebRTCLocal */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -788,7 +786,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				D8ECB200A6C3588FB2C19E78 /* XCLocalSwiftPackageReference "LocalPackages/OQSRAIILocal" */,
-				4BF7ADB923E18CDD4BFB1197 /* XCLocalSwiftPackageReference "LocalPackages/WebRTCLocal" */,
+				4BF7ADB923E18CDD4BFB1197 /* XCRemoteSwiftPackageReference "WebRTC" */,
 			);
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
@@ -1297,19 +1295,27 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		4BF7ADB923E18CDD4BFB1197 /* XCLocalSwiftPackageReference "LocalPackages/WebRTCLocal" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = LocalPackages/WebRTCLocal;
-		};
 		D8ECB200A6C3588FB2C19E78 /* XCLocalSwiftPackageReference "LocalPackages/OQSRAIILocal" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = LocalPackages/OQSRAIILocal;
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		4BF7ADB923E18CDD4BFB1197 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC";
+			requirement = {
+				kind = exactVersion;
+				version = 141.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		76123964202BD611B7E681E7 /* WebRTC */ = {
 			isa = XCSwiftPackageProductDependency;
+			package = 4BF7ADB923E18CDD4BFB1197 /* XCRemoteSwiftPackageReference "WebRTC" */;
 			productName = WebRTC;
 		};
 		EE00C62C33482B8E88952EF2 /* OQSRAII */ = {

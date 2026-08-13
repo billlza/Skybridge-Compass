@@ -1,6 +1,0 @@
-module liboqs [system] {
-  header "oqs/oqs.h"
-  link "oqs"
-  link "crypto"
-  export *
-}

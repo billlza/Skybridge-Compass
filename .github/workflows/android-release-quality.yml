@@ -8,6 +8,8 @@ on:
       - ".github/workflows/android-release-quality.yml"
       - "Package.swift"
       - "Package.resolved"
+      - "Config/**"
+      - "Scripts/**"
       - "platforms/android/**"
       - "SkyBridge Compass iOS/**"
       - "Sources/**"
@@ -22,6 +24,8 @@ on:
       - ".github/workflows/android-release-quality.yml"
       - "Package.swift"
       - "Package.resolved"
+      - "Config/**"
+      - "Scripts/**"
       - "platforms/android/**"
       - "SkyBridge Compass iOS/**"
       - "Sources/**"
@@ -219,7 +223,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git ls-files --error-unmatch Package.resolved >/dev/null
+          for lockfile in \
+            Package.resolved \
+            "SkyBridge Compass iOS/Package.resolved" \
+            "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+          do
+            git ls-files --error-unmatch "$lockfile" >/dev/null
+            git cat-file -e "HEAD:$lockfile"
+          done
+          for artifact in \
+            Sources/Vendor/liboqs.xcframework/macos-arm64/liboqs.a \
+            Sources/Vendor/liboqs.xcframework/ios-arm64/liboqs.a \
+            Sources/Vendor/liboqs.xcframework/ios-arm64_x86_64-simulator/liboqs.a \
+            Sources/Vendor/liboqs.provenance.json \
+            Config/native-dependencies.lock.json \
+            Scripts/build_liboqs_xcframework.sh \
+            Scripts/native_source_helpers.sh \
+            Scripts/native_vendor_provenance.py \
+            Scripts/test_native_vendor_provenance.py \
+            Scripts/liboqs.module.modulemap \
+            Scripts/liboqs_version_probe.c \
+            Scripts/merge_liboqs_simulator_headers.py \
+            Scripts/test_merge_liboqs_simulator_headers.py \
+            Scripts/Patches/liboqs-0.16.0-xkcp-appleclang.patch
+          do
+            git ls-files --error-unmatch "$artifact" >/dev/null
+            git cat-file -e "HEAD:$artifact"
+          done
+          bash -n Scripts/build_liboqs_xcframework.sh Scripts/build_with_widgets.sh
+          python3 -W error -B -m py_compile \
+            Scripts/merge_liboqs_simulator_headers.py \
+            Scripts/native_vendor_provenance.py
+          python3 -W error -B Scripts/test_merge_liboqs_simulator_headers.py
+          python3 -W error -B Scripts/test_native_vendor_provenance.py
+          python3 -W error -B Scripts/native_vendor_provenance.py verify \
+            --repository-root . \
+            --lock Config/native-dependencies.lock.json \
+            --provenance Sources/Vendor/liboqs.provenance.json
           swift build \
             --disable-automatic-resolution \
             --product FormalMacWebRTCHost \
@@ -243,6 +283,8 @@ jobs:
           xcodebuild \
             -project "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj" \
             -scheme "SkyBridgeCompass-iOS" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
             -configuration Debug \
             -destination "generic/platform=iOS Simulator" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData-ios" \
@@ -254,5 +296,8 @@ jobs:
             echo "iOS build emitted a warning or error diagnostic" >&2
             exit 1
           fi
+          git diff --exit-code -- \
+            "SkyBridge Compass iOS/Package.resolved" \
+            "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
           git diff --check
           [[ -z "$(git status --porcelain --untracked-files=all)" ]]

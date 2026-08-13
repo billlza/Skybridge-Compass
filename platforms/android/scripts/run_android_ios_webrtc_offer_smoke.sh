@@ -1430,6 +1430,8 @@ if [[ "$IOS_TARGET" == "physical" ]]; then
   if ! xcodebuild \
     -project "$IOS_PROJECT_FILE" \
     -scheme "$IOS_SCHEME" \
+    -disableAutomaticPackageResolution \
+    -onlyUsePackageVersionsFromResolvedFile \
     -configuration Debug \
     -destination "$IOS_DESTINATION" \
     -derivedDataPath "$RUN_DIR/DerivedData-ios" \
@@ -1588,6 +1590,8 @@ if [[ "$IOS_TARGET" == "simulator" ]]; then
   xcodebuild \
     -project "$IOS_PROJECT_FILE" \
     -scheme "$IOS_SCHEME" \
+    -disableAutomaticPackageResolution \
+    -onlyUsePackageVersionsFromResolvedFile \
     -configuration Debug \
     -destination "id=${IOS_SIM_ID}" \
     -derivedDataPath "$RUN_DIR/DerivedData-ios" \
