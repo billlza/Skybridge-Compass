@@ -31,6 +31,7 @@ import com.skybridge.compass.filetransfer.webrtc.resume.TransferCheckpointStore
 import com.skybridge.compass.filetransfer.webrtc.resume.ResumeReceivePlanner
 import com.skybridge.compass.filetransfer.webrtc.resume.TransferDirection
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +64,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -166,6 +168,17 @@ class StaleWebRtcFileTransferOwnerException(
     val transferId: String,
 ) : IllegalStateException("file transfer owner is stale for transfer $transferId")
 
+class CompletionOutcomeUnknownException(
+    val transferId: String,
+) : IllegalStateException(
+    "completion outcome is unknown for transfer $transferId; a fresh transfer could duplicate delivery",
+)
+
+internal class WebRtcFileTransferSendException(
+    val transferId: String,
+    val payloadBytes: Int,
+) : IllegalStateException("file transfer send failed: payloadBytes=$payloadBytes")
+
 class BatchResumeMigrationUnsupportedException(
     val transferId: String,
     val batchId: String,
@@ -226,8 +239,22 @@ class WebRtcFileTransferController(
     },
     /** Test seam immediately before a nonterminal progress commit, while the attempt lock is held. */
     private val beforeOutboundProgressCommit: (String) -> Unit = {},
+    /** Dispatcher for controller-owned background work. Production remains on [Dispatchers.IO]. */
+    private val backgroundDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /** Test seam after an inbound finalization wins but before durable/file side effects begin. */
+    private val afterInboundFinalizationClaim: (String) -> Unit = {},
+    /** Test seam after witness preparation and reversible I/O, immediately before the owner gate. */
+    private val beforeInboundDestinationCommit: (String) -> Unit = {},
+    /** Test seam after the entry owner check, before any replay-ledger operation is admitted. */
+    private val afterInboundLedgerRotation: (String) -> Unit = {},
+    /** Delay before the one bounded retry of an exact immutable completion request. */
+    private val completionAcknowledgementRetryDelayMs: Long = DEFAULT_COMPLETION_ACK_RETRY_DELAY_MS,
+    /** Narrow scheduling seam; production always uses cancellable coroutine delay. */
+    private val waitBeforeCompletionRetry: suspend (Long) -> Unit = { delay(it) },
+    /** Test seam immediately before NACK/timer contenders reserve the one retry slot. */
+    private val beforeCompletionRetryReservation: () -> Unit = {},
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + backgroundDispatcher)
     private val checkpointMutationLock = Any()
     private val inboundAdmission = InboundTransferAdmission(
         maximumActiveTransfers = MAX_ACTIVE_INBOUND_TRANSFERS,
@@ -247,6 +274,7 @@ class WebRtcFileTransferController(
             InboundFileDestinationPolicy.IN_MEMORY,
             InboundFileDestinationPolicy.DOWNLOADS -> null
         }
+    private val inboundCompletionReplayLedger = InboundCompletionReplayLedger()
     private val checkpointMutationTails = ConcurrentHashMap<String, QueuedCheckpointMutation>()
     private val batchManifestMutationCoordinator = batchManifestStore
         ?.coordinationNamespace
@@ -270,6 +298,9 @@ class WebRtcFileTransferController(
         }
         require(maxResendCacheBytes > 0) {
             "maxResendCacheBytes must be positive"
+        }
+        require(completionAcknowledgementRetryDelayMs > 0L) {
+            "completion acknowledgement retry delay must be positive"
         }
         if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.DOWNLOADS) {
             requireNotNull(appContext) { "Downloads inbound storage requires an application context" }
@@ -302,8 +333,19 @@ class WebRtcFileTransferController(
         mutation: CheckpointMutation,
         operation: suspend TransferCheckpointStore.() -> Unit,
     ): QueuedCheckpointMutation {
+        val queued = reserveCheckpointMutation(transferId, owner, mutation, operation)
+        return startCheckpointMutation(queued)
+    }
+
+    /** Reserve source order without dispatching store/owner work while a receive transition is held. */
+    private fun reserveCheckpointMutation(
+        transferId: String,
+        owner: WebRtcSecureOperationOwner,
+        mutation: CheckpointMutation,
+        operation: suspend TransferCheckpointStore.() -> Unit,
+    ): QueuedCheckpointMutation {
         val attemptGeneration = currentOutboundAttempt(transferId, owner)?.generation
-        return enqueueCheckpointMutationInternal(
+        return reserveCheckpointMutationInternal(
             transferId = transferId,
             mutation = mutation,
             failureOwner = owner,
@@ -324,7 +366,7 @@ class WebRtcFileTransferController(
     /** Explicit local deletion is not a network operation and deliberately invalidates any owner. */
     private fun enqueueLocalCheckpointDeletion(transferId: String): QueuedCheckpointMutation {
         checkpointOwners.remove(transferId)
-        return enqueueCheckpointMutationInternal(
+        val queued = reserveCheckpointMutationInternal(
             transferId = transferId,
             mutation = CheckpointMutation.DELETE,
             failureOwner = null,
@@ -332,9 +374,10 @@ class WebRtcFileTransferController(
             operationAllowed = { checkpointOwners[transferId] == null },
             operation = { delete(transferId) },
         )
+        return startCheckpointMutation(queued)
     }
 
-    private fun enqueueCheckpointMutationInternal(
+    private fun reserveCheckpointMutationInternal(
         transferId: String,
         mutation: CheckpointMutation,
         failureOwner: WebRtcSecureOperationOwner?,
@@ -392,6 +435,10 @@ class WebRtcFileTransferController(
             }
             checkpointMutationTails.remove(transferId, queued)
         }
+        return queued
+    }
+
+    private fun startCheckpointMutation(queued: QueuedCheckpointMutation): QueuedCheckpointMutation {
         queued.worker.start()
         return queued
     }
@@ -755,10 +802,17 @@ class WebRtcFileTransferController(
     private val _receivedFiles = MutableSharedFlow<ReceivedFile>(extraBufferCapacity = 8)
     val receivedFiles: SharedFlow<ReceivedFile> = _receivedFiles
 
+    private enum class ReceiveLifecycle {
+        ACTIVE,
+        FINALIZING,
+        TERMINATED,
+    }
+
     private data class ReceiveContext(
         val owner: WebRtcSecureOperationOwner,
         val batchToken: BatchManifestGenerationToken?,
         val metadata: CrossNetworkFileTransferValidator.Metadata,
+        val metadataFingerprint: InboundMetadataFingerprint,
         val transferId: String,
         val version: Int,
         val authenticatedSenderDeviceId: String?,
@@ -774,6 +828,15 @@ class WebRtcFileTransferController(
         var appPrivateTemporaryFile: AppPrivateInboundFileCommitter.OwnedTemporaryFile?,
         var receivedBytes: Long = 0L
     ) {
+        /**
+         * Linearizes receive readiness and terminal ownership. DataChannel callbacks and controller
+         * background work are allowed to arrive on different threads, so volatile flags alone are
+         * insufficient: approval and completion could otherwise both observe the other as absent.
+         */
+        val stateLock = Any()
+        /** Serializes receive file mutation against terminal claim without holding [stateLock]. */
+        val transitionLock = Any()
+        var lifecycle: ReceiveLifecycle = ReceiveLifecycle.ACTIVE
         val buffer = ByteArrayOutputStream()
         var nextExpectedChunkIndex: Int = 0
         val pendingChunks: MutableMap<Int, ByteArray> = HashMap()
@@ -787,13 +850,8 @@ class WebRtcFileTransferController(
         var expectedMerkleSigAlg: String? = null
         val chunkHashes: MutableMap<Int, ByteArray> = HashMap()
 
-        @Volatile
         var approvalDecision: InboundFileTransferDecision? = null
-
-        @Volatile
         var declined: Boolean = false
-
-        @Volatile
         var approvalJob: Job? = null
     }
 
@@ -808,21 +866,106 @@ class WebRtcFileTransferController(
 
     private val receiveContexts = ConcurrentHashMap<String, ReceiveContext>()
 
+    private class InboundMetadataFingerprint(message: CrossNetworkFileTransferMessage) {
+        private val canonicalRequest = CrossNetworkFileTransferWireCodec.encode(message).copyOf()
+
+        override fun equals(other: Any?): Boolean =
+            other is InboundMetadataFingerprint &&
+                canonicalRequest.contentEquals(other.canonicalRequest)
+
+        override fun hashCode(): Int = canonicalRequest.contentHashCode()
+    }
+
+    private data class DetachedReceiveResources(
+        val receiveFile: RandomAccessFile?,
+        val appPrivateTemporaryFile: AppPrivateInboundFileCommitter.OwnedTemporaryFile?,
+        val partialFileToDelete: File?,
+    )
+
+    private data class TransferResourceRelease(
+        val claimedReceive: ReceiveContext?,
+        val receiveCleanup: ReceiveResourceCleanupReport,
+    )
+
+    private data class MissingChunkWaitSnapshot(
+        val completeReceivedAtMs: Long,
+        val missingChunks: List<Int>,
+        val bufferedBytes: Long,
+    )
+
+    /**
+     * Atomically removes an active receive from every future state transition. The caller owns all
+     * cleanup after this returns true; a concurrent finalizer or terminal action will return false.
+     */
+    private fun claimReceiveTermination(
+        context: ReceiveContext,
+        markDeclined: Boolean,
+    ): Boolean = synchronized(context.transitionLock) {
+        val claimed = synchronized(context.stateLock) {
+            if (context.lifecycle != ReceiveLifecycle.ACTIVE) {
+                false
+            } else {
+                context.lifecycle = ReceiveLifecycle.TERMINATED
+                if (markDeclined) context.declined = true
+                true
+            }
+        }
+        if (claimed) {
+            check(receiveContexts.remove(context.transferId, context)) {
+                "active receive disappeared before terminal claim was published"
+            }
+        }
+        claimed
+    }
+
+    /**
+     * Claims finalization exactly once after both independent readiness signals are visible under
+     * the same monitor. Removing the context while holding that monitor prevents a callback that
+     * already captured it from mutating receive resources after finalization begins.
+     */
+    private fun claimReceiveFinalization(
+        context: ReceiveContext,
+    ): InboundFileTransferDecision.Accept? {
+        if (!webrtc.isCurrentSecureOperationOwner(context.owner)) return null
+        return synchronized(context.transitionLock) {
+            val decision = synchronized(context.stateLock) {
+                if (context.lifecycle != ReceiveLifecycle.ACTIVE) return@synchronized null
+                val accepted = context.approvalDecision as? InboundFileTransferDecision.Accept
+                    ?: return@synchronized null
+                if (!isReceiveCompleteLocked(context)) return@synchronized null
+                context.lifecycle = ReceiveLifecycle.FINALIZING
+                accepted
+            }
+            if (decision != null) {
+                check(receiveContexts.remove(context.transferId, context)) {
+                    "active receive disappeared before finalization claim was published"
+                }
+            }
+            decision
+        }
+    }
+
     private fun cleanupReceiveContext(
         context: ReceiveContext,
         deletePartialFile: Boolean,
     ): ReceiveResourceCleanupReport {
         releaseInboundAdmission(context)
-        context.approvalJob?.cancel()
-        context.approvalJob = null
-        val receiveFile = context.raf
-        context.raf = null
-        val appPrivateTemporaryFile = context.appPrivateTemporaryFile
-        context.appPrivateTemporaryFile = null
-        val partialFile = context.partialFile.takeIf { deletePartialFile }
-        val report = if (appPrivateTemporaryFile != null && deletePartialFile) {
+        var approvalJob: Job? = null
+        val resources = synchronized(context.stateLock) {
+            approvalJob = context.approvalJob
+            context.approvalJob = null
+            DetachedReceiveResources(
+                receiveFile = context.raf.also { context.raf = null },
+                appPrivateTemporaryFile = context.appPrivateTemporaryFile.also {
+                    context.appPrivateTemporaryFile = null
+                },
+                partialFileToDelete = context.partialFile.takeIf { deletePartialFile },
+            )
+        }
+        approvalJob?.cancel()
+        val report = if (resources.appPrivateTemporaryFile != null && deletePartialFile) {
             try {
-                requireNotNull(appPrivateInboundFileCommitter).discard(appPrivateTemporaryFile)
+                requireNotNull(appPrivateInboundFileCommitter).discard(resources.appPrivateTemporaryFile)
                 ReceiveResourceCleanupReport(context.transferId)
             } catch (error: Exception) {
                 ReceiveResourceCleanupReport(
@@ -839,11 +982,13 @@ class WebRtcFileTransferController(
             ReceiveResourceCleanup.execute(
                 transferId = context.transferId,
                 closePartialFile = when {
-                    appPrivateTemporaryFile != null -> ({ appPrivateTemporaryFile.close() })
-                    receiveFile != null -> ({ receiveFile.close() })
+                    resources.appPrivateTemporaryFile != null -> ({
+                        resources.appPrivateTemporaryFile.close()
+                    })
+                    resources.receiveFile != null -> ({ resources.receiveFile.close() })
                     else -> null
                 },
-                deletePartialFile = partialFile?.let { file ->
+                deletePartialFile = resources.partialFileToDelete?.let { file ->
                     {
                         if (file.exists() && !file.delete() && file.exists()) {
                             throw IOException("partial file deletion returned false")
@@ -852,11 +997,13 @@ class WebRtcFileTransferController(
                 },
             )
         }
-        if (deletePartialFile && report.isSuccessful) {
-            context.partialFile = null
+        synchronized(context.stateLock) {
+            if (deletePartialFile && report.isSuccessful) {
+                context.partialFile = null
+            }
+            context.pendingChunks.clear()
+            context.pendingChunkBytes = 0L
         }
-        context.pendingChunks.clear()
-        context.pendingChunkBytes = 0L
         return report
     }
 
@@ -930,6 +1077,10 @@ class WebRtcFileTransferController(
     ) {
         val state = AtomicReference(OutboundAttemptState.ACTIVE)
         val completionExpectation = AtomicReference<OutboundCompletionExpectation?>(null)
+        val completionPayload = AtomicReference<ByteArray?>(null)
+        val completionSendAttempts = AtomicInteger(0)
+        val completionSendAccepted = AtomicBoolean(false)
+        val completionRetryStarted = AtomicBoolean(false)
         val closeable = AtomicReference<Closeable?>(null)
         val closeFailure = AtomicReference<IOException?>(null)
         val initiatorActive = AtomicBoolean(true)
@@ -962,6 +1113,8 @@ class WebRtcFileTransferController(
 
     /** Per-transfer resend loop jobs, bound to the exact key epoch that created them. */
     private val resendJobs = ConcurrentHashMap<String, OwnedTransferJob>()
+    /** Exact immutable completion retry, independent from chunk/NACK retransmission. */
+    private val completionRetryJobs = ConcurrentHashMap<String, OwnedTransferJob>()
 
     /**
      * Last chunk/ack activity timestamp (epoch millis via [clockMs]) per active transfer. An entry's
@@ -1002,6 +1155,30 @@ class WebRtcFileTransferController(
             abandonStaleOperation(transferId, owner)
             throw StaleWebRtcFileTransferOwnerException(transferId)
         }
+    }
+
+    /**
+     * Run one short replay-ledger transition under the transport's exact key-epoch gate.
+     *
+     * An inbound callback may pass its entry check immediately before a same-session rekey. Ledger
+     * owner rotation and every subsequent mutation therefore share the manager gate; losing that
+     * race is a normal stale-operation outcome, never an internal ledger assertion.
+     */
+    private fun <T> runCompletionLedgerIfCurrent(
+        transferId: String,
+        owner: WebRtcSecureOperationOwner,
+        operation: InboundCompletionReplayLedger.() -> T,
+    ): T? {
+        var result: T? = null
+        val committed = webrtc.runIfCurrentSecureOperationOwner(owner) {
+            inboundCompletionReplayLedger.rotateTo(owner)
+            result = inboundCompletionReplayLedger.operation()
+        }
+        if (!committed) {
+            abandonStaleOperation(transferId, owner)
+            return null
+        }
+        return result
     }
 
     private fun beginOutboundAttempt(
@@ -1149,8 +1326,13 @@ class WebRtcFileTransferController(
         synchronized(attempt.linearizationLock) {
             if (outboundAttempts[transferId] !== attempt) return
             if (attempt.state.get() != OutboundAttemptState.COMPLETION_ARMED) return
-            beforeOutboundProgressCommit(status)
-            _progress.value = Progress(transferId, sentBytes, totalBytes, status)
+            val truthfulStatus = if (attempt.completionSendAccepted.get()) {
+                status
+            } else {
+                "completion request pending bounded retry"
+            }
+            beforeOutboundProgressCommit(truthfulStatus)
+            _progress.value = Progress(transferId, sentBytes, totalBytes, truthfulStatus)
         }
     }
 
@@ -1164,13 +1346,18 @@ class WebRtcFileTransferController(
     ) {
         currentOutboundAttempt(transferId, owner)?.let(::markOutboundStale)
         var receiveCleanup = ReceiveResourceCleanupReport(transferId)
+        var claimedLiveReceive = false
         receiveContexts[transferId]?.takeIf { it.owner === owner }?.let { context ->
-            if (receiveContexts.remove(transferId, context)) {
-                context.declined = true
+            if (claimReceiveTermination(context, markDeclined = true)) {
+                claimedLiveReceive = true
                 receiveCleanup = cleanupReceiveContext(context, deletePartialFile = false)
             }
         }
-        if (checkpointOwners[transferId] === owner && currentOutboundAttempt(transferId, owner) == null) {
+        if (
+            claimedLiveReceive &&
+            checkpointOwners[transferId] === owner &&
+            currentOutboundAttempt(transferId, owner) == null
+        ) {
             _progress.value = Progress(
                 transferId = transferId,
                 lastStatus = cleanupAwareStatus(
@@ -1366,6 +1553,11 @@ class WebRtcFileTransferController(
     ): String {
         val originalTransferId = checkpoint.transferId
         requireCurrentOwner(originalTransferId, owner)
+        checkpointOwners[originalTransferId]?.let { checkpointOwner ->
+            if (checkpointOwner !== owner) {
+                throw StaleWebRtcFileTransferOwnerException(originalTransferId)
+            }
+        }
         require(checkpoint.direction == TransferDirection.SEND) { "resume checkpoint is not a SEND" }
         val chunkSize = requireNotNull(checkpoint.chunkSize) { "send checkpoint missing chunkSize" }
         val totalChunks = requireNotNull(checkpoint.totalChunks) { "send checkpoint missing totalChunks" }
@@ -1385,9 +1577,15 @@ class WebRtcFileTransferController(
         require(checkpoint.receivedChunks.isEmpty() && checkpoint.receivedChunkSha256HexByIndex.isEmpty()) {
             "send checkpoint contains receive-side chunk state"
         }
+        if (checkpoint.completionRequestSent) {
+            throw CompletionOutcomeUnknownException(originalTransferId)
+        }
         currentOutboundAttempt(originalTransferId, owner)?.let { previousAttempt ->
             check(previousAttempt.state.get() == OutboundAttemptState.TIMED_OUT) {
                 "only a timed-out outbound attempt may be recovered"
+            }
+            if (previousAttempt.completionExpectation.get() != null) {
+                throw CompletionOutcomeUnknownException(originalTransferId)
             }
         }
         val batch = batchManifestStore?.list()?.firstOrNull { manifest ->
@@ -2351,6 +2549,14 @@ class WebRtcFileTransferController(
             abandonStaleOperation(msg.transferId, owner)
             return
         }
+        val ledgerRotated = webrtc.runIfCurrentSecureOperationOwner(owner) {
+            inboundCompletionReplayLedger.rotateTo(owner)
+        }
+        if (!ledgerRotated) {
+            abandonStaleOperation(msg.transferId, owner)
+            return
+        }
+        afterInboundLedgerRotation(msg.transferId)
 
         // Any chunk/ack (or other) message for a watched transfer counts as activity and resets the
         // idle/interrupt watchdog (Requirement 5.12). No-op for transfers not currently watched.
@@ -2375,34 +2581,67 @@ class WebRtcFileTransferController(
                     rejectInboundMessage(owner, msg, "batch was deleted locally")
                     return
                 }
-                // Idempotent: if already tracking, just ACK (supports resume).
+                val metadataFingerprint = InboundMetadataFingerprint(msg)
+                // Idempotent only for the exact immutable metadata request under this owner.
                 val existingContext = receiveContexts[metadata.transferId]
                 if (existingContext?.owner === owner) {
-                    sendFt(
-                        owner,
-                        metadata.transferId,
-                        encode(
-                            CrossNetworkFileTransferMessage(
-                                version = msg.version,
-                                op = CrossNetworkFileTransferOp.metadataAck,
-                                transferId = metadata.transferId,
-                                receivedBytes = metadata.fileSize
+                    if (existingContext.metadataFingerprint == metadataFingerprint) {
+                        sendFt(
+                            owner,
+                            metadata.transferId,
+                            encode(
+                                CrossNetworkFileTransferMessage(
+                                    version = msg.version,
+                                    op = CrossNetworkFileTransferOp.metadataAck,
+                                    transferId = metadata.transferId,
+                                    receivedBytes = metadata.fileSize
+                                )
                             )
                         )
-                    )
+                    } else {
+                        rejectInboundMessage(
+                            owner,
+                            msg,
+                            "transferId metadata conflict",
+                            publishProgress = false,
+                        )
+                    }
                     return
                 }
                 if (existingContext != null) {
                     abandonStaleOperation(metadata.transferId, existingContext.owner)
                 }
 
+                val reservation = runCompletionLedgerIfCurrent(metadata.transferId, owner) {
+                    reserve(owner, metadata.transferId)
+                } ?: return
+                when (reservation) {
+                    InboundCompletionReplayLedger.Reservation.RESERVED -> Unit
+                    InboundCompletionReplayLedger.Reservation.CAPACITY_EXCEEDED -> {
+                        rejectInboundMessage(owner, msg, "inbound completion witness capacity exceeded")
+                        return
+                    }
+                    InboundCompletionReplayLedger.Reservation.ALREADY_ACTIVE,
+                    InboundCompletionReplayLedger.Reservation.ALREADY_USED -> {
+                        rejectInboundMessage(
+                            owner,
+                            msg,
+                            "transferId is single-use within one secure session",
+                            publishProgress = false,
+                        )
+                        return
+                    }
+                }
+
                 val existingCp = try {
                     runBlocking(Dispatchers.IO) { checkpointStore.load(metadata.transferId) }
                 } catch (e: Exception) {
+                    if (!tombstoneInboundReceive(owner, metadata.transferId)) return
                     rejectInboundMessage(owner, msg, "checkpoint load failed: ${e.javaClass.simpleName}")
                     return
                 }
                 if (existingCp != null && checkpointOwners[metadata.transferId] !== owner) {
+                    if (!tombstoneInboundReceive(owner, metadata.transferId)) return
                     rejectInboundMessage(owner, msg, "checkpoint belongs to a previous secure owner")
                     return
                 }
@@ -2410,6 +2649,7 @@ class WebRtcFileTransferController(
                 try {
                     existingCp?.validateReceiveCheckpoint(metadata)
                 } catch (e: Exception) {
+                    if (!tombstoneInboundReceive(owner, metadata.transferId)) return
                     rejectInboundMessage(owner, msg, "checkpoint metadata mismatch: ${e.message ?: e.javaClass.simpleName}")
                     return
                 }
@@ -2422,12 +2662,11 @@ class WebRtcFileTransferController(
                     val f = File(p)
                     if (f.exists()) f else null
                 }
-                val preloadReceivedChunks = existingCp?.receivedChunks?.toSet().orEmpty()
-
                 if (
                     inboundFileDestinationPolicy == InboundFileDestinationPolicy.IN_MEMORY &&
                     metadata.fileSize > MAX_IN_MEMORY_RECEIVE_BYTES
                 ) {
+                    if (!tombstoneInboundReceive(owner, metadata.transferId)) return
                     rejectInboundMessage(owner, msg, "in-memory receive exceeds supported range")
                     return
                 }
@@ -2436,6 +2675,7 @@ class WebRtcFileTransferController(
                     metadata.fileSize,
                 )
                 if (admissionFailure != null) {
+                    if (!tombstoneInboundReceive(owner, metadata.transferId)) return
                     rejectInboundMessage(owner, msg, admissionFailure)
                     return
                 }
@@ -2477,6 +2717,7 @@ class WebRtcFileTransferController(
                     }
                 } catch (error: Exception) {
                     inboundAdmission.release(metadata.transferId)
+                    if (!tombstoneInboundReceive(owner, metadata.transferId)) return
                     rejectInboundMessage(
                         owner,
                         msg,
@@ -2489,6 +2730,7 @@ class WebRtcFileTransferController(
                     owner = owner,
                     batchToken = batchToken,
                     metadata = metadata,
+                    metadataFingerprint = metadataFingerprint,
                     transferId = metadata.transferId,
                     version = msg.version,
                     authenticatedSenderDeviceId = authenticatedSenderDeviceId,
@@ -2507,7 +2749,10 @@ class WebRtcFileTransferController(
                 val previousContext = receiveContexts.putIfAbsent(metadata.transferId, ctx)
                 if (previousContext != null) {
                     cleanupReceiveContext(ctx, deletePartialFile = true)
-                    if (previousContext.owner === owner) {
+                    if (
+                        previousContext.owner === owner &&
+                        previousContext.metadataFingerprint == metadataFingerprint
+                    ) {
                         sendFt(
                             owner,
                             metadata.transferId,
@@ -2528,11 +2773,26 @@ class WebRtcFileTransferController(
                 // Watch this receive for idle/interrupt timeout (Requirement 5.12).
                 startIdleWatchdogFor(metadata.transferId, owner)
                 // preload received chunks if we have them (resume after restart)
-                ctx.receivedChunkIndices.addAll(preloadReceivedChunks)
                 try {
-                    restoreContiguousReceiveProgress(ctx, existingCp, storage.partialFile)
+                    synchronized(ctx.transitionLock) {
+                        if (synchronized(ctx.stateLock) {
+                                ctx.lifecycle != ReceiveLifecycle.ACTIVE
+                            }
+                        ) return
+                        val restored = planContiguousReceiveProgress(ctx, existingCp, storage.partialFile)
+                        synchronized(ctx.stateLock) {
+                            check(ctx.lifecycle == ReceiveLifecycle.ACTIVE) {
+                                "receive terminated during serialized checkpoint restore"
+                            }
+                            applyContiguousReceiveProgress(ctx, existingCp, restored)
+                        }
+                    }
                 } catch (e: Exception) {
-                    receiveContexts.remove(metadata.transferId, ctx)
+                    if (!claimReceiveTermination(ctx, markDeclined = true)) return
+                    if (!tombstoneInboundReceive(ctx)) {
+                        cleanupReceiveContext(ctx, deletePartialFile = false)
+                        return
+                    }
                     val cleanup = cleanupReceiveContext(ctx, deletePartialFile = false)
                     rejectInboundMessage(
                         owner,
@@ -2630,7 +2890,6 @@ class WebRtcFileTransferController(
             }
             CrossNetworkFileTransferOp.chunk -> {
                 val ctx = receiveContexts[msg.transferId]?.takeIf { it.owner === owner }
-                if (ctx?.declined == true) return
                 if (ctx == null) return
                 val actualHash = msg.chunkData?.let { sha256(it) }
                 val chunkData = runCatching {
@@ -2641,71 +2900,125 @@ class WebRtcFileTransferController(
                 }
                 val chunkIndex = requireNotNull(msg.chunkIndex)
                 val verifiedHash = requireNotNull(actualHash)
-
-                ctx.chunkHashes[chunkIndex] = verifiedHash
-                // tolerate out-of-order + duplicates: buffer by index, then flush contiguous window
-                if (chunkIndex >= ctx.nextExpectedChunkIndex && !ctx.pendingChunks.containsKey(chunkIndex)) {
-                    val pendingBytes = ctx.pendingChunkBytes + chunkData.size.toLong()
-                    if (pendingBytes > MAX_PENDING_CHUNK_BYTES) {
-                        rejectReceive(ctx, "pending chunk window exceeded")
-                        return
-                    }
-                    ctx.pendingChunks[chunkIndex] = chunkData
-                    ctx.pendingChunkBytes = pendingBytes
+                var accepted = false
+                var claimedRejection: String? = null
+                var checkpointMutation: QueuedCheckpointMutation? = null
+                if (!webrtc.isCurrentSecureOperationOwner(owner)) {
+                    abandonStaleOperation(ctx.transferId, owner)
+                    return
                 }
-                ctx.receivedChunkIndices.add(chunkIndex)
-                while (true) {
-                    if (!webrtc.isCurrentSecureOperationOwner(owner) || receiveContexts[ctx.transferId] !== ctx) {
-                        abandonStaleOperation(ctx.transferId, owner)
-                        return
+                synchronized(ctx.transitionLock) {
+                    val active = synchronized(ctx.stateLock) {
+                        ctx.lifecycle == ReceiveLifecycle.ACTIVE && !ctx.declined
                     }
-                    val next = ctx.pendingChunks.remove(ctx.nextExpectedChunkIndex) ?: break
-                    ctx.pendingChunkBytes = (ctx.pendingChunkBytes - next.size.toLong()).coerceAtLeast(0L)
-                    val cs = ctx.chunkSize ?: next.size
-                    val offset = ctx.nextExpectedChunkIndex.toLong() * cs.toLong()
-                    if (ctx.appPrivateTemporaryFile != null) {
-                        try {
-                            ctx.appPrivateTemporaryFile?.writeAt(offset, next)
-                        } catch (e: Exception) {
-                            rejectReceive(ctx, "private partial file write failed: ${e.javaClass.simpleName}")
-                            return
-                        }
-                    } else if (ctx.raf != null) {
-                        try {
-                            ctx.raf?.seek(offset)
-                            ctx.raf?.write(next)
-                        } catch (e: Exception) {
-                            rejectReceive(ctx, "partial file write failed: ${e.javaClass.simpleName}")
-                            return
-                        }
-                    } else {
-                        ctx.buffer.write(next)
-                    }
-                    ctx.receivedBytes = maxOf(ctx.receivedBytes, offset + next.size.toLong())
-                    ctx.nextExpectedChunkIndex += 1
-                }
+                    if (!active) return@synchronized
 
-                enqueueCheckpointMutation(ctx.transferId, owner, CheckpointMutation.UPDATE) {
-                    val existing = load(ctx.transferId)
-                    if (existing != null) {
-                        val merged = (existing.receivedChunks.toList() + listOf(chunkIndex)).distinct().sorted().toIntArray()
-                        save(
-                            existing.copy(
-                                receivedChunks = merged,
-                                receivedChunkSha256HexByIndex = existing.receivedChunkSha256HexByIndex +
-                                    (chunkIndex to verifiedHash.toHex())
+                    val admitted = synchronized(ctx.stateLock) {
+                        ctx.chunkHashes[chunkIndex] = verifiedHash
+                        if (chunkIndex >= ctx.nextExpectedChunkIndex && !ctx.pendingChunks.containsKey(chunkIndex)) {
+                            val pendingBytes = ctx.pendingChunkBytes + chunkData.size.toLong()
+                            if (pendingBytes > MAX_PENDING_CHUNK_BYTES) {
+                                false
+                            } else {
+                                ctx.pendingChunks[chunkIndex] = chunkData
+                                ctx.pendingChunkBytes = pendingBytes
+                                true
+                            }
+                        } else {
+                            true
+                        }.also { chunkAdmitted ->
+                            if (chunkAdmitted) ctx.receivedChunkIndices.add(chunkIndex)
+                        }
+                    }
+                    if (!admitted) {
+                        if (claimReceiveTermination(ctx, markDeclined = true)) {
+                            claimedRejection = "pending chunk window exceeded"
+                        }
+                        return@synchronized
+                    }
+
+                    while (true) {
+                        val write = synchronized(ctx.stateLock) {
+                            val next = ctx.pendingChunks.remove(ctx.nextExpectedChunkIndex)
+                                ?: return@synchronized null
+                            ctx.pendingChunkBytes =
+                                (ctx.pendingChunkBytes - next.size.toLong()).coerceAtLeast(0L)
+                            val chunkSize = ctx.chunkSize ?: next.size
+                            Triple(
+                                next,
+                                ctx.nextExpectedChunkIndex.toLong() * chunkSize.toLong(),
+                                ctx.appPrivateTemporaryFile != null,
                             )
-                        )
+                        } ?: break
+                        val (next, offset, appPrivateDestination) = write
+                        try {
+                            when {
+                                appPrivateDestination ->
+                                    ctx.appPrivateTemporaryFile?.writeAt(offset, next)
+                                ctx.raf != null -> {
+                                    ctx.raf?.seek(offset)
+                                    ctx.raf?.write(next)
+                                }
+                                else -> ctx.buffer.write(next)
+                            }
+                        } catch (error: Exception) {
+                            val destination = if (appPrivateDestination) {
+                                "private partial file"
+                            } else {
+                                "partial file"
+                            }
+                            if (claimReceiveTermination(ctx, markDeclined = true)) {
+                                claimedRejection = "$destination write failed: ${error.javaClass.simpleName}"
+                            }
+                            break
+                        }
+                        synchronized(ctx.stateLock) {
+                            ctx.receivedBytes = maxOf(ctx.receivedBytes, offset + next.size.toLong())
+                            ctx.nextExpectedChunkIndex += 1
+                        }
                     }
+
+                    if (claimedRejection != null) return@synchronized
+                    // Reserve source order before releasing the receive transition. Store and owner
+                    // work starts only after the transition lock has been released.
+                    checkpointMutation = reserveCheckpointMutation(
+                        ctx.transferId,
+                        owner,
+                        CheckpointMutation.UPDATE,
+                    ) {
+                        val existing = load(ctx.transferId)
+                        if (existing != null) {
+                            val merged = (existing.receivedChunks.toList() + listOf(chunkIndex))
+                                .distinct()
+                                .sorted()
+                                .toIntArray()
+                            save(
+                                existing.copy(
+                                    receivedChunks = merged,
+                                    receivedChunkSha256HexByIndex =
+                                        existing.receivedChunkSha256HexByIndex +
+                                            (chunkIndex to verifiedHash.toHex()),
+                                ),
+                            )
+                        }
+                    }
+                    accepted = true
                 }
 
-                // If sender already signaled "complete" but we were missing chunks, finalize once complete.
-                if (ctx.completeReceived) {
-                    val totalChunks = ctx.totalChunks
-                    if (totalChunks != null && totalChunks > 0 && ctx.receivedChunkIndices.size == totalChunks) {
-                        maybeFinalizeIfReady(ctx)
-                    }
+                checkpointMutation?.let(::startCheckpointMutation)
+                claimedRejection?.let { reason ->
+                    finishRejectedReceive(ctx, reason)
+                    return
                 }
+                if (!accepted) return
+                if (!webrtc.isCurrentSecureOperationOwner(owner)) {
+                    abandonStaleOperation(ctx.transferId, owner)
+                    return
+                }
+
+                // Completion and approval may each become ready on a different thread. The helper
+                // atomically claims finalization if this chunk closed the final missing gap.
+                maybeFinalizeIfReady(ctx)
 
                 sendFt(
                     owner,
@@ -2723,29 +3036,90 @@ class WebRtcFileTransferController(
                 )
             }
             CrossNetworkFileTransferOp.complete -> {
+                val fingerprint = runCatching {
+                    CrossNetworkFileTransferValidator.completionFingerprint(msg)
+                }.getOrElse { error ->
+                    rejectInboundMessage(owner, msg, error.message ?: "invalid complete")
+                    return
+                }
+                val lookup = runCompletionLedgerIfCurrent(fingerprint.transferId, owner) {
+                    bindOrLookup(owner, fingerprint)
+                } ?: return
+                when (lookup) {
+                    is InboundCompletionReplayLedger.CompletionLookup.Replay -> {
+                        sendCompletionAcknowledgement(
+                            owner = owner,
+                            transferId = fingerprint.transferId,
+                            acknowledgement = lookup.acknowledgement,
+                            replay = true,
+                        )
+                        return
+                    }
+                    InboundCompletionReplayLedger.CompletionLookup.Conflict,
+                    InboundCompletionReplayLedger.CompletionLookup.Tombstone -> {
+                        rejectInboundMessage(
+                            owner,
+                            msg,
+                            "completion evidence mismatch",
+                            publishProgress = false,
+                        )
+                        return
+                    }
+                    InboundCompletionReplayLedger.CompletionLookup.Missing -> {
+                        rejectInboundMessage(owner, msg, "unknown transferId")
+                        return
+                    }
+                    InboundCompletionReplayLedger.CompletionLookup.Active -> Unit
+                }
                 val ctx = receiveContexts[msg.transferId]?.takeIf { it.owner === owner }
                 if (ctx != null) {
                     runCatching {
-                        CrossNetworkFileTransferValidator.validateComplete(msg, ctx.metadata)
+                        val validated = CrossNetworkFileTransferValidator.validateComplete(msg, ctx.metadata)
+                        check(validated == fingerprint) { "completion fingerprint changed during validation" }
                     }.onFailure { err ->
                         rejectReceive(ctx, err.message ?: "invalid complete")
                         return
                     }
-                    ctx.completeReceived = true
-                    ctx.completeReceivedAtMs = System.currentTimeMillis()
-                    ctx.expectedFileSha256 = msg.fileSha256
-                    ctx.expectedMerkleRoot = msg.merkleRoot
-                    ctx.expectedMerkleSig = msg.merkleRootSignature
-                    ctx.expectedMerkleSigAlg = msg.merkleRootSignatureAlg
+                    var accepted = false
+                    var waitSnapshot: MissingChunkWaitSnapshot? = null
+                    synchronized(ctx.transitionLock) {
+                        synchronized(ctx.stateLock) {
+                            if (ctx.lifecycle != ReceiveLifecycle.ACTIVE || ctx.declined) {
+                                return@synchronized
+                            }
+                            ctx.completeReceived = true
+                            ctx.completeReceivedAtMs = System.currentTimeMillis()
+                            ctx.expectedFileSha256 = msg.fileSha256
+                            ctx.expectedMerkleRoot = msg.merkleRoot
+                            ctx.expectedMerkleSig = msg.merkleRootSignature
+                            ctx.expectedMerkleSigAlg = msg.merkleRootSignatureAlg
+                            accepted = true
 
-                    val totalChunks = ctx.totalChunks
-                    if (totalChunks != null && totalChunks > 0 && ctx.receivedChunkIndices.size != totalChunks) {
-                        val missing = (0 until totalChunks).filterNot { ctx.receivedChunkIndices.contains(it) }
+                            val totalChunks = ctx.totalChunks
+                            if (
+                                totalChunks != null &&
+                                totalChunks > 0 &&
+                                ctx.nextExpectedChunkIndex != totalChunks
+                            ) {
+                                waitSnapshot = MissingChunkWaitSnapshot(
+                                    completeReceivedAtMs = ctx.completeReceivedAtMs,
+                                    missingChunks = (0 until totalChunks).filterNot {
+                                        ctx.receivedChunkIndices.contains(it)
+                                    },
+                                    bufferedBytes = ctx.buffer.size().toLong(),
+                                )
+                            }
+                        }
+                    }
+                    if (!accepted) return
+
+                    waitSnapshot?.let { snapshot ->
                         _progress.value = Progress(
                             transferId = ctx.transferId,
-                            sentBytes = ctx.buffer.size().toLong(),
+                            sentBytes = snapshot.bufferedBytes,
                             totalBytes = ctx.totalBytes ?: 0L,
-                            lastStatus = "waiting missing chunks: ${missing.take(16)}${if (missing.size > 16) "..." else ""}"
+                            lastStatus = "waiting missing chunks: ${snapshot.missingChunks.take(16)}" +
+                                if (snapshot.missingChunks.size > 16) "..." else "",
                         )
 
                         // Optional NACK: ask sender to resend missing chunks (backward compatible).
@@ -2757,8 +3131,8 @@ class WebRtcFileTransferController(
                                     version = msg.version,
                                     op = CrossNetworkFileTransferOp.chunkAck,
                                     transferId = msg.transferId,
-                                    missingChunks = missing.take(512).toIntArray(),
-                                    message = "missingChunks"
+                                    missingChunks = snapshot.missingChunks.take(512).toIntArray(),
+                                    message = "missingChunks",
                                 )
                             )
                         )
@@ -2767,48 +3141,58 @@ class WebRtcFileTransferController(
                         // We just keep receiving; if sender retries/resends, we'll finalize once complete.
                         scope.launch {
                             delay(missingChunkReceiveTimeoutMs)
-                            val still = receiveContexts[ctx.transferId]
-                            if (
-                                still === ctx &&
-                                still.owner === owner &&
-                                webrtc.isCurrentSecureOperationOwner(owner) &&
-                                still.completeReceived &&
-                                still.completeReceivedAtMs == ctx.completeReceivedAtMs
-                            ) {
-                                val tc = still.totalChunks
-                                val ok = (tc == null) || (still.receivedChunkIndices.size == tc)
-                                if (!ok) {
-                                    // Best-effort final NACK before we give up.
-                                    val tcNonNull = tc // smart-cast: !ok implies tc != null
-                                    if (tcNonNull > 0) {
-                                        val missing2 = (0 until tcNonNull).filterNot { still.receivedChunkIndices.contains(it) }
-                                        runCatching {
-                                            sendFt(
-                                                owner,
-                                                still.transferId,
-                                                encode(
-                                                    CrossNetworkFileTransferMessage(
-                                                        version = msg.version,
-                                                        op = CrossNetworkFileTransferOp.chunkAck,
-                                                        transferId = msg.transferId,
-                                                        missingChunks = missing2.take(512).toIntArray(),
-                                                        message = "missingChunks(timeout)"
-                                                    )
-                                                )
-                                            )
-                                        }
-                                    }
-                                    cleanupTimedOutReceive(still)
-                                }
-                            } else if (still === ctx && still.owner === owner) {
+                            if (!webrtc.isCurrentSecureOperationOwner(owner)) {
                                 abandonStaleOperation(ctx.transferId, owner)
+                                return@launch
                             }
+                            val timedOutMissing = synchronized(ctx.transitionLock) transition@{
+                                val missing = synchronized(ctx.stateLock) state@{
+                                    if (
+                                        ctx.lifecycle != ReceiveLifecycle.ACTIVE ||
+                                        !ctx.completeReceived ||
+                                        ctx.completeReceivedAtMs != snapshot.completeReceivedAtMs
+                                    ) {
+                                        return@state null
+                                    }
+                                    val totalChunks = ctx.totalChunks ?: return@state null
+                                    if (ctx.nextExpectedChunkIndex == totalChunks) return@state null
+                                    (0 until totalChunks).filterNot {
+                                        ctx.receivedChunkIndices.contains(it)
+                                    }
+                                } ?: return@transition null
+                                if (!claimReceiveTermination(ctx, markDeclined = true)) {
+                                    return@transition null
+                                }
+                                missing
+                            } ?: return@launch
+
+                            // Best-effort final NACK after timeout ownership is claimed. No receive
+                            // resource can be mutated while this notification and cleanup run.
+                            runCatching {
+                                sendFt(
+                                    owner,
+                                    ctx.transferId,
+                                    encode(
+                                        CrossNetworkFileTransferMessage(
+                                            version = msg.version,
+                                            op = CrossNetworkFileTransferOp.chunkAck,
+                                            transferId = msg.transferId,
+                                            missingChunks = timedOutMissing.take(512).toIntArray(),
+                                            message = "missingChunks(timeout)",
+                                        )
+                                    )
+                                )
+                            }
+                            finishTimedOutReceive(ctx)
                         }
                         return
                     }
 
                     maybeFinalizeIfReady(ctx)
                 }
+                // Exact duplicates that race an already-claimed finalizer deliberately do nothing.
+                // The winner records the completion witness before its first acknowledgement; a
+                // later retry will therefore replay the immutable acknowledgement.
             }
             CrossNetworkFileTransferOp.chunkAck -> {
                 val transferId = msg.transferId
@@ -2880,16 +3264,16 @@ class WebRtcFileTransferController(
                 if (hasOutboundOperation) {
                     failOutboundTransfer(requireNotNull(attempt), peerFailureReason)
                 }
-                val receiveCleanup = receiveCtx?.let {
+                val release = releaseTransferResources(msg.transferId, owner)
+                release.claimedReceive?.let {
                     launchReceiveBatchEntryStatus(it, BatchManifestEntry.Status.FAILED)
-                    releaseTransferResources(msg.transferId, owner)
-                } ?: ReceiveResourceCleanupReport(msg.transferId)
-                if (attempt == null && receiveCtx != null) {
+                }
+                if (attempt == null && release.claimedReceive != null) {
                     _progress.value = Progress(
                         transferId = msg.transferId,
                         lastStatus = cleanupAwareStatus(
                             peerFailureReason,
-                            receiveCleanup,
+                            release.receiveCleanup,
                         ),
                     )
                 }
@@ -2927,14 +3311,14 @@ class WebRtcFileTransferController(
                             BatchManifestEntry.Status.CANCELLED,
                         )
                     }
-                receiveContexts[msg.transferId]
-                    ?.takeIf { it.owner === owner }
-                    ?.let { launchReceiveBatchEntryStatus(it, BatchManifestEntry.Status.CANCELLED) }
-                val receiveCleanup = releaseTransferResources(msg.transferId, owner)
-                if (attempt == null) {
+                val release = releaseTransferResources(msg.transferId, owner)
+                release.claimedReceive?.let {
+                    launchReceiveBatchEntryStatus(it, BatchManifestEntry.Status.CANCELLED)
+                }
+                if (attempt == null && release.claimedReceive != null) {
                     _progress.value = Progress(
                         transferId = msg.transferId,
-                        lastStatus = cleanupAwareStatus("cancelled by peer", receiveCleanup),
+                        lastStatus = cleanupAwareStatus("cancelled by peer", release.receiveCleanup),
                     )
                 }
             }
@@ -2983,10 +3367,12 @@ class WebRtcFileTransferController(
                     BatchManifestEntry.Status.CANCELLED,
                 )
             }
-        receiveContext
-            ?.takeIf { it.owner === owner }
-            ?.let { launchReceiveBatchEntryStatus(it, BatchManifestEntry.Status.CANCELLED) }
-        val version = receiveContext?.takeIf { it.owner === owner }?.version ?: 1
+        val release = releaseTransferResources(transferId, owner)
+        release.claimedReceive?.let {
+            launchReceiveBatchEntryStatus(it, BatchManifestEntry.Status.CANCELLED)
+        }
+        if (attempt == null && release.claimedReceive == null) return
+        val version = release.claimedReceive?.version ?: 1
         val notification = runCatching {
             val payload = encode(
                 CrossNetworkFileTransferMessage(
@@ -2997,16 +3383,15 @@ class WebRtcFileTransferController(
             )
             if (attempt != null) sendTerminalOutbound(attempt, payload) else sendFt(owner, transferId, payload)
         }
-        val receiveCleanup = releaseTransferResources(transferId, owner)
         val cancellationStatus = if (notification.isSuccess) {
             "cancelled"
         } else {
             "cancelled locally; peer notification failed: ${notification.exceptionOrNull()?.javaClass?.simpleName}"
         }
-        if (attempt == null) {
+        if (attempt == null && release.claimedReceive != null) {
             _progress.value = Progress(
                 transferId = transferId,
-                lastStatus = cleanupAwareStatus(cancellationStatus, receiveCleanup),
+                lastStatus = cleanupAwareStatus(cancellationStatus, release.receiveCleanup),
             )
         }
     }
@@ -3019,10 +3404,13 @@ class WebRtcFileTransferController(
     private fun releaseTransferResources(
         transferId: String,
         owner: WebRtcSecureOperationOwner,
-    ): ReceiveResourceCleanupReport {
+    ): TransferResourceRelease {
         // Stop this transfer's resend loop immediately.
         resendJobs[transferId]?.takeIf { it.owner === owner }?.let { ownedJob ->
             if (resendJobs.remove(transferId, ownedJob)) ownedJob.job.cancel()
+        }
+        completionRetryJobs[transferId]?.takeIf { it.owner === owner }?.let { ownedJob ->
+            if (completionRetryJobs.remove(transferId, ownedJob)) ownedJob.job.cancel()
         }
 
         // Sender side: drop context, batch mapping.
@@ -3035,20 +3423,25 @@ class WebRtcFileTransferController(
 
         // Receiver side: cancel approval, close + delete partial file, clear buffers.
         var receiveCleanup = ReceiveResourceCleanupReport(transferId)
-        receiveContexts[transferId]?.takeIf { it.owner === owner }?.let { rx ->
-            if (!receiveContexts.remove(transferId, rx)) return@let
-            rx.declined = true
-            receiveCleanup = cleanupReceiveContext(rx, deletePartialFile = true)
+        val claimedReceive = receiveContexts[transferId]
+            ?.takeIf { it.owner === owner }
+            ?.takeIf { claimReceiveTermination(it, markDeclined = true) }
+        claimedReceive?.let { rx ->
+            val tombstoned = tombstoneInboundReceive(rx)
+            receiveCleanup = cleanupReceiveContext(rx, deletePartialFile = tombstoned)
         }
 
         // Stop watching this transfer for idle/interrupt (it is terminal now).
         stopIdleWatchdogFor(transferId, owner)
 
         // Delete this transfer's checkpoint so it is not offered for resume.
-        if (receiveCleanup.checkpointDisposition == ReceiveCleanupCheckpointDisposition.DELETE) {
+        if (
+            checkpointOwners[transferId] === owner &&
+            receiveCleanup.checkpointDisposition == ReceiveCleanupCheckpointDisposition.DELETE
+        ) {
             enqueueCheckpointMutation(transferId, owner, CheckpointMutation.DELETE) { delete(transferId) }
         }
-        return receiveCleanup
+        return TransferResourceRelease(claimedReceive, receiveCleanup)
     }
 
     // region Idle / interrupt watchdog (Requirement 5.12)
@@ -3108,9 +3501,10 @@ class WebRtcFileTransferController(
 
     /**
      * Terminate every watched transfer whose idle time has crossed [idleInterruptTimeoutMs] as of
-     * [nowMs], RETAINING each one's verified-bytes checkpoint so it can be resumed
-     * (Requirement 5.12). Pure enough to be driven directly from tests with an injected clock; the
-     * background loop simply calls it on each poll.
+     * [nowMs], retaining its checkpoint either for ordinary resume (before completion) or as
+     * evidence of an unknown delivery outcome (after a completion request was sent). Pure enough
+     * to be driven directly from tests with an injected clock; the background loop simply calls it
+     * on each poll.
      */
     internal fun runIdleInterruptSweep(nowMs: Long) {
         // Snapshot to avoid mutating while iterating.
@@ -3133,11 +3527,10 @@ class WebRtcFileTransferController(
     /**
      * Terminate THIS transfer due to idle/interrupt while RETAINING its checkpoint (Requirement
      * 5.12). This is deliberately distinct from [releaseTransferResources] / [rejectReceive] /
-     * [cleanupTimedOutReceive], which PURGE the checkpoint on cancel/decline/corrupt/give-up: here
-     * the transfer is resumable, so the verified-bytes checkpoint (and any partial file) is left in
-     * place. It can resume only if the same live secure owner remains current; after reconnect or
-     * rekey the UI must start a fresh transfer rather than silently crossing owners. Presents a
-     * truthful interrupt/timeout reason.
+     * [cleanupTimedOutReceive], which PURGE the checkpoint on cancel/decline/corrupt/give-up. A
+     * pre-completion checkpoint may resume only under the same live secure owner. Once a completion
+     * request has been sent, the checkpoint is evidence only: a fresh-ID resume is forbidden because
+     * the peer may already have committed the file. Presents the corresponding truthful status.
      */
     private fun timeoutTransferRetainingCheckpoint(
         transferId: String,
@@ -3152,12 +3545,21 @@ class WebRtcFileTransferController(
                 ?.sentBytes
                 ?.coerceAtMost(total)
                 ?: 0L
-            val timeoutStatus = TransferActivityTimeoutDecision.statusMessage(
-                TransferActivityTimeoutDecision.reasonFor(
-                    sessionUsable = webrtc.isCurrentSecureOperationOwner(owner),
-                ),
-                idleInterruptTimeoutMs,
+            val timeoutReason = TransferActivityTimeoutDecision.reasonFor(
+                sessionUsable = webrtc.isCurrentSecureOperationOwner(owner),
             )
+            // The completion expectation is published before the conservative pre-send checkpoint
+            // marker is persisted. That save suspends, so the watchdog may win while the attempt is
+            // still ACTIVE. Once the expectation exists, ordinary resume is no longer truthful:
+            // the marker may commit even if this process subsequently loses the send transition.
+            val timeoutStatus = if (attempt.completionExpectation.get() != null) {
+                TransferActivityTimeoutDecision.completionOutcomeUnknownStatusMessage(
+                    timeoutReason,
+                    idleInterruptTimeoutMs,
+                )
+            } else {
+                TransferActivityTimeoutDecision.statusMessage(timeoutReason, idleInterruptTimeoutMs)
+            }
             if (!tryTransitionOutboundTerminal(
                     attempt,
                     OutboundAttemptState.TIMED_OUT,
@@ -3176,9 +3578,23 @@ class WebRtcFileTransferController(
             return
         }
 
+        val claimedReceive = if (attempt == null) {
+            receiveContexts[transferId]
+                ?.takeIf { it.owner === owner }
+                ?.takeIf { claimReceiveTermination(it, markDeclined = true) }
+                // A finalizer/cancel/error that already claimed the receive owns every inbound
+                // terminal side effect. The idle sweep has only consumed its stale activity entry.
+                ?: return
+        } else {
+            null
+        }
+
         // Stop this transfer's resend loop immediately (no more chunk retransmits).
         resendJobs[transferId]?.takeIf { it.owner === owner }?.let { ownedJob ->
             if (resendJobs.remove(transferId, ownedJob)) ownedJob.job.cancel()
+        }
+        completionRetryJobs[transferId]?.takeIf { it.owner === owner }?.let { ownedJob ->
+            if (completionRetryJobs.remove(transferId, ownedJob)) ownedJob.job.cancel()
         }
 
         // Capture progress figures before dropping in-memory state.
@@ -3196,9 +3612,11 @@ class WebRtcFileTransferController(
         var receivedBytes = 0L
         var totalBytes = 0L
         var receiveCleanup = ReceiveResourceCleanupReport(transferId)
-        receiveContexts[transferId]?.takeIf { it.owner === owner }?.let { rx ->
-            if (!receiveContexts.remove(transferId, rx)) return@let
-            rx.declined = true
+        claimedReceive?.let { rx ->
+            if (!tombstoneInboundReceive(rx)) {
+                cleanupReceiveContext(rx, deletePartialFile = false)
+                return
+            }
             // Close the RAF but DO NOT delete the partial file — it backs the retained checkpoint.
             receiveCleanup = cleanupReceiveContext(rx, deletePartialFile = false)
             receivedBytes = rx.receivedBytes
@@ -3218,7 +3636,7 @@ class WebRtcFileTransferController(
         val reason = TransferActivityTimeoutDecision.reasonFor(
             sessionUsable = webrtc.isCurrentSecureOperationOwner(owner),
         )
-        if (attempt == null) {
+        if (attempt == null && claimedReceive != null) {
             _progress.value = Progress(
                 transferId = transferId,
                 sentBytes = receivedBytes,
@@ -3242,11 +3660,14 @@ class WebRtcFileTransferController(
         owner: WebRtcSecureOperationOwner,
         msg: CrossNetworkFileTransferMessage,
         reason: String,
+        publishProgress: Boolean = true,
     ) {
-        _progress.value = Progress(
-            transferId = msg.transferId.takeIf { it.isNotBlank() },
-            lastStatus = "rejected inbound file transfer: $reason"
-        )
+        if (publishProgress) {
+            _progress.value = Progress(
+                transferId = msg.transferId.takeIf { it.isNotBlank() },
+                lastStatus = "rejected inbound file transfer: $reason"
+            )
+        }
         sendFt(
             owner,
             msg.transferId,
@@ -3266,7 +3687,15 @@ class WebRtcFileTransferController(
             abandonStaleOperation(ctx.transferId, ctx.owner)
             return
         }
-        val removed = if (receiveContexts.remove(ctx.transferId, ctx)) ctx else return
+        if (!claimReceiveTermination(ctx, markDeclined = true)) return
+        finishRejectedReceive(ctx, reason)
+    }
+
+    private fun finishRejectedReceive(removed: ReceiveContext, reason: String) {
+        if (!tombstoneInboundReceive(removed)) {
+            cleanupReceiveContext(removed, deletePartialFile = false)
+            return
+        }
         launchReceiveBatchEntryStatus(removed, BatchManifestEntry.Status.FAILED)
         stopIdleWatchdogFor(removed.transferId, removed.owner)
         val cleanup = cleanupReceiveContext(removed, deletePartialFile = true)
@@ -3291,12 +3720,11 @@ class WebRtcFileTransferController(
         )
     }
 
-    private suspend fun cleanupTimedOutReceive(ctx: ReceiveContext) {
-        if (!webrtc.isCurrentSecureOperationOwner(ctx.owner)) {
-            abandonStaleOperation(ctx.transferId, ctx.owner)
+    private suspend fun finishTimedOutReceive(removed: ReceiveContext) {
+        if (!tombstoneInboundReceive(removed)) {
+            cleanupReceiveContext(removed, deletePartialFile = false)
             return
         }
-        val removed = if (receiveContexts.remove(ctx.transferId, ctx)) ctx else return
         launchReceiveBatchEntryStatus(removed, BatchManifestEntry.Status.FAILED)
         stopIdleWatchdogFor(removed.transferId, removed.owner)
         val cleanup = cleanupReceiveContext(removed, deletePartialFile = true)
@@ -3314,41 +3742,57 @@ class WebRtcFileTransferController(
     }
 
     private fun startInboundApprovalIfNeeded(ctx: ReceiveContext) {
-        if (ctx.approvalDecision != null || ctx.approvalJob != null || ctx.declined) return
-
-        ctx.approvalJob = scope.launch {
-            val decision = runCatching {
-                inboundApprovalProvider.requestDecision(
-                    InboundFileTransferApprovalRequest(
-                        transferId = ctx.transferId,
-                        fileName = ctx.fileName,
-                        mimeType = ctx.mimeType,
-                        fileSizeBytes = ctx.totalBytes,
-                        authenticatedSenderDeviceId = ctx.authenticatedSenderDeviceId,
-                        senderDeviceId = ctx.senderDeviceId,
-                        senderDeviceName = ctx.senderDeviceName
+        val candidate = scope.launch(start = CoroutineStart.LAZY) {
+                val decision = try {
+                    inboundApprovalProvider.requestDecision(
+                        InboundFileTransferApprovalRequest(
+                            transferId = ctx.transferId,
+                            fileName = ctx.fileName,
+                            mimeType = ctx.mimeType,
+                            fileSizeBytes = ctx.totalBytes,
+                            authenticatedSenderDeviceId = ctx.authenticatedSenderDeviceId,
+                            senderDeviceId = ctx.senderDeviceId,
+                            senderDeviceName = ctx.senderDeviceName,
+                        )
                     )
-                )
-            }.getOrElse {
-                InboundFileTransferDecision.Decline
-            }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    InboundFileTransferDecision.Decline
+                }
 
-            val current = receiveContexts[ctx.transferId]
+                if (!webrtc.isCurrentSecureOperationOwner(ctx.owner)) {
+                    abandonStaleOperation(ctx.transferId, ctx.owner)
+                    return@launch
+                }
+                val acceptedDecision = synchronized(ctx.stateLock) {
+                    if (ctx.lifecycle != ReceiveLifecycle.ACTIVE) {
+                        return@synchronized false
+                    }
+                    ctx.approvalDecision = decision
+                    true
+                }
+                if (!acceptedDecision) return@launch
+
+                when (decision) {
+                    is InboundFileTransferDecision.Accept -> maybeFinalizeIfReady(ctx)
+                    InboundFileTransferDecision.Decline -> abortInboundReceive(ctx, reason = "declined")
+                }
+        }
+        val attached = synchronized(ctx.stateLock) {
             if (
-                current !== ctx ||
-                current.owner !== ctx.owner ||
-                !webrtc.isCurrentSecureOperationOwner(ctx.owner)
+                ctx.lifecycle != ReceiveLifecycle.ACTIVE ||
+                ctx.approvalDecision != null ||
+                ctx.approvalJob != null ||
+                ctx.declined
             ) {
-                abandonStaleOperation(ctx.transferId, ctx.owner)
-                return@launch
-            }
-            current.approvalDecision = decision
-
-            when (decision) {
-                is InboundFileTransferDecision.Accept -> maybeFinalizeIfReady(current)
-                InboundFileTransferDecision.Decline -> abortInboundReceive(current, reason = "declined")
+                false
+            } else {
+                ctx.approvalJob = candidate
+                true
             }
         }
+        if (attached) candidate.start() else candidate.cancel()
     }
 
     private fun abortInboundReceive(ctx: ReceiveContext, reason: String) {
@@ -3356,27 +3800,30 @@ class WebRtcFileTransferController(
             abandonStaleOperation(ctx.transferId, ctx.owner)
             return
         }
-        ctx.declined = true
-        val removed = if (receiveContexts.remove(ctx.transferId, ctx)) ctx else return
-        launchReceiveBatchEntryStatus(removed, BatchManifestEntry.Status.CANCELLED)
-        stopIdleWatchdogFor(removed.transferId, removed.owner)
-        val cleanup = cleanupReceiveContext(removed, deletePartialFile = true)
-        deleteCheckpointAfterSuccessfulCleanup(removed, cleanup)
+        if (!claimReceiveTermination(ctx, markDeclined = true)) return
+        if (!tombstoneInboundReceive(ctx)) {
+            cleanupReceiveContext(ctx, deletePartialFile = false)
+            return
+        }
+        launchReceiveBatchEntryStatus(ctx, BatchManifestEntry.Status.CANCELLED)
+        stopIdleWatchdogFor(ctx.transferId, ctx.owner)
+        val cleanup = cleanupReceiveContext(ctx, deletePartialFile = true)
+        deleteCheckpointAfterSuccessfulCleanup(ctx, cleanup)
         _progress.value = Progress(
-            transferId = removed.transferId,
-            sentBytes = removed.receivedBytes,
-            totalBytes = removed.totalBytes ?: removed.receivedBytes,
+            transferId = ctx.transferId,
+            sentBytes = ctx.receivedBytes,
+            totalBytes = ctx.totalBytes ?: ctx.receivedBytes,
             lastStatus = cleanupAwareStatus("inbound declined ($reason)", cleanup)
         )
         // Best-effort notify peer.
         sendFt(
-            removed.owner,
-            removed.transferId,
+            ctx.owner,
+            ctx.transferId,
             encode(
                 CrossNetworkFileTransferMessage(
-                    version = removed.version,
+                    version = ctx.version,
                     op = CrossNetworkFileTransferOp.error,
-                    transferId = removed.transferId,
+                    transferId = ctx.transferId,
                     message = "declined"
                 )
             )
@@ -3436,27 +3883,34 @@ class WebRtcFileTransferController(
         }
     }
 
-    private fun restoreContiguousReceiveProgress(
+    private fun planContiguousReceiveProgress(
         ctx: ReceiveContext,
         checkpoint: TransferCheckpoint?,
-        partialFile: File?
+        partialFile: File?,
+    ): ResumeReceivePlanner.RestoredPrefix? {
+        if (checkpoint == null || partialFile == null) return null
+        return ResumeReceivePlanner.restoreContiguousPrefix(
+            fileSize = ctx.metadata.fileSize,
+            chunkSize = ctx.metadata.chunkSize,
+            totalChunks = ctx.metadata.totalChunks,
+            partialLength = partialFile.length(),
+            receivedChunks = checkpoint.receivedChunks.toSet(),
+            receivedChunkSha256HexByIndex = checkpoint.receivedChunkSha256HexByIndex,
+        )
+    }
+
+    private fun applyContiguousReceiveProgress(
+        ctx: ReceiveContext,
+        checkpoint: TransferCheckpoint?,
+        restored: ResumeReceivePlanner.RestoredPrefix?,
     ) {
+        check(Thread.holdsLock(ctx.stateLock)) { "receive state lock is required" }
         if (checkpoint == null) return
         ctx.receivedChunkIndices.clear()
         ctx.chunkHashes.clear()
         ctx.nextExpectedChunkIndex = 0
         ctx.receivedBytes = 0L
-
-        if (partialFile == null) return
-        val partialLength = partialFile.length()
-        val restored = ResumeReceivePlanner.restoreContiguousPrefix(
-            fileSize = ctx.metadata.fileSize,
-            chunkSize = ctx.metadata.chunkSize,
-            totalChunks = ctx.metadata.totalChunks,
-            partialLength = partialLength,
-            receivedChunks = checkpoint.receivedChunks.toSet(),
-            receivedChunkSha256HexByIndex = checkpoint.receivedChunkSha256HexByIndex
-        )
+        if (restored == null) return
         for ((index, hash) in restored.chunkHashesByIndex) {
             ctx.receivedChunkIndices.add(index)
             ctx.chunkHashes[index] = hash
@@ -3465,16 +3919,15 @@ class WebRtcFileTransferController(
         ctx.receivedBytes = restored.restoredBytes
     }
 
-    private fun isReceiveComplete(ctx: ReceiveContext): Boolean {
+    private fun isReceiveCompleteLocked(ctx: ReceiveContext): Boolean {
+        check(Thread.holdsLock(ctx.stateLock)) { "receive state lock is required" }
         if (!ctx.completeReceived) return false
         val totalChunks = ctx.totalChunks
         return totalChunks == null || totalChunks <= 0 || ctx.nextExpectedChunkIndex == totalChunks
     }
 
     private fun maybeFinalizeIfReady(ctx: ReceiveContext) {
-        val decision = ctx.approvalDecision
-        if (decision !is InboundFileTransferDecision.Accept) return
-        if (!isReceiveComplete(ctx)) return
+        val decision = claimReceiveFinalization(ctx) ?: return
         finalizeReceive(ctx, decision)
     }
 
@@ -3484,9 +3937,16 @@ class WebRtcFileTransferController(
         val appPrivateTemporaryFile: AppPrivateInboundFileCommitter.OwnedTemporaryFile?,
     )
 
-    private data class DownloadsSaveResult(
+    private data class PreparedDownloadsSave(
         val uri: Uri,
-        val displayName: String
+        val displayName: String,
+        val resolver: ContentResolver,
+    )
+
+    private data class InboundDestinationCommit(
+        val localPath: String? = null,
+        val downloadsUri: String? = null,
+        val downloadsDisplayName: String? = null,
     )
 
     private fun finalizeReceive(
@@ -3494,18 +3954,31 @@ class WebRtcFileTransferController(
         decision: InboundFileTransferDecision.Accept,
     ) {
         if (!webrtc.isCurrentSecureOperationOwner(ctx.owner)) {
-            abandonStaleOperation(ctx.transferId, ctx.owner)
+            synchronized(ctx.stateLock) {
+                ctx.lifecycle = ReceiveLifecycle.TERMINATED
+                ctx.declined = true
+            }
+            ensureFinalizationOwnerIsCurrent(ctx)
             return
         }
-        // Remove first so we don't emit twice if duplicates arrive.
-        val removed = if (receiveContexts.remove(ctx.transferId, ctx)) ctx else return
+        val removed = ctx
+        check(synchronized(removed.stateLock) {
+            removed.lifecycle == ReceiveLifecycle.FINALIZING
+        }) { "receive finalization was not claimed" }
+        afterInboundFinalizationClaim(removed.transferId)
         stopIdleWatchdogFor(removed.transferId, removed.owner)
-        removed.approvalJob?.cancel()
-        removed.approvalJob = null
+        val approvalJob = synchronized(removed.stateLock) {
+            removed.approvalJob.also {
+                removed.approvalJob = null
+            }
+        }
+        approvalJob?.cancel()
+        val (receiveFile, appPrivateTemporaryFile) = synchronized(removed.stateLock) {
+            val resources = removed.raf to removed.appPrivateTemporaryFile
+            removed.raf = null
+            resources
+        }
         val expectedSize = requireNotNull(removed.totalBytes) { "validated metadata missing fileSize" }
-        val receiveFile = removed.raf
-        removed.raf = null
-        val appPrivateTemporaryFile = removed.appPrivateTemporaryFile
         if (receiveFile != null || appPrivateTemporaryFile != null) {
             val closeResult = if (appPrivateTemporaryFile != null) {
                 appPrivateTemporaryFile.synchronizeAndClose()
@@ -3661,85 +4134,136 @@ class WebRtcFileTransferController(
         }
         // From here integrity is proven; actualHash is guaranteed non-null by a Pass outcome.
         val verifiedHash = requireNotNull(actualHash) { "integrity passed without a computed hash" }
+        val completionFingerprint = InboundCompletionFingerprint(
+            version = removed.version,
+            transferId = removed.transferId,
+            receivedBytes = expectedSize,
+            fileSha256 = requireNotNull(removed.expectedFileSha256),
+            merkleRoot = removed.expectedMerkleRoot,
+            merkleRootSignature = removed.expectedMerkleSig,
+            merkleRootSignatureAlgorithm = removed.expectedMerkleSigAlg,
+        )
+        val acknowledgement = CrossNetworkFileTransferMessage(
+            version = removed.version,
+            op = CrossNetworkFileTransferOp.completeAck,
+            transferId = removed.transferId,
+            receivedBytes = actualSize,
+            fileSha256 = verifiedHash,
+        )
+        val preparedCompletion = try {
+            runCompletionLedgerIfCurrent(removed.transferId, removed.owner) {
+                prepareCompletion(
+                    owner = removed.owner,
+                    fingerprint = completionFingerprint,
+                    acknowledgement = acknowledgement,
+                )
+            } ?: run {
+                ensureFinalizationOwnerIsCurrent(removed)
+                return
+            }
+        } catch (error: Exception) {
+            failFinalizedReceive(
+                removed = removed,
+                actualSize = actualSize,
+                expectedSize = expectedSize,
+                status = "received complete (completion witness preparation failed: ${error.javaClass.simpleName})",
+                peerMessage = "completion witness unavailable",
+            )
+            return
+        }
 
-        var outLocalPath: String? = removed.partialFile?.absolutePath
-        var outBytes: ByteArray? = if (removed.partialFile != null) null else removed.buffer.toByteArray()
-        var downloadsUri: String? = null
-        var downloadsDisplayName: String? = null
-        var terminalCleanup = ReceiveResourceCleanupReport(removed.transferId)
-
-        if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.DOWNLOADS) {
-            val ctx = appContext ?: run {
+        val preparedDownloads = if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.DOWNLOADS) {
+            val context = appContext ?: run {
+                abortPreparedCompletion(preparedCompletion)
                 failFinalizedReceive(
                     removed = removed,
                     actualSize = actualSize,
                     expectedSize = expectedSize,
                     status = "received complete (downloads save unavailable)",
-                    peerMessage = "downloads save unavailable"
+                    peerMessage = "downloads save unavailable",
                 )
                 return
             }
-            val save = runCatching { saveInboundToDownloads(ctx, removed, decision) }.getOrElse { err ->
-                if (err is StaleWebRtcFileTransferOwnerException) {
-                    ensureFinalizationOwnerIsCurrent(removed)
-                    return
-                }
-                failFinalizedReceive(
-                    removed = removed,
-                    actualSize = actualSize,
-                    expectedSize = expectedSize,
-                    status = "received complete (downloads save failed: ${err.javaClass.simpleName})",
-                    peerMessage = "downloads save failed"
-                )
-                return
-            }
-            downloadsUri = save.uri.toString()
-            downloadsDisplayName = save.displayName
-            outLocalPath = null
-            outBytes = null
-            // Keep storage tidy: remove the private partial after successful commit to Downloads.
-            terminalCleanup = cleanupReceiveContext(removed, deletePartialFile = true)
-        } else if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.APP_PRIVATE_DURABLE) {
-            val committer = requireNotNull(appPrivateInboundFileCommitter)
-            val temporaryFile = requireNotNull(appPrivateTemporaryFile) {
-                "app-private receive completed without an owned staging file"
-            }
-            val committedFile = try {
-                var result: File? = null
-                val committedForOwner = webrtc.runIfCurrentSecureOperationOwner(removed.owner) {
-                    result = committer.commitValidated(
-                        temporaryFile = temporaryFile,
-                        preferredFileName = decision.downloadsDisplayName.ifBlank {
-                            removed.fileName ?: "skybridge-received"
-                        },
-                    )
-                }
-                if (!committedForOwner) {
-                    throw StaleWebRtcFileTransferOwnerException(removed.transferId)
-                }
-                requireNotNull(result)
+            try {
+                prepareInboundDownloadsSave(context, removed, decision)
             } catch (error: Exception) {
+                abortPreparedCompletion(preparedCompletion)
                 if (error is StaleWebRtcFileTransferOwnerException) {
-                    runCatching { committer.discard(temporaryFile) }
-                    ensureFinalizationOwnerIsCurrent(removed)
+                    ensureFinalizationOwnerIsCurrent(
+                        removed,
+                        additionalCleanupFailure = error.suppressed.firstOrNull() as? Exception,
+                    )
                     return
                 }
+                val preexistingCleanup = cleanupFailureReport(
+                    removed = removed,
+                    failure = error.suppressed.firstOrNull() as? Exception,
+                )
                 failFinalizedReceive(
                     removed = removed,
                     actualSize = actualSize,
                     expectedSize = expectedSize,
-                    status = "received complete (app-private commit failed: ${error.javaClass.simpleName})",
-                    peerMessage = "app-private commit failed",
+                    status = "received complete (downloads save failed: ${error.javaClass.simpleName})",
+                    peerMessage = "downloads save failed",
+                    preexistingCleanupFailure = preexistingCleanup,
                 )
                 return
             }
-            removed.appPrivateTemporaryFile = null
-            removed.partialFile = committedFile
-            outLocalPath = committedFile.absolutePath
-            outBytes = null
+        } else {
+            null
         }
 
-        if (!ensureFinalizationOwnerIsCurrent(removed)) return
+        val temporaryFile = appPrivateTemporaryFile.takeIf {
+            inboundFileDestinationPolicy == InboundFileDestinationPolicy.APP_PRIVATE_DURABLE
+        }
+        val destinationCommit = try {
+            beforeInboundDestinationCommit(removed.transferId)
+            commitInboundDestinationAndWitness(
+                removed = removed,
+                decision = decision,
+                preparedCompletion = preparedCompletion,
+                preparedDownloads = preparedDownloads,
+                appPrivateTemporaryFile = temporaryFile,
+            )
+        } catch (error: Exception) {
+            val pendingCleanupFailure = preparedDownloads?.let(::cleanupPreparedDownloadsSave)
+            pendingCleanupFailure?.let(error::addSuppressed)
+            abortPreparedCompletion(preparedCompletion)
+            if (error is StaleWebRtcFileTransferOwnerException) {
+                // The durable destination was never committed. Preserve the closed, owned staging
+                // file with its checkpoint so cleanup failure cannot be hidden and recovery state
+                // cannot point at a path that this stale continuation already deleted.
+                ensureFinalizationOwnerIsCurrent(
+                    removed,
+                    additionalCleanupFailure = pendingCleanupFailure,
+                )
+                return
+            }
+            failFinalizedReceive(
+                removed = removed,
+                actualSize = actualSize,
+                expectedSize = expectedSize,
+                status = "received complete (destination commit failed: ${error.javaClass.simpleName})",
+                peerMessage = "destination commit failed",
+                preexistingCleanupFailure = cleanupFailureReport(removed, pendingCleanupFailure),
+            )
+            return
+        }
+
+        var terminalCleanup = ReceiveResourceCleanupReport(removed.transferId)
+        val outBytes = if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.IN_MEMORY) {
+            removed.buffer.toByteArray()
+        } else {
+            null
+        }
+        if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.APP_PRIVATE_DURABLE) {
+            removed.appPrivateTemporaryFile = null
+            removed.partialFile = requireNotNull(destinationCommit.localPath).let(::File)
+        } else if (inboundFileDestinationPolicy == InboundFileDestinationPolicy.DOWNLOADS) {
+            // The pending MediaStore item and replay witness are now committed. Only the private
+            // staging copy remains to be removed; a cleanup failure retains its checkpoint.
+            terminalCleanup = cleanupReceiveContext(removed, deletePartialFile = true)
+        }
 
         launchReceiveBatchEntryStatus(removed, BatchManifestEntry.Status.COMPLETED)
         releaseInboundAdmission(removed)
@@ -3750,7 +4274,9 @@ class WebRtcFileTransferController(
             lastStatus = cleanupAwareStatus(
                 buildString {
                     append("received complete")
-                    if (downloadsDisplayName != null) append(" → Downloads/$downloadsDisplayName")
+                    if (destinationCommit.downloadsDisplayName != null) {
+                        append(" → Downloads/${destinationCommit.downloadsDisplayName}")
+                    }
                 },
                 terminalCleanup,
             )
@@ -3758,28 +4284,62 @@ class WebRtcFileTransferController(
         _receivedFiles.tryEmit(
             ReceivedFile(
                 transferId = removed.transferId,
-                fileName = downloadsDisplayName ?: removed.fileName,
+                fileName = destinationCommit.downloadsDisplayName ?: removed.fileName,
                 mimeType = removed.mimeType,
                 bytes = outBytes,
-                localPath = outLocalPath,
-                downloadsUri = downloadsUri,
-                downloadsDisplayName = downloadsDisplayName
+                localPath = destinationCommit.localPath,
+                downloadsUri = destinationCommit.downloadsUri,
+                downloadsDisplayName = destinationCommit.downloadsDisplayName,
             )
         )
         deleteCheckpointAfterSuccessfulCleanup(removed, terminalCleanup)
-        sendFt(
-            removed.owner,
-            removed.transferId,
-            encode(
-                CrossNetworkFileTransferMessage(
-                    version = removed.version,
-                    op = CrossNetworkFileTransferOp.completeAck,
-                    transferId = removed.transferId,
-                    receivedBytes = actualSize,
-                    fileSha256 = verifiedHash
-                )
-            )
+        sendCompletionAcknowledgement(
+            owner = removed.owner,
+            transferId = removed.transferId,
+            acknowledgement = acknowledgement,
+            replay = false,
         )
+        synchronized(removed.stateLock) {
+            removed.lifecycle = ReceiveLifecycle.TERMINATED
+        }
+    }
+
+    private fun sendCompletionAcknowledgement(
+        owner: WebRtcSecureOperationOwner,
+        transferId: String,
+        acknowledgement: CrossNetworkFileTransferMessage,
+        replay: Boolean,
+    ) {
+        val failure = runCatching {
+            sendFt(owner, transferId, encode(acknowledgement))
+        }.exceptionOrNull()
+        if (failure == null) {
+            if (
+                replay &&
+                webrtc.isCurrentSecureOperationOwner(owner) &&
+                _progress.value.transferId == transferId &&
+                _progress.value.lastStatus?.startsWith(
+                    "received complete; acknowledgement pending replay",
+                ) == true
+            ) {
+                _progress.value = Progress(
+                    transferId = transferId,
+                    sentBytes = acknowledgement.receivedBytes ?: 0L,
+                    totalBytes = acknowledgement.receivedBytes ?: 0L,
+                    lastStatus = "received complete; acknowledgement replayed",
+                )
+            }
+            return
+        }
+        if (replay) return
+        if (webrtc.isCurrentSecureOperationOwner(owner)) {
+            _progress.value = Progress(
+                transferId = transferId,
+                sentBytes = acknowledgement.receivedBytes ?: 0L,
+                totalBytes = acknowledgement.receivedBytes ?: 0L,
+                lastStatus = "received complete; acknowledgement pending replay: ${failure.javaClass.simpleName}",
+            )
+        }
     }
 
     private fun failFinalizedReceive(
@@ -3791,6 +4351,10 @@ class WebRtcFileTransferController(
         preexistingCleanupFailure: ReceiveResourceCleanupReport? = null,
     ) {
         if (!ensureFinalizationOwnerIsCurrent(removed)) return
+        if (!tombstoneInboundReceive(removed)) {
+            ensureFinalizationOwnerIsCurrent(removed)
+            return
+        }
         launchReceiveBatchEntryStatus(removed, BatchManifestEntry.Status.FAILED)
         stopIdleWatchdogFor(removed.transferId, removed.owner)
         val cleanup = preexistingCleanupFailure
@@ -3814,12 +4378,45 @@ class WebRtcFileTransferController(
                 )
             )
         )
+        synchronized(removed.stateLock) {
+            removed.lifecycle = ReceiveLifecycle.TERMINATED
+        }
     }
 
-    private fun ensureFinalizationOwnerIsCurrent(context: ReceiveContext): Boolean {
+    private fun tombstoneInboundReceive(context: ReceiveContext): Boolean =
+        tombstoneInboundReceive(context.owner, context.transferId)
+
+    private fun tombstoneInboundReceive(
+        owner: WebRtcSecureOperationOwner,
+        transferId: String,
+    ): Boolean = runCompletionLedgerIfCurrent(transferId, owner) {
+        tombstoneActive(owner, transferId)
+        true
+    } == true
+
+    private fun ensureFinalizationOwnerIsCurrent(
+        context: ReceiveContext,
+        additionalCleanupFailure: Exception? = null,
+    ): Boolean {
         if (webrtc.isCurrentSecureOperationOwner(context.owner)) return true
-        context.declined = true
-        val cleanup = cleanupReceiveContext(context, deletePartialFile = false)
+        synchronized(context.stateLock) {
+            context.lifecycle = ReceiveLifecycle.TERMINATED
+            context.declined = true
+        }
+        val resourceCleanup = cleanupReceiveContext(context, deletePartialFile = false)
+        val cleanup = if (additionalCleanupFailure == null) {
+            resourceCleanup
+        } else {
+            ReceiveResourceCleanupReport(
+                transferId = context.transferId,
+                failures = listOf(
+                    ReceiveResourceCleanupFailure(
+                        stage = ReceiveResourceCleanupStage.DELETE_PARTIAL_FILE,
+                        cause = additionalCleanupFailure,
+                    ),
+                ) + resourceCleanup.failures,
+            )
+        }
         stopIdleWatchdogFor(context.transferId, context.owner)
         if (checkpointOwners[context.transferId] === context.owner) {
             _progress.value = Progress(
@@ -3835,28 +4432,25 @@ class WebRtcFileTransferController(
         return false
     }
 
-    private fun saveInboundToDownloads(
+    /**
+     * Performs only reversible Downloads work. The MediaStore row remains `IS_PENDING=1`, so it is
+     * not a user-visible durable delivery until [commitInboundDestinationAndWitness] finalizes the
+     * row and records the exact completion witness inside one secure-owner gate.
+     */
+    private fun prepareInboundDownloadsSave(
         context: Context,
         removed: ReceiveContext,
-        decision: InboundFileTransferDecision.Accept
-    ): DownloadsSaveResult {
+        decision: InboundFileTransferDecision.Accept,
+    ): PreparedDownloadsSave {
         requireCurrentOwner(removed.transferId, removed.owner)
         val resolver = context.contentResolver
         val desired = sanitizeDownloadsDisplayName(
             decision.downloadsDisplayName.ifBlank { removed.fileName ?: "skybridge-received" }
         )
-
-        val targetName = if (!decision.overwriteExisting) {
-            uniqueDownloadsDisplayName(context, desired)
-        } else {
-            // Explicit overwrite means deletion failures are terminal, not permission fallbacks.
-            resolver.delete(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                "${MediaStore.MediaColumns.DISPLAY_NAME}=?",
-                arrayOf(desired)
-            )
-            desired
+        require(!decision.overwriteExisting) {
+            "Downloads overwrite cannot be committed atomically"
         }
+        val targetName = uniqueDownloadsDisplayName(context, desired)
 
         requireCurrentOwner(removed.transferId, removed.owner)
 
@@ -3882,24 +4476,119 @@ class WebRtcFileTransferController(
                 os.flush()
             } ?: error("openOutputStream failed")
             requireCurrentOwner(removed.transferId, removed.owner)
-            val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-            check(resolver.update(uri, done, null, null) == 1) {
-                "MediaStore finalize failed"
-            }
-            requireCurrentOwner(removed.transferId, removed.owner)
         } catch (error: Exception) {
-            // The item is not a committed receive until the exact owner survives the full write.
-            try {
-                resolver.delete(uri, null, null)
-            } catch (cleanupError: Exception) {
-                error.addSuppressed(
-                    IllegalStateException("failed to remove uncommitted Downloads item", cleanupError),
-                )
-            }
+            cleanupPreparedDownloadsSave(
+                PreparedDownloadsSave(
+                    uri = uri,
+                    displayName = targetName,
+                    resolver = resolver,
+                ),
+            )?.let(error::addSuppressed)
             throw error
         }
 
-        return DownloadsSaveResult(uri = uri, displayName = targetName)
+        return PreparedDownloadsSave(
+            uri = uri,
+            displayName = targetName,
+            resolver = resolver,
+        )
+    }
+
+    /**
+     * The only inbound success linearization point. No send, suspension, or owner query is allowed
+     * inside the transport gate: destination commit runs first, then the already-prepared pure
+     * in-memory witness transition. If destination commit throws, the witness is never recorded.
+     */
+    private fun commitInboundDestinationAndWitness(
+        removed: ReceiveContext,
+        decision: InboundFileTransferDecision.Accept,
+        preparedCompletion: InboundCompletionReplayLedger.PreparedCompletion,
+        preparedDownloads: PreparedDownloadsSave?,
+        appPrivateTemporaryFile: AppPrivateInboundFileCommitter.OwnedTemporaryFile?,
+    ): InboundDestinationCommit {
+        var result: InboundDestinationCommit? = null
+        val committedForOwner = webrtc.runIfCurrentSecureOperationOwner(removed.owner) {
+            result = when (inboundFileDestinationPolicy) {
+                InboundFileDestinationPolicy.IN_MEMORY -> InboundDestinationCommit()
+                InboundFileDestinationPolicy.APP_PRIVATE_DURABLE -> {
+                    val committed = requireNotNull(appPrivateInboundFileCommitter).commitValidated(
+                        temporaryFile = requireNotNull(appPrivateTemporaryFile) {
+                            "app-private receive completed without an owned staging file"
+                        },
+                        preferredFileName = decision.downloadsDisplayName.ifBlank {
+                            removed.fileName ?: "skybridge-received"
+                        },
+                    )
+                    InboundDestinationCommit(localPath = committed.absolutePath)
+                }
+                InboundFileDestinationPolicy.DOWNLOADS -> {
+                    val save = requireNotNull(preparedDownloads) {
+                        "downloads receive completed without a pending destination"
+                    }
+                    val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                    check(save.resolver.update(save.uri, done, null, null) == 1) {
+                        "MediaStore finalize failed"
+                    }
+                    InboundDestinationCommit(
+                        downloadsUri = save.uri.toString(),
+                        downloadsDisplayName = save.displayName,
+                    )
+                }
+            }
+            check(inboundCompletionReplayLedger.commitPrepared(preparedCompletion)) {
+                "completion witness changed during destination commit"
+            }
+        }
+        if (!committedForOwner) {
+            throw StaleWebRtcFileTransferOwnerException(removed.transferId)
+        }
+        return requireNotNull(result) { "destination commit returned no result" }
+    }
+
+    private fun cleanupPreparedDownloadsSave(prepared: PreparedDownloadsSave): Exception? =
+        try {
+            val deleted = prepared.resolver.delete(prepared.uri, null, null)
+            if (deleted == 1) {
+                null
+            } else {
+                IOException("uncommitted Downloads item delete returned $deleted")
+            }
+        } catch (cleanupError: Exception) {
+            IOException(
+                "failed to remove uncommitted Downloads item",
+                cleanupError,
+            )
+        }
+
+    private fun abortPreparedCompletion(
+        prepared: InboundCompletionReplayLedger.PreparedCompletion,
+    ) {
+        var result: InboundCompletionReplayLedger.PreparedAbortResult? = null
+        val currentOwnerCommitted = webrtc.runIfCurrentSecureOperationOwner(prepared.owner) {
+            inboundCompletionReplayLedger.rotateTo(prepared.owner)
+            result = inboundCompletionReplayLedger.abortPrepared(prepared)
+        }
+        if (!currentOwnerCommitted) return
+        check(result != InboundCompletionReplayLedger.PreparedAbortResult.INVALID_TOKEN) {
+            "failed destination transaction lost its prepared completion token"
+        }
+    }
+
+    private fun cleanupFailureReport(
+        removed: ReceiveContext,
+        failure: Exception?,
+    ): ReceiveResourceCleanupReport? {
+        if (failure == null) return null
+        val receiveCleanup = cleanupReceiveContext(removed, deletePartialFile = true)
+        return ReceiveResourceCleanupReport(
+            transferId = removed.transferId,
+            failures = listOf(
+                ReceiveResourceCleanupFailure(
+                    stage = ReceiveResourceCleanupStage.DELETE_PARTIAL_FILE,
+                    cause = failure,
+                ),
+            ) + receiveCleanup.failures,
+        )
     }
 
     private fun sanitizeDownloadsDisplayName(raw: String): String {
@@ -3990,16 +4679,37 @@ class WebRtcFileTransferController(
             }
         )
 
-    private fun tryResendComplete(ctx: SendContext): Boolean =
-        runCatching {
-            sendCompleteFromContext(ctx)
+    private fun tryResendComplete(ctx: SendContext): Boolean {
+        val attempt = currentOutboundAttempt(ctx.transferId, ctx.owner)
+            ?.takeIf { it.generation == ctx.attemptGeneration }
+            ?: return false
+        beforeCompletionRetryReservation()
+        if (!reserveCompletionSendAttempt(attempt)) return true
+        return runCatching {
+            val accepted = sendReservedOutboundCompletionAttempt(
+                attempt,
+                requireNotNull(attempt.completionPayload.get()).copyOf(),
+            )
+            if (!accepted && attempt.state.get() == OutboundAttemptState.COMPLETION_ARMED) {
+                failOutboundTransfer(
+                    attempt,
+                    "completion acknowledgement outcome unknown",
+                    deleteCheckpoint = false,
+                )
+            }
+            accepted
         }.fold(
-            onSuccess = { true },
+            onSuccess = { it },
             onFailure = { error ->
-                failOutboundTransfer(ctx, "complete resend failed: ${error.javaClass.simpleName}")
+                failOutboundTransfer(
+                    attempt,
+                    "complete resend failed: ${error.javaClass.simpleName}",
+                    deleteCheckpoint = false,
+                )
                 false
             }
         )
+    }
 
     private fun failOutboundTransfer(ctx: SendContext, reason: String) {
         val attempt = currentOutboundAttempt(ctx.transferId, ctx.owner)
@@ -4117,6 +4827,9 @@ class WebRtcFileTransferController(
         resendJobs[attempt.transferId]?.takeIf { it.owner === attempt.owner }?.let { ownedJob ->
             if (resendJobs.remove(attempt.transferId, ownedJob)) ownedJob.job.cancel()
         }
+        completionRetryJobs[attempt.transferId]?.takeIf { it.owner === attempt.owner }?.let { ownedJob ->
+            if (completionRetryJobs.remove(attempt.transferId, ownedJob)) ownedJob.job.cancel()
+        }
         sendContexts[attempt.transferId]
             ?.takeIf {
                 it.owner === attempt.owner &&
@@ -4169,41 +4882,6 @@ class WebRtcFileTransferController(
         return sendContexts[transferId]?.takeIf {
             it.owner === owner && it.attemptGeneration == attempt.generation
         }
-    }
-
-    private fun sendCompleteFromContext(ctx: SendContext) {
-        val attempt = currentOutboundAttempt(ctx.transferId, ctx.owner)
-            ?.takeIf { it.generation == ctx.attemptGeneration }
-            ?: throw StaleWebRtcFileTransferOwnerException(ctx.transferId)
-        check(attempt.state.get() == OutboundAttemptState.COMPLETION_ARMED) {
-            "complete resend requires an armed outbound attempt"
-        }
-        val leaves = ctx.chunks.map { sha256(it) }
-        val merkleRoot = MerkleSha256.root(leaves)
-        val merkleSig = computeOutboundHmac(
-            attempt = attempt,
-            preimage = MerkleRootAuthV1.preimage(
-                transferId = ctx.transferId,
-                merkleRoot = merkleRoot,
-                fileSha256 = ctx.fileSha256,
-            ),
-        )
-
-        sendArmedOutbound(
-            attempt,
-            encode(
-                CrossNetworkFileTransferMessage(
-                    version = 1,
-                    op = CrossNetworkFileTransferOp.complete,
-                    transferId = ctx.transferId,
-                    receivedBytes = ctx.totalBytes,
-                    fileSha256 = ctx.fileSha256,
-                    merkleRoot = merkleRoot,
-                    merkleRootSignature = merkleSig,
-                    merkleRootSignatureAlg = "hmac-sha256-session-v1"
-                )
-            )
-        )
     }
 
     private fun sha256(data: ByteArray): ByteArray =
@@ -4289,7 +4967,7 @@ class WebRtcFileTransferController(
         )
     }
 
-    private fun armAndSendOutboundComplete(
+    private suspend fun armAndSendOutboundComplete(
         attempt: OutboundAttempt,
         expectation: OutboundCompletionExpectation,
         bytes: ByteArray,
@@ -4302,13 +4980,116 @@ class WebRtcFileTransferController(
         check(attempt.completionExpectation.compareAndSet(null, expectation)) {
             "outbound completion expectation already registered"
         }
+        val immutablePayload = bytes.copyOf()
+        check(attempt.completionPayload.compareAndSet(null, immutablePayload)) {
+            "outbound completion payload already registered"
+        }
+        try {
+            enqueueCheckpointMutation(
+                    attempt.transferId,
+                    attempt.owner,
+                    CheckpointMutation.UPDATE,
+                ) {
+                    val existing = load(attempt.transferId)
+                        ?: error("send checkpoint missing while completion is armed")
+                    save(existing.copy(completionRequestSent = true))
+                }
+                .awaitCompletion()
+        } catch (error: Exception) {
+            failOutboundTransfer(attempt, "completion checkpoint update failed: ${error.javaClass.simpleName}", deleteCheckpoint = false)
+            throw error
+        }
         check(attempt.state.compareAndSet(
             OutboundAttemptState.ACTIVE,
             OutboundAttemptState.COMPLETION_ARMED,
         )) {
             "outbound attempt terminated before completion could be armed"
         }
-        sendArmedOutbound(attempt, bytes)
+        check(reserveCompletionSendAttempt(attempt)) {
+            "initial completion send slot was unavailable"
+        }
+        sendReservedOutboundCompletionAttempt(attempt, immutablePayload)
+        if (attempt.state.get() == OutboundAttemptState.COMPLETION_ARMED) {
+            startCompletionAcknowledgementRetry(attempt)
+        }
+    }
+
+    /** Reserve a completion send number without performing transport work under the attempt lock. */
+    private fun reserveCompletionSendAttempt(attempt: OutboundAttempt): Boolean =
+        synchronized(attempt.linearizationLock) {
+            if (
+                outboundAttempts[attempt.transferId] !== attempt ||
+                attempt.state.get() != OutboundAttemptState.COMPLETION_ARMED ||
+                attempt.completionSendAttempts.get() >= COMPLETION_MAX_SEND_ATTEMPTS
+            ) {
+                false
+            } else {
+                attempt.completionSendAttempts.incrementAndGet()
+                true
+            }
+        }
+
+    private fun sendReservedOutboundCompletionAttempt(
+        attempt: OutboundAttempt,
+        bytes: ByteArray,
+    ): Boolean {
+        val accepted = try {
+            sendArmedOutbound(attempt, bytes)
+            true
+        } catch (error: WebRtcFileTransferSendException) {
+            if (attempt.state.get() == OutboundAttemptState.COMPLETION_ARMED) {
+                false
+            } else {
+                throw error
+            }
+        }
+        if (accepted) attempt.completionSendAccepted.set(true)
+        markTransferActivity(attempt.transferId, attempt.owner)
+        return accepted
+    }
+
+    private fun startCompletionAcknowledgementRetry(attempt: OutboundAttempt) {
+        if (!attempt.completionRetryStarted.compareAndSet(false, true)) return
+        val payload = requireNotNull(attempt.completionPayload.get()).copyOf()
+        val job = scope.launch {
+            waitBeforeCompletionRetry(completionAcknowledgementRetryDelayMs)
+            if (!webrtc.isCurrentSecureOperationOwner(attempt.owner)) {
+                markOutboundStale(attempt)
+                return@launch
+            }
+            beforeCompletionRetryReservation()
+            if (!reserveCompletionSendAttempt(attempt)) return@launch
+            val accepted = runCatching {
+                sendReservedOutboundCompletionAttempt(attempt, payload)
+            }.getOrElse { error ->
+                failOutboundTransfer(
+                    attempt,
+                    "complete retry failed: ${error.javaClass.simpleName}",
+                    deleteCheckpoint = false,
+                )
+                return@launch
+            }
+            if (!accepted && attempt.state.get() == OutboundAttemptState.COMPLETION_ARMED) {
+                failOutboundTransfer(
+                    attempt,
+                    "completion acknowledgement outcome unknown",
+                    deleteCheckpoint = false,
+                )
+            } else if (accepted && attempt.state.get() == OutboundAttemptState.COMPLETION_ARMED) {
+                publishSentCompleteIfUnacknowledged(
+                    transferId = attempt.transferId,
+                    owner = attempt.owner,
+                    sentBytes = requireNotNull(attempt.completionExpectation.get()).totalBytes,
+                    totalBytes = requireNotNull(attempt.completionExpectation.get()).totalBytes,
+                    status = "resent complete; awaiting acknowledgement",
+                )
+            }
+        }
+        val ownedJob = OwnedTransferJob(attempt.owner, job)
+        completionRetryJobs.put(attempt.transferId, ownedJob)?.let { previous ->
+            if (previous.owner !== attempt.owner) previous.job.cancel()
+        }
+        job.invokeOnCompletion { completionRetryJobs.remove(attempt.transferId, ownedJob) }
     }
 
     private fun sendOutboundChunk(
@@ -4362,8 +5143,11 @@ class WebRtcFileTransferController(
             if (afterRejectedSend !in allowedStates) {
                 throw OutboundAttemptTerminatedException(attempt.transferId, afterRejectedSend)
             }
+            if (allowSynchronousAck) {
+                throw WebRtcFileTransferSendException(attempt.transferId, bytes.size)
+            }
             if (failOutboundTransfer(attempt, "transport rejected send")) {
-                error("file transfer send failed: payloadBytes=${bytes.size}")
+                throw WebRtcFileTransferSendException(attempt.transferId, bytes.size)
             }
 
             // A synchronous callback may win the terminal CAS between the state read above and
@@ -4408,7 +5192,7 @@ class WebRtcFileTransferController(
         requireCurrentOwner(transferId, owner)
         if (!webrtc.send(owner, bytes, WebRtcAppSecureEnvelope.PacketType.FILE_TRANSFER)) {
             requireCurrentOwner(transferId, owner)
-            error("file transfer send failed: payloadBytes=${bytes.size}")
+            throw WebRtcFileTransferSendException(transferId, bytes.size)
         }
         requireCurrentOwner(transferId, owner)
     }
@@ -4421,6 +5205,8 @@ class WebRtcFileTransferController(
         const val MAX_AGGREGATE_INBOUND_BYTES = 16L * 1024 * 1024 * 1024
         const val SHA256_BYTES = 32
         const val DEFAULT_MISSING_CHUNK_RECEIVE_TIMEOUT_MS = 10_000L
+        const val DEFAULT_COMPLETION_ACK_RETRY_DELAY_MS = 10_000L
+        const val COMPLETION_MAX_SEND_ATTEMPTS = 2
 
         /**
          * Idle / interrupt timeout for an active transfer (Requirement 5.12): 30s with no chunk/ack

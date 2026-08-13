@@ -249,6 +249,41 @@ class CrossNetworkFileTransferValidatorTest {
         }
     }
 
+    @Test
+    fun rejectsCompleteWithoutExactVersionAndReceivedBytes() {
+        val transferId = UUID.randomUUID().toString()
+        val metadata = CrossNetworkFileTransferValidator.validateMetadata(
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.metadata,
+                transferId = transferId,
+                fileName = "data.bin",
+                fileSize = 4,
+                chunkSize = 4,
+                totalChunks = 1,
+            ),
+        )
+        val digest = sha256(byteArrayOf(1, 2, 3, 4))
+
+        listOf(
+            CrossNetworkFileTransferMessage(
+                version = 2,
+                op = CrossNetworkFileTransferOp.complete,
+                transferId = transferId,
+                receivedBytes = 4,
+                fileSha256 = digest,
+            ),
+            CrossNetworkFileTransferMessage(
+                op = CrossNetworkFileTransferOp.complete,
+                transferId = transferId,
+                fileSha256 = digest,
+            ),
+        ).forEach { complete ->
+            assertThrows(IllegalArgumentException::class.java) {
+                CrossNetworkFileTransferValidator.validateComplete(complete, metadata)
+            }
+        }
+    }
+
     private fun sha256(bytes: ByteArray): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(bytes)
 }

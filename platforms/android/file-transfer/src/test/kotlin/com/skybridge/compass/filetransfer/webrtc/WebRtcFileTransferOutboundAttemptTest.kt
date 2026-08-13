@@ -4,22 +4,30 @@ import com.skybridge.compass.core.p2p.P2PHandshakePolicyOverride
 import com.skybridge.compass.core.webrtc.AuthenticatedPeerMetadata
 import com.skybridge.compass.core.webrtc.SkyBridgeWebRtcConnectionManager
 import com.skybridge.compass.core.webrtc.WebRtcSession
+import com.skybridge.compass.filetransfer.webrtc.resume.InMemoryTransferCheckpointStore
 import com.skybridge.compass.filetransfer.webrtc.resume.TransferCheckpoint
 import com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferMessage
 import com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferOp
 import com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferWireCodec
 import com.skybridge.compass.shared.webrtc.WebRtcAppSecureEnvelope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Test
 import java.io.ByteArrayInputStream
 import java.io.IOException
@@ -27,10 +35,14 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class WebRtcFileTransferOutboundAttemptTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -212,6 +224,271 @@ class WebRtcFileTransferOutboundAttemptTest {
             "send failed: invalid complete acknowledgement evidence",
             controller.progress.value.lastStatus,
         )
+    }
+
+    @Test
+    fun lostCompletionAcknowledgementRetriesExactPayloadOnceAndCanStillAcknowledge() = runTest {
+        val transferId = UUID.randomUUID().toString()
+        val payload = "completion retry payload".encodeToByteArray()
+        val transport = RecordingTransport()
+        val retryGate = CompletableDeferred<Unit>()
+        lateinit var controller: WebRtcFileTransferController
+        var completeCount = 0
+        transport.onMessage = { message ->
+            if (message.op == CrossNetworkFileTransferOp.complete) {
+                completeCount += 1
+                if (completeCount == 2) {
+                    controller.handleIncoming(
+                        encode(
+                            CrossNetworkFileTransferMessage(
+                                op = CrossNetworkFileTransferOp.completeAck,
+                                transferId = transferId,
+                                receivedBytes = payload.size.toLong(),
+                                fileSha256 = sha256(payload),
+                            ),
+                        ),
+                    )
+                }
+            }
+        }
+        controller = WebRtcFileTransferController(
+            transport,
+            json = json,
+            backgroundDispatcher = StandardTestDispatcher(testScheduler),
+            waitBeforeCompletionRetry = { retryGate.await() },
+        )
+
+        controller.sendBytesAsFile(transferId, "retry.bin", bytes = payload, chunkSize = 4)
+        runCurrent()
+        val beforeRetry = transport.rawMessages
+            .filter { it.first.op == CrossNetworkFileTransferOp.complete }
+        assertEquals(1, beforeRetry.size, "first completion attempt must precede its retry timer")
+        val firstComplete = beforeRetry.first().second
+        retryGate.complete(Unit)
+        runCurrent()
+
+        val completePayloads = transport.rawMessages
+            .filter { it.first.op == CrossNetworkFileTransferOp.complete }
+            .map { it.second }
+        assertEquals(2, completePayloads.size)
+        assertArrayEquals(firstComplete, completePayloads[1])
+        assertTrue(controller.isOperationAcknowledged(transferId))
+        assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
+
+        runCurrent()
+        assertEquals(
+            2,
+            transport.messages.count { it.op == CrossNetworkFileTransferOp.complete },
+            "terminal acknowledgement must cancel the retry job",
+        )
+    }
+
+    @Test
+    fun nackConsumesSecondCompleteAttemptAndTimerCannotCreateThirdAttemptOrFailure() = runTest {
+        val transferId = UUID.randomUUID().toString()
+        val payload = "nack consumes bounded completion retry".encodeToByteArray()
+        val transport = RecordingTransport()
+        val retryGate = CompletableDeferred<Unit>()
+        val controller = WebRtcFileTransferController(
+            transport,
+            json = json,
+            backgroundDispatcher = StandardTestDispatcher(testScheduler),
+            waitBeforeCompletionRetry = { retryGate.await() },
+        )
+
+        controller.sendBytesAsFile(transferId, "nack.bin", bytes = payload, chunkSize = 8)
+        runCurrent()
+        val firstComplete = transport.rawMessages.single {
+            it.first.op == CrossNetworkFileTransferOp.complete
+        }.second
+
+        controller.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.chunkAck,
+                    transferId = transferId,
+                    missingChunks = intArrayOf(0),
+                ),
+            ),
+        )
+        runCurrent()
+        val afterNack = transport.rawMessages.filter {
+            it.first.op == CrossNetworkFileTransferOp.complete
+        }
+        assertEquals(2, afterNack.size)
+        assertArrayEquals(firstComplete, afterNack[1].second)
+        assertTrue(controller.isCurrentOperation(transferId))
+        assertFalse(controller.isOperationAcknowledged(transferId))
+
+        retryGate.complete(Unit)
+        runCurrent()
+        assertEquals(
+            2,
+            transport.messages.count { it.op == CrossNetworkFileTransferOp.complete },
+            "the timer must exit when a peer NACK already consumed attempt two",
+        )
+        assertTrue(controller.isCurrentOperation(transferId))
+        assertFalse(controller.progress.value.lastStatus?.startsWith("send failed") == true)
+
+        controller.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.completeAck,
+                    transferId = transferId,
+                    receivedBytes = payload.size.toLong(),
+                    fileSha256 = sha256(payload),
+                ),
+            ),
+        )
+        assertTrue(controller.isOperationAcknowledged(transferId))
+        assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
+    }
+
+    @Test
+    fun concurrentNackAndTimerReserveExactlyOneSecondCompletionAttempt() = runTest {
+        val transferId = UUID.randomUUID().toString()
+        val payload = "concurrent retry contenders".encodeToByteArray()
+        val transport = RecordingTransport()
+        val checkpointStore = InMemoryTransferCheckpointStore()
+        val retryGate = CompletableDeferred<Unit>()
+        val reservationBarrier = CyclicBarrier(2)
+        val completeCount = AtomicInteger()
+        val secondComplete = CountDownLatch(1)
+        transport.onMessage = { message ->
+            if (
+                message.op == CrossNetworkFileTransferOp.complete &&
+                completeCount.incrementAndGet() == 2
+            ) {
+                secondComplete.countDown()
+            }
+        }
+        val controller = WebRtcFileTransferController(
+            transport,
+            json = json,
+            checkpointStore = checkpointStore,
+            backgroundDispatcher = Dispatchers.IO,
+            waitBeforeCompletionRetry = { retryGate.await() },
+            beforeCompletionRetryReservation = {
+                reservationBarrier.await(2, TimeUnit.SECONDS)
+            },
+        )
+
+        controller.sendBytesAsFile(transferId, "concurrent.bin", bytes = payload, chunkSize = 4)
+        assertEquals(1, completeCount.get())
+        val firstComplete = transport.rawMessages.single {
+            it.first.op == CrossNetworkFileTransferOp.complete
+        }.second
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val nack = executor.submit {
+                controller.handleIncoming(
+                    encode(
+                        CrossNetworkFileTransferMessage(
+                            op = CrossNetworkFileTransferOp.chunkAck,
+                            transferId = transferId,
+                            missingChunks = intArrayOf(0),
+                        ),
+                    ),
+                )
+            }
+            retryGate.complete(Unit)
+            assertTrue(secondComplete.await(2, TimeUnit.SECONDS))
+            nack.get(2, TimeUnit.SECONDS)
+
+            assertEquals(2, completeCount.get(), "only one contender may reserve attempt two")
+            val completePayloads = transport.rawMessages
+                .filter { it.first.op == CrossNetworkFileTransferOp.complete }
+                .map { it.second }
+            assertEquals(2, completePayloads.size)
+            assertArrayEquals(firstComplete, completePayloads[1])
+            val retained = checkpointStore.load(transferId)
+            assertTrue(retained?.completionRequestSent == true)
+            assertTrue(controller.isCurrentOperation(transferId))
+            assertFalse(controller.progress.value.lastStatus?.startsWith("send failed") == true)
+
+            controller.handleIncoming(
+                encode(
+                    CrossNetworkFileTransferMessage(
+                        op = CrossNetworkFileTransferOp.completeAck,
+                        transferId = transferId,
+                        receivedBytes = payload.size.toLong(),
+                        fileSha256 = sha256(payload),
+                    ),
+                ),
+            )
+            assertTrue(controller.isOperationAcknowledged(transferId))
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun terminalPeerErrorOrStaleOwnerPreventsCompletionRetry() = runTest {
+        suspend fun assertNoRetry(staleOwner: Boolean) {
+            val transferId = UUID.randomUUID().toString()
+            val transport = RecordingTransport()
+            val retryGate = CompletableDeferred<Unit>()
+            val controller = WebRtcFileTransferController(
+                transport,
+                json = json,
+                backgroundDispatcher = StandardTestDispatcher(testScheduler),
+                waitBeforeCompletionRetry = { retryGate.await() },
+            )
+            controller.sendBytesAsFile(
+                transferId,
+                "terminal.bin",
+                bytes = "terminal".encodeToByteArray(),
+                chunkSize = 4,
+            )
+            if (staleOwner) {
+                transport.replaceTestSecureOwner()
+            } else {
+                controller.handleIncoming(
+                    encode(
+                        CrossNetworkFileTransferMessage(
+                            op = CrossNetworkFileTransferOp.error,
+                            transferId = transferId,
+                            message = "terminal rejection",
+                        ),
+                    ),
+                )
+            }
+            runCurrent()
+            assertFalse(controller.isCurrentOperation(transferId))
+            retryGate.complete(Unit)
+            runCurrent()
+            assertEquals(
+                1,
+                transport.messages.count { it.op == CrossNetworkFileTransferOp.complete },
+                "terminal winner must cancel retry (staleOwner=$staleOwner)",
+            )
+        }
+
+        assertNoRetry(staleOwner = false)
+        assertNoRetry(staleOwner = true)
+    }
+
+    @Test
+    fun ambiguousCompletionCheckpointCannotResumeUnderFreshIdentifier() {
+        val checkpoint = sendCheckpoint(
+            transferId = UUID.randomUUID().toString(),
+            fileSize = 8,
+            chunkSize = 4,
+            totalChunks = 2,
+        ).copy(completionRequestSent = true)
+        val controller = WebRtcFileTransferController(RecordingTransport(), json = json)
+
+        assertThrows(CompletionOutcomeUnknownException::class.java) {
+            runBlocking {
+                controller.resumeSendFromCheckpoint(
+                    checkpoint = checkpoint,
+                    owner = TestWebRtcSecureOperationOwner,
+                    mimeType = "application/octet-stream",
+                    openStream = { ByteArrayInputStream(ByteArray(8)) },
+                )
+            }
+        }
     }
 
     @Test
@@ -420,6 +697,7 @@ class WebRtcFileTransferOutboundAttemptTest {
         override var onData: ((ByteArray) -> Unit)? = null
         override var onPacketData: ((ByteArray, WebRtcAppSecureEnvelope.PacketType) -> Unit)? = null
         val messages = mutableListOf<CrossNetworkFileTransferMessage>()
+        val rawMessages = mutableListOf<Pair<CrossNetworkFileTransferMessage, ByteArray>>()
         var onMessage: ((CrossNetworkFileTransferMessage) -> Unit)? = null
         var acceptMessage: (CrossNetworkFileTransferMessage) -> Boolean = { true }
 
@@ -443,6 +721,7 @@ class WebRtcFileTransferOutboundAttemptTest {
             if (packetType == WebRtcAppSecureEnvelope.PacketType.FILE_TRANSFER) {
                 val message = CrossNetworkFileTransferWireCodec.decode(bytes)
                 messages += message
+                rawMessages += message to bytes.copyOf()
                 onMessage?.invoke(message)
                 return acceptMessage(message)
             }

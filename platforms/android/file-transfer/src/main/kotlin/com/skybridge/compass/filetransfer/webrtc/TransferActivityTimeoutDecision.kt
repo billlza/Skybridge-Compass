@@ -14,10 +14,11 @@ package com.skybridge.compass.filetransfer.webrtc
  * (which also stops all inbound activity), the elapsed idle time crosses the threshold and this
  * decision reports a timeout.
  *
- * Crucially, this is a *decision*, not an action: acting on the decision (terminating THIS transfer
- * while RETAINING its verified-bytes checkpoint so it can be resumed) is the caller's job. This
- * separation keeps the "idle 30s => timed out, reason attributable" rule exhaustively unit-testable
- * with an injected clock and no live transport.
+ * Crucially, this is a *decision*, not an action: acting on the decision is the caller's job. A
+ * pre-completion checkpoint remains resumable, while a checkpoint that records a sent completion
+ * request is retained only as evidence of an unknown delivery outcome. This separation keeps the
+ * "idle 30s => timed out, reason attributable" rule exhaustively unit-testable with an injected
+ * clock and no live transport.
  *
  * This does NOT change the wire protocol.
  */
@@ -66,5 +67,19 @@ internal object TransferActivityTimeoutDecision {
             Reason.SESSION_INTERRUPTED ->
                 "transfer interrupted: session dropped >${seconds}s (checkpoint retained, resumable)"
         }
+    }
+
+    /**
+     * A completion request may already have been durably committed by the peer. Its checkpoint is
+     * evidence of an ambiguous outcome, not a resumable payload; retrying under a fresh identifier
+     * could deliver the same file twice.
+     */
+    fun completionOutcomeUnknownStatusMessage(reason: Reason, idleThresholdMs: Long): String {
+        val seconds = idleThresholdMs / 1000L
+        val prefix = when (reason) {
+            Reason.IDLE_NO_ACTIVITY -> "transfer interrupted: no completion acknowledgement for ${seconds}s"
+            Reason.SESSION_INTERRUPTED -> "transfer interrupted: session dropped >${seconds}s"
+        }
+        return "$prefix (delivery outcome unknown; checkpoint retained for evidence; do not resend)"
     }
 }

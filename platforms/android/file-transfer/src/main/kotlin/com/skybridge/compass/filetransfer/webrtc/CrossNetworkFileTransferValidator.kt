@@ -110,12 +110,24 @@ internal object CrossNetworkFileTransferValidator {
     fun validateComplete(
         message: CrossNetworkFileTransferMessage,
         metadata: Metadata
-    ) {
-        require(canonicalTransferId(message.transferId) == metadata.transferId) { "file transfer complete transferId mismatch" }
-        message.receivedBytes?.let {
-            require(it == metadata.fileSize) { "file transfer complete receivedBytes mismatch" }
+    ): InboundCompletionFingerprint {
+        val fingerprint = completionFingerprint(message)
+        require(fingerprint.transferId == metadata.transferId) { "file transfer complete transferId mismatch" }
+        require(fingerprint.receivedBytes == metadata.fileSize) { "file transfer complete receivedBytes mismatch" }
+        return fingerprint
+    }
+
+    fun completionFingerprint(message: CrossNetworkFileTransferMessage): InboundCompletionFingerprint {
+        require(message.version == 1) { "file transfer complete version unsupported" }
+        require(message.op == com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferOp.complete) {
+            "file transfer completion fingerprint requires complete operation"
         }
-        requireSha256(message.fileSha256, "fileSha256")
+        val transferId = canonicalTransferId(message.transferId)
+        val receivedBytes = requireNotNull(message.receivedBytes) {
+            "file transfer complete missing receivedBytes"
+        }
+        require(receivedBytes >= 0L) { "file transfer complete receivedBytes must be non-negative" }
+        val fileSha256 = requireSha256(message.fileSha256, "fileSha256")
         message.merkleRoot?.let { root ->
             require(root.size == SHA256_BYTES) { "file transfer merkleRoot must be 32 bytes" }
         }
@@ -129,6 +141,15 @@ internal object CrossNetworkFileTransferValidator {
         require(message.merkleRootSignatureAlg == null || message.merkleRootSignature != null) {
             "file transfer complete merkleRootSignatureAlg requires merkleRootSignature"
         }
+        return InboundCompletionFingerprint(
+            version = message.version,
+            transferId = transferId,
+            receivedBytes = receivedBytes,
+            fileSha256 = fileSha256,
+            merkleRoot = message.merkleRoot,
+            merkleRootSignature = message.merkleRootSignature,
+            merkleRootSignatureAlgorithm = message.merkleRootSignatureAlg,
+        )
     }
 
     fun canonicalTransferId(raw: String): String {

@@ -36,6 +36,12 @@ data class TransferCheckpoint(
     val receivedChunkSha256HexByIndex: Map<Int, String> = emptyMap(),
 
     val completeReceived: Boolean = false,
+    /**
+     * True once an outbound `complete` request has been durably armed. A missing acknowledgement
+     * after this point has an ambiguous remote outcome, so recovery must never create a fresh wire
+     * identifier and risk delivering the same file twice.
+     */
+    val completionRequestSent: Boolean = false,
     val lastStatus: String? = null,
 
     val createdAtMs: Long = System.currentTimeMillis(),
@@ -81,4 +87,3 @@ data class TransferCheckpoint(
         )
     }
 }
-

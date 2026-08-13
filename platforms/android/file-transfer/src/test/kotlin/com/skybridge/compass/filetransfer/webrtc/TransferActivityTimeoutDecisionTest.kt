@@ -83,4 +83,18 @@ class TransferActivityTimeoutDecisionTest {
         assertTrue(dropped.contains("session"), "interrupt reason must explain the cause: $dropped")
         assertTrue(dropped.contains("resumable"), "reason must indicate the transfer is resumable: $dropped")
     }
+
+    @Test
+    fun completionOutcomeUnknownStatus_retainsEvidenceButNeverClaimsResumeIsSafe() {
+        val status = TransferActivityTimeoutDecision.completionOutcomeUnknownStatusMessage(
+            TransferActivityTimeoutDecision.Reason.IDLE_NO_ACTIVITY,
+            threshold,
+        )
+
+        assertTrue(status.contains("30s"))
+        assertTrue(status.contains("delivery outcome unknown"))
+        assertTrue(status.contains("checkpoint retained for evidence"))
+        assertTrue(status.contains("do not resend"))
+        assertFalse(status.contains("resumable"))
+    }
 }

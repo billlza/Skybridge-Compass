@@ -453,6 +453,13 @@ class CheckpointMutationQueueTest {
         override suspend fun load(transferId: String): TransferCheckpoint? = checkpoints[transferId]
 
         override suspend fun save(checkpoint: TransferCheckpoint) {
+            // Completion admission now persists a marker before the first complete packet. It is a
+            // distinct durability boundary, not the chunk-progress mutation whose old-owner race
+            // this fixture controls, so preserve it without consuming the fixture's sequence slot.
+            if (checkpoint.completionRequestSent && checkpoint.ackedChunks.isEmpty()) {
+                checkpoints[checkpoint.transferId] = checkpoint
+                return
+            }
             val invocation = saveInvocations.incrementAndGet()
             if (invocation == 2) {
                 secondSaveStarted.complete(Unit)

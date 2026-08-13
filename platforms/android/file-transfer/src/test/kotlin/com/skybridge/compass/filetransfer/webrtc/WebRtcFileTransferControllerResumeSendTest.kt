@@ -15,6 +15,9 @@ import com.skybridge.compass.shared.webrtc.WebRtcAppSecureEnvelope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
@@ -35,6 +38,7 @@ import java.io.IOException
  * The wire protocol carries no attempt generation. Recovery therefore migrates to a fresh transfer
  * id and retransmits from chunk zero; delayed packets for the timed-out id cannot affect it.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class WebRtcFileTransferControllerResumeSendTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
@@ -198,6 +202,49 @@ class WebRtcFileTransferControllerResumeSendTest {
         assertEquals("send complete acknowledged", controller.progress.value.lastStatus)
         assertEquals(null, checkpointStore.load(transferId))
         assertEquals(null, checkpointStore.load(recoveryId))
+    }
+
+    @Test
+    fun resumeSend_withoutResendCacheStillRetriesExactCompletionPayload() = runTest {
+        val transport = RecordingTransport()
+        val originalId = UUID.randomUUID().toString()
+        val payload = "0123456789abcdef".encodeToByteArray()
+        val checkpoint = TransferCheckpoint.newSend(
+            transferId = originalId,
+            sourceUri = null,
+            fileName = "large-retry.bin",
+            mimeType = "application/octet-stream",
+            fileSize = payload.size.toLong(),
+            chunkSize = 4,
+            totalChunks = 4,
+        )
+        val controller = WebRtcFileTransferController(
+            transport,
+            json = json,
+            checkpointStore = TrackingCheckpointStore(checkpoint),
+            maxResendCacheBytes = 8,
+            backgroundDispatcher = StandardTestDispatcher(testScheduler),
+            completionAcknowledgementRetryDelayMs = 50L,
+        )
+
+        val recoveryId = controller.resumeSendFromCheckpoint(
+            checkpoint = checkpoint,
+            owner = TestWebRtcSecureOperationOwner,
+            mimeType = "application/octet-stream",
+            openStream = { ByteArrayInputStream(payload) },
+        )
+        val firstComplete = transport.rawMessages.single {
+            it.first.op == CrossNetworkFileTransferOp.complete && it.first.transferId == recoveryId
+        }.second
+
+        advanceTimeBy(50L)
+        runCurrent()
+
+        val completions = transport.rawMessages.filter {
+            it.first.op == CrossNetworkFileTransferOp.complete && it.first.transferId == recoveryId
+        }
+        assertEquals(2, completions.size)
+        org.junit.jupiter.api.Assertions.assertArrayEquals(firstComplete, completions[1].second)
     }
 
     @Test
@@ -421,6 +468,7 @@ class WebRtcFileTransferControllerResumeSendTest {
         override var onData: ((ByteArray) -> Unit)? = null
         override var onPacketData: ((ByteArray, WebRtcAppSecureEnvelope.PacketType) -> Unit)? = null
         val messages = mutableListOf<CrossNetworkFileTransferMessage>()
+        val rawMessages = mutableListOf<Pair<CrossNetworkFileTransferMessage, ByteArray>>()
 
         fun clear() = messages.clear()
 
@@ -442,10 +490,12 @@ class WebRtcFileTransferControllerResumeSendTest {
 
         override fun send(bytes: ByteArray, packetType: WebRtcAppSecureEnvelope.PacketType): Boolean {
             if (packetType == WebRtcAppSecureEnvelope.PacketType.FILE_TRANSFER) {
-                messages += json.decodeFromString(
+                val message = json.decodeFromString(
                     CrossNetworkFileTransferMessage.serializer(),
                     bytes.decodeToString()
                 )
+                messages += message
+                rawMessages += message to bytes.copyOf()
             }
             return true
         }

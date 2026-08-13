@@ -12,6 +12,9 @@ import com.skybridge.compass.filetransfer.webrtc.resume.TransferCheckpointStore
 import com.skybridge.compass.filetransfer.webrtc.resume.TransferDirection
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -24,6 +27,9 @@ import org.junit.jupiter.api.Test
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -35,11 +41,12 @@ import java.util.concurrent.atomic.AtomicLong
  * existing resume entry can pick it up. The timeout clock is injected so these tests are fully
  * deterministic — no wall-clock sleeps.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class WebRtcFileTransferControllerIdleTimeoutTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
     @Test
-    fun idle30s_terminatesTransferButRetainsResumableCheckpoint() = runTest {
+    fun idle30s_afterCompleteRetainsEvidenceButForbidsDuplicateResume() = runTest {
         // No peer wired: acks never arrive, so the send stays in-progress and goes idle.
         val clock = AtomicLong(0L)
         val transport = RecordingTransport()
@@ -71,7 +78,8 @@ class WebRtcFileTransferControllerIdleTimeoutTest {
         clock.set(30_000L)
         sender.runIdleInterruptSweep(clock.get())
 
-        // The verified-bytes checkpoint is RETAINED (NOT deleted) so the transfer stays resumable.
+        // Complete was already sent. The retained checkpoint is ambiguity evidence, not permission
+        // to redeliver the same payload under a fresh identifier.
         val retained = checkpointStore.load(transferId)
         assertNotNull(retained, "idle/interrupt timeout MUST retain the checkpoint for resume")
         assertEquals(TransferDirection.SEND, retained!!.direction)
@@ -81,7 +89,9 @@ class WebRtcFileTransferControllerIdleTimeoutTest {
         val status = sender.progress.value.lastStatus
         assertNotNull(status)
         assertTrue(status!!.contains("interrupted"), "must present an interrupt/timeout reason: $status")
-        assertTrue(status.contains("resumable"), "reason must indicate the transfer is resumable: $status")
+        assertTrue(status.contains("delivery outcome unknown"), "status must expose ambiguity: $status")
+        assertTrue(status.contains("do not resend"), "status must prohibit duplicate delivery: $status")
+        assertFalse(status.contains("resumable"), "post-complete checkpoint is not resumable: $status")
 
         // The send is terminated: a subsequent NACK does NOT resume/resend (context released).
         val opsBefore = transport.ops.toList()
@@ -97,6 +107,65 @@ class WebRtcFileTransferControllerIdleTimeoutTest {
         )
         yield()
         assertEquals(opsBefore, transport.ops.toList(), "no resend after idle/interrupt termination")
+    }
+
+    @Test
+    fun idleSweepDuringCompletionMarkerSaveRetainsUnknownOutcomeEvidence() = runTest {
+        val clock = AtomicLong(0L)
+        val markerSaveStarted = CountDownLatch(1)
+        val allowMarkerSave = CountDownLatch(1)
+        val transport = RecordingTransport()
+        val checkpointStore = RecordingCheckpointStore(
+            completionMarkerSaveStarted = markerSaveStarted,
+            allowCompletionMarkerSave = allowMarkerSave,
+        )
+        val sender = WebRtcFileTransferController(
+            webrtc = transport,
+            json = json,
+            checkpointStore = checkpointStore,
+            idleInterruptTimeoutMs = 30_000L,
+            idleWatchdogPollMs = 1_000_000L,
+            clockMs = { clock.get() },
+        )
+        val transferId = UUID.randomUUID().toString()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val sending = executor.submit<Result<Unit>> {
+                runCatching {
+                    runBlocking {
+                        sender.sendBytesAsFile(
+                            transferId = transferId,
+                            fileName = "arming.txt",
+                            mimeType = "text/plain",
+                            bytes = "completion marker barrier".encodeToByteArray(),
+                            chunkSize = 4,
+                        )
+                    }
+                }
+            }
+            assertTrue(markerSaveStarted.await(2, TimeUnit.SECONDS))
+
+            clock.set(30_000L)
+            sender.runIdleInterruptSweep(clock.get())
+            val timeoutStatus = sender.progress.value.lastStatus.orEmpty()
+            assertTrue(timeoutStatus.contains("delivery outcome unknown"), timeoutStatus)
+            assertTrue(timeoutStatus.contains("do not resend"), timeoutStatus)
+            assertFalse(timeoutStatus.contains("resumable"), timeoutStatus)
+
+            allowMarkerSave.countDown()
+            assertTrue(sending.get(2, TimeUnit.SECONDS).isFailure)
+            val retained = checkpointStore.load(transferId)
+            assertTrue(retained?.completionRequestSent == true)
+            assertEquals(
+                0,
+                transport.messages.count { it.op == CrossNetworkFileTransferOp.complete },
+                "a watchdog winner must prevent the suspended completion transition from sending",
+            )
+            assertEquals(timeoutStatus, sender.progress.value.lastStatus)
+        } finally {
+            allowMarkerSave.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -165,6 +234,91 @@ class WebRtcFileTransferControllerIdleTimeoutTest {
         assertNotNull(checkpointStore.load(transferId), "receive checkpoint retained on idle timeout")
         assertEquals(0, checkpointStore.deleteCount.get(), "idle timeout must not delete the checkpoint")
         assertTrue(receiver.progress.value.lastStatus?.contains("interrupted") == true)
+    }
+
+    @Test
+    fun idleSweepLosesAfterFinalizationClaimAndCannotOverwriteReceiveSuccess() = runTest {
+        val clock = AtomicLong(0L)
+        val finalizationClaimed = CountDownLatch(1)
+        val allowFinalization = CountDownLatch(1)
+        val transport = RecordingTransport()
+        val receiver = WebRtcFileTransferController(
+            webrtc = transport,
+            json = json,
+            inboundApprovalProvider = acceptingApprovalProvider(),
+            idleInterruptTimeoutMs = 30_000L,
+            idleWatchdogPollMs = 1_000_000L,
+            clockMs = { clock.get() },
+            backgroundDispatcher = StandardTestDispatcher(testScheduler),
+            afterInboundFinalizationClaim = {
+                finalizationClaimed.countDown()
+                check(allowFinalization.await(2, TimeUnit.SECONDS))
+            },
+        )
+        val transferId = UUID.randomUUID().toString()
+        val payload = "finalization owns idle terminal".encodeToByteArray()
+
+        receiver.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.metadata,
+                    transferId = transferId,
+                    fileName = "winner.txt",
+                    fileSize = payload.size.toLong(),
+                    chunkSize = payload.size,
+                    totalChunks = 1,
+                    mimeType = "text/plain",
+                ),
+            ),
+        )
+        runCurrent()
+        receiver.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.chunk,
+                    transferId = transferId,
+                    chunkIndex = 0,
+                    chunkData = payload,
+                    chunkSha256 = sha256(payload),
+                    rawSize = payload.size,
+                ),
+            ),
+        )
+
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val completing = executor.submit {
+                receiver.handleIncoming(
+                    encode(
+                        CrossNetworkFileTransferMessage(
+                            op = CrossNetworkFileTransferOp.complete,
+                            transferId = transferId,
+                            receivedBytes = payload.size.toLong(),
+                            fileSha256 = sha256(payload),
+                        ),
+                    ),
+                )
+            }
+            assertTrue(finalizationClaimed.await(2, TimeUnit.SECONDS))
+
+            clock.set(30_000L)
+            receiver.runIdleInterruptSweep(clock.get())
+            assertFalse(receiver.progress.value.lastStatus?.contains("interrupted") == true)
+
+            allowFinalization.countDown()
+            completing.get()
+        } finally {
+            allowFinalization.countDown()
+            executor.shutdownNow()
+        }
+        runCurrent()
+
+        assertEquals("received complete", receiver.progress.value.lastStatus)
+        assertEquals(
+            1,
+            transport.messages.count { it.op == CrossNetworkFileTransferOp.completeAck },
+        )
+        assertFalse(receiver.progress.value.lastStatus?.contains("interrupted") == true)
     }
 
     @Test
@@ -310,7 +464,10 @@ class WebRtcFileTransferControllerIdleTimeoutTest {
         override fun release() = Unit
     }
 
-    private class RecordingCheckpointStore : TransferCheckpointStore {
+    private class RecordingCheckpointStore(
+        private val completionMarkerSaveStarted: CountDownLatch? = null,
+        private val allowCompletionMarkerSave: CountDownLatch? = null,
+    ) : TransferCheckpointStore {
         private val checkpoints = ConcurrentHashMap<String, TransferCheckpoint>()
         val saveCount = AtomicInteger()
         val deleteCount = AtomicInteger()
@@ -318,6 +475,14 @@ class WebRtcFileTransferControllerIdleTimeoutTest {
         override suspend fun load(transferId: String): TransferCheckpoint? = checkpoints[transferId]
 
         override suspend fun save(checkpoint: TransferCheckpoint) {
+            if (checkpoint.completionRequestSent) {
+                completionMarkerSaveStarted?.countDown()
+                allowCompletionMarkerSave?.let { gate ->
+                    check(gate.await(2, TimeUnit.SECONDS)) {
+                        "completion marker save was not released"
+                    }
+                }
+            }
             checkpoints[checkpoint.transferId] = checkpoint
             saveCount.incrementAndGet()
         }

@@ -9,12 +9,15 @@ import com.skybridge.compass.shared.p2p.filetransfer.CrossNetworkFileTransferOp
 import com.skybridge.compass.shared.webrtc.WebRtcAppSecureEnvelope
 import com.skybridge.compass.filetransfer.webrtc.resume.TransferCheckpoint
 import com.skybridge.compass.filetransfer.webrtc.resume.TransferCheckpointStore
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.Json
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -30,8 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * These exercise the controller end-to-end through [WebRtcFileTransferController.handleIncoming]:
  *  - a corrupted transfer never delivers a file and deletes its checkpoint (no residue);
- *  - a transfer whose integrity passes delivers the file exactly once (a duplicate `complete`
- *    after finalize does NOT re-deliver);
+ *  - a transfer whose integrity passes delivers the file exactly once while an exact duplicate
+ *    `complete` replays the stored acknowledgement without re-delivery;
  *  - an interruption (decline) cleans up state and never delivers.
  *
  * The in-memory receive path is used (no Android context), so the partial-file residue invariant
@@ -39,10 +42,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * every failure branch now routes through; here we assert the observable outcomes: no delivery, no
  * completeAck, and checkpoint deletion on every failure/interruption branch.
  *
- * Delivery is asserted deterministically via the `completeAck` wire message, which the controller
- * sends exactly once and ONLY immediately after the received file is emitted (same method, same
- * thread) — so `completeAck count == 1` is a reliable proxy for "delivered exactly once" and its
- * absence for "never delivered", without racing an off-thread SharedFlow collector.
+ * Delivery is collected independently from the wire ACK count because exact completion retries
+ * deliberately replay the stored ACK after the file has already been delivered.
  */
 class WebRtcFileTransferControllerIntegrityCleanupTest {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -57,6 +58,10 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
             checkpointStore = checkpointStore,
             inboundApprovalProvider = acceptingApprovalProvider()
         )
+        val deliveries = CopyOnWriteArrayList<WebRtcFileTransferController.ReceivedFile>()
+        backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            receiver.receivedFiles.collect { deliveries += it }
+        }
 
         val transferId = UUID.randomUUID().toString()
         val chunk0 = "abc".encodeToByteArray()
@@ -93,11 +98,16 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
         )
         repeat(5) { yield() }
 
-        assertEquals(
-            1,
-            transport.messages.count { it.op == CrossNetworkFileTransferOp.completeAck },
-            "integrity-passing transfer must be delivered/acked exactly once"
+        val acknowledgementFrames = transport.rawMessages
+            .filter { it.first.op == CrossNetworkFileTransferOp.completeAck }
+        assertEquals(2, acknowledgementFrames.size, "exact duplicate complete must replay its ACK")
+        assertArrayEquals(
+            acknowledgementFrames[0].second,
+            acknowledgementFrames[1].second,
+            "replayed completion acknowledgement must be byte-identical",
         )
+        assertEquals(1, deliveries.size, "completion replay must not deliver the file twice")
+        assertEquals(1, checkpointStore.deleteCount.get(), "completion replay must not repeat cleanup")
         assertFalse(
             transport.messages.any { it.op == CrossNetworkFileTransferOp.error },
             "no error must be sent when integrity passes"
@@ -107,6 +117,26 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
             "progress must reflect a completed receive"
         )
         assertEquals(null, checkpointStore.load(transferId), "checkpoint must be deleted after delivery")
+
+        val completedProgress = receiver.progress.value
+        val staleOwner = transport.currentTestSecureOwner()
+        transport.replaceTestSecureOwner()
+        receiver.handleIncoming(
+            staleOwner,
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.complete,
+                    transferId = transferId,
+                    receivedBytes = wholeFile.size.toLong(),
+                    fileSha256 = sha256(wholeFile),
+                ),
+            ),
+        )
+        assertEquals(
+            completedProgress,
+            receiver.progress.value,
+            "a stale packet with only a deleting checkpoint must not overwrite terminal success",
+        )
     }
 
     @Test
@@ -214,7 +244,39 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
         val chunk1 = "def".encodeToByteArray()
         val wholeFile = chunk0 + chunk1
 
-        feedMetadataAndChunks(receiver, transferId, chunk0, chunk1)
+        receiver.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.metadata,
+                    transferId = transferId,
+                    fileName = "file.bin",
+                    fileSize = wholeFile.size.toLong(),
+                    chunkSize = chunk0.size,
+                    totalChunks = 2,
+                    mimeType = "application/octet-stream",
+                ),
+            ),
+        )
+        withTimeout(2_000) {
+            while (checkpointStore.deleteCount.get() == 0) yield()
+            while (receiver.progress.value.lastStatus?.contains("declined") != true) yield()
+        }
+        val declinedStatus = receiver.progress.value
+
+        // Late frames still receive a fail-closed response, but cannot replace the local terminal
+        // decision or resurrect delivery state.
+        receiver.handleIncoming(
+            encode(
+                CrossNetworkFileTransferMessage(
+                    op = CrossNetworkFileTransferOp.chunk,
+                    transferId = transferId,
+                    chunkIndex = 0,
+                    chunkData = chunk0,
+                    chunkSha256 = sha256(chunk0),
+                    rawSize = chunk0.size,
+                ),
+            ),
+        )
         receiver.handleIncoming(
             encode(
                 CrossNetworkFileTransferMessage(
@@ -227,7 +289,7 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
         )
 
         withTimeout(2_000) {
-            while (checkpointStore.deleteCount.get() == 0) yield()
+            while (transport.messages.none { it.op == CrossNetworkFileTransferOp.error }) yield()
         }
         repeat(5) { yield() }
 
@@ -236,10 +298,8 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
             "declined transfer must never be acked as complete (no delivery)"
         )
         assertEquals(null, checkpointStore.load(transferId), "declined transfer must delete its checkpoint")
-        assertTrue(
-            receiver.progress.value.lastStatus?.contains("declined") == true,
-            "declined transfer status must reflect the decline"
-        )
+        assertEquals(1, checkpointStore.deleteCount.get(), "late frames must not repeat cleanup")
+        assertEquals(declinedStatus, receiver.progress.value, "late frames must not overwrite decline")
     }
 
     private fun feedMetadataAndChunks(
@@ -316,6 +376,7 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
         override var onPacketData: ((ByteArray, WebRtcAppSecureEnvelope.PacketType) -> Unit)? = null
         val ops = mutableListOf<CrossNetworkFileTransferOp>()
         val messages = CopyOnWriteArrayList<CrossNetworkFileTransferMessage>()
+        val rawMessages = CopyOnWriteArrayList<Pair<CrossNetworkFileTransferMessage, ByteArray>>()
 
         override fun hasSessionKeys(): Boolean = true
         override fun authenticatedPeerDeviceId(): String = "trusted-peer"
@@ -341,6 +402,7 @@ class WebRtcFileTransferControllerIntegrityCleanupTest {
                     bytes.decodeToString()
                 )
                 messages += message
+                rawMessages += message to bytes.copyOf()
                 ops += message.op
             }
             return true
