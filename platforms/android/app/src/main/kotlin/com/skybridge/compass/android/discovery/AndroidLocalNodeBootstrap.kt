@@ -4,7 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.skybridge.compass.android.data.SecuritySettings
-import com.skybridge.compass.android.data.SecuritySettingsStore
+import com.skybridge.compass.android.data.SecuritySettingsSource
 import com.skybridge.compass.core.p2p.TcpControlEvent
 import com.skybridge.compass.core.p2p.TcpControlServer
 import com.skybridge.compass.core.p2p.TcpControlSession
@@ -12,85 +12,284 @@ import com.skybridge.compass.discovery.data.datasources.BonjourLocalNetworkPermi
 import com.skybridge.compass.discovery.data.services.P2PLocalNodeService
 import com.skybridge.compass.discovery.domain.entities.DeviceCapability
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Singleton
-class AndroidLocalNodeBootstrap @Inject constructor(
-    @param:ApplicationContext private val appContext: Context,
+class AndroidLocalNodeBootstrap internal constructor(
     private val localNodeService: P2PLocalNodeService,
-    private val tcpControlServer: TcpControlServer
+    private val tcpControlServer: TcpControlServer,
+    dispatcher: CoroutineDispatcher,
+    private val observeSecuritySettings: () -> kotlinx.coroutines.flow.Flow<SecuritySettings>,
+    private val permissionGranted: () -> Boolean,
+    private val lifecycleHooks: AndroidLocalNodeLifecycleHooks = AndroidLocalNodeLifecycleHooks(),
+    private val logInfo: (String) -> Unit = { },
+    private val logWarning: (String) -> Unit = { },
+    private val logError: (String, Throwable) -> Unit = { _, _ -> }
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var observeJob: Job? = null
-    private var incomingSessionsJob: Job? = null
-    private val activeIncomingSessions: MutableMap<Int, TcpControlSession> = ConcurrentHashMap()
-    private val incomingSessionJobs: MutableMap<Int, Job> = ConcurrentHashMap()
+    @Inject
+    constructor(
+        @ApplicationContext appContext: Context,
+        localNodeService: P2PLocalNodeService,
+        tcpControlServer: TcpControlServer,
+        securitySettingsSource: SecuritySettingsSource
+    ) : this(
+        localNodeService = localNodeService,
+        tcpControlServer = tcpControlServer,
+        dispatcher = Dispatchers.IO,
+        observeSecuritySettings = securitySettingsSource::observe,
+        permissionGranted = {
+            BonjourLocalNetworkPermissionPolicy.isGranted(appContext, Build.VERSION.SDK_INT)
+        },
+        logInfo = { message -> Log.i(TAG, message) },
+        logWarning = { message -> Log.w(TAG, message) },
+        logError = { message, error -> Log.e(TAG, message, error) }
+    )
+
+    private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+    private val lifecycleCommands = Channel<LifecycleCommand>(capacity = LIFECYCLE_COMMAND_CAPACITY)
+    private val nextSessionId = AtomicLong(0)
+    private val requestLock = Any()
+    private var requestGeneration = 0L
+    private var desiredRunning = false
+    private var closed = false
+    private var lifecycleJob: Job? = null
+    private var lifecycleGeneration = 0L
+    private var cleanupRequired = false
+    private val lifecycleCoordinator = scope.launch {
+        for (command in lifecycleCommands) {
+            when (command) {
+                is LifecycleCommand.Start -> {
+                    handleStartCommand(command.generation)
+                }
+                is LifecycleCommand.Stop -> completeLifecycleCommand(command.completion) {
+                    lifecycleHooks.afterStopCommandClaimed()
+                    stopRuntime()
+                }
+                is LifecycleCommand.Close -> {
+                    val closedCleanly = completeLifecycleCommand(command.completion) {
+                        lifecycleHooks.afterStopCommandClaimed()
+                        stopRuntime()
+                    }
+                    if (closedCleanly) {
+                        lifecycleCommands.close()
+                        return@launch
+                    }
+                }
+                is LifecycleCommand.RuntimeEnded -> {
+                    if (lifecycleJob === command.job) {
+                        lifecycleJob = null
+                        val ownerGeneration = lifecycleGeneration
+                        synchronized(requestLock) {
+                            if (requestGeneration == ownerGeneration) desiredRunning = false
+                        }
+                        try {
+                            cleanupRuntimeIfNeeded()
+                        } catch (cleanupError: Exception) {
+                            command.error.addSuppressed(cleanupError)
+                            synchronized(requestLock) {
+                                if (requestGeneration == ownerGeneration) desiredRunning = false
+                            }
+                            logError(
+                                "Android Bonjour presence terminated with cleanup failure",
+                                command.error
+                            )
+                        }
+                        val restartGeneration = synchronized(requestLock) {
+                            requestGeneration.takeIf {
+                                !closed && desiredRunning && it != ownerGeneration
+                            }
+                        }
+                        if (restartGeneration != null) {
+                            handleStartCommand(restartGeneration)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * Starts the local Bonjour presence only after Android's local-network gate is satisfied.
      * Returning false is an expected first-run state, not a transient network failure to retry.
      */
     fun start(): Boolean {
-        if (!BonjourLocalNetworkPermissionPolicy.isGranted(appContext, Build.VERSION.SDK_INT)) {
-            Log.i(TAG, "Android Bonjour presence waiting for local-network permission")
+        if (!permissionGranted()) {
+            logInfo("Android Bonjour presence waiting for local-network permission")
             return false
         }
-        if (observeJob?.isActive == true) return true
-        Log.i(TAG, "Starting Android Bonjour presence bootstrap")
-        collectIncomingSessions()
-        observeJob = scope.launch {
-            SecuritySettingsStore.observe(appContext)
-                .map(AndroidLocalNodeBootstrapPolicy::advertisementSettings)
-                .distinctUntilChanged()
-                .collectLatest { settings ->
-                    startLocalNode(settings)
-                }
-        }.also { job ->
-            job.invokeOnCompletion { error ->
-                if (error != null && error !is CancellationException) {
-                    Log.e(TAG, "Android Bonjour presence monitor stopped unexpectedly", error)
-                }
+        synchronized(requestLock) {
+            check(!closed) { "Android Bonjour presence bootstrap is closed" }
+            val previousGeneration = requestGeneration
+            val previousDesiredRunning = desiredRunning
+            desiredRunning = true
+            val command = LifecycleCommand.Start(++requestGeneration)
+            if (lifecycleCommands.trySend(command).isFailure) {
+                requestGeneration = previousGeneration
+                desiredRunning = previousDesiredRunning
+                error("Android Bonjour presence command queue is full or closed")
             }
         }
+        logInfo("Starting Android Bonjour presence bootstrap")
         return true
     }
 
-    fun stop() {
-        observeJob?.cancel()
-        observeJob = null
-        incomingSessionsJob?.cancel()
-        incomingSessionsJob = null
-        incomingSessionJobs.values.forEach { it.cancel() }
-        incomingSessionJobs.clear()
-        activeIncomingSessions.values.forEach { it.close() }
-        activeIncomingSessions.clear()
-        localNodeService.stop()
+    suspend fun stop() {
+        val completion = CompletableDeferred<Unit>()
+        synchronized(requestLock) {
+            check(!closed) { "Android Bonjour presence bootstrap is closed" }
+            val previousGeneration = requestGeneration
+            val previousDesiredRunning = desiredRunning
+            desiredRunning = false
+            requestGeneration += 1
+            val command = LifecycleCommand.Stop(completion)
+            if (lifecycleCommands.trySend(command).isFailure) {
+                requestGeneration = previousGeneration
+                desiredRunning = previousDesiredRunning
+                error("Android Bonjour presence command queue is full or closed")
+            }
+        }
+        completion.await()
+    }
+
+    private suspend fun startRuntimeIfNeeded(generation: Long) {
+        val existing = lifecycleJob
+        if (existing?.isActive == true) {
+            return
+        }
+        if (existing != null || cleanupRequired) stopRuntime()
+        if (!isCurrentStartRequest(generation)) return
+        cleanupRequired = true
+        lifecycleGeneration = generation
+        var runtimeError: Throwable? = null
+        lifecycleJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                coroutineScope {
+                    launch(start = CoroutineStart.UNDISPATCHED) { collectIncomingSessions() }
+                    launch(start = CoroutineStart.UNDISPATCHED) {
+                        tcpControlServer.terminalFailure
+                            .filterNotNull()
+                            .collect { failure ->
+                                throw IllegalStateException(
+                                    "Android Bonjour presence lost its TCP listener",
+                                    failure.cause
+                                )
+                            }
+                    }
+                    observeSecuritySettings()
+                        .map(AndroidLocalNodeBootstrapPolicy::advertisementSettings)
+                        .distinctUntilChanged()
+                        .collectLatest { settings -> startLocalNode(settings) }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                runtimeError = error
+            }
+        }.also { job ->
+            job.invokeOnCompletion { completionError ->
+                val error = runtimeError ?: completionError
+                    ?: IllegalStateException("Android Bonjour presence runtime ended unexpectedly")
+                if (error !is CancellationException) {
+                    logError("Android Bonjour presence monitor stopped unexpectedly", error)
+                }
+                postRuntimeEnded(LifecycleCommand.RuntimeEnded(job, error))
+            }
+        }
+    }
+
+    private suspend fun handleStartCommand(generation: Long) {
+        if (!isCurrentStartRequest(generation)) return
+        try {
+            startRuntimeIfNeeded(generation)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            synchronized(requestLock) {
+                if (requestGeneration == generation) desiredRunning = false
+            }
+            logError("Android Bonjour presence failed to start", error)
+        }
+    }
+
+    private fun postRuntimeEnded(command: LifecycleCommand.RuntimeEnded) {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                lifecycleCommands.send(command)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (!synchronized(requestLock) { closed }) {
+                    logError("Android Bonjour presence coordinator rejected runtime completion", error)
+                }
+            }
+        }
+    }
+
+    private fun isCurrentStartRequest(generation: Long): Boolean = synchronized(requestLock) {
+        !closed && desiredRunning && requestGeneration == generation
+    }
+
+    private suspend fun stopRuntime() {
+        val job = lifecycleJob
+        lifecycleJob = null
+        job?.cancelAndJoin()
+        cleanupRuntimeIfNeeded()
+    }
+
+    private suspend fun cleanupRuntimeIfNeeded() {
+        if (cleanupRequired) {
+            localNodeService.stop()
+            lifecycleHooks.afterRuntimeStopped()
+            cleanupRequired = false
+        }
+    }
+
+    private suspend fun completeLifecycleCommand(
+        completion: CompletableDeferred<Unit>,
+        operation: suspend () -> Unit
+    ): Boolean {
+        try {
+            operation()
+            completion.complete(Unit)
+            return true
+        } catch (error: Exception) {
+            completion.completeExceptionally(error)
+            return false
+        }
     }
 
     private suspend fun startLocalNode(settings: AndroidLocalNodeAdvertisementSettings) {
         var attempt = 1
         while (currentCoroutineContext().isActive) {
             try {
-                Log.i(
-                    TAG,
+                logInfo(
                     "Android Bonjour presence settings resolved showDeviceName=${settings.showDeviceName} " +
                         "verifiedCapabilities=${settings.verifiedCapabilities.size} attempt=$attempt"
                 )
@@ -98,17 +297,16 @@ class AndroidLocalNodeBootstrap @Inject constructor(
                     showDeviceName = settings.showDeviceName,
                     verifiedCapabilities = settings.verifiedCapabilities
                 )
-                Log.i(TAG, "Android Bonjour presence active on _skybridge._tcp port=$port")
+                logInfo("Android Bonjour presence active on _skybridge._tcp port=$port")
                 return
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                if (!BonjourLocalNetworkPermissionPolicy.isGranted(appContext, Build.VERSION.SDK_INT)) {
-                    Log.w(TAG, "Android Bonjour presence stopped because local-network permission is unavailable")
+                if (!permissionGranted()) {
+                    logWarning("Android Bonjour presence stopped because local-network permission is unavailable")
                     return
                 }
-                Log.e(
-                    TAG,
+                logError(
                     "Android Bonjour presence stopped after startup failure attempt=$attempt " +
                         "retryInMs=$START_RETRY_DELAY_MS",
                     error
@@ -119,40 +317,63 @@ class AndroidLocalNodeBootstrap @Inject constructor(
         }
     }
 
-    fun close() {
-        stop()
-        scope.cancel()
-    }
-
-    private fun collectIncomingSessions() {
-        if (incomingSessionsJob?.isActive == true) return
-        incomingSessionsJob = scope.launch {
-            tcpControlServer.incomingSessions.collect { session ->
-                val sessionId = System.identityHashCode(session)
-                activeIncomingSessions[sessionId] = session
-                incomingSessionJobs[sessionId] = scope.launch {
-                    observeIncomingSession(sessionId = sessionId, session = session)
+    suspend fun close() {
+        val completion = CompletableDeferred<Unit>()
+        synchronized(requestLock) {
+            check(!closed) { "Android Bonjour presence bootstrap is closed" }
+            val previousGeneration = requestGeneration
+            val previousDesiredRunning = desiredRunning
+            closed = true
+            desiredRunning = false
+            requestGeneration += 1
+            val command = LifecycleCommand.Close(completion)
+            if (lifecycleCommands.trySend(command).isFailure) {
+                closed = false
+                requestGeneration = previousGeneration
+                desiredRunning = previousDesiredRunning
+                error("Android Bonjour presence command queue is full or closed")
+            }
+        }
+        withContext(NonCancellable) {
+            var completed = false
+            try {
+                completion.await()
+                lifecycleCoordinator.join()
+                completed = true
+            } finally {
+                if (!completed) {
+                    synchronized(requestLock) { closed = false }
+                } else {
+                    scope.cancel()
                 }
             }
         }
     }
 
+    private suspend fun collectIncomingSessions(): Nothing = coroutineScope {
+        tcpControlServer.incomingSessions.collect { session ->
+            val sessionId = nextSessionId.incrementAndGet()
+            launch(start = CoroutineStart.UNDISPATCHED) {
+                observeIncomingSession(sessionId = sessionId, session = session)
+            }
+        }
+    }
+
     private suspend fun observeIncomingSession(
-        sessionId: Int,
+        sessionId: Long,
         session: TcpControlSession
     ) {
         try {
             session.events
                 .onEach { event -> logIncomingSessionEvent(sessionId = sessionId, event = event) }
-                .takeWhile { event -> event !is TcpControlEvent.Disconnected }
-                .collect()
-        } finally {
-            activeIncomingSessions.remove(sessionId)
-            incomingSessionJobs.remove(sessionId)
-        }
+                .takeWhile { event ->
+                    event !is TcpControlEvent.Failed && event !is TcpControlEvent.Disconnected
+                }
+                .collect { }
+        } finally { session.close() }
     }
 
-    private fun logIncomingSessionEvent(sessionId: Int, event: TcpControlEvent) {
+    private fun logIncomingSessionEvent(sessionId: Long, event: TcpControlEvent) {
         when (event) {
             is TcpControlEvent.HandshakeEstablished -> Log.i(
                 TAG,
@@ -179,11 +400,27 @@ class AndroidLocalNodeBootstrap @Inject constructor(
         }
     }
 
+    private sealed interface LifecycleCommand {
+        data class Start(val generation: Long) : LifecycleCommand
+        data class Stop(val completion: CompletableDeferred<Unit>) : LifecycleCommand
+        data class Close(val completion: CompletableDeferred<Unit>) : LifecycleCommand
+        data class RuntimeEnded(
+            val job: Job,
+            val error: Throwable
+        ) : LifecycleCommand
+    }
+
     private companion object {
         private const val TAG = "AndroidLocalNode"
         private const val START_RETRY_DELAY_MS = 30_000L
+        private const val LIFECYCLE_COMMAND_CAPACITY = 64
     }
 }
+
+internal class AndroidLocalNodeLifecycleHooks(
+    val afterStopCommandClaimed: suspend () -> Unit = { },
+    val afterRuntimeStopped: suspend () -> Unit = { }
+)
 
 internal data class AndroidLocalNodeAdvertisementSettings(
     val showDeviceName: Boolean,

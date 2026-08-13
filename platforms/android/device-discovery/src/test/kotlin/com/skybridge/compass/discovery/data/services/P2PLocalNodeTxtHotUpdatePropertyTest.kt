@@ -23,8 +23,8 @@ import io.mockk.mockk
  *
  * **Validates: Requirements 3.12**
  *
- * 任务 7.19 的属性测试。与 [P2PLocalNodeServiceTest] 的示例测试**互补**：示例测试固定四个序列
- * （能力变化、仅套件变化、配置不变、stop），本文件在随机生成的"配置序列"（能力集合 × 套件 CSV ×
+ * 任务 7.19 的属性测试。与 [P2PLocalNodeServiceTest] 的示例测试**互补**：示例测试覆盖固定生命周期，
+ * 本文件在随机生成的"配置序列"（能力集合 × 套件 CSV ×
  * showDeviceName 的任意长度变化序列）上验证 R3.12 的两个半部：
  *
  * 1. **变化即重写**：广播活跃期间，当已验证能力集合或密码套件集合发生变化时，
@@ -40,7 +40,8 @@ import io.mockk.mockk
  * `BonjourAdvertiserDataSource` / `TcpControlServer` / `LocalP2PIdentity` 用 mockk 替身注入，
  * 被测的是 [P2PLocalNodeService] 的真实配置比较与重新广播逻辑。
  *
- * 为避免空真通过，每个测试统计其真正走到的分支并在 `checkAll` 后断言计数均大于 0。
+ * 随机序列只断言对每个输入都成立的不变量；单维度分支覆盖由下方确定性见证提供，避免把随机样本
+ * 是否恰好命中稀有相邻组合错误地用作 release gate。
  */
 /**
  * 被测服务 + 捕获槽。身份稳定（deviceId / pubKeyFP 恒定），套件 CSV 按 [suitesSequence] 依次返回，
@@ -113,13 +114,6 @@ class P2PLocalNodeTxtHotUpdatePropertyTest : FunSpec({
     ) { capabilities, suites, showDeviceName -> Step(capabilities, suites, showDeviceName) }
 
     test("Property 16: 跨任意配置序列，服务实例名来源与身份指纹逐次不变；仅集合变化才触发重写") {
-        var sawRewrite = 0
-        var sawNoRewrite = 0
-        var sawCapabilityOnlyChange = 0
-        var sawSuiteOnlyChange = 0
-        var sawShowNameOnlyChange = 0
-        var sawMultiStepSequence = 0
-
         checkAll(400, Arb.list(stepArb, 1..6)) { steps ->
             val harness = Harness(steps.map { it.suitesCsv }, deviceId, fingerprint)
 
@@ -161,41 +155,68 @@ class P2PLocalNodeTxtHotUpdatePropertyTest : FunSpec({
                     P2PLocalNodeAdvertisementPolicy.cryptoSuitesTxt(step.suitesCsv)
             }
 
-            // 分支计数（证明非空真）。
-            if (harness.capturedAds.size > 1) sawRewrite++
-            if (steps.size > 1 && harness.capturedAds.size < steps.size) sawNoRewrite++
-            if (steps.size > 1) sawMultiStepSequence++
-            steps.zipWithNext().forEach { (a, b) ->
-                val capChanged = a.capabilities != b.capabilities
-                val suiteChanged = a.suitesCsv != b.suitesCsv
-                val nameChanged = a.showDeviceName != b.showDeviceName
-                if (capChanged && !suiteChanged && !nameChanged) sawCapabilityOnlyChange++
-                if (!capChanged && suiteChanged && !nameChanged) sawSuiteOnlyChange++
-                if (!capChanged && !suiteChanged && nameChanged) sawShowNameOnlyChange++
+        }
+    }
+
+    test("Property 16: 单维度配置变化与配置不变均有确定性见证") {
+        val fileTransfer = setOf(DeviceCapability.FILE_TRANSFER)
+        val scenarios = listOf(
+            listOf(
+                Step(emptySet(), "0101", true),
+                Step(fileTransfer, "0101", true)
+            ),
+            listOf(
+                Step(fileTransfer, "0101", true),
+                Step(fileTransfer, "0001,0101", true)
+            ),
+            listOf(
+                Step(fileTransfer, "0101", true),
+                Step(fileTransfer, "0101", false)
+            ),
+            listOf(
+                Step(fileTransfer, "0101", false),
+                Step(fileTransfer, "0101", true)
+            ),
+            listOf(
+                Step(fileTransfer, "0101", false),
+                Step(fileTransfer, "0101", false)
+            )
+        )
+
+        scenarios.forEach { steps ->
+            val harness = Harness(steps.map { it.suitesCsv }, deviceId, fingerprint)
+            steps.forEach { step ->
+                harness.service.start(
+                    showDeviceName = step.showDeviceName,
+                    verifiedCapabilities = step.capabilities
+                )
+            }
+
+            val expectedRegistrations = if (steps[0] == steps[1]) 1 else 2
+            harness.capturedAds.size shouldBe expectedRegistrations
+            harness.capturedServiceTypes.distinct() shouldBe
+                listOf(AppleBonjourInterop.MAIN_SERVICE_TYPE)
+            harness.capturedAds.forEach { advertisement ->
+                advertisement.uniqueId shouldBe deviceId
+                advertisement.deviceId shouldBe deviceId
+                advertisement.pubKeyFP shouldBe fingerprint
             }
         }
 
-        println(
-            "[Property 16 序列] sawRewrite=$sawRewrite sawNoRewrite=$sawNoRewrite " +
-                "sawCapabilityOnlyChange=$sawCapabilityOnlyChange " +
-                "sawSuiteOnlyChange=$sawSuiteOnlyChange " +
-                "sawShowNameOnlyChange=$sawShowNameOnlyChange " +
-                "sawMultiStepSequence=$sawMultiStepSequence"
-        )
-
-        // 非空真保证：重写、未重写、三种单维度变化与多步序列都被真正生成到。
-        (sawRewrite > 0) shouldBe true
-        (sawNoRewrite > 0) shouldBe true
-        (sawCapabilityOnlyChange > 0) shouldBe true
-        (sawSuiteOnlyChange > 0) shouldBe true
-        (sawShowNameOnlyChange > 0) shouldBe true
-        (sawMultiStepSequence > 0) shouldBe true
+        scenarios.slice(2..3).forEach { steps ->
+            val harness = Harness(steps.map { it.suitesCsv }, deviceId, fingerprint)
+            steps.forEach { step ->
+                harness.service.start(step.showDeviceName, step.capabilities)
+            }
+            harness.capturedAds.map { it.name } shouldBe steps.map { step ->
+                if (step.showDeviceName) "Pixel 9 Pro" else "Android Device"
+            }
+            harness.capturedAds.map { it.uniqueId }.distinct() shouldBe listOf(deviceId)
+            harness.capturedAds.map { it.pubKeyFP }.distinct() shouldBe listOf(fingerprint)
+        }
     }
 
     test("Property 16: 仅密码套件集合变化也必须触发重写，且身份字段保持不变") {
-        var suiteChangeRewrites = 0
-        var suiteUnchangedCases = 0
-
         checkAll(
             300,
             capabilitySetArb,
@@ -219,27 +240,14 @@ class P2PLocalNodeTxtHotUpdatePropertyTest : FunSpec({
                 harness.capturedAds[0].pubKeyFP shouldBe harness.capturedAds[1].pubKeyFP
                 harness.capturedAds[0].uniqueId shouldBe harness.capturedAds[1].uniqueId
                 harness.capturedAds[0].deviceId shouldBe harness.capturedAds[1].deviceId
-                suiteChangeRewrites++
             } else {
                 // 套件相同且其它维度不变：不得重复注册。
                 harness.capturedAds.size shouldBe 1
-                suiteUnchangedCases++
             }
         }
-
-        println(
-            "[Property 16 仅套件变化] suiteChangeRewrites=$suiteChangeRewrites " +
-                "suiteUnchangedCases=$suiteUnchangedCases"
-        )
-
-        // 非空真保证："套件变了"与"套件没变"两条分支都被真正生成到。
-        (suiteChangeRewrites > 0) shouldBe true
-        (suiteUnchangedCases > 0) shouldBe true
     }
 
     test("Property 16: stop() 后身份不变量在下一轮 start 中仍然成立（注销不改写身份）") {
-        var restartCases = 0
-
         checkAll(200, capabilitySetArb, capabilitySetArb, suitesCsvArb) { first, second, suites ->
             val harness = Harness(listOf(suites, suites), deviceId, fingerprint)
 
@@ -254,11 +262,6 @@ class P2PLocalNodeTxtHotUpdatePropertyTest : FunSpec({
             harness.capturedAds[0].uniqueId shouldBe harness.capturedAds[1].uniqueId
             harness.capturedAds[1].capabilities shouldBe
                 P2PLocalNodeAdvertisementPolicy.capabilityTxt(second)
-            restartCases++
         }
-
-        println("[Property 16 stop/start] restartCases=$restartCases")
-
-        (restartCases > 0) shouldBe true
     }
 })

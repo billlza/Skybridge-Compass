@@ -39,7 +39,14 @@ object P2PHandshakeWire {
     const val PROVIDER_TYPE_CRYPTO_KIT_CLASSIC = "CryptoKit-Classic"
 
     private const val PROTOCOL_VERSION: Byte = 0x01
-    private const val MAX_HANDSHAKE_MESSAGE_BYTES: Int = 16 * 1_024
+    const val MAX_HANDSHAKE_MESSAGE_BYTES: Int = 16 * 1_024
+    const val MAX_HANDSHAKE_FRAME_BYTES: Int =
+        (
+            MAX_HANDSHAKE_MESSAGE_BYTES +
+                HandshakePaddingP1.HEADER_BYTES +
+                TrafficPaddingP2.HEADER_BYTES +
+                TrafficPaddingP2.PADDING_BUCKET - 1
+            ) / TrafficPaddingP2.PADDING_BUCKET * TrafficPaddingP2.PADDING_BUCKET
     private const val MAX_SUPPORTED_SUITES: Int = 8
     private const val MAX_KEY_SHARES: Int = 2
     private val DOMAIN_A = "SkyBridge-A".toByteArray(Charsets.UTF_8)

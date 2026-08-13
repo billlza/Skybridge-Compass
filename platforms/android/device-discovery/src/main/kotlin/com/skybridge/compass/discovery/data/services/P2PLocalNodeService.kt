@@ -9,10 +9,11 @@ import com.skybridge.compass.discovery.data.interop.AppleBonjourInterop
 import com.skybridge.compass.discovery.domain.entities.DeviceCapability
 import com.skybridge.compass.shared.platform.AndroidPlatformMetadata
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -22,20 +23,29 @@ import javax.inject.Singleton
  * - Advertises mDNS TXT records including `deviceId` and `pubKeyFP`
  */
 @Singleton
-class P2PLocalNodeService @Inject constructor(
+class P2PLocalNodeService internal constructor(
     private val advertiser: BonjourAdvertiserDataSource,
     private val identity: LocalP2PIdentity,
     private val tcpServer: TcpControlServer,
-    private val runtimeParameters: RuntimeNetworkParametersSource
+    private val runtimeParameters: RuntimeNetworkParametersSource,
+    private val ioDispatcher: CoroutineDispatcher
 ) {
+    @Inject
+    constructor(
+        advertiser: BonjourAdvertiserDataSource,
+        identity: LocalP2PIdentity,
+        tcpServer: TcpControlServer,
+        runtimeParameters: RuntimeNetworkParametersSource
+    ) : this(advertiser, identity, tcpServer, runtimeParameters, Dispatchers.IO)
+
     private companion object {
         private const val PROTOCOL_VERSION = "1.0.0"
     }
 
-    private val started = AtomicBoolean(false)
     private val lifecycleMutex = Mutex()
-    @Volatile private var boundPort: Int? = null
-    @Volatile private var currentAdvertisementConfig: P2PLocalNodeAdvertisementConfig? = null
+    private var started = false
+    private var boundPort: Int? = null
+    private var currentAdvertisementConfig: P2PLocalNodeAdvertisementConfig? = null
 
     /**
      * Advertising registration status (R3.13), surfaced from the underlying advertiser so the
@@ -69,10 +79,10 @@ class P2PLocalNodeService @Inject constructor(
                 identity.discoveryCryptoSuitesCsv()
             )
         )
-        return withContext(Dispatchers.IO) {
+        return withContext(ioDispatcher) {
             lifecycleMutex.withLock {
                 try {
-                    if (started.get()) {
+                    if (started) {
                         val port = checkNotNull(boundPort) {
                             "P2P local node is marked started without a bound TCP port"
                         }
@@ -83,7 +93,7 @@ class P2PLocalNodeService @Inject constructor(
                         return@withLock port
                     }
 
-                    started.set(true)
+                    started = true
                     // R7.4: the listen/advertised port is taken from the user-configured range at
                     // start time, so a settings change is honored by the next presence start while
                     // an already-bound presence keeps its port.
@@ -92,26 +102,26 @@ class P2PLocalNodeService @Inject constructor(
                     boundPort = port
                     currentAdvertisementConfig = desiredConfig
                     port
-                } catch (t: Throwable) {
+                } catch (t: Exception) {
                     boundPort = null
                     currentAdvertisementConfig = null
-                    started.set(false)
-                    cleanupAfterStartFailure(t)
+                    started = false
+                    withContext(NonCancellable) { cleanupAfterStartFailure(t) }
                     throw t
                 }
             }
         }
     }
 
-    private fun cleanupAfterStartFailure(cause: Throwable) {
+    private suspend fun cleanupAfterStartFailure(cause: Throwable) {
         try {
-            advertiser.stopAdvertising()
-        } catch (cleanupError: Throwable) {
+            tcpServer.stop()
+        } catch (cleanupError: Exception) {
             cause.addSuppressed(cleanupError)
         }
         try {
-            tcpServer.stop()
-        } catch (cleanupError: Throwable) {
+            advertiser.stopAdvertising()
+        } catch (cleanupError: Exception) {
             cause.addSuppressed(cleanupError)
         }
     }
@@ -159,12 +169,27 @@ class P2PLocalNodeService @Inject constructor(
         )
     }
 
-    fun stop() {
-        if (!started.compareAndSet(true, false)) return
-        boundPort = null
-        currentAdvertisementConfig = null
-        advertiser.stopAdvertising()
-        tcpServer.stop()
+    suspend fun stop() {
+        withContext(ioDispatcher) {
+            lifecycleMutex.withLock {
+                started = false
+                boundPort = null
+                currentAdvertisementConfig = null
+                var failure: Throwable? = null
+                try {
+                    tcpServer.stop()
+                } catch (error: Exception) {
+                    failure = error
+                }
+                try {
+                    advertiser.stopAdvertising()
+                } catch (error: Exception) {
+                    val firstFailure = failure
+                    if (firstFailure == null) failure = error else firstFailure.addSuppressed(error)
+                }
+                failure?.let { throw it }
+            }
+        }
     }
 }
 

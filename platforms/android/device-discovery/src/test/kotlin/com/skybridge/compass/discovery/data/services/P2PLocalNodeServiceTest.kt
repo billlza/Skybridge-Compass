@@ -16,6 +16,12 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 
 /**
  * Service-level coverage for Task 7.7:
@@ -28,6 +34,7 @@ import io.mockk.verify
  * (nsdManager.stopServiceDiscovery); this test focuses on the advertise-side lifecycle owned by
  * P2PLocalNodeService, which is the unit under test.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class P2PLocalNodeServiceTest : FunSpec({
 
     fun newIdentity(suitesCsv: String): LocalP2PIdentity = mockk<LocalP2PIdentity>().also { identity ->
@@ -136,7 +143,50 @@ class P2PLocalNodeServiceTest : FunSpec({
 
         // Advertising is unregistered (the whole-node stopAdvertising() overload) and the TCP
         // control endpoint is torn down.
-        verify(exactly = 1) { advertiser.stopAdvertising() }
+        coVerify(exactly = 1) { advertiser.stopAdvertising() }
         verify(exactly = 1) { tcpServer.stop() }
+    }
+
+    test("stop waits for an in-flight start and leaves the node fully stopped") {
+        runTest {
+            val advertiser = mockk<BonjourAdvertiserDataSource>(relaxed = true)
+            val identity = newIdentity(suitesCsv = "0101")
+            val tcpServer = mockk<TcpControlServer>()
+            every { tcpServer.start(any<IntRange>()) } returnsMany listOf(55_005, 55_006)
+            every { tcpServer.stop() } just Runs
+
+            val advertisementEntered = CompletableDeferred<Unit>()
+            val releaseAdvertisement = CompletableDeferred<Unit>()
+            coEvery { advertiser.startAdvertising(any(), any(), any()) } coAnswers {
+                advertisementEntered.complete(Unit)
+                releaseAdvertisement.await()
+                "device-abc"
+            }
+
+            val service = P2PLocalNodeService(
+                advertiser,
+                identity,
+                tcpServer,
+                FakeRuntimeNetworkParametersSource(),
+                StandardTestDispatcher(testScheduler)
+            )
+            val starting = async {
+                service.start(showDeviceName = true, verifiedCapabilities = emptySet())
+            }
+            advertisementEntered.await()
+            val stopping = async { service.stop() }
+            runCurrent()
+            stopping.isCompleted shouldBe false
+
+            releaseAdvertisement.complete(Unit)
+            starting.await() shouldBe 55_005
+            stopping.await()
+
+            coEvery { advertiser.startAdvertising(any(), any(), any()) } returns "device-abc"
+            service.start(showDeviceName = true, verifiedCapabilities = emptySet()) shouldBe 55_006
+            verify(exactly = 2) { tcpServer.start(any<IntRange>()) }
+            verify(exactly = 1) { tcpServer.stop() }
+            coVerify(exactly = 1) { advertiser.stopAdvertising() }
+        }
     }
 })

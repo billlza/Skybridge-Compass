@@ -11,10 +11,11 @@ import java.nio.ByteOrder
  */
 object HandshakePaddingP1 {
     private val MAGIC = byteArrayOf(0x53, 0x42, 0x50, 0x31) // "SBP1"
+    const val HEADER_BYTES: Int = 8
 
     fun wrap(payload: ByteArray): ByteArray {
         // Android side: keep minimal wrapper (no bucket sizing); receiver will still unwrap.
-        val headerLen = 8
+        val headerLen = HEADER_BYTES
         val out = ByteArray(headerLen + payload.size)
         System.arraycopy(MAGIC, 0, out, 0, 4)
         ByteBuffer.wrap(out, 4, 4).order(ByteOrder.BIG_ENDIAN).putInt(payload.size)
@@ -33,5 +34,4 @@ object HandshakePaddingP1 {
         return data.copyOfRange(start, end)
     }
 }
-
 

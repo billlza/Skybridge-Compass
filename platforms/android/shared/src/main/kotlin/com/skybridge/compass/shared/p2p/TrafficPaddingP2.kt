@@ -18,7 +18,7 @@ import java.nio.ByteOrder
 object TrafficPaddingP2 {
     // "SBP2"
     private val MAGIC = "SBP2".encodeToByteArray()
-    private const val HEADER_LEN = 4 + 4 // magic + u32 actualLen (big-endian)
+    const val HEADER_BYTES: Int = 4 + 4 // magic + u32 actualLen (big-endian)
 
     /** Coarse padding bucket (bytes) used to quantize wrapped frame sizes. */
     const val PADDING_BUCKET: Int = 256
@@ -36,27 +36,27 @@ object TrafficPaddingP2 {
         if (!txPaddingEnabled) return payload
         // Round the framed size up to the next padding bucket so distinct payload
         // lengths collapse into a small set of observable sizes.
-        val framed = HEADER_LEN + payload.size
+        val framed = HEADER_BYTES + payload.size
         val bucketed = ((framed + PADDING_BUCKET - 1) / PADDING_BUCKET) * PADDING_BUCKET
         return wrapToLength(payload, bucketed)
     }
 
     fun unwrapIfNeeded(data: ByteArray, label: String? = null): ByteArray {
-        if (data.size < HEADER_LEN) return data
+        if (data.size < HEADER_BYTES) return data
         if (!data.copyOfRange(0, 4).contentEquals(MAGIC)) return data
 
         val bb = ByteBuffer.wrap(data).order(ByteOrder.BIG_ENDIAN)
         bb.position(4)
         val actualLen = bb.int
-        if (actualLen < 0 || actualLen > data.size - HEADER_LEN) return data
-        return data.copyOfRange(HEADER_LEN, HEADER_LEN + actualLen)
+        if (actualLen < 0 || actualLen > data.size - HEADER_BYTES) return data
+        return data.copyOfRange(HEADER_BYTES, HEADER_BYTES + actualLen)
     }
 
     /**
      * Optional future support: force-wrap to an exact total length for testing.
      */
     fun wrapToLength(payload: ByteArray, totalLen: Int): ByteArray {
-        val minLen = HEADER_LEN + payload.size
+        val minLen = HEADER_BYTES + payload.size
         val target = maxOf(minLen, totalLen)
         val buf = Buffer()
         buf.write(MAGIC)
@@ -67,5 +67,4 @@ object TrafficPaddingP2 {
         return buf.readByteArray()
     }
 }
-
 

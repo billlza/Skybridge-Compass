@@ -14,6 +14,11 @@ import com.skybridge.compass.core.data.RuntimePairingApprovalParametersSource
 import com.skybridge.compass.core.p2p.PairingTrustManager
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * SkyBridge Compass Android Application
@@ -31,6 +36,7 @@ class SkyBridgeApplication : Application() {
     private var anrWatchdog: AnrWatchdog? = null
     private var performanceSampler: PerformanceSampler? = null
     private var frameMetricsSampler: FrameMetricsSampler? = null
+    private val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     
     override fun onCreate() {
         super.onCreate()
@@ -56,7 +62,7 @@ class SkyBridgeApplication : Application() {
     fun startLocalNodeDiscovery(): Boolean = androidLocalNodeBootstrap.start()
 
     /** Stops Bonjour publication and inbound LAN sessions after local-network access is revoked. */
-    fun stopLocalNodeDiscovery() = androidLocalNodeBootstrap.stop()
+    suspend fun stopLocalNodeDiscovery() = androidLocalNodeBootstrap.stop()
     
     private fun initializeApp() {
         // Crash/ANR 追踪 + 性能采样
@@ -75,7 +81,17 @@ class SkyBridgeApplication : Application() {
         stopApplicationService("performanceSampler") { performanceSampler?.stop() }
         stopApplicationService("frameMetricsSampler") { frameMetricsSampler?.uninstall() }
         stopApplicationService("cloudSettingsSync") { cloudSettingsSyncManager.stop() }
-        stopApplicationService("androidLocalNode") { androidLocalNodeBootstrap.close() }
+        // Android invokes onTerminate only for emulated processes. Production cleanup is owned by
+        // the explicit, awaitable local-network lifecycle; this is a best-effort emulator hook.
+        lifecycleScope.launch {
+            try {
+                androidLocalNodeBootstrap.close()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.w("SkyBridgeApp", "Failed to stop androidLocalNode", error)
+            }
+        }
     }
 
     private fun stopApplicationService(name: String, stop: () -> Unit) {

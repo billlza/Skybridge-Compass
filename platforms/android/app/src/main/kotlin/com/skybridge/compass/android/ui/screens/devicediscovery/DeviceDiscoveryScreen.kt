@@ -55,6 +55,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -98,6 +99,8 @@ import com.skybridge.compass.discovery.domain.entities.DiscoveredDevice
 import com.skybridge.compass.discovery.presentation.events.DeviceDiscoveryEvent
 import com.skybridge.compass.discovery.presentation.viewmodels.DeviceDiscoveryViewModel
 import com.skybridge.compass.shared.productsession.ProductSessionAuthority
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
 
 @Composable
 private fun t(zh: String, en: String, ja: String): String = localizedText(zh, en, ja)
@@ -112,11 +115,18 @@ fun DeviceDiscoveryScreen(
     val discoveredDevices = uiState.devices
     val isScanning = uiState.isDiscovering
     val context = androidx.compose.ui.platform.LocalContext.current
+    val lifecycleScope = rememberCoroutineScope()
     val appSettings by AppSettingsStore.observe(context).collectAsState(initial = AppSettings())
     val devSettings by DeveloperSettingsStore.observe(context).collectAsState(initial = DeveloperSettings())
     var searchText by remember { mutableStateOf("") }
     var autoConnectedDeviceId by rememberSaveable { mutableStateOf<String?>(null) }
     var permissionWasDenied by rememberSaveable { mutableStateOf(false) }
+    var localNodeStopError by rememberSaveable { mutableStateOf<String?>(null) }
+    val localNodeStopFailureMessage = t(
+        "停止局域网广播失败",
+        "Failed to stop local-network advertising",
+        "ローカルネットワーク広告の停止に失敗しました"
+    )
     // R3.8: guards the one-shot auto-request so entering the screen initiates the
     // permission prompt exactly once per visit and does not re-loop after a denial
     // (subsequent requests go through the on-screen "Allow Access" re-request entry).
@@ -137,8 +147,24 @@ fun DeviceDiscoveryScreen(
     }
 
     fun startAuthorizedDiscovery() {
+        localNodeStopError = null
         (context.applicationContext as? SkyBridgeApplication)?.startLocalNodeDiscovery()
         viewModel.onEvent(DeviceDiscoveryEvent.StartDiscovery())
+    }
+
+    fun stopUnauthorizedDiscovery() {
+        val application = context.applicationContext as? SkyBridgeApplication
+        if (application != null) {
+            lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                try {
+                    application.stopLocalNodeDiscovery()
+                    localNodeStopError = null
+                } catch (error: Exception) {
+                    localNodeStopError = localNodeStopFailureMessage
+                }
+            }
+        }
+        viewModel.onEvent(DeviceDiscoveryEvent.StopDiscovery)
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -150,8 +176,7 @@ fun DeviceDiscoveryScreen(
         if (granted) {
             startAuthorizedDiscovery()
         } else {
-            (context.applicationContext as? SkyBridgeApplication)?.stopLocalNodeDiscovery()
-            viewModel.onEvent(DeviceDiscoveryEvent.StopDiscovery)
+            stopUnauthorizedDiscovery()
         }
     }
 
@@ -165,8 +190,7 @@ fun DeviceDiscoveryScreen(
             permissionWasDenied = false
             startAuthorizedDiscovery()
         } else {
-            (context.applicationContext as? SkyBridgeApplication)?.stopLocalNodeDiscovery()
-            viewModel.onEvent(DeviceDiscoveryEvent.StopDiscovery)
+            stopUnauthorizedDiscovery()
         }
     }
 
@@ -330,6 +354,22 @@ fun DeviceDiscoveryScreen(
                             }
                         },
                         onRefresh = { viewModel.onEvent(DeviceDiscoveryEvent.RefreshDevices) }
+                    )
+                }
+            }
+        }
+
+        localNodeStopError?.let { error ->
+            item {
+                LiquidGlassSurface(
+                    modifier = Modifier.fillMaxWidth(),
+                    tintColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.22f),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }

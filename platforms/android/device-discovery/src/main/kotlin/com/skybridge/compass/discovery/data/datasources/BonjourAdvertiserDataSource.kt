@@ -13,12 +13,14 @@ import com.skybridge.compass.discovery.data.codec.BonjourTxtRecordCodec
 import com.skybridge.compass.discovery.data.interop.AppleBonjourInterop
 import com.skybridge.compass.shared.platform.AndroidPlatformMetadata
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.lang.reflect.Method
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -48,12 +50,8 @@ class BonjourAdvertiserDataSource @Inject constructor(
     private companion object {
         private const val TAG = "BonjourAdvertiser"
         private const val NSD_REGISTRATION_TIMEOUT_MS = 10_000L
+        private const val NSD_UNREGISTRATION_TIMEOUT_MS = 10_000L
     }
-
-    private data class ActiveRegistration(
-        val serviceType: String,
-        val listener: NsdManager.RegistrationListener
-    )
 
     data class Advertisement(
         val deviceId: String,
@@ -86,8 +84,8 @@ class BonjourAdvertiserDataSource @Inject constructor(
     val advertisingStatus: StateFlow<BonjourAdvertisingStatus> = advertisingStatusState.asStateFlow()
 
     private val registrationLock = Any()
-    private val activeRegistrations = LinkedHashMap<String, ActiveRegistration>()
-    @Volatile private var multicastLock: WifiManager.MulticastLock? = null
+    private val registrationLeases = BonjourRegistrationLeaseRegistry<NsdManager.RegistrationListener>()
+    private var multicastLock: WifiManager.MulticastLock? = null
     private val setAttributeStringMethod: Method? by lazy(LazyThreadSafetyMode.PUBLICATION) {
         runCatching {
             NsdServiceInfo::class.java.getMethod(
@@ -150,21 +148,28 @@ class BonjourAdvertiserDataSource @Inject constructor(
             delayMs = delayMs
         )
         return registrar.register(serviceType = serviceType) {
+            // A previous timed-out callback can still own the exact lease. Every retry first
+            // completes that lease's stop transaction instead of creating a parallel registration.
+            stopAdvertising(serviceType)
             // Each attempt gets its own registration timeout; a timeout is surfaced as a transient
             // BonjourAdvertisingException so the retry policy (not structured cancellation) handles it.
-            acquireMulticastLockIfNeeded()
             try {
-                withTimeout(NSD_REGISTRATION_TIMEOUT_MS) {
+                withTimeoutOrNull(NSD_REGISTRATION_TIMEOUT_MS) {
                     registerService(serviceType = serviceType, serviceInfo = serviceInfo)
-                }
-            } catch (error: TimeoutCancellationException) {
-                stopAdvertising(serviceType)
-                throw BonjourAdvertisingException(
-                    "NSD registration timed out after ${NSD_REGISTRATION_TIMEOUT_MS}ms for $serviceType",
-                    error
+                } ?: throw BonjourAdvertisingException(
+                    "NSD registration timed out after ${NSD_REGISTRATION_TIMEOUT_MS}ms for $serviceType"
                 )
-            } catch (error: Throwable) {
-                stopAdvertising(serviceType)
+            } catch (error: CancellationException) {
+                withContext(NonCancellable) {
+                    runCatching { stopAdvertising(serviceType) }
+                        .exceptionOrNull()
+                        ?.let(error::addSuppressed)
+                }
+                throw error
+            } catch (error: Exception) {
+                runCatching { stopAdvertising(serviceType) }
+                    .exceptionOrNull()
+                    ?.let(error::addSuppressed)
                 throw error
             }
         }
@@ -176,6 +181,7 @@ class BonjourAdvertiserDataSource @Inject constructor(
     ): String =
         suspendCancellableCoroutine { cont ->
             val done = AtomicBoolean(false)
+            lateinit var registration: BonjourRegistrationLeaseRegistry.Lease<NsdManager.RegistrationListener>
 
             val listener = object : NsdManager.RegistrationListener {
                 override fun onRegistrationFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
@@ -184,11 +190,12 @@ class BonjourAdvertiserDataSource @Inject constructor(
                         "NSD registration failed serviceType=$serviceType " +
                             "serviceName=${serviceInfo?.serviceName ?: "unknown"} errorCode=$errorCode"
                     )
+                    val failure = IllegalStateException(
+                        "NSD registration failed (errorCode=$errorCode)"
+                    )
+                    retireRegistration(registration)?.let(failure::addSuppressed)
                     if (done.compareAndSet(false, true)) {
-                        clearRegistration(serviceType, this)
-                        cont.resumeWithException(
-                            IllegalStateException("NSD registration failed (errorCode=$errorCode)")
-                        )
+                        cont.resumeWithException(failure)
                     }
                 }
 
@@ -199,10 +206,14 @@ class BonjourAdvertiserDataSource @Inject constructor(
                             "serviceName=${serviceInfo?.serviceName ?: "unknown"} " +
                             "port=${serviceInfo?.port ?: 0}"
                     )
+                    val shouldUnregister = synchronized(registrationLock) {
+                        registrationLeases.markRegistered(registration)
+                    }
                     if (done.compareAndSet(false, true)) {
                         val name = serviceInfo?.serviceName ?: "unknown"
                         cont.resume(name)
                     }
+                    if (shouldUnregister) requestUnregisterExact(registration)
                 }
 
                 override fun onServiceUnregistered(serviceInfo: NsdServiceInfo?) {
@@ -211,7 +222,7 @@ class BonjourAdvertiserDataSource @Inject constructor(
                         "NSD service unregistered serviceType=$serviceType " +
                             "serviceName=${serviceInfo?.serviceName ?: "unknown"}"
                     )
-                    clearRegistration(serviceType, this)
+                    completeUnregistration(registration)
                 }
 
                 override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
@@ -220,15 +231,18 @@ class BonjourAdvertiserDataSource @Inject constructor(
                         "NSD unregistration failed serviceType=$serviceType " +
                             "serviceName=${serviceInfo?.serviceName ?: "unknown"} errorCode=$errorCode"
                     )
-                    clearRegistration(serviceType, this)
+                    failUnregistration(
+                        registration = registration,
+                        error = BonjourAdvertisingException(
+                            "NSD unregistration failed (errorCode=$errorCode) for $serviceType"
+                        )
+                    )
                 }
             }
 
             synchronized(registrationLock) {
-                activeRegistrations[serviceType] = ActiveRegistration(
-                    serviceType = serviceType,
-                    listener = listener
-                )
+                acquireMulticastLockLockedIfNeeded()
+                registration = registrationLeases.install(serviceType, listener)
             }
 
             val registrationResult = runCatching {
@@ -240,19 +254,22 @@ class BonjourAdvertiserDataSource @Inject constructor(
                 registerWithNsdManager(serviceInfo = serviceInfo, listener = listener)
             }
 
-            if (registrationResult.isFailure && done.compareAndSet(false, true)) {
-                clearRegistration(serviceType, listener)
-                cont.resumeWithException(
-                    registrationResult.exceptionOrNull()
-                        ?: IllegalStateException("NSD registration failed")
-                )
+            if (registrationResult.isFailure) {
+                val failure = registrationResult.exceptionOrNull()
+                    ?: IllegalStateException("NSD registration failed")
+                retireRegistration(registration)?.let(failure::addSuppressed)
+                if (done.compareAndSet(false, true)) {
+                    cont.resumeWithException(failure)
+                }
                 return@suspendCancellableCoroutine
             }
 
             cont.invokeOnCancellation {
-                if (done.compareAndSet(false, true)) {
-                    stopAdvertising(serviceType)
+                done.compareAndSet(false, true)
+                val claim = synchronized(registrationLock) {
+                    registrationLeases.claimStop(registration)
                 }
+                if (claim?.shouldUnregister == true) requestUnregisterExact(registration)
             }
         }
 
@@ -260,7 +277,6 @@ class BonjourAdvertiserDataSource @Inject constructor(
         serviceInfo: NsdServiceInfo,
         listener: NsdManager.RegistrationListener
     ) {
-        @Suppress("DEPRECATION")
         nsdManager.registerService(
             serviceInfo,
             NsdManager.PROTOCOL_DNS_SD,
@@ -269,36 +285,39 @@ class BonjourAdvertiserDataSource @Inject constructor(
         )
     }
 
-    fun stopAdvertising(serviceType: String) {
-        val listener = synchronized(registrationLock) {
-            activeRegistrations.remove(serviceType)?.listener
-        } ?: return
-
-        try {
-            @Suppress("DEPRECATION")
-            nsdManager.unregisterService(listener)
-        } catch (error: Throwable) {
-            Log.w(TAG, "Failed to unregister NSD serviceType=$serviceType", error)
+    suspend fun stopAdvertising(serviceType: String) {
+        val registration = synchronized(registrationLock) {
+            registrationLeases.current(serviceType)
         }
-        releaseMulticastLockIfIdle()
+        if (registration == null) {
+            releaseOrphanMulticastLockIfIdle()
+        } else {
+            unregisterAndAwait(registration)
+        }
     }
 
-    fun stopAdvertising() {
+    suspend fun stopAdvertising() {
         val registrations = synchronized(registrationLock) {
-            val current = activeRegistrations.values.toList()
-            activeRegistrations.clear()
-            current
+            registrationLeases.snapshot()
         }
-
+        var failure: Exception? = null
         registrations.forEach { registration ->
             try {
-                @Suppress("DEPRECATION")
-                nsdManager.unregisterService(registration.listener)
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to unregister NSD serviceType=${registration.serviceType}", error)
+                unregisterAndAwait(registration)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val firstFailure = failure
+                if (firstFailure == null) failure = error else firstFailure.addSuppressed(error)
             }
         }
-        releaseMulticastLock()
+        try {
+            releaseOrphanMulticastLockIfIdle()
+        } catch (error: Exception) {
+            val firstFailure = failure
+            if (firstFailure == null) failure = error else firstFailure.addSuppressed(error)
+        }
+        failure?.let { throw it }
         advertisingStatusState.value = BonjourAdvertisingStatus.Idle
     }
 
@@ -425,59 +444,121 @@ class BonjourAdvertiserDataSource @Inject constructor(
         return sb.toString().trim('-').ifBlank { "skybridge" }.take(63)
     }
 
-    private fun clearRegistration(
-        serviceType: String,
-        listener: NsdManager.RegistrationListener
+    private suspend fun unregisterAndAwait(
+        registration: BonjourRegistrationLeaseRegistry.Lease<NsdManager.RegistrationListener>
     ) {
-        synchronized(registrationLock) {
-            val active = activeRegistrations[serviceType] ?: return
-            if (active.listener === listener) {
-                activeRegistrations.remove(serviceType)
+        val claim = synchronized(registrationLock) {
+            registrationLeases.claimStop(registration)
+        }
+            ?: return
+        if (claim.shouldUnregister) requestUnregisterExact(registration)
+        val completed = withTimeoutOrNull(NSD_UNREGISTRATION_TIMEOUT_MS) {
+            claim.attempt.await()
+            true
+        } ?: false
+        if (!completed) {
+            // The callback carries only the listener, not a per-request ID. Keep the exact
+            // UNREGISTERING lease and waiter alive: later callers reuse it without issuing a
+            // duplicate unregister that a late callback could accidentally complete.
+            throw BonjourAdvertisingException(
+                "NSD unregistration timed out after ${NSD_UNREGISTRATION_TIMEOUT_MS}ms " +
+                    "for ${registration.serviceType}"
+            )
+        }
+    }
+
+    private fun requestUnregisterExact(
+        registration: BonjourRegistrationLeaseRegistry.Lease<NsdManager.RegistrationListener>
+    ) {
+        try {
+            nsdManager.unregisterService(registration.resource)
+        } catch (error: Exception) {
+            failUnregistration(
+                registration,
+                BonjourAdvertisingException(
+                    "Failed to unregister NSD serviceType=${registration.serviceType}",
+                    error
+                )
+            )
+        }
+    }
+
+    private fun completeUnregistration(
+        registration: BonjourRegistrationLeaseRegistry.Lease<NsdManager.RegistrationListener>
+    ) {
+        val (retired, cleanupError) = synchronized(registrationLock) {
+            val exact = registrationLeases.completeStop(registration) ?: return
+            exact to runCatching { releaseMulticastLockLockedIfIdle() }.exceptionOrNull()
+        }
+        if (cleanupError == null) {
+            retired.attempt?.complete(Unit)
+        } else {
+            retired.attempt?.completeExceptionally(cleanupError)
+            Log.e(TAG, "Failed to release multicast lock after NSD unregistration", cleanupError)
+        }
+    }
+
+    private fun failUnregistration(
+        registration: BonjourRegistrationLeaseRegistry.Lease<NsdManager.RegistrationListener>,
+        error: Throwable
+    ) {
+        val attempt = synchronized(registrationLock) {
+            if (!registrationLeases.isCurrent(registration)) return
+            registrationLeases.failStop(registration)
+        }
+        attempt?.completeExceptionally(error)
+    }
+
+    private fun retireRegistration(
+        registration: BonjourRegistrationLeaseRegistry.Lease<NsdManager.RegistrationListener>
+    ): Throwable? {
+        val (retired, cleanupError) = synchronized(registrationLock) {
+            val exact = registrationLeases.retireIfCurrent(registration) ?: return null
+            exact to runCatching { releaseMulticastLockLockedIfIdle() }.exceptionOrNull()
+        }
+        val terminalError = BonjourAdvertisingException(
+            "NSD registration ended before unregistration completed for ${registration.serviceType}"
+        )
+        cleanupError?.let(terminalError::addSuppressed)
+        retired.attempt?.completeExceptionally(terminalError)
+        return cleanupError
+    }
+
+    private fun acquireMulticastLockLockedIfNeeded() {
+        multicastLock?.let { existing ->
+            if (existing.isHeld) return
+            try {
+                existing.acquire()
+                return
+            } catch (error: Exception) {
+                throw BonjourAdvertisingException("Failed to reacquire Wi-Fi multicast lock", error)
             }
         }
-        releaseMulticastLockIfIdle()
-    }
-
-    private fun acquireMulticastLockIfNeeded() {
-        val shouldAcquire = synchronized(registrationLock) {
-            activeRegistrations.isEmpty()
-        }
-        if (shouldAcquire) {
-            acquireMulticastLock()
-        }
-    }
-
-    private fun acquireMulticastLock() {
-        if (multicastLock != null) return
         val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
         multicastLock = wifi.createMulticastLock("skybridge-mdns-advertise").apply {
             setReferenceCounted(false)
             try {
                 acquire()
-            } catch (error: Throwable) {
+            } catch (error: Exception) {
                 multicastLock = null
                 throw BonjourAdvertisingException("Failed to acquire Wi-Fi multicast lock", error)
             }
         }
     }
 
-    private fun releaseMulticastLockIfIdle() {
-        val shouldRelease = synchronized(registrationLock) {
-            activeRegistrations.isEmpty()
-        }
-        if (shouldRelease) {
-            releaseMulticastLock()
+    private fun releaseMulticastLockLockedIfIdle() {
+        if (registrationLeases.hasActiveLeases()) return
+        val lock = multicastLock ?: return
+        try {
+            if (lock.isHeld) lock.release()
+            multicastLock = null
+        } catch (error: Exception) {
+            throw BonjourAdvertisingException("Failed to release Wi-Fi multicast lock", error)
         }
     }
 
-    private fun releaseMulticastLock() {
-        val lock = multicastLock ?: return
-        multicastLock = null
-        try {
-            if (lock.isHeld) lock.release()
-        } catch (error: Throwable) {
-            Log.w(TAG, "Failed to release Wi-Fi multicast lock", error)
-        }
+    private fun releaseOrphanMulticastLockIfIdle() {
+        synchronized(registrationLock) { releaseMulticastLockLockedIfIdle() }
     }
 }
 

@@ -25,6 +25,8 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.skybridge.compass.core.data.RuntimeNetworkParametersSource
 import com.skybridge.compass.core.network.DisconnectCause
 import com.skybridge.compass.core.network.ReconnectAttemptResult
@@ -37,6 +39,7 @@ import kotlinx.coroutines.delay
 import com.skybridge.compass.discovery.data.services.DiscoveryWindow.withDiscoveryWindow
 import com.skybridge.compass.discovery.data.interop.AppleBonjourPeerRoutes
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 设备发现仓库实现
@@ -63,7 +66,10 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
     private val _connectionStates = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     private val deviceIdToEndpointId: MutableMap<String, String> = mutableMapOf()
     private val endpointIdToDeviceId: MutableMap<String, String> = mutableMapOf()
-    private val tcpSessionsByDeviceId: MutableMap<String, TcpControlSession> = ConcurrentHashMap()
+    private val tcpSessionsByDeviceId = TcpSessionOwnerRegistry<String, TcpControlSession>(
+        maxOwners = MAX_TCP_SESSION_OWNERS,
+        closeOwner = TcpControlSession::close
+    )
 
     private var isDiscovering = false
 
@@ -193,12 +199,14 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
     private suspend fun connectViaTcp(deviceId: String, address: String, port: Int): Boolean {
         return withContext(Dispatchers.IO) {
             // Real Pro-release compatible control channel (length framing + handshake + AES-GCM app frames).
-            val session = tcpControlClient.connect(
-                host = address,
-                port = port,
-                peerDeviceIdHint = deviceId
-            )
-            tcpSessionsByDeviceId[deviceId] = session
+            tcpSessionsByDeviceId.replace(deviceId) { onClosed ->
+                tcpControlClient.connect(
+                    host = address,
+                    port = port,
+                    peerDeviceIdHint = deviceId,
+                    onClosed = onClosed
+                )
+            }
             true
         }
     }
@@ -247,7 +255,7 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
     private suspend fun performDisconnection(deviceId: String) {
         // 实现断开连接逻辑
         // 根据设备ID找到对应的连接并关闭
-        tcpSessionsByDeviceId.remove(deviceId)?.close()
+        tcpSessionsByDeviceId.disconnect(deviceId)
         deviceIdToEndpointId[deviceId]?.let { endpointId ->
             nearbyManager.disconnect(endpointId)
             endpointIdToDeviceId.remove(endpointId)
@@ -397,5 +405,92 @@ class DeviceDiscoveryRepositoryImpl @Inject constructor(private val unifiedDisco
          * 失败——后者由 [DisconnectCause.TERMINAL] 表达，不进入重连循环。
          */
         private const val FAILURE_CONNECT_REJECTED = "CONNECT_REJECTED"
+        private const val MAX_TCP_SESSION_OWNERS = 64
+    }
+}
+
+internal class TcpSessionOwnerRegistry<K : Any, V : Any>(
+    private val maxOwners: Int,
+    stripeCount: Int = 16,
+    closeOwner: (V) -> Unit
+) {
+    private val owners = ConcurrentHashMap<K, V>()
+    private val ownerCount = AtomicInteger()
+    private val stripes: Array<Mutex>
+    private val closeOwner: (V) -> Unit = closeOwner
+
+    init {
+        require(maxOwners > 0) { "TCP session owner capacity must be positive" }
+        require(stripeCount > 0) { "TCP session owner stripe count must be positive" }
+        stripes = Array(stripeCount) { Mutex() }
+    }
+
+    suspend fun replace(
+        key: K,
+        createOwner: suspend (onClosed: (V) -> Unit) -> V
+    ): V = withKeyLock(key) {
+        val predecessor = owners[key]
+        if (predecessor != null) {
+            closeOwner(predecessor)
+            retire(key, predecessor)
+        }
+        reserveSlot()
+
+        var installed = false
+        val publicationLock = Any()
+        var closedBeforeInstall = false
+        try {
+            val successor = createOwner { closedOwner ->
+                val retireInstalledOwner = synchronized(publicationLock) {
+                    if (installed) {
+                        true
+                    } else {
+                        closedBeforeInstall = true
+                        false
+                    }
+                }
+                if (retireInstalledOwner) retire(key, closedOwner)
+            }
+            synchronized(publicationLock) {
+                check(!closedBeforeInstall) {
+                    "TCP session closed before exact ownership publication"
+                }
+                check(owners.putIfAbsent(key, successor) == null) {
+                    "TCP session successor ownership changed inside its serialized slot"
+                }
+                installed = true
+            }
+            return@withKeyLock successor
+        } finally {
+            if (!installed) ownerCount.decrementAndGet()
+        }
+    }
+
+    suspend fun disconnect(key: K) = withKeyLock(key) {
+        val owner = owners[key] ?: return@withKeyLock
+        closeOwner(owner)
+        retire(key, owner)
+    }
+
+    internal fun retire(key: K, owner: V): Boolean {
+        if (!owners.remove(key, owner)) return false
+        ownerCount.decrementAndGet()
+        return true
+    }
+
+    internal fun owner(key: K): V? = owners[key]
+    internal fun size(): Int = ownerCount.get()
+
+    private fun reserveSlot() {
+        val reserved = ownerCount.incrementAndGet()
+        if (reserved > maxOwners) {
+            ownerCount.decrementAndGet()
+            error("TCP session owner capacity of $maxOwners is exhausted")
+        }
+    }
+
+    private suspend fun <T> withKeyLock(key: K, action: suspend () -> T): T {
+        val stripeIndex = Math.floorMod(key.hashCode(), stripes.size)
+        return stripes[stripeIndex].withLock { action() }
     }
 }

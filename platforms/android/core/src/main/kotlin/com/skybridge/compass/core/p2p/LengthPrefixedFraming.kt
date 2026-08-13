@@ -18,18 +18,27 @@ object LengthPrefixedFraming {
     }
 
     fun readFrame(input: InputStream, maxFrameSize: Int): ByteArray {
-        val header = readExactly(input, 4)
+        return readFrame(input, maxFrameSize, beforeRead = {})
+    }
+
+    internal fun readFrame(
+        input: InputStream,
+        maxFrameSize: Int,
+        beforeRead: () -> Unit
+    ): ByteArray {
+        val header = readExactly(input, 4, beforeRead)
         val len = ByteBuffer.wrap(header).order(ByteOrder.BIG_ENDIAN).int
         if (len <= 0 || len > maxFrameSize) {
             throw IllegalStateException("Invalid frame length: $len")
         }
-        return readExactly(input, len)
+        return readExactly(input, len, beforeRead)
     }
 
-    private fun readExactly(input: InputStream, len: Int): ByteArray {
+    private fun readExactly(input: InputStream, len: Int, beforeRead: () -> Unit): ByteArray {
         val buf = ByteArray(len)
         var off = 0
         while (off < len) {
+            beforeRead()
             val n = input.read(buf, off, len - off)
             if (n < 0) throw EOFException("EOF")
             off += n
@@ -37,4 +46,3 @@ object LengthPrefixedFraming {
         return buf
     }
 }
-

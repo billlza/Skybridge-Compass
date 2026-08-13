@@ -10,21 +10,27 @@ import com.skybridge.compass.shared.p2p.P2PSoa
 import com.skybridge.compass.shared.p2p.QPeriaptPlatformPolicy
 import com.skybridge.compass.shared.p2p.TrafficPaddingP2
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 sealed class TcpControlEvent {
     data class HandshakeEstablished(
@@ -53,7 +59,9 @@ class TcpControlSession internal constructor(
     private val peerKemStore: PeerKemKeyStore,
     private val peerIdHint: String?,
     private val handshakePolicyOverride: P2PHandshakePolicyOverride? = null,
-    private val role: Role
+    private val role: Role,
+    private val handshakeDeadlineMillis: Long = DEFAULT_HANDSHAKE_DEADLINE_MILLIS,
+    private val nanoTime: () -> Long = System::nanoTime
 ) {
     enum class Role { INITIATOR, RESPONDER }
 
@@ -68,6 +76,10 @@ class TcpControlSession internal constructor(
 
     private val codec = AppMessageCodec()
     private val secureRandom = SecureRandom()
+    private val initialHandshakeDeadlineNanos = TcpHandshakeDeadline.deadlineNanos(
+        startNanos = nanoTime(),
+        timeoutMillis = handshakeDeadlineMillis
+    )
 
     @Volatile private var sessionKeys: P2PHandshakeWire.DerivedSessionKeys? = null
     @Volatile private var negotiatedSuiteWireId: Int = 0
@@ -76,35 +88,71 @@ class TcpControlSession internal constructor(
     private val authenticatedPairingAttemptGate = AuthenticatedPairingAttemptGate()
 
     private val running = AtomicBoolean(false)
+    private val closeState = TcpControlSessionCloseState()
+    private val ownerCloseCallback = TcpControlSessionOwnerCloseCallback(this)
     private val pairingExchangeSent = AtomicBoolean(false)
 
     private var readJob: Job? = null
 
+    internal fun setOnClosed(callback: (TcpControlSession) -> Unit) {
+        ownerCloseCallback.register(callback)
+    }
+
     fun start() {
-        if (!running.compareAndSet(false, true)) return
-        readJob = scope.launch {
-            try {
-                when (role) {
-                    Role.INITIATOR -> performHandshakeAsInitiator()
-                    Role.RESPONDER -> performHandshakeAsResponder()
+        closeState.runIfOpen {
+            if (!running.compareAndSet(false, true)) return@runIfOpen
+            readJob = scope.launch {
+                try {
+                    when (role) {
+                        Role.INITIATOR -> performHandshakeAsInitiator()
+                        Role.RESPONDER -> performHandshakeAsResponder()
+                    }
+                    startReceiveLoop()
+                } catch (cancellation: CancellationException) {
+                    try {
+                        close()
+                    } catch (closeFailure: Exception) {
+                        cancellation.addSuppressed(closeFailure)
+                    }
+                    throw cancellation
+                } catch (_: Exception) {
+                    _events.emit(
+                        TcpControlEvent.Failed(
+                            currentPeerId(),
+                            "TCP session terminated due to a protocol or transport error"
+                        )
+                    )
+                    try {
+                        close()
+                    } catch (_: Exception) {
+                        withContext(NonCancellable) {
+                            _events.emit(
+                                TcpControlEvent.Failed(
+                                    currentPeerId(),
+                                    "TCP session cleanup failed after termination"
+                                )
+                            )
+                        }
+                    }
                 }
-                startReceiveLoop()
-            } catch (t: Throwable) {
-                _events.tryEmit(TcpControlEvent.Failed(currentPeerId(), t.message ?: "tcp session failed"))
-                close()
             }
         }
     }
 
-    fun close() {
-        running.set(false)
-        authenticatedPairingAttemptGate.clear()
-        runCatching { readJob?.cancel() }
-        soaPairKey?.let { SoaPeerSessionArbiter.shared.clearEstablished(it) }
-        soaPairKey = null
-        runCatching { socket.close() }
-        _events.tryEmit(TcpControlEvent.Disconnected(currentPeerId()))
-    }
+    fun close() = closeState.close(
+        prepare = {
+            running.set(false)
+            authenticatedPairingAttemptGate.clear()
+            readJob?.cancel()
+            soaPairKey?.let { SoaPeerSessionArbiter.shared.clearEstablished(it) }
+            soaPairKey = null
+        },
+        closeSocket = socket::close,
+        notifyClosed = {
+            _events.tryEmit(TcpControlEvent.Disconnected(currentPeerId()))
+            ownerCloseCallback.notifyClosed()
+        }
+    )
 
     suspend fun sendAppMessage(message: AppMessage) {
         val keys = requireNotNull(sessionKeys) { "session not authenticated" }
@@ -176,7 +224,7 @@ class TcpControlSession internal constructor(
                     attemptId = attemptId,
                     startedAtNs = System.nanoTime()
                 ) { _, _ ->
-                    runCatching { socket.close() }
+                    close()
                 }
             )
             when (decision) {
@@ -214,7 +262,7 @@ class TcpControlSession internal constructor(
             var rawMessageB: ByteArray? = null
             var rawFinishedFromResponder: ByteArray? = null
             while (rawMessageB == null || rawFinishedFromResponder == null) {
-                val frame = readFrame()
+                val frame = readHandshakeFrame(initialHandshakeDeadlineNanos)
                 val traffic = TrafficPaddingP2.unwrapIfNeeded(frame, label = "rx")
                 val handshake = HandshakePaddingP1.unwrapIfNeeded(traffic)
                 if (isLikelyFinished(handshake)) {
@@ -239,16 +287,15 @@ class TcpControlSession internal constructor(
 
             sendMutex.withLock { LengthPrefixedFraming.writeFrame(output, result.clientFinishedToSend) }
 
-            onHandshakeEstablished(
+            val committed = onHandshakeEstablished(
                 peerId = peerId,
                 suiteWireId = result.negotiatedSuite.wireId.toInt(),
                 keys = result.sessionKeys,
-                remoteProtocolIdentityFingerprint = result.remoteProtocolIdentityFingerprint
+                remoteProtocolIdentityFingerprint = result.remoteProtocolIdentityFingerprint,
+                establishedPairKey = outgoingPairKey,
+                handshakeDeadlineNanos = initialHandshakeDeadlineNanos
             )
-            outgoingPairKey?.let {
-                arbiter.markEstablished(it)
-                soaPairKey = it
-            }
+            if (!committed) return
 
             // Best-effort: proactively send pairingIdentityExchange (helps strict PQC bootstrap).
             sendPairingIdentityExchangeIfNeeded(force = false)
@@ -264,7 +311,7 @@ class TcpControlSession internal constructor(
 
     private suspend fun performHandshakeAsResponder() {
         val server = P2PHandshakeServer()
-        val msgAFrame = readFrame()
+        val msgAFrame = readHandshakeFrame(initialHandshakeDeadlineNanos)
         val msgA = HandshakePaddingP1.unwrapIfNeeded(TrafficPaddingP2.unwrapIfNeeded(msgAFrame, label = "rx"))
 
         val arbiter = SoaPeerSessionArbiter.shared
@@ -281,7 +328,6 @@ class TcpControlSession internal constructor(
 
         val resolvedPeer = resolveInboundPeerIdentity(decodedMsgA)
         val peerId = resolvedPeer.peerId
-        authenticatedPeerId = peerId
 
         val localPeerId = P2PSoa.canonicalPeerIdBytes(localIdentity.deviceId())
         val pairKey = P2PSoa.pairKey(localPeerId, resolvedPeer.remoteSoaPeerId)
@@ -353,30 +399,39 @@ class TcpControlSession internal constructor(
         }
 
         // Await client Finished.
-        val finFrame = readFrame()
+        val finFrame = readHandshakeFrame(initialHandshakeDeadlineNanos)
         val fin = HandshakePaddingP1.unwrapIfNeeded(TrafficPaddingP2.unwrapIfNeeded(finFrame, label = "rx"))
         require(server.verifyClientFinished(fin, resp.state.sessionKeys)) { "Client Finished MAC invalid" }
 
-        arbiter.markEstablished(incomingPairKey)
-        soaPairKey = incomingPairKey
-        onHandshakeEstablished(
+        val committed = onHandshakeEstablished(
             peerId = peerId,
             suiteWireId = P2PHandshakeWire.decodeMessageB(
                 HandshakePaddingP1.unwrapIfNeeded(resp.messageBToSend)
             ).selectedSuite.wireId.toInt(),
             keys = resp.state.sessionKeys,
-            remoteProtocolIdentityFingerprint = resp.state.remoteProtocolIdentityFingerprint
+            remoteProtocolIdentityFingerprint = resp.state.remoteProtocolIdentityFingerprint,
+            establishedPairKey = incomingPairKey,
+            handshakeDeadlineNanos = initialHandshakeDeadlineNanos
         )
+        if (!committed) return
         sendPairingIdentityExchangeIfNeeded(force = false)
     }
 
-    private suspend fun onHandshakeEstablished(
+    private fun onHandshakeEstablished(
         peerId: String?,
         suiteWireId: Int,
         keys: P2PHandshakeWire.DerivedSessionKeys,
-        remoteProtocolIdentityFingerprint: String
-    ) {
-        if (authenticatedPairingAttemptGate.establishIfActive(
+        remoteProtocolIdentityFingerprint: String,
+        establishedPairKey: ByteArray?,
+        handshakeDeadlineNanos: Long
+    ): Boolean {
+        val committed = closeState.commitIfOpen {
+            TcpHandshakeDeadline.remainingTimeoutMillis(
+                deadlineNanos = handshakeDeadlineNanos,
+                nowNanos = nanoTime()
+            )
+            socket.soTimeout = 0
+            authenticatedPairingAttemptGate.establishIfActive(
                 observedProtocolFingerprint = remoteProtocolIdentityFingerprint,
                 isActive = running::get,
                 onEstablished = {
@@ -386,12 +441,33 @@ class TcpControlSession internal constructor(
                     sessionKeys = keys
                     negotiatedSuiteWireId = suiteWireId
                 }
-            ) == null
-        ) {
-            return
+            ) ?: return@commitIfOpen false
+            establishedPairKey?.let {
+                SoaPeerSessionArbiter.shared.markEstablished(it)
+                soaPairKey = it
+            }
+            _events.tryEmit(
+                TcpControlEvent.HandshakeEstablished(
+                    negotiatedSuiteWireId = suiteWireId,
+                    peerId = peerId
+                )
+            )
+            true
         }
-        _events.tryEmit(TcpControlEvent.HandshakeEstablished(negotiatedSuiteWireId = suiteWireId, peerId = peerId))
+        return committed == true
     }
+
+    private fun readHandshakeFrame(deadlineNanos: Long): ByteArray =
+        LengthPrefixedFraming.readFrame(
+            input = input,
+            maxFrameSize = P2PHandshakeWire.MAX_HANDSHAKE_FRAME_BYTES,
+            beforeRead = {
+                socket.soTimeout = TcpHandshakeDeadline.remainingTimeoutMillis(
+                    deadlineNanos = deadlineNanos,
+                    nowNanos = nanoTime()
+                )
+            }
+        )
 
     private fun readFrame(): ByteArray {
         // macOS uses maxFrameBytes; keep a conservative limit here.
@@ -402,7 +478,7 @@ class TcpControlSession internal constructor(
         while (running.get()) {
             val frame = try {
                 readFrame()
-            } catch (t: Throwable) {
+            } catch (_: Exception) {
                 break
             }
             val traffic = TrafficPaddingP2.unwrapIfNeeded(frame, label = "rx")
@@ -410,13 +486,28 @@ class TcpControlSession internal constructor(
 
             // Rekey support: allow receiving a new MessageA while already established (macOS strict PQC bootstrap).
             if (isLikelyMessageA(unpadded)) {
-                runCatching { performRekeyAsResponder(rawMessageA = unpadded) }
-                    .onFailure { _events.tryEmit(TcpControlEvent.Failed(currentPeerId(), it.message ?: "rekey failed")) }
+                try {
+                    performRekeyAsResponder(rawMessageA = unpadded)
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    _events.tryEmit(
+                        TcpControlEvent.Failed(currentPeerId(), "authenticated session rekey failed")
+                    )
+                    break
+                }
                 continue
             }
 
             val keys = sessionKeys ?: continue
-            val plaintext = runCatching { AesGcmCombined.decrypt(keys.receiveKey, unpadded) }.getOrNull() ?: continue
+            val plaintext = try {
+                AesGcmCombined.decrypt(keys.receiveKey, unpadded)
+            } catch (_: Exception) {
+                _events.tryEmit(
+                    TcpControlEvent.Failed(currentPeerId(), "authenticated frame validation failed")
+                )
+                break
+            }
 
             val env = BusinessEnvelope.decode(plaintext)
             if (env != null && env.kind == BusinessEnvelope.KIND_REMOTE_DESKTOP_FRAME) {
@@ -447,7 +538,7 @@ class TcpControlSession internal constructor(
                     _events.tryEmit(
                         TcpControlEvent.Failed(
                             peerId = currentPeerId(),
-                            error = "unsupported authenticated app-control message: ${decoded.type}"
+                            error = "unsupported authenticated app-control message"
                         )
                     )
                     break
@@ -466,6 +557,10 @@ class TcpControlSession internal constructor(
     }
 
     private suspend fun performRekeyAsResponder(rawMessageA: ByteArray) {
+        val rekeyDeadlineNanos = TcpHandshakeDeadline.deadlineNanos(
+            startNanos = nanoTime(),
+            timeoutMillis = handshakeDeadlineMillis
+        )
         val decodedMsgA = P2PHandshakeWire.decodeMessageA(rawMessageA)
         val okSigA = P2PHandshakeWire.verifyMessageASignature(decodedMsgA, rawMessageAWithoutPadding = rawMessageA)
         require(okSigA) { "MessageA signature invalid (rekey)" }
@@ -517,7 +612,7 @@ class TcpControlSession internal constructor(
         }
 
         // Await client Finished.
-        val finFrame = readFrame()
+        val finFrame = readHandshakeFrame(rekeyDeadlineNanos)
         val fin = HandshakePaddingP1.unwrapIfNeeded(TrafficPaddingP2.unwrapIfNeeded(finFrame, label = "rx"))
         require(server.verifyClientFinished(fin, resp.state.sessionKeys)) { "Client Finished MAC invalid (rekey)" }
 
@@ -526,12 +621,14 @@ class TcpControlSession internal constructor(
             .selectedSuite
             .wireId
             .toInt()
-        onHandshakeEstablished(
+        check(onHandshakeEstablished(
             peerId = peerId,
             suiteWireId = suite,
             keys = resp.state.sessionKeys,
-            remoteProtocolIdentityFingerprint = resp.state.remoteProtocolIdentityFingerprint
-        )
+            remoteProtocolIdentityFingerprint = resp.state.remoteProtocolIdentityFingerprint,
+            establishedPairKey = null,
+            handshakeDeadlineNanos = rekeyDeadlineNanos
+        )) { "rekey completed after session close" }
     }
 
     private suspend fun handlePairingIdentityExchange(payload: AppMessage.PairingIdentityExchangePayload) {
@@ -638,14 +735,27 @@ class TcpControlSession internal constructor(
 
     private fun isLikelyFinished(data: ByteArray): Boolean {
         if (data.size != 38) return false
-        return runCatching { P2PHandshakeWire.decodeFinished(data) }.isSuccess
+        return try {
+            P2PHandshakeWire.decodeFinished(data)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
-    private fun isLikelyMessageA(data: ByteArray): Boolean =
-        runCatching { P2PHandshakeWire.decodeMessageA(data) }.isSuccess
+    private fun isLikelyMessageA(data: ByteArray): Boolean = try {
+        P2PHandshakeWire.decodeMessageA(data)
+        true
+    } catch (_: Exception) {
+        false
+    }
 
-    private fun isLikelyMessageB(data: ByteArray): Boolean =
-        runCatching { P2PHandshakeWire.decodeMessageB(data) }.isSuccess
+    private fun isLikelyMessageB(data: ByteArray): Boolean = try {
+        P2PHandshakeWire.decodeMessageB(data)
+        true
+    } catch (_: Exception) {
+        false
+    }
 
     private fun effectivePolicyOverride(): P2PHandshakePolicyOverride {
         return handshakePolicyOverride ?: localIdentity.defaultHandshakePolicyOverride()
@@ -660,7 +770,147 @@ class TcpControlSession internal constructor(
         ).resolve(messageA)
 
     companion object {
+        private const val DEFAULT_HANDSHAKE_DEADLINE_MILLIS = 30_000L
         private val UUID_REGEX =
             Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+    }
+}
+
+internal object TcpHandshakeDeadline {
+    private const val NANOS_PER_MILLISECOND = 1_000_000L
+
+    fun deadlineNanos(startNanos: Long, timeoutMillis: Long): Long {
+        require(timeoutMillis > 0) { "TCP handshake deadline must be positive" }
+        require(timeoutMillis <= Long.MAX_VALUE / NANOS_PER_MILLISECOND) {
+            "TCP handshake deadline is too large"
+        }
+        val durationNanos = timeoutMillis * NANOS_PER_MILLISECOND
+        require(durationNanos < Long.MAX_VALUE / 2) { "TCP handshake deadline is too large" }
+        return startNanos + durationNanos
+    }
+
+    fun remainingTimeoutMillis(deadlineNanos: Long, nowNanos: Long): Int {
+        val remainingNanos = deadlineNanos - nowNanos
+        if (remainingNanos <= 0L) {
+            throw SocketTimeoutException("TCP handshake deadline exceeded")
+        }
+        val roundedUpMillis = (remainingNanos - 1L) / NANOS_PER_MILLISECOND + 1L
+        return roundedUpMillis.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+}
+
+/**
+ * Coordinates the three distinct phases of session shutdown.
+ *
+ * A requested close permanently prevents a later [TcpControlSession.start], but a failed socket
+ * close does not pretend that shutdown completed. The same session owner can therefore retry the
+ * exact resource without repeating already-completed preparation or notification phases.
+ */
+internal class TcpControlSessionCloseState {
+    private val lock = ReentrantLock()
+    private val closeCompleted = lock.newCondition()
+    private var closeRequested = false
+    private var closeInProgress = false
+    private var prepared = false
+    private var socketClosed = false
+    private var notified = false
+
+    val canStart: Boolean
+        get() = lock.withLock { !closeRequested }
+
+    fun runIfOpen(action: () -> Unit): Boolean = lock.withLock {
+        if (closeRequested) return false
+        action()
+        true
+    }
+
+    fun <T> commitIfOpen(action: () -> T): T? = lock.withLock {
+        if (closeRequested) return null
+        action()
+    }
+
+    fun close(
+        prepare: () -> Unit,
+        closeSocket: () -> Unit,
+        notifyClosed: () -> Unit
+    ) {
+        lock.withLock {
+            closeRequested = true
+            while (closeInProgress) closeCompleted.await()
+            if (notified) return
+            closeInProgress = true
+        }
+
+        try {
+            if (lock.withLock { !prepared }) {
+                prepare()
+                lock.withLock { prepared = true }
+            }
+            if (lock.withLock { !socketClosed }) {
+                closeSocket()
+                lock.withLock { socketClosed = true }
+            }
+            if (lock.withLock { !notified }) {
+                notifyClosed()
+                lock.withLock { notified = true }
+            }
+        } finally {
+            lock.withLock {
+                closeInProgress = false
+                closeCompleted.signalAll()
+            }
+        }
+    }
+}
+
+internal class TcpControlSessionOwnerCloseCallback<T : Any>(
+    private val owner: T
+) {
+    private val lock = Any()
+    private var callback: ((T) -> Unit)? = null
+    private var closed = false
+    private var callbackRunning = false
+    private var callbackCompleted = false
+
+    fun register(value: (T) -> Unit) {
+        val claimed = synchronized(lock) {
+            check(callback == null && !callbackCompleted) {
+                "TCP session close ownership callback is already registered"
+            }
+            callback = value
+            claimLocked()
+        }
+        claimed?.let(::runClaimed)
+    }
+
+    fun notifyClosed() {
+        val claimed = synchronized(lock) {
+            closed = true
+            claimLocked()
+        }
+        claimed?.let(::runClaimed)
+    }
+
+    private fun claimLocked(): ((T) -> Unit)? {
+        val value = callback
+        if (!closed || value == null || callbackRunning || callbackCompleted) return null
+        callbackRunning = true
+        return value
+    }
+
+    private fun runClaimed(value: (T) -> Unit) {
+        var completed = false
+        try {
+            value(owner)
+            completed = true
+        } finally {
+            synchronized(lock) {
+                callbackRunning = false
+                if (completed && callback === value) {
+                    callbackCompleted = true
+                    callback = null
+                }
+            }
+        }
     }
 }
