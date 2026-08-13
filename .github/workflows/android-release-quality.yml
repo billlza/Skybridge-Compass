@@ -207,11 +207,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild -version
-          swift --version
+          xcode_version="$(xcodebuild -version)"
+          swift_version="$(swift --version)"
+          printf '%s\n' "$xcode_version"
+          printf '%s\n' "$swift_version"
           [[ "$(sw_vers -productVersion)" == 26.* ]]
-          xcodebuild -version | grep -Eq '^Xcode 26\.'
-          swift --version | grep -Eq 'Swift version 6\.3([ .]|$)'
+          grep -Eq '^Xcode 26\.' <<<"$xcode_version"
+          grep -Eq 'Swift version 6\.3([ .]|$)' <<<"$swift_version"
 
       - name: Build and test formal macOS interoperability
         shell: bash

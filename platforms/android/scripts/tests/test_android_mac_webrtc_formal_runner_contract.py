@@ -11,9 +11,11 @@ from pathlib import Path
 
 
 ANDROID_ROOT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = ANDROID_ROOT.parents[1]
 RUNNER_PATH = ANDROID_ROOT / "scripts/run_android_mac_webrtc_formal_smoke.sh"
 VALIDATOR_PATH = ANDROID_ROOT / "scripts/validate_android_mac_webrtc_formal_evidence.py"
 GRADLE_PATH = ANDROID_ROOT / "app/build.gradle.kts"
+WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/android-release-quality.yml"
 OFFERER_PATH = (
     ANDROID_ROOT
     / "app/src/androidTest/kotlin/com/skybridge/compass/android/webrtc/AppleReleaseInteropOffererAppInstrumentationTest.kt"
@@ -21,6 +23,7 @@ OFFERER_PATH = (
 RUNNER = RUNNER_PATH.read_text(encoding="utf-8")
 VALIDATOR = VALIDATOR_PATH.read_text(encoding="utf-8")
 GRADLE = GRADLE_PATH.read_text(encoding="utf-8")
+WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8")
 
 
 def bash_function(name: str) -> str:
@@ -30,6 +33,17 @@ def bash_function(name: str) -> str:
 
 
 class MacFormalRunnerContractTests(unittest.TestCase):
+    def test_apple_toolchain_probe_captures_complete_version_output(self) -> None:
+        self.assertIn('xcode_version="$(xcodebuild -version)"', WORKFLOW)
+        self.assertIn('swift_version="$(swift --version)"', WORKFLOW)
+        self.assertIn('grep -Eq \'^Xcode 26\\.\' <<<"$xcode_version"', WORKFLOW)
+        self.assertIn(
+            'grep -Eq \'Swift version 6\\.3([ .]|$)\' <<<"$swift_version"',
+            WORKFLOW,
+        )
+        self.assertNotIn("xcodebuild -version |", WORKFLOW)
+        self.assertNotIn("swift --version |", WORKFLOW)
+
     def test_help_is_side_effect_free_and_documents_formal_boundary(self) -> None:
         result = subprocess.run(
             ["bash", str(RUNNER_PATH), "--help"],
