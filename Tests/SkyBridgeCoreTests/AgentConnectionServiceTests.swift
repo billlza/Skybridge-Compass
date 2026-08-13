@@ -2,6 +2,38 @@ import Testing
 import Foundation
 @testable import SkyBridgeCore
 
+private actor AgentConnectionBarrier {
+    private var entered = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseContinuation: CheckedContinuation<Void, Never>?
+
+    func suspend() async {
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        await withCheckedContinuation { releaseContinuation = $0 }
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        releaseContinuation?.resume()
+        releaseContinuation = nil
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() { lock.withLock { value += 1 } }
+    func snapshot() -> Int { lock.withLock { value } }
+}
+
 /// AgentConnectionService 测试
 /// 测试 Agent 连接、认证和重连机制
 struct AgentConnectionServiceTests {
@@ -68,6 +100,262 @@ struct AgentConnectionServiceTests {
         
         #expect(service.connectionState == .disconnected)
     }
+
+    @Test("外部丢弃达到阈值时立即断开")
+    @MainActor
+    func testExternalDropThresholdDisconnectsImmediately() async throws {
+        let limits = makeAgentSecurityLimits(dropThreshold: 3)
+        let limiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "external-drop-threshold"
+        )
+        let service = AgentConnectionService(
+            authToken: "test-token",
+            securityLimits: limits
+        )
+        service.installRateLimiter(limiter)
+
+        let firstDisconnected = await service.applyExternalDropPolicy(using: limiter)
+        let secondDisconnected = await service.applyExternalDropPolicy(using: limiter)
+        let thresholdDisconnected = await service.applyExternalDropPolicy(using: limiter)
+
+        #expect(firstDisconnected == false)
+        #expect(secondDisconnected == false)
+        #expect(thresholdDisconnected == true)
+        #expect(service.connectionState == .disconnected)
+        #expect(service.lastError?.errorDescription == AgentConnectionError.rateLimitExceeded.errorDescription)
+        #expect(await limiter.droppedMessageCount == 3)
+    }
+
+    @Test("旧连接的限流终态不能断开替代连接")
+    @MainActor
+    func testStaleExternalDropCannotDisconnectReplacement() async throws {
+        let limits = makeAgentSecurityLimits(dropThreshold: 1)
+        let oldLimiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "old-rate-limit-owner"
+        )
+        let replacementLimiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "replacement-rate-limit-owner"
+        )
+        let service = AgentConnectionService(
+            authToken: "test-token",
+            securityLimits: limits
+        )
+        service.installRateLimiter(oldLimiter)
+        service.afterExternalDropDecision = {
+            await MainActor.run {
+                service.installRateLimiter(replacementLimiter)
+            }
+        }
+
+        let staleDisconnected = await service.applyExternalDropPolicy(using: oldLimiter)
+
+        #expect(staleDisconnected == false)
+        #expect(service.lastError == nil)
+
+        service.afterExternalDropDecision = nil
+        let replacementDisconnected = await service.applyExternalDropPolicy(using: replacementLimiter)
+        #expect(replacementDisconnected == true)
+        #expect(service.lastError?.errorDescription == AgentConnectionError.rateLimitExceeded.errorDescription)
+    }
+
+    @Test("外来限流器不能改变当前连接")
+    @MainActor
+    func testForeignLimiterCannotDisconnectCurrentConnection() async throws {
+        let limits = makeAgentSecurityLimits(dropThreshold: 1)
+        let currentLimiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "current-rate-limit-owner"
+        )
+        let foreignLimiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "foreign-rate-limit-owner"
+        )
+        let service = AgentConnectionService(
+            authToken: "test-token",
+            securityLimits: limits
+        )
+        service.installRateLimiter(currentLimiter)
+
+        let foreignDisconnected = await service.applyExternalDropPolicy(using: foreignLimiter)
+
+        #expect(foreignDisconnected == false)
+        #expect(service.lastError == nil)
+        #expect(await foreignLimiter.droppedMessageCount == 0)
+    }
+
+    @Test("未知消息类型累计到阈值时立即断开")
+    @MainActor
+    func testUnknownMessageTypeCountsTowardExternalDropThreshold() async throws {
+        let limits = makeAgentSecurityLimits(dropThreshold: 2)
+        let limiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "unknown-message-owner"
+        )
+        let service = AgentConnectionService(
+            authToken: "test-token",
+            securityLimits: limits
+        )
+        service.installRateLimiter(limiter)
+        let unknownMessage = URLSessionWebSocketTask.Message.string(#"{"type":"unknown"}"#)
+
+        await service.handleReceivedMessageForTesting(unknownMessage)
+        #expect(service.lastError == nil)
+        #expect(await limiter.droppedMessageCount == 1)
+
+        await service.handleReceivedMessageForTesting(unknownMessage)
+        #expect(service.lastError?.errorDescription == AgentConnectionError.rateLimitExceeded.errorDescription)
+        #expect(await limiter.droppedMessageCount == 2)
+    }
+
+    @Test("重连等待被手动断开后不能复活连接")
+    @MainActor
+    func testManualDisconnectCancelsPendingReconnect() async throws {
+        let limits = makeAgentSecurityLimits(dropThreshold: 3)
+        let limiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "reconnect-cancellation-owner"
+        )
+        let service = AgentConnectionService(
+            authToken: "test-token",
+            reconnectDelay: 1,
+            securityLimits: limits
+        )
+        let barrier = AgentConnectionBarrier()
+        let attempts = LockedCounter()
+        service.installRateLimiter(limiter)
+        service.waitBeforeReconnect = { _ in
+            await barrier.suspend()
+            try Task.checkCancellation()
+        }
+        service.onConnectionAttemptStarted = { attempts.increment() }
+
+        let reconnectTask = Task { @MainActor in
+            await service.handleDisconnectionForTesting()
+        }
+        await barrier.waitUntilEntered()
+        service.disconnect()
+        reconnectTask.cancel()
+        await barrier.release()
+        await reconnectTask.value
+
+        #expect(service.connectionState == .disconnected)
+        #expect(attempts.snapshot() == 0)
+    }
+
+    @Test("首次连接失败归属当前尝试且允许再次连接")
+    @MainActor
+    func testInitialConnectionFailureIsAttributedAndRetryable() async throws {
+        let attempts = LockedCounter()
+        let service = AgentConnectionService(
+            agentURL: URL(string: "ws://127.0.0.1:7002/agent")!,
+            authToken: "test-token"
+        )
+        service.performConnectionPing = { _ in
+            attempts.increment()
+            throw AgentConnectionError.connectionFailed("injected ping failure")
+        }
+
+        for expectedAttemptCount in 1...2 {
+            do {
+                try await service.connect()
+                Issue.record("连接探测失败必须显式抛出")
+            } catch {
+                #expect(error is AgentConnectionError)
+            }
+
+            #expect(service.connectionState == .failed)
+            #expect(service.isAuthenticated == false)
+            if case .connectionFailed(let reason) = service.lastError {
+                #expect(reason == "injected ping failure")
+            } else {
+                Issue.record("连接失败必须保留精确领域错误")
+            }
+            #expect(attempts.snapshot() == expectedAttemptCount)
+            #expect(await service.availableRateLimitTokens == 0)
+        }
+    }
+
+    @Test("重连连续失败达到上限后进入唯一失败终态")
+    @MainActor
+    func testReconnectFailuresReachConfiguredLimit() async throws {
+        let limits = makeAgentSecurityLimits(dropThreshold: 3)
+        let limiter = ConnectionRateLimiter(
+            limits: limits,
+            connectionId: "reconnect-failure-owner"
+        )
+        let attempts = LockedCounter()
+        let service = AgentConnectionService(
+            agentURL: URL(string: "ws://127.0.0.1:7002/agent")!,
+            authToken: "test-token",
+            maxReconnectAttempts: 2,
+            reconnectDelay: 1,
+            securityLimits: limits
+        )
+        service.installRateLimiter(limiter)
+        service.waitBeforeReconnect = { _ in }
+        service.performConnectionPing = { _ in
+            attempts.increment()
+            throw AgentConnectionError.connectionFailed("injected retry failure")
+        }
+
+        await service.handleDisconnectionForTesting()
+
+        #expect(attempts.snapshot() == 2)
+        #expect(service.connectionState == .failed)
+        #expect(service.isAuthenticated == false)
+        #expect(
+            service.lastError?.errorDescription
+                == AgentConnectionError.maxReconnectAttemptsExceeded.errorDescription
+        )
+        #expect(await service.availableRateLimitTokens == 0)
+    }
+}
+
+private func makeAgentSecurityLimits(dropThreshold: Int) -> SecurityLimits {
+    let defaults = SecurityLimits.default
+    return SecurityLimits(
+        maxTotalFiles: defaults.maxTotalFiles,
+        maxTotalBytes: defaults.maxTotalBytes,
+        globalTimeout: defaults.globalTimeout,
+        maxRegexPatternLength: defaults.maxRegexPatternLength,
+        maxRegexPatternCount: defaults.maxRegexPatternCount,
+        maxRegexGroups: defaults.maxRegexGroups,
+        maxRegexQuantifiers: defaults.maxRegexQuantifiers,
+        maxRegexAlternations: defaults.maxRegexAlternations,
+        maxRegexLookaheads: defaults.maxRegexLookaheads,
+        perPatternTimeout: defaults.perPatternTimeout,
+        perPatternInputLimit: defaults.perPatternInputLimit,
+        maxTotalHistoryBytes: defaults.maxTotalHistoryBytes,
+        tokenBucketRate: defaults.tokenBucketRate,
+        tokenBucketBurst: defaults.tokenBucketBurst,
+        maxMessageBytes: defaults.maxMessageBytes,
+        decodeDepthLimit: defaults.decodeDepthLimit,
+        decodeArrayLengthLimit: defaults.decodeArrayLengthLimit,
+        decodeStringLengthLimit: defaults.decodeStringLengthLimit,
+        droppedMessagesThreshold: dropThreshold,
+        droppedMessagesWindow: defaults.droppedMessagesWindow,
+        pakeRecordTTL: defaults.pakeRecordTTL,
+        pakeMaxRecords: defaults.pakeMaxRecords,
+        pakeCleanupInterval: defaults.pakeCleanupInterval,
+        maxSymlinkDepth: defaults.maxSymlinkDepth,
+        maxRetryCount: defaults.maxRetryCount,
+        maxRetryDelay: defaults.maxRetryDelay,
+        maxExtractedFiles: defaults.maxExtractedFiles,
+        maxTotalExtractedBytes: defaults.maxTotalExtractedBytes,
+        maxNestingDepth: defaults.maxNestingDepth,
+        maxCompressionRatio: defaults.maxCompressionRatio,
+        maxExtractionTime: defaults.maxExtractionTime,
+        maxBytesPerFile: defaults.maxBytesPerFile,
+        largeFileThreshold: defaults.largeFileThreshold,
+        hashTimeoutQuick: defaults.hashTimeoutQuick,
+        hashTimeoutStandard: defaults.hashTimeoutStandard,
+        hashTimeoutDeep: defaults.hashTimeoutDeep,
+        maxEventQueueSize: defaults.maxEventQueueSize,
+        maxPendingPerSubscriber: defaults.maxPendingPerSubscriber
+    )
 }
 
 // MARK: - 状态枚举测试

@@ -122,6 +122,44 @@ public final class AgentConnectionService: ObservableObject {
  /// Initialized on connection, uses SecurityLimits configuration
  /// **Validates: Requirements 4.1, 4.6, 4.7, 4.8**
     private var connectionRateLimiter: ConnectionRateLimiter?
+
+ /// Monotonic owner token for the currently installed connection resources.
+    private var connectionGeneration: UInt64 = 0
+
+ /// Ensures only the current connection can claim rate-limit termination once.
+    private var rateLimitTerminationClaimed = false
+
+ /// Test-only callback invoked after an external drop decision crosses the actor boundary.
+    internal var afterExternalDropDecision: (@Sendable () async -> Void)?
+
+ /// Injectable ping boundary for deterministic connection-transaction tests.
+    internal var performConnectionPing: @Sendable (URLSessionWebSocketTask) async throws -> Void = { socket in
+        try await withCheckedThrowingContinuation { continuation in
+            socket.sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+ /// Injectable retry wait; production remains a cancellable monotonic sleep.
+    internal var waitBeforeReconnect: @Sendable (Duration) async throws -> Void = { duration in
+        try await Task.sleep(for: duration)
+    }
+
+ /// Test-only observation for proving a cancelled retry never starts a connect.
+    internal var onConnectionAttemptStarted: (@Sendable () -> Void)?
+
+    private struct ConnectionSessionOwner {
+        let generation: UInt64
+        let connectionId: String
+        let urlSession: URLSession?
+        let webSocketTask: URLSessionWebSocketTask?
+        let rateLimiter: ConnectionRateLimiter
+    }
     
  /// Limited JSON decoder for safe message parsing
  /// **Validates: Requirements 4.4, 4.5**
@@ -205,18 +243,32 @@ public final class AgentConnectionService: ObservableObject {
         isManuallyDisconnected = false
         reconnectAttempts = 0
         
- // Initialize per-connection rate limiter (Requirements 4.1, 4.8)
-        connectionId = UUID().uuidString
-        connectionRateLimiter = ConnectionRateLimiter(
-            limits: securityLimits,
-            connectionId: connectionId
-        )
-        
-        try await performConnect()
+        let owner = beginConnectionAttempt()
+
+        do {
+            try await performConnect(owner: owner)
+        } catch is CancellationError {
+            if isCurrent(owner) {
+                retireConnection(owner: owner)
+                updateState(.disconnected)
+                isAuthenticated = false
+            }
+            throw CancellationError()
+        } catch {
+            if isCurrent(owner) {
+                lastError = (error as? AgentConnectionError)
+                    ?? .connectionFailed(error.localizedDescription)
+                retireConnection(owner: owner)
+                updateState(.failed)
+                isAuthenticated = false
+            }
+            throw error
+        }
     }
     
  /// 断开连接
     public func disconnect() {
+        connectionGeneration &+= 1
         isManuallyDisconnected = true
         receiveTask?.cancel()
         receiveTask = nil
@@ -227,6 +279,7 @@ public final class AgentConnectionService: ObservableObject {
         
  // Clean up rate limiter
         connectionRateLimiter = nil
+        pendingMessageCount = 0
         
         updateState(.disconnected)
         isAuthenticated = false
@@ -258,49 +311,62 @@ public final class AgentConnectionService: ObservableObject {
     
  // MARK: - Private Methods
     
-    private func performConnect() async throws {
+    private func performConnect(owner: ConnectionSessionOwner) async throws {
+        guard let socket = owner.webSocketTask,
+              owner.urlSession != nil,
+              isCurrent(owner),
+              !isManuallyDisconnected else {
+            throw CancellationError()
+        }
+        onConnectionAttemptStarted?()
         updateState(.connecting)
         logger.info("正在连接到 Agent: \(self.agentURL)")
-        
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = 10
-        urlSession = URLSession(configuration: configuration)
-        
-        guard let session = urlSession else {
-            throw AgentConnectionError.connectionFailed("无法创建 URLSession")
-        }
-        
-        webSocketTask = session.webSocketTask(with: agentURL)
-        webSocketTask?.resume()
+        socket.resume()
         
  // 等待连接建立
         do {
  // 发送 ping 验证连接
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                webSocketTask?.sendPing { error in
-                    if let error = error {
-                        continuation.resume(throwing: error)
-                    } else {
-                        continuation.resume()
-                    }
-                }
+            try await performConnectionPing(socket)
+            try Task.checkCancellation()
+            guard isCurrent(owner), !isManuallyDisconnected else {
+                throw CancellationError()
             }
             updateState(.connected)
             logger.info("WebSocket 连接已建立")
             
  // 开始认证
-            try await authenticate()
+            try await authenticate(owner: owner)
+            try Task.checkCancellation()
+            guard isCurrent(owner), !isManuallyDisconnected else {
+                throw CancellationError()
+            }
             
  // 开始接收消息
-            startReceiving()
+            startReceiving(owner: owner)
             
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as AgentConnectionError {
+            guard isCurrent(owner) else {
+                throw CancellationError()
+            }
+            logger.error("连接失败: \(error.localizedDescription)")
+            throw error
         } catch {
+            guard isCurrent(owner) else {
+                throw CancellationError()
+            }
             logger.error("连接失败: \(error.localizedDescription)")
             throw AgentConnectionError.connectionFailed(error.localizedDescription)
         }
     }
     
-    private func authenticate() async throws {
+    private func authenticate(owner: ConnectionSessionOwner) async throws {
+        guard let socket = owner.webSocketTask,
+              isCurrent(owner),
+              !isManuallyDisconnected else {
+            throw CancellationError()
+        }
         updateState(.authenticating)
         logger.info("正在认证...")
         
@@ -312,21 +378,25 @@ public final class AgentConnectionService: ObservableObject {
             throw AgentConnectionError.authenticationFailed("认证消息编码失败")
         }
         
-        try await webSocketTask?.send(.string(jsonString))
-        
- // 等待认证响应
-        guard let webSocketTask = webSocketTask else {
-            throw AgentConnectionError.authenticationFailed("WebSocket 已断开")
+        try await socket.send(.string(jsonString))
+        try Task.checkCancellation()
+        guard isCurrent(owner), !isManuallyDisconnected else {
+            throw CancellationError()
         }
         
-        let message = try await webSocketTask.receive()
+ // 等待认证响应
+        let message = try await socket.receive()
+        try Task.checkCancellation()
+        guard isCurrent(owner), !isManuallyDisconnected else {
+            throw CancellationError()
+        }
         
         switch message {
         case .string(let text):
-            try handleAuthResponse(text)
+            try handleAuthResponse(text, owner: owner)
         case .data(let data):
             if let text = String(data: data, encoding: .utf8) {
-                try handleAuthResponse(text)
+                try handleAuthResponse(text, owner: owner)
             } else {
                 throw AgentConnectionError.authenticationFailed("无法解析认证响应")
             }
@@ -335,7 +405,10 @@ public final class AgentConnectionService: ObservableObject {
         }
     }
     
-    private func handleAuthResponse(_ text: String) throws {
+    private func handleAuthResponse(_ text: String, owner: ConnectionSessionOwner) throws {
+        guard isCurrent(owner), !isManuallyDisconnected else {
+            throw CancellationError()
+        }
         guard let data = text.data(using: .utf8) else {
             throw AgentConnectionError.authenticationFailed("无法解析响应数据")
         }
@@ -347,6 +420,7 @@ public final class AgentConnectionService: ObservableObject {
             updateState(.authenticated)
             isAuthenticated = true
             reconnectAttempts = 0
+            lastError = nil
             logger.info("认证成功: \(authOK.message)")
             return
         }
@@ -364,77 +438,82 @@ public final class AgentConnectionService: ObservableObject {
     }
 
     
-    private func startReceiving() {
+    private func startReceiving(owner: ConnectionSessionOwner) {
+        guard isCurrent(owner), owner.webSocketTask != nil else {
+            logger.error("无法启动接收循环：连接资源未完整安装")
+            return
+        }
         receiveTask = Task { [weak self] in
-            await self?.receiveLoop()
+            await self?.receiveLoop(owner: owner)
         }
     }
     
-    private func receiveLoop() async {
+    private func receiveLoop(owner: ConnectionSessionOwner) async {
+        guard let webSocketTask = owner.webSocketTask else { return }
         while !Task.isCancelled {
-            guard let webSocketTask = webSocketTask else { break }
+            guard isCurrent(owner) else { break }
             
             do {
                 let message = try await webSocketTask.receive()
+                guard !Task.isCancelled, isCurrent(owner) else { return }
                 
  // DoS 防护：速率限制检查 (Requirements 4.1, 4.6, 4.7, 4.8)
-                if let rateLimiter = connectionRateLimiter {
-                    let decision = await rateLimiter.shouldProcess()
-                    
-                    switch decision {
-                    case .allow:
+                let decision = await owner.rateLimiter.shouldProcess()
+                guard !Task.isCancelled, isCurrent(owner) else { return }
+
+                switch decision {
+                case .allow:
  // Message allowed, continue processing
-                        break
-                        
-                    case .drop:
+                    break
+
+                case .drop:
  // Message dropped due to rate limiting
-                        let droppedCount = await rateLimiter.droppedMessageCount
-                        onRateLimitTriggered?(droppedCount)
-                        logger.warning("⚠️ 速率限制：丢弃消息 (总丢弃: \(droppedCount))")
-                        continue  // 丢弃此消息，继续接收下一条
-                        
-                    case .disconnect(let reason):
- // Too many dropped messages - disconnect and emit security event
-                        logger.error("🚨 速率限制：\(reason)，断开连接")
-                        lastError = .rateLimitExceeded
-                        
- // Emit security event (Requirements 4.6, 4.7)
-                        let droppedCount = await rateLimiter.droppedMessageCount
-                        SecurityEventEmitter.emitDetached(
-                            SecurityEvent.rateLimitDisconnect(
-                                connectionId: connectionId,
-                                droppedCount: droppedCount,
-                                windowSeconds: securityLimits.droppedMessagesWindow
-                            )
-                        )
-                        
-                        disconnect()
-                        return
-                    }
+                    let droppedCount = await owner.rateLimiter.droppedMessageCount
+                    guard !Task.isCancelled, isCurrent(owner) else { return }
+                    onRateLimitTriggered?(droppedCount)
+                    logger.warning("⚠️ 速率限制：丢弃消息 (总丢弃: \(droppedCount))")
+                    continue  // 丢弃此消息，继续接收下一条
+
+                case .disconnect(let reason):
+                    await disconnectForRateLimit(reason: reason, owner: owner)
+                    return
                 }
                 
  // DoS 防护：队列深度检查
                 if pendingMessageCount >= Self.maxQueueDepth {
-                    await connectionRateLimiter?.recordDropped()
+                    if await applyExternalDropPolicy(owner: owner) {
+                        return
+                    }
+                    guard !Task.isCancelled, isCurrent(owner) else { return }
                     logger.warning("⚠️ 队列溢出：丢弃消息 (队列深度: \(self.pendingMessageCount))")
                     continue
                 }
                 
                 pendingMessageCount += 1
-                await handleReceivedMessage(message)
+                await handleReceivedMessage(message, owner: owner)
+                guard !Task.isCancelled, isCurrent(owner) else {
+                    if isCurrent(owner) {
+                        pendingMessageCount -= 1
+                    }
+                    return
+                }
                 pendingMessageCount -= 1
                 
             } catch {
-                if !Task.isCancelled && !isManuallyDisconnected {
+                if !Task.isCancelled && isCurrent(owner) && !isManuallyDisconnected {
                     logger.error("接收消息失败: \(error.localizedDescription)")
-                    await handleDisconnection()
+                    await handleDisconnection(owner: owner)
                 }
                 break
             }
         }
     }
     
-    private func handleReceivedMessage(_ message: URLSessionWebSocketTask.Message) async {
+    private func handleReceivedMessage(
+        _ message: URLSessionWebSocketTask.Message,
+        owner: ConnectionSessionOwner
+    ) async {
+        guard !Task.isCancelled, isCurrent(owner) else { return }
         let data: Data
         let messageSize: Int
         
@@ -457,7 +536,8 @@ public final class AgentConnectionService: ObservableObject {
  // DoS 防护：消息大小检查 (Requirement 4.3)
  // Check BEFORE any parsing to prevent memory exhaustion
         if messageSize > securityLimits.maxMessageBytes {
-            await connectionRateLimiter?.recordDropped()
+            _ = await owner.rateLimiter.recordDropped()
+            guard !Task.isCancelled, isCurrent(owner) else { return }
             logger.warning("⚠️ 消息过大：\(messageSize) bytes > \(self.securityLimits.maxMessageBytes) bytes，关闭连接")
             lastError = .messageTooLarge(messageSize)
             disconnect()
@@ -469,6 +549,7 @@ public final class AgentConnectionService: ObservableObject {
             
  // Auth token validation before processing (Requirements 9.4, 9.5, 9.6)
             let isTokenValid = await validateMessageAuthToken(agentMessage)
+            guard !Task.isCancelled, isCurrent(owner) else { return }
             if !isTokenValid {
  // Invalid token - close connection (Requirement 9.4)
                 logger.error("🚨 认证令牌验证失败，关闭连接")
@@ -477,13 +558,162 @@ public final class AgentConnectionService: ObservableObject {
             }
             
             onMessage?(agentMessage)
-        } catch let error as LimitedJSONDecoder.DecodingError {
- // Handle decoder limit violations (Requirements 4.4, 4.5)
-            logger.warning("消息解码限制违规: \(error)")
-            await connectionRateLimiter?.recordDropped()
+        } catch let error as AgentConnectionError {
+ // All recoverable parse rejections count toward the external-drop threshold.
+            logger.warning("消息解析拒绝: \(error.localizedDescription)")
+            _ = await applyExternalDropPolicy(owner: owner)
         } catch {
             logger.warning("解析消息失败: \(error.localizedDescription)")
+            _ = await applyExternalDropPolicy(owner: owner)
         }
+    }
+
+ /// Record an externally rejected message and apply the threshold decision now.
+ ///
+ /// - Returns: `true` when the connection was disconnected.
+    @discardableResult
+    internal func applyExternalDropPolicy(
+        using rateLimiter: ConnectionRateLimiter
+    ) async -> Bool {
+        guard let owner = currentConnectionSessionOwner(),
+              owner.rateLimiter === rateLimiter else {
+            return false
+        }
+
+        return await applyExternalDropPolicy(owner: owner)
+    }
+
+ /// Test seam that parses a message under the exact currently installed owner.
+    internal func handleReceivedMessageForTesting(
+        _ message: URLSessionWebSocketTask.Message
+    ) async {
+        guard let owner = currentConnectionSessionOwner() else { return }
+        await handleReceivedMessage(message, owner: owner)
+    }
+
+ /// Test seam for exercising the real reconnect cancellation path.
+    internal func handleDisconnectionForTesting() async {
+        guard let owner = currentConnectionSessionOwner() else { return }
+        await handleDisconnection(owner: owner)
+    }
+
+    private func applyExternalDropPolicy(owner: ConnectionSessionOwner) async -> Bool {
+        guard !Task.isCancelled, isCurrent(owner) else { return false }
+
+        let decision = await owner.rateLimiter.recordDropped()
+        await afterExternalDropDecision?()
+        guard !Task.isCancelled, isCurrent(owner) else { return false }
+        guard case .disconnect(let reason) = decision else {
+            return false
+        }
+
+        return await disconnectForRateLimit(reason: reason, owner: owner)
+    }
+
+    @discardableResult
+    private func disconnectForRateLimit(
+        reason: String,
+        owner: ConnectionSessionOwner
+    ) async -> Bool {
+        guard isCurrent(owner),
+              !rateLimitTerminationClaimed else {
+            return false
+        }
+
+ // Claim and detach the current session before any suspension. A stale
+ // continuation can no longer disconnect or attribute evidence to a replacement.
+        rateLimitTerminationClaimed = true
+        let droppedWindow = securityLimits.droppedMessagesWindow
+        logger.error("🚨 速率限制：\(reason)，断开连接")
+        lastError = .rateLimitExceeded
+        disconnect()
+
+ // Emit security event (Requirements 4.6, 4.7)
+        let droppedCount = await owner.rateLimiter.droppedInWindow
+        SecurityEventEmitter.emitDetached(
+            SecurityEvent.rateLimitDisconnect(
+                connectionId: owner.connectionId,
+                droppedCount: droppedCount,
+                windowSeconds: droppedWindow
+            )
+        )
+
+        return true
+    }
+
+ /// Installs a new session-scoped limiter. Internal only for deterministic
+ /// owner-replacement tests; production calls it once per connection attempt.
+    internal func installRateLimiter(_ rateLimiter: ConnectionRateLimiter) {
+        connectionGeneration &+= 1
+        connectionId = rateLimiter.connectionId
+        connectionRateLimiter = rateLimiter
+        rateLimitTerminationClaimed = false
+        pendingMessageCount = 0
+    }
+
+    private func beginConnectionAttempt() -> ConnectionSessionOwner {
+        let rateLimiter = ConnectionRateLimiter(
+            limits: securityLimits,
+            connectionId: UUID().uuidString
+        )
+        installRateLimiter(rateLimiter)
+        lastError = nil
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: configuration)
+        let socket = session.webSocketTask(with: agentURL)
+        urlSession = session
+        webSocketTask = socket
+        return ConnectionSessionOwner(
+            generation: connectionGeneration,
+            connectionId: connectionId,
+            urlSession: session,
+            webSocketTask: socket,
+            rateLimiter: rateLimiter
+        )
+    }
+
+    private func currentConnectionSessionOwner() -> ConnectionSessionOwner? {
+        guard let connectionRateLimiter else {
+            return nil
+        }
+        return ConnectionSessionOwner(
+            generation: connectionGeneration,
+            connectionId: connectionId,
+            urlSession: urlSession,
+            webSocketTask: webSocketTask,
+            rateLimiter: connectionRateLimiter
+        )
+    }
+
+    private func isCurrent(_ owner: ConnectionSessionOwner) -> Bool {
+        guard owner.generation == connectionGeneration,
+              owner.connectionId == connectionId,
+              owner.rateLimiter === connectionRateLimiter else {
+            return false
+        }
+        if let ownerSession = owner.urlSession, ownerSession !== urlSession {
+            return false
+        }
+        if let ownerSocket = owner.webSocketTask, ownerSocket !== webSocketTask {
+            return false
+        }
+        return true
+    }
+
+    private func retireConnection(owner: ConnectionSessionOwner) {
+        guard isCurrent(owner) else { return }
+        connectionGeneration &+= 1
+        owner.webSocketTask?.cancel(with: .goingAway, reason: nil)
+        owner.urlSession?.invalidateAndCancel()
+        if let ownerSocket = owner.webSocketTask, webSocketTask === ownerSocket {
+            webSocketTask = nil
+        }
+        if let ownerSession = owner.urlSession, urlSession === ownerSession {
+            urlSession = nil
+        }
+        connectionRateLimiter = nil
+        pendingMessageCount = 0
     }
     
  /// Parse message with security limits enforcement (Requirements 4.4, 4.5)
@@ -615,7 +845,9 @@ public final class AgentConnectionService: ObservableObject {
         return try parseMessageWithLimits(data)
     }
     
-    private func handleDisconnection() async {
+    private func handleDisconnection(owner failedOwner: ConnectionSessionOwner) async {
+        guard isCurrent(failedOwner), !isManuallyDisconnected else { return }
+        retireConnection(owner: failedOwner)
         updateState(.disconnected)
         isAuthenticated = false
         
@@ -626,14 +858,37 @@ public final class AgentConnectionService: ObservableObject {
             reconnectAttempts += 1
             updateState(.reconnecting)
             logger.info("尝试重连 (\(self.reconnectAttempts)/\(self.maxReconnectAttempts))...")
-            
-            try? await Task.sleep(nanoseconds: UInt64(reconnectDelay * 1_000_000_000))
-            
+
             do {
-                try await performConnect()
+                try await waitBeforeReconnect(.seconds(reconnectDelay))
+                try Task.checkCancellation()
+                guard !isManuallyDisconnected,
+                      connectionRateLimiter == nil,
+                      connectionState == .reconnecting else {
+                    return
+                }
+
+                let retryOwner = beginConnectionAttempt()
+                do {
+                    try await performConnect(owner: retryOwner)
+                } catch is CancellationError {
+                    if isCurrent(retryOwner) {
+                        retireConnection(owner: retryOwner)
+                    }
+                    return
+                } catch {
+                    guard isCurrent(retryOwner), !isManuallyDisconnected else {
+                        return
+                    }
+                    logger.error("重连失败: \(error.localizedDescription)")
+                    await handleDisconnection(owner: retryOwner)
+                }
+            } catch is CancellationError {
+                return
             } catch {
-                logger.error("重连失败: \(error.localizedDescription)")
-                await handleDisconnection()
+                logger.error("重连等待失败: \(error.localizedDescription)")
+                updateState(.failed)
+                lastError = .connectionFailed(error.localizedDescription)
             }
         } else {
             updateState(.failed)
@@ -647,4 +902,3 @@ public final class AgentConnectionService: ObservableObject {
         onStateChange?(newState)
     }
 }
-

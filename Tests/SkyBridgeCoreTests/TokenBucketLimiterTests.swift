@@ -9,6 +9,26 @@
 import XCTest
 @testable import SkyBridgeCore
 
+private final class ManualRateLimiterClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: ContinuousClock.Instant
+
+    init(instant: ContinuousClock.Instant = ContinuousClock.now) {
+        self.instant = instant
+    }
+
+    func currentInstant() -> ContinuousClock.Instant {
+        lock.withLock { instant }
+    }
+
+    func advance(by duration: Duration) {
+        precondition(duration >= .zero, "Manual clock must remain monotonic")
+        lock.withLock {
+            instant = instant.advanced(by: duration)
+        }
+    }
+}
+
 // MARK: - Property Test: Token Bucket Rate Limiting Per Connection
 // **Feature: security-hardening, Property 10: Token bucket rate limiting per connection**
 // **Validates: Requirements 4.1, 4.8**
@@ -35,8 +55,13 @@ final class TokenBucketLimiterTests: XCTestCase {
  // Generate random configuration within valid bounds
             let rate = Double.random(in: 10.0...1000.0)
             let burst = Int.random(in: 10...500)
-            
-            let limiter = TokenBucketLimiter(rate: rate, burst: burst)
+
+            let clock = ManualRateLimiterClock()
+            let limiter = TokenBucketLimiter(
+                rate: rate,
+                burst: burst,
+                now: { clock.currentInstant() }
+            )
             
  // Property 1: Initial tokens should equal burst capacity
             let initialTokens = await limiter.availableTokens
@@ -78,8 +103,13 @@ final class TokenBucketLimiterTests: XCTestCase {
     func testTokenRefillOverTime() async throws {
         let rate = 100.0 // 100 tokens per second
         let burst = 100
-        
-        let limiter = TokenBucketLimiter(rate: rate, burst: burst)
+
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: rate,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
         
  // Consume all tokens
         for _ in 0..<burst {
@@ -90,60 +120,105 @@ final class TokenBucketLimiterTests: XCTestCase {
         let exhausted = await limiter.tryConsume()
         XCTAssertFalse(exhausted, "Tokens should be exhausted")
         
- // Wait for some tokens to refill (100ms = 10 tokens at 100/s rate)
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        
- // Should be able to consume at least one token now
- // tryConsume triggers refill, so this tests the refill mechanism
-        let canConsume = await limiter.tryConsume()
-        XCTAssertTrue(canConsume, "Should be able to consume after refill")
-        
- // After consuming one, we should still have some tokens
- // (100ms at 100/s = ~10 tokens, minus 1 consumed = ~9)
- // We can verify by trying to consume more
-        var consumedAfterWait = 1 // Already consumed one above
-        for _ in 0..<15 {
-            if await limiter.tryConsume() {
-                consumedAfterWait += 1
-            }
-        }
-        
- // Should have been able to consume roughly 10 tokens (with timing tolerance)
-        XCTAssertGreaterThan(consumedAfterWait, 5, "Should have refilled at least 5 tokens")
-        XCTAssertLessThan(consumedAfterWait, 16, "Should not have refilled more than expected")
+ // Advance exactly 100ms: 10 tokens at 100 tokens per second.
+        clock.advance(by: .milliseconds(100))
+
+        let consumedTen = await limiter.tryConsume(count: 10)
+        let consumedEleventh = await limiter.tryConsume()
+        let remaining = await limiter.availableTokens
+        XCTAssertTrue(consumedTen, "Exactly 10 tokens should refill")
+        XCTAssertFalse(consumedEleventh, "An eleventh token must not be available")
+        XCTAssertEqual(remaining, 0, accuracy: 0.000_001)
     }
-    
+
+ /// Test that fractional refill accumulates without creating a ghost token.
+    func testFractionalRefillAccumulatesToWholeToken() async throws {
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 4.0,
+            burst: 1,
+            now: { clock.currentInstant() }
+        )
+
+        let initialConsume = await limiter.tryConsume()
+        XCTAssertTrue(initialConsume)
+
+        clock.advance(by: .milliseconds(125))
+        let halfTokenConsume = await limiter.tryConsume()
+        let halfTokenBalance = await limiter.availableTokens
+        XCTAssertFalse(halfTokenConsume, "Half a token must not be consumable")
+        XCTAssertEqual(halfTokenBalance, 0.5, accuracy: 0.000_001)
+
+        clock.advance(by: .milliseconds(125))
+        let accumulatedConsume = await limiter.tryConsume()
+        let consumeAfterAccumulated = await limiter.tryConsume()
+        XCTAssertTrue(accumulatedConsume, "Two half-token intervals should accumulate")
+        XCTAssertFalse(consumeAfterAccumulated, "The accumulated token must be consumed once")
+    }
+
  /// Test that tokens are clamped to burst capacity on refill
     func testTokensClampedToBurstOnRefill() async throws {
         let rate = 1000.0 // High rate
         let burst = 50
-        
-        let limiter = TokenBucketLimiter(rate: rate, burst: burst)
+
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: rate,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
         
  // Consume some tokens
         for _ in 0..<10 {
             _ = await limiter.tryConsume()
         }
         
- // Wait for refill (should refill more than we consumed)
-        try await Task.sleep(nanoseconds: 100_000_000) // 100ms = 100 tokens at 1000/s
-        
- // Tokens should be clamped to burst
-        let afterRefill = await limiter.availableTokens
-        XCTAssertLessThanOrEqual(
-            afterRefill, Double(burst),
-            "Tokens (\(afterRefill)) should be clamped to burst (\(burst))"
+ // Advance enough to refill more than the bucket can hold.
+        clock.advance(by: .milliseconds(100)) // 100 tokens at 1000/s
+
+ // Consuming exactly the burst must succeed, but one more token must fail.
+        let consumedBurst = await limiter.tryConsume(count: burst)
+        let consumedBeyondBurst = await limiter.tryConsume()
+        XCTAssertTrue(consumedBurst)
+        XCTAssertFalse(consumedBeyondBurst, "Refill must clamp at burst capacity")
+    }
+
+ /// Monitoring snapshots should account for elapsed time without consuming.
+    func testAvailableTokenSnapshotsRefillAtQueryTime() async throws {
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 4.0,
+            burst: 4,
+            now: { clock.currentInstant() }
         )
+
+        let consumedInitialBurst = await limiter.tryConsume(count: 4)
+        XCTAssertTrue(consumedInitialBurst)
+
+        clock.advance(by: .milliseconds(625)) // 2.5 tokens
+        let preciseSnapshot = await limiter.availableTokens
+        let integerSnapshot = await limiter.availableTokensInt
+        XCTAssertEqual(preciseSnapshot, 2.5, accuracy: 0.000_001)
+        XCTAssertEqual(integerSnapshot, 2)
     }
     
  /// Test that multiple connections have independent token buckets
     func testIndependentTokenBucketsPerConnection() async throws {
         let rate = 100.0
         let burst = 50
-        
+
+        let clock = ManualRateLimiterClock()
  // Create two independent limiters (simulating two connections)
-        let limiter1 = TokenBucketLimiter(rate: rate, burst: burst)
-        let limiter2 = TokenBucketLimiter(rate: rate, burst: burst)
+        let limiter1 = TokenBucketLimiter(
+            rate: rate,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
+        let limiter2 = TokenBucketLimiter(
+            rate: rate,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
         
  // Exhaust limiter1
         for _ in 0..<burst {
@@ -166,7 +241,12 @@ final class TokenBucketLimiterTests: XCTestCase {
  /// Test tryConsume with count parameter
     func testTryConsumeMultiple() async throws {
         let burst = 100
-        let limiter = TokenBucketLimiter(rate: 100.0, burst: burst)
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 100.0,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
         
  // Consume 50 tokens at once
         let consumed50 = await limiter.tryConsume(count: 50)
@@ -183,12 +263,22 @@ final class TokenBucketLimiterTests: XCTestCase {
  // Tokens should be unchanged after failed consume
         let afterFailed = await limiter.availableTokens
         XCTAssertEqual(afterFailed, remaining, accuracy: 1.0, "Tokens should be unchanged after failed consume")
+
+        let consumedBeyondCapacity = await limiter.tryConsume(count: Int.max)
+        let afterBeyondCapacity = await limiter.availableTokens
+        XCTAssertFalse(consumedBeyondCapacity, "A request larger than burst must fail")
+        XCTAssertEqual(afterBeyondCapacity, remaining, accuracy: 0.000_001)
     }
     
  /// Test reset functionality
     func testReset() async throws {
         let burst = 100
-        let limiter = TokenBucketLimiter(rate: 100.0, burst: burst)
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 100.0,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
         
  // Exhaust tokens
         for _ in 0..<burst {
@@ -199,18 +289,25 @@ final class TokenBucketLimiterTests: XCTestCase {
         let afterExhaust = await limiter.availableTokens
         XCTAssertLessThan(afterExhaust, 1.0, "Should be exhausted")
         
- // Reset
+ // Elapsed time before reset must not be counted after the reset baseline moves.
+        clock.advance(by: .seconds(10))
         await limiter.reset()
-        
- // Should have full capacity again
-        let afterReset = await limiter.availableTokens
-        XCTAssertEqual(afterReset, Double(burst), "Should have full capacity after reset")
+
+ // The reset bucket has exactly one burst, not a second refill from old elapsed time.
+        let consumedResetBurst = await limiter.tryConsume(count: burst)
+        let consumedBeyondResetBurst = await limiter.tryConsume()
+        XCTAssertTrue(consumedResetBurst)
+        XCTAssertFalse(consumedBeyondResetBurst)
     }
     
  /// Test initialization from SecurityLimits
     func testInitFromSecurityLimits() async throws {
         let limits = SecurityLimits.default
-        let limiter = TokenBucketLimiter(limits: limits)
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            limits: limits,
+            now: { clock.currentInstant() }
+        )
         
         let tokens = await limiter.availableTokens
         XCTAssertEqual(tokens, Double(limits.tokenBucketBurst), "Should initialize with burst from limits")
@@ -218,7 +315,12 @@ final class TokenBucketLimiterTests: XCTestCase {
     
  /// Test edge case: consume with count 0
     func testConsumeZero() async throws {
-        let limiter = TokenBucketLimiter(rate: 100.0, burst: 100)
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 100.0,
+            burst: 100,
+            now: { clock.currentInstant() }
+        )
         
         let consumed = await limiter.tryConsume(count: 0)
         XCTAssertTrue(consumed, "Consuming 0 tokens should always succeed")
@@ -229,7 +331,12 @@ final class TokenBucketLimiterTests: XCTestCase {
     
  /// Test floating-point precision: >= 1.0 check prevents ghost tokens
     func testFloatingPointPrecision() async throws {
-        let limiter = TokenBucketLimiter(rate: 100.0, burst: 1)
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 100.0,
+            burst: 1,
+            now: { clock.currentInstant() }
+        )
         
  // Consume the single token
         let consumed = await limiter.tryConsume()
@@ -238,6 +345,35 @@ final class TokenBucketLimiterTests: XCTestCase {
  // Immediately try again - should fail (no ghost tokens from floating point)
         let ghostConsume = await limiter.tryConsume()
         XCTAssertFalse(ghostConsume, "Should not have ghost tokens from floating point precision")
+    }
+
+ /// Actor isolation must prevent concurrent consumers from overspending a fixed bucket.
+    func testConcurrentConsumptionDoesNotExceedBurst() async throws {
+        let burst = 100
+        let clock = ManualRateLimiterClock()
+        let limiter = TokenBucketLimiter(
+            rate: 100.0,
+            burst: burst,
+            now: { clock.currentInstant() }
+        )
+
+        let accepted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<(burst * 2) {
+                group.addTask {
+                    await limiter.tryConsume()
+                }
+            }
+
+            var count = 0
+            for await result in group where result {
+                count += 1
+            }
+            return count
+        }
+
+        XCTAssertEqual(accepted, burst)
+        let remaining = await limiter.availableTokens
+        XCTAssertEqual(remaining, 0, accuracy: 0.000_001)
     }
 }
 
@@ -277,10 +413,11 @@ final class ConnectionRateLimiterTests: XCTestCase {
                 threshold: threshold,
                 window: windowSeconds
             )
-            
+            let clock = ManualRateLimiterClock()
             let limiter = ConnectionRateLimiter(
                 limits: limits,
-                connectionId: "test-\(iteration)"
+                connectionId: "test-\(iteration)",
+                now: { clock.currentInstant() }
             )
             
  // Property 1: Initial state should allow processing
@@ -290,19 +427,18 @@ final class ConnectionRateLimiterTests: XCTestCase {
                 "Iteration \(iteration): Initial decision should be allow"
             )
             
- // Property 2: After exhausting burst, should get drop decisions
- // Exhaust the token bucket
-            for _ in 0..<burst {
-                _ = await limiter.shouldProcess()
+ // Property 2: Exhaust the remaining burst without recording a drop.
+            for _ in 1..<burst {
+                let decision = await limiter.shouldProcess()
+                XCTAssertEqual(decision, .allow, "Iteration \(iteration): Burst token should be allowed")
             }
             
  // Next requests should be dropped (until threshold)
             var dropCount = 0
             for _ in 0..<(threshold - 1) {
                 let decision = await limiter.shouldProcess()
-                if decision == .drop {
-                    dropCount += 1
-                }
+                XCTAssertEqual(decision, .drop, "Iteration \(iteration): Expected a drop before threshold")
+                dropCount += 1
             }
             
  // Property 3: Should have dropped messages but not disconnected yet
@@ -318,12 +454,8 @@ final class ConnectionRateLimiterTests: XCTestCase {
                     reason.contains("\(threshold)"),
                     "Iteration \(iteration): Disconnect reason should mention threshold"
                 )
-            } else if finalDecision == .drop {
- // May still be drop if timing allows some refill
- // This is acceptable - the important thing is we don't allow
-            } else if finalDecision == .allow {
- // Tokens may have refilled - this is timing dependent
- // Skip this iteration's threshold check
+            } else {
+                XCTFail("Iteration \(iteration): Expected disconnect at threshold, got \(finalDecision)")
             }
         }
     }
@@ -337,7 +469,7 @@ final class ConnectionRateLimiterTests: XCTestCase {
             window: 10.0
         )
         
-        let limiter = ConnectionRateLimiter(limits: limits, connectionId: "test")
+        let limiter = makeLimiter(limits: limits, connectionId: "test")
         
  // Consume the single token
         let first = await limiter.shouldProcess()
@@ -370,7 +502,7 @@ final class ConnectionRateLimiterTests: XCTestCase {
             window: 60.0 // Long window to ensure all drops count
         )
         
-        let limiter = ConnectionRateLimiter(limits: limits, connectionId: "test")
+        let limiter = makeLimiter(limits: limits, connectionId: "test")
         
  // Consume the single token
         _ = await limiter.shouldProcess()
@@ -402,7 +534,8 @@ final class ConnectionRateLimiterTests: XCTestCase {
             window: windowSeconds
         )
         
-        let limiter = ConnectionRateLimiter(limits: limits, connectionId: "test")
+        let clock = ManualRateLimiterClock()
+        let limiter = makeLimiter(limits: limits, connectionId: "test", clock: clock)
         
  // Consume token
         _ = await limiter.shouldProcess()
@@ -412,8 +545,8 @@ final class ConnectionRateLimiterTests: XCTestCase {
             _ = await limiter.shouldProcess()
         }
         
- // Wait for window to expire
-        try await Task.sleep(nanoseconds: 200_000_000) // 200ms > 100ms window
+ // Advance past the exact monotonic-window boundary without wall-clock sleep.
+        clock.advance(by: .milliseconds(101))
         
  // Drops in window should be 0 now
         let dropsInWindow = await limiter.droppedInWindow
@@ -422,6 +555,27 @@ final class ConnectionRateLimiterTests: XCTestCase {
  // Total dropped count should still reflect all drops
         let totalDropped = await limiter.droppedMessageCount
         XCTAssertEqual(totalDropped, 3, "Total dropped should still be 3")
+    }
+
+ /// The drop window is inclusive at the exact cutoff and expires immediately after it.
+    func testSlidingWindowExactCutoff() async throws {
+        let limits = createTestLimits(
+            rate: 1.0,
+            burst: 1,
+            threshold: 5,
+            window: 0.1
+        )
+        let clock = ManualRateLimiterClock()
+        let limiter = makeLimiter(limits: limits, connectionId: "cutoff", clock: clock)
+
+        _ = await limiter.recordDropped()
+        clock.advance(by: .milliseconds(100))
+        let atCutoff = await limiter.droppedInWindow
+        XCTAssertEqual(atCutoff, 1, "A drop exactly at the cutoff remains in the window")
+
+        clock.advance(by: .nanoseconds(1))
+        let afterCutoff = await limiter.droppedInWindow
+        XCTAssertEqual(afterCutoff, 0, "A drop expires immediately after the cutoff")
     }
     
  /// Test that multiple connections have independent drop tracking
@@ -433,8 +587,9 @@ final class ConnectionRateLimiterTests: XCTestCase {
             window: 10.0
         )
         
-        let limiter1 = ConnectionRateLimiter(limits: limits, connectionId: "conn1")
-        let limiter2 = ConnectionRateLimiter(limits: limits, connectionId: "conn2")
+        let clock = ManualRateLimiterClock()
+        let limiter1 = makeLimiter(limits: limits, connectionId: "conn1", clock: clock)
+        let limiter2 = makeLimiter(limits: limits, connectionId: "conn2", clock: clock)
         
  // Exhaust and drop on limiter1
         _ = await limiter1.shouldProcess()
@@ -464,7 +619,7 @@ final class ConnectionRateLimiterTests: XCTestCase {
             window: 10.0
         )
         
-        let limiter = ConnectionRateLimiter(limits: limits, connectionId: "test")
+        let limiter = makeLimiter(limits: limits, connectionId: "test")
         
  // Exhaust and drop
         _ = await limiter.shouldProcess()
@@ -497,24 +652,24 @@ final class ConnectionRateLimiterTests: XCTestCase {
             window: 10.0
         )
         
-        let limiter = ConnectionRateLimiter(limits: limits, connectionId: "test")
+        let limiter = makeLimiter(limits: limits, connectionId: "test")
         
- // Record external drops (e.g., oversized messages rejected before rate limit check)
+ // External drops must return `.drop` until the exact disconnect threshold.
         for _ in 0..<4 {
-            await limiter.recordDropped()
+            let decision = await limiter.recordDropped()
+            XCTAssertEqual(decision, .drop)
         }
         
         let drops = await limiter.droppedMessageCount
         XCTAssertEqual(drops, 4, "Should have 4 external drops recorded")
         
- // One more drop should trigger disconnect
-        await limiter.recordDropped()
-        
- // Now shouldProcess should return disconnect
- // (even though token bucket has tokens, the drop threshold is exceeded)
- // Note: The current implementation checks threshold after a drop from rate limiting
- // External drops via recordDropped don't automatically trigger disconnect check
- // This is by design - disconnect is checked in shouldProcess flow
+ // The threshold-th external drop must itself request immediate disconnect.
+        let thresholdDecision = await limiter.recordDropped()
+        if case .disconnect(let reason) = thresholdDecision {
+            XCTAssertTrue(reason.contains("5"))
+        } else {
+            XCTFail("Expected external drop at threshold to disconnect, got \(thresholdDecision)")
+        }
     }
     
  /// Test factory creates independent limiters
@@ -533,6 +688,18 @@ final class ConnectionRateLimiterTests: XCTestCase {
     }
     
  // MARK: - Helper Methods
+
+    private func makeLimiter(
+        limits: SecurityLimits,
+        connectionId: String,
+        clock: ManualRateLimiterClock = ManualRateLimiterClock()
+    ) -> ConnectionRateLimiter {
+        return ConnectionRateLimiter(
+            limits: limits,
+            connectionId: connectionId,
+            now: { clock.currentInstant() }
+        )
+    }
     
     private func createTestLimits(
         rate: Double,

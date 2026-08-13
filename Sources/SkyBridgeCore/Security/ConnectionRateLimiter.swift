@@ -41,6 +41,9 @@ public actor ConnectionRateLimiter {
     
  /// Token bucket for rate limiting
     private let tokenBucket: TokenBucketLimiter
+
+ /// Monotonic time source shared with the bucket in deterministic tests.
+    private let now: @Sendable () -> ContinuousClock.Instant
     
  /// Sliding window of dropped message records
     private var droppedMessages: [DroppedMessageRecord] = []
@@ -60,21 +63,36 @@ public actor ConnectionRateLimiter {
  /// - limits: Security limits configuration
  /// - connectionId: Unique identifier for this connection
     public init(limits: SecurityLimits, connectionId: String) {
-        self.limits = limits
-        self.connectionId = connectionId
-        self.tokenBucket = TokenBucketLimiter(limits: limits)
+        self.init(
+            limits: limits,
+            connectionId: connectionId,
+            now: { ContinuousClock.now }
+        )
     }
     
- /// Initialize with custom token bucket (for testing).
+ /// Initialize with a custom monotonic time source for deterministic tests.
  ///
  /// - Parameters:
  /// - limits: Security limits configuration
  /// - connectionId: Unique identifier for this connection
- /// - tokenBucket: Custom token bucket instance
-    internal init(limits: SecurityLimits, connectionId: String, tokenBucket: TokenBucketLimiter) {
+ /// - now: Monotonic time source shared by token refill and drop-window tracking
+    internal init(
+        limits: SecurityLimits,
+        connectionId: String,
+        now: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        precondition(
+            limits.droppedMessagesThreshold > 0,
+            "Dropped-message threshold must be positive"
+        )
+        precondition(
+            limits.droppedMessagesWindow.isFinite && limits.droppedMessagesWindow > 0,
+            "Dropped-message window must be finite and positive"
+        )
         self.limits = limits
         self.connectionId = connectionId
-        self.tokenBucket = tokenBucket
+        self.tokenBucket = TokenBucketLimiter(limits: limits, now: now)
+        self.now = now
     }
     
  // MARK: - Public Interface
@@ -91,24 +109,25 @@ public actor ConnectionRateLimiter {
         }
         
  // Message will be dropped - record it
-        recordDropped()
-        
- // Check if we should disconnect
-        if shouldDisconnect() {
-            return .disconnect(reason: "Exceeded \(limits.droppedMessagesThreshold) dropped messages in \(Int(limits.droppedMessagesWindow))s window")
-        }
-        
-        return .drop
+        return recordDropped()
     }
     
- /// Record a dropped message (called internally or externally for oversized messages).
-    public func recordDropped() {
-        let now = ContinuousClock.now
-        droppedMessages.append(DroppedMessageRecord(timestamp: now, count: 1))
+ /// Record an externally rejected message and return the resulting policy decision.
+ ///
+ /// Callers must apply `.disconnect` immediately so malformed messages cannot
+ /// bypass the sliding-window threshold while remaining below the token rate.
+    public func recordDropped() -> RateLimitDecision {
+        let currentInstant = now()
+        droppedMessages.append(DroppedMessageRecord(timestamp: currentInstant, count: 1))
         totalDroppedCount += 1
         
  // Prune old records outside the window
-        pruneOldRecords(now: now)
+        pruneOldRecords(now: currentInstant)
+
+        if shouldDisconnect() {
+            return .disconnect(reason: disconnectReason)
+        }
+        return .drop
     }
     
  /// Get total dropped message count (for monitoring).
@@ -118,7 +137,7 @@ public actor ConnectionRateLimiter {
     
  /// Get dropped messages in current window (for monitoring).
     public var droppedInWindow: Int {
-        pruneOldRecords(now: ContinuousClock.now)
+        pruneOldRecords(now: now())
         return droppedMessages.reduce(0) { $0 + $1.count }
     }
     
@@ -142,6 +161,11 @@ public actor ConnectionRateLimiter {
     private func shouldDisconnect() -> Bool {
         let droppedInCurrentWindow = droppedMessages.reduce(0) { $0 + $1.count }
         return droppedInCurrentWindow >= limits.droppedMessagesThreshold
+    }
+
+    private var disconnectReason: String {
+        "Exceeded \(limits.droppedMessagesThreshold) dropped messages in " +
+        "\(limits.droppedMessagesWindow)s window"
     }
     
  /// Remove records outside the sliding window.

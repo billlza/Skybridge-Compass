@@ -19,6 +19,8 @@ import Foundation
 ///
 /// **Validates: Requirements 4.1**
 public actor TokenBucketLimiter {
+
+    private static let maximumExactlyRepresentableTokenCount = 9_007_199_254_740_992
     
  // MARK: - Configuration
     
@@ -27,6 +29,10 @@ public actor TokenBucketLimiter {
     
  /// Maximum token capacity (burst limit)
     private let burst: Int
+
+ /// Monotonic time source. Production always uses `ContinuousClock`; the
+ /// internal injection point keeps elapsed-time tests deterministic.
+    private let now: @Sendable () -> ContinuousClock.Instant
     
  // MARK: - State
     
@@ -44,23 +50,46 @@ public actor TokenBucketLimiter {
  /// - rate: Token refill rate in tokens per second
  /// - burst: Maximum token capacity (burst limit)
     public init(rate: Double, burst: Int) {
-        precondition(rate > 0, "Rate must be positive")
+        self.init(rate: rate, burst: burst, now: { ContinuousClock.now })
+    }
+
+ /// Internal initializer for deterministic elapsed-time tests.
+    internal init(
+        rate: Double,
+        burst: Int,
+        now: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        precondition(rate.isFinite && rate > 0, "Rate must be finite and positive")
         precondition(burst > 0, "Burst must be positive")
-        
+        precondition(
+            burst <= Self.maximumExactlyRepresentableTokenCount,
+            "Burst exceeds exact token-count precision"
+        )
+
         self.rate = rate
         self.burst = burst
+        self.now = now
         self.tokens = Double(burst) // Start with full bucket
-        self.lastRefill = ContinuousClock.now
+        self.lastRefill = now()
     }
     
  /// Initialize from SecurityLimits configuration.
  ///
  /// - Parameter limits: Security limits configuration
     public init(limits: SecurityLimits) {
-        self.rate = limits.tokenBucketRate
-        self.burst = limits.tokenBucketBurst
-        self.tokens = Double(limits.tokenBucketBurst)
-        self.lastRefill = ContinuousClock.now
+        self.init(limits: limits, now: { ContinuousClock.now })
+    }
+
+ /// Internal configuration initializer for deterministic elapsed-time tests.
+    internal init(
+        limits: SecurityLimits,
+        now: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        self.init(
+            rate: limits.tokenBucketRate,
+            burst: limits.tokenBucketBurst,
+            now: now
+        )
     }
     
  // MARK: - Public Interface
@@ -83,11 +112,16 @@ public actor TokenBucketLimiter {
  /// Attempt to consume multiple tokens.
  ///
  /// - Parameter count: Number of tokens to consume
+ /// - Precondition: `count` must be non-negative
  /// - Returns: `true` if all tokens were consumed, `false` if rate limited
     public func tryConsume(count: Int) -> Bool {
+        precondition(count >= 0, "Token count must not be negative")
         guard count > 0 else { return true }
         
         refill()
+
+ // A bucket can never satisfy a request larger than its configured capacity.
+        guard count <= burst else { return false }
         
         let required = Double(count)
         if tokens >= required {
@@ -99,19 +133,21 @@ public actor TokenBucketLimiter {
     
  /// Get current available tokens (for monitoring/testing).
     public var availableTokens: Double {
- // Note: This is a snapshot, may be stale immediately after return
+        refill()
+ // This is an up-to-date snapshot at the actor-isolated query instant.
         return tokens
     }
     
  /// Get current available tokens as integer (for monitoring).
     public var availableTokensInt: Int {
+        refill()
         return Int(tokens)
     }
     
  /// Reset the bucket to full capacity.
     public func reset() {
         tokens = Double(burst)
-        lastRefill = ContinuousClock.now
+        lastRefill = now()
     }
     
  // MARK: - Private Methods
@@ -119,8 +155,9 @@ public actor TokenBucketLimiter {
  /// Refill tokens based on elapsed time since last refill.
  /// Clamps to burst capacity to prevent unbounded accumulation.
     private func refill() {
-        let now = ContinuousClock.now
-        let elapsed = now - lastRefill
+        let currentInstant = now()
+        precondition(currentInstant >= lastRefill, "Monotonic clock moved backwards")
+        let elapsed = currentInstant - lastRefill
         
  // Convert Duration to seconds
         let elapsedSeconds = Double(elapsed.components.seconds) +
@@ -132,6 +169,6 @@ public actor TokenBucketLimiter {
  // Clamp to burst capacity (critical: prevents unbounded accumulation)
         tokens = min(Double(burst), tokens + newTokens)
         
-        lastRefill = now
+        lastRefill = currentInstant
     }
 }
