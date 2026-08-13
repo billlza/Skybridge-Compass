@@ -35,7 +35,6 @@ import java.io.IOException
 import java.security.MessageDigest
 import java.nio.file.Files
 import java.util.UUID
-import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -602,12 +601,18 @@ class WebRtcFileTransferControllerControlFlowTest {
 
     @Test
     fun handleIncoming_concurrentDuplicateCompleteClaimsFinalizationOnce() = runTest {
+        val finalizationClaimed = CountDownLatch(1)
+        val allowFinalization = CountDownLatch(1)
         val transport = RecordingTransport()
         val receiver = WebRtcFileTransferController(
             webrtc = transport,
             json = json,
             inboundApprovalProvider = acceptingApprovalProvider(),
             backgroundDispatcher = StandardTestDispatcher(testScheduler),
+            afterInboundFinalizationClaim = {
+                finalizationClaimed.countDown()
+                check(allowFinalization.await(2, TimeUnit.SECONDS))
+            },
         )
         val transferId = UUID.randomUUID().toString()
         val payload = "concurrent terminal claim".encodeToByteArray()
@@ -619,18 +624,27 @@ class WebRtcFileTransferControllerControlFlowTest {
         receiver.handleIncoming(inboundChunk(transferId, payload))
 
         val complete = inboundComplete(transferId, payload)
-        val executor = Executors.newFixedThreadPool(2)
+        val executor = Executors.newSingleThreadExecutor()
         try {
-            val barrier = CyclicBarrier(3)
-            val completions = List(2) {
-                executor.submit {
-                    barrier.await()
-                    receiver.handleIncoming(complete)
-                }
+            val finalizing = executor.submit {
+                receiver.handleIncoming(complete)
             }
-            barrier.await()
-            completions.forEach { it.get() }
+            assertTrue(finalizationClaimed.await(2, TimeUnit.SECONDS))
+
+            // The first callback has atomically removed the live receive but has not yet committed
+            // its completion witness. A truly concurrent duplicate must observe only the bound
+            // active ledger entry: it cannot commit, deliver, or ACK independently.
+            receiver.handleIncoming(complete)
+            runCurrent()
+            assertFalse(received.isCompleted)
+            assertFalse(
+                transport.messages.any { it.op == CrossNetworkFileTransferOp.completeAck },
+            )
+
+            allowFinalization.countDown()
+            finalizing.get(2, TimeUnit.SECONDS)
         } finally {
+            allowFinalization.countDown()
             executor.shutdownNow()
         }
         runCurrent()
