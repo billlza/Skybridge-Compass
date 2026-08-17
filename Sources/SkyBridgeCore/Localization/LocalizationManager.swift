@@ -295,7 +295,7 @@ public final class LocalizationManager: ObservableObject {
         }
 
         let primaryBundle = bundle ?? Bundle.main
-        let secondaryBundle = Bundle.module
+        let secondaryBundle = SkyBridgeResourceBundleLocator.core
 
  // 系统默认语言直接查找（避免返回原始key）
         let systemValue = primaryBundle.localizedString(forKey: key, value: nil, table: nil)

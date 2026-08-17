@@ -1632,6 +1632,16 @@ else
   log "跳过 PowerMetricsHelper（未找到可执行文件：${HELPER_BIN_PATH}）"
 fi
 
+# 资源 bundle 存在性闸门：可执行文件引用的 <Package>_<Target>.bundle 必须全部
+# 落位于 Contents/Resources，且二进制必须携带非致命 Bundle 解析器标记
+# （SkyBridgeResourceBundleLocator/v1），防止 SwiftPM Bundle.module fatalError
+# 造成的 zh-Hans 启动即崩类回归。
+log "校验资源 bundle 存在性与非致命 Bundle 解析器标记"
+"${ROOT_DIR}/Scripts/verify_app_resource_bundles.sh" "${APP_DIR}" || {
+  echo "错误：资源 bundle 存在性闸门未通过；禁止打包会在启动期 fatalError 的应用。" >&2
+  exit 1
+}
+
 # 优先使用正式证书签名；未配置证书时回退 ad-hoc
 if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
   log "使用证书签名：${SIGN_IDENTITY}"
