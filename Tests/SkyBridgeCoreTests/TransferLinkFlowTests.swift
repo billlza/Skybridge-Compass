@@ -102,6 +102,62 @@ final class TransferLinkFlowTests: XCTestCase {
         XCTAssertTrue(refreshed.isActive)
     }
 
+    func testConcurrentClaimsOnSingleDownloadLinkGrantExactlyOne() async throws {
+        let fileURL = try makeTemporaryFile(named: "claim-race.txt", contents: "claim race")
+        let link = try await manager.createTransferLink(for: [fileURL], maxDownloads: 1, requiresPassword: false)
+        createdLinkIDs.append(link.id)
+
+        let manager = self.manager
+        let linkID = link.id
+        let grantedCount = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<8 {
+                group.addTask { await manager.claimDownload(for: linkID) }
+            }
+            var granted = 0
+            for await didClaim in group where didClaim {
+                granted += 1
+            }
+            return granted
+        }
+
+        XCTAssertEqual(
+            grantedCount,
+            1,
+            "maxDownloads=1 的链接在并发抢占下必须恰好放行一次：检查+计数如果不是单次原子判定，多个请求会同时通过剩余次数检查而超发。"
+        )
+        let refreshed = await manager.getLink(by: link.id)
+        XCTAssertNil(refreshed, "配额耗尽后链接必须立即失效，后续请求不能再取到该链接。")
+    }
+
+    func testFinalQuotaDownloadDeliversFullBodyThenExhaustsLink() async throws {
+        let contents = String(repeating: "final-quota-payload-", count: 8_192)
+        let fileURL = try makeTemporaryFile(named: "final-quota.txt", contents: contents)
+        let link = try await manager.createTransferLink(for: [fileURL], maxDownloads: 1, requiresPassword: false)
+        createdLinkIDs.append(link.id)
+
+        let downloadURL = try loopbackURL(for: link, path: "/link/\(link.id)/download/0")
+        let (data, response) = try await URLSession.shared.data(from: downloadURL)
+        let httpResponse = try XCTUnwrap(response as? HTTPURLResponse)
+
+        XCTAssertEqual(httpResponse.statusCode, 200)
+        XCTAssertEqual(
+            String(data: data, encoding: .utf8),
+            contents,
+            "耗尽最后一次配额的下载必须完整送达：空闲停服只能发生在响应发送收尾之后，不能在发完响应头后就掐断连接。"
+        )
+
+        let refreshed = await manager.getLink(by: link.id)
+        XCTAssertNil(refreshed, "最后一次配额被占用后链接必须失效。")
+
+        do {
+            let (_, secondResponse) = try await URLSession.shared.data(from: downloadURL)
+            let secondHTTP = try XCTUnwrap(secondResponse as? HTTPURLResponse)
+            XCTAssertNotEqual(secondHTTP.statusCode, 200, "配额耗尽后不允许再次下载成功。")
+        } catch {
+            // 服务器可能已因空闲而停机，连接被拒绝同样证明配额没有被第二次放行。
+        }
+    }
+
     func testScannerShouldRejectHostMismatchedTransferLink() async throws {
         let fileURL = try makeTemporaryFile(named: "transfer-link-host-check.txt", contents: "host check")
         let link = try await manager.createTransferLink(for: [fileURL])

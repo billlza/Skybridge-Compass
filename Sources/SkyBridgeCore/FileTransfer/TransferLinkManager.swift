@@ -125,22 +125,29 @@ public final class TransferLinkManager: ObservableObject, Sendable {
     }
 
     public func recordDownload(for linkId: String) async {
-        guard var link = await linkStorage.getLink(by: linkId), link.isActive, !link.isExpired else {
-            return
-        }
+        guard await claimDownload(for: linkId) else { return }
+        await stopServerIfIdle()
+    }
 
-        link.currentDownloads += 1
-        link.lastAccessedAt = Date()
-        if link.currentDownloads >= link.maxDownloads {
-            link.isActive = false
+    /// 下载配额的唯一裁决点：剩余次数检查与自增在存储层同一次原子操作内完成，
+    /// 并发请求不可能都通过检查而超发 maxDownloads。返回 false 表示链接
+    /// 不存在/已失效/配额已被并发请求占完。
+    func claimDownload(for linkId: String) async -> Bool {
+        guard let link = await linkStorage.claimDownload(linkId) else {
+            return false
         }
-
-        try? await linkStorage.updateLink(link)
         if !link.isActive {
             NotificationCenter.default.post(name: .transferLinkExpired, object: nil, userInfo: ["linkId": link.id])
             revokeAccessGrants(for: link.id)
         }
         await syncActiveLinks()
+        return true
+    }
+
+    /// HTTP 响应（含文件体）发送收尾后才允许空闲停服；claim 时就停服会把
+    /// 正在传输最后一次配额的连接掐断。
+    func downloadDidFinish(for linkId: String) async {
+        _ = linkId
         await stopServerIfIdle()
     }
 
@@ -213,8 +220,11 @@ public final class TransferLinkManager: ObservableObject, Sendable {
             validateAccessToken: { [weak self] linkID, token, clientAddress in
                 await self?.validateAccessGrant(linkId: linkID, token: token, clientAddress: clientAddress) ?? false
             },
-            recordDownload: { [weak self] linkID in
-                await self?.recordDownload(for: linkID)
+            claimDownload: { [weak self] linkID in
+                await self?.claimDownload(for: linkID) ?? false
+            },
+            downloadDidFinish: { [weak self] linkID in
+                await self?.downloadDidFinish(for: linkID)
             }
         )
 
@@ -615,6 +625,30 @@ private final class TransferLinkStorage: Sendable {
         await withCheckedContinuation { continuation in
             storageQueue.async {
                 continuation.resume(returning: self.links.withLock { $0[id] })
+            }
+        }
+    }
+
+    /// 原子占用一次下载配额：检查与自增在同一次持锁内完成，返回更新后的链接；
+    /// 无剩余配额（或链接不可用）时返回 nil，绝不超发。
+    func claimDownload(_ id: String) async -> TransferLink? {
+        await withCheckedContinuation { continuation in
+            storageQueue.async {
+                continuation.resume(returning: self.links.withLock { links -> TransferLink? in
+                    guard var link = links[id],
+                          link.isActive,
+                          !link.isExpired,
+                          link.currentDownloads < link.maxDownloads else {
+                        return nil
+                    }
+                    link.currentDownloads += 1
+                    link.lastAccessedAt = Date()
+                    if link.currentDownloads >= link.maxDownloads {
+                        link.isActive = false
+                    }
+                    links[id] = link
+                    return link
+                })
             }
         }
     }

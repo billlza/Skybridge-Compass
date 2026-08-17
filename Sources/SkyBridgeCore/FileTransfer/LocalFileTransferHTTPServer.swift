@@ -20,7 +20,10 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         let lookupLink: @Sendable (String) async -> TransferLink?
         let issueAccessGrant: @Sendable (String, String) async -> AccessGrant?
         let validateAccessToken: @Sendable (String, String, String) async -> Bool
-        let recordDownload: @Sendable (String) async -> Void
+        /// 配额的原子判定点：检查+计数一次完成，返回 true 才允许发文件。
+        let claimDownload: @Sendable (String) async -> Bool
+        /// 响应（含文件体）发送收尾后调用，用于空闲停服等延后副作用。
+        let downloadDidFinish: @Sendable (String) async -> Void
     }
 
     private struct HTTPRequest: Sendable {
@@ -76,7 +79,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
 
         let header: Data
         let body: Body
-        let onHeaderSent: (@Sendable () async -> Void)?
+        let onResponseSent: (@Sendable () async -> Void)?
     }
 
     private struct UnlockAttemptState: Sendable {
@@ -480,7 +483,18 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             return makeTextResponse(statusCode: 404, body: "Not Found")
         }
 
-        return fileResponse(for: link.files[resolvedIndex], linkID: linkID, rangeHeader: request.headers["range"])
+        let fileURL = link.files[resolvedIndex]
+        guard FileManager.default.isReadableFile(atPath: fileURL.path) else {
+            return makeTextResponse(statusCode: 500, body: "Failed to stat file")
+        }
+
+        // 配额检查与占用必须是同一次原子判定：旧的“先查剩余、发完头再计数”
+        // 允许并发请求同时通过检查而超发 maxDownloads。
+        guard await callbacks.claimDownload(linkID) else {
+            return makeTextResponse(statusCode: 410, body: "Link exhausted")
+        }
+
+        return fileResponse(for: fileURL, linkID: linkID, rangeHeader: request.headers["range"])
     }
 
     private func bundleResponse(for linkID: String, request: HTTPRequest) async -> HTTPResponse {
@@ -520,6 +534,12 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
                   let fileSize = attributes[.size] as? NSNumber else {
                 try? FileManager.default.removeItem(at: temp)
                 return makeTextResponse(statusCode: 500, body: "Zip failed")
+            }
+
+            // 打包成功后才原子占用配额，zip 失败不消耗下载次数。
+            guard await callbacks.claimDownload(linkID) else {
+                try? FileManager.default.removeItem(at: temp)
+                return makeTextResponse(statusCode: 410, body: "Link exhausted")
             }
 
             return streamedFileResponse(
@@ -597,8 +617,8 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             contentType: mime,
             contentLength: Int(length),
             extraHeaders: extraHeaders,
-            onHeaderSent: { [callbacks] in
-                await callbacks.recordDownload(linkID)
+            onResponseSent: { [callbacks] in
+                await callbacks.downloadDidFinish(linkID)
             }
         )
     }
@@ -615,9 +635,6 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
     private func send(response: HTTPResponse, on connection: NWConnection) async {
         do {
             try await sendData(response.header, on: connection)
-            if let onHeaderSent = response.onHeaderSent {
-                await onHeaderSent()
-            }
 
             switch response.body {
             case .data(let data):
@@ -636,6 +653,12 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
             }
         } catch {
             connection.cancel()
+        }
+
+        // 必须等响应（含文件体）发送收尾后再通知下载结束：管理端可能因“最后一次
+        // 配额已耗尽”触发空闲停服，提前通知会把仍在传输的连接掐断。
+        if let onResponseSent = response.onResponseSent {
+            await onResponseSent()
         }
     }
 
@@ -1061,7 +1084,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         contentType: String,
         contentLength: Int? = nil,
         extraHeaders: [(String, String)] = [],
-        onHeaderSent: (@Sendable () async -> Void)? = nil,
+        onResponseSent: (@Sendable () async -> Void)? = nil,
         contentSecurityPolicy: String? = nil
     ) -> HTTPResponse {
         let bodyLength: Int
@@ -1089,7 +1112,7 @@ final class LocalFileTransferHTTPServer: @unchecked Sendable {
         headers.append(contentsOf: extraHeaders)
 
         let header = buildHeader(statusCode: statusCode, headers: headers)
-        return HTTPResponse(header: header, body: body, onHeaderSent: onHeaderSent)
+        return HTTPResponse(header: header, body: body, onResponseSent: onResponseSent)
     }
 
     private func buildHeader(statusCode: Int, headers: [(String, String)]) -> Data {
