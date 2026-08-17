@@ -2555,6 +2555,26 @@ async function removeFromRooms(ws) {
   await signalingState.removeRoomMember(meta.sessionId, meta.deviceId, meta.clientId || '');
 }
 
+/// A session token stays `bound` for the life of the session; without this
+/// release the only rebind path is the reclaim window measured from the LAST
+/// bind, so any reconnect after a silent drop (NAT timeout, path change, app
+/// backgrounding) is walled with `session_token_already_bound` and a hosted
+/// session can never re-attach signaling.
+async function releaseSessionTokenBinding(ws) {
+  const meta = wsMeta.get(ws);
+  if (!meta?.tokenHash || !meta?.clientId) return;
+  await signalingState.updateEphemeral('session_token', meta.tokenHash, (record) => {
+    // A reclaim or refresh may already own the binding; never clobber a
+    // binding this socket no longer holds.
+    if (record.state !== 'bound' || record.boundClientId !== meta.clientId) {
+      return false;
+    }
+    record.boundClientId = null;
+    record.boundInstanceId = null;
+    record.boundReleasedAt = now();
+  });
+}
+
 async function dropLocalClientById(clientId, reason = 'remote_reclaim') {
   if (!wss) return;
   for (const client of wss.clients) {
@@ -4579,16 +4599,23 @@ wss.on('connection', (ws, req) => {
         return;
       }
       if (record.state === 'bound') {
+        // A binding released by its socket's close may be re-bound at any time
+        // while the token lives; a binding still held by a live socket is only
+        // reclaimable inside the short window so a hijack with a stolen token
+        // stays an observable race against the connected owner.
+        const released = !record.boundClientId;
         const withinWindow = now() - Number(record.boundAt || 0) <= SESSION_RECLAIM_WINDOW_MS;
         const sameScope = record.sessionId === sessionId
           && record.deviceId
           && record.protocolPublicKeyFingerprint
           && record.role;
-        if (withinWindow && sameScope) {
-          reclaimTarget = {
-            instanceId: record.boundInstanceId,
-            clientId: record.boundClientId
-          };
+        if ((released || withinWindow) && sameScope) {
+          if (record.boundClientId && record.boundInstanceId) {
+            reclaimTarget = {
+              instanceId: record.boundInstanceId,
+              clientId: record.boundClientId
+            };
+          }
           record.boundAt = now();
           record.boundInstanceId = INSTANCE_ID;
           record.boundClientId = clientId;
@@ -4609,6 +4636,9 @@ wss.on('connection', (ws, req) => {
     }
     if (bindError) {
       incrementSecurityCounter('ws_1008_bind_rejected');
+      // Ack the rejection in-band before closing: close-frame reasons are
+      // dropped by some client transports, leaving reconnect loops blind.
+      wsSendRaw(ws, { type: 'error', error: bindError, sessionId });
       ws.close(1008, bindError);
       return;
     }
@@ -4807,6 +4837,9 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     void removeFromRooms(ws).catch((error) => {
       console.error('[WS] close cleanup failed:', safeLogErrorCode(error));
+    });
+    void releaseSessionTokenBinding(ws).catch((error) => {
+      console.error('[WS] close binding release failed:', safeLogErrorCode(error));
     });
   });
 
