@@ -194,7 +194,7 @@ let package = Package(
         // '.../Release/include/module.modulemap'"。OQSRAII 的成熟做法是：liboqs 仅作 .binaryTarget
         // 提供静态库，由一个常规 C/C++ 目标 OQSRAII 消费（Swift `import OQSRAII`），SwiftPM 在该目标
         // 自有模块目录里自动生成模块，不与共享 include 冲突。这里对 QPeriaptFFI 完全照搬：
-        //   - QPeriaptFFI（binaryTarget）只贡献 libq_periapt_ffi.a，不再携带任何 module.modulemap；
+        //   - QPeriaptFFI（binaryTarget）只贡献 libq_periapt_ffi_abi2.a，不再携带任何 module.modulemap；
         //   - CQPeriapt 自带一份 q_periapt.h（vendored，与 OQSRAII 自带 OQSRAII.h 同构），通过伞头
         //     CQPeriapt.h 重新导出 C ABI；SwiftPM 为 CQPeriapt 自动生成模块映射；
         //   - Swift 端改为 `import CQPeriapt`（替代 `import QPeriaptFFI`）。
