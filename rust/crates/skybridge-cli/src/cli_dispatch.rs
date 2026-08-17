@@ -17,9 +17,9 @@ use crate::operator_status::{doctor, metrics, tail_logs};
 use crate::performance_commands::check_performance;
 use crate::session_commands::{disconnect, session_inspect, session_ls};
 use crate::{
-    AgentSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands, DeviceSubcommand,
-    DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand, LogsSubcommand,
-    RemoteDesktopSubcommand, SessionSubcommand,
+    AgentSubcommand, AndroidSubcommand, CheckSubcommand, Cli, CodeSubcommand, Commands,
+    DeviceSubcommand, DiagnoseSubcommand, DoctorSubcommand, FileSubcommand, InternalSubcommand,
+    LogsSubcommand, RemoteDesktopSubcommand, SessionSubcommand,
 };
 
 pub(super) async fn dispatch(cli: Cli) -> Result<()> {
@@ -73,6 +73,21 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                         crate::crossnet_commands::settings_set(set_args).await
                     }
                 }
+            }
+        },
+        Commands::Android(android) => match android.command {
+            AndroidSubcommand::Devices(args) => crate::android_commands::devices(args).await,
+            AndroidSubcommand::Status(args) => {
+                crate::android_commands::bridge_query(args, "status").await
+            }
+            AndroidSubcommand::Doctor(args) => {
+                crate::android_commands::bridge_query(args, "doctor").await
+            }
+            AndroidSubcommand::Lan(args) => {
+                crate::android_commands::bridge_query(args, "lan").await
+            }
+            AndroidSubcommand::Code(args) => {
+                crate::android_commands::bridge_query(args, "code").await
             }
         },
         Commands::Session(session) => match session.command {

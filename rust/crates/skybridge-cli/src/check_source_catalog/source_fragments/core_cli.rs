@@ -49,9 +49,21 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         "agent_runtime_guard.rs",
         include_str!("../../agent_runtime_guard.rs"),
     ),
+    (
+        "android_bridge.rs",
+        include_str!("../../android_bridge.rs"),
+    ),
+    (
+        "android_commands.rs",
+        include_str!("../../android_commands.rs"),
+    ),
     ("auth_commands.rs", include_str!("../../auth_commands.rs")),
     ("auth_support.rs", include_str!("../../auth_support.rs")),
     ("cli_args.rs", include_str!("../../cli_args.rs")),
+    (
+        "cli_args/android.rs",
+        include_str!("../../cli_args/android.rs"),
+    ),
     ("cli_args/check.rs", include_str!("../../cli_args/check.rs")),
     (
         "cli_args/common.rs",

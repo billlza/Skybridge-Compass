@@ -1,6 +1,8 @@
 use clap::Parser;
 use std::process::ExitCode;
 mod agent_runtime_guard;
+mod android_bridge;
+mod android_commands;
 mod auth_commands;
 mod auth_support;
 mod check_coverage;

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod android;
 mod check;
 mod common;
 #[cfg(target_os = "macos")]
@@ -11,6 +12,7 @@ mod operator;
 mod smoke;
 mod test;
 
+pub(crate) use android::*;
 pub(crate) use check::*;
 pub(crate) use common::*;
 #[cfg(target_os = "macos")]
@@ -43,6 +45,7 @@ pub(crate) enum Commands {
     Connect(ConnectCommand),
     #[cfg(target_os = "macos")]
     Crossnet(CrossnetCommand),
+    Android(AndroidCommand),
     Session(SessionCommand),
     Disconnect(DisconnectCommand),
     RemoteDesktop(RemoteDesktopCommand),
@@ -88,6 +91,13 @@ impl Cli {
                         args.output.json || set_args.output.json
                     }
                 },
+            },
+            Commands::Android(android) => match &android.command {
+                AndroidSubcommand::Devices(args) => args.output.json,
+                AndroidSubcommand::Status(args)
+                | AndroidSubcommand::Doctor(args)
+                | AndroidSubcommand::Lan(args)
+                | AndroidSubcommand::Code(args) => args.output.json,
             },
             Commands::Session(session) => match &session.command {
                 SessionSubcommand::Ls(output) => output.json,
