@@ -1610,7 +1610,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
-            onFramesDisplayed: { [remoteDesktopManager] presentationTimeStamp, displayedFrameCount, completedAt, frameAgeMs, cameraPresentationContext in
+            onFramesDisplayed: { [remoteDesktopManager] presentationTimeStamp, displayedFrameCount, completedAt, frameAgeMs, cameraPresentationContext, framePresentationContext in
                 remoteDesktopManager.recordMetalRendererDisplayedFramesForSmoke(
                     displayedFrameCount: displayedFrameCount,
                     completedAt: completedAt,
@@ -1621,7 +1621,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                         presentationTimeStamp: presentationTimeStamp,
                         displayedFrameCount: displayedFrameCount,
                         completedAt: completedAt,
-                        cameraPresentationContext: cameraPresentationContext
+                        cameraPresentationContext: cameraPresentationContext,
+                        framePresentationContext: framePresentationContext
                     )
                 }
             },
@@ -1681,7 +1682,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             Int,
             Date,
             Int?,
-            CameraFramePresentationContext?
+            CameraFramePresentationContext?,
+            RemoteDesktopFramePresentationContext?
         ) -> Void
         private let onRenderOrientation: @Sendable (RemoteDesktopRenderOrientation) -> Void
         private weak var attachedView: MetalVideoContainerView?
@@ -1701,7 +1703,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 Int,
                 Date,
                 Int?,
-                CameraFramePresentationContext?
+                CameraFramePresentationContext?,
+                RemoteDesktopFramePresentationContext?
             ) -> Void,
             onRenderOrientation: @escaping @Sendable (RemoteDesktopRenderOrientation) -> Void
         ) {
@@ -1904,7 +1907,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             Int,
             Date,
             Int?,
-            CameraFramePresentationContext?
+            CameraFramePresentationContext?,
+            RemoteDesktopFramePresentationContext?
         ) -> Void)?
         var onRenderOrientation: (@Sendable (RemoteDesktopRenderOrientation) -> Void)?
 
@@ -2125,6 +2129,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                     frameVersion: frameVersion,
                     presentationTimeStamp: presentationTimeStamp,
                     cameraPresentationContext: frame.cameraPresentationContext,
+                    framePresentationContext: frame.framePresentationContext,
                     frameAgeMs: frameAgeMs,
                     renderStartedAt: renderStartedAt,
                     drawableSize: drawableSize,
@@ -2177,6 +2182,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                 frameVersion: frameVersion,
                 presentationTimeStamp: presentationTimeStamp,
                 cameraPresentationContext: frame.cameraPresentationContext,
+                framePresentationContext: frame.framePresentationContext,
                 frameAgeMs: frameAgeMs,
                 renderStartedAt: renderStartedAt,
                 drawableSize: drawableSize,
@@ -2355,6 +2361,7 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
             frameVersion: UInt64,
             presentationTimeStamp: CMTime,
             cameraPresentationContext: CameraFramePresentationContext?,
+            framePresentationContext: RemoteDesktopFramePresentationContext?,
             frameAgeMs: Int?,
             renderStartedAt: UInt64,
             drawableSize: CGSize,
@@ -2408,7 +2415,8 @@ private struct RemoteDesktopMetalVideoView: UIViewRepresentable {
                         displayedCallbackCount,
                         displayedCallbackCompletedAt,
                         frameAgeMs,
-                        cameraPresentationContext
+                        cameraPresentationContext,
+                        framePresentationContext
                     )
                 }
             }
@@ -2648,10 +2656,11 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
                     )
                 }
             },
-            onFramePresented: { [remoteDesktopManager] cameraPresentationContext, presentedAt in
+            onFramePresented: { [remoteDesktopManager] cameraPresentationContext, framePresentationContext, presentedAt in
                 Task { @MainActor in
                     await remoteDesktopManager.handleVideoRendererDidPresentFrame(
                         cameraPresentationContext: cameraPresentationContext,
+                        framePresentationContext: framePresentationContext,
                         presentedAt: presentedAt
                     )
                 }
@@ -2690,13 +2699,18 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
         private let onDecodeFailure: @Sendable (String?) -> Void
         private let onRequiresFlush: @Sendable () -> Void
         private let onFrameEnqueued: @Sendable (CMTime, Int) -> Void
-        private let onFramePresented: @Sendable (CameraFramePresentationContext?, Date) -> Void
+        private let onFramePresented: @Sendable (
+            CameraFramePresentationContext?,
+            RemoteDesktopFramePresentationContext?,
+            Date
+        ) -> Void
         private weak var activeFeed: RemoteVideoFrameFeed?
         private weak var attachedView: SampleBufferDisplayView?
         private weak var attachedLayer: AVSampleBufferDisplayLayer?
         private var notificationTokens: [NSObjectProtocol] = []
         private var bufferedFrames: [DisplaySampleBufferFrame] = []
         private var pendingCameraPresentationContext: CameraFramePresentationContext?
+        private var pendingFramePresentationContext: RemoteDesktopFramePresentationContext?
         private var isAwaitingRendererPresentation = false
         private var isDrainScheduled = false
         private var framePumpTask: Task<Void, Never>?
@@ -2709,6 +2723,7 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             onFrameEnqueued: @escaping @Sendable (CMTime, Int) -> Void,
             onFramePresented: @escaping @Sendable (
                 CameraFramePresentationContext?,
+                RemoteDesktopFramePresentationContext?,
                 Date
             ) -> Void
         ) {
@@ -2756,6 +2771,7 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             guard let layer = attachedLayer else { return }
             bufferedFrames.removeAll(keepingCapacity: true)
             pendingCameraPresentationContext = nil
+            pendingFramePresentationContext = nil
             isAwaitingRendererPresentation = false
             isDrainScheduled = false
             layer.stopRequestingMediaData()
@@ -2808,6 +2824,9 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
             while layer.isReadyForMoreMediaData {
                 if layer.requiresFlushToResumeDecoding {
                     bufferedFrames.removeAll(keepingCapacity: true)
+                    pendingCameraPresentationContext = nil
+                    pendingFramePresentationContext = nil
+                    isAwaitingRendererPresentation = false
                     isDrainScheduled = false
                     layer.stopRequestingMediaData()
                     layer.flush()
@@ -2822,8 +2841,11 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
                 }
 
                 let frame = bufferedFrames.removeFirst()
-                pendingCameraPresentationContext = frame.cameraPresentationContext
-                isAwaitingRendererPresentation = true
+                if !isAwaitingRendererPresentation {
+                    pendingCameraPresentationContext = frame.cameraPresentationContext
+                    pendingFramePresentationContext = frame.framePresentationContext
+                    isAwaitingRendererPresentation = true
+                }
                 layer.enqueue(frame.sampleBuffer)
                 onFrameEnqueued(frame.presentationTimeStamp, bufferedFrames.count)
             }
@@ -2883,9 +2905,11 @@ private struct RemoteDesktopSampleBufferVideoView: UIViewRepresentable {
                 return
             }
             let context = pendingCameraPresentationContext
+            let frameContext = pendingFramePresentationContext
             pendingCameraPresentationContext = nil
+            pendingFramePresentationContext = nil
             isAwaitingRendererPresentation = false
-            onFramePresented(context, Date())
+            onFramePresented(context, frameContext, Date())
         }
 
         private func detachObservers() {

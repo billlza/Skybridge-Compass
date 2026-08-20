@@ -44,7 +44,8 @@ extension CrossNetworkConnectionManager {
                     transaction: transaction,
                     streamRefreshToken: streamRefreshToken,
                     audioEndpointPresent: audioEndpointPresent,
-                    screenFrameTransport: screenFrameTransport
+                    screenFrameTransport: screenFrameTransport,
+                    framePresentationAckVersion: nil
                 )
             }
         }

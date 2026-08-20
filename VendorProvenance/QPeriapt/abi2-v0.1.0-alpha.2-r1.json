@@ -22,7 +22,8 @@
     "developer_id_authority": "Developer ID Application: Zi ang Li (YKUPL7Z869)",
     "developer_team_id": "YKUPL7Z869",
     "certificate_sha256": "806673908a3ddcd558dcc8d3ef055085f1fff100bda0acfb2e1315afd652ac8d",
-    "code_directory_hash": "86ad573a34e57e02e7d34ab203d3fa750e917395"
+    "code_directory_hash": "86ad573a34e57e02e7d34ab203d3fa750e917395",
+    "rust_toolchain": "1.96.1"
   },
   "static_libraries": {
     "macos-arm64_x86_64/libq_periapt_ffi_abi2.a": "7c64f5ff2bd166458bf68d95667066bf85612737a6d65f885fe1038157bdc6cb",

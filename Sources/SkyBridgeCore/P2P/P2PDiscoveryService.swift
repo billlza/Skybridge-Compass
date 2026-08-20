@@ -115,7 +115,7 @@ final class P2PStartupLifecycle {
                 commit()
                 self.state = .running
                 self.startupTask = nil
-            } catch {
+			                                } catch {
                 await rollback()
                 if self.generation == startupGeneration {
                     self.state = .idle
@@ -464,6 +464,7 @@ public class P2PDiscoveryService: BaseManager {
         let connection: NWConnection
         var task: Task<Void, Never>?
         var aliases: Set<String>
+        var authenticatedAuthority: AuthenticatedRemoteAuthority?
     }
     private static let maximumProvisionalInboundConnections =
         P2PInboundAdmissionPolicy.maximumConcurrentConnections
@@ -765,13 +766,17 @@ public class P2PDiscoveryService: BaseManager {
     private func upsertInboundControlSession(
         id: UUID,
         connection: NWConnection,
-        aliases rawAliases: [String?]
+        aliases rawAliases: [String?],
+        authenticatedAuthority: AuthenticatedRemoteAuthority?
     ) {
         let aliases = Self.normalizedInboundControlAliases(rawAliases)
         guard !aliases.isEmpty else { return }
 
         guard var session = inboundControlSessions[id] else { return }
         session.aliases.formUnion(aliases)
+        if let authenticatedAuthority {
+            session.authenticatedAuthority = authenticatedAuthority
+        }
         inboundControlSessions[id] = session
     }
 
@@ -782,7 +787,8 @@ public class P2PDiscoveryService: BaseManager {
         inboundControlSessions[id] = InboundControlSession(
             connection: connection,
             task: nil,
-            aliases: []
+            aliases: [],
+            authenticatedAuthority: nil
         )
     }
 
@@ -827,6 +833,17 @@ public class P2PDiscoveryService: BaseManager {
     private func cancelInboundControlSessionsWithoutWaiting() {
         let sessions = Array(inboundControlSessions.values)
         inboundControlSessions.removeAll(keepingCapacity: false)
+        for session in sessions {
+            session.task?.cancel()
+            session.connection.cancel()
+        }
+    }
+
+    private func cancelInboundControlSessionsWithoutWaiting(
+        matching sessionIDs: Set<UUID>
+    ) {
+        guard !sessionIDs.isEmpty else { return }
+        let sessions = sessionIDs.compactMap { inboundControlSessions.removeValue(forKey: $0) }
         for session in sessions {
             session.task?.cancel()
             session.connection.cancel()
@@ -1459,6 +1476,7 @@ public class P2PDiscoveryService: BaseManager {
     )
     private var localInterfaceCacheEntry: LocalInterfaceCacheEntry?
     private let localInterfaceCacheTTL: TimeInterval = 8
+    private var trustInvalidationCancellables = Set<AnyCancellable>()
 
  // MARK: - 初始化
 
@@ -1467,6 +1485,51 @@ public class P2PDiscoveryService: BaseManager {
         $discoveredDevices
             .map { $0.map { Self.mapToP2PDevice($0) } }
             .assign(to: &self.$p2pDevices)
+        TrustSyncService.shared.trustInvalidationPublisher
+            .sink { [weak self] event in
+                MainActor.assumeIsolated { [weak self] in
+                    self?.handleTrustInvalidation(event)
+                }
+            }
+            .store(in: &trustInvalidationCancellables)
+    }
+
+    private func handleTrustInvalidation(_ event: TrustInvalidationEvent) {
+        let authenticatedTargets = authenticatedConnections.compactMap {
+            key,
+            connection -> (String, P2PConnection)? in
+            connection.matchesTrustInvalidation(event) ? (key, connection) : nil
+        }
+        for (key, connection) in authenticatedTargets {
+            // Dictionary object identity is the owner capability. A stale
+            // invalidation snapshot may never detach a replacement that reused
+            // the same route key.
+            guard authenticatedConnections[key] === connection else { continue }
+            authenticatedConnections.removeValue(forKey: key)
+            connection.disconnect()
+            if let transport = connections[key] {
+                transport.stateUpdateHandler = nil
+                transport.cancel()
+                connections.removeValue(forKey: key)
+            }
+            outboundConnectionAttemptIds.removeValue(forKey: key)
+        }
+
+        let inboundTargets = Set<UUID>(inboundControlSessions.compactMap { id, session in
+            guard let authority = session.authenticatedAuthority,
+                  event.matches(authority: authority) else {
+                return nil
+            }
+            return id
+        })
+        cancelInboundControlSessionsWithoutWaiting(matching: inboundTargets)
+
+        if connections.isEmpty,
+           authenticatedConnections.isEmpty,
+           inboundControlSessions.isEmpty,
+           activeInboundSessions == 0 {
+            connectionStatus = .disconnected
+        }
     }
 
  // MARK: - BaseManager 重写
@@ -3128,16 +3191,27 @@ public class P2PDiscoveryService: BaseManager {
         ) else {
             throw Self.protocolIdentityBindingFailure("PIB-1 final acknowledgement signature invalid")
         }
-        let promoted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-            deviceId: validated.deviceId,
-            displayName: validated.deviceName ?? device.name,
-            preferredCurrentDeviceId: targetDeviceId,
-            knownDeviceIds: candidates + [validated.deviceId] + validated.aliases,
-            protocolSigningAlgorithm: algorithm,
-            protocolPublicKeyFingerprint: validated.protocolIdentityFingerprint,
-            authenticatedProtocolPublicKey: validated.protocolIdentityPublicKey,
-            pinSource: .pib1OperatorApproval
-        )
+        let promoted: Bool
+        do {
+            promoted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
+                deviceId: validated.deviceId,
+                displayName: validated.deviceName ?? device.name,
+                preferredCurrentDeviceId: targetDeviceId,
+                knownDeviceIds: candidates + [validated.deviceId] + validated.aliases,
+                protocolSigningAlgorithm: algorithm,
+                protocolPublicKeyFingerprint: validated.protocolIdentityFingerprint,
+                authenticatedProtocolPublicKey: validated.protocolIdentityPublicKey,
+                pinSource: .pib1OperatorApproval
+            )
+        } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+            // The authority pin is already durable; post-commit cleanup residue
+            // must not fail the completed binding (mirrors PairingIdentityExchangeCommitCoordinator).
+            promoted = true
+            let residueLine = "⚠️ PIB-1 authority pin committed but post-commit cleanup left residue; binding remains committed lifecycle=identity-oob>pinned-cleanup-residue"
+            logger.warning("\(residueLine, privacy: .public) residue=\(cleanupResidue, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append(residueLine)
+        }
         guard promoted else {
             throw Self.protocolIdentityBindingFailure("authority pin promotion failed")
         }
@@ -5585,6 +5659,20 @@ public class P2PDiscoveryService: BaseManager {
         var driver: HandshakeDriver?
         var presenceLease: ConnectionPresenceService.PresenceLease?
         var classicTransferSessionLease: ClassicTransferSessionRegistry.SessionLease?
+        var productConnectivityAttemptOwner: ProductConnectivityAttemptOwner?
+
+        func failProductConnectivityAttempt(
+            _ reason: ProductConnectivityAttemptFailureReason
+        ) async {
+            guard let owner = productConnectivityAttemptOwner else { return }
+            productConnectivityAttemptOwner = nil
+            _ = await MainActor.run {
+                ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
+                    owner: owner,
+                    reason: reason
+                )
+            }
+        }
 
         func runSession() async {
 
@@ -5641,10 +5729,23 @@ public class P2PDiscoveryService: BaseManager {
         // unlock app-message processing or shared connected state.
         var sessionKeys: SessionKeys?
         var previousSessionKeysBeforeRekey: SessionKeys?
+        var previousAuthenticatedRemoteAuthorityBeforeRekey: AuthenticatedRemoteAuthority?
         var lastPairingIdentityExchangeReply: PairingIdentityExchangeReplyThrottleState?
         var didSendPostAuthPairingIdentityExchange = false
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
         var latestPeerFileTransferPort: UInt16?
+        struct PairingOperationState {
+            var sessionKeys: SessionKeys?
+            var authority: AuthenticatedRemoteAuthority?
+            var isRekeying: Bool
+        }
+        let pairingOperationState = OSAllocatedUnfairLock(
+            initialState: PairingOperationState(
+                sessionKeys: nil,
+                authority: nil,
+                isRekeying: false
+            )
+        )
         let peer = PeerIdentifier(deviceId: resolvedPeerId)
         peerIdForPresence = peer.deviceId
 	        let endpointDescriptionForPresence = Self.stableEndpointLabel(for: connection.endpoint)
@@ -5664,7 +5765,8 @@ public class P2PDiscoveryService: BaseManager {
                         peer.deviceId,
                         endpointHostOrIPForClassicTransfer,
                         endpointDescriptionForPresence
-                    ]
+                    ],
+                    authenticatedAuthority: authenticatedRemoteAuthority
                 )
             }
         }
@@ -5676,6 +5778,24 @@ public class P2PDiscoveryService: BaseManager {
                 return nil
             }
             return trimmed
+        }
+
+        func isCurrentPairingOperation(
+            keys expectedKeys: SessionKeys,
+            authority expectedAuthority: AuthenticatedRemoteAuthority
+        ) -> Bool {
+            let current = pairingOperationState.withLock { $0 }
+            guard !Task.isCancelled,
+                  !current.isRekeying,
+                  let currentKeys = current.sessionKeys,
+                  currentKeys.sessionId == expectedKeys.sessionId,
+                  currentKeys.transcriptHash == expectedKeys.transcriptHash,
+                  current.authority == expectedAuthority else {
+                return false
+            }
+            if case .failed = connection.state { return false }
+            if case .cancelled = connection.state { return false }
+            return true
         }
 
         func validatedPairingIdentityPayload(
@@ -5729,28 +5849,6 @@ public class P2PDiscoveryService: BaseManager {
             ) ?? "P2P Peer"
         }
 
-        func persistAuthenticatedRemoteAuthority(
-            from payload: AppMessage.PairingIdentityExchangePayload,
-            displayName: String,
-            validatedAuthority: ValidatedPairingIdentityAuthority
-        ) async throws {
-            let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-                deviceId: validatedAuthority.declaredDeviceId,
-                displayName: displayName,
-                preferredCurrentDeviceId: validatedAuthority.declaredDeviceId,
-                knownDeviceIds: validatedAuthority.authorizedDeviceIds,
-                protocolSigningAlgorithm: validatedAuthority.protocolSigningAlgorithm,
-                protocolPublicKeyFingerprint: validatedAuthority.protocolPublicKeyFingerprint,
-                authenticatedProtocolPublicKey: validatedAuthority.protocolPublicKey
-            )
-            guard persisted else {
-                throw P2PDiscoveryError.connectionCancelled
-            }
-            logger.info(
-                "🔐 inbound current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(validatedAuthority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
-            )
-        }
-
         func encryptAppPayload(_ plaintext: Data, with keys: SessionKeys) throws -> Data {
             let key = SymmetricKey(data: keys.sendKey)
             let box = try AES.GCM.seal(plaintext, using: key)
@@ -5768,6 +5866,43 @@ public class P2PDiscoveryService: BaseManager {
 
         func isLikelyHandshakeControlPacket(_ data: Data) -> Bool {
             Self.isLikelyHandshakeControlFrame(data)
+        }
+
+        func authenticateProductConnectivityAttemptIfReady(
+            keys: SessionKeys
+        ) async {
+            guard authenticatedRemoteAuthority != nil,
+                  let owner = productConnectivityAttemptOwner else {
+                return
+            }
+            productConnectivityAttemptOwner = nil
+            guard let sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: keys.sessionId,
+                transcriptHash: keys.transcriptHash
+            ) else {
+                _ = await MainActor.run {
+                    ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
+                        owner: owner,
+                        reason: .publicationFailed
+                    )
+                }
+                return
+            }
+            let recorded = await MainActor.run {
+                ProductReleaseEvidenceRecorder.shared.authenticateConnectivityAttempt(
+                    owner: owner,
+                    sessionReference: sessionReference,
+                    negotiatedSuite: keys.negotiatedSuite
+                )
+            }
+            if !recorded {
+                _ = await MainActor.run {
+                    ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
+                        owner: owner,
+                        reason: .publicationFailed
+                    )
+                }
+            }
         }
 
         func publishInboundPresence(keys: SessionKeys) async -> Bool {
@@ -5842,6 +5977,7 @@ public class P2PDiscoveryService: BaseManager {
             }
             guard let publishedLease else { return false }
             presenceLease = publishedLease
+            await authenticateProductConnectivityAttemptIfReady(keys: keys)
             return true
         }
 
@@ -6228,6 +6364,8 @@ public class P2PDiscoveryService: BaseManager {
                         }
                         logger.info("🔁 入站 rekey：\(fromKind)·\(fromSuite) -> \(toKind)·\(toSuite) peer=\(peerIdForPresence, privacy: .public)")
                         previousSessionKeysBeforeRekey = sessionKeys
+                        previousAuthenticatedRemoteAuthorityBeforeRekey = authenticatedRemoteAuthority
+                        pairingOperationState.withLock { $0.isRekeying = true }
                         driver = nil
                         sessionKeys = nil
                     }
@@ -6256,10 +6394,33 @@ public class P2PDiscoveryService: BaseManager {
                                     connection.cancel()
                                     return
                                 }
-                                recordRemoteControlSecurityIdentity(
-                                    from: payload,
-                                    validatedAuthority: validatedAuthority
-                                )
+                                guard let pairingAuthorityLease = authenticatedRemoteAuthority else {
+                                    logger.error("⛔️ inbound pairing identity lost authenticated authority owner")
+                                    connection.cancel()
+                                    return
+                                }
+                                let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
+                                do {
+                                    pairingReservation = try await PairingIdentityExchangeCommitCoordinator
+                                        .reserve(deviceIds: validatedAuthority.authorizedDeviceIds)
+                                } catch {
+                                    logger.error(
+                                        "⛔️ pairing commit admission unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                                let transportIsCurrent: @MainActor @Sendable () -> Bool = {
+                                    isCurrentPairingOperation(
+                                        keys: keys,
+                                        authority: pairingAuthorityLease
+                                    )
+                                }
+                                guard await transportIsCurrent() else {
+                                    _ = await PairingIdentityExchangeCommitCoordinator
+                                        .rollback(pairingReservation)
+                                    return
+                                }
                                 declaredDeviceIdForVerification = validatedAuthority.declaredDeviceId
                                 await refreshInboundControlSessionAliases()
                                 latestPeerCapabilities = normalizedIdentityCapabilities(from: payload)
@@ -6309,24 +6470,54 @@ public class P2PDiscoveryService: BaseManager {
 		                                        "🔐 pairingIdentityExchange accepted on authenticated protocol-identity channel: declared=\(payloadDiagnosticLabel, privacy: .public)"
 		                                    )
 		                                }
-	                                guard decision != PairingTrustApprovalService.Decision.reject else {
-	                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payloadDiagnosticLabel, privacy: .public)")
-	                                    break
-	                                }
+		                                guard decision != PairingTrustApprovalService.Decision.reject else {
+		                                    _ = await PairingIdentityExchangeCommitCoordinator
+		                                        .rollback(pairingReservation)
+		                                    logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(payloadDiagnosticLabel, privacy: .public)")
+		                                    break
+		                                }
 
-	                                await PeerKEMBootstrapStore.shared.upsert(
-	                                    deviceIds: validatedAuthority.authorizedDeviceIds,
-	                                    kemPublicKeys: payload.kemPublicKeys,
-	                                    platform: payload.platform,
-	                                    osVersion: payload.osVersion,
-	                                    verifiedProtocolFingerprint: validatedAuthority.protocolPublicKeyFingerprint
+		                                let commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt
+		                                do {
+		                                    let result = try await PairingIdentityExchangeCommitCoordinator
+		                                        .commitAuthorityAndKEM(
+		                                            reservation: pairingReservation,
+		                                            payload: payload,
+		                                            authority: pairingAuthorityLease,
+		                                            displayName: displayName,
+		                                            platform: payload.platform,
+		                                            osVersion: payload.osVersion,
+		                                            isCurrent: transportIsCurrent
+		                                        )
+		                                    guard case .committed(let receipt) = result else { return }
+		                                    commitReceipt = receipt
+		                                } catch {
+		                                    logger.error(
+		                                        "⛔️ pairing authority/KEM commit failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+		                                    )
+		                                    connection.cancel()
+			                                    return
+			                                }
+			                                let shouldReturnFromPairingHandler = try await
+			                                    PairingIdentityExchangeCommitCoordinator.withCommittedReceipt(
+			                                        commitReceipt
+			                                    ) {
+			                                recordRemoteControlSecurityIdentity(
+		                                    from: payload,
+		                                    validatedAuthority: validatedAuthority
 		                                )
-	                                logger.info(
-	                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(payloadDiagnosticLabel, privacy: .public) peer=\(peerDiagnosticLabel, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
-	                                )
-	                                guard await publishInboundClassicTransferSession(keys: keys) else {
-	                                    return
-	                                }
+		                                logger.info(
+		                                    "🔑 已提交对端 authority-bound KEM：declared=\(payloadDiagnosticLabel, privacy: .public) peer=\(peerDiagnosticLabel, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+		                                )
+			                                guard await publishInboundClassicTransferSession(keys: keys) else {
+			                                    return true
+		                                }
+		                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+		                                    commitReceipt,
+		                                    transportIsCurrent: transportIsCurrent
+			                                ) else {
+			                                    return true
+		                                }
 	                                if await publishInboundPresence(keys: keys) {
 	                                    logger.info(
 	                                        "📡 refreshed inbound file-transfer route from pairing identity: peer=\(payloadDiagnosticLabel, privacy: .public) fileTransferPort=\(payload.fileTransferPort.map(String.init) ?? "-", privacy: .public)"
@@ -6334,7 +6525,7 @@ public class P2PDiscoveryService: BaseManager {
 	                                }
 
                                 guard let localIdentity = await makeLocalPairingIdentityExchangeMessage(reason: "bootstrap reply") else {
-                                    break
+                                    return false
                                 }
                                 let outPlain = try JSONEncoder().encode(localIdentity.message)
                                 let now = Date()
@@ -6350,6 +6541,12 @@ public class P2PDiscoveryService: BaseManager {
                                         label: "tx"
                                     )
                                     try await sendFramed(outPadded)
+                                    guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                        commitReceipt,
+                                        transportIsCurrent: transportIsCurrent
+			                                    ) else {
+			                                        return true
+                                    }
                                     lastPairingIdentityExchangeReply = PairingIdentityExchangeReplyThrottleState(
                                         requestKey: requestKey,
                                         repliedAt: now
@@ -6358,13 +6555,11 @@ public class P2PDiscoveryService: BaseManager {
                                 } else {
                                     logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
                                 }
-
-                                try await persistAuthenticatedRemoteAuthority(
-                                    from: payload,
-                                    displayName: displayName,
-                                    validatedAuthority: validatedAuthority
-                                )
-
+                                return false
+                            }
+                            if shouldReturnFromPairingHandler {
+                                return
+                            }
                             case .ping(let payload):
                                 let reply = AppMessage.pong(.init(id: payload.id))
                                 let outPlain = try JSONEncoder().encode(reply)
@@ -6526,6 +6721,10 @@ public class P2PDiscoveryService: BaseManager {
                             return
                         }
                         let messageA = preparedHandshakeFrame.messageA
+                        await failProductConnectivityAttempt(.superseded)
+                        let connectivityAttemptReference = messageA.soaExtension.flatMap {
+                            ProductConnectivityAttemptReference.make(from: $0.attemptId)
+                        }
                         let activeLocalSOAPeerId = preparedHandshakeFrame.localSOAPeerId
                         let soaBinding = InboundHandshakeAdapter.bindSOAState(
                             from: messageA,
@@ -6558,6 +6757,21 @@ public class P2PDiscoveryService: BaseManager {
                             peerSupportedSuites: messageA.supportedSuites,
                             localPQCSuitesAvailable: localPQCAvailable
                         ), rejection == .peerOfferedClassicOnly {
+                            let configuredProvider = CryptoProviderFactory.make(policy: .requirePQC)
+                            let localOfferedSuites = CryptoProviderFactory
+                                .handshakeOfferedPQCSuites(using: configuredProvider)
+                            if let localProfile = ProductConnectivityProfileClassifier
+                                .configuredProfile(
+                                    requirePQC: true,
+                                    selectedSuiteWireID: configuredProvider.activeSuite.wireId
+                                ) {
+                                _ = await ProductReleaseEvidenceRecorder.shared
+                                    .recordStrictPQCClassicOfferRejection(
+                                    peerMessageA: messageA,
+                                    localProfile: localProfile,
+                                    offeredSuites: localOfferedSuites
+                                )
+                            }
                             logger.error(
                                 "❌ \(rejection.diagnosticMessage, privacy: .public). peer=\(peerDiagnosticLabel, privacy: .public)"
                             )
@@ -6618,7 +6832,7 @@ public class P2PDiscoveryService: BaseManager {
 
                         do {
                             let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: offeredSuites)
-                            driver = try HandshakeDriver(
+                            let newDriver = try HandshakeDriver(
                                 transport: transport,
                                 cryptoProvider: cryptoProvider,
                                 protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: sigAAlgorithm),
@@ -6633,8 +6847,29 @@ public class P2PDiscoveryService: BaseManager {
                                     ? .replaceAuthenticated
                                     : .rejectDuplicate
                             )
+                            let attemptSnapshot = await newDriver
+                                .productConnectivityAttemptSnapshot()
+                            if let connectivityAttemptReference,
+                               let localProfile = ProductConnectivityProfileClassifier
+                                .configuredProfile(
+                                    requirePQC: attemptSnapshot.requirePQC,
+                                    selectedSuiteWireID: attemptSnapshot.localActiveSuite.wireId
+                                ) {
+                                productConnectivityAttemptOwner = await MainActor.run {
+                                    ProductReleaseEvidenceRecorder.shared.beginConnectivityAttempt(
+                                        attemptReference: connectivityAttemptReference,
+                                        role: .responder,
+                                        localProfile: localProfile,
+                                        offeredSuites: attemptSnapshot.localOfferedSuites,
+                                        requirePQC: attemptSnapshot.requirePQC,
+                                        allowClassicFallback: attemptSnapshot.allowClassicFallback
+                                    )
+                                }
+                            }
+                            driver = newDriver
                             logger.info("🤝 入站 HandshakeDriver 初始化完成: sigA=\(sigAAlgorithm.rawValue, privacy: .public) provider=\(String(describing: type(of: cryptoProvider)), privacy: .public)")
                         } catch {
+                            await failProductConnectivityAttempt(.handshakeFailed)
                             logger.error("❌ 入站 HandshakeDriver 初始化失败: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
                             return
                         }
@@ -6674,6 +6909,7 @@ public class P2PDiscoveryService: BaseManager {
                 logger.debug("🤝 HandshakeDriver state: \(st.diagnosticSummary, privacy: .public)")
 
                 if case .failed(let reason) = st {
+                    await failProductConnectivityAttempt(.handshakeFailed)
                     if let previousKeys = previousSessionKeysBeforeRekey {
                         if let previousLease = previousEstablishedArbiterLeaseBeforeRekey {
                             guard await PeerSessionArbiter.shared.restoreEstablishedIfVacant(
@@ -6690,6 +6926,14 @@ public class P2PDiscoveryService: BaseManager {
                         }
                         previousSessionKeysBeforeRekey = nil
                         sessionKeys = previousKeys
+                        let restoredAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
+                        authenticatedRemoteAuthority = restoredAuthority
+                        pairingOperationState.withLock {
+                            $0.sessionKeys = previousKeys
+                            $0.authority = restoredAuthority
+                            $0.isRekeying = false
+                        }
+                        previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                         let restoredPeerId = peerIdForPresence
                         Task { @MainActor in
                             ConnectionPresenceService.shared.clearRekeying(peerId: restoredPeerId)
@@ -6706,6 +6950,10 @@ public class P2PDiscoveryService: BaseManager {
                         "⚠️ 入站握手失败，等待同连接重试: peer=\(peerDiagnosticLabel, privacy: .public) reason=\(reason.diagnosticReasonCode, privacy: .public)"
                     )
                     authenticatedRemoteAuthority = nil
+                    pairingOperationState.withLock {
+                        $0.authority = nil
+                        $0.isRekeying = false
+                    }
                     driver = nil
                     continue
                 }
@@ -6730,6 +6978,10 @@ public class P2PDiscoveryService: BaseManager {
                         return
                     }
                     authenticatedRemoteAuthority = resolvedRemoteAuthority
+                    // Bind invalidation ownership as soon as Finished exports
+                    // the exact authority. Revocation must not wait for a
+                    // later pairing-identity or heartbeat application frame.
+                    await refreshInboundControlSessionAliases()
                     let newArbiterLease = await activeDriver.getEstablishedArbiterLease()
                     if let inboundPairKey {
                         guard let newArbiterLease,
@@ -6745,7 +6997,13 @@ public class P2PDiscoveryService: BaseManager {
                     establishedArbiterLease = newArbiterLease
                     previousEstablishedArbiterLeaseBeforeRekey = nil
                     sessionKeys = keys
+                    pairingOperationState.withLock {
+                        $0.sessionKeys = keys
+                        $0.authority = resolvedRemoteAuthority
+                        $0.isRekeying = false
+                    }
                     previousSessionKeysBeforeRekey = nil
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                     if let processingLease = initialHandshakeProcessingLease {
                         try Task.checkCancellation()
                         guard await MainActor.run(body: {
@@ -6812,6 +7070,9 @@ public class P2PDiscoveryService: BaseManager {
         }
 
         await runSession()
+        await failProductConnectivityAttempt(
+            Task.isCancelled ? .cancelled : .transportClosed
+        )
         // Every exit from `runSession` is terminal for this exact accepted
         // socket. Cancel before releasing the registries so a policy rejection
         // cannot leave an unowned ready descriptor after provisional timeout

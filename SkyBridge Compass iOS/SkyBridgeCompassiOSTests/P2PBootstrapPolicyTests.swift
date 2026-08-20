@@ -1212,8 +1212,83 @@ final class P2PBootstrapPolicyTests: XCTestCase {
 
         XCTAssertLessThan(cacheLookup.lowerBound, replayAdmission.lowerBound)
         XCTAssertLessThan(replayAdmission.lowerBound, cacheRecord.lowerBound)
+        let responseConstruction = try XCTUnwrap(
+            managerSource.range(
+                of: "let response = AppMessage.SignedKEMRefreshPayload(",
+                range: replayAdmission.upperBound..<cacheRecord.lowerBound
+            )
+        )
+        let completionTransaction = managerSource[
+            responseConstruction.lowerBound..<cacheRecord.upperBound
+        ]
+        XCTAssertFalse(
+            completionTransaction.contains("Task.checkCancellation()"),
+            "A completed signed response must be cached atomically before cancellation is observed."
+        )
         XCTAssertTrue(gateSource.contains("private let maxEntries: Int"))
         XCTAssertTrue(gateSource.contains("completedResponses.removeValue(forKey: key)"))
+        XCTAssertFalse(gateSource.contains("guard !Task.isCancelled else { return }"))
+    }
+
+    func testCancelledCompletionStillCachesSignedResponseForIdempotentRetry() async {
+        let gate = SignedKEMRefreshRequestAdmissionGate(
+            ttl: 300,
+            rateLimitWindow: 60,
+            maxRequestsPerWindow: 2,
+            maxEntries: 32
+        )
+        let requestHash = String(repeating: "a", count: 64)
+        let requesterDeviceId = "id:ios-1"
+        let requesterFingerprint = String(repeating: "b", count: 64)
+        let initialAdmission = await gate.admit(
+            requestHashHex: requestHash,
+            requesterDeviceId: requesterDeviceId,
+            requesterFingerprint: requesterFingerprint,
+            now: 10
+        )
+        XCTAssertEqual(initialAdmission, .allowed)
+        let response = AppMessage.SignedKEMRefreshPayload(
+            deviceId: "id:mac-1",
+            protocolSigningAlgorithm: "ed25519",
+            protocolIdentityPublicKey: Data(repeating: 0x11, count: 32),
+            protocolIdentityFingerprint: String(repeating: "c", count: 64),
+            kemPublicKeys: [],
+            keyId: "key",
+            generation: 1,
+            sentAt: Date(timeIntervalSince1970: 10),
+            expiresAt: Date(timeIntervalSince1970: 310),
+            requestNonce: Data(repeating: 0x22, count: 24),
+            requestHashHex: requestHash,
+            signature: Data(repeating: 0x33, count: 64)
+        )
+
+        let completion = Task {
+            try? await Task.sleep(for: .milliseconds(10))
+            await gate.recordCompletedResponse(
+                response,
+                requestHashHex: requestHash,
+                requesterDeviceId: requesterDeviceId,
+                requesterFingerprint: requesterFingerprint,
+                now: 11
+            )
+        }
+        completion.cancel()
+        await completion.value
+
+        let cachedResponse = await gate.cachedCompletedResponse(
+            requestHashHex: requestHash,
+            requesterDeviceId: requesterDeviceId,
+            requesterFingerprint: requesterFingerprint,
+            now: 12
+        )
+        XCTAssertEqual(cachedResponse, response)
+        let replayAdmission = await gate.admit(
+            requestHashHex: requestHash,
+            requesterDeviceId: requesterDeviceId,
+            requesterFingerprint: requesterFingerprint,
+            now: 12
+        )
+        XCTAssertEqual(replayAdmission, .replay)
     }
 
     func testSignedLANRefreshRequestBindsPolicyHashOnIOS() {

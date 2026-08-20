@@ -1,0 +1,130 @@
+name: ios-app-store-export
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_root:
+        description: "Absolute protected-runner path containing the accepted iOS xcarchive and identity"
+        required: true
+        type: string
+      evidence_root:
+        description: "Absolute protected-runner path containing the four archive-bound physical evidence directories"
+        required: true
+        type: string
+      release_testing_ipa:
+        description: "Absolute path to the same sealed release-testing IPA used for physical acceptance"
+        required: true
+        type: string
+      output_dir:
+        description: "Fresh absolute repository-sandbox or temporary-root path named skybridge-ios-release-*"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-app-store-export-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-environment-protection:
+    runs-on: macos-26
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Require Independent App Store Export Approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT_NAME: release-ios-app-store-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release-environment.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/environments/$RELEASE_ENVIRONMENT_NAME" \
+            > "$response"
+          python3 Scripts/validate_release_environment_protection.py \
+            --response "$response" \
+            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+
+  export-accepted-archive:
+    needs: verify-environment-protection
+    runs-on: [self-hosted, macOS, skybridge-real-device-release]
+    environment: release-ios-app-store-export
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CANDIDATE_ROOT: ${{ inputs.candidate_root }}
+      EVIDENCE_ROOT: ${{ inputs.evidence_root }}
+      RELEASE_TESTING_IPA: ${{ inputs.release_testing_ipa }}
+      OUTPUT_DIR: ${{ inputs.output_dir }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Revalidate App Store Export Approval Environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT_NAME: release-ios-app-store-export
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release-environment-after-approval.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/environments/$RELEASE_ENVIRONMENT_NAME" \
+            > "$response"
+          python3 Scripts/validate_release_environment_protection.py \
+            --response "$response" \
+            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+      - name: Require Exact Clean Source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+      - name: Self-Test iOS App Store Transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 Scripts/test_ios_app_store_release_transaction.py
+          bash -n Scripts/export_ios_app_store_product.sh
+          bash -n Scripts/upload_ios_app_store_product.sh
+      - name: Revalidate Physical Evidence and Export Accepted Archive
+        env:
+          ASC_API_KEY_PATH: ${{ secrets.SKYBRIDGE_ASC_API_KEY_PATH }}
+          ASC_API_KEY_ID: ${{ secrets.SKYBRIDGE_ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.SKYBRIDGE_ASC_API_ISSUER_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash Scripts/export_ios_app_store_product.sh \
+            --archive "$CANDIDATE_ROOT/SkyBridgeCompass-iOS.xcarchive" \
+            --archive-identity "$CANDIDATE_ROOT/ios-release-archive-identity.json" \
+            --release-testing-ipa "$RELEASE_TESTING_IPA" \
+            --physical-acceptance "$CANDIDATE_ROOT/ios-physical-release-acceptance.json" \
+            --evidence-root "$EVIDENCE_ROOT" \
+            --output-dir "$OUTPUT_DIR" \
+            --api-key-path "$ASC_API_KEY_PATH" \
+            --api-key-id "$ASC_API_KEY_ID" \
+            --api-issuer-id "$ASC_API_ISSUER_ID"
+      - name: Retain Redacted Verification Only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-app-store-export-verification
+          path: |
+            ${{ inputs.output_dir }}/ios-app-store-export-verification.json
+            ${{ inputs.output_dir }}/export.log
+          if-no-files-found: error
+          retention-days: 14

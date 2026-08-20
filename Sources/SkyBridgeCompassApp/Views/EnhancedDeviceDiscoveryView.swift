@@ -1174,6 +1174,13 @@ public struct EnhancedDeviceDiscoveryView: View {
                             for id in idsToForget {
                                 do {
                                     try await TrustSyncService.shared.revokeTrustRecord(deviceId: id)
+                                } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                                        TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+                                    // 撤销墓碑已权威提交且失效通知已发布；post-commit 清理残留不得中止
+                                    // 其余 alias 的撤销与后续 bootstrap 材料清理。
+                                    SkyBridgeLogger.security.warning(
+                                        "Trust removal committed with post-commit cleanup residue; continuing. residue=\(cleanupResidue)"
+                                    )
                                 } catch {
                                     SkyBridgeLogger.security.error(
                                         "Trust removal failed; retaining local trust material. errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"

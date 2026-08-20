@@ -1,306 +1,346 @@
 #!/usr/bin/env python3
-"""Exercise the producer/consumer contract for real-device release evidence."""
+"""Source contracts for candidate -> physical evidence -> publish transaction."""
 
 from __future__ import annotations
 
-import io
-import json
-import os
-import stat
-import subprocess
-import sys
-import tarfile
-import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
-PRODUCER_WORKFLOW = ROOT / ".github/workflows/real-device-release-gate.yml"
-CONSUMER_WORKFLOW = ROOT / ".github/workflows/macos-release-readiness.yml"
+CANDIDATE_WORKFLOW = ROOT / ".github/workflows/macos-release-readiness.yml"
+EVIDENCE_WORKFLOW = ROOT / ".github/workflows/real-device-release-gate.yml"
+PUBLISH_WORKFLOW = ROOT / ".github/workflows/macos-release-publish.yml"
 ACTIONLINT_CONFIG = ROOT / ".github/actionlint.yaml"
-EXTRACTOR = ROOT / "Scripts/extract_real_device_release_evidence_archive.py"
-FILE_SET_STAGER = ROOT / "Scripts/stage_real_device_release_evidence.py"
-MACOS_HANDOFF_EXTRACTOR = ROOT / "Scripts/extract_macos_release_handoff.py"
-CHECKOUT_V6 = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"  # v6.1.0
-UPLOAD_ARTIFACT_V4 = (
-    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"  # v4.6.2
+CANDIDATE_IDENTITY = ROOT / "Scripts/macos_release_candidate_identity.py"
+P2P_PRODUCER = ROOT / "Scripts/run_real_device_p2p_remote_smoke.sh"
+WEBRTC_PRODUCER = ROOT / "Scripts/run_real_device_webrtc_smoke.sh"
+FILE_TRANSFER_PRODUCER = ROOT / "Scripts/run_real_device_file_transfer_smoke.sh"
+IOS_PHYSICAL_ACCEPTANCE = ROOT / "Scripts/ios_physical_release_acceptance.py"
+PRODUCT_EVIDENCE_COLLECTOR = ROOT / "Scripts/collect_product_release_evidence_log.sh"
+PRODUCT_EVIDENCE_VALIDATOR = ROOT / "Scripts/validate_product_release_evidence_log.py"
+CHECKOUT_V6 = "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+UPLOAD_V7 = "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+DOWNLOAD_V8 = "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+
+CANONICAL_EVIDENCE = (
+    "real-device-connectivity-matrix-public-redacted",
+    "real-device-p2p-remote-smoke-public-redacted",
+    "real-device-webrtc-smoke-public-redacted",
+    "real-device-file-transfer-smoke-public-redacted",
 )
-DOWNLOAD_ARTIFACT_V4 = (
-    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"  # v4.3.0
+LEGACY_NOTICE_EVIDENCE = (
+    "real-device-p2p-security-notice-public-redacted",
+    "local-webrtc-security-notice-public-redacted",
+    "local-macos-security-notice-panel-public-redacted",
 )
 
 
-def add_regular_file(
-    archive: tarfile.TarFile,
-    name: str,
-    content: bytes,
-    *,
-    mode: int = 0o600,
-) -> None:
-    member = tarfile.TarInfo(name)
-    member.mode = mode
-    member.size = len(content)
-    archive.addfile(member, io.BytesIO(content))
+class ReleaseWorkflowTransactionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.candidate = CANDIDATE_WORKFLOW.read_text(encoding="utf-8")
+        cls.evidence = EVIDENCE_WORKFLOW.read_text(encoding="utf-8")
+        cls.publish = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
 
+    def test_candidate_workflow_builds_once_before_any_physical_evidence(self) -> None:
+        self.assertIn("release_build_id:", self.candidate)
+        self.assertIn("macos-signed-release-candidate:", self.candidate)
+        build = self.candidate.index("Build Signed + Notarized Release DMG")
+        identity = self.candidate.index("Create Immutable Candidate Identity")
+        handoff = self.candidate.index("Assemble and Verify Signed Candidate Handoff")
+        upload = self.candidate.index("Upload Signed Release Candidate")
+        self.assertLess(build, identity)
+        self.assertLess(identity, handoff)
+        self.assertLess(handoff, upload)
+        self.assertIn("macos_release_candidate_identity.py create", self.candidate)
+        self.assertIn("--package-integrity-only", self.candidate)
+        self.assertNotIn("release_artifact_run_id", self.candidate)
+        signed_job = self.candidate[self.candidate.index("  macos-signed-release-candidate:") :]
+        self.assertNotIn("publish_macos_update_release.sh", signed_job)
+        for name in CANONICAL_EVIDENCE + LEGACY_NOTICE_EVIDENCE:
+            self.assertNotIn(name, self.candidate)
 
-class RealDeviceReleaseWorkflowContractTests(unittest.TestCase):
-    def run_extractor(self, archive_path: Path, destination: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                sys.executable,
-                os.fspath(EXTRACTOR),
-                "--archive",
-                os.fspath(archive_path),
-                "--destination",
-                os.fspath(destination),
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
+    def test_candidate_identity_carries_platform_and_byte_binding(self) -> None:
+        identity = CANDIDATE_IDENTITY.read_text(encoding="utf-8")
+        for required in (
+            "teamIdentifier",
+            "cdHash",
+            "designatedRequirement",
+            "notarizationAccepted",
+            "appStaplerValid",
+            "dmgStaplerValid",
+            "appGatekeeperAccepted",
+            "dmgGatekeeperAccepted",
+            "appBundleDigest",
+            "dmgDigest",
+            "detect accidental candidate/evidence mismatch",
+        ):
+            self.assertIn(required, identity)
+
+    def test_evidence_workflow_is_protected_and_consumes_exact_candidate(self) -> None:
+        for required in (
+            "runs-on: [self-hosted, macOS, skybridge-real-device-release]",
+            "environment: release-real-device-evidence",
+            "verify-evidence-environment-protection:",
+            "needs: verify-evidence-environment-protection",
+            "Require Independent Evidence Approval Environment",
+            "validate_release_environment_protection.py",
+            "candidate_run_id:",
+            "candidate_run_attempt:",
+            "CANDIDATE_WORKFLOW_PATH: .github/workflows/macos-release-readiness.yml",
+            "CANDIDATE_ARTIFACT_NAME: macos-signed-release-candidate",
+            "macos_release_candidate_identity.py verify",
+            "macos_release_candidate_identity.py compare",
+            '[[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]',
+            '--expected-head-sha "$GITHUB_SHA"',
+            '--expected-head-branch "$GITHUB_REF_NAME"',
+            "ios_archive_identity:",
+            "ios_release_testing_ipa:",
+            "Verify Sealed iOS Physical Product Inputs",
+            "ios_physical_release_acceptance.py verify-product",
+            '--ios-archive-identity "$IOS_ARCHIVE_IDENTITY"',
+            '--release-testing-ipa "$IOS_RELEASE_TESTING_IPA"',
+        ):
+            self.assertIn(required, self.evidence)
+        candidate_verify = self.evidence.index("Verify and Extract Immutable Signed Candidate")
+        evidence_stage = self.evidence.index("Validate and Stage Four Candidate-Bound Physical Artifacts")
+        first_upload = self.evidence.index("Upload Connectivity Matrix Evidence")
+        self.assertLess(candidate_verify, evidence_stage)
+        self.assertLess(evidence_stage, first_upload)
+
+    def test_formal_ios_producers_only_prepare_the_sealed_ipa(self) -> None:
+        producers = (
+            (P2P_PRODUCER, 'if [[ "$LAB_RUN" != "1" ]]; then'),
+            (WEBRTC_PRODUCER, 'if [[ "$LAB_RUN" != "1" ]]; then'),
+            (FILE_TRANSFER_PRODUCER, 'if [[ "$USER_REALISTIC" == "1" ]]; then'),
+        )
+        for path, predicate in producers:
+            with self.subTest(producer=path.name):
+                source = path.read_text(encoding="utf-8")
+                required_message = (
+                    "requires SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY and "
+                    "SKYBRIDGE_IOS_RELEASE_TESTING_IPA"
+                )
+                message_index = source.index(required_message)
+                formal_start = source.rfind(predicate, 0, message_index)
+                diagnostic_message = source.index(
+                    'echo "==> Building diagnostic iOS app for real device',
+                    message_index,
+                )
+                diagnostic_start = source.rfind(
+                    "\nelse\n", message_index, diagnostic_message
+                )
+                formal_branch = source[formal_start:diagnostic_start]
+                self.assertGreaterEqual(formal_start, 0)
+                self.assertGreaterEqual(diagnostic_start, 0)
+                self.assertIn("ios_physical_release_acceptance.py\" prepare-product", formal_branch)
+                self.assertIn("build=not-performed", formal_branch)
+                for forbidden in (
+                    "skybridge_run_xcodebuild",
+                    "skybridge_archive_ios_distribution_product",
+                    "skybridge_export_ios_distribution_archive",
+                    "xcodebuild archive",
+                    "xcodebuild -exportArchive",
+                ):
+                    self.assertNotIn(forbidden, formal_branch)
+
+    def test_archive_binding_is_producer_finalizer_stager_validator_bound(self) -> None:
+        physical = IOS_PHYSICAL_ACCEPTANCE.read_text(encoding="utf-8")
+        finalizer = (ROOT / "Scripts/finalize_release_acceptance_manifests.py").read_text(
+            encoding="utf-8"
+        )
+        stager = (ROOT / "Scripts/stage_real_device_release_evidence.py").read_text(
+            encoding="utf-8"
+        )
+        validator = (
+            ROOT / "Scripts/validate_real_device_release_acceptance_artifact.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('manifest["iosReleaseArchive"] = binding', physical)
+        self.assertIn('payload.get("iosReleaseArchive") != required_archive_binding', finalizer)
+        self.assertIn("recorded_binding != required_binding", stager)
+        self.assertIn('manifest.get("iosReleaseArchive") != expected_binding(identity)', validator)
+
+    def test_only_four_canonical_evidence_artifacts_are_formal(self) -> None:
+        for name in CANONICAL_EVIDENCE:
+            self.assertIn(name, self.evidence)
+            self.assertIn(name, self.publish)
+        for name in LEGACY_NOTICE_EVIDENCE:
+            self.assertNotIn(name, self.evidence)
+            self.assertNotIn(name, self.publish)
+        for step in (
+            "Upload Connectivity Matrix Evidence",
+            "Upload P2P Remote Evidence",
+            "Upload WebRTC Remote Evidence",
+            "Upload File Transfer Evidence",
+        ):
+            self.assertEqual(self.evidence.count(step), 1)
+        self.assertEqual(
+            self.evidence.count("skybridge-release-evidence-archives/real-device-"), 4
         )
 
-    def test_workflows_bind_producer_and_consumer_to_same_repository_sha(self) -> None:
-        producer = PRODUCER_WORKFLOW.read_text(encoding="utf-8")
-        consumer = CONSUMER_WORKFLOW.read_text(encoding="utf-8")
+    def test_publish_workflow_consumes_original_candidate_without_rebuild(self) -> None:
         for required in (
-            "SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}",
-            "SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}",
-            '[[ "$(git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]',
-            '--expected-source-repository "$GITHUB_REPOSITORY"',
-            '--expected-source-sha "$GITHUB_SHA"',
-            '[[ "$EVIDENCE_ROOT" == /* ]]',
-            '[[ -d "$EVIDENCE_ROOT" && ! -L "$EVIDENCE_ROOT" ]]',
+            "environment: macos-production-release",
+            "verify-publish-environment-protection:",
+            "needs: verify-publish-environment-protection",
+            "Require Independent Publication Approval Environment",
+            "validate_release_environment_protection.py",
+            "contents: write",
+            "candidate_run_id:",
+            "evidence_run_id:",
+            "Verify Immutable Candidate and Four Evidence Artifacts",
+            "macos_release_candidate_identity.py verify",
+            "macos_release_candidate_identity.py compare",
+            "Validate Full Readiness Against Candidate-Bound Evidence",
+            "Publish Original Immutable Candidate Bytes",
+            "publish_macos_update_release.sh",
+            '--app-path "$MACOS_PUBLISH_CANDIDATE_ROOT/SkyBridge Compass Pro.app"',
+            '--dmg-path "$MACOS_PUBLISH_DMG_PATH"',
+        ):
+            self.assertIn(required, self.publish)
+        for forbidden in (
+            "build_dmg.sh",
+            "package_app.sh",
+            "swift build",
+            "xcodebuild build",
+            "--notarize-app",
+        ):
+            self.assertNotIn(forbidden, self.publish)
+
+    def test_formal_paths_do_not_promote_diagnostic_notice_probes(self) -> None:
+        for workflow in (self.candidate, self.evidence, self.publish):
+            for forbidden in (
+                "run_remote_control_notice_panel_probe.sh",
+                "LocalLanInteropHost",
+                "SmokeHarness",
+                "SKYBRIDGE_TESTING",
+                "p2p-notice",
+                "webrtc-notice",
+                "notice-panel",
+            ):
+                self.assertNotIn(forbidden, workflow)
+
+    def test_p2p_missing_normal_product_inbound_is_fail_closed(self) -> None:
+        p2p = P2P_PRODUCER.read_text(encoding="utf-8")
+        self.assertIn("LocalLanInteropHost remains diagnostic-only", p2p)
+        self.assertIn("Formal P2P evidence is unavailable", p2p)
+        self.assertIn('if [[ "$LAB_RUN" != "1" ]]', p2p)
+        self.assertIn('"macRuntimeExecutable": "LocalLanInteropHost"', p2p)
+        self.assertIn('"macProductPath": normal_product_p2p_inbound', p2p)
+        self.assertIn("normal_product_p2p_inbound = False", p2p)
+
+    def test_webrtc_missing_normal_product_entry_is_fail_closed(self) -> None:
+        webrtc = WEBRTC_PRODUCER.read_text(encoding="utf-8")
+        for required in (
+            "skybridge_bind_macos_release_candidate_evidence",
+            "Formal WebRTC evidence is unavailable",
+            "LocalWebRTCSmokeHarness remains diagnostic-only",
+            '"macRuntimeExecutable": "SkyBridgeCompassApp" if mac_host_mode == "product"',
+            '"noticeEvidenceSource": "normal-product-session"',
+        ):
+            self.assertIn(required, webrtc)
+
+    def test_file_transfer_missing_normal_product_entry_is_fail_closed(self) -> None:
+        producer = FILE_TRANSFER_PRODUCER.read_text(encoding="utf-8")
+        for required in (
+            "skybridge_bind_macos_release_candidate_evidence",
+            "Formal file-transfer evidence is unavailable",
+            "LocalP2PFileTransferSmokeHarness remains diagnostic-only",
         ):
             self.assertIn(required, producer)
-        for required in (
-            "RELEASE_ARTIFACT_WORKFLOW_PATH: .github/workflows/real-device-release-gate.yml",
-            '--expected-head-sha "${GITHUB_SHA}"',
-            '--expected-head-branch "${GITHUB_REF_NAME}"',
-            "SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}",
-            "SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}",
-        ):
-            self.assertIn(required, consumer)
 
-    def test_actionlint_knows_the_protected_runner_label(self) -> None:
+    def test_normal_product_log_is_pid_start_time_and_audit_token_bound(self) -> None:
+        collector = PRODUCT_EVIDENCE_COLLECTOR.read_text(encoding="utf-8")
+        validator = PRODUCT_EVIDENCE_VALIDATOR.read_text(encoding="utf-8")
+        for required in (
+            "webrtc_smoke_process_ownership.py",
+            "mac-capture",
+            "mac-status --identity",
+            "--ownership-record",
+            "com.skybridge.compass.release-evidence",
+            "ProductSession",
+        ):
+            self.assertIn(required, collector)
+        self.assertGreaterEqual(collector.count("mac-status --identity"), 2)
+        self.assertNotIn("/bin/ps", collector)
+        for required in (
+            'MAX_EVENT_COUNT_PER_SESSION = 20',
+            '"startTimeToken"',
+            '"ownershipVerified"',
+            '"SkyBridgeCompassApp"',
+            '"fileTransferStarted"',
+            '"fileTransferCompleted"',
+            '"localFramePresented"',
+            '"p2p-renderer-ack"',
+            '"webrtc-renderer-receipt"',
+            '"local-renderer"',
+            '"ios-product-session.log"',
+            '"ios-product-session-capture.json"',
+            '"connectivityAttemptStarted"',
+            '"connectivityAttemptAuthenticated"',
+            '"connectivityEndpoint"',
+            '"connectivityPolicyRejected"',
+            '"peerOfferSignature"',
+            '"releaseArchiveBindingVerified"',
+            '"SkyBridgeCompass-iOS"',
+        ):
+            self.assertIn(required, validator)
+        self.assertNotIn("fileChunkAccepted", validator)
+        self.assertNotIn('"connectivityCase"', validator)
+        self.assertNotIn('"Q-Periapt-ContextBound",', validator)
+
+    def test_evidence_consumer_regressions_are_warning_strict_and_ci_bound(self) -> None:
+        source_gate = (ROOT / "Scripts/gates/source_quality_gate.sh").read_text(
+            encoding="utf-8"
+        )
+        strict_python_tests = (
+            "test_validate_real_device_release_acceptance_artifact.py",
+            "test_validate_product_release_evidence_log.py",
+            "test_stage_real_device_release_evidence.py",
+            "test_real_device_release_workflow_contract.py",
+        )
+        for test in strict_python_tests:
+            with self.subTest(test=test):
+                command = f"python3 -W error Scripts/{test}"
+                self.assertIn(command, self.candidate)
+                self.assertIn(command, self.evidence)
+                self.assertIn(
+                    f'python3 -W error "${{ROOT_DIR}}/Scripts/{test}"',
+                    source_gate,
+                )
+        redaction_test = "bash Scripts/test_real_device_smoke_redaction.sh"
+        self.assertIn(redaction_test, self.candidate)
+        self.assertIn(redaction_test, self.evidence)
+        self.assertIn(
+            'bash "${ROOT_DIR}/Scripts/test_real_device_smoke_redaction.sh"',
+            source_gate,
+        )
+
+    def test_actions_are_pinned_and_checkouts_never_persist_credentials(self) -> None:
+        combined = self.candidate + self.evidence + self.publish
+        self.assertIn(UPLOAD_V7, combined)
+        self.assertIn(DOWNLOAD_V8, combined)
+        self.assertEqual(
+            combined.count(f"uses: {CHECKOUT_V6}"),
+            combined.count("persist-credentials: false"),
+        )
+
+    def test_actionlint_knows_protected_runner_label(self) -> None:
         self.assertEqual(
             ACTIONLINT_CONFIG.read_text(encoding="utf-8"),
-            "self-hosted-runner:\n"
-            "  labels:\n"
-            "    - skybridge-real-device-release\n",
+            "self-hosted-runner:\n  labels:\n    - skybridge-real-device-release\n",
         )
 
-    def test_generic_ios_release_compiles_the_probed_iphoneos_pqc_surface(self) -> None:
-        consumer = CONSUMER_WORKFLOW.read_text(encoding="utf-8")
-        probe = "skybridge_require_apple_pqc_sdk_symbol_probe iphoneos"
-        build = "Build Generic iOS Release Without Signing"
-        self.assertIn(probe, consumer)
-        self.assertIn('${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE:-0}', consumer)
-        self.assertIn("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK", consumer)
-        self.assertLess(consumer.index(probe), consumer.index(build))
-
-    def test_rust_protocol_changes_trigger_the_apple_release_lane(self) -> None:
-        consumer = CONSUMER_WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(
-            consumer.count('- "rust/**"'),
+    def test_readiness_covers_ios_export_and_runs_actionlint(self) -> None:
+        self.assertGreaterEqual(
+            self.candidate.count('.github/workflows/ios-app-store-export.yml'),
             2,
-            "Rust SBWC/wire changes must trigger both pull-request and push Apple release checks",
-        )
-
-    def test_producer_uploads_archives_and_consumer_extracts_them(self) -> None:
-        producer = PRODUCER_WORKFLOW.read_text(encoding="utf-8")
-        consumer = CONSUMER_WORKFLOW.read_text(encoding="utf-8")
-        self.assertEqual(producer.count("skybridge-release-evidence-archives/"), 7)
-        self.assertEqual(producer.count(".tar.gz\n          if-no-files-found: error"), 7)
-        self.assertIn("Extract Mode-Preserving Release Evidence", consumer)
-        self.assertIn('extraction_path="$download_directory/public-redacted"', consumer)
-        self.assertIn("python3 Scripts/extract_real_device_release_evidence_archive.py", consumer)
-        extractor = EXTRACTOR.read_text(encoding="utf-8")
-        self.assertIn("member.isdir() or member.isfile()", extractor)
-        self.assertIn('".." in parts', extractor)
-
-    def test_producer_revalidates_the_exact_archived_bytes_before_upload(self) -> None:
-        producer = PRODUCER_WORKFLOW.read_text(encoding="utf-8")
-        archive_validation = producer.index(
-            '--artifact-dir "$archive_verification_root/$evidence_name"'
-        )
-        first_upload = producer.index("- name: Upload Connectivity Matrix Evidence")
-        self.assertLess(archive_validation, first_upload)
-        self.assertIn(
-            '--artifact-dir "$archive_verification_root/'
-            'real-device-p2p-remote-smoke-public-redacted"',
-            producer,
         )
         self.assertIn(
-            '--artifact-dir "$archive_verification_root/'
-            'real-device-webrtc-smoke-public-redacted"',
-            producer,
+            "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12",
+            self.candidate,
         )
-
-    def test_producer_stages_only_contract_files_and_scans_both_byte_surfaces(self) -> None:
-        producer = PRODUCER_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("python3 Scripts/test_stage_real_device_release_evidence.py", producer)
-        self.assertIn("python3 Scripts/stage_real_device_release_evidence.py", producer)
-        self.assertNotIn('cp -R -p "$source_path/."', producer)
-        self.assertEqual(producer.count("skybridge_smoke_check_public_artifacts"), 2)
-        staging_contract = producer.index('--destination "$staging/$evidence_name"')
-        staging_scan = producer.index(
-            'skybridge_smoke_check_public_artifacts "$staging/$evidence_name"'
-        )
-        archive_contract = producer.index('--verify "$verification_path"')
-        archive_scan = producer.index(
-            'skybridge_smoke_check_public_artifacts "$verification_path"'
-        )
-        first_upload = producer.index("- name: Upload Connectivity Matrix Evidence")
-        self.assertLess(staging_contract, staging_scan)
-        self.assertLess(archive_contract, archive_scan)
-        self.assertLess(archive_scan, first_upload)
-        stager = FILE_SET_STAGER.read_text(encoding="utf-8")
-        self.assertIn("evidence file is not in the", stager)
-        self.assertIn('FILE_SET_MANIFEST = "release-evidence-file-set.json"', stager)
-
-    def test_macos_signing_and_publishing_are_separate_permission_domains(self) -> None:
-        consumer = CONSUMER_WORKFLOW.read_text(encoding="utf-8")
-        signed_start = consumer.index("  macos-signed-release-gate:")
-        publish_start = consumer.index("  macos-immutable-release-publish:")
-        signed_job = consumer[signed_start:publish_start]
-        publish_job = consumer[publish_start:]
-        self.assertIn("contents: read", signed_job)
-        self.assertIn("actions: read", signed_job)
-        self.assertNotIn("contents: write", signed_job)
-        self.assertNotIn("SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64", signed_job)
-        self.assertIn("if: always()", signed_job)
-        self.assertIn("Remove Temporary Signing Credentials", signed_job)
-        self.assertIn("macos-signed-release-handoff.tar.gz.sha256", signed_job)
-        self.assertIn("environment: macos-production-release", publish_job)
-        self.assertIn("contents: write", publish_job)
-        self.assertIn("needs.macos-signed-release-gate.result == 'success'", publish_job)
-        self.assertIn("inputs.publish_update_release == true", publish_job)
-        self.assertIn("Scripts/publish_macos_update_release.sh", publish_job)
-        self.assertIn("python3 Scripts/extract_macos_release_handoff.py", consumer)
-        self.assertIn(UPLOAD_ARTIFACT_V4, signed_job)
-        self.assertIn(DOWNLOAD_ARTIFACT_V4, publish_job)
-        self.assertEqual(
-            consumer.count(f"uses: {CHECKOUT_V6}"),
-            consumer.count("persist-credentials: false"),
-        )
-        handoff_extractor = MACOS_HANDOFF_EXTRACTOR.read_text(encoding="utf-8")
-        self.assertIn("archive hard links are forbidden", handoff_extractor)
-        self.assertIn("archive member is outside the release handoff contract", handoff_extractor)
-
-    def test_embedded_extractor_preserves_safe_file_modes(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            archive_path = root / "evidence.tar.gz"
-            destination = root / "public-redacted"
-            with tarfile.open(archive_path, mode="w:gz") as archive:
-                child = tarfile.TarInfo("proofs/device")
-                child.type = tarfile.DIRTYPE
-                child.mode = 0o700
-                archive.addfile(child)
-                parent = tarfile.TarInfo("proofs")
-                parent.type = tarfile.DIRTYPE
-                parent.mode = 0o700
-                archive.addfile(parent)
-                identity_proof = {
-                    "schemaVersion": 1,
-                    "sourceRepository": "billlza/Skybridge-Compass",
-                    "sourceCommit": "a" * 40,
-                    "productSurface": "production",
-                    "swiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
-                    "testingCompilationCondition": False,
-                    "binaryTestSurfaceDetected": False,
-                    "realDevice": True,
-                    "secureEnclaveBacked": True,
-                    "softwareFallbackUsed": False,
-                    "privateKeyExported": False,
-                    "created": True,
-                    "persisted": True,
-                    "restoredAfterRelaunch": True,
-                    "signed": True,
-                    "verified": True,
-                    "handshakePersistenceVerified": True,
-                    "currentPathAuthorityVerified": True,
-                    "measurementSource": "signed-production-app-runtime",
-                    "algorithm": "mldsa87",
-                    "protection": "secureEnclaveRequired",
-                    "deviceRef": "1" * 24,
-                    "evidenceSessionRef": "2" * 24,
-                }
-                add_regular_file(
-                    archive,
-                    "ios-production-identity-proof.json",
-                    (json.dumps(identity_proof, sort_keys=True) + "\n").encode("utf-8"),
-                )
-                add_regular_file(
-                    archive,
-                    "proofs/device/diagnostic.txt",
-                    b"measured\n",
-                )
-                add_regular_file(
-                    archive,
-                    "release-acceptance.json",
-                    b'{"schemaVersion":1}\n',
-                )
-
-            result = self.run_extractor(archive_path, destination)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            release_manifest = destination / "release-acceptance.json"
-            identity_proof_path = destination / "ios-production-identity-proof.json"
-            self.assertEqual(release_manifest.read_bytes(), b'{"schemaVersion":1}\n')
-            self.assertEqual(stat.S_IMODE(release_manifest.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(identity_proof_path.stat().st_mode), 0o600)
-            validation = subprocess.run(
-                [
-                    sys.executable,
-                    os.fspath(
-                        ROOT / "Scripts/validate_real_device_release_acceptance_artifact.py"
-                    ),
-                    "--kind",
-                    "production-identity",
-                    "--artifact-dir",
-                    os.fspath(destination),
-                    "--expected-source-repository",
-                    "billlza/Skybridge-Compass",
-                    "--expected-source-sha",
-                    "a" * 40,
-                ],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(validation.returncode, 0, validation.stderr)
-
-    def test_embedded_extractor_rejects_traversal(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            archive_path = root / "traversal.tar.gz"
-            destination = root / "public-redacted"
-            escaped_path = root / "escaped.json"
-            with tarfile.open(archive_path, mode="w:gz") as archive:
-                add_regular_file(archive, "../escaped.json", b"unsafe\n")
-
-            result = self.run_extractor(archive_path, destination)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse(escaped_path.exists())
-
-    def test_embedded_extractor_rejects_links_and_special_files(self) -> None:
-        for member_type in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.FIFOTYPE):
-            with self.subTest(member_type=member_type):
-                with tempfile.TemporaryDirectory() as temporary_directory:
-                    root = Path(temporary_directory)
-                    archive_path = root / "special.tar.gz"
-                    destination = root / "public-redacted"
-                    with tarfile.open(archive_path, mode="w:gz") as archive:
-                        member = tarfile.TarInfo("unsafe-entry")
-                        member.type = member_type
-                        member.mode = 0o600
-                        member.linkname = "release-acceptance.json"
-                        archive.addfile(member)
-
-                    result = self.run_extractor(archive_path, destination)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertFalse((destination / "unsafe-entry").exists())
 
 
 if __name__ == "__main__":

@@ -27,6 +27,8 @@ targets:
     info:
       path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
       properties:
+        CFBundleShortVersionString: "1.0.2"
+        CFBundleVersion: "2"
         CFBundleURLTypes:
           - CFBundleURLName: com.skybridge.compass.ios
             CFBundleURLSchemes:
@@ -156,6 +158,8 @@ targets:
     info:
       path: "Widgets/Info.plist"
       properties:
+        CFBundleShortVersionString: "1.0.2"
+        CFBundleVersion: "2"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     sources:

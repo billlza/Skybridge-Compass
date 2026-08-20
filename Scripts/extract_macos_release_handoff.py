@@ -18,8 +18,7 @@ MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024
 APP_ROOT = "SkyBridge Compass Pro.app"
 REQUIRED_FILES = {
-    "macos-release-evidence.tar.gz",
-    "release-artifact-run-provenance.json",
+    "macos-release-candidate.json",
 }
 DMG_PATTERN = re.compile(r"SkyBridgeCompassPro-[0-9]+\.[0-9]+\.[0-9]+\.dmg", re.ASCII)
 

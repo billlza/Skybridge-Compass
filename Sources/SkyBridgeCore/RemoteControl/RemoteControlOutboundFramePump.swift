@@ -22,10 +22,19 @@ struct RemoteMessage: Codable, Sendable {
         case clipboard
         case streamConfiguration
         case streamConfigurationAck
+        case framePresentationAck
         case damageReport
         case cursorUpdate
         case overlayUpdate
     }
+}
+
+struct RemoteControlSentFrameMetadata: Equatable, Sendable {
+    let sequenceNumber: UInt64
+    let streamTransaction: RemoteDesktopStreamConfigurationTransaction
+    let bytes: Int
+    let width: Int
+    let height: Int
 }
 
 final class RemoteControlVideoPaceClock: @unchecked Sendable {
@@ -152,6 +161,8 @@ actor RemoteControlOutboundFramePump {
     private var audioDrainTask: Task<Void, Never>?
     private var closed = false
     private var onNeedsSyncRefresh: (@Sendable () -> Void)?
+    private var onFrameSent: (@Sendable (RemoteControlSentFrameMetadata) -> Void)?
+    private var streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction?
     private var lastSentFrameAt: Date = .distantPast
     private var waitingForSyncSince: Date?
     private var lastSyncRefreshRequestAt: Date = .distantPast
@@ -358,6 +369,7 @@ actor RemoteControlOutboundFramePump {
         self.allowsInsecureLegacy = allowsInsecureLegacy
         secureEnvelopeSendSequencer.resetIfSessionChanged(sessionId: sessionKeys?.sessionId)
         self.sessionKeys = sessionKeys
+        streamConfigurationTransaction = requestedStreamConfiguration?.streamConfigurationTransaction
         if !damageTrackingEnabled {
             latestDamageReport = nil
         }
@@ -487,6 +499,12 @@ actor RemoteControlOutboundFramePump {
         onNeedsSyncRefresh = handler
     }
 
+    func setFrameSentHandler(
+        _ handler: (@Sendable (RemoteControlSentFrameMetadata) -> Void)?
+    ) {
+        onFrameSent = handler
+    }
+
     func close() {
         closed = true
         noteFrameTelemetry(dropped: frameQueue.pendingFrames.count)
@@ -504,6 +522,8 @@ actor RemoteControlOutboundFramePump {
             lastVideoFrameContentProcessedCallbackAt = nil
             cancelVideoPaceWake()
             onNeedsSyncRefresh = nil
+            onFrameSent = nil
+            streamConfigurationTransaction = nil
             waitingForSyncSince = nil
         audioDrainGeneration &+= 1
         audioDrainTask?.cancel()
@@ -979,6 +999,7 @@ actor RemoteControlOutboundFramePump {
                 try scheduleVideoFrameSend(
                     payload,
                     payloadBytes: payloadBytes,
+                    sourceFrame: nextFrame,
                     cadenceAnchorMode: isStaleQueueCatchUpFrame ? .staleQueueCatchUp : .normal
                 )
                 if isStaleQueueCatchUpFrame {
@@ -1014,6 +1035,7 @@ actor RemoteControlOutboundFramePump {
     private func scheduleVideoFrameSend(
         _ plaintext: Data,
         payloadBytes: Int,
+        sourceFrame: ScreenData,
         cadenceAnchorMode: VideoCadenceAnchorMode = .normal
     ) throws {
         let outboundData = try makeOutboundRemoteFrame(plaintext, packetType: .screen)
@@ -1029,6 +1051,17 @@ actor RemoteControlOutboundFramePump {
         inFlightVideoSends += 1
         let sendCompletionId = nextVideoSendCompletionIdentifier()
         let generation = videoSendGeneration
+        let sentFrameMetadata = sourceFrame.sequenceNumber.flatMap { sequenceNumber in
+            streamConfigurationTransaction.map { transaction in
+                RemoteControlSentFrameMetadata(
+                    sequenceNumber: sequenceNumber,
+                    streamTransaction: transaction,
+                    bytes: sourceFrame.imageData.count,
+                    width: sourceFrame.width,
+                    height: sourceFrame.height
+                )
+            }
+        }
         let sendStartedAt = Date()
         noteVideoFrameScheduled(at: sendStartedAt)
         pendingVideoSendCompletions.append(
@@ -1061,6 +1094,7 @@ actor RemoteControlOutboundFramePump {
                     sendMode: sendMode,
                     sendStartedAt: sendStartedAt,
                     contentProcessedAt: contentProcessedAt,
+                    sentFrameMetadata: sentFrameMetadata,
                     error: error
                 )
             }
@@ -1130,6 +1164,7 @@ actor RemoteControlOutboundFramePump {
         sendMode: FramedMessageSendMode,
         sendStartedAt: Date,
         contentProcessedAt: Date,
+        sentFrameMetadata: RemoteControlSentFrameMetadata?,
         error: Error?
     ) async {
         guard generation == videoSendGeneration else { return }
@@ -1141,6 +1176,9 @@ actor RemoteControlOutboundFramePump {
                 "❌ 发送屏幕数据失败: peer=\(self.peerId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
             )
             return
+        }
+        if let sentFrameMetadata {
+            onFrameSent?(sentFrameMetadata)
         }
 
         let completedAt = Date()

@@ -520,12 +520,39 @@ PY
 FINALIZER_FUNCTION="$(sed -n '/^finalize_release_acceptance_manifests_after_cleanup() {$/,/^}$/p' "$SMOKE_SCRIPT")"
 FINALIZER_ARTIFACT_DIR="$TMP_DIR/finalizer-artifact"
 FINALIZER_PUBLIC_DIR="$TMP_DIR/finalizer-public"
+FINALIZER_IOS_IDENTITY="$TMP_DIR/ios-release-archive-identity.json"
 mkdir -m 0700 "$FINALIZER_ARTIFACT_DIR" "$FINALIZER_PUBLIC_DIR"
-python3 - "$FINALIZER_ARTIFACT_DIR" "$FINALIZER_PUBLIC_DIR" <<'PY'
+python3 - "$ROOT_DIR/Scripts" "$FINALIZER_IOS_IDENTITY" "$FINALIZER_ARTIFACT_DIR" "$FINALIZER_PUBLIC_DIR" <<'PY'
 import json
 import pathlib
 import sys
 
+sys.path.insert(0, sys.argv[1])
+import ios_physical_release_acceptance as physical
+import ios_release_archive_identity as archive_identity
+
+identity = archive_identity.validate_identity({
+    "schemaVersion": 1,
+    "identityPurpose": archive_identity.IDENTITY_PURPOSE,
+    "archiveTreeSha256": "3" * 64,
+    "archiveFileCount": 12,
+    "archiveTotalBytes": 8192,
+    "appExecutableUUIDs": [{"architecture": "arm64", "uuid": "11111111-1111-1111-1111-111111111111"}],
+    "widgetExecutableUUIDs": [{"architecture": "arm64", "uuid": "22222222-2222-2222-2222-222222222222"}],
+    "debugSymbolsVerified": True,
+    "releaseTestingIpaSha256": "4" * 64,
+    "sourceRepository": "example/skybridge",
+    "sourceCommit": "1" * 40,
+    "sourceInputDigest": "2" * 64,
+    "releaseVersion": "1.0.2",
+    "releaseBuild": "2",
+    "appBundleIdentifier": archive_identity.APP_BUNDLE_IDENTIFIER,
+    "widgetBundleIdentifier": archive_identity.WIDGET_BUNDLE_IDENTIFIER,
+    "productSurface": "production",
+    "buildConfiguration": "Release",
+    "swiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
+})
+pathlib.Path(sys.argv[2]).write_bytes(archive_identity.canonical_bytes(identity))
 payload = {
     "acceptanceEligible": False,
     "cleanupComplete": False,
@@ -542,8 +569,9 @@ payload = {
     "preCleanupCandidate": True,
     "schemaVersion": 1,
     "transport": "webrtc",
+    "iosReleaseArchive": physical.expected_binding(identity),
 }
-for root in map(pathlib.Path, sys.argv[1:]):
+for root in map(pathlib.Path, sys.argv[3:]):
     path = root / "release-acceptance.json"
     path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
     path.chmod(0o600)
@@ -552,6 +580,8 @@ PY
   eval "$FINALIZER_FUNCTION"
   export ARTIFACT_DIR="$FINALIZER_ARTIFACT_DIR"
   export PUBLIC_ARTIFACT_DIR="$FINALIZER_PUBLIC_DIR"
+  export LAB_RUN=0
+  export IOS_RELEASE_ARCHIVE_IDENTITY="$FINALIZER_IOS_IDENTITY"
   finalize_release_acceptance_manifests_after_cleanup
 )
 python3 - "$FINALIZER_ARTIFACT_DIR" "$FINALIZER_PUBLIC_DIR" <<'PY'
@@ -583,7 +613,7 @@ set +e
 (
   eval "$CLEANUP_FUNCTIONS"
   eval 'copy_round_diagnostics() { :; }; terminate_ios_app() { :; }; copy_mac_media_diagnostics() { :; }; terminate_mac_host() { :; }; destroy_process_ownership_session() { :; }'
-  IOS_CONSOLE_HANDLE_STARTED=0
+  export IOS_CONSOLE_HANDLE_STARTED=0
   DID_COPY_IOS_BOOTSTRAP=0
   AUTH_SESSION_FILE=""
   AUTH_PRIVATE_DIR=""
@@ -620,7 +650,7 @@ set +e
 (
   eval "$CLEANUP_FUNCTIONS"
   eval 'copy_round_diagnostics() { :; }; terminate_ios_app() { :; }; copy_mac_media_diagnostics() { :; }; terminate_mac_host() { :; }; destroy_process_ownership_session() { :; }'
-  IOS_CONSOLE_HANDLE_STARTED=0
+  export IOS_CONSOLE_HANDLE_STARTED=0
   DID_COPY_IOS_BOOTSTRAP=0
   AUTH_SESSION_FILE=""
   AUTH_PRIVATE_DIR=""

@@ -451,11 +451,13 @@ ARTIFACT_DATE=2026-01-23 python3 Scripts/aggregate_kernel_emulation.py
 - [`Docs/ops/notary-credential-bootstrap.md`](Docs/ops/notary-credential-bootstrap.md)
 - [`Scripts/ensure_notarytool_credentials.sh`](Scripts/ensure_notarytool_credentials.sh)
 
-`bundle exec fastlane release` 现在会在正式发布前先自动执行 notary 凭据自检：
+`bundle exec fastlane release` 现在会在本地候选打包前先自动执行 notary 凭据自检：
 
 - 当前本机凭据已可用：直接继续
 - 当前本机凭据缺失：自动调用 `Scripts/bootstrap_notarytool_credentials.sh`
-- bootstrap 完成后再次验证，成功才进入真正的发版链
+- bootstrap 完成后再次验证，成功才进入本地构建、签名、公证与 package-integrity-only 校验
+
+该 lane 不消费物理证据，也不生成“最终发布就绪”结论。正式发布只允许走受保护的候选构建 → 同一候选物理证据 → 原字节发布工作流。
 
 发布 DMG 还会在 `package_app.sh` 前自动执行 Developer ID provisioning profile 自检：
 
@@ -472,16 +474,21 @@ SKYBRIDGE_ASSOCIATE_DEVELOPER_ID_APP_GROUPS=1 \
 这一步可能触发 Apple 2FA。关联完成后，后续 DMG 打包只需要常规命令；脚本会继续强校验 profile 中是否真的包含 `group.com.skybridge.compass`。
 
 ```bash
+export SKYBRIDGE_RELEASE_BUILD_ID=202608120001 # 替换为下一批准的单调递增数字构建号
 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session \
 SKYBRIDGE_REQUIRE_APP_GROUPS=1 \
 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
-./Scripts/build_dmg.sh --notarize-dmg --require-notarization
+./Scripts/build_dmg.sh \
+  --build-id "$SKYBRIDGE_RELEASE_BUILD_ID" \
+  --notarize-dmg \
+  --require-notarization
 ```
 
 当前发布约束：
 
 - 发布 DMG 只接受明确 Release provenance 的 `SkyBridgeCompassApp` executable 产物（默认 `swiftpm_release`；在 Xcode Package destination 无歧义时也接受 `xcode_release`），最终 `.app` 由 `package_app.sh` 组装；禁止把 `SkyBridgeCompassMac.app` native app bundle 当作发布 runtime。
 - `package_app.sh` 在 `release_dmg` 上下文下会校验构建来源，禁止隐式 fallback。
+- `build_dmg.sh` 要求显式正整数 `--build-id`，并验证最终 `.app` 的 `CFBundleVersion` 与该事务完全一致；正式构建不使用时间 fallback。
 - `build_dmg.sh --use-existing-app` 也会校验现有 `.app` 的构建来源与稳定 Xcode/SDK metadata，非 Release provenance 或 beta SDK 产物会直接失败。
 - 正式发布必须使用 `Developer ID Application` 证书签名；`ad-hoc` 仅适合本地调试，不适合稳定复用 macOS TCC 授权。
 - `Developer ID + notarized DMG` 发布链下，Apple 登录固定走 `web_session`（`ASWebAuthenticationSession` + Services ID）；原生 `Sign in with Apple` 仅适用于 Apple 官方支持的分发通道。
@@ -490,7 +497,7 @@ SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
 - 主应用 profile 可通过 `SKYBRIDGE_MACOS_PROVISIONPROFILE_PATH` 指定，Widget Extension profile 可通过 `SKYBRIDGE_WIDGET_PROVISIONPROFILE_PATH` 指定。
 - 若要完全跳过 profile 自检，可显式设置 `SKYBRIDGE_ENSURE_DEVELOPER_ID_PROFILES=0`；正式发布不建议这样做。
 - 若要执行本地 notarization，需要提供 `notarytool` 凭据（例如 `NOTARYTOOL_KEY` / `NOTARYTOOL_KEY_ID` / `NOTARYTOOL_ISSUER` 或 keychain profile）。
-- 发布 readiness 必须提供 Mac/iOS 连通性矩阵 artifact，由 `skybridge check connectivity` 验证 Mac→iOS 的 XWing/XWing、XWing/PQC、PQC/XWing、PQC/Classic、Classic/PQC 路径，避免只凭性能 artifact 放过入站握手失败。
+- 发布 readiness 必须提供与精确候选进程绑定的 Mac/iOS shipping-product OSLog artifact。`skybridge check connectivity` 只接受 X-Wing/X-Wing、X-Wing/PQC、PQC/X-Wing 三组双端认证成功，以及 Mac、iOS shipping responder 各一次已验证签名的 Classic offer 严格策略拒绝；外部 case/status 标签、helper、Debug 或 simulator 证据均不能替代产品事件。
 
 推荐的最终校验命令：
 
@@ -516,7 +523,7 @@ SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 \
 
 当前目录下最近一次本地生成的 DMG 构建产物：
 
-- `dist/SkyBridgeCompassPro-1.0.0.dmg`
+- `dist/SkyBridgeCompassPro-1.0.2.dmg`
 
 ## 说明
 

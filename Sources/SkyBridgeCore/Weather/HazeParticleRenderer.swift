@@ -146,7 +146,7 @@ final class HazeParticleRenderer: NSObject, MTKViewDelegate {
         do {
             metalLibrary = try SkyBridgeMetalShaderLibrary.load(
                 device: device,
-                bundle: Bundle.module,
+                bundle: SkyBridgeResourceBundleLocator.core,
                 sourceResourceNames: ["HazeParticleShaders"],
                 requiredFunctionNames: [
                     "hazeParticleVertex",

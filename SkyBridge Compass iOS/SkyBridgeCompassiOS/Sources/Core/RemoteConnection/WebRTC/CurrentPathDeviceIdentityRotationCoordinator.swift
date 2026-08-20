@@ -562,6 +562,11 @@ final class IOSCurrentPathDeviceIdentityRotationCoordinator {
             throw IOSCurrentPathDeviceIdentityRotationError
                 .localAuthorityCommittedRecoveryRequired(error.localizedDescription)
         }
+        if prepared.resolutionDisposition == .createdAndCommitted,
+           let descriptor = prepared.productEvidenceDescriptor {
+            _ = ProductReleaseEvidenceRecorder.shared
+                .recordProductionIdentityCommitted(descriptor)
+        }
     }
 
     private func commitIdentityRotationPreservingOnlyRecoverableState(

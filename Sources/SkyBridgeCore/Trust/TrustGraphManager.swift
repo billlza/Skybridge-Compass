@@ -82,8 +82,15 @@ public final class TrustGraphManager: ObservableObject {
         )
         
         // 保存到信任存储
-        try await trustSyncService.addTrustRecord(record)
-        
+        do {
+            try await trustSyncService.addTrustRecord(record)
+        } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+            // 记录已权威提交；post-commit 清理残留不得报告为信任失败
+            //（与 PairingIdentityExchangeCommitCoordinator 的处理一致）。
+            logger.warning("⚠️ 信任记录已提交但事后清理留有残留: \(deviceId), residue=\(cleanupResidue)")
+        }
+
         // 更新本地列表
         await loadTrustGraphDevices()
         
@@ -102,7 +109,14 @@ public final class TrustGraphManager: ObservableObject {
         }
         
         // 撤销信任
-        try await trustSyncService.revokeTrustRecord(deviceId: deviceId)
+        do {
+            try await trustSyncService.revokeTrustRecord(deviceId: deviceId)
+        } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+            // 撤销墓碑已权威提交且失效通知已发布；post-commit 清理残留不得向 UI 报告为撤销失败
+            //（与 PairingIdentityExchangeCommitCoordinator 的处理一致）。
+            logger.warning("⚠️ 撤销已提交但事后清理留有残留: \(deviceId), residue=\(cleanupResidue)")
+        }
         
         // 更新本地列表
         await loadTrustGraphDevices()
@@ -150,11 +164,17 @@ public final class TrustGraphManager: ObservableObject {
         let oldName = trustedDevices.first(where: { $0.deviceId == oldDeviceId })?.displayName
 
         // 更新 Keychain/iCloud Keychain 同步记录（tombstone + add）
-        try await trustSyncService.handleKeyRotation(
-            oldDeviceId: oldDeviceId,
-            newDeviceId: newCertificate.deviceId,
-            newCertificate: newCertificate
-        )
+        do {
+            try await trustSyncService.handleKeyRotation(
+                oldDeviceId: oldDeviceId,
+                newDeviceId: newCertificate.deviceId,
+                newCertificate: newCertificate
+            )
+        } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+            // 轮换的权威写入（旧墓碑 + 新记录）已提交；post-commit 清理残留不得报告为轮换失败。
+            logger.warning("⚠️ 密钥轮换已提交但事后清理留有残留: \(oldDeviceId) -> \(newCertificate.deviceId), residue=\(cleanupResidue)")
+        }
 
         await loadTrustGraphDevices()
 

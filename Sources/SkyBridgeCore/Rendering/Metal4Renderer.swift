@@ -119,7 +119,7 @@ public final class Metal4Renderer: @unchecked Sendable {
         
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
             requiredFunctionNames: [vertexFunction, fragmentFunction]
         ) else {
@@ -244,7 +244,7 @@ public final class Metal4Renderer: @unchecked Sendable {
     private func setupFallbackDenoisePipeline() {
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
             requiredFunctionNames: ["gaussianBlurDenoise"]
         ) else {
@@ -347,7 +347,7 @@ public final class Metal4Renderer: @unchecked Sendable {
         
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
             requiredFunctionNames: [functionName]
         ),

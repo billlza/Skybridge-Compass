@@ -3,8 +3,9 @@
 
 The protected real-device workflow must never upload an operator supplied
 directory wholesale.  This module defines the versioned, fail-closed contract
-for each of the seven evidence artifacts and emits a content-addressed file-set
-manifest that is verified again after archive extraction.
+for each of the four canonical evidence artifacts and emits a canonical file-set
+manifest that is verified again after archive extraction. Its digests detect
+accidental file/run mismatch; they are not a security boundary.
 """
 
 from __future__ import annotations
@@ -20,6 +21,33 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from macos_release_candidate_identity import (
+    CandidateIdentityError,
+    canonical_bytes as canonical_candidate_bytes,
+    validate_manifest as validate_candidate_manifest,
+)
+from ios_physical_release_acceptance import (
+    PhysicalAcceptanceError,
+    expected_binding,
+    validate_archive_binding,
+)
+from ios_release_archive_identity import (
+    ArchiveIdentityError,
+    load_identity as load_ios_archive_identity,
+    validate_release_testing_ipa,
+)
+from validate_product_release_evidence_log import (
+    ProductEvidenceError,
+    validate_artifact_log as validate_product_release_evidence_log,
+)
+from extract_ios_product_release_evidence import (
+    IOSProductEvidenceError,
+    validate_installation_capture,
+)
+from validate_real_device_release_acceptance_artifact import (
+    validate_product_only_formal_evidence,
+)
 
 
 SCHEMA_VERSION = 1
@@ -37,9 +65,15 @@ class Contract:
     required_patterns: tuple[re.Pattern[str], ...] = ()
 
 
-COMMON_IDENTITY_FILES = frozenset(
+FORMAL_PRODUCT_FILES = frozenset(
     {
         "ios-production-identity-proof.json",
+        "ios-product-installation-capture.json",
+        "ios-product-session-capture.json",
+        "ios-product-session.log",
+        "mac-product-session-capture.json",
+        "mac-product-session.log",
+        "macos-release-candidate.json",
         "release-acceptance.json",
     }
 )
@@ -49,182 +83,13 @@ def _patterns(*values: str) -> tuple[re.Pattern[str], ...]:
     return tuple(re.compile(value, re.ASCII) for value in values)
 
 
-P2P_REMOTE_FILES = COMMON_IDENTITY_FILES | frozenset(
-    {
-        "device-info.txt",
-        "ios-build.log",
-        "ios-console.stderr.log",
-        "ios-launch.json",
-        "ios-processes.json",
-        "ios-processes.log",
-        "ios-processes.stderr.log",
-        "ios-product-proof.json",
-        "ios.pqc.json",
-        "ipad-authenticated-forward-port-probe.stderr.log",
-        "ipad-authenticated-forward-route.stderr.log",
-        "ipad-control-port-probe.stderr.log",
-        "mac-control-port-probe.stderr.log",
-        "mac-online-ipad-build.log",
-        "mac-online-ipad-open.stderr.log",
-        "mac-online-ipad.app.stderr.log",
-        "mac-online-ipad.app.stdout.log",
-        "mac-online-ipad.status.log",
-        "mac-online-ipad.stderr.log",
-        "mac-online-ipad.stdout.log",
-        "mac-remote-port-probe.stderr.log",
-        "mac-smoke-source.stdout.log",
-        "mac.pqc.json",
-        "mac.status.log",
-        "mac.stdout.log",
-        "macos-build.log",
-        "p2p-approval-proof.json",
-    }
-)
-
-P2P_DYNAMIC_PATTERNS = _patterns(
-    r"ios-p2p-remote-(?!.*\.(?:app-cache|console|listener)\.status\.log$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log",
-    r"ios-p2p-remote-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(?:app-cache|console|listener)\.status\.log",
-    r"ios-p2p-remote-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.trace\.log",
-    r"ios-copy-(?:listener-status|pqc-report|status|trace)\.(?:json|log|stderr\.log|stdout\.log)",
-)
-
-WEBRTC_REMOTE_FILES = COMMON_IDENTITY_FILES | frozenset(
-    {
-        "device-info.json",
-        "ios-build.log",
-        "ios-launch.json",
-        "ios-product-verification.json",
-        "mac.pqc.json",
-        "mac.status.log",
-        "mac.stdout.log",
-        "macos-build.log",
-        "media-relay-preflight.log",
-        "product-path-proof.json",
-        "webrtc_media_doctor.json",
-        "webrtc_media_doctor.stderr.log",
-    }
-)
-
-WEBRTC_DYNAMIC_PATTERNS = _patterns(
-    r"ios-real-webrtc-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log",
-    r"ios-real-webrtc-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log\.trace\.log",
-    r"ios-real-webrtc-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log\.webrtc-media\.jsonl",
-    r"webrtc-media-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.jsonl",
-)
-
-FILE_TRANSFER_FILES = COMMON_IDENTITY_FILES | frozenset(
-    {
-        "device-info.json",
-        "device-info.txt",
-        "ios-build.log",
-        "ios-launch.json",
-        "mac.pqc.json",
-        "mac.status.log",
-        "mac.stderr.log",
-        "mac.stdout.log",
-        "macos-build.log",
-        "macos-host-codesign.log",
-        "macos-release-readiness.log",
-    }
-)
-
-FILE_TRANSFER_PATTERNS = _patterns(
-    r"ios-real-device-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log",
-    r"mac-host-[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:sample\.txt|system\.log)",
-)
-
-LOCAL_WEBRTC_NOTICE_FILES = frozenset(
-    {
-        "ios-build.log",
-        "macos-build.log",
-        "signaling.log",
-    }
-)
-
-LOCAL_WEBRTC_NOTICE_PATTERNS = _patterns(
-    r"ios_round_[1-9][0-9]*\.(?:pqc\.json|preflight\.status\.log|preflight\.status\.log\.trace\.log|preflight\.stderr\.log|preflight\.stdout\.log|status\.log|status\.log\.trace\.log|status\.log\.webrtc-media\.jsonl|stderr\.log|stdout\.log)",
-    r"mac_round_[1-9][0-9]*\.(?:code|pqc\.json|status\.log|stdout\.log)",
-    r"webrtc-media-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.jsonl",
-    r"webrtc_media_doctor_round_[1-9][0-9]*\.(?:json|stderr\.log)",
-)
-
-
 CONTRACTS: dict[str, Contract] = {
-    "connectivity": Contract(
-        exact=COMMON_IDENTITY_FILES | frozenset({"ios.status.log", "mac.status.log"}),
+    kind: Contract(
+        exact=FORMAL_PRODUCT_FILES,
         patterns=(),
-        required_exact=COMMON_IDENTITY_FILES | frozenset({"ios.status.log", "mac.status.log"}),
-    ),
-    "p2p-remote": Contract(
-        exact=P2P_REMOTE_FILES,
-        patterns=P2P_DYNAMIC_PATTERNS,
-        required_exact=COMMON_IDENTITY_FILES
-        | frozenset(
-            {
-                "ios-product-proof.json",
-                "mac-online-ipad.status.log",
-                "mac.status.log",
-                "p2p-approval-proof.json",
-            }
-        ),
-        required_patterns=_patterns(
-            r"ios-p2p-remote-(?!.*\.(?:app-cache|console|listener)\.status\.log$)[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log"
-        ),
-    ),
-    "webrtc-remote": Contract(
-        exact=WEBRTC_REMOTE_FILES,
-        patterns=WEBRTC_DYNAMIC_PATTERNS,
-        required_exact=COMMON_IDENTITY_FILES
-        | frozenset(
-            {
-                "mac.status.log",
-                "media-relay-preflight.log",
-                "product-path-proof.json",
-                "webrtc_media_doctor.json",
-            }
-        ),
-        required_patterns=_patterns(
-            r"ios-real-webrtc-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log",
-            r"ios-real-webrtc-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log\.trace\.log",
-        ),
-    ),
-    "file-transfer": Contract(
-        exact=FILE_TRANSFER_FILES,
-        patterns=FILE_TRANSFER_PATTERNS,
-        required_exact=COMMON_IDENTITY_FILES | frozenset({"mac.status.log"}),
-        required_patterns=_patterns(
-            r"ios-real-device-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.status\.log"
-        ),
-    ),
-    "p2p-notice": Contract(
-        exact=P2P_REMOTE_FILES,
-        patterns=P2P_DYNAMIC_PATTERNS,
-        required_exact=COMMON_IDENTITY_FILES
-        | frozenset({"ios-product-proof.json", "mac.status.log", "p2p-approval-proof.json"}),
-    ),
-    "webrtc-notice": Contract(
-        exact=LOCAL_WEBRTC_NOTICE_FILES,
-        patterns=LOCAL_WEBRTC_NOTICE_PATTERNS,
-        required_exact=frozenset({"signaling.log"}),
-        required_patterns=_patterns(r"mac_round_[1-9][0-9]*\.status\.log"),
-    ),
-    "notice-panel": Contract(
-        exact=frozenset(
-            {
-                "panel_probe.build.log",
-                "panel_probe.status.log",
-                "panel_probe.stdout.log",
-            }
-        ),
-        patterns=(),
-        required_exact=frozenset(
-            {
-                "panel_probe.build.log",
-                "panel_probe.status.log",
-                "panel_probe.stdout.log",
-            }
-        ),
-    ),
+        required_exact=FORMAL_PRODUCT_FILES,
+    )
+    for kind in ("connectivity", "p2p-remote", "webrtc-remote", "file-transfer")
 }
 
 
@@ -311,6 +176,13 @@ def _collect(root: Path, contract: Contract, *, include_manifest: bool) -> dict[
         if not _matches(contract, relative_file):
             _fail(f"evidence file is not in the {SCHEMA_VERSION} allowlist: {relative_file}")
         content = _read_regular_file(entry, relative_file)
+        if relative_file == "macos-release-candidate.json":
+            try:
+                candidate = validate_candidate_manifest(json.loads(content.decode("utf-8")))
+            except (CandidateIdentityError, UnicodeError, json.JSONDecodeError) as exc:
+                _fail(f"invalid macOS release candidate identity: {exc}")
+            if canonical_candidate_bytes(candidate) != content:
+                _fail("macOS release candidate identity is not canonical JSON")
         files[relative_file] = content
         total_bytes += len(content)
         if len(files) > MAX_FILE_COUNT:
@@ -324,6 +196,61 @@ def _collect(root: Path, contract: Contract, *, include_manifest: bool) -> dict[
         if not any(pattern.fullmatch(name) for name in files):
             _fail(f"required evidence file pattern is missing: {pattern.pattern}")
     return files
+
+
+def _required_ios_archive_binding(identity_path: Path, ipa_path: Path) -> dict[str, object]:
+    try:
+        identity = load_ios_archive_identity(identity_path)
+        validate_release_testing_ipa(identity, ipa_path)
+    except ArchiveIdentityError as exc:
+        _fail(f"invalid sealed iOS archive or release-testing IPA: {exc}")
+    return expected_binding(identity)
+
+
+def _validate_ios_archive_binding(
+    files: dict[str, bytes], required_binding: dict[str, object] | None
+) -> dict[str, object]:
+    try:
+        manifest = json.loads(files["release-acceptance.json"].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail(f"release acceptance manifest is not valid UTF-8 JSON: {exc}")
+    if not isinstance(manifest, dict):
+        _fail("release acceptance manifest must be a JSON object")
+    if manifest.get("acceptanceEligible") is not True:
+        _fail("only acceptance-eligible evidence may enter formal staging")
+    recorded_binding = manifest.get("iosReleaseArchive")
+    try:
+        validate_archive_binding(recorded_binding)
+    except PhysicalAcceptanceError as exc:
+        _fail(f"release evidence contains an invalid iOS archive binding: {exc}")
+    if required_binding is not None and recorded_binding != required_binding:
+        _fail("release evidence does not bind the exact iOS archive and IPA")
+    return manifest
+
+
+def _formal_product_kind(kind: str) -> str:
+    return {"p2p-remote": "p2p", "webrtc-remote": "webrtc"}.get(kind, kind)
+
+
+def _validate_fixed_product_artifacts(
+    kind: str,
+    artifact_dir: Path,
+    manifest: dict[str, object],
+) -> None:
+    repository = manifest.get("sourceRepository")
+    commit = manifest.get("sourceCommit")
+    if not isinstance(repository, str) or not isinstance(commit, str):
+        _fail("release manifest is missing source provenance")
+    try:
+        validate_product_only_formal_evidence(
+            artifact_dir,
+            _formal_product_kind(kind),
+            manifest,
+            expected_repository=repository,
+            expected_source_sha=commit,
+        )
+    except SystemExit as exc:
+        _fail(str(exc))
 
 
 def _manifest(kind: str, files: dict[str, bytes]) -> bytes:
@@ -342,7 +269,16 @@ def _manifest(kind: str, files: dict[str, bytes]) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def stage(kind: str, source: Path, destination: Path) -> None:
+def stage(
+    kind: str,
+    source: Path,
+    destination: Path,
+    *,
+    ios_archive_identity: Path | None,
+    release_testing_ipa: Path | None,
+) -> None:
+    if ios_archive_identity is None or release_testing_ipa is None:
+        _fail("initial formal staging requires the sealed iOS identity and IPA")
     contract = CONTRACTS[kind]
     source_root = _validate_root(source, "source evidence directory")
     destination_parent = destination.parent.resolve(strict=True)
@@ -352,6 +288,11 @@ def stage(kind: str, source: Path, destination: Path) -> None:
     if destination.exists() or destination.is_symlink():
         _fail(f"destination must not already exist: {destination}")
     files = _collect(source_root, contract, include_manifest=False)
+    manifest = _validate_ios_archive_binding(
+        files,
+        _required_ios_archive_binding(ios_archive_identity, release_testing_ipa),
+    )
+    _validate_fixed_product_artifacts(kind, source_root, manifest)
     temporary = Path(
         tempfile.mkdtemp(prefix=f".{destination.name}.", dir=os.fspath(destination_parent))
     )
@@ -383,7 +324,13 @@ def stage(kind: str, source: Path, destination: Path) -> None:
         raise
 
 
-def verify(kind: str, artifact_dir: Path) -> None:
+def verify(
+    kind: str,
+    artifact_dir: Path,
+    *,
+    ios_archive_identity: Path | None,
+    release_testing_ipa: Path | None,
+) -> None:
     contract = CONTRACTS[kind]
     root = _validate_root(artifact_dir, "staged evidence directory")
     manifest_path = root / FILE_SET_MANIFEST
@@ -418,6 +365,14 @@ def verify(kind: str, artifact_dir: Path) -> None:
             _fail("file-set manifest contains an invalid or duplicate file entry")
         expected[name] = (byte_count, digest)
     files = _collect(root, contract, include_manifest=True)
+    release_manifest = _validate_ios_archive_binding(
+        files,
+        (
+            _required_ios_archive_binding(ios_archive_identity, release_testing_ipa)
+            if ios_archive_identity is not None and release_testing_ipa is not None
+            else None
+        ),
+    )
     if set(files) != set(expected):
         unexpected = sorted(set(files) - set(expected))
         missing = sorted(set(expected) - set(files))
@@ -431,6 +386,7 @@ def verify(kind: str, artifact_dir: Path) -> None:
             _fail(f"staged evidence content does not match its manifest: {name}")
     if _manifest(kind, files) != manifest_content:
         _fail("file-set manifest is not in canonical form")
+    _validate_fixed_product_artifacts(kind, root, release_manifest)
 
 
 def main() -> int:
@@ -440,17 +396,39 @@ def main() -> int:
     mode.add_argument("--source", type=Path)
     mode.add_argument("--verify", dest="verify_dir", type=Path)
     parser.add_argument("--destination", type=Path)
+    parser.add_argument("--ios-archive-identity", type=Path)
+    parser.add_argument("--release-testing-ipa", type=Path)
     args = parser.parse_args()
     try:
         if args.source is not None:
             if args.destination is None:
                 _fail("--destination is required with --source")
-            stage(args.kind, args.source, args.destination)
+            if args.ios_archive_identity is None or args.release_testing_ipa is None:
+                _fail(
+                    "initial formal staging requires --ios-archive-identity and "
+                    "--release-testing-ipa"
+                )
+            stage(
+                args.kind,
+                args.source,
+                args.destination,
+                ios_archive_identity=args.ios_archive_identity,
+                release_testing_ipa=args.release_testing_ipa,
+            )
         else:
             if args.destination is not None:
                 _fail("--destination is only valid with --source")
-            verify(args.kind, args.verify_dir)
-    except ContractError as exc:
+            if (args.ios_archive_identity is None) != (args.release_testing_ipa is None):
+                _fail(
+                    "--ios-archive-identity and --release-testing-ipa must be supplied together"
+                )
+            verify(
+                args.kind,
+                args.verify_dir,
+                ios_archive_identity=args.ios_archive_identity,
+                release_testing_ipa=args.release_testing_ipa,
+            )
+    except (ArchiveIdentityError, ContractError) as exc:
         print(f"release evidence file-set contract rejected: {exc}", file=sys.stderr)
         return 1
     print(f"release evidence file-set contract valid: kind={args.kind}")

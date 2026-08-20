@@ -21,6 +21,7 @@ IOS_DEBUG_ENTITLEMENTS="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompass-
 IOS_RELEASE_ENTITLEMENTS="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
 IOS_APP_INFO_PLIST="${SCRIPT_DIR}/../SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
 SOURCE_INPUT_DIGEST_TOOL="${SCRIPT_DIR}/source_input_digest.py"
+PROCESS_OWNERSHIP_SHELL_HELPER="${SCRIPT_DIR}/real_device_ios_process_ownership.sh"
 
 fail() {
   echo "[test-real-device-smoke-preflight] $1" >&2
@@ -116,21 +117,21 @@ cleanup_body="$(
 artifact_sync_body="$(
   awk '
     /^sync_macos_smoke_host_artifacts\(\)/ { in_function = 1 }
-    /^tracked_process_executable\(\)/ { in_function = 0 }
+    /^compute_source_input_snapshot\(\)/ { in_function = 0 }
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
 tracked_process_termination_body="$(
   awk '
-    /^terminate_tracked_process\(\)/ { in_function = 1 }
-    /^capture_ios_release_source_provenance\(\)/ { in_function = 0 }
+    /^skybridge_mac_terminate_owned_process\(\)/ { in_function = 1 }
+    /^skybridge_ios_process_snapshot\(\)/ { in_function = 0 }
     in_function { print }
-  ' "$SMOKE_SCRIPT"
+  ' "$PROCESS_OWNERSHIP_SHELL_HELPER"
 )"
 artifact_reset_body="$(
   awk '
     /^reset_smoke_artifacts\(\)/ { in_function = 1 }
-    /^terminate_stale_smoke_scripts\(\)/ { in_function = 0 }
+    /^require_no_concurrent_smoke_scripts\(\)/ { in_function = 0 }
     in_function { print }
   ' "$SMOKE_SCRIPT"
 )"
@@ -185,7 +186,7 @@ source_provenance_body="$(
 )"
 ios_build_invocation_body="$(
   awk '
-    /^IOS_XCODEBUILD_SETTINGS=\(/ { in_block = 1 }
+    /^[[:space:]]*IOS_XCODEBUILD_SETTINGS=\(/ { in_block = 1 }
     /^if \[\[ ! -d "\$IOS_APP_PATH"/ { in_block = 0 }
     in_block { print }
   ' "$SMOKE_SCRIPT"
@@ -262,7 +263,7 @@ script_has_literal 'SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0' \
   || fail "real-device smoke must require the SwiftPM HAS_APPLE_PQC_SDK compile gate before X-Wing validation"
 script_has_literal "skybridge_detect_apple_pqc_sdk iphoneos" \
   || fail "real-device X-Wing smoke must probe iPhoneOS Apple PQC SDK symbols before building the iOS app"
-script_has_literal 'Apple PQC SDK symbol probe failed for the iOS app; refusing to build a real-device X-Wing smoke target without HAS_APPLE_PQC_SDK.' \
+script_has_literal 'Apple PQC SDK symbol probe failed for the diagnostic iOS app; refusing a real-device X-Wing smoke target without HAS_APPLE_PQC_SDK.' \
   || fail "missing iPhoneOS Apple PQC SDK symbols must fail closed before building the iOS app"
 script_has_literal "SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK" \
   || fail "iOS real-device X-Wing smoke must pass the Xcode HAS_APPLE_PQC_SDK build setting"
@@ -885,8 +886,8 @@ script_has_literal "--stderr \"\$MAC_ONLINE_LAUNCH_STDERR\"" \
   || fail "Mac online iPad LaunchServices app stderr must not share stdout"
 script_has_literal "2>>\"\$MAC_ONLINE_LAUNCH_OPEN_STDERR\"" \
   || fail "Mac online iPad smoke must capture open(1) diagnostics on failure"
-grep -q 'terminate_stale_macos_online_ipad_clients' "$SMOKE_SCRIPT" \
-  || fail "Mac online iPad smoke must terminate stale copies of the same app bundle before LaunchServices open"
+grep -q 'require_no_external_macos_online_ipad_clients' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must fail closed when the exact app executable already runs"
 grep -q 'MAC_ONLINE_PACKAGED_APP_BUNDLE=' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must default to a packaged app bundle"
 grep -q 'SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE' "$SMOKE_SCRIPT" \
@@ -989,16 +990,18 @@ contains_literal "$mac_online_debug_body" 'clear_runtime_bundle_quarantine_if_pr
   || fail "runtime-only Debug app quarantine must be conditionally cleared with explicit error handling"
 [[ "$mac_online_build_body" == *'ENABLE_DEBUG_DYLIB=NO'* ]] \
   || fail "Mac online iPad Debug app must disable debug dylib stubs for reliable LaunchServices launch"
-grep -q 'find_macos_online_ipad_client_pid' "$SMOKE_SCRIPT" \
-  || fail "Mac online iPad smoke must track the app PID, not the open wrapper PID"
+grep -q 'skybridge_mac_wait_for_single_exact_process' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must discover the exact app executable instead of tracking the open wrapper"
+grep -q 'skybridge_mac_capture_owned_process' "$SMOKE_SCRIPT" \
+  || fail "Mac online iPad smoke must capture canonical executable, start time, and audit token before use"
 grep -q 'launch method=open-app-bundle pid=%s role=mac-online-ipad-client' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must emit LaunchServices app PID evidence"
 grep -q 'launch requested role=mac-online-ipad-client' "$SMOKE_SCRIPT" \
   || fail "Mac online iPad smoke must distinguish shell launch requests from real app boot evidence"
 ! grep -q 'boot role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=external-accessibility' "$SMOKE_SCRIPT" \
   || fail "shell harness must not prewrite dashboard boot evidence"
-! grep -q '/usr/bin/open -n -W' "$SMOKE_SCRIPT" \
-  || fail "Mac online iPad smoke must not use open -W as the app process handle"
+! grep -Eq '^[[:space:]]+-n([[:space:]]|\\|$)' "$SMOKE_SCRIPT" \
+  || fail "formal LaunchServices smoke must not force a second app instance with open -n"
 script_has_literal "SKYBRIDGE_TARGET_IPAD_IDENTITY=\"\$IOS_PQC_DEVICE_ID\"" \
   || fail "Accessibility click evidence must be identity-bound to the real iPad PQC report"
 grep -q 'No paired physical iPad with CoreDevice connection capability found' "$SMOKE_SCRIPT" \
@@ -1100,7 +1103,7 @@ target_contracts = (
     '  echo "==> Scope: signed current-source macOS host (diagnostic-only; no iOS target)"\n'
     'else\n'
     '  echo "==> Real device: $IOS_DEVICE_LABEL"',
-    'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then',
+    'if [[ "$LAB_RUN" == "1" && "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then',
     'if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" ]]; then\n'
     '  xcrun devicectl list devices',
     'if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then\n'
@@ -1142,7 +1145,7 @@ grep -Fq 'identitySourceStaplerValid' "$RELEASE_ACCEPTANCE_VALIDATOR" \
   || fail "release validation must require stapler proof for the host identity source"
 grep -Fq 'identitySourceGatekeeperAccepted' "$RELEASE_ACCEPTANCE_VALIDATOR" \
   || fail "release validation must require Gatekeeper proof for the host identity source"
-script_has_literal 'MAC_HOST_PRODUCT_APP_BUNDLE="$ROOT_DIR/dist/SkyBridge Compass Pro.app"' \
+script_has_literal 'MAC_HOST_PRODUCT_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_PRODUCT_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"' \
   || fail "acceptance host signing must use the canonical dist product app as its read-only identity source"
 script_has_literal 'MAC_HOST_PRODUCT_BUNDLE_ID="com.skybridge.compass.pro"' \
   || fail "macOS host helper must bind to the production bundle identifier for product Keychain access"
@@ -1351,20 +1354,31 @@ contains_literal "$artifact_sync_body" '[[ ! -s "$HOST_STATUS" ]] || [[ ! -s "$H
   || fail "artifact sync must fail closed when launched-host evidence is missing"
 script_has_literal 'failed stage=cleanup phase=artifact-sync reason=mac-host-runtime-artifact-copy-failed' \
   || fail "runtime evidence persistence failure must affect an otherwise successful acceptance run"
-contains_literal "$cleanup_body" 'terminate_tracked_process "$HOST_PID" "macOS smoke host" "$expected_host_executable"' \
-  || fail "cleanup must terminate the host only through the executable-bound process helper"
-contains_literal "$cleanup_body" 'terminate_tracked_process "$MAC_SOURCE_PID" "macOS smoke source" "$MAC_SOURCE_DIRECT_BIN"' \
-  || fail "cleanup must terminate the source helper only through the executable-bound process helper"
-contains_literal "$cleanup_body" 'terminate_tracked_process "$MAC_ONLINE_PID" "macOS online iPad client" "$MAC_ONLINE_APP_BIN"' \
-  || fail "cleanup must terminate the online client only through the executable-bound process helper"
-contains_literal "$tracked_process_termination_body" 'actual_canonical="$(python3 -c' \
-  || fail "tracked-process cleanup must canonicalize the executable identity before signaling"
-contains_literal "$tracked_process_termination_body" 'if [[ "$actual_canonical" != "$expected_canonical" ]]; then' \
-  || fail "tracked-process cleanup must reject PID reuse or executable mismatch"
-contains_literal "$tracked_process_termination_body" 'kill -TERM "$pid"' \
-  || fail "tracked-process cleanup must attempt bounded graceful termination"
-contains_literal "$tracked_process_termination_body" 'kill -KILL "$pid"' \
-  || fail "tracked-process cleanup must have a bounded, identity-revalidated force-termination path"
+contains_literal "$cleanup_body" 'skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$HOST_PID" \
+      "$MAC_HOST_PROCESS_IDENTITY"' \
+  || fail "cleanup must terminate the host only through its audit-token ownership record"
+contains_literal "$cleanup_body" 'skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_SOURCE_PID" \
+      "$MAC_SOURCE_PROCESS_IDENTITY"' \
+  || fail "cleanup must terminate the source helper only through its audit-token ownership record"
+contains_literal "$cleanup_body" 'skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_ONLINE_PID" \
+      "$MAC_ONLINE_PROCESS_IDENTITY"' \
+  || fail "cleanup must terminate the online client only through its audit-token ownership record"
+contains_literal "$tracked_process_termination_body" 'skybridge_mac_owned_process_status' \
+  || fail "owned-process cleanup must revalidate the exact audit-token identity before signaling"
+contains_literal "$tracked_process_termination_body" '--signal TERM' \
+  || fail "owned-process cleanup must attempt bounded graceful termination"
+contains_literal "$tracked_process_termination_body" '--signal KILL' \
+  || fail "owned-process cleanup must have a bounded, identity-revalidated force-termination path"
+! contains_literal "$tracked_process_termination_body" 'kill -TERM' \
+  || fail "owned-process cleanup must not use PID-only SIGTERM"
+! contains_literal "$tracked_process_termination_body" 'kill -KILL' \
+  || fail "owned-process cleanup must not use PID-only SIGKILL"
 ! contains_literal "$cleanup_body" 'kill -TERM "$HOST_PID"' \
   || fail "cleanup must not signal the host PID without executable identity validation"
 script_has_literal 'unregister_launch_services_app_bundle "$MAC_APP_BUNDLE"' \
@@ -1397,8 +1411,8 @@ canonical_restore_line="$(grep -n 'restore_canonical_macos_launch_services_regis
   || fail "cleanup must contain online unregister, helper unregister, and canonical restore phases"
 (( online_cleanup_line < helper_cleanup_line && helper_cleanup_line < canonical_restore_line )) \
   || fail "cleanup order must be runtime app unregister -> helper unregister -> canonical register last"
-script_has_literal 'terminate_macos_smoke_host_bundle_processes' \
-  || fail "cleanup must terminate helper processes by the exact runtime executable path"
+script_has_literal 'skybridge_mac_exact_executable_pids' \
+  || fail "helper cleanup must prove the exact runtime executable is absent before unregistering"
 script_has_literal 'failed stage=cleanup phase=launch-services-restore reason=canonical-app-or-runtime-absence-proof-missing runtime=preserved-private' \
   || fail "LaunchServices restoration failure must preserve the private runtime and affect a successful run"
 contains_literal "$cleanup_body" 'if (( original_status == 0 && cleanup_status == 0 ))' \

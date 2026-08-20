@@ -96,6 +96,10 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
         XCTAssertEqual(payload.mediaAudioEndpoint?.port, 34_78)
         XCTAssertEqual(payload.mediaFallbackPolicy, "fail-fast")
         XCTAssertEqual(payload.streamRefreshToken, 42)
+        XCTAssertEqual(
+            payload.framePresentationAckVersion,
+            RemoteDesktopFramePresentationAcknowledgement.currentVersion
+        )
     }
 
     func testCrossNetworkStrictPayloadForbidsFallbackAndAdvertisesNativeMainPath() {
@@ -140,6 +144,7 @@ final class RemoteDesktopViewerStreamConfigurationFactoryTests: XCTestCase {
         XCTAssertNil(payload.audioMode)
         XCTAssertNil(payload.mediaSessionId)
         XCTAssertNil(payload.mediaAudioEndpoint)
+        XCTAssertNil(payload.framePresentationAckVersion)
     }
 
     func testCrossNetworkAudioIntentWithoutEndpointProducesExplicitVideoOnlyPayload() {

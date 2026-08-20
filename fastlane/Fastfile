@@ -59,7 +59,7 @@ platform :mac do
     UI.success("✅ 应用公证完成！")
   end
   
-  desc "最终 Developer ID 发布链：构建、签名、公证 .app/.dmg，Apple 登录固定走 web_session，并执行严格 release readiness 校验"
+  desc "本地 Developer ID 候选打包链：构建、签名、公证并执行 package-integrity-only 校验；不生成发布就绪结论"
   lane :release do
     signing_identity = current_signing_identity
     if signing_identity.empty?
@@ -68,18 +68,13 @@ platform :mac do
 
     sh("cd .. && ./Scripts/ensure_notarytool_credentials.sh")
 
-    connectivity_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"]
-    p2p_remote_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR"]
-    webrtc_remote_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_WEBRTC_REMOTE_ARTIFACT_DIR"]
-    file_transfer_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR"]
-    p2p_notice_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR"]
-    webrtc_notice_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR"]
-    notice_panel_artifact_dir = ENV["SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR"]
-    if connectivity_artifact_dir.to_s.empty? || p2p_remote_artifact_dir.to_s.empty? || webrtc_remote_artifact_dir.to_s.empty? || file_transfer_artifact_dir.to_s.empty? || p2p_notice_artifact_dir.to_s.empty? || webrtc_notice_artifact_dir.to_s.empty? || notice_panel_artifact_dir.to_s.empty?
-      UI.user_error!("最终发布必须显式传入 SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_WEBRTC_REMOTE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR、SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR")
+    release_build_id = ENV["SKYBRIDGE_RELEASE_BUILD_ID"]
+    unless release_build_id.to_s.match?(/\A[1-9][0-9]*\z/)
+      UI.user_error!("正式 macOS 构建必须显式设置正整数 SKYBRIDGE_RELEASE_BUILD_ID")
     end
 
     release_args = [
+      "--build-id #{Shellwords.escape(release_build_id)}",
       "--identity #{Shellwords.escape(signing_identity)}",
       "--notarize-app",
       "--notarize-dmg",
@@ -91,25 +86,16 @@ platform :mac do
     end
 
     sh("cd .. && SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session SKYBRIDGE_REQUIRE_APP_GROUPS=1 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 ./Scripts/build_dmg.sh #{release_args.join(' ')}")
-    readiness_args = [
-      "--require-notarization",
-      "--connectivity-artifact-dir #{Shellwords.escape(connectivity_artifact_dir)}",
-      "--p2p-remote-artifact-dir #{Shellwords.escape(p2p_remote_artifact_dir)}",
-      "--webrtc-remote-artifact-dir #{Shellwords.escape(webrtc_remote_artifact_dir)}",
-      "--file-transfer-artifact-dir #{Shellwords.escape(file_transfer_artifact_dir)}",
-      "--p2p-notice-artifact-dir #{Shellwords.escape(p2p_notice_artifact_dir)}",
-      "--webrtc-notice-artifact-dir #{Shellwords.escape(webrtc_notice_artifact_dir)}",
-      "--notice-panel-artifact-dir #{Shellwords.escape(notice_panel_artifact_dir)}"
-    ]
+    readiness_args = ["--require-notarization", "--package-integrity-only"]
     sh("cd .. && SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION=1 ./Scripts/check_macos_release_readiness.sh #{readiness_args.join(' ')}")
 
     if ENV["SKYBRIDGE_PUBLISH_UPDATE_RELEASE"] == "1"
       UI.user_error!(
-        "远程发布只允许由受保护的 macos-release-readiness GitHub Actions workflow 执行；Fastlane 仅构建、签名、公证并校验本地候选物。"
+        "远程发布只允许由受保护的候选→物理证据→发布 GitHub Actions 事务执行；Fastlane 仅构建、签名、公证并校验本地候选物。"
       )
     end
 
-    UI.success("✅ 最终发布版本已准备好，DMG 已完成严格校验并复制到桌面！")
+    UI.success("✅ 本地候选物已完成签名、公证与 package-integrity-only 校验；尚未形成发布就绪结论。")
   end
   
 end

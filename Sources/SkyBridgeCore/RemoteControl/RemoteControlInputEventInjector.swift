@@ -25,25 +25,6 @@ struct RemoteControlInjectionMapping: Sendable {
     let visibleSize: CGSize
 }
 
-/// 进程内「当前活动采集会话」的注入映射单一真相。被控端任一时刻只有一个视频采集会话，鼠标注入的
-/// 两条路径（P2P 与 WebRTC）注入的是同一台机器的同一被采集屏，因此共用同一映射。由
-/// `ScreenCaptureKitStreamer` 在解析到实际采集显示器后发布、停止时清除（仅视频采集流参与，
-/// 音频专用流 `captureVideoOutput == false` 不参与）。映射为 nil 时注入回退到旧的直通行为。
-enum RemoteControlInjectionMappingStore {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var current: RemoteControlInjectionMapping?
-
-    static func publish(_ mapping: RemoteControlInjectionMapping?) {
-        lock.lock(); defer { lock.unlock() }
-        current = mapping
-    }
-
-    static func snapshot() -> RemoteControlInjectionMapping? {
-        lock.lock(); defer { lock.unlock() }
-        return current
-    }
-}
-
 struct RemoteControlInputOwner: Hashable, Sendable {
     enum Transport: String, Sendable {
         case p2p
@@ -55,6 +36,93 @@ struct RemoteControlInputOwner: Hashable, Sendable {
     let generation: UUID
 }
 
+enum RemoteControlInjectionMappingSnapshot: Sendable {
+    case available(RemoteControlInjectionMapping)
+    case missing
+    case ownerConflict
+}
+
+struct RemoteControlInjectionMappingLease: Hashable, Sendable {
+    let owner: RemoteControlInputOwner
+    fileprivate let generation: UUID
+}
+
+/// Process-wide mapping for the one active remote-control video capture. The
+/// mapping is leased to an exact transport/session/generation owner. Publishing
+/// a replacement is atomic and a stale stream can clear only its own lease.
+enum RemoteControlInjectionMappingStore {
+    private struct OwnedMapping: Sendable {
+        let lease: RemoteControlInjectionMappingLease
+        let mapping: RemoteControlInjectionMapping
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var current: OwnedMapping?
+
+    @discardableResult
+    static func publish(
+        _ mapping: RemoteControlInjectionMapping,
+        for owner: RemoteControlInputOwner
+    ) -> RemoteControlInjectionMappingLease {
+        let lease = RemoteControlInjectionMappingLease(
+            owner: owner,
+            generation: UUID()
+        )
+        lock.lock(); defer { lock.unlock() }
+        current = OwnedMapping(lease: lease, mapping: mapping)
+        return lease
+    }
+
+    static func clear(_ lease: RemoteControlInjectionMappingLease) {
+        lock.lock(); defer { lock.unlock() }
+        guard current?.lease == lease else { return }
+        current = nil
+    }
+
+    static func snapshot(
+        for owner: RemoteControlInputOwner
+    ) -> RemoteControlInjectionMappingSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        guard let current else { return .missing }
+        guard current.lease.owner == owner else { return .ownerConflict }
+        return .available(current.mapping)
+    }
+
+    /// 逐帧驱动的发布口（CGDisplay JPEG 回退路径专用）：仅当商店中当前不是
+    /// 「同 owner + 同 displayID + 同 visibleSize」时才原子替换，避免每帧生成
+    /// 新租约。返回新租约；未发生替换时返回 nil（调用方保留旧租约）。
+    static func publishIfChanged(
+        _ mapping: RemoteControlInjectionMapping,
+        for owner: RemoteControlInputOwner
+    ) -> RemoteControlInjectionMappingLease? {
+        lock.lock(); defer { lock.unlock() }
+        if let current,
+           current.lease.owner == owner,
+           current.mapping.displayID == mapping.displayID,
+           current.mapping.visibleSize == mapping.visibleSize {
+            return nil
+        }
+        let lease = RemoteControlInjectionMappingLease(
+            owner: owner,
+            generation: UUID()
+        )
+        current = OwnedMapping(lease: lease, mapping: mapping)
+        return lease
+    }
+}
+
+struct ResolvedRemoteControlInjectionMapping: Sendable {
+    let visibleSize: CGSize
+    let displayBounds: CGRect
+}
+
+enum RemoteControlInjectionMappingResolution: Sendable {
+    case available(ResolvedRemoteControlInjectionMapping)
+    case missing
+    case ownerConflict
+    case invalidDisplay
+}
+
 enum RemoteControlMouseButton: Hashable, Sendable {
     case left
     case right
@@ -63,6 +131,8 @@ enum RemoteControlMouseButton: Hashable, Sendable {
 enum RemoteControlInputPostResult: Equatable, Sendable {
     case posted
     case invalidEvent
+    case mappingUnavailable
+    case invalidDisplay
     case permissionDenied
     case ownerConflict
     case untrackedRelease
@@ -105,8 +175,8 @@ final class RemoteControlInputLifecycleCoordinator {
 
     private let ensureAccessibilityPermission: () -> Bool
     private let hasAccessibilityPermission: () -> Bool
-    private let mouseInjectionPoint: (RemoteMouseEvent) -> CGPoint
-    private let postMouseEvent: (RemoteMouseEvent, RemoteControlMouseButton?) -> Bool
+    private let resolveInjectionMapping: (RemoteControlInputOwner) -> RemoteControlInjectionMappingResolution
+    private let postMouseEvent: (RemoteMouseEvent, CGPoint, RemoteControlMouseButton?) -> Bool
     private let postKeyboardEvent: (RemoteKeyboardEvent) -> Bool
     private let currentPointerLocation: () -> CGPoint?
     private let postMouseButtonRelease: (RemoteControlMouseButton, CGPoint, Int) -> Bool
@@ -125,11 +195,11 @@ final class RemoteControlInputLifecycleCoordinator {
         hasAccessibilityPermission: @escaping () -> Bool = {
             RemoteControlInputEventInjector.hasAccessibilityPermission()
         },
-        mouseInjectionPoint: @escaping (RemoteMouseEvent) -> CGPoint = {
-            RemoteControlInputEventInjector.mouseInjectionPoint(for: $0)
+        resolveInjectionMapping: @escaping (RemoteControlInputOwner) -> RemoteControlInjectionMappingResolution = {
+            RemoteControlInputEventInjector.resolveInjectionMapping(for: $0)
         },
-        postMouseEvent: @escaping (RemoteMouseEvent, RemoteControlMouseButton?) -> Bool = {
-            RemoteControlInputEventInjector.postMouseEvent($0, draggingButton: $1)
+        postMouseEvent: @escaping (RemoteMouseEvent, CGPoint, RemoteControlMouseButton?) -> Bool = {
+            RemoteControlInputEventInjector.postMouseEvent($0, at: $1, draggingButton: $2)
         },
         postKeyboardEvent: @escaping (RemoteKeyboardEvent) -> Bool = {
             RemoteControlInputEventInjector.postKeyboardEvent($0)
@@ -146,7 +216,7 @@ final class RemoteControlInputLifecycleCoordinator {
     ) {
         self.ensureAccessibilityPermission = ensureAccessibilityPermission
         self.hasAccessibilityPermission = hasAccessibilityPermission
-        self.mouseInjectionPoint = mouseInjectionPoint
+        self.resolveInjectionMapping = resolveInjectionMapping
         self.postMouseEvent = postMouseEvent
         self.postKeyboardEvent = postKeyboardEvent
         self.currentPointerLocation = currentPointerLocation
@@ -174,15 +244,51 @@ final class RemoteControlInputLifecycleCoordinator {
             return .ownerConflict
         }
 
-        guard ensureAccessibilityPermission() else {
-            return .permissionDenied
+        let mapping: ResolvedRemoteControlInjectionMapping
+        switch resolveInjectionMapping(owner) {
+        case .available(let resolvedMapping):
+            mapping = resolvedMapping
+        case .missing:
+            // 采集重启窗口内旧流 stop() 先清映射、新映射尚未发布：已跟踪的
+            // button-up 绝不能因此被丢弃，否则 pressedMouseStates 永久卡住、
+            // 后续 mouseMoved 全部变成拖拽。补发合成 release（释放合成按键
+            // 严格安全于让它保持按下）；Down/位置事件仍照常拒绝。
+            if Self.isMouseButtonUp(event.type), let button {
+                return postTrackedReleaseWithoutMapping(event: event, button: button)
+            }
+            return .mappingUnavailable
+        case .ownerConflict:
+            return .ownerConflict
+        case .invalidDisplay:
+            // 显示器在按住期间失效（拔线/重配）同样不能丢弃已跟踪的 button-up。
+            if Self.isMouseButtonUp(event.type), let button {
+                return postTrackedReleaseWithoutMapping(event: event, button: button)
+            }
+            return .invalidDisplay
         }
-        let injectionPoint = mouseInjectionPoint(event)
+        guard event.x >= 0,
+              event.y >= 0,
+              event.x < Double(mapping.visibleSize.width),
+              event.y < Double(mapping.visibleSize.height) else {
+            // 采集尺寸在按住期间变化（分辨率切换）会让在途 button-up 落在旧坐标
+            // 空间之外；已跟踪的 release 用按下时注入点补发，不得丢弃。
+            if Self.isMouseButtonUp(event.type), let button {
+                return postTrackedReleaseWithoutMapping(event: event, button: button)
+            }
+            return .invalidEvent
+        }
+        let injectionPoint = RemoteControlInputEventInjector.mouseInjectionPoint(
+            for: event,
+            mapping: mapping
+        )
         guard injectionPoint.x.isFinite, injectionPoint.y.isFinite else {
             return .invalidEvent
         }
+        guard ensureAccessibilityPermission() else {
+            return .permissionDenied
+        }
         let draggingButton = event.type == .mouseMoved ? activeDragButton() : nil
-        guard postMouseEvent(event, draggingButton) else {
+        guard postMouseEvent(event, injectionPoint, draggingButton) else {
             return .injectionFailed
         }
 
@@ -225,6 +331,24 @@ final class RemoteControlInputLifecycleCoordinator {
             return .ownerConflict
         }
 
+        switch resolveInjectionMapping(owner) {
+        case .available:
+            break
+        case .missing:
+            // 释放合成键不需要坐标：已跟踪的 keyUp 绝不能因映射缺失被丢弃，
+            // 否则合成按键保持按下并持续自动重复，与鼠标卡键同类。
+            if event.type == .keyUp {
+                return postTrackedKeyReleaseWithoutMapping(event.keyCode)
+            }
+            return .mappingUnavailable
+        case .ownerConflict:
+            return .ownerConflict
+        case .invalidDisplay:
+            if event.type == .keyUp {
+                return postTrackedKeyReleaseWithoutMapping(event.keyCode)
+            }
+            return .invalidDisplay
+        }
         guard ensureAccessibilityPermission() else {
             return .permissionDenied
         }
@@ -323,6 +447,44 @@ final class RemoteControlInputLifecycleCoordinator {
         )
     }
 
+    /// 无映射时补发已跟踪按键的合成 button-up。坐标优先用按下时记录的注入点
+    /// （已按当时映射换算为全局点坐标），仅在异常缺失时退回事件透传坐标。
+    /// 与 releaseAll 相同：先清跟踪状态再 post，保证清理幂等。
+    private func postTrackedReleaseWithoutMapping(
+        event: RemoteMouseEvent,
+        button: RemoteControlMouseButton
+    ) -> RemoteControlInputPostResult {
+        let pressedState = pressedMouseStates.removeValue(forKey: button)
+        pressedControlOrder.removeAll { $0 == .mouse(button) }
+        clearOwnerWhenNoControlsRemain()
+        let releasePoint = pressedState?.injectionPoint
+            ?? CGPoint(x: event.x, y: event.y)
+        let clickCount = pressedState?.clickCount
+            ?? max(1, min(event.clickCount ?? 1, 2))
+        guard ensureAccessibilityPermission() else {
+            return .permissionDenied
+        }
+        guard postMouseButtonRelease(button, releasePoint, clickCount) else {
+            return .injectionFailed
+        }
+        return .posted
+    }
+
+    /// 无映射/显示失效时补发已跟踪按键的合成 keyUp。释放合成键不需要坐标。
+    /// 与 releaseAll 相同：先清跟踪状态再 post，保证清理幂等。
+    private func postTrackedKeyReleaseWithoutMapping(_ keyCode: Int) -> RemoteControlInputPostResult {
+        pressedKeys.remove(keyCode)
+        pressedControlOrder.removeAll { $0 == .key(keyCode) }
+        clearOwnerWhenNoControlsRemain()
+        guard ensureAccessibilityPermission() else {
+            return .permissionDenied
+        }
+        guard postKeyboardRelease(keyCode) else {
+            return .injectionFailed
+        }
+        return .posted
+    }
+
     private func hasConflictingPressedOwner(_ owner: RemoteControlInputOwner) -> Bool {
         guard let currentOwner, currentOwner != owner else { return false }
         return !pressedControlOrder.isEmpty
@@ -365,6 +527,44 @@ final class RemoteControlInputLifecycleCoordinator {
 }
 
 enum RemoteControlInputEventInjector {
+    static func resolveInjectionMapping(
+        for owner: RemoteControlInputOwner
+    ) -> RemoteControlInjectionMappingResolution {
+        let mapping: RemoteControlInjectionMapping
+        switch RemoteControlInjectionMappingStore.snapshot(for: owner) {
+        case .available(let availableMapping):
+            mapping = availableMapping
+        case .missing:
+            return .missing
+        case .ownerConflict:
+            return .ownerConflict
+        }
+
+        guard mapping.visibleSize.width.isFinite,
+              mapping.visibleSize.height.isFinite,
+              mapping.visibleSize.width > 0,
+              mapping.visibleSize.height > 0,
+              CGDisplayIsOnline(mapping.displayID) != 0,
+              CGDisplayIsActive(mapping.displayID) != 0 else {
+            return .invalidDisplay
+        }
+        let bounds = CGDisplayBounds(mapping.displayID)
+        guard bounds.origin.x.isFinite,
+              bounds.origin.y.isFinite,
+              bounds.width.isFinite,
+              bounds.height.isFinite,
+              bounds.width > 0,
+              bounds.height > 0 else {
+            return .invalidDisplay
+        }
+        return .available(
+            ResolvedRemoteControlInjectionMapping(
+                visibleSize: mapping.visibleSize,
+                displayBounds: bounds
+            )
+        )
+    }
+
     static func ensureAccessibilityPermission() -> Bool {
         if AXIsProcessTrusted() { return true }
         // Trigger the system prompt; the user still grants the permission in System Settings.
@@ -380,15 +580,19 @@ enum RemoteControlInputEventInjector {
     @discardableResult
     static func postMouseEvent(
         _ event: RemoteMouseEvent,
+        at point: CGPoint,
         draggingButton: RemoteControlMouseButton? = nil
     ) -> Bool {
-        guard event.x.isFinite, event.y.isFinite, event.timestamp.isFinite else {
+        guard event.x.isFinite,
+              event.y.isFinite,
+              event.timestamp.isFinite,
+              point.x.isFinite,
+              point.y.isFinite else {
             return false
         }
         // Viewer input and stream-side cursor/damage telemetry already share a top-left
         // display coordinate space. Do not flip Y again on injection, or taps in the
         // upper half land in the lower half (and vice versa).
-        let point = mouseInjectionPoint(for: event)
         let clickState = Int64(max(1, min(event.clickCount ?? 1, 2)))
 
         func mouseEvent(_ type: CGEventType, button: CGMouseButton) -> CGEvent? {
@@ -436,23 +640,18 @@ enum RemoteControlInputEventInjector {
         }
     }
 
-    static func mouseInjectionPoint(for event: RemoteMouseEvent) -> CGPoint {
-        // 无活动映射（单元测试 / 映射尚未发布）：保持旧的直通行为，把坐标当作全局点。
-        guard let mapping = RemoteControlInjectionMappingStore.snapshot(),
-              mapping.visibleSize.width > 0, mapping.visibleSize.height > 0 else {
-            return CGPoint(x: event.x, y: event.y)
-        }
+    static func mouseInjectionPoint(
+        for event: RemoteMouseEvent,
+        mapping: ResolvedRemoteControlInjectionMapping
+    ) -> CGPoint {
         // CGDisplayBounds 与 CGEvent 注入共用「左上原点、Y 向下」的全局显示点坐标系，
         // 与控制端帧坐标系一致，无需再次翻转 Y（见 postMouseEvent 注释）。
-        let bounds = CGDisplayBounds(mapping.displayID)
-        guard bounds.width > 0, bounds.height > 0 else {
-            // 采集屏已失效（如被拔出）：回退直通，避免注入到非法坐标。
-            return CGPoint(x: event.x, y: event.y)
-        }
-        let normalizedX = event.x / Double(mapping.visibleSize.width)
-        let normalizedY = event.y / Double(mapping.visibleSize.height)
-        let globalX = Double(bounds.minX) + normalizedX * Double(bounds.width)
-        let globalY = Double(bounds.minY) + normalizedY * Double(bounds.height)
+        let scaleX = Double(mapping.displayBounds.width) / Double(mapping.visibleSize.width)
+        let scaleY = Double(mapping.displayBounds.height) / Double(mapping.visibleSize.height)
+        let globalX = Double(mapping.displayBounds.minX)
+            + event.x * scaleX
+        let globalY = Double(mapping.displayBounds.minY)
+            + event.y * scaleY
         return CGPoint(x: globalX, y: globalY)
     }
 

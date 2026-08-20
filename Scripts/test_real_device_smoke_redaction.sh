@@ -461,6 +461,68 @@ timestamp 2026-07-26T22:23:41.337Z sha256:c52ea764fc00 version=1.2.3 clock=22:23
 EOF
 skybridge_smoke_check_public_artifacts "$SAFE_FIELDS_PUBLIC_DIR"
 
+PAIRED_PRODUCT_FIXTURE="$ROOT_DIR/rust/crates/skybridge-cli/tests/fixtures/connectivity/mac-ios-matrix-pass"
+PAIRED_PRODUCT_RAW_DIR="$TMP_DIR/paired-product-raw"
+PAIRED_PRODUCT_PUBLIC_DIR="$TMP_DIR/paired-product-public"
+mkdir -p "$PAIRED_PRODUCT_RAW_DIR"
+for product_file in \
+  mac-product-session.log mac-product-session-capture.json \
+  ios-product-session.log ios-product-session-capture.json \
+  release-acceptance.json; do
+  cp "$PAIRED_PRODUCT_FIXTURE/$product_file" "$PAIRED_PRODUCT_RAW_DIR/$product_file"
+done
+skybridge_smoke_check_public_artifacts "$PAIRED_PRODUCT_RAW_DIR"
+skybridge_smoke_materialize_public_artifacts \
+  "$DEVICE_LABEL" \
+  "$PAIRED_PRODUCT_RAW_DIR" \
+  "$PAIRED_PRODUCT_PUBLIC_DIR"
+skybridge_smoke_check_public_artifacts "$PAIRED_PRODUCT_PUBLIC_DIR"
+
+PAIRED_PRODUCT_INCOMPLETE_DIR="$TMP_DIR/paired-product-incomplete"
+cp -R "$PAIRED_PRODUCT_RAW_DIR" "$PAIRED_PRODUCT_INCOMPLETE_DIR"
+rm "$PAIRED_PRODUCT_INCOMPLETE_DIR/ios-product-session-capture.json"
+if skybridge_smoke_check_public_artifacts "$PAIRED_PRODUCT_INCOMPLETE_DIR" >/dev/null 2>&1; then
+  echo "Expected incomplete paired product evidence to fail the public artifact scan" >&2
+  exit 1
+fi
+if skybridge_smoke_materialize_public_artifacts \
+  "$DEVICE_LABEL" \
+  "$PAIRED_PRODUCT_INCOMPLETE_DIR" \
+  "$TMP_DIR/paired-product-incomplete-public" >/dev/null 2>&1; then
+  echo "Expected incomplete paired product evidence to fail materialization" >&2
+  exit 1
+fi
+
+NESTED_RESERVED_DIR="$TMP_DIR/nested-reserved-product"
+mkdir -p "$NESTED_RESERVED_DIR/nested"
+printf '%s\n' 'authorization=unredacted-reserved-name-bypass' \
+  >"$NESTED_RESERVED_DIR/nested/mac-product-session.log"
+if nested_scan_output="$(
+  skybridge_smoke_check_public_artifacts "$NESTED_RESERVED_DIR" 2>&1
+)"; then
+  echo "Expected a nested schema-validated basename to fail the public artifact scan" >&2
+  exit 1
+fi
+if [[ "$nested_scan_output" != *"schema-validated public artifact name must be top-level"* ]]; then
+  echo "Expected nested reserved scan rejection to identify the top-level path contract" >&2
+  printf '%s\n' "$nested_scan_output" >&2
+  exit 1
+fi
+if nested_materialize_output="$(
+  skybridge_smoke_materialize_public_artifacts \
+    "$DEVICE_LABEL" \
+    "$NESTED_RESERVED_DIR" \
+    "$TMP_DIR/nested-reserved-product-public" 2>&1
+)"; then
+  echo "Expected a nested schema-validated basename to fail materialization" >&2
+  exit 1
+fi
+if [[ "$nested_materialize_output" != *"schema-validated public artifact name must be top-level"* ]]; then
+  echo "Expected nested reserved materialization rejection to identify the top-level path contract" >&2
+  printf '%s\n' "$nested_materialize_output" >&2
+  exit 1
+fi
+
 skybridge_smoke_materialize_public_artifacts "$DEVICE_LABEL" "$RAW_ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$DEVICE_ID"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$DEVICE_ID"
 

@@ -366,7 +366,7 @@ public class MetalFXProcessor {
  // 创建简单的降噪计算着色器
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
             requiredFunctionNames: ["simple_denoise_compute"]
         ),

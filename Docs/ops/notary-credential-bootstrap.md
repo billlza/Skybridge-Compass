@@ -51,11 +51,12 @@
 
 ## 以后每次发版
 
-### 标准路径
+### 本地候选打包路径
 
-bootstrap 完成后，后续每次只需要跑正式发版链：
+bootstrap 完成后，可用以下 lane 构建、签名、公证并执行 package-integrity-only 校验：
 
 ```bash
+: "${SKYBRIDGE_RELEASE_BUILD_ID:?set an approved positive numeric build id}"
 bundle exec fastlane release
 ```
 
@@ -64,12 +65,17 @@ bundle exec fastlane release
 1. 先检测当前 notary 凭据是否已经可用
 2. 若不可用，则自动调用 `bootstrap_notarytool_credentials.sh`
 3. bootstrap 后再做一次 `notarytool history` 级别的真实认证校验
-4. 只有验证通过，才进入正式构建 / 签名 / 公证链
+4. 只有验证通过，才进入本地构建 / 签名 / 公证链
+
+该 lane 不校验四类物理证据，不能宣称候选已可发布。正式发布由受保护的候选→物理证据→发布工作流完成，且不会在证据之后重建候选。
 
 或者直接脚本：
 
 ```bash
-./Scripts/build_dmg.sh --identity "Developer ID Application: ..."
+: "${SKYBRIDGE_RELEASE_BUILD_ID:?set an approved positive numeric build id}"
+./Scripts/build_dmg.sh \
+  --build-id "$SKYBRIDGE_RELEASE_BUILD_ID" \
+  --identity "Developer ID Application: ..."
 ./Scripts/check_macos_release_readiness.sh --require-notarization
 ```
 
@@ -175,5 +181,5 @@ xcrun notarytool history --keychain-profile skybridge-notary
 统一流程：
 
 1. API key 初次配置或轮换后运行 `bootstrap_notarytool_credentials.sh`
-2. 平时发版直接走 `fastlane release`
+2. 本地候选打包可走 `fastlane release`；正式发布必须走受保护工作流
 3. 公证失败时，先重跑 bootstrap，再查发版链本身

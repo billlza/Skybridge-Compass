@@ -730,6 +730,17 @@ public actor PeerSessionArbiter {
 /// - 双 resume 防护：使用 finishOnce() 统一收敛成功/失败
 /// - MessageB 早到防护：pendingResult 暂存早到的结果
 /// - 取消语义：调用方取消时 zeroize + emit event
+struct ProductConnectivityHandshakeAttemptSnapshot: Sendable, Equatable {
+    let localActiveSuite: CryptoSuite
+    let localOfferedSuites: [CryptoSuite]
+    let requirePQC: Bool
+    let allowClassicFallback: Bool
+    let outboundSOAAttemptID: Data?
+    let localProtocolSigningAlgorithm: ProtocolSigningAlgorithm
+    let localProtocolSigningKeyProtection: ProtocolSigningKeyProtection
+    let localProtocolPublicKey: Data
+}
+
 @available(iOS 17.0, *)
 public actor HandshakeDriver {
     
@@ -798,6 +809,9 @@ public actor HandshakeDriver {
     
     /// sigA 使用的签名算法
     private let sigAAlgorithm: ProtocolSigningAlgorithm
+
+    /// Exact private-key residency bound when this driver was created.
+    private let protocolSigningKeyProtection: ProtocolSigningKeyProtection
 
     /// 可选 SOA 元数据（initiator）
     private let soaMetadata: HandshakeSOAMetadata?
@@ -902,6 +916,7 @@ public actor HandshakeDriver {
         self.protocolSignatureProvider = protocolSignatureProvider
         self.identityKeyHandle = identityKeyHandle
         self.sigAAlgorithm = sigAAlgorithm
+        self.protocolSigningKeyProtection = protocolSigningKeyProtection
         self.identityPublicKey = identityPublicKey
         self.policy = policy
         self.cryptoPolicy = cryptoPolicy
@@ -930,6 +945,23 @@ public actor HandshakeDriver {
 
     public func getEstablishedArbiterLease() -> PeerSessionArbiter.EstablishedLease? {
         establishedArbiterLease
+    }
+
+    /// Immutable local facts captured when this exact driver was created.
+    /// This exposes no peer identity or key material and does not participate
+    /// in suite selection or admission.
+    func productConnectivityAttemptSnapshot()
+        -> ProductConnectivityHandshakeAttemptSnapshot {
+        ProductConnectivityHandshakeAttemptSnapshot(
+            localActiveSuite: cryptoProvider.activeSuite,
+            localOfferedSuites: offeredSuites ?? [cryptoProvider.activeSuite],
+            requirePQC: policy.requirePQC,
+            allowClassicFallback: policy.allowClassicFallback,
+            outboundSOAAttemptID: soaMetadata?.attemptId,
+            localProtocolSigningAlgorithm: sigAAlgorithm,
+            localProtocolSigningKeyProtection: protocolSigningKeyProtection,
+            localProtocolPublicKey: identityPublicKey
+        )
     }
     
     // MARK: - Public API

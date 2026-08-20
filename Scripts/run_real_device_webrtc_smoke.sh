@@ -9,6 +9,7 @@ source "$ROOT_DIR/Scripts/ios_distribution_signing_helpers.sh"
 source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/xcodebuild_helpers.sh"
+source "$ROOT_DIR/Scripts/release_candidate_evidence_helpers.sh"
 PROCESS_OWNERSHIP_HELPER="$ROOT_DIR/Scripts/webrtc_smoke_process_ownership.py"
 ARTIFACT_DIR="${SKYBRIDGE_SMOKE_ARTIFACT_DIR:-$ROOT_DIR/Artifacts/real_device_webrtc_smoke_$(date +%Y%m%d_%H%M%S)}"
 if [[ "$ARTIFACT_DIR" != /* ]]; then
@@ -27,6 +28,8 @@ IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebu
 IOS_RELEASE_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
 IOS_APP_DISTRIBUTION_PROFILE_INPUT="${SKYBRIDGE_SMOKE_IOS_APP_DISTRIBUTION_PROFILE:-}"
 IOS_WIDGET_DISTRIBUTION_PROFILE_INPUT="${SKYBRIDGE_SMOKE_IOS_WIDGET_DISTRIBUTION_PROFILE:-}"
+IOS_RELEASE_ARCHIVE_IDENTITY="${SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY:-}"
+IOS_RELEASE_TESTING_IPA="${SKYBRIDGE_IOS_RELEASE_TESTING_IPA:-}"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-240}"
 SMOKE_SOAK_SECONDS="${SKYBRIDGE_SMOKE_SOAK_SECONDS:-10}"
 SMOKE_MIN_FPS="${SKYBRIDGE_SMOKE_MIN_FPS:-30.00}"
@@ -84,7 +87,12 @@ SIGNALING_SERVER_URL="${SKYBRIDGE_SMOKE_SIGNALING_SERVER_URL:-${SKYBRIDGE_SIGNAL
 SIGNALING_WS_URL="${SKYBRIDGE_SMOKE_SIGNALING_WEBSOCKET_URL:-${SKYBRIDGE_SIGNALING_WEBSOCKET_URL:-$DEFAULT_SIGNALING_WS_URL}}"
 STUN_URL="${SKYBRIDGE_STUN_URL:-}"
 TURN_URLS="${SKYBRIDGE_TURN_URLS:-}"
-CLIENT_VERSION="${SKYBRIDGE_CLIENT_VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/Sources/SkyBridgeCompassApp/Info.plist" 2>/dev/null || echo "1.0.0")}"
+if [[ -n "${SKYBRIDGE_CLIENT_VERSION:-}" ]]; then
+  CLIENT_VERSION="${SKYBRIDGE_CLIENT_VERSION}"
+elif ! CLIENT_VERSION="$(bash "$ROOT_DIR/Scripts/check_macos_release_version.sh")"; then
+  echo "Unable to resolve the validated macOS release version for the WebRTC smoke client" >&2
+  exit 1
+fi
 PROTOCOL_VERSION="${SKYBRIDGE_PROTOCOL_VERSION:-1}"
 
 mkdir -p "$ARTIFACT_DIR"
@@ -149,6 +157,7 @@ IOS_ARCHIVE_LOG="$ARTIFACT_DIR/ios-archive.log"
 IOS_EXPORT_DIR="$ARTIFACT_DIR/ios-export"
 IOS_EXPORT_LOG="$ARTIFACT_DIR/ios-export.log"
 IOS_EXPORTED_APP="$ARTIFACT_DIR/SkyBridgeCompass-iOS-exported.app"
+IOS_FORMAL_EXTRACTED_APP="$ARTIFACT_DIR/ios-release-testing/SkyBridgeCompass-iOS.app"
 IOS_STATUS_NAME="ios-real-webrtc-${RUN_ID}.status.log"
 IOS_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME"
 IOS_TRACE_LOCAL="$ARTIFACT_DIR/$IOS_STATUS_NAME.trace.log"
@@ -199,12 +208,14 @@ ACCEPTANCE_CANDIDATE_READY=0
 cleanup() {
   local original_status=$?
   local cleanup_status=0
+  local ownership_cleanup_safe=1
   trap - EXIT
 
   if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]]; then
     copy_round_diagnostics || true
     if ! terminate_ios_app; then
       cleanup_status=1
+      ownership_cleanup_safe=0
       echo "failed stage=cleanup phase=ios-process reason=exact-process-exit-unverified" >&2
     fi
   else
@@ -212,11 +223,16 @@ cleanup() {
   fi
   if ! terminate_mac_host; then
     cleanup_status=1
+    ownership_cleanup_safe=0
     echo "failed stage=cleanup phase=mac-process reason=exact-process-exit-unverified" >&2
   fi
-  if ! destroy_process_ownership_session; then
-    cleanup_status=1
-    echo "Failed to remove the private WebRTC process-ownership directory: ${PROCESS_OWNERSHIP_PRIVATE_DIR:-<unknown>}" >&2
+  if (( ownership_cleanup_safe == 1 )); then
+    if ! destroy_process_ownership_session; then
+      cleanup_status=1
+      echo "Failed to remove the private WebRTC process-ownership directory: ${PROCESS_OWNERSHIP_PRIVATE_DIR:-<unknown>}" >&2
+    fi
+  else
+    echo "Preserving private WebRTC process-ownership diagnostics after unverifiable cleanup: ${PROCESS_OWNERSHIP_PRIVATE_DIR:-<unknown>}" >&2
   fi
   if ! overwrite_ios_bootstrap_with_tombstone; then
     cleanup_status=1
@@ -663,119 +679,14 @@ terminate_mac_host() {
   if [[ -z "$MAC_PID" ]]; then
     return 0
   fi
-  if [[ -z "$MAC_PROCESS_IDENTITY" || ! -f "$MAC_PROCESS_IDENTITY" ]]; then
-    echo "Refusing to signal the macOS WebRTC PID without its private ownership record." >&2
+  if ! skybridge_mac_terminate_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_PID" \
+    "$MAC_PROCESS_IDENTITY" \
+    "macOS WebRTC product process"; then
     return 1
   fi
-  local target_pid
-  if ! target_pid="$(python3 "$PROCESS_OWNERSHIP_HELPER" identity-pid \
-    --platform macos \
-    --identity "$MAC_PROCESS_IDENTITY")"; then
-    echo "Refusing to signal the macOS WebRTC PID because its ownership record is invalid." >&2
-    return 1
-  fi
-  if [[ "$target_pid" != "$MAC_PID" ]]; then
-    echo "Refusing to signal the macOS WebRTC PID because launch state and ownership record disagree." >&2
-    return 1
-  fi
-
-  local process_status
-  if python3 "$PROCESS_OWNERSHIP_HELPER" mac-status --identity "$MAC_PROCESS_IDENTITY"; then
-    process_status=0
-  else
-    process_status=$?
-  fi
-  if (( process_status == 1 )); then
-    wait "$target_pid" >/dev/null 2>&1 || true
-    rm -f -- "$MAC_PROCESS_IDENTITY"
-    MAC_PID=""
-    return 0
-  fi
-  if (( process_status != 0 )); then
-    echo "Refusing to send SIGTERM: macOS WebRTC process ownership is unverifiable." >&2
-    return 1
-  fi
-  local signal_status
-  if python3 "$PROCESS_OWNERSHIP_HELPER" mac-signal \
-    --identity "$MAC_PROCESS_IDENTITY" \
-    --signal TERM; then
-    signal_status=0
-  else
-    signal_status=$?
-  fi
-  if (( signal_status == 1 )); then
-    wait "$target_pid" >/dev/null 2>&1 || true
-    rm -f -- "$MAC_PROCESS_IDENTITY"
-    MAC_PID=""
-    return 0
-  fi
-  if (( signal_status != 0 )); then
-    echo "SIGTERM was not sent because exact macOS WebRTC process ownership could not be preserved." >&2
-    return 1
-  fi
-  for _ in {1..20}; do
-    if python3 "$PROCESS_OWNERSHIP_HELPER" mac-status --identity "$MAC_PROCESS_IDENTITY"; then
-      sleep 0.25
-      continue
-    fi
-    process_status=$?
-    if (( process_status == 1 )); then
-      wait "$target_pid" >/dev/null 2>&1 || true
-      rm -f -- "$MAC_PROCESS_IDENTITY"
-      MAC_PID=""
-      return 0
-    fi
-    echo "macOS WebRTC process ownership became unverifiable after SIGTERM: pid=$target_pid" >&2
-    return 1
-  done
-
-  if python3 "$PROCESS_OWNERSHIP_HELPER" mac-status --identity "$MAC_PROCESS_IDENTITY"; then
-    process_status=0
-  else
-    process_status=$?
-    if (( process_status == 1 )); then
-      wait "$target_pid" >/dev/null 2>&1 || true
-      rm -f -- "$MAC_PROCESS_IDENTITY"
-      MAC_PID=""
-      return 0
-    fi
-    echo "Refusing to send SIGKILL: macOS WebRTC process ownership is unverifiable." >&2
-    return 1
-  fi
-  if python3 "$PROCESS_OWNERSHIP_HELPER" mac-signal \
-    --identity "$MAC_PROCESS_IDENTITY" \
-    --signal KILL; then
-    signal_status=0
-  else
-    signal_status=$?
-  fi
-  if (( signal_status == 1 )); then
-    wait "$target_pid" >/dev/null 2>&1 || true
-    rm -f -- "$MAC_PROCESS_IDENTITY"
-    MAC_PID=""
-    return 0
-  fi
-  if (( signal_status != 0 )); then
-    echo "SIGKILL was not sent because exact macOS WebRTC process ownership could not be preserved." >&2
-    return 1
-  fi
-  for _ in {1..20}; do
-    if python3 "$PROCESS_OWNERSHIP_HELPER" mac-status --identity "$MAC_PROCESS_IDENTITY"; then
-      sleep 0.25
-      continue
-    fi
-    process_status=$?
-    if (( process_status == 1 )); then
-      wait "$target_pid" >/dev/null 2>&1 || true
-      rm -f -- "$MAC_PROCESS_IDENTITY"
-      MAC_PID=""
-      return 0
-    fi
-    echo "macOS WebRTC process ownership became unverifiable after SIGKILL: pid=$target_pid" >&2
-    return 1
-  done
-  echo "macOS WebRTC product process remains alive after SIGKILL: pid=$target_pid" >&2
-  return 1
+  MAC_PID=""
 }
 
 ios_console_handle_is_exact_and_running() {
@@ -1236,6 +1147,7 @@ payload = {
     "preCleanupCandidate": (
         not is_lab
         and product_path_proof.get("iosProductionProduct") is True
+        and product_path_proof.get("iosReleaseVersionVerified") is True
         and ios_production_identity_lifecycle_verified
     ),
     "cleanupComplete": False,
@@ -1261,6 +1173,15 @@ payload = {
     "macKeychainMode": keychain_mode,
     "iosKeychainMode": keychain_mode,
     "macProductPath": mac_host_mode == "product",
+    "macCandidateIdentityVerified": not is_lab and mac_host_mode == "product",
+    "macRuntimeExecutable": "SkyBridgeCompassApp" if mac_host_mode == "product" else "skybridge-cli",
+    "macProductSurface": "production" if mac_host_mode == "product" else "diagnostic-cli",
+    "macDebugBuild": False if mac_host_mode == "product" else True,
+    "macTestingCompilationCondition": False if mac_host_mode == "product" else True,
+    "remoteControlNoticeProductPath": mac_host_mode == "product",
+    "remoteControlNoticeHumanApproval": human_approval_proof == "1",
+    "remoteControlNoticePanelPresented": human_approval_proof == "1" and mac_host_mode == "product",
+    "noticeEvidenceSource": "normal-product-session" if mac_host_mode == "product" else "diagnostic-cli-session",
     "iosProductPath": True,
     "approvalSurface": "shared-product-panel" if mac_host_mode == "product" else "diagnostic-none",
     "humanApproval": human_approval_proof == "1",
@@ -1278,6 +1199,9 @@ payload = {
     "iosTestingCompilationCondition": product_path_proof.get("iosTestingCompilationCondition") is True,
     "iosBinaryTestSurfaceDetected": product_path_proof.get("iosBinaryTestSurfaceDetected") is True,
     "iosProductionProduct": product_path_proof.get("iosProductionProduct") is True,
+    "iosReleaseVersion": product_path_proof.get("iosReleaseVersion"),
+    "iosReleaseBuild": product_path_proof.get("iosReleaseBuild"),
+    "iosReleaseVersionVerified": product_path_proof.get("iosReleaseVersionVerified") is True,
     "iosProductionIdentityAlgorithm": "unproven",
     "iosProductionIdentityProtection": "unproven",
     "iosProductionIdentityLifecycleVerified": ios_production_identity_lifecycle_verified,
@@ -1321,10 +1245,16 @@ PY
 finalize_release_acceptance_manifests_after_cleanup() {
   local private_manifest="$ARTIFACT_DIR/release-acceptance.json"
   local public_manifest="$PUBLIC_ARTIFACT_DIR/release-acceptance.json"
+  local identity_arguments=()
+
+  if [[ "$LAB_RUN" != "1" ]]; then
+    identity_arguments=(--archive-identity "$IOS_RELEASE_ARCHIVE_IDENTITY")
+  fi
 
   python3 "$ROOT_DIR/Scripts/finalize_release_acceptance_manifests.py" \
     --private-manifest "$private_manifest" \
-    --public-manifest "$public_manifest"
+    --public-manifest "$public_manifest" \
+    "${identity_arguments[@]}"
 }
 
 stamp_release_session_evidence() {
@@ -2572,6 +2502,9 @@ payload = {
     "iosNestedWidgetVerified": ios_verification.get("nestedWidgetVerified") is True,
     "iosGetTaskAllowDisabled": ios_verification.get("getTaskAllow") is False,
     "iosReleaseProvenanceVerified": ios_verification.get("releaseProvenanceVerified") is True,
+    "iosReleaseVersion": ios_verification.get("releaseVersion"),
+    "iosReleaseBuild": ios_verification.get("releaseBuild"),
+    "iosReleaseVersionVerified": ios_verification.get("releaseVersionVerified") is True,
     "iosBuildConfiguration": ios_verification.get("configuration"),
     "iosSourceDirtyState": source_dirty_state,
     "sourceRepository": ios_verification.get("sourceRepository"),
@@ -2607,6 +2540,16 @@ require_command xcodebuild
 require_command cargo
 validate_acceptance_profile
 validate_remote_signaling_urls
+skybridge_bind_macos_release_candidate_evidence \
+  "$ROOT_DIR" \
+  "$MAC_PRODUCT_APP_BUNDLE" \
+  "$ARTIFACT_DIR" \
+  "$LAB_RUN"
+if [[ "$LAB_RUN" != "1" ]]; then
+  echo "Formal WebRTC evidence is unavailable until the normal SkyBridgeCompassApp product entry point exposes the measured inbound session without DEBUG or SKYBRIDGE_TESTING." >&2
+  echo "LocalWebRTCSmokeHarness remains diagnostic-only and cannot produce release evidence." >&2
+  exit 2
+fi
 initialize_private_auth_session_dir
 initialize_process_ownership_session
 MAC_CODE="$ARTIFACT_DIR/mac.code"
@@ -2678,18 +2621,33 @@ else
 fi
 
 prepare_ios_build_provenance
-resolve_ios_distribution_signing_inputs
-echo "==> Building iOS app for real device ($IOS_BUILD_CONFIGURATION)"
-IOS_BUILD_DESTINATION="${SKYBRIDGE_IOS_BUILD_DESTINATION:-generic/platform=iOS}"
-echo "    build destination: $IOS_BUILD_DESTINATION"
-skybridge_configure_optional_apple_pqc_sdk_compile_gate iphoneos
-if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]] || ! skybridge_apple_pqc_sdk_probe_succeeded; then
-  echo "Apple PQC SDK symbol probe failed for the iOS WebRTC app; refusing to build an X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
-  echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=$(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR:-}")" >&2
-  exit 1
-fi
-echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-IOS_XCODEBUILD_SETTINGS=(
+if [[ "$LAB_RUN" != "1" ]]; then
+  if [[ -z "$IOS_RELEASE_ARCHIVE_IDENTITY" || -z "$IOS_RELEASE_TESTING_IPA" ]]; then
+    echo "Formal WebRTC evidence requires SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY and SKYBRIDGE_IOS_RELEASE_TESTING_IPA." >&2
+    exit 2
+  fi
+  mkdir -m 0700 "$(dirname "$IOS_FORMAL_EXTRACTED_APP")"
+  echo "==> Preparing the sealed release-testing IPA without rebuilding"
+  IOS_APP_PATH="$(
+    python3 "$ROOT_DIR/Scripts/ios_physical_release_acceptance.py" prepare-product \
+      --identity "$IOS_RELEASE_ARCHIVE_IDENTITY" \
+      --release-testing-ipa "$IOS_RELEASE_TESTING_IPA" \
+      --destination-app "$IOS_FORMAL_EXTRACTED_APP"
+  )"
+  printf 'formal iOS product source=sealed-release-testing-ipa build=not-performed\n' >"$IOS_BUILD_LOG"
+else
+  resolve_ios_distribution_signing_inputs
+  echo "==> Building diagnostic iOS app for real device ($IOS_BUILD_CONFIGURATION)"
+  IOS_BUILD_DESTINATION="${SKYBRIDGE_IOS_BUILD_DESTINATION:-generic/platform=iOS}"
+  echo "    build destination: $IOS_BUILD_DESTINATION"
+  skybridge_configure_optional_apple_pqc_sdk_compile_gate iphoneos
+  if [[ "${SKYBRIDGE_ENABLE_APPLE_PQC_SDK:-0}" != "1" ]] || ! skybridge_apple_pqc_sdk_probe_succeeded; then
+    echo "Apple PQC SDK symbol probe failed for the diagnostic iOS WebRTC app; refusing an X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
+    echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=$(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR:-}")" >&2
+    exit 1
+  fi
+  echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
+  IOS_XCODEBUILD_SETTINGS=(
   "SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION=$IOS_BUILD_CONFIGURATION"
   "SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE=$IOS_SOURCE_DIRTY_STATE"
   "SKYBRIDGE_PACKAGING_GIT_COMMIT=$IOS_SOURCE_COMMIT"
@@ -2698,8 +2656,8 @@ IOS_XCODEBUILD_SETTINGS=(
   "SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
   "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"
-)
-if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+  )
+  if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
   echo "==> Archiving iOS WebRTC testing product with installed-only Automatic signing"
   skybridge_archive_ios_distribution_product \
     "$IOS_PROJECT" \
@@ -2725,7 +2683,7 @@ if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
       "$IOS_EXPORT_DIR" \
       "$IOS_EXPORTED_APP"
   )"
-else
+  else
   IOS_XCODEBUILD_ARGS=(
     -project "$IOS_PROJECT"
     -scheme "$IOS_SCHEME"
@@ -2738,10 +2696,15 @@ else
   SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 \
     skybridge_run_xcodebuild "${IOS_XCODEBUILD_ARGS[@]}" >"$IOS_BUILD_LOG" 2>&1
   IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
+  fi
 fi
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
   exit 1
+fi
+if [[ "$LAB_RUN" != "1" ]]; then
+  IOS_APP_DISTRIBUTION_PROFILE="$IOS_APP_PATH/embedded.mobileprovision"
+  IOS_WIDGET_DISTRIBUTION_PROFILE="$IOS_APP_PATH/PlugIns/SkyBridgeCompass-Widgets.appex/embedded.mobileprovision"
 fi
 verify_ios_product_app "$IOS_APP_PATH"
 write_product_path_proof
@@ -2807,43 +2770,50 @@ if [[ -n "$TURN_URLS" ]]; then
   MAC_HOST_ENV+=("SKYBRIDGE_TURN_URLS=$TURN_URLS")
 fi
 if [[ "$MAC_HOST_MODE" == "product" ]]; then
-  existing_mac_pids="$(/usr/bin/pgrep -x SkyBridgeCompassApp 2>/dev/null || true)"
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "packaged macOS WebRTC product"; then
+    exit 1
+  fi
   open_args=(
-    -n
     --stdout "$MAC_STDOUT"
     --stderr "$MAC_STDOUT"
   )
   for environment_entry in "${MAC_HOST_ENV[@]}"; do
     open_args+=(--env "$environment_entry")
   done
-  /usr/bin/open "${open_args[@]}" "$MAC_PRODUCT_APP_BUNDLE"
-  mac_launch_started_at="$(date +%s)"
-  while [[ -z "$MAC_PID" ]]; do
-    while IFS= read -r candidate_pid; do
-      [[ -n "$candidate_pid" ]] || continue
-      if ! grep -qx "$candidate_pid" <<<"$existing_mac_pids"; then
-        MAC_PID="$candidate_pid"
-        break
-      fi
-    done < <(/usr/bin/pgrep -x SkyBridgeCompassApp 2>/dev/null || true)
-    if (( "$(date +%s)" - mac_launch_started_at >= 20 )); then
-      echo "Timed out waiting for the packaged macOS WebRTC product process." >&2
-      exit 1
-    fi
-    sleep 0.25
-  done
+  if ! /usr/bin/open "${open_args[@]}" "$MAC_PRODUCT_APP_BUNDLE"; then
+    echo "LaunchServices failed to start the packaged macOS WebRTC product." >&2
+    exit 1
+  fi
+  if ! skybridge_mac_wait_for_single_exact_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    20 \
+    MAC_PID \
+    "packaged macOS WebRTC product"; then
+    exit 1
+  fi
 else
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "macOS WebRTC diagnostic host"; then
+    exit 1
+  fi
   (
     umask 077
     exec env "${MAC_HOST_ENV[@]}" "$MAC_APP_BIN"
   ) >"$MAC_STDOUT" 2>&1 &
   MAC_PID="$!"
 fi
-if ! python3 "$PROCESS_OWNERSHIP_HELPER" mac-capture \
-  --pid "$MAC_PID" \
-  --expected-executable "$MAC_APP_BIN" \
-  --output "$MAC_PROCESS_IDENTITY"; then
-  echo "Failed to capture the exact macOS WebRTC process executable and start-time token." >&2
+if ! skybridge_mac_capture_owned_process \
+  "$PROCESS_OWNERSHIP_HELPER" \
+  "$MAC_PID" \
+  "$MAC_APP_BIN" \
+  "$MAC_PROCESS_IDENTITY" \
+  "macOS WebRTC product process"; then
   exit 1
 fi
 
@@ -3071,8 +3041,17 @@ echo "==> Closing the exact iOS console launch handle and proving remote app abs
 terminate_ios_app
 stamp_release_session_evidence "$SESSION_ID"
 write_release_acceptance_manifest
+if [[ "$LAB_RUN" != "1" ]]; then
+  python3 "$ROOT_DIR/Scripts/ios_physical_release_acceptance.py" bind-manifest \
+    --identity "$IOS_RELEASE_ARCHIVE_IDENTITY" \
+    --manifest "$ARTIFACT_DIR/release-acceptance.json"
+fi
 echo "==> Materializing redacted public WebRTC smoke artifacts"
 skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID" "$MAC_DEVICE_ID" "$IOS_LOGICAL_DEVICE_ID" "$MAC_PQC_DEVICE_ID"
+skybridge_verify_public_macos_release_candidate_evidence \
+  "$ROOT_DIR" \
+  "$ARTIFACT_DIR" \
+  "$PUBLIC_ARTIFACT_DIR"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID" "$MAC_DEVICE_ID" "$IOS_LOGICAL_DEVICE_ID" "$MAC_PQC_DEVICE_ID"
 echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
 ACCEPTANCE_CANDIDATE_READY=1

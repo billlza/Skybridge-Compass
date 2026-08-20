@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import plistlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -27,6 +29,8 @@ class IOSDistributionProductSurfaceTests(unittest.TestCase):
         binary_test_surface: str = "0",
         source_repository: str = "billlza/Skybridge-Compass",
         source_commit: str = "a" * 40,
+        app_info_path: str = "/missing/app-info.plist",
+        widget_info_path: str = "/missing/widget-info.plist",
     ) -> subprocess.CompletedProcess[str]:
         arguments = [
             "/missing/app-profile.mobileprovision",
@@ -56,6 +60,8 @@ class IOSDistributionProductSurfaceTests(unittest.TestCase):
             product_surface,
             compilation_conditions,
             binary_test_surface,
+            app_info_path,
+            widget_info_path,
         ]
         return subprocess.run(
             ["python3", str(VERIFIER), *arguments],
@@ -115,6 +121,52 @@ class IOSDistributionProductSurfaceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("compilation-condition metadata is malformed", result.stdout)
 
+    def test_formal_proof_rejects_mismatched_app_and_widget_release_version(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            app_info = root / "app.plist"
+            widget_info = root / "widget.plist"
+            app_info.write_bytes(
+                plistlib.dumps(
+                    {"CFBundleShortVersionString": "1.0.2", "CFBundleVersion": "2"}
+                )
+            )
+            widget_info.write_bytes(
+                plistlib.dumps(
+                    {"CFBundleShortVersionString": "1.0.2", "CFBundleVersion": "3"}
+                )
+            )
+            result = self.run_verifier(
+                product_surface="production",
+                compilation_conditions="HAS_APPLE_PQC_SDK",
+                app_info_path=str(app_info),
+                widget_info_path=str(widget_info),
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release version/build do not match", result.stdout)
+
+    def test_formal_proof_rejects_noncanonical_release_version_or_build(self) -> None:
+        invalid_values = (("1.0", "2"), ("1.0.2", "0"))
+        for version, build in invalid_values:
+            with self.subTest(version=version, build=build), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                app_info = root / "app.plist"
+                widget_info = root / "widget.plist"
+                payload = {
+                    "CFBundleShortVersionString": version,
+                    "CFBundleVersion": build,
+                }
+                app_info.write_bytes(plistlib.dumps(payload))
+                widget_info.write_bytes(plistlib.dumps(payload))
+                result = self.run_verifier(
+                    product_surface="production",
+                    compilation_conditions="HAS_APPLE_PQC_SDK",
+                    app_info_path=str(app_info),
+                    widget_info_path=str(widget_info),
+                )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertRegex(result.stdout, r"strict semantic version|positive integer")
+
 
 class WidgetEntitlementConformanceTests(unittest.TestCase):
     """The nested Widget must not independently carry the host App's privileged
@@ -145,6 +197,17 @@ class WidgetEntitlementConformanceTests(unittest.TestCase):
             "YKUPL7Z869.group.com.skybridge.compass"
         ]
         self.assertTrue(verifier.widget_signed_entitlements_conform(entitlements))
+
+    def test_widget_rejects_unexpected_meaningful_capability_or_group(self) -> None:
+        for key, value in (
+            ("com.apple.developer.associated-domains", ["applinks:example.invalid"]),
+            ("com.example.unreviewed-widget-capability", True),
+            ("com.apple.security.application-groups", ["group.example.invalid"]),
+        ):
+            with self.subTest(entitlement=key):
+                entitlements = dict(self.CONFORMING_WIDGET_ENTITLEMENTS)
+                entitlements[key] = value
+                self.assertFalse(verifier.widget_signed_entitlements_conform(entitlements))
 
     def test_widget_rejects_each_disallowed_privileged_entitlement(self) -> None:
         privileged_samples = {
@@ -198,6 +261,73 @@ class WidgetEntitlementConformanceTests(unittest.TestCase):
         self.assertTrue(verifier.entitlement_value_is_present(True))
         self.assertTrue(verifier.entitlement_value_is_present(["CloudKit"]))
         self.assertTrue(verifier.entitlement_value_is_present("production"))
+
+    def test_profile_entitlement_coverage_handles_lists_wildcards_and_scalars(self) -> None:
+        self.assertTrue(
+            verifier.profile_entitlement_covers(
+                ["YKUPL7Z869.*", "com.apple.token"],
+                ["YKUPL7Z869.com.skybridge.compass.ios"],
+            )
+        )
+        self.assertTrue(verifier.profile_entitlement_covers(True, True))
+        self.assertFalse(verifier.profile_entitlement_covers(None, True))
+        self.assertFalse(
+            verifier.profile_entitlement_covers(
+                ["group.example.invalid"],
+                ["group.com.skybridge.compass"],
+            )
+        )
+
+    def test_app_rejects_unexpected_meaningful_capability_and_unsafe_system_flags(self) -> None:
+        expected = {
+            "aps-environment": "production",
+            "keychain-access-groups": [
+                "YKUPL7Z869.com.skybridge.compass.ios",
+                "YKUPL7Z869.group.com.skybridge.compass",
+            ],
+        }
+        base = {
+            "application-identifier": "YKUPL7Z869.com.skybridge.compass.ios",
+            "com.apple.developer.team-identifier": "YKUPL7Z869",
+            **expected,
+        }
+        self.assertTrue(
+            verifier.app_signed_entitlements_conform(
+                base,
+                expected_entitlements=expected,
+                expected_team="YKUPL7Z869",
+                lab_run=False,
+            )
+        )
+        for key, value in (
+            ("com.apple.developer.associated-domains", ["applinks:example.invalid"]),
+            ("com.example.unreviewed-app-capability", True),
+            ("get-task-allow", True),
+            ("beta-reports-active", False),
+            ("com.apple.security.application-groups", ["group.example.invalid"]),
+        ):
+            with self.subTest(entitlement=key):
+                changed = dict(base)
+                changed[key] = value
+                self.assertFalse(
+                    verifier.app_signed_entitlements_conform(
+                        changed,
+                        expected_entitlements=expected,
+                        expected_team="YKUPL7Z869",
+                        lab_run=False,
+                    )
+                )
+
+        debug = dict(base)
+        debug["get-task-allow"] = True
+        self.assertTrue(
+            verifier.app_signed_entitlements_conform(
+                debug,
+                expected_entitlements=expected,
+                expected_team="YKUPL7Z869",
+                lab_run=True,
+            )
+        )
 
     def test_debug_lab_widget_requires_no_keychain_group(self) -> None:
         self.assertEqual(

@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import Combine
 import CryptoKit
 import Security
 import LocalAuthentication
@@ -112,6 +113,12 @@ public struct ProtocolIdentityBindingV2: Codable, Sendable, Equatable, Hashable 
 
 /// 信任记录
 public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
+    /// Version of the deterministic payload covered by `signature`.
+    /// A nil value identifies a record written before the complete payload was
+    /// introduced and is accepted only when every historically unsigned
+    /// security field remains in its safe legacy state.
+    public static let currentSignaturePayloadVersion = 2
+
  /// 记录 ID（deviceId 作为主键）
     public var id: String { deviceId }
     
@@ -167,6 +174,9 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
  /// 版本号
     public let version: Int
 
+    /// Deterministic signature schema. Optional for decoding historical records.
+    public let signaturePayloadVersion: Int?
+
  /// 签名（由本机管理密钥签名）
     public let signature: Data
     
@@ -196,8 +206,10 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
     
  /// 是否过期（tombstone 30 天后过期）
     public var isExpired: Bool {
-        guard let revokedAt = revokedAt else { return false }
-        let expirationDate = revokedAt.addingTimeInterval(30 * 24 * 60 * 60) // 30 天
+        guard isTombstone else { return false }
+        // updatedAt was covered by every historical signature schema. An old
+        // record's unbound revokedAt must never shorten tombstone retention.
+        let expirationDate = updatedAt.addingTimeInterval(30 * 24 * 60 * 60) // 30 天
         return Date() > expirationDate
     }
 
@@ -319,6 +331,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         version: Int = 1,
+        signaturePayloadVersion: Int? = nil,
         signature: Data,
         recordType: TrustRecordType = .add,
         revokedAt: Date? = nil,
@@ -350,6 +363,7 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.version = version
+        self.signaturePayloadVersion = signaturePayloadVersion
         self.signature = signature
         self.recordType = recordType
         self.revokedAt = revokedAt
@@ -361,6 +375,10 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
     
  /// 创建撤销记录（tombstone）
     public func revoked(signature: Data) -> TrustRecord {
+        revoked(signature: signature, at: Date())
+    }
+
+    func revoked(signature: Data, at revocationDate: Date) -> TrustRecord {
         TrustRecord(
             deviceId: deviceId,
             pubKeyFP: pubKeyFP,
@@ -378,11 +396,12 @@ public struct TrustRecord: Codable, Sendable, Equatable, Identifiable {
             attestationData: attestationData,
             capabilities: capabilities,
             createdAt: createdAt,
-            updatedAt: Date(),
+            updatedAt: revocationDate,
             version: version + 1,
+            signaturePayloadVersion: Self.currentSignaturePayloadVersion,
             signature: signature,
             recordType: .revoke,
-            revokedAt: Date(),
+            revokedAt: revocationDate,
             deviceName: deviceName,
             currentDeviceId: currentDeviceId,
             knownDeviceIds: knownDeviceIds,
@@ -958,6 +977,12 @@ public enum TrustSyncError: Error, LocalizedError, Sendable {
     case conflictResolutionFailed
     case encodingError(String)
     case decodingError(String)
+    case localTrustStoreUnavailable
+    case aliasCleanupFailedAfterAuthoritativeCommit(String)
+    case fallbackCleanupFailedAfterAuthoritativeCommit(String)
+    case mutationWaiterLimitExceeded(maximum: Int)
+    case mutationWaitDeadlineExceeded
+    case pairingAuthorityCommitSuperseded
     
     public var errorDescription: String? {
         switch self {
@@ -977,15 +1002,292 @@ public enum TrustSyncError: Error, LocalizedError, Sendable {
             return "Encoding error: \(reason)"
         case .decodingError(let reason):
             return "Decoding error: \(reason)"
+        case .localTrustStoreUnavailable:
+            return "Local trust store is unavailable"
+        case .aliasCleanupFailedAfterAuthoritativeCommit(let reason):
+            return "Authoritative trust commit succeeded, but stale alias cleanup failed: \(reason)"
+        case .fallbackCleanupFailedAfterAuthoritativeCommit(let reason):
+            return "Authoritative trust commit succeeded, but stale fallback cleanup failed: \(reason)"
+        case .mutationWaiterLimitExceeded(let maximum):
+            return "Trust mutation waiter limit exceeded: maximum=\(maximum)"
+        case .mutationWaitDeadlineExceeded:
+            return "Trust mutation wait deadline exceeded"
+        case .pairingAuthorityCommitSuperseded:
+            return "Pairing authority commit was superseded before durable persistence"
         }
     }
 }
+
+typealias PairingAuthorityCommitValidator = @MainActor @Sendable () async -> Bool
 
 public enum CurrentPathTrustConflict: Sendable, Equatable {
     case identityConflict
     case deviceIdMigrationRequired
     case quarantinedIdentity
     case revokedIdentity
+}
+
+/// Exact authenticated protocol authority removed from the local trust graph.
+/// Device aliases are retained for diagnostics and identity migration, but
+/// session teardown is authorized only by an exact algorithm + fingerprint
+/// match so a stale alias cannot cancel an unrelated replacement session.
+struct TrustInvalidationAuthority: Sendable, Hashable {
+    let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+    let protocolPublicKeyFingerprint: String
+
+    init?(
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String
+    ) {
+        guard let fingerprint = TrustRecord.normalizedProtocolFingerprint(
+            protocolPublicKeyFingerprint
+        ) else {
+            return nil
+        }
+        self.protocolSigningAlgorithm = protocolSigningAlgorithm
+        self.protocolPublicKeyFingerprint = fingerprint
+    }
+}
+
+struct TrustInvalidationIdentity: Sendable, Hashable {
+    let deviceIds: Set<String>
+    let authorities: Set<TrustInvalidationAuthority>
+
+    init?(record: TrustRecord, additionalDeviceIds: Set<String> = []) {
+        let normalizedDeviceIds = Set(
+            (PeerTrustLookup.recordLookupCandidates(record) + Array(additionalDeviceIds))
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        let normalizedAuthorities = Set(record.currentPathAuthorityPins.compactMap { pin in
+            TrustInvalidationAuthority(
+                protocolSigningAlgorithm: pin.algorithm,
+                protocolPublicKeyFingerprint: pin.fingerprint
+            )
+        })
+        guard !normalizedAuthorities.isEmpty else { return nil }
+        self.deviceIds = normalizedDeviceIds
+        self.authorities = normalizedAuthorities
+    }
+}
+
+struct TrustInvalidationEvent: Sendable, Equatable {
+    let revision: UUID
+    let identities: Set<TrustInvalidationIdentity>
+
+    init(revision: UUID = UUID(), identities: Set<TrustInvalidationIdentity>) {
+        self.revision = revision
+        self.identities = identities
+    }
+
+    func matches(authority: AuthenticatedRemoteAuthority) -> Bool {
+        guard let exactAuthority = TrustInvalidationAuthority(
+            protocolSigningAlgorithm: authority.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint
+        ) else {
+            return false
+        }
+        return identities.contains { $0.authorities.contains(exactAuthority) }
+    }
+
+    func matches(
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String
+    ) -> Bool {
+        guard let exactAuthority = TrustInvalidationAuthority(
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint
+        ) else {
+            return false
+        }
+        return identities.contains { $0.authorities.contains(exactAuthority) }
+    }
+}
+
+/// Serializes trust persistence transactions across MainActor reentrancy while
+/// bounding queued work. Cancellation and deadline expiry remove a queued
+/// waiter instead of leaving an abandoned continuation behind.
+actor TrustMutationAdmissionGate {
+    private struct Permit {
+        let token: UUID
+        let deadline: ContinuousClock.Instant?
+    }
+
+    private struct Waiter {
+        let token: UUID
+        let deadline: ContinuousClock.Instant
+        let continuation: CheckedContinuation<Permit, any Error>
+        let deadlineTask: Task<Void, Never>
+    }
+
+    private let maximumWaiters: Int
+    private let maximumWaitDuration: Duration
+    private let sleepUntilDeadline: @Sendable (Duration) async throws -> Void
+    private let now: @Sendable () -> ContinuousClock.Instant
+    private var ownerToken: UUID?
+    private var waiters: [Waiter] = []
+#if DEBUG || SKYBRIDGE_TESTING
+    private var waiterCountObservers: [
+        (expected: Int, continuation: CheckedContinuation<Void, Never>)
+    ] = []
+#endif
+
+    init(
+        maximumWaiters: Int = 16,
+        maximumWaitDuration: Duration = .seconds(30),
+        sleepUntilDeadline: @escaping @Sendable (Duration) async throws -> Void = { duration in
+            try await Task.sleep(for: duration)
+        },
+        now: @escaping @Sendable () -> ContinuousClock.Instant = {
+            ContinuousClock().now
+        }
+    ) {
+        precondition(maximumWaiters >= 0)
+        precondition(maximumWaitDuration > .zero)
+        self.maximumWaiters = maximumWaiters
+        self.maximumWaitDuration = maximumWaitDuration
+        self.sleepUntilDeadline = sleepUntilDeadline
+        self.now = now
+    }
+
+    var pendingWaiterCount: Int {
+        waiters.count
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    func waitUntilPendingWaiterCountForTesting(_ expected: Int) async {
+        if waiters.count == expected { return }
+        await withCheckedContinuation { continuation in
+            waiterCountObservers.append((expected: expected, continuation: continuation))
+        }
+    }
+#endif
+
+    func run<T: Sendable>(
+        _ operation: @MainActor @Sendable () async throws -> T
+    ) async throws -> T {
+        let permit = try await acquire()
+        defer { release(token: permit.token) }
+        try validate(permit: permit)
+        try Task.checkCancellation()
+        return try await operation()
+    }
+
+    private func acquire() async throws -> Permit {
+        try Task.checkCancellation()
+        let token = UUID()
+        if ownerToken == nil {
+            ownerToken = token
+            return Permit(token: token, deadline: nil)
+        }
+
+        rejectElapsedWaiters()
+        guard waiters.count < maximumWaiters else {
+            throw TrustSyncError.mutationWaiterLimitExceeded(maximum: maximumWaiters)
+        }
+
+        let deadline = now().advanced(by: maximumWaitDuration)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let deadlineTask = Task { [maximumWaitDuration, sleepUntilDeadline] in
+                    do {
+                        try await sleepUntilDeadline(maximumWaitDuration)
+                    } catch {
+                        return
+                    }
+                    self.expireWaiter(token: token)
+                }
+                waiters.append(
+                    Waiter(
+                        token: token,
+                        deadline: deadline,
+                        continuation: continuation,
+                        deadlineTask: deadlineTask
+                    )
+                )
+                notifyWaiterCountObserversForTesting()
+                if Task.isCancelled {
+                    cancelWaiter(token: token)
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(token: token) }
+        }
+    }
+
+    private func cancelWaiter(token: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.token == token }) else { return }
+        let waiter = waiters.remove(at: index)
+        notifyWaiterCountObserversForTesting()
+        waiter.deadlineTask.cancel()
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func expireWaiter(token: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.token == token }) else { return }
+        guard now() >= waiters[index].deadline else { return }
+        let waiter = waiters.remove(at: index)
+        notifyWaiterCountObserversForTesting()
+        waiter.continuation.resume(throwing: TrustSyncError.mutationWaitDeadlineExceeded)
+    }
+
+    private func validate(permit: Permit) throws {
+        guard let deadline = permit.deadline else { return }
+        guard now() < deadline else {
+            throw TrustSyncError.mutationWaitDeadlineExceeded
+        }
+    }
+
+    private func rejectElapsedWaiters() {
+        let currentInstant = now()
+        var activeWaiters: [Waiter] = []
+        activeWaiters.reserveCapacity(waiters.count)
+        for waiter in waiters {
+            guard currentInstant >= waiter.deadline else {
+                activeWaiters.append(waiter)
+                continue
+            }
+            waiter.deadlineTask.cancel()
+            waiter.continuation.resume(throwing: TrustSyncError.mutationWaitDeadlineExceeded)
+        }
+        waiters = activeWaiters
+        notifyWaiterCountObserversForTesting()
+    }
+
+    private func release(token: UUID) {
+        precondition(ownerToken == token, "Only the active trust mutation owner may release it")
+        while !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            notifyWaiterCountObserversForTesting()
+            next.deadlineTask.cancel()
+            guard now() < next.deadline else {
+                next.continuation.resume(throwing: TrustSyncError.mutationWaitDeadlineExceeded)
+                continue
+            }
+            ownerToken = next.token
+            next.continuation.resume(
+                returning: Permit(token: next.token, deadline: next.deadline)
+            )
+            return
+        }
+        ownerToken = nil
+    }
+
+    private func notifyWaiterCountObserversForTesting() {
+#if DEBUG || SKYBRIDGE_TESTING
+        var remaining: [
+            (expected: Int, continuation: CheckedContinuation<Void, Never>)
+        ] = []
+        for observer in waiterCountObservers {
+            if observer.expected == waiters.count {
+                observer.continuation.resume()
+            } else {
+                remaining.append(observer)
+            }
+        }
+        waiterCountObservers = remaining
+#endif
+    }
 }
 
 
@@ -1044,6 +1346,11 @@ public final class TrustSyncService: ObservableObject {
     
  /// 最后同步时间
     @Published public var lastSyncTime: Date?
+
+    private let trustInvalidationSubject = PassthroughSubject<TrustInvalidationEvent, Never>()
+    var trustInvalidationPublisher: AnyPublisher<TrustInvalidationEvent, Never> {
+        trustInvalidationSubject.eraseToAnyPublisher()
+    }
     
  // MARK: - Properties
     
@@ -1052,17 +1359,112 @@ public final class TrustSyncService: ObservableObject {
     
  /// 本地缓存
     private var localCache: [String: TrustRecord] = [:]
+    private let mutationGate = TrustMutationAdmissionGate()
+    private var initialLoadTask: Task<Result<Void, TrustSyncError>, Never>?
+    /// 单调递增的加载尝试代号。MainActor 串行化下用于判断“当前 initialLoadTask
+    /// 是否已被其他调用方替换”，防止并发调用方重复补发重试。
+    private var loadAttemptGeneration: UInt64 = 0
+    /// 本地信任存储可用性门（对齐 iOS TrustedDeviceStore.isAuthorityPersistenceAvailable）：
+    /// 加载以硬失败收场时置 false，所有同步准入读取 fail closed；
+    /// “空 store 但可读”仍视为可用（允许首次接触）。
+    private(set) var isLocalStoreAvailable = true
 
 #if DEBUG || SKYBRIDGE_TESTING
     private var usesInMemoryPersistenceForTesting: Bool = false
+    private var initialLoadTaskBeforeInMemoryTesting: Task<Result<Void, TrustSyncError>, Never>?
+    private var isLocalStoreAvailableBeforeInMemoryTesting: Bool?
+    private var initialLoadOperationForTesting: (@MainActor @Sendable () async throws -> Void)?
+    var aliasRecordDeletionForTesting: (@MainActor @Sendable (String) throws -> Void)?
+    var mutationPostSignBarrierForTesting: (@MainActor @Sendable () async -> Void)?
 #endif
     
  // MARK: - Initialization
     
     private init() {
-        Task {
-            await loadLocalRecords()
+        initialLoadTask = makeInitialLoadAttemptTask()
+    }
+
+#if DEBUG || SKYBRIDGE_TESTING
+    init(
+        initialLoadOperationForTesting: @escaping @MainActor @Sendable () async throws -> Void
+    ) {
+        usesInMemoryPersistenceForTesting = true
+        self.initialLoadOperationForTesting = initialLoadOperationForTesting
+        initialLoadTask = makeInitialLoadAttemptTask()
+    }
+
+    init(initialRecordsForTesting: [TrustRecord]) {
+        usesInMemoryPersistenceForTesting = true
+        localCache = Dictionary(
+            uniqueKeysWithValues: initialRecordsForTesting.map { ($0.deviceId, $0) }
+        )
+        loadAttemptGeneration &+= 1
+        initialLoadTask = Task { @MainActor in .success(()) }
+        updateActiveTrustRecordsFromCache()
+    }
+
+    func requireInitialLoadForTesting() async throws {
+        try await requireInitialLoadSucceeded()
+    }
+#endif
+
+    /// 与 init 完全相同的加载操作；重试路径必须复用它（含测试注入的 op），
+    /// 保证生产与测试的自愈语义一致。
+    private func performInitialLoadOperation() async throws {
+#if DEBUG || SKYBRIDGE_TESTING
+        if let initialLoadOperationForTesting {
+            try await initialLoadOperationForTesting()
+            return
         }
+#endif
+        try await loadLocalRecords()
+    }
+
+    private func makeInitialLoadAttemptTask() -> Task<Result<Void, TrustSyncError>, Never> {
+        loadAttemptGeneration &+= 1
+        return Task { @MainActor [weak self] in
+            guard let self else {
+                return .failure(.localTrustStoreUnavailable)
+            }
+            do {
+                try await self.performInitialLoadOperation()
+                self.isLocalStoreAvailable = true
+                return .success(())
+            } catch {
+                self.isLocalStoreAvailable = false
+                return .failure((error as? TrustSyncError) ?? .localTrustStoreUnavailable)
+            }
+        }
+    }
+
+    private func awaitInitialLoadCompletion() async {
+        guard let initialLoadTask else { return }
+        _ = await initialLoadTask.value
+    }
+
+    private func requireInitialLoadSucceeded() async throws {
+        try Task.checkCancellation()
+        guard let initialLoadTask else {
+            throw TrustSyncError.localTrustStoreUnavailable
+        }
+        // 在 await 之前采样 generation：await 期间若有其他调用方已补发重试，
+        // generation 必然改变，本调用只需搭乘那次重试而不再补发。
+        let observedGeneration = loadAttemptGeneration
+        let result = await initialLoadTask.value
+        try Task.checkCancellation()
+        if case .success = result { return }
+
+        // 硬失败可在进程内自愈：每个调用方最多补发一次全新加载（不循环重试），
+        // 持续失败仍对每个调用方保持 fail closed；原因消除后下一次调用即恢复。
+        if loadAttemptGeneration == observedGeneration {
+            self.initialLoadTask = makeInitialLoadAttemptTask()
+        }
+        guard let retryTask = self.initialLoadTask else {
+            throw TrustSyncError.localTrustStoreUnavailable
+        }
+        let retryResult = await retryTask.value
+        try Task.checkCancellation()
+        try retryResult.get()
     }
     
  // MARK: - Public Properties
@@ -1080,11 +1482,46 @@ public final class TrustSyncService: ObservableObject {
  /// - Returns: 签名后的信任记录
     @discardableResult
     public func addTrustRecord(_ record: TrustRecord) async throws -> TrustRecord {
+        try await requireInitialLoadSucceeded()
+        return try await mutationGate.run { [self, record] in
+            try await addTrustRecordWithinMutation(record)
+        }
+    }
+
+    /// Performs read-modify-write inside the mutation admission gate. Callers
+    /// that merge KEM keys, capabilities, or authority metadata must use this
+    /// path instead of reading `getTrustRecord` before a later async write.
+    @discardableResult
+    func upsertTrustRecordAtomically(
+        deviceId: String,
+        transform: @escaping @MainActor @Sendable (TrustRecord?) throws -> TrustRecord
+    ) async throws -> TrustRecord {
+        try await requireInitialLoadSucceeded()
+        return try await mutationGate.run { [self, deviceId, transform] in
+            let record = try transform(localCache[deviceId])
+            guard record.deviceId == deviceId else {
+                throw TrustSyncError.verificationFailed
+            }
+            return try await addTrustRecordWithinMutation(record)
+        }
+    }
+
+    private func addTrustRecordWithinMutation(
+        _ record: TrustRecord,
+        commitValidator: PairingAuthorityCommitValidator? = nil
+    ) async throws -> TrustRecord {
+        guard denialConflict(for: record) == nil else {
+            throw TrustSyncError.verificationFailed
+        }
+
  // 检查是否已存在
         if let existing = localCache[record.deviceId] {
  // 如果已存在且不是 tombstone，更新
             if !existing.isTombstone {
-                return try await updateTrustRecord(record)
+                return try await updateTrustRecordWithinMutation(
+                    record,
+                    commitValidator: commitValidator
+                )
             }
  // 如果是 tombstone，不允许重新添加同一 deviceId
             throw TrustSyncError.conflictResolutionFailed
@@ -1092,52 +1529,131 @@ public final class TrustSyncService: ObservableObject {
         
  // 签名记录
         let signedRecord = try await signRecord(record)
+        try await validateMutationStillCurrentAfterSigning(
+            commitValidator: commitValidator
+        )
         
  // 保存到本地
+        let postCommitError: TrustSyncError?
 #if DEBUG || SKYBRIDGE_TESTING
-        if usesInMemoryPersistenceForTesting {
-            try removeFallbackRecord(deviceId: signedRecord.deviceId)
+        if !usesInMemoryPersistenceForTesting {
+            postCommitError = try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
         } else {
-            try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+            postCommitError = nil
         }
 #else
-        try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+        postCommitError = try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
 #endif
         localCache[signedRecord.deviceId] = signedRecord
         
  // 更新 UI
-        await updateActiveTrustRecords()
+        updateActiveTrustRecordsFromCache()
+
+        if let postCommitError {
+            throw postCommitError
+        }
         
         SkyBridgeLogger.p2p.info("Added trust record: \(signedRecord.shortId)")
         return signedRecord
+    }
+
+    private func denialConflict(for incoming: TrustRecord) -> CurrentPathTrustConflict? {
+        // 不可用的 store 无法证明 incoming 未被撤销：一律 fail closed。
+        guard isLocalStoreAvailable else { return .quarantinedIdentity }
+        let incomingDirectCandidates = Set(
+            [incoming.deviceId, incoming.currentDeviceIdMetadata]
+                .compactMap { $0 }
+                .flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+                .map { $0.lowercased() }
+        )
+        let incomingAuthorityFingerprints = incoming.currentPathAuthorityFingerprints
+        let incomingLegacyFingerprint = incoming.pubKeyFP
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        for existing in localCache.values where !existing.isExpired {
+            let conflict: CurrentPathTrustConflict
+            if existing.isTombstone || existing.lifecycleState == .revoked {
+                conflict = .revokedIdentity
+            } else if existing.lifecycleState == .quarantined
+                        || existing.lifecycleState == .reverificationRequired {
+                conflict = .quarantinedIdentity
+            } else {
+                continue
+            }
+
+            let existingDirectCandidates = Set(
+                [existing.deviceId, existing.currentDeviceIdMetadata]
+                    .compactMap { $0 }
+                    .flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+                    .map { $0.lowercased() }
+            )
+            if !incomingDirectCandidates.isDisjoint(with: existingDirectCandidates) {
+                return conflict
+            }
+            if !incomingAuthorityFingerprints.isDisjoint(
+                with: existing.currentPathAuthorityFingerprints
+            ) {
+                return conflict
+            }
+            let existingLegacyFingerprint = existing.pubKeyFP
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if !incomingLegacyFingerprint.isEmpty,
+               incomingLegacyFingerprint == existingLegacyFingerprint {
+                return conflict
+            }
+        }
+        return nil
     }
     
  /// 撤销信任记录（创建 tombstone）
  /// - Parameter deviceId: 设备 ID
     public func revokeTrustRecord(deviceId: String) async throws {
+        try await requireInitialLoadSucceeded()
+        try await mutationGate.run { [self, deviceId] in
+            try await revokeTrustRecordWithinMutation(deviceId: deviceId)
+        }
+    }
+
+    private func revokeTrustRecordWithinMutation(deviceId: String) async throws {
         guard let existing = localCache[deviceId] else {
             throw TrustSyncError.recordNotFound
         }
         
- // 创建撤销记录
-        let dataToSign = try createDataToSign(for: existing, revoked: true)
+ // 先构造最终 tombstone，再签名其精确持久化载荷。
+        let revocationDate = Date()
+        let unsignedRevokedRecord = existing.revoked(signature: Data(), at: revocationDate)
+        let dataToSign = try createCompleteDataToSign(for: unsignedRevokedRecord, revoked: true)
         let signature = try await keyManager.sign(data: dataToSign)
-        let revokedRecord = existing.revoked(signature: signature)
+        try await validateMutationStillCurrentAfterSigning()
+        let revokedRecord = existing.revoked(signature: signature, at: revocationDate)
         
  // 保存到本地
+        let postCommitError: TrustSyncError?
 #if DEBUG || SKYBRIDGE_TESTING
-        if usesInMemoryPersistenceForTesting {
-            try removeFallbackRecord(deviceId: revokedRecord.deviceId)
+        if !usesInMemoryPersistenceForTesting {
+            postCommitError = try saveToKeychain(revokedRecord, synchronizable: isSyncAvailable)
         } else {
-            try saveToKeychain(revokedRecord, synchronizable: isSyncAvailable)
+            postCommitError = nil
         }
 #else
-        try saveToKeychain(revokedRecord, synchronizable: isSyncAvailable)
+        postCommitError = try saveToKeychain(revokedRecord, synchronizable: isSyncAvailable)
 #endif
         localCache[deviceId] = revokedRecord
         
  // 更新 UI
-        await updateActiveTrustRecords()
+        updateActiveTrustRecordsFromCache()
+
+        // The durable tombstone is the commit point. Notify synchronously
+        // before reporting any post-commit mirror-cleanup error so no active
+        // session can outlive authority revocation merely because cleanup of a
+        // stale copy failed.
+        publishTrustInvalidation(records: [revokedRecord])
+
+        if let postCommitError {
+            throw postCommitError
+        }
         
         SkyBridgeLogger.p2p.info("Revoked trust record: \(revokedRecord.shortId)")
     }
@@ -1145,35 +1661,40 @@ public final class TrustSyncService: ObservableObject {
  /// 获取所有可用于认证的信任记录。
  /// 隔离、待重新验证、撤销和过期记录仍可留在管理面，但绝不能进入认证面。
     public func getActiveTrustRecords() async -> [TrustRecord] {
-        return localCache.values.filter(\.isAuthenticationEligible)
+        await awaitInitialLoadCompletion()
+        return activeTrustRecordsSnapshot()
     }
     
  /// 获取信任记录
  /// - Parameter deviceId: 设备 ID
  /// - Returns: 信任记录（如果存在）
     public func getTrustRecord(deviceId: String) -> TrustRecord? {
+        guard isLocalStoreAvailable else { return nil }
         guard let record = localCache[deviceId] else { return nil }
         return record.isTombstone ? nil : record
     }
-    
+
  /// 检查设备是否受信任
  /// - Parameter deviceId: 设备 ID
  /// - Returns: 是否受信任
     public func isTrusted(deviceId: String) -> Bool {
+        guard isLocalStoreAvailable else { return false }
         guard let record = localCache[deviceId] else { return false }
         return record.isAuthenticationEligible
     }
-    
+
  /// 检查公钥指纹是否受信任
  /// - Parameter pubKeyFP: 公钥指纹
  /// - Returns: 是否受信任
     public func isTrusted(pubKeyFP: String) -> Bool {
+        guard isLocalStoreAvailable else { return false }
         return localCache.values.contains {
             $0.pubKeyFP == pubKeyFP && $0.isAuthenticationEligible
         }
     }
 
     public func getCurrentPathTrustRecord(fingerprint: String) -> TrustRecord? {
+        guard isLocalStoreAvailable else { return nil }
         let normalized = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
         return localCache.values.first { record in
@@ -1189,6 +1710,7 @@ public final class TrustSyncService: ObservableObject {
         deviceId: String,
         algorithm: ProtocolSigningAlgorithm
     ) -> ProtocolIdentityBindingV2? {
+        guard isLocalStoreAvailable else { return nil }
         let matchingBindings = localCache.values.compactMap { record -> ProtocolIdentityBindingV2? in
             guard record.isAuthenticationEligible,
                   currentPathDeviceMatches(record, deviceId: deviceId) else {
@@ -1221,6 +1743,7 @@ public final class TrustSyncService: ObservableObject {
         publicKey: Data,
         algorithm: ProtocolSigningAlgorithm
     ) -> ProtocolIdentityBindingV2? {
+        guard isLocalStoreAvailable else { return nil }
         let matches = localCache.values.compactMap { record -> ProtocolIdentityBindingV2? in
             guard let binding = record.authenticatedProtocolIdentityBinding(for: algorithm),
                   binding.publicKey == publicKey else {
@@ -1255,6 +1778,7 @@ public final class TrustSyncService: ObservableObject {
         fingerprint: String,
         matchingDeviceId deviceId: String
     ) -> TrustRecord? {
+        guard isLocalStoreAvailable else { return nil }
         let normalized = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return nil }
         return localCache.values.first { record in
@@ -1268,6 +1792,9 @@ public final class TrustSyncService: ObservableObject {
         deviceId: String,
         protocolPublicKeyFingerprint: String
     ) -> CurrentPathTrustConflict? {
+        // Store 不可用时无法证明该身份未被撤销/隔离，准入判定必须 fail closed
+        //（对齐 iOS TrustedDeviceStore.evaluateCurrentPathBinding）。
+        guard isLocalStoreAvailable else { return .quarantinedIdentity }
         let normalizedFingerprint = protocolPublicKeyFingerprint
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
@@ -1409,45 +1936,34 @@ public final class TrustSyncService: ObservableObject {
         let stableCurrentDeviceId = PeerTrustLookup.persistentDeviceId(from: preferredCurrentDeviceId)
             ?? preferredCurrentDeviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        var lookupCandidates = PeerTrustLookup.lookupCandidates(
+        let authenticatedLookupCandidates = PeerTrustLookup.lookupCandidates(
             primary: normalizedDeviceId,
             persistent: stableCurrentDeviceId
         )
-        for knownDeviceId in knownDeviceIds {
-            for candidate in PeerTrustLookup.lookupCandidates(for: knownDeviceId) where !lookupCandidates.contains(candidate) {
-                lookupCandidates.append(candidate)
-            }
-        }
-        let candidateSet = Set(lookupCandidates)
-        let candidateLowerSet = Set(candidateSet.map { $0.lowercased() })
-        let candidateDisplayNamesLower = Set(
-            [normalizedDisplayName]
-                .compactMap { $0?.lowercased() }
-                .filter { !$0.isEmpty }
+        let authenticatedCandidateSet = Set(authenticatedLookupCandidates)
+        let authenticatedCandidateLowerSet = Set(
+            authenticatedCandidateSet.map { $0.lowercased() }
         )
 
+        func directRecordMatchesAuthenticatedIdentity(_ record: TrustRecord) -> Bool {
+            let directCandidates = Set(
+                [record.deviceId, record.currentDeviceIdMetadata]
+                    .compactMap { $0 }
+                    .flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+            )
+            return !directCandidates.isDisjoint(with: authenticatedCandidateSet)
+                || directCandidates.contains {
+                    authenticatedCandidateLowerSet.contains($0.lowercased())
+                }
+        }
+
+        // Only identifiers authenticated by the current path may select an
+        // existing authority. Remote aliases and display names are metadata;
+        // they must never lend another record's KEM, attestation, or legacy key.
         let matchingRecords = existingRecords.filter { record in
             !record.isTombstone &&
             !record.isExpired &&
-            PeerTrustLookup.recordMatches(
-                record,
-                candidates: candidateSet,
-                candidateLowercased: candidateLowerSet,
-                candidateDisplayNamesLower: candidateDisplayNamesLower
-            )
-        }
-
-        func mergeKnownDeviceIds(existing: [String?]) -> [String]? {
-            let merged = Set(
-                existing
-                    .compactMap { $0 }
-                    + lookupCandidates
-                    + [stableCurrentDeviceId, normalizedDeviceId].compactMap { $0 }
-            )
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            guard !merged.isEmpty else { return nil }
-            return Array(merged).sorted()
+            directRecordMatchesAuthenticatedIdentity(record)
         }
 
         let targetRecord: TrustRecord?
@@ -1460,6 +1976,53 @@ public final class TrustSyncService: ObservableObject {
             targetRecord = stableMatches.count == 1 ? stableMatches[0] : nil
         } else {
             targetRecord = nil
+        }
+        guard matchingRecords.count <= 1 || targetRecord != nil else { return nil }
+
+        func conflictsWithAnotherRecord(_ claims: [String]) -> Bool {
+            let claimedCandidates = Set(
+                claims.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+            )
+            guard !claimedCandidates.isEmpty else { return false }
+            let claimedCandidatesLower = Set(claimedCandidates.map { $0.lowercased() })
+            let targetStorageKey = targetRecord?.deviceId
+            return existingRecords.contains { record in
+                guard !record.isExpired, record.deviceId != targetStorageKey else { return false }
+                let directCandidates = [record.deviceId, record.currentDeviceIdMetadata]
+                    .compactMap { $0 }
+                    .flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
+                return directCandidates.contains {
+                    claimedCandidates.contains($0)
+                        || claimedCandidatesLower.contains($0.lowercased())
+                }
+            }
+        }
+
+        var existingIdentityClaims = [normalizedDeviceId]
+            + [stableCurrentDeviceId].compactMap { $0 }
+        if let targetRecord {
+            existingIdentityClaims.append(targetRecord.deviceId)
+            existingIdentityClaims.append(targetRecord.currentDeviceId)
+            existingIdentityClaims.append(contentsOf: targetRecord.knownDeviceIdsMetadata ?? [])
+        }
+        guard !conflictsWithAnotherRecord(existingIdentityClaims) else { return nil }
+
+        // Retain only non-conflicting remote aliases. Alias claims cannot select
+        // an authority record or cause another record's durable alias deletion.
+        let retainedKnownDeviceIds = knownDeviceIds.filter {
+            !conflictsWithAnotherRecord([$0])
+        }
+
+        func mergeKnownDeviceIds(existing: [String?]) -> [String]? {
+            let merged = Set(
+                existing.compactMap { $0 }
+                    + authenticatedLookupCandidates
+                    + retainedKnownDeviceIds
+                    + [stableCurrentDeviceId, normalizedDeviceId].compactMap { $0 }
+            )
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return merged.isEmpty ? nil : Array(merged).sorted()
         }
 
         if let targetRecord {
@@ -1589,6 +2152,63 @@ public final class TrustSyncService: ObservableObject {
         authenticatedProtocolPublicKey: Data? = nil,
         pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
     ) async throws -> Bool {
+        try await requireInitialLoadSucceeded()
+        return try await mutationGate.run { [self] in
+            try await recordAuthenticatedRemoteAuthorityWithinMutation(
+                deviceId: deviceId,
+                displayName: displayName,
+                preferredCurrentDeviceId: preferredCurrentDeviceId,
+                knownDeviceIds: knownDeviceIds,
+                protocolSigningAlgorithm: protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+                authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
+                pinSource: pinSource
+            )
+        }
+    }
+
+    /// Pairing-only authority commit. The transport/generation validator is
+    /// rechecked after signing and immediately before persistence, which keeps
+    /// a suspended old pairing operation from becoming durable after a newer
+    /// operation has replaced it.
+    @discardableResult
+    func recordAuthenticatedRemoteAuthorityForPairing(
+        deviceId: String,
+        displayName: String? = nil,
+        preferredCurrentDeviceId: String? = nil,
+        knownDeviceIds: [String] = [],
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        authenticatedProtocolPublicKey: Data? = nil,
+        isCurrent: @escaping PairingAuthorityCommitValidator
+    ) async throws -> Bool {
+        try await requireInitialLoadSucceeded()
+        return try await mutationGate.run { [self] in
+            try await recordAuthenticatedRemoteAuthorityWithinMutation(
+                deviceId: deviceId,
+                displayName: displayName,
+                preferredCurrentDeviceId: preferredCurrentDeviceId,
+                knownDeviceIds: knownDeviceIds,
+                protocolSigningAlgorithm: protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+                authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
+                pinSource: .authenticatedHandshake,
+                commitValidator: isCurrent
+            )
+        }
+    }
+
+    private func recordAuthenticatedRemoteAuthorityWithinMutation(
+        deviceId: String,
+        displayName: String?,
+        preferredCurrentDeviceId: String?,
+        knownDeviceIds: [String],
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        authenticatedProtocolPublicKey: Data?,
+        pinSource: ProtocolIdentityPinSource,
+        commitValidator: PairingAuthorityCommitValidator? = nil
+    ) async throws -> Bool {
         guard let record = Self.resolvedAuthenticatedRemoteAuthorityRecord(
             existingRecords: Array(localCache.values),
             deviceId: deviceId,
@@ -1602,33 +2222,62 @@ public final class TrustSyncService: ObservableObject {
         ) else {
             return false
         }
-        let signedRecord = try await addTrustRecord(record)
+        let signedRecord = try await addTrustRecordWithinMutation(
+            record,
+            commitValidator: commitValidator
+        )
         let aliasesToRemove = Set(signedRecord.knownDeviceIdsMetadata ?? [])
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && $0 != signedRecord.deviceId }
         var removedAliasRecord = false
         for alias in aliasesToRemove where localCache[alias] != nil {
             do {
-                try deleteFromKeychain(deviceId: alias)
+                try deleteAliasRecordFromPersistence(deviceId: alias)
                 localCache.removeValue(forKey: alias)
                 removedAliasRecord = true
             } catch {
-                // The authoritative record above is already durably committed. Alias
-                // cleanup is post-commit maintenance and must never turn that success
-                // into a caller-visible rejection with live trust left behind.
+                if removedAliasRecord {
+                    updateActiveTrustRecordsFromCache()
+                }
                 SkyBridgeLogger.p2p.error(
-                    "Authoritative protocol identity committed but alias cleanup failed; retrying cleanup on a later maintenance pass. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                    "Authoritative protocol identity committed but alias cleanup failed. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                )
+                throw TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(
+                    SkyBridgeDiagnosticRedaction.errorSummary(error)
                 )
             }
         }
         if removedAliasRecord {
-            await updateActiveTrustRecords()
+            updateActiveTrustRecordsFromCache()
         }
         return true
+    }
+
+    private func publishTrustInvalidation(
+        records: [TrustRecord],
+        additionalDeviceIds: Set<String> = []
+    ) {
+        let identities = Set(records.compactMap { record in
+            TrustInvalidationIdentity(
+                record: record,
+                additionalDeviceIds: additionalDeviceIds
+            )
+        })
+        guard !identities.isEmpty else { return }
+        trustInvalidationSubject.send(
+            TrustInvalidationEvent(identities: identities)
+        )
     }
     
  /// 同步信任记录
     public func sync() async throws {
+        try await requireInitialLoadSucceeded()
+        try await mutationGate.run { [self] in
+            try await syncWithinMutation()
+        }
+    }
+
+    private func syncWithinMutation() async throws {
         guard isSyncAvailable else {
             syncStatus = .unavailable
             throw TrustSyncError.syncUnavailable
@@ -1639,10 +2288,13 @@ public final class TrustSyncService: ObservableObject {
         do {
  // 从 Keychain 加载所有记录（包括同步的）
             let allRecords = try loadAllFromKeychain()
-            let verifiedRecords = await verifiedTrustRecordsForLocalLoad(allRecords, source: "Keychain sync")
-            
- // 解决冲突
-            for record in verifiedRecords {
+            let verification = await verifiedTrustRecordsForLocalLoad(
+                allRecords,
+                source: "Keychain sync"
+            )
+
+ // 解决冲突（deny-only tombstone 走同一条 revoke 优先合并路径）
+            for record in verification.verifiedRecords + verification.denyOnlyTombstones {
                 if let existing = localCache[record.deviceId] {
                     let resolved = try resolveConflict(local: existing, remote: record)
                     localCache[record.deviceId] = resolved
@@ -1650,12 +2302,17 @@ public final class TrustSyncService: ObservableObject {
                     localCache[record.deviceId] = record
                 }
             }
+
+            let denialRecords = localCache.values.filter {
+                !$0.isExpired && ($0.isTombstone || $0.lifecycleState != .active)
+            }
+            publishTrustInvalidation(records: denialRecords)
             
  // 清理过期 tombstone
-            try await cleanupExpiredTombstones()
+            try cleanupExpiredTombstonesWithinMutation()
             
  // 更新 UI
-            await updateActiveTrustRecords()
+            updateActiveTrustRecordsFromCache()
             
             syncStatus = .synced
             lastSyncTime = Date()
@@ -1669,6 +2326,13 @@ public final class TrustSyncService: ObservableObject {
     
  /// 清理过期 tombstone（30 天）
     public func cleanupExpiredTombstones() async throws {
+        try await requireInitialLoadSucceeded()
+        try await mutationGate.run { [self] in
+            try cleanupExpiredTombstonesWithinMutation()
+        }
+    }
+
+    private func cleanupExpiredTombstonesWithinMutation() throws {
         let expiredIds = localCache.filter { $0.value.isExpired }.map { $0.key }
         
         for deviceId in expiredIds {
@@ -1692,30 +2356,39 @@ public final class TrustSyncService: ObservableObject {
         newDeviceId: String,
         newCertificate: P2PIdentityCertificate
     ) async throws {
+        try await requireInitialLoadSucceeded()
+        try await mutationGate.run { [self] in
  // 撤销旧设备
-        if localCache[oldDeviceId] != nil {
-            try await revokeTrustRecord(deviceId: oldDeviceId)
-        }
+            if localCache[oldDeviceId] != nil {
+                do {
+                    try await revokeTrustRecordWithinMutation(deviceId: oldDeviceId)
+                } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                        TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+                    // 旧设备 tombstone 已权威提交且失效已发布；清理残留不得中止新设备记录的写入。
+                    SkyBridgeLogger.p2p.warning("Key rotation: old-device revocation committed with post-commit cleanup residue: \(cleanupResidue)")
+                }
+            }
         
  // 添加新设备
-        let newRecord = TrustRecord(
-            deviceId: newDeviceId,
-            pubKeyFP: newCertificate.pubKeyFP,
-            publicKey: newCertificate.publicKey,
-            secureEnclavePublicKey: newCertificate.publicKey,
-            kemPublicKeys: newCertificate.kemPublicKeys,
-            attestationLevel: newCertificate.attestationLevel,
-            attestationData: newCertificate.attestationData,
-            capabilities: newCertificate.capabilities,
-            signature: Data(), // 将在 addTrustRecord 中签名
-            deviceName: nil
-        )
+            let newRecord = TrustRecord(
+                deviceId: newDeviceId,
+                pubKeyFP: newCertificate.pubKeyFP,
+                publicKey: newCertificate.publicKey,
+                secureEnclavePublicKey: newCertificate.publicKey,
+                kemPublicKeys: newCertificate.kemPublicKeys,
+                attestationLevel: newCertificate.attestationLevel,
+                attestationData: newCertificate.attestationData,
+                capabilities: newCertificate.capabilities,
+                signature: Data(), // 将在 addTrustRecord 中签名
+                deviceName: nil
+            )
 
-        try await addTrustRecord(newRecord)
+            _ = try await addTrustRecordWithinMutation(newRecord)
 
-        let oldDeviceDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(oldDeviceId)
-        let newDeviceDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(newDeviceId)
-        SkyBridgeLogger.p2p.info("Key rotation: \(oldDeviceDiagnosticLabel, privacy: .public) -> \(newDeviceDiagnosticLabel, privacy: .public)")
+            let oldDeviceDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(oldDeviceId)
+            let newDeviceDiagnosticLabel = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(newDeviceId)
+            SkyBridgeLogger.p2p.info("Key rotation: \(oldDeviceDiagnosticLabel, privacy: .public) -> \(newDeviceDiagnosticLabel, privacy: .public)")
+        }
     }
 
     // MARK: - Conflict Resolution
@@ -1747,18 +2420,45 @@ public final class TrustSyncService: ObservableObject {
  // MARK: - Private Methods
     
  /// 加载本地记录
-    private func loadLocalRecords() async {
+    private func loadLocalRecords() async throws {
+        try await loadLocalRecords(
+            keychainRecords: { [self] in try loadAllFromKeychain() },
+            fallbackRecords: { [self] in try loadFallbackRecords() }
+        )
+    }
+
+    private func loadLocalRecords(
+        keychainRecords: @MainActor () throws -> [TrustRecord],
+        fallbackRecords: @MainActor () throws -> [TrustRecord]
+    ) async throws {
+        // 验签环境预检：身份密钥存储的环境性失败（如首次解锁前的
+        // errSecInteractionNotAllowed）必须让整库进入不可用（fail closed），
+        // 而不是让每条记录都以"验签失败"被逐条跳过后返回"空但可用"的
+        // 首次接触语义。密钥尚不存在（返回 nil）不是环境失败。
+        do {
+            _ = try await keyManager.existingIdentityKeyInfoStrict()
+        } catch {
+            isLocalStoreAvailable = false
+            syncStatus = .failed
+            throw (error as? TrustSyncError) ?? .localTrustStoreUnavailable
+        }
+
         var mergedCache: [String: TrustRecord] = [:]
         var conflictedDeviceIds: Set<String> = []
+        var loadFailure: TrustSyncError?
 
         func merge(_ record: TrustRecord) {
-            guard !conflictedDeviceIds.contains(record.deviceId) else { return }
+            // tombstone 不受冲突隔离拦截：resolveConflict 对 tombstone 走 revoke
+            // 优先、不会抛错；若被隔离拦下，同 deviceId 先冲突后到的吊销会被静默
+            // 丢弃，破坏单调吊销并允许后续 re-pair 持久覆盖墓碑。
+            guard record.isTombstone || !conflictedDeviceIds.contains(record.deviceId) else { return }
             if let existing = mergedCache[record.deviceId] {
                 do {
                     mergedCache[record.deviceId] = try resolveConflict(local: existing, remote: record)
                 } catch {
                     // Fail closed at startup: neither conflicting authority is
                     // exposed to authentication until an explicit recovery.
+                    // 只隔离这一个 deviceId，绝不升级为整库加载失败。
                     mergedCache.removeValue(forKey: record.deviceId)
                     conflictedDeviceIds.insert(record.deviceId)
                     syncStatus = .failed
@@ -1772,10 +2472,15 @@ public final class TrustSyncService: ObservableObject {
         }
 
         do {
-            let records = try loadAllFromKeychain()
-            let verifiedRecords = await verifiedTrustRecordsForLocalLoad(records, source: "Keychain")
-            for record in verifiedRecords { merge(record) }
-            SkyBridgeLogger.p2p.debug("Loaded \(verifiedRecords.count) verified trust records from Keychain")
+            let records = try keychainRecords()
+            let verification = await verifiedTrustRecordsForLocalLoad(
+                records,
+                source: "Keychain"
+            )
+            for record in verification.verifiedRecords { merge(record) }
+            // deny-only tombstone 与已验证记录走同一条 revoke 优先的合并路径。
+            for tombstone in verification.denyOnlyTombstones { merge(tombstone) }
+            SkyBridgeLogger.p2p.debug("Loaded \(verification.verifiedRecords.count) verified trust records from Keychain")
         } catch {
             // errSecParam(-50) 在部分系统/环境下会出现在 synchronizable 查询中；
             // 对于启动期加载而言，视作“暂无可用 trust records”更合理，避免刷错误日志。
@@ -1787,92 +2492,111 @@ public final class TrustSyncService: ObservableObject {
                 SkyBridgeLogger.p2p.warning("⚠️ Trust records keychain unavailable (\(status)); loading protected local trust mirror")
             } else {
                 SkyBridgeLogger.p2p.error("Failed to load trust records: \(error.localizedDescription)")
+                // loadFailure 只保留给真正不可读的 store（整库查询硬失败）；
+                // 单条坏记录已在上面按条跳过，不会走到这里。
+                loadFailure = (error as? TrustSyncError) ?? .localTrustStoreUnavailable
             }
         }
 
         do {
-            let fallbackRecords = try loadFallbackRecords()
-            let verifiedFallbackRecords = await verifiedTrustRecordsForLocalLoad(fallbackRecords, source: "protected local trust mirror")
-            for record in verifiedFallbackRecords { merge(record) }
-            if !verifiedFallbackRecords.isEmpty {
-                SkyBridgeLogger.p2p.debug("Loaded \(verifiedFallbackRecords.count) verified trust records from fallback storage")
+            let records = try fallbackRecords()
+            let verification = await verifiedTrustRecordsForLocalLoad(
+                records,
+                source: "protected local trust mirror"
+            )
+            for record in verification.verifiedRecords { merge(record) }
+            for tombstone in verification.denyOnlyTombstones { merge(tombstone) }
+            if !verification.verifiedRecords.isEmpty {
+                SkyBridgeLogger.p2p.debug("Loaded \(verification.verifiedRecords.count) verified trust records from fallback storage")
             }
         } catch {
             syncStatus = .failed
             SkyBridgeLogger.p2p.error("Failed to load protected local trust mirror: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)")
+            loadFailure = loadFailure
+                ?? (error as? TrustSyncError)
+                ?? .localTrustStoreUnavailable
         }
 
+        if let loadFailure {
+            // 硬失败：store 不可读，所有同步准入读取自此 fail closed，
+            // 直到一次成功加载恢复可用性。
+            isLocalStoreAvailable = false
+            syncStatus = .failed
+            throw loadFailure
+        }
         localCache = mergedCache
-        await updateActiveTrustRecords()
+        isLocalStoreAvailable = true
+        updateActiveTrustRecordsFromCache()
     }
 
+    /// 单次加载的验证聚合结果。
+    private struct LocalLoadVerification {
+        /// 本机身份密钥验签通过、可参与认证决策的记录。
+        var verifiedRecords: [TrustRecord] = []
+        /// 本机无法验证签名、但按 monotonic revocation 保留为仅拒绝语义的
+        /// tombstone（isAuthenticationEligible 恒为 false，绝不进入认证面）。
+        var denyOnlyTombstones: [TrustRecord] = []
+    }
+
+    /// 逐条验签，单条坏记录只跳过，绝不让整库加载失败：iCloud 同步来的记录由
+    /// 对端设备的本地身份密钥签名，本机永远无法验证，这种良性 fan-out 不允许
+    /// 把整个 trust store 打成不可用（那会让撤销检查 fail open）。
     private func verifiedTrustRecordsForLocalLoad(
         _ records: [TrustRecord],
         source: String
-    ) async -> [TrustRecord] {
-        var verifiedRecords: [TrustRecord] = []
-        verifiedRecords.reserveCapacity(records.count)
+    ) async -> LocalLoadVerification {
+        var verification = LocalLoadVerification()
+        verification.verifiedRecords.reserveCapacity(records.count)
         for record in records {
+            let isValid: Bool
             do {
-                guard try await verifyRecordSignature(record) else {
-                    SkyBridgeLogger.p2p.warning(
-                        "Rejected \(source, privacy: .public) trust record during local load: reason=invalid_signature device=redacted"
-                    )
-                    continue
-                }
-                verifiedRecords.append(record)
+                isValid = try await verifyRecordSignature(record)
             } catch {
                 SkyBridgeLogger.p2p.warning(
                     "Rejected \(source, privacy: .public) trust record during local load: reason=verification_error error=\(error.localizedDescription, privacy: .private) device=redacted"
                 )
+                retainDenyOnlyTombstoneIfNeeded(record, in: &verification, source: source)
+                continue
             }
+            guard isValid else {
+                SkyBridgeLogger.p2p.warning(
+                    "Rejected \(source, privacy: .public) trust record during local load: reason=invalid_signature device=redacted"
+                )
+                retainDenyOnlyTombstoneIfNeeded(record, in: &verification, source: source)
+                continue
+            }
+            verification.verifiedRecords.append(record)
         }
-        return verifiedRecords
+        return verification
+    }
+
+    /// 异设备撤销必须继续生效：无法验证的 tombstone 保留为仅拒绝记录，
+    /// 走与已验证记录相同的合并机制，保证 revoke 单调优先。
+    private func retainDenyOnlyTombstoneIfNeeded(
+        _ record: TrustRecord,
+        in verification: inout LocalLoadVerification,
+        source: String
+    ) {
+        guard record.isTombstone else { return }
+        verification.denyOnlyTombstones.append(record)
+        SkyBridgeLogger.p2p.warning(
+            "Retained unverifiable \(source, privacy: .public) tombstone as deny-only during local load: device=redacted"
+        )
     }
     
  /// 更新活跃信任记录
-    private func updateActiveTrustRecords() async {
-        activeTrustRecords = await getActiveTrustRecords()
+    private func activeTrustRecordsSnapshot() -> [TrustRecord] {
+        guard isLocalStoreAvailable else { return [] }
+        return localCache.values.filter(\.isAuthenticationEligible)
+    }
+
+    private func updateActiveTrustRecordsFromCache() {
+        activeTrustRecords = activeTrustRecordsSnapshot()
     }
     
  /// 签名记录
-    private func signRecord(_ record: TrustRecord) async throws -> TrustRecord {
-#if DEBUG || SKYBRIDGE_TESTING
-        if usesInMemoryPersistenceForTesting {
-            return TrustRecord(
-                deviceId: record.deviceId,
-                pubKeyFP: record.pubKeyFP,
-                publicKey: record.publicKey,
-                secureEnclavePublicKey: record.secureEnclavePublicKey,
-                protocolPublicKey: record.protocolPublicKey,
-                protocolSigningAlgorithm: record.protocolSigningAlgorithm,
-                protocolPublicKeyFingerprint: record.protocolPublicKeyFingerprint,
-                protocolIdentityPins: record.protocolIdentityPins,
-                protocolIdentityBindingsV2: record.protocolIdentityBindingsV2,
-                legacyP256PublicKey: record.legacyP256PublicKey,
-                signatureAlgorithm: record.signatureAlgorithm,
-                kemPublicKeys: record.kemPublicKeys,
-                attestationLevel: record.attestationLevel,
-                attestationData: record.attestationData,
-                capabilities: record.capabilities,
-                createdAt: record.createdAt,
-                updatedAt: record.updatedAt,
-                version: record.version,
-                signature: record.signature.isEmpty ? Data(repeating: 0xAA, count: 64) : record.signature,
-                recordType: record.recordType,
-                revokedAt: record.revokedAt,
-                deviceName: record.deviceName,
-                currentDeviceId: record.currentDeviceIdMetadata,
-                knownDeviceIds: record.knownDeviceIdsMetadata,
-                lifecycleState: record.lifecycleStateMetadata
-            )
-        }
-#endif
-
-        let dataToSign = try createDataToSign(for: record, revoked: false)
-        let signature = try await keyManager.sign(data: dataToSign)
-        
-        return TrustRecord(
+    private func recordUsingCurrentSignaturePayload(_ record: TrustRecord) -> TrustRecord {
+        TrustRecord(
             deviceId: record.deviceId,
             pubKeyFP: record.pubKeyFP,
             publicKey: record.publicKey,
@@ -1891,7 +2615,8 @@ public final class TrustSyncService: ObservableObject {
             createdAt: record.createdAt,
             updatedAt: record.updatedAt,
             version: record.version,
-            signature: signature,
+            signaturePayloadVersion: TrustRecord.currentSignaturePayloadVersion,
+            signature: record.signature,
             recordType: record.recordType,
             revokedAt: record.revokedAt,
             deviceName: record.deviceName,
@@ -1900,9 +2625,94 @@ public final class TrustSyncService: ObservableObject {
             lifecycleState: record.lifecycleStateMetadata
         )
     }
+
+    private func validateMutationStillCurrentAfterSigning(
+        commitValidator: PairingAuthorityCommitValidator? = nil
+    ) async throws {
+#if DEBUG || SKYBRIDGE_TESTING
+        if let mutationPostSignBarrierForTesting {
+            await mutationPostSignBarrierForTesting()
+        }
+#endif
+        try Task.checkCancellation()
+        if let commitValidator, !(await commitValidator()) {
+            throw TrustSyncError.pairingAuthorityCommitSuperseded
+        }
+    }
+
+    private func signRecord(_ record: TrustRecord) async throws -> TrustRecord {
+        let signableRecord = recordUsingCurrentSignaturePayload(record)
+#if DEBUG || SKYBRIDGE_TESTING
+        if usesInMemoryPersistenceForTesting {
+            return TrustRecord(
+                deviceId: signableRecord.deviceId,
+                pubKeyFP: signableRecord.pubKeyFP,
+                publicKey: signableRecord.publicKey,
+                secureEnclavePublicKey: signableRecord.secureEnclavePublicKey,
+                protocolPublicKey: signableRecord.protocolPublicKey,
+                protocolSigningAlgorithm: signableRecord.protocolSigningAlgorithm,
+                protocolPublicKeyFingerprint: signableRecord.protocolPublicKeyFingerprint,
+                protocolIdentityPins: signableRecord.protocolIdentityPins,
+                protocolIdentityBindingsV2: signableRecord.protocolIdentityBindingsV2,
+                legacyP256PublicKey: signableRecord.legacyP256PublicKey,
+                signatureAlgorithm: signableRecord.signatureAlgorithm,
+                kemPublicKeys: signableRecord.kemPublicKeys,
+                attestationLevel: signableRecord.attestationLevel,
+                attestationData: signableRecord.attestationData,
+                capabilities: signableRecord.capabilities,
+                createdAt: signableRecord.createdAt,
+                updatedAt: signableRecord.updatedAt,
+                version: signableRecord.version,
+                signaturePayloadVersion: signableRecord.signaturePayloadVersion,
+                signature: signableRecord.signature.isEmpty ? Data(repeating: 0xAA, count: 64) : signableRecord.signature,
+                recordType: signableRecord.recordType,
+                revokedAt: signableRecord.revokedAt,
+                deviceName: signableRecord.deviceName,
+                currentDeviceId: signableRecord.currentDeviceIdMetadata,
+                knownDeviceIds: signableRecord.knownDeviceIdsMetadata,
+                lifecycleState: signableRecord.lifecycleStateMetadata
+            )
+        }
+#endif
+
+        let dataToSign = try createCompleteDataToSign(for: signableRecord, revoked: false)
+        let signature = try await keyManager.sign(data: dataToSign)
+
+        return TrustRecord(
+            deviceId: signableRecord.deviceId,
+            pubKeyFP: signableRecord.pubKeyFP,
+            publicKey: signableRecord.publicKey,
+            secureEnclavePublicKey: signableRecord.secureEnclavePublicKey,
+            protocolPublicKey: signableRecord.protocolPublicKey,
+            protocolSigningAlgorithm: signableRecord.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: signableRecord.protocolPublicKeyFingerprint,
+            protocolIdentityPins: signableRecord.protocolIdentityPins,
+            protocolIdentityBindingsV2: signableRecord.protocolIdentityBindingsV2,
+            legacyP256PublicKey: signableRecord.legacyP256PublicKey,
+            signatureAlgorithm: signableRecord.signatureAlgorithm,
+            kemPublicKeys: signableRecord.kemPublicKeys,
+            attestationLevel: signableRecord.attestationLevel,
+            attestationData: signableRecord.attestationData,
+            capabilities: signableRecord.capabilities,
+            createdAt: signableRecord.createdAt,
+            updatedAt: signableRecord.updatedAt,
+            version: signableRecord.version,
+            signaturePayloadVersion: signableRecord.signaturePayloadVersion,
+            signature: signature,
+            recordType: signableRecord.recordType,
+            revokedAt: signableRecord.revokedAt,
+            deviceName: signableRecord.deviceName,
+            currentDeviceId: signableRecord.currentDeviceIdMetadata,
+            knownDeviceIds: signableRecord.knownDeviceIdsMetadata,
+            lifecycleState: signableRecord.lifecycleStateMetadata
+        )
+    }
     
  /// 更新信任记录
-    private func updateTrustRecord(_ record: TrustRecord) async throws -> TrustRecord {
+    private func updateTrustRecordWithinMutation(
+        _ record: TrustRecord,
+        commitValidator: PairingAuthorityCommitValidator? = nil
+    ) async throws -> TrustRecord {
         guard let existing = localCache[record.deviceId] else {
             throw TrustSyncError.recordNotFound
         }
@@ -1946,29 +2756,111 @@ public final class TrustSyncService: ObservableObject {
         )
         
         let signedRecord = try await signRecord(updatedRecord)
+        try await validateMutationStillCurrentAfterSigning(
+            commitValidator: commitValidator
+        )
+        let postCommitError: TrustSyncError?
 #if DEBUG || SKYBRIDGE_TESTING
-        if usesInMemoryPersistenceForTesting {
-            try removeFallbackRecord(deviceId: signedRecord.deviceId)
+        if !usesInMemoryPersistenceForTesting {
+            postCommitError = try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
         } else {
-            try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+            postCommitError = nil
         }
 #else
-        try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
+        postCommitError = try saveToKeychain(signedRecord, synchronizable: isSyncAvailable)
 #endif
         localCache[signedRecord.deviceId] = signedRecord
         
-        await updateActiveTrustRecords()
+        updateActiveTrustRecordsFromCache()
+        if let postCommitError {
+            throw postCommitError
+        }
         return signedRecord
     }
     
  /// 创建待签名数据
     private func createDataToSign(for record: TrustRecord, revoked: Bool) throws -> Data {
-        try createDataToSign(
+        if record.signaturePayloadVersion == TrustRecord.currentSignaturePayloadVersion {
+            return try createCompleteDataToSign(for: record, revoked: revoked)
+        }
+        guard record.signaturePayloadVersion == nil else {
+            throw TrustSyncError.encodingError("unsupported trust signature payload version")
+        }
+        return try createDataToSign(
             for: record,
             revoked: revoked,
             includeProtocolIdentityPins: true,
             includeProtocolIdentityBindingsV2: true
         )
+    }
+
+    /// Complete trust payload. Every persisted field that can affect
+    /// authentication, revocation, expiry, migration, or trust presentation is
+    /// covered, including the raw-key v2 authority sidecar.
+    private func createCompleteDataToSign(
+        for record: TrustRecord,
+        revoked: Bool
+    ) throws -> Data {
+        var encoder = DeterministicEncoder()
+        encoder.encode("SKYBRIDGE-TRUST-RECORD")
+        encoder.encode(Int64(TrustRecord.currentSignaturePayloadVersion))
+        encoder.encode(record.deviceId)
+        encoder.encode(record.pubKeyFP)
+        encoder.encode(record.publicKey)
+        encoder.encode(record.secureEnclavePublicKey) { enc, value in enc.encode(value) }
+        encoder.encode(record.protocolPublicKey) { enc, value in enc.encode(value) }
+        encoder.encode(record.protocolSigningAlgorithm?.rawValue) { enc, value in enc.encode(value) }
+        encoder.encode(record.protocolPublicKeyFingerprint?.lowercased()) { enc, value in enc.encode(value) }
+        encoder.encode(record.protocolIdentityPins) { enc, pins in
+            let normalizedPins = TrustRecord.normalizedProtocolIdentityPins(
+                pins,
+                legacyFingerprint: nil,
+                legacyAlgorithm: nil,
+                approvedAt: record.updatedAt
+            ) ?? []
+            enc.encode(normalizedPins, encoder: { inner, pin in
+                inner.encode(pin.algorithm.rawValue)
+                inner.encode(pin.fingerprint)
+                inner.encode(pin.approvedAt)
+                inner.encode(pin.source.rawValue)
+            })
+        }
+        encoder.encode(record.protocolIdentityBindingsV2) { enc, bindings in
+            let canonicalBindings = TrustRecord.canonicalProtocolIdentityBindingsV2(bindings) ?? []
+            enc.encode(canonicalBindings, encoder: { inner, binding in
+                inner.encode(Int64(binding.version))
+                inner.encode(binding.algorithm)
+                inner.encode(binding.publicKey)
+                inner.encode(binding.fingerprint)
+                inner.encode(binding.source)
+                inner.encode(binding.approvedAt)
+                inner.encode(binding.generation)
+                inner.encode(binding.state)
+            })
+        }
+        encoder.encode(record.legacyP256PublicKey) { enc, value in enc.encode(value) }
+        encoder.encode(record.signatureAlgorithm?.rawValue) { enc, value in enc.encode(value) }
+        encoder.encode(record.kemPublicKeys, encoder: { enc, keys in
+            let sorted = keys.sorted { $0.suiteWireId < $1.suiteWireId }
+            enc.encode(sorted, encoder: { inner, key in
+                inner.encode(key.suiteWireId)
+                inner.encode(key.publicKey)
+            })
+        })
+        encoder.encode(UInt8(record.attestationLevel.rawValue))
+        encoder.encode(record.attestationData) { enc, value in enc.encode(value) }
+        encoder.encode(record.capabilities)
+        encoder.encode(record.createdAt)
+        encoder.encode(record.updatedAt)
+        encoder.encode(Int64(record.version))
+        encoder.encode(record.recordType.rawValue)
+        encoder.encode(record.revokedAt) { enc, value in enc.encode(value) }
+        encoder.encode(record.deviceName) { enc, value in enc.encode(value) }
+        encoder.encode(record.currentDeviceIdMetadata) { enc, value in enc.encode(value) }
+        encoder.encode(canonicalKnownDeviceIds(for: record)) { enc, values in enc.encode(values) }
+        encoder.encode(record.lifecycleStateMetadata?.rawValue) { enc, value in enc.encode(value) }
+        encoder.encode(revoked ? "revoke" : "add")
+        return encoder.finalize()
     }
 
     private func createDataToSign(
@@ -2083,7 +2975,10 @@ public final class TrustSyncService: ObservableObject {
  // MARK: - Keychain Operations
     
  /// 保存到 Keychain
-    private func saveToKeychain(_ record: TrustRecord, synchronizable: Bool) throws {
+    private func saveToKeychain(
+        _ record: TrustRecord,
+        synchronizable: Bool
+    ) throws -> TrustSyncError? {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         let data = try encoder.encode(record)
@@ -2101,14 +2996,7 @@ public final class TrustSyncService: ObservableObject {
             [kSecValueData as String: data] as CFDictionary
         )
         if updateStatus == errSecSuccess {
-            do {
-                try removeFallbackRecord(deviceId: record.deviceId)
-            } catch {
-                SkyBridgeLogger.p2p.error(
-                    "Trust record Keychain update committed; stale fallback cleanup failed and will be retried. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
-                )
-            }
-            return
+            return fallbackCleanupErrorAfterAuthoritativeCommit(deviceId: record.deviceId)
         }
 
         if updateStatus != errSecItemNotFound {
@@ -2118,7 +3006,7 @@ public final class TrustSyncService: ObservableObject {
                 SkyBridgeLogger.p2p.warning(
                     "⚠️ Trust record keychain update unavailable (\(updateStatus)); persisted to protected local trust mirror: \(recordDiagnosticLabel, privacy: .public)"
                 )
-                return
+                return nil
             }
             throw TrustSyncError.keychainError(updateStatus)
         }
@@ -2134,14 +3022,7 @@ public final class TrustSyncService: ObservableObject {
 
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
         if addStatus == errSecSuccess {
-            do {
-                try removeFallbackRecord(deviceId: record.deviceId)
-            } catch {
-                SkyBridgeLogger.p2p.error(
-                    "Trust record Keychain add committed; stale fallback cleanup failed and will be retried. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
-                )
-            }
-            return
+            return fallbackCleanupErrorAfterAuthoritativeCommit(deviceId: record.deviceId)
         }
 
         if shouldMirrorTrustRecordAfterKeychainFailure(addStatus) || addStatus == errSecDuplicateItem {
@@ -2150,10 +3031,27 @@ public final class TrustSyncService: ObservableObject {
             SkyBridgeLogger.p2p.warning(
                 "⚠️ Trust record keychain add unavailable (\(addStatus)); persisted to protected local trust mirror: \(recordDiagnosticLabel, privacy: .public)"
             )
-            return
+            return nil
         }
 
         throw TrustSyncError.keychainError(addStatus)
+    }
+
+    private func fallbackCleanupErrorAfterAuthoritativeCommit(
+        deviceId: String
+    ) -> TrustSyncError? {
+        do {
+            try removeFallbackRecord(deviceId: deviceId)
+            return nil
+        } catch {
+            syncStatus = .failed
+            SkyBridgeLogger.p2p.error(
+                "Authoritative trust record committed, but stale fallback cleanup failed. error=\(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            return .fallbackCleanupFailedAfterAuthoritativeCommit(
+                SkyBridgeDiagnosticRedaction.errorSummary(error)
+            )
+        }
     }
     
  /// 从 Keychain 加载所有记录
@@ -2169,21 +3067,10 @@ public final class TrustSyncService: ObservableObject {
             guard status == errSecSuccess else {
                 throw TrustSyncError.keychainError(status)
             }
-            return (result as? [[String: Any]]) ?? []
-        }
-        
-        func copyDataItems(_ inputQuery: [String: Any]) throws -> [Data] {
-            var query = inputQuery
-            Self.forbidKeychainAuthenticationUI(&query)
-            var result: AnyObject?
-            let status = SecItemCopyMatching(query as CFDictionary, &result)
-            if status == errSecItemNotFound {
-                return []
+            guard let items = result as? [[String: Any]] else {
+                throw TrustSyncError.decodingError("Keychain returned an unexpected item shape")
             }
-            guard status == errSecSuccess else {
-                throw TrustSyncError.keychainError(status)
-            }
-            return (result as? [Data]) ?? []
+            return items
         }
 
         let baseQuery: [String: Any] = [
@@ -2194,33 +3081,17 @@ public final class TrustSyncService: ObservableObject {
             kSecMatchLimit as String: kSecMatchLimitAll
         ]
         
-        // data-only 查询：某些环境下同时返回 attributes + synchronizableAny 会 errSecParam(-50)
-        let baseQueryDataOnly: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: KeychainConstants.service,
-            kSecReturnData as String: kCFBooleanTrue as Any,
-            kSecMatchLimit as String: kSecMatchLimitAll
-        ]
-
         // 首选：一次性拉取所有（含 synchronizable true/false）。
-        // 在部分系统/环境下，kSecAttrSynchronizableAny 会返回 errSecParam(-50)，因此提供降级方案。
+        // 在部分系统/环境下，kSecAttrSynchronizableAny 会返回
+        // errSecParam(-50)，因此降级为分别查询同步和非同步项。每条查询
+        // 始终保留 account attribute，防止 payload deviceId 与真实存储键错配。
         var items: [[String: Any]] = []
         do {
             var q = baseQuery
             q[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
             items = try copyItems(q)
         } catch let TrustSyncError.keychainError(status) where status == errSecParam {
-            // 先尝试 data-only + synchronizableAny（不依赖 attributes）
-            do {
-                var q = baseQueryDataOnly
-                q[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
-                let dataItems = try copyDataItems(q)
-                return try decodeTrustRecords(from: dataItems, source: "Keychain")
-            } catch let TrustSyncError.keychainError(status) where status == errSecParam {
-                // 继续降级到分开查询
-            }
-
-            // 降级：分别拉取 non-sync 和 sync 项，再合并去重
+            // 降级：分别拉取 non-sync 和 sync 项，并保留两份记录供冲突解析。
             var nonSync = baseQuery
             nonSync[kSecAttrSynchronizable as String] = kCFBooleanFalse as Any
             var sync = baseQuery
@@ -2239,23 +3110,52 @@ public final class TrustSyncService: ObservableObject {
                 b = []
             }
 
-            // 合并去重（按 account）
-            var seen: Set<String> = []
-            var merged: [[String: Any]] = []
-            for item in (a + b) {
-                let account = item[kSecAttrAccount as String] as? String ?? UUID().uuidString
-                if seen.insert(account).inserted {
-                    merged.append(item)
-                }
-            }
-            items = merged
+            // Preserve both copies. Conflict resolution must see a tombstone
+            // rather than nondeterministically dropping one by account.
+            items = a + b
         }
         
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
-        
-        let dataItems = items.compactMap { $0[kSecValueData as String] as? Data }
-        return try decodeTrustRecords(from: dataItems, decoder: decoder, source: "Keychain")
+
+        // 单条损坏/错位的 item 只跳过：整库查询失败（copyItems 抛出）才是硬错误。
+        return items.enumerated().compactMap { index, item in
+            guard let data = item[kSecValueData as String] as? Data else {
+                SkyBridgeLogger.p2p.warning(
+                    "Skipped keychain trust item during local load: index=\(index, privacy: .public) reason=missing_value_data"
+                )
+                return nil
+            }
+            guard let account = item[kSecAttrAccount as String] as? String else {
+                SkyBridgeLogger.p2p.warning(
+                    "Skipped keychain trust item during local load: index=\(index, privacy: .public) reason=missing_account_identity"
+                )
+                return nil
+            }
+            let record: TrustRecord
+            do {
+                record = try decoder.decode(TrustRecord.self, from: data)
+            } catch {
+                SkyBridgeLogger.p2p.warning(
+                    "Skipped keychain trust item during local load: index=\(index, privacy: .public) reason=decoding_error error=\(error.localizedDescription, privacy: .private)"
+                )
+                return nil
+            }
+            guard Self.keychainAccount(account, matchesRecordDeviceId: record.deviceId) else {
+                SkyBridgeLogger.p2p.warning(
+                    "Skipped keychain trust item during local load: index=\(index, privacy: .public) reason=account_identity_mismatch"
+                )
+                return nil
+            }
+            return record
+        }
+    }
+
+    nonisolated static func keychainAccount(
+        _ account: String,
+        matchesRecordDeviceId deviceId: String
+    ) -> Bool {
+        account == KeychainConstants.recordPrefix + deviceId
     }
     
     private func decodeTrustRecords(from dataItems: [Data], decoder: JSONDecoder = {
@@ -2295,6 +3195,17 @@ public final class TrustSyncService: ObservableObject {
             throw TrustSyncError.keychainError(status)
         }
         try removeFallbackRecord(deviceId: deviceId)
+    }
+
+    private func deleteAliasRecordFromPersistence(deviceId: String) throws {
+#if DEBUG || SKYBRIDGE_TESTING
+        if let aliasRecordDeletionForTesting {
+            try aliasRecordDeletionForTesting(deviceId)
+            return
+        }
+        guard !usesInMemoryPersistenceForTesting else { return }
+#endif
+        try deleteFromKeychain(deviceId: deviceId)
     }
 
     private func isKeychainEntitlementUnavailable(_ status: OSStatus) -> Bool {
@@ -2357,10 +3268,35 @@ public final class TrustSyncService: ObservableObject {
     }
 
     func setInMemoryPersistenceForTesting(_ enabled: Bool) {
+        if enabled, !usesInMemoryPersistenceForTesting {
+            initialLoadTaskBeforeInMemoryTesting = initialLoadTask
+            isLocalStoreAvailableBeforeInMemoryTesting = isLocalStoreAvailable
+            loadAttemptGeneration &+= 1
+            initialLoadTask = Task { @MainActor in .success(()) }
+            isLocalStoreAvailable = true
+        } else if !enabled, usesInMemoryPersistenceForTesting {
+            loadAttemptGeneration &+= 1
+            initialLoadTask = initialLoadTaskBeforeInMemoryTesting
+            initialLoadTaskBeforeInMemoryTesting = nil
+            isLocalStoreAvailable = isLocalStoreAvailableBeforeInMemoryTesting ?? true
+            isLocalStoreAvailableBeforeInMemoryTesting = nil
+        }
         usesInMemoryPersistenceForTesting = enabled
     }
 
+    /// 以注入的记录源跑一遍真实的加载管线（验签、合并、可用性门）。
+    func loadLocalRecordsForTesting(
+        keychainRecords: @MainActor () throws -> [TrustRecord],
+        fallbackRecords: @MainActor () throws -> [TrustRecord] = { [] }
+    ) async throws {
+        try await loadLocalRecords(
+            keychainRecords: keychainRecords,
+            fallbackRecords: fallbackRecords
+        )
+    }
+
     func removeRecordsForTesting(deviceIds: [String]) async throws {
+        try await requireInitialLoadSucceeded()
         let normalizedDeviceIds = Set(
             deviceIds
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -2369,18 +3305,82 @@ public final class TrustSyncService: ObservableObject {
 
         guard !normalizedDeviceIds.isEmpty else { return }
 
-        for deviceId in normalizedDeviceIds {
-            try deleteFromKeychain(deviceId: deviceId)
-            localCache.removeValue(forKey: deviceId)
+        try await mutationGate.run { [self, normalizedDeviceIds] in
+            for deviceId in normalizedDeviceIds {
+                if !usesInMemoryPersistenceForTesting {
+                    try deleteFromKeychain(deviceId: deviceId)
+                }
+                localCache.removeValue(forKey: deviceId)
+            }
+            updateActiveTrustRecordsFromCache()
         }
+    }
 
-        await updateActiveTrustRecords()
+    func rawTrustRecordForTesting(deviceId: String) async -> TrustRecord? {
+        await awaitInitialLoadCompletion()
+        return localCache[deviceId]
     }
 #endif
     
+    private func hasSafeLegacyUnsignedFields(_ record: TrustRecord) -> Bool {
+        guard record.signaturePayloadVersion == nil,
+              record.legacyP256PublicKey == nil,
+              record.signatureAlgorithm == nil,
+              record.attestationData == nil else {
+            return false
+        }
+        if record.isTombstone {
+            guard let revokedAt = record.revokedAt,
+                  abs(revokedAt.timeIntervalSince(record.updatedAt)) < 0.001,
+                  record.lifecycleState == .revoked else {
+                return false
+            }
+        } else if record.revokedAt != nil {
+            return false
+        }
+        return true
+    }
+
+    private func hasSafePreMultiPinLegacyFields(_ record: TrustRecord) -> Bool {
+        guard hasSafeLegacyUnsignedFields(record) else { return false }
+        return record.protocolIdentityPins?.isEmpty != false
+    }
+
+    private func hasSafeOriginalLegacyFields(_ record: TrustRecord) -> Bool {
+        guard hasSafePreMultiPinLegacyFields(record),
+              record.protocolIdentityBindingsV2?.isEmpty != false,
+              record.protocolPublicKey == nil,
+              record.protocolSigningAlgorithm == nil,
+              record.protocolPublicKeyFingerprint == nil,
+              record.currentDeviceIdMetadata == nil,
+              record.knownDeviceIdsMetadata?.isEmpty != false,
+              record.lifecycleStateMetadata == nil else {
+            return false
+        }
+        return true
+    }
+
  /// 验证记录签名
     public func verifyRecordSignature(_ record: TrustRecord) async throws -> Bool {
-        let signerPublicKey = try await keyManager.getOrCreateIdentityKey().publicKey
+        guard let identityKey = try await keyManager.existingIdentityKeyInfoStrict() else {
+            throw TrustSyncError.verificationFailed
+        }
+        let signerPublicKey = identityKey.publicKey
+
+        if record.signaturePayloadVersion == TrustRecord.currentSignaturePayloadVersion {
+            let completePayload = try createDataToSign(for: record, revoked: record.isTombstone)
+            return try await keyManager.verify(
+                data: completePayload,
+                signature: record.signature,
+                publicKey: signerPublicKey
+            )
+        }
+
+        guard record.signaturePayloadVersion == nil,
+              hasSafeLegacyUnsignedFields(record) else {
+            return false
+        }
+
         let currentPayload = try createDataToSign(for: record, revoked: record.isTombstone)
         if try await keyManager.verify(
             data: currentPayload,
@@ -2411,20 +3411,23 @@ public final class TrustSyncService: ObservableObject {
             return true
         }
 
-        let preMultiPinPayload = try createDataToSign(
-            for: record,
-            revoked: record.isTombstone,
-            includeProtocolIdentityPins: false,
-            includeProtocolIdentityBindingsV2: false
-        )
-        if try await keyManager.verify(
-            data: preMultiPinPayload,
-            signature: record.signature,
-            publicKey: signerPublicKey
-        ) {
-            return true
+        if hasSafePreMultiPinLegacyFields(record) {
+            let preMultiPinPayload = try createDataToSign(
+                for: record,
+                revoked: record.isTombstone,
+                includeProtocolIdentityPins: false,
+                includeProtocolIdentityBindingsV2: false
+            )
+            if try await keyManager.verify(
+                data: preMultiPinPayload,
+                signature: record.signature,
+                publicKey: signerPublicKey
+            ) {
+                return true
+            }
         }
 
+        guard hasSafeOriginalLegacyFields(record) else { return false }
         let legacyPayload = try createLegacyDataToSign(for: record, revoked: record.isTombstone)
         return try await keyManager.verify(
             data: legacyPayload,

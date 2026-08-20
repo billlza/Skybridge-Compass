@@ -993,6 +993,17 @@ if [[ "${MAIN_BUILD_SYSTEM}" == "swiftpm" && -z "${SKYBRIDGE_SWIFTPM_RELEASE_SCR
 fi
 APP_NAME="${SKYBRIDGE_PACKAGE_APP_BUNDLE_NAME}"
 PACKAGE_CONTEXT="${SKYBRIDGE_PACKAGE_CONTEXT:-app}"
+if is_release_distribution_context; then
+  export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1
+  if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then
+    echo "错误：release_dmg 打包要求显式 SKYBRIDGE_PACKAGE_BUILD_ID；禁止使用时间 fallback" >&2
+    exit 1
+  fi
+  if [[ ! "${SKYBRIDGE_PACKAGE_BUILD_ID}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "错误：release_dmg 的 SKYBRIDGE_PACKAGE_BUILD_ID 必须是正整数：${SKYBRIDGE_PACKAGE_BUILD_ID}" >&2
+    exit 1
+  fi
+fi
 PACKAGE_OUTPUT_DIR_OVERRIDE="${SKYBRIDGE_PACKAGE_OUTPUT_DIR:-}"
 APP_DIR="$(skybridge_resolve_package_app_path \
   "${ROOT_DIR}" \
@@ -1096,6 +1107,9 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
     )
     if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
       SWIFTPM_BUILD_ARGS+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
+    fi
+    if is_release_distribution_context; then
+      SWIFTPM_BUILD_ARGS+=(-Xswiftc -warnings-as-errors)
     fi
     swift build \
       "${SWIFTPM_BUILD_ARGS[@]}" \
@@ -1414,6 +1428,10 @@ log "记录打包构建来源: ${BUILD_SOURCE}"
 if [[ -z "${SKYBRIDGE_PACKAGE_BUILD_ID:-}" ]]; then
   SKYBRIDGE_PACKAGE_BUILD_ID="$(date +%Y%m%d%H%M%S)"
 fi
+if [[ ! "${SKYBRIDGE_PACKAGE_BUILD_ID}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "错误：SKYBRIDGE_PACKAGE_BUILD_ID 必须是正整数：${SKYBRIDGE_PACKAGE_BUILD_ID}" >&2
+  exit 1
+fi
 plutil -replace CFBundleVersion -string "${SKYBRIDGE_PACKAGE_BUILD_ID}" "${INFO_PLIST_DST}"
 log "设置打包 Build ID: ${SKYBRIDGE_PACKAGE_BUILD_ID}"
 
@@ -1538,7 +1556,12 @@ build_power_metrics_helper() {
   if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
     swiftpm_build_args+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
   fi
-  swift build "${swiftpm_build_args[@]}" --product "${HELPER_EXECUTABLE}"
+  if is_release_distribution_context; then
+    swiftpm_build_args+=(-Xswiftc -warnings-as-errors)
+  fi
+  swift build \
+    "${swiftpm_build_args[@]}" \
+    --product "${HELPER_EXECUTABLE}"
 }
 
 HELPER_BIN_PATH="$(resolve_helper_bin_path)"

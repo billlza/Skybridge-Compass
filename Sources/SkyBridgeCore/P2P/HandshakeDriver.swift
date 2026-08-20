@@ -132,6 +132,14 @@ enum HandshakeIdentityPinningPolicy {
 ///
 /// 3. 取消语义 (P0 - 11.6)：
 /// - 调用方取消时必须 zeroize + emit event
+struct ProductConnectivityHandshakeAttemptSnapshot: Sendable, Equatable {
+    let localActiveSuite: CryptoSuite
+    let localOfferedSuites: [CryptoSuite]
+    let requirePQC: Bool
+    let allowClassicFallback: Bool
+    let outboundSOAAttemptID: Data?
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 public actor HandshakeDriver {
 
@@ -956,6 +964,17 @@ public actor HandshakeDriver {
 
     public func getEstablishedArbiterLease() -> PeerSessionArbiter.EstablishedLease? {
         establishedArbiterLease
+    }
+
+    func productConnectivityAttemptSnapshot()
+        -> ProductConnectivityHandshakeAttemptSnapshot {
+        ProductConnectivityHandshakeAttemptSnapshot(
+            localActiveSuite: cryptoProvider.activeSuite,
+            localOfferedSuites: offeredSuites ?? [cryptoProvider.activeSuite],
+            requirePQC: policy.requirePQC,
+            allowClassicFallback: policy.allowClassicFallback,
+            outboundSOAAttemptID: soaMetadata?.attemptId
+        )
     }
 
     private func captureCandidateRemoteAuthority(

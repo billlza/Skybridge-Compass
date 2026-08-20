@@ -3,8 +3,24 @@ name: real-device-release-gate
 on:
   workflow_dispatch:
     inputs:
+      candidate_run_id:
+        description: "macos-release-readiness run id containing the immutable signed candidate used by every producer"
+        required: true
+        type: string
+      candidate_run_attempt:
+        description: "Exact candidate workflow run attempt"
+        required: true
+        type: string
       evidence_root:
-        description: "Absolute path on the protected physical-device runner containing the seven completed public-redacted evidence directories"
+        description: "Absolute protected-runner path containing four completed candidate-bound public-redacted evidence directories"
+        required: true
+        type: string
+      ios_archive_identity:
+        description: "Absolute path to the sealed iOS archive identity used by every physical producer"
+        required: true
+        type: string
+      ios_release_testing_ipa:
+        description: "Absolute path to the release-testing IPA installed by every physical producer"
         required: true
         type: string
 
@@ -16,18 +32,71 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify-evidence-environment-protection:
+    runs-on: macos-26
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Require Independent Evidence Approval Environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT_NAME: release-real-device-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release-environment.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/environments/$RELEASE_ENVIRONMENT_NAME" \
+            > "$response"
+          python3 Scripts/validate_release_environment_protection.py \
+            --response "$response" \
+            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+
   validate-and-publish-evidence:
+    needs: verify-evidence-environment-protection
     runs-on: [self-hosted, macOS, skybridge-real-device-release]
     environment: release-real-device-evidence
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
     env:
+      CANDIDATE_WORKFLOW_PATH: .github/workflows/macos-release-readiness.yml
+      CANDIDATE_ARTIFACT_NAME: macos-signed-release-candidate
       SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}
       SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}
+      IOS_ARCHIVE_IDENTITY: ${{ inputs.ios_archive_identity }}
+      IOS_RELEASE_TESTING_IPA: ${{ inputs.ios_release_testing_ipa }}
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
+
+      - name: Revalidate Evidence Approval Environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT_NAME: release-real-device-evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release-environment-after-approval.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/environments/$RELEASE_ENVIRONMENT_NAME" \
+            > "$response"
+          python3 Scripts/validate_release_environment_protection.py \
+            --response "$response" \
+            --expected-name "$RELEASE_ENVIRONMENT_NAME"
 
       - name: Require Exact Clean Producer Source
         shell: bash
@@ -42,20 +111,123 @@ jobs:
             exit 1
           }
 
-      - name: Self-Test Release Evidence Contracts
+      - name: Self-Test Candidate and Evidence Contracts
         shell: bash
         run: |
           set -euo pipefail
+          python3 Scripts/test_macos_release_candidate_identity.py
+          python3 Scripts/test_extract_macos_release_handoff.py
           python3 Scripts/test_verify_ios_distribution_product.py
-          python3 Scripts/test_validate_real_device_release_acceptance_artifact.py
+          python3 -W error Scripts/test_validate_real_device_release_acceptance_artifact.py
+          python3 -W error Scripts/test_validate_product_release_evidence_log.py
+          python3 -W error Scripts/test_ios_product_installation.py
+          python3 -W error Scripts/test_extract_ios_product_release_evidence.py
+          python3 -W error Scripts/test_formal_product_evidence_manifest.py
+          python3 -W error Scripts/test_formal_product_evidence_session_contract.py
           python3 Scripts/test_finalize_release_acceptance_manifests.py
-          python3 Scripts/test_stage_real_device_release_evidence.py
-          python3 Scripts/test_real_device_release_workflow_contract.py
+          python3 -W error Scripts/test_stage_real_device_release_evidence.py
+          python3 -W error Scripts/test_real_device_release_workflow_contract.py
+          bash Scripts/test_real_device_smoke_redaction.sh
+          python3 Scripts/test_ios_app_store_release_transaction.py
 
-      - name: Validate and Stage Physical-Device Evidence
+      - name: Verify Sealed iOS Physical Product Inputs
         shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$IOS_ARCHIVE_IDENTITY" == /* && "$IOS_RELEASE_TESTING_IPA" == /* ]] || {
+            echo "::error::iOS archive identity and release-testing IPA paths must be absolute."
+            exit 1
+          }
+          [[ -f "$IOS_ARCHIVE_IDENTITY" && ! -L "$IOS_ARCHIVE_IDENTITY" ]] || {
+            echo "::error::Sealed iOS archive identity is unavailable or linked."
+            exit 1
+          }
+          [[ -f "$IOS_RELEASE_TESTING_IPA" && ! -L "$IOS_RELEASE_TESTING_IPA" ]] || {
+            echo "::error::Release-testing IPA is unavailable or linked."
+            exit 1
+          }
+          python3 Scripts/ios_physical_release_acceptance.py verify-product \
+            --identity "$IOS_ARCHIVE_IDENTITY" \
+            --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
+
+      - name: Validate Immutable Candidate Run Provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/skybridge-release-candidate"
+          bash Scripts/validate_macos_release_artifact_run.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-run-attempt "$CANDIDATE_RUN_ATTEMPT" \
+            --expected-workflow-path "$CANDIDATE_WORKFLOW_PATH" \
+            --expected-event workflow_dispatch \
+            --expected-head-sha "$GITHUB_SHA" \
+            --expected-head-branch "$GITHUB_REF_NAME" \
+            --artifact "$CANDIDATE_ARTIFACT_NAME" \
+            --provenance-output "$RUNNER_TEMP/skybridge-release-candidate/candidate-run-provenance.json"
+
+      - name: Download Immutable Signed Candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/skybridge-release-candidate/download
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify and Extract Immutable Signed Candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          download_root="$RUNNER_TEMP/skybridge-release-candidate/download"
+          archive="$download_root/macos-signed-release-candidate.tar.gz"
+          checksum="$archive.sha256"
+          candidate_root="$RUNNER_TEMP/skybridge-release-candidate/extracted"
+          [[ -f "$archive" && ! -L "$archive" && -f "$checksum" && ! -L "$checksum" ]] || {
+            echo "::error::Immutable candidate archive or reliability checksum is missing."
+            exit 1
+          }
+          unexpected="$(find "$download_root" -mindepth 1 -maxdepth 1 \
+            ! -name 'macos-signed-release-candidate.tar.gz' \
+            ! -name 'macos-signed-release-candidate.tar.gz.sha256' -print -quit)"
+          [[ -z "$unexpected" ]] || {
+            echo "::error::Immutable candidate artifact contains an unexpected top-level file."
+            exit 1
+          }
+          (
+            cd "$download_root"
+            shasum -a 256 -c "$(basename "$checksum")"
+          )
+          [[ ! -e "$candidate_root" && ! -L "$candidate_root" ]] || {
+            echo "::error::Candidate extraction destination already exists."
+            exit 1
+          }
+          python3 Scripts/extract_macos_release_handoff.py \
+            --archive "$archive" \
+            --destination "$candidate_root"
+          dmg_paths=("$candidate_root"/SkyBridgeCompassPro-*.dmg)
+          [[ "${#dmg_paths[@]}" == "1" && -f "${dmg_paths[0]}" ]] || {
+            echo "::error::Candidate handoff must contain exactly one versioned DMG."
+            exit 1
+          }
+          python3 Scripts/macos_release_candidate_identity.py verify \
+            --identity "$candidate_root/macos-release-candidate.json" \
+            --app "$candidate_root/SkyBridge Compass Pro.app" \
+            --dmg "${dmg_paths[0]}"
+          {
+            echo "SKYBRIDGE_RELEASE_CANDIDATE_ROOT=$candidate_root"
+            echo "SKYBRIDGE_RELEASE_CANDIDATE_MANIFEST=$candidate_root/macos-release-candidate.json"
+            echo "SKYBRIDGE_RELEASE_CANDIDATE_APP_PATH=$candidate_root/SkyBridge Compass Pro.app"
+            echo "SKYBRIDGE_RELEASE_CANDIDATE_DMG_PATH=${dmg_paths[0]}"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate and Stage Four Candidate-Bound Physical Artifacts
         env:
           EVIDENCE_ROOT: ${{ inputs.evidence_root }}
+        shell: bash
         run: |
           set -euo pipefail
           [[ "$EVIDENCE_ROOT" == /* ]] || {
@@ -76,14 +248,13 @@ jobs:
             "real-device-p2p-remote-smoke-public-redacted|p2p-remote"
             "real-device-webrtc-smoke-public-redacted|webrtc-remote"
             "real-device-file-transfer-smoke-public-redacted|file-transfer"
-            "real-device-p2p-security-notice-public-redacted|p2p-notice"
-            "local-webrtc-security-notice-public-redacted|webrtc-notice"
-            "local-macos-security-notice-panel-public-redacted|notice-panel"
           )
-
           staging="$RUNNER_TEMP/skybridge-release-evidence"
-          rm -rf "$staging"
-          mkdir -p "$staging"
+          [[ ! -e "$staging" && ! -L "$staging" ]] || {
+            echo "::error::Evidence staging destination already exists."
+            exit 1
+          }
+          mkdir -m 0700 "$staging"
           source Scripts/real_device_smoke_redaction.sh
           for evidence_spec in "${evidence_specs[@]}"; do
             evidence_name="${evidence_spec%%|*}"
@@ -93,120 +264,99 @@ jobs:
               echo "::error::Missing release evidence directory: $evidence_name"
               exit 1
             }
+            python3 Scripts/macos_release_candidate_identity.py compare \
+              --expected "$SKYBRIDGE_RELEASE_CANDIDATE_MANIFEST" \
+              --actual "$source_path/macos-release-candidate.json"
             python3 Scripts/stage_real_device_release_evidence.py \
               --kind "$evidence_kind" \
               --source "$source_path" \
-              --destination "$staging/$evidence_name"
+              --destination "$staging/$evidence_name" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
             python3 Scripts/stage_real_device_release_evidence.py \
               --kind "$evidence_kind" \
-              --verify "$staging/$evidence_name"
+              --verify "$staging/$evidence_name" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
+            python3 Scripts/macos_release_candidate_identity.py compare \
+              --expected "$SKYBRIDGE_RELEASE_CANDIDATE_MANIFEST" \
+              --actual "$staging/$evidence_name/macos-release-candidate.json"
             skybridge_smoke_check_public_artifacts "$staging/$evidence_name"
-          done
-
-          for evidence_name in \
-            real-device-connectivity-matrix-public-redacted \
-            real-device-p2p-remote-smoke-public-redacted \
-            real-device-webrtc-smoke-public-redacted \
-            real-device-file-transfer-smoke-public-redacted \
-            real-device-p2p-security-notice-public-redacted; do
             python3 Scripts/validate_real_device_release_acceptance_artifact.py \
               --kind production-identity \
               --artifact-dir "$staging/$evidence_name" \
               --expected-source-repository "$GITHUB_REPOSITORY" \
-              --expected-source-sha "$GITHUB_SHA"
+              --expected-source-sha "$GITHUB_SHA" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
+            acceptance_kind="$evidence_kind"
+            [[ "$acceptance_kind" == "p2p-remote" ]] && acceptance_kind="p2p"
+            [[ "$acceptance_kind" == "webrtc-remote" ]] && acceptance_kind="webrtc"
+            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+              --kind "$acceptance_kind" \
+              --artifact-dir "$staging/$evidence_name" \
+              --expected-source-repository "$GITHUB_REPOSITORY" \
+              --expected-source-sha "$GITHUB_SHA" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
           done
-          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
-            --kind p2p \
-            --artifact-dir "$staging/real-device-p2p-remote-smoke-public-redacted" \
-            --expected-source-repository "$GITHUB_REPOSITORY" \
-            --expected-source-sha "$GITHUB_SHA"
-          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
-            --kind webrtc \
-            --artifact-dir "$staging/real-device-webrtc-smoke-public-redacted" \
-            --expected-source-repository "$GITHUB_REPOSITORY" \
-            --expected-source-sha "$GITHUB_SHA"
 
-      - name: Create Mode-Preserving Evidence Archives
+      - name: Archive and Revalidate Exact Evidence Bytes
         shell: bash
         run: |
           set -euo pipefail
-          evidence_names=(
-            "real-device-connectivity-matrix-public-redacted"
-            "real-device-p2p-remote-smoke-public-redacted"
-            "real-device-webrtc-smoke-public-redacted"
-            "real-device-file-transfer-smoke-public-redacted"
-            "real-device-p2p-security-notice-public-redacted"
-            "local-webrtc-security-notice-public-redacted"
-            "local-macos-security-notice-panel-public-redacted"
-          )
-          staging="$RUNNER_TEMP/skybridge-release-evidence"
-          archive_root="$RUNNER_TEMP/skybridge-release-evidence-archives"
-          archive_verification_root="$RUNNER_TEMP/skybridge-release-evidence-archive-verification"
-          rm -rf "$archive_root"
-          rm -rf "$archive_verification_root"
-          mkdir -p "$archive_root"
-          mkdir -p "$archive_verification_root"
-          for evidence_name in "${evidence_names[@]}"; do
-            archive_path="$archive_root/$evidence_name.tar.gz"
-            verification_path="$archive_verification_root/$evidence_name"
-            COPYFILE_DISABLE=1 tar -czf "$archive_path" -C "$staging/$evidence_name" .
-            [[ -s "$archive_path" ]] || {
-              echo "::error::Evidence archive is empty: $evidence_name"
-              exit 1
-            }
-            tar -tzf "$archive_path" >/dev/null
-            python3 Scripts/extract_real_device_release_evidence_archive.py \
-              --archive "$archive_path" \
-              --destination "$verification_path"
-          done
-
           evidence_specs=(
             "real-device-connectivity-matrix-public-redacted|connectivity"
             "real-device-p2p-remote-smoke-public-redacted|p2p-remote"
             "real-device-webrtc-smoke-public-redacted|webrtc-remote"
             "real-device-file-transfer-smoke-public-redacted|file-transfer"
-            "real-device-p2p-security-notice-public-redacted|p2p-notice"
-            "local-webrtc-security-notice-public-redacted|webrtc-notice"
-            "local-macos-security-notice-panel-public-redacted|notice-panel"
           )
+          staging="$RUNNER_TEMP/skybridge-release-evidence"
+          archive_root="$RUNNER_TEMP/skybridge-release-evidence-archives"
+          verification_root="$RUNNER_TEMP/skybridge-release-evidence-verification"
+          mkdir -m 0700 "$archive_root" "$verification_root"
           source Scripts/real_device_smoke_redaction.sh
           for evidence_spec in "${evidence_specs[@]}"; do
             evidence_name="${evidence_spec%%|*}"
             evidence_kind="${evidence_spec#*|}"
-            verification_path="$archive_verification_root/$evidence_name"
+            archive="$archive_root/$evidence_name.tar.gz"
+            verification="$verification_root/$evidence_name"
+            COPYFILE_DISABLE=1 tar -czf "$archive" -C "$staging/$evidence_name" .
+            [[ -s "$archive" ]] || { echo "::error::Evidence archive is empty: $evidence_name"; exit 1; }
+            tar -tzf "$archive" >/dev/null
+            python3 Scripts/extract_real_device_release_evidence_archive.py \
+              --archive "$archive" \
+              --destination "$verification"
             python3 Scripts/stage_real_device_release_evidence.py \
               --kind "$evidence_kind" \
-              --verify "$verification_path"
-            skybridge_smoke_check_public_artifacts "$verification_path"
-          done
-
-          # Validate the exact bytes that will be uploaded, not only the
-          # mutable staging directories from which the archives were created.
-          for evidence_name in \
-            real-device-connectivity-matrix-public-redacted \
-            real-device-p2p-remote-smoke-public-redacted \
-            real-device-webrtc-smoke-public-redacted \
-            real-device-file-transfer-smoke-public-redacted \
-            real-device-p2p-security-notice-public-redacted; do
+              --verify "$verification" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
+            python3 Scripts/macos_release_candidate_identity.py compare \
+              --expected "$SKYBRIDGE_RELEASE_CANDIDATE_MANIFEST" \
+              --actual "$verification/macos-release-candidate.json"
+            skybridge_smoke_check_public_artifacts "$verification"
             python3 Scripts/validate_real_device_release_acceptance_artifact.py \
               --kind production-identity \
-              --artifact-dir "$archive_verification_root/$evidence_name" \
+              --artifact-dir "$verification" \
               --expected-source-repository "$GITHUB_REPOSITORY" \
-              --expected-source-sha "$GITHUB_SHA"
+              --expected-source-sha "$GITHUB_SHA" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
+            acceptance_kind="$evidence_kind"
+            [[ "$acceptance_kind" == "p2p-remote" ]] && acceptance_kind="p2p"
+            [[ "$acceptance_kind" == "webrtc-remote" ]] && acceptance_kind="webrtc"
+            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+              --kind "$acceptance_kind" \
+              --artifact-dir "$verification" \
+              --expected-source-repository "$GITHUB_REPOSITORY" \
+              --expected-source-sha "$GITHUB_SHA" \
+              --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
+              --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
           done
-          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
-            --kind p2p \
-            --artifact-dir "$archive_verification_root/real-device-p2p-remote-smoke-public-redacted" \
-            --expected-source-repository "$GITHUB_REPOSITORY" \
-            --expected-source-sha "$GITHUB_SHA"
-          python3 Scripts/validate_real_device_release_acceptance_artifact.py \
-            --kind webrtc \
-            --artifact-dir "$archive_verification_root/real-device-webrtc-smoke-public-redacted" \
-            --expected-source-repository "$GITHUB_REPOSITORY" \
-            --expected-source-sha "$GITHUB_SHA"
 
       - name: Upload Connectivity Matrix Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: real-device-connectivity-matrix-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-connectivity-matrix-public-redacted.tar.gz
@@ -214,7 +364,7 @@ jobs:
           retention-days: 30
 
       - name: Upload P2P Remote Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: real-device-p2p-remote-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-remote-smoke-public-redacted.tar.gz
@@ -222,7 +372,7 @@ jobs:
           retention-days: 30
 
       - name: Upload WebRTC Remote Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: real-device-webrtc-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-webrtc-smoke-public-redacted.tar.gz
@@ -230,33 +380,20 @@ jobs:
           retention-days: 30
 
       - name: Upload File Transfer Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: real-device-file-transfer-smoke-public-redacted
           path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-file-transfer-smoke-public-redacted.tar.gz
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload P2P Notice Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: real-device-p2p-security-notice-public-redacted
-          path: ${{ runner.temp }}/skybridge-release-evidence-archives/real-device-p2p-security-notice-public-redacted.tar.gz
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload WebRTC Notice Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: local-webrtc-security-notice-public-redacted
-          path: ${{ runner.temp }}/skybridge-release-evidence-archives/local-webrtc-security-notice-public-redacted.tar.gz
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload macOS Notice Panel Evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: local-macos-security-notice-panel-public-redacted
-          path: ${{ runner.temp }}/skybridge-release-evidence-archives/local-macos-security-notice-panel-public-redacted.tar.gz
-          if-no-files-found: error
-          retention-days: 30
+      - name: Remove Candidate and Evidence Working Copies
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/rm -rf \
+            "$RUNNER_TEMP/skybridge-release-candidate" \
+            "$RUNNER_TEMP/skybridge-release-evidence" \
+            "$RUNNER_TEMP/skybridge-release-evidence-archives" \
+            "$RUNNER_TEMP/skybridge-release-evidence-verification"

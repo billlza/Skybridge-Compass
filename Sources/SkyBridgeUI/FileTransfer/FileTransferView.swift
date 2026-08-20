@@ -860,11 +860,20 @@ private struct ModernTransferRowView: View {
         .onAppear {
             if transfer.status == .transferring {
                 isAnimating = true
+            } else if transfer.status == .completed {
+                FileTransferManager.shared.recordProductFileTransferCompletionVisible(
+                    for: transfer
+                )
             }
         }
         .onChange(of: transfer.status) { _, newStatus in
             withAnimation {
                 isAnimating = newStatus == .transferring
+            }
+            if newStatus == .completed {
+                FileTransferManager.shared.recordProductFileTransferCompletionVisible(
+                    for: transfer
+                )
             }
         }
     }
@@ -924,6 +933,12 @@ private struct CompactTransferRowView: View {
             Spacer()
         }
         .padding(.vertical, 4)
+        .onAppear {
+            guard transfer.status == .completed else { return }
+            FileTransferManager.shared.recordProductFileTransferCompletionVisible(
+                for: transfer
+            )
+        }
     }
 
     private func formatDate(_ date: Date) -> String {
@@ -1063,6 +1078,12 @@ private struct EnhancedHistoryRowView: View {
             if let scanResult = transfer.scanResult {
                 ScanDetailSheet(result: scanResult)
             }
+        }
+        .onAppear {
+            guard transfer.status == .completed else { return }
+            FileTransferManager.shared.recordProductFileTransferCompletionVisible(
+                for: transfer
+            )
         }
     }
 

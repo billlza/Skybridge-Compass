@@ -4,6 +4,78 @@ import XCTest
 @testable import SkyBridgeCompass_iOS
 
 @available(iOS 17.0, *)
+final class WebRTCRemoteMediaAdmissionStateTests: XCTestCase {
+    func testTracksAreDisabledUntilExactStreamAdmissionAndRevocationDisablesThemAgain() {
+        var state = WebRTCRemoteMediaAdmissionState()
+        XCTAssertFalse(state.videoEnabled)
+        XCTAssertFalse(state.audioEnabled)
+
+        XCTAssertTrue(state.setVideoEnabled(true))
+        XCTAssertTrue(state.setAudioEnabled(true))
+        XCTAssertTrue(state.videoEnabled)
+        XCTAssertTrue(state.audioEnabled)
+
+        XCTAssertTrue(state.setVideoEnabled(false))
+        XCTAssertTrue(state.setAudioEnabled(false))
+        XCTAssertFalse(state.videoEnabled)
+        XCTAssertFalse(state.audioEnabled)
+    }
+
+    func testReplacementTracksInheritCurrentAdmissionAndCloseCannotReopenMedia() {
+        var state = WebRTCRemoteMediaAdmissionState()
+        XCTAssertTrue(state.setVideoEnabled(true))
+        XCTAssertTrue(state.setAudioEnabled(true))
+
+        let replacementVideoEnabled = state.videoEnabled
+        let replacementAudioEnabled = state.audioEnabled
+        XCTAssertTrue(replacementVideoEnabled)
+        XCTAssertTrue(replacementAudioEnabled)
+
+        state.close()
+        XCTAssertTrue(state.isClosed)
+        XCTAssertFalse(state.videoEnabled)
+        XCTAssertFalse(state.audioEnabled)
+        XCTAssertFalse(state.setVideoEnabled(true))
+        XCTAssertFalse(state.setAudioEnabled(true))
+        XCTAssertFalse(state.videoEnabled)
+        XCTAssertFalse(state.audioEnabled)
+    }
+
+    func testSessionWiresEveryNewOrReplacementTrackThroughTheAdmissionState() throws {
+        let source = try String(
+            contentsOfFile: repositoryRoot()
+                .appendingPathComponent(
+                    "SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift"
+                )
+                .path,
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(source.contains("remoteVideoAdmissionEnabled"))
+        XCTAssertFalse(source.contains("remoteAudioAdmissionEnabled"))
+        XCTAssertTrue(source.contains("track.isEnabled = remoteMediaAdmission.videoEnabled"))
+        XCTAssertEqual(
+            source.components(separatedBy: "track?.isEnabled = self.remoteMediaAdmission.audioEnabled").count - 1,
+            2
+        )
+        XCTAssertTrue(source.contains("audioTransceiver.receiver.track?.isEnabled = remoteMediaAdmission.audioEnabled"))
+        XCTAssertTrue(source.contains("remoteMediaAdmission.close()"))
+    }
+
+    private func repositoryRoot() -> URL {
+        var current = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        while !FileManager.default.fileExists(
+            atPath: current.appendingPathComponent("project.yml").path
+        ) {
+            let parent = current.deletingLastPathComponent()
+            precondition(parent.path != current.path, "Could not locate repository root")
+            current = parent
+        }
+        return current
+    }
+}
+
+@available(iOS 17.0, *)
 final class WebRTCSignalingFaultInjectionTests: XCTestCase {
     @MainActor
     func testFileTransferOwnerRejectsSameSessionIDReplacement() {

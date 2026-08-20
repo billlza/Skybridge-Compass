@@ -13,6 +13,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import finalize_release_acceptance_manifests as finalizer
+import ios_physical_release_acceptance as physical
+import ios_release_archive_identity as archive_identity
+
+
+APP_UUIDS = [
+    {"architecture": "arm64", "uuid": "11111111-1111-1111-1111-111111111111"}
+]
+WIDGET_UUIDS = [
+    {"architecture": "arm64", "uuid": "22222222-2222-2222-2222-222222222222"}
+]
 
 
 class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
@@ -27,6 +37,31 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
         public_directory = root / "public"
         private_directory.mkdir(mode=0o700)
         public_directory.mkdir(mode=0o700)
+        identity = archive_identity.validate_identity(
+            {
+                "schemaVersion": 1,
+                "identityPurpose": archive_identity.IDENTITY_PURPOSE,
+                "archiveTreeSha256": "3" * 64,
+                "archiveFileCount": 12,
+                "archiveTotalBytes": 8192,
+                "appExecutableUUIDs": APP_UUIDS,
+                "widgetExecutableUUIDs": WIDGET_UUIDS,
+                "debugSymbolsVerified": True,
+                "releaseTestingIpaSha256": "4" * 64,
+                "sourceRepository": "example/skybridge",
+                "sourceCommit": "1" * 40,
+                "sourceInputDigest": "2" * 64,
+                "releaseVersion": "1.0.2",
+                "releaseBuild": "2",
+                "appBundleIdentifier": archive_identity.APP_BUNDLE_IDENTIFIER,
+                "widgetBundleIdentifier": archive_identity.WIDGET_BUNDLE_IDENTIFIER,
+                "productSurface": "production",
+                "buildConfiguration": "Release",
+                "swiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
+            }
+        )
+        identity_path = root / "ios-release-archive-identity.json"
+        identity_path.write_bytes(archive_identity.canonical_bytes(identity))
         payload = {
             "acceptanceEligible": False,
             "cleanupComplete": False,
@@ -43,16 +78,13 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             "iosProductionIdentityProtection": "secureEnclaveRequired",
             "iosProductionIdentityLifecycleVerified": True,
             "iosProductionIdentityProof": True,
+            "iosReleaseArchive": physical.expected_binding(identity),
+            "macRuntimeExecutable": "SkyBridgeCompassApp",
+            "macProductSurface": "production",
+            "macCandidateIdentityVerified": True,
+            "macDebugBuild": False,
+            "macTestingCompilationCondition": False,
         }
-        if transport == "p2p":
-            payload.update(
-                {
-                    "macHostLaunchMode": "packaged",
-                    "macHostDiagnosticOnly": False,
-                    "identitySourceStaplerValid": True,
-                    "identitySourceGatekeeperAccepted": True,
-                }
-            )
         raw = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         private_path = private_directory / finalizer.MANIFEST_FILE_NAME
         public_path = public_directory / finalizer.MANIFEST_FILE_NAME
@@ -69,6 +101,10 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             finally:
                 os.close(directory_descriptor)
         return private_path, public_path, raw
+
+    @staticmethod
+    def identity_path(private_manifest: Path) -> Path:
+        return private_manifest.parent.parent / "ios-release-archive-identity.json"
 
     @staticmethod
     def write_all(descriptor: int, content: bytes) -> None:
@@ -100,6 +136,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
         self.assertIs(payload["cleanupComplete"], True)
         self.assertIs(payload["diagnosticOnly"], False)
         self.assertEqual(payload["finalizationOrder"], finalizer.FINALIZATION_ORDER)
+        self.assertIn("iosReleaseArchive", payload)
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.stat().st_uid, os.geteuid())
         self.assertEqual(path.stat().st_nlink, 1)
@@ -116,6 +153,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             finalizer.finalize_release_acceptance_manifests(
                 private_path,
                 public_path,
+                archive_identity=self.identity_path(private_path),
                 fault_injector=record_phase,
             )
 
@@ -127,7 +165,39 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 phases.index("before-public-final-replace"),
             )
 
-    def test_p2p_signed_lab_host_cannot_be_finalized_as_acceptance(self) -> None:
+    def test_candidate_requires_exact_identity_and_preserves_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            private_path, public_path, original = self.create_manifests(Path(raw_root))
+            with self.assertRaisesRegex(
+                finalizer.FinalizationError,
+                "requires an explicit sealed iOS archive identity",
+            ):
+                finalizer.finalize_release_acceptance_manifests(
+                    private_path,
+                    public_path,
+                )
+            self.assert_pre_cleanup_red(private_path, original)
+            self.assert_pre_cleanup_red(public_path, original)
+
+            for path in (private_path, public_path):
+                payload = self.read_payload(path)
+                payload["iosReleaseArchive"]["releaseBuild"] = "3"
+                path.write_text(
+                    json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                path.chmod(0o600)
+            with self.assertRaisesRegex(
+                finalizer.FinalizationError,
+                "does not bind the exact iOS archive and IPA",
+            ):
+                finalizer.finalize_release_acceptance_manifests(
+                    private_path,
+                    public_path,
+                    archive_identity=self.identity_path(private_path),
+                )
+
+    def test_p2p_nonproduct_mac_cannot_be_finalized_as_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             private_path, public_path, _ = self.create_manifests(
                 Path(raw_root),
@@ -135,10 +205,8 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             )
             for path in (private_path, public_path):
                 payload = self.read_payload(path)
-                payload["macHostLaunchMode"] = "packaged-lab"
-                payload["macHostDiagnosticOnly"] = True
-                payload["identitySourceStaplerValid"] = False
-                payload["identitySourceGatekeeperAccepted"] = False
+                payload["macProductSurface"] = "diagnostic"
+                payload["macCandidateIdentityVerified"] = False
                 path.write_text(
                     json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
@@ -147,11 +215,12 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 finalizer.FinalizationError,
-                "macHostLaunchMode must be packaged",
+                "production macOS product surface",
             ):
                 finalizer.finalize_release_acceptance_manifests(
                     private_path,
                     public_path,
+                    archive_identity=self.identity_path(private_path),
                 )
 
             self.assertIs(self.read_payload(private_path)["acceptanceEligible"], False)
@@ -169,6 +238,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 finalizer.finalize_release_acceptance_manifests(
                     private_path,
                     public_path,
+                    archive_identity=self.identity_path(private_path),
                     fault_injector=fail_private_replace,
                 )
 
@@ -205,6 +275,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 finalizer.finalize_release_acceptance_manifests(
                     private_path,
                     public_path,
+                    archive_identity=self.identity_path(private_path),
                 )
 
             self.assertIs(self.read_payload(private_path)["acceptanceEligible"], False)
@@ -231,6 +302,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 finalizer.finalize_release_acceptance_manifests(
                     private_path,
                     public_path,
+                    archive_identity=self.identity_path(private_path),
                     fault_injector=corrupt_private_before_verify,
                 )
 
@@ -256,6 +328,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 finalizer.finalize_release_acceptance_manifests(
                     private_path,
                     public_path,
+                    archive_identity=self.identity_path(private_path),
                     fault_injector=fail_public_replace,
                 )
 
@@ -271,7 +344,11 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 private_path.unlink()
                 private_path.mkdir(mode=0o700)
                 with self.assertRaisesRegex(finalizer.FinalizationError, "regular file"):
-                    finalizer.finalize_release_acceptance_manifests(private_path, public_path)
+                    finalizer.finalize_release_acceptance_manifests(
+                        private_path,
+                        public_path,
+                        archive_identity=self.identity_path(private_path),
+                    )
                 self.assert_pre_cleanup_red(public_path, original)
 
         with self.subTest("mode"):
@@ -279,7 +356,11 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 private_path, public_path, original = self.create_manifests(Path(raw_root))
                 private_path.chmod(0o640)
                 with self.assertRaisesRegex(finalizer.FinalizationError, "mode must be 0600"):
-                    finalizer.finalize_release_acceptance_manifests(private_path, public_path)
+                    finalizer.finalize_release_acceptance_manifests(
+                        private_path,
+                        public_path,
+                        archive_identity=self.identity_path(private_path),
+                    )
                 self.assert_pre_cleanup_red(public_path, original)
 
         with self.subTest("hard-link"):
@@ -290,7 +371,11 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                     finalizer.FinalizationError,
                     "exactly one filesystem link",
                 ):
-                    finalizer.finalize_release_acceptance_manifests(private_path, public_path)
+                    finalizer.finalize_release_acceptance_manifests(
+                        private_path,
+                        public_path,
+                        archive_identity=self.identity_path(private_path),
+                    )
                 self.assert_pre_cleanup_red(public_path, original)
 
         with self.subTest("symlink"):
@@ -300,7 +385,11 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 private_path.rename(target)
                 private_path.symlink_to(target.name)
                 with self.assertRaisesRegex(finalizer.FinalizationError, "without following links"):
-                    finalizer.finalize_release_acceptance_manifests(private_path, public_path)
+                    finalizer.finalize_release_acceptance_manifests(
+                        private_path,
+                        public_path,
+                        archive_identity=self.identity_path(private_path),
+                    )
                 self.assert_pre_cleanup_red(public_path, original)
 
         with self.subTest("size"):
@@ -309,7 +398,11 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
                 private_path.write_bytes(b"x" * (finalizer.MAX_MANIFEST_BYTES + 1))
                 private_path.chmod(0o600)
                 with self.assertRaisesRegex(finalizer.FinalizationError, "manifest size"):
-                    finalizer.finalize_release_acceptance_manifests(private_path, public_path)
+                    finalizer.finalize_release_acceptance_manifests(
+                        private_path,
+                        public_path,
+                        archive_identity=self.identity_path(private_path),
+                    )
                 self.assert_pre_cleanup_red(public_path, original)
 
 

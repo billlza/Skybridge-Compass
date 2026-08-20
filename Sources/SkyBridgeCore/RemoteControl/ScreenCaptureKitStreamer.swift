@@ -65,6 +65,7 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
     private var configuredVideoToolboxDataRateBurstLimitBytes = 0
     private var configuredVideoToolboxDataRateBurstWindowMs = 0
     private var capturedDisplayID: CGDirectDisplayID?
+    private var injectionMappingLease: RemoteControlInjectionMappingLease?
     /// 控制端请求采集的显示器（nil = 主屏）。用于显示选择与拓扑变化判断。
     private var requestedDisplayID: CGDirectDisplayID?
     private var capturedDisplayPixelSize: CGSize = .zero
@@ -178,7 +179,8 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         lowLatencyMode: Bool? = nil,
         videoCompressionLevelPercent: Int? = nil,
         bitstreamFormat: EncodedBitstreamFormat = .native,
-        preferredDisplayID: CGDirectDisplayID? = nil
+        preferredDisplayID: CGDirectDisplayID? = nil,
+        inputOwner: RemoteControlInputOwner? = nil
     ) async throws {
         guard !started else { return }
         started = true
@@ -259,17 +261,6 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         )
         visibleWidth = Int(visibleSize.width)
         visibleHeight = Int(visibleSize.height)
-        // 发布鼠标注入坐标映射的单一真相：控制端坐标位于「可见帧像素空间」(visibleWidth×visibleHeight)，
-        // 注入侧据此 + 实际采集显示器的 CGDisplayBounds 还原为全局点坐标（含非主屏原点偏移）。
-        // 仅视频采集流参与；音频专用流 (captureVideoOutput == false) 不发布，避免覆盖视频流映射。
-        if captureVideoOutput {
-            RemoteControlInjectionMappingStore.publish(
-                RemoteControlInjectionMapping(
-                    displayID: display.displayID,
-                    visibleSize: CGSize(width: visibleWidth, height: visibleHeight)
-                )
-            )
-        }
         width = Int(encodedBackingSize.width)
         height = Int(encodedBackingSize.height)
         let selectedQueueDepth = Self.captureQueueDepth(
@@ -385,11 +376,24 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
                     preserveExactVisibleSize: preserveExactVisibleSize,
                     lowLatencyMode: lowLatencyMode,
                     videoCompressionLevelPercent: videoCompressionLevelPercent,
-                    bitstreamFormat: bitstreamFormat
+                    bitstreamFormat: bitstreamFormat,
+                    preferredDisplayID: preferredDisplayID,
+                    inputOwner: inputOwner
                 )
                 return
             }
             throw error
+        }
+        // Publish only after ScreenCaptureKit has actually started. Video captures
+        // without a remote-input owner remain deliberately non-injectable.
+        if captureVideoOutput, let inputOwner {
+            injectionMappingLease = RemoteControlInjectionMappingStore.publish(
+                RemoteControlInjectionMapping(
+                    displayID: display.displayID,
+                    visibleSize: CGSize(width: visibleWidth, height: visibleHeight)
+                ),
+                for: inputOwner
+            )
         }
         startVideoCadenceTimerIfNeeded(captureVideoOutput: captureVideoOutput)
         armFirstEncodedFrameWatchdogIfNeeded(captureVideoOutput: captureVideoOutput)
@@ -448,12 +452,19 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
 
  /// 停止采集与编码
     @MainActor
-    func stop() {
+    func stop(inputOwner: RemoteControlInputOwner? = nil) {
         guard started else { return }
         started = false
-        // 清除注入坐标映射（仅视频采集流；在下方把 captureVideoOutput 复位为 true 之前读取本会话的真实值）。
-        if captureVideoOutput {
-            RemoteControlInjectionMappingStore.publish(nil)
+        // The stream's published owner is authoritative. `clear(for:)` cannot
+        // remove a replacement mapping, even if this old stream stops later.
+        if let publishedLease = injectionMappingLease {
+            if let inputOwner, inputOwner != publishedLease.owner {
+                logger.error(
+                    "Remote-control capture stopped with a non-owning input lease"
+                )
+            }
+            RemoteControlInjectionMappingStore.clear(publishedLease)
+            injectionMappingLease = nil
         }
         stateLock.lock()
         lastSampleBufferAt = .distantPast

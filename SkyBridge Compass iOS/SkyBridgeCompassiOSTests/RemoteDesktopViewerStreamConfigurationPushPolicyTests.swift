@@ -98,7 +98,9 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
                 transaction: replacement,
                 streamRefreshToken: 7,
                 audioEndpointPresent: true,
-                screenFrameTransport: "webrtc-native-main"
+                screenFrameTransport: "webrtc-native-main",
+                framePresentationAckVersion:
+                    RemoteDesktopFramePresentationAcknowledgement.currentVersion
             )
 
         XCTAssertFalse(
@@ -108,7 +110,9 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
                     transaction: first,
                     streamRefreshToken: 7,
                     audioEndpointPresent: true,
-                    screenFrameTransport: "webrtc-native-main"
+                    screenFrameTransport: "webrtc-native-main",
+                    framePresentationAckVersion:
+                        RemoteDesktopFramePresentationAcknowledgement.currentVersion
                 ),
                 expectation: expectation
             )
@@ -120,11 +124,63 @@ final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
                     transaction: replacement,
                     streamRefreshToken: 7,
                     audioEndpointPresent: true,
-                    screenFrameTransport: "webrtc-native-main"
+                    screenFrameTransport: "webrtc-native-main",
+                    framePresentationAckVersion:
+                        RemoteDesktopFramePresentationAcknowledgement.currentVersion
                 ),
                 expectation: expectation
             )
         )
+        XCTAssertTrue(
+            RemoteDesktopViewerStreamConfigurationPushPolicy.acknowledgementMatches(
+                .init(
+                    acceptedAt: 3,
+                    transaction: replacement,
+                    streamRefreshToken: 7,
+                    audioEndpointPresent: true,
+                    screenFrameTransport: "webrtc-native-main",
+                    framePresentationAckVersion: nil
+                ),
+                expectation: expectation
+            ),
+            "A legacy host must keep streaming when it omits the optional capability receipt"
+        )
+        XCTAssertFalse(
+            RemoteDesktopViewerStreamConfigurationPushPolicy.acknowledgementMatches(
+                .init(
+                    acceptedAt: 4,
+                    transaction: replacement,
+                    streamRefreshToken: 7,
+                    audioEndpointPresent: true,
+                    screenFrameTransport: "webrtc-native-main",
+                    framePresentationAckVersion: 2
+                ),
+                expectation: expectation
+            )
+        )
+    }
+
+    func testFramePresentationAcknowledgementGateRejectsDuplicateAndStaleRelease() {
+        let first = RemoteDesktopFramePresentationContext(
+            sequenceNumber: 1,
+            streamTransaction: RemoteDesktopStreamConfigurationTransaction(),
+            streamEpoch: 7
+        )
+        let replacement = RemoteDesktopFramePresentationContext(
+            sequenceNumber: 2,
+            streamTransaction: RemoteDesktopStreamConfigurationTransaction(),
+            streamEpoch: 8
+        )
+        var gate = RemoteDesktopManager.FramePresentationAcknowledgementGate()
+
+        XCTAssertTrue(gate.reserve(first))
+        XCTAssertFalse(gate.reserve(first))
+        gate.release(replacement)
+        XCTAssertTrue(gate.isCurrent(first))
+        gate.release(first)
+        XCTAssertTrue(gate.reserve(replacement))
+        gate.reset()
+        XCTAssertFalse(gate.isCurrent(replacement))
     }
     func testPendingAudioBindingIsNotUsableBeforeExactTransportIsReady() {
         XCTAssertFalse(

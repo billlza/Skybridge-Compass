@@ -68,21 +68,23 @@ pub(super) fn append_entries(
     entries.push(CheckCoverageEntry {
         id: "remote_control_notice_panel_position_gate",
         domain: "security",
-        command: "skybridge check remote-control-notice --artifact-dir <dir> --transport p2p|webrtc --require-panel",
+        command: "Scripts/validate_real_device_release_acceptance_artifact.py --kind p2p|webrtc --artifact-dir <canonical-remote-artifact>",
         covered: source_has_all(
             source,
             &[
                 "recordPanelPresentedEvidence",
                 "remoteControlNoticePanelPresented",
-                "run_remote_control_notice_panel_probe.sh",
-                "LocalMacosSecurityNoticePanel",
-                "panel_pending_top_center",
-                "panel_active_buttons",
-                "panel_visible_until_disconnect",
+                "remoteControlNoticeHumanApproved",
+                "remoteControlNoticeProductPath",
+                "remoteControlNoticePanelPresented",
+                "noticeEvidenceSource",
+                "normal-product-session",
+                "macRuntimeExecutable",
+                "SkyBridgeCompassApp",
                 "testSecurityNoticePanelEmitsVerifiableTopCenterEvidence",
             ],
         ),
-        evidence: "remote-control security notice artifacts prove the production AppKit panel is top-centered, exposes approval/disconnect actions, and stays visible until disconnect".to_owned(),
+        evidence: "canonical P2P/WebRTC artifacts must bind the normal signed product session to panel presentation, an explicit human decision, active secure media/input effects, and disconnect; local probes remain diagnostic-only".to_owned(),
     });
     entries.push(CheckCoverageEntry {
         id: "remote_control_notice_identity_redaction_gate",

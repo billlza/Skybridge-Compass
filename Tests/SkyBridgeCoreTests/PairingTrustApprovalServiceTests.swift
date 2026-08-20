@@ -148,6 +148,65 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         )
     }
 
+    func testPostCommitCleanupResidueStillCommitsRequesterApproval() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        service.setProtocolIdentityPinErrorForTesting(
+            TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit("error_domain=test code=1")
+        )
+        defer { service.setProtocolIdentityPinErrorForTesting(nil) }
+        let requesterId = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "d", count: 64)
+        let transactionId = UUID()
+        let requestHash = String(repeating: "1", count: 64)
+        let candidateHash = String(repeating: "2", count: 64)
+        let sasHash = String(repeating: "3", count: 64)
+
+        let approvalTask = Task { @MainActor in
+            await service.stageTestProtocolIdentityBindingRequesterApproval(
+                peerEndpoint: "lan-pin-residue-test",
+                requesterDeviceIds: [requesterId],
+                displayName: requesterId,
+                platform: "iOS",
+                verificationCode: "123456",
+                requesterProtocolSigningAlgorithm: .mlDSA65,
+                requesterProtocolIdentityFingerprint: fingerprint,
+                transactionId: transactionId,
+                requestHashHex: requestHash,
+                candidateHashHex: candidateHash,
+                sasTranscriptHashHex: sasHash
+            )
+        }
+
+        let request = try await waitForPendingRequest(service)
+        service.resolve(request, decision: .allowOnce)
+
+        let approvalDecision = await approvalTask.value
+        XCTAssertEqual(approvalDecision, .allowOnce)
+        let commitDecision = await service.commitProtocolIdentityBindingRequesterApproval(
+            decision: approvalDecision,
+            transactionId: transactionId,
+            requesterDeviceIds: [requesterId],
+            requesterProtocolSigningAlgorithm: .mlDSA65,
+            requesterProtocolIdentityFingerprint: fingerprint,
+            requestHashHex: requestHash,
+            candidateHashHex: candidateHash,
+            sasTranscriptHashHex: sasHash
+        )
+        XCTAssertEqual(
+            commitDecision,
+            .allowOnce,
+            "Post-commit cleanup residue must not reject an approval whose authority pin already committed."
+        )
+        let cachedFingerprints = await PeerProtocolIdentityBootstrapStore.shared
+            .trustedFingerprints(forCandidates: [requesterId])
+        XCTAssertTrue(
+            cachedFingerprints.contains(fingerprint),
+            "The bootstrap-cache upsert must still run after a success-with-residue pin commit."
+        )
+        _ = await PeerProtocolIdentityBootstrapStore.shared.clear(deviceIds: [requesterId])
+    }
+
     func testCancellingRequesterApprovalRejectsAndClearsPendingPrompt() async throws {
         let service = PairingTrustApprovalService.shared
         service.userDismissedCurrentPrompt()

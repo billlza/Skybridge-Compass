@@ -233,7 +233,11 @@ struct CoordinateConversionIntegrationTests {
             timestamp: 1234567890
         )
 
-        let point = RemoteControlManager.mouseInjectionPoint(for: event)
+        let point = RemoteControlManager.mouseInjectionPoint(
+            for: event,
+            visibleSize: CGSize(width: 640, height: 360),
+            displayBounds: CGRect(x: 0, y: 0, width: 640, height: 360)
+        )
 
         #expect(point.x == 320)
         #expect(point.y == 180)

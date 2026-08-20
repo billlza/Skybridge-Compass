@@ -32,6 +32,7 @@ public enum RemoteMessageType: String, Codable, Sendable {
     // The payload is the shared, transaction-correlated acknowledgement from
     // SkyBridgeProtocolCore; LAN and WebRTC both consume the same contract.
     case streamConfigurationAck = "streamConfigurationAck"
+    case framePresentationAck = "framePresentationAck"
     case damageReport = "damageReport"
     case cursorUpdate = "cursorUpdate"
     case overlayUpdate = "overlayUpdate"

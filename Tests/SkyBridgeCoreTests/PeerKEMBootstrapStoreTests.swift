@@ -815,6 +815,95 @@ final class PeerKEMBootstrapStoreTests: XCTestCase {
         await store.clearForTesting()
     }
 
+    func testAuthorityBoundMutationRetainsMatchingCurrentSignedRefreshAsExactLease() async throws {
+        let store = PeerKEMBootstrapStore.shared
+        await store.clearForTesting()
+
+        let canonicalId = "id:\(UUID().uuidString.lowercased())"
+        let signedKey = Data(repeating: 0x71, count: 1_216)
+        let pairingKey = Data(repeating: 0x72, count: 1_184)
+        let exchange = try makeSignedKEMRefreshExchange(
+            deviceId: canonicalId,
+            kemPublicKey: signedKey,
+            generation: 60
+        )
+        try await store.upsertSignedKEMRefresh(
+            deviceIds: [canonicalId],
+            payload: exchange.payload,
+            request: exchange.request,
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint],
+            minimumGeneration: nil
+        )
+
+        let receipt = try await store.upsertAuthorityBoundPairingKEM(
+            deviceIds: [canonicalId],
+            kemPublicKeys: [
+                KEMPublicKeyInfo(
+                    suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                    publicKey: pairingKey
+                )
+            ],
+            verifiedProtocolFingerprint: exchange.payload.protocolIdentityFingerprint
+        )
+
+        let receiptIsCurrent = await store.isCurrentAuthorityBoundPairingKEMMutation(receipt)
+        let didRollback = await store.rollbackAuthorityBoundPairingKEMMutation(receipt)
+        XCTAssertTrue(receiptIsCurrent)
+        XCTAssertTrue(didRollback)
+        let retained = await store.signedRefreshKEMPublicKeys(
+            forCandidates: [canonicalId],
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint]
+        )
+        XCTAssertEqual(retained[CryptoSuite.xwingMLDSA.wireId], signedKey)
+        XCTAssertNil(retained[CryptoSuite.mlkem768MLDSA65.wireId])
+
+        await store.clearForTesting()
+    }
+
+    func testAuthorityBoundMutationRejectsCurrentSignedRefreshForDifferentAuthority() async throws {
+        let store = PeerKEMBootstrapStore.shared
+        await store.clearForTesting()
+
+        let canonicalId = "id:\(UUID().uuidString.lowercased())"
+        let signedKey = Data(repeating: 0x81, count: 1_216)
+        let exchange = try makeSignedKEMRefreshExchange(
+            deviceId: canonicalId,
+            kemPublicKey: signedKey,
+            generation: 61
+        )
+        try await store.upsertSignedKEMRefresh(
+            deviceIds: [canonicalId],
+            payload: exchange.payload,
+            request: exchange.request,
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint],
+            minimumGeneration: nil
+        )
+
+        do {
+            _ = try await store.upsertAuthorityBoundPairingKEM(
+                deviceIds: [canonicalId],
+                kemPublicKeys: [
+                    KEMPublicKeyInfo(
+                        suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+                        publicKey: Data(repeating: 0x82, count: 1_184)
+                    )
+                ],
+                verifiedProtocolFingerprint: String(repeating: "f", count: 64)
+            )
+            XCTFail("A signed refresh for another authority must fail the pairing transaction")
+        } catch let error as PeerKEMBootstrapStore.AuthorityBoundPairingKEMMutationError {
+            XCTAssertEqual(error, .signedRefreshAuthorityConflict)
+        }
+
+        let retained = await store.signedRefreshKEMPublicKeys(
+            forCandidates: [canonicalId],
+            pinnedProtocolFingerprints: [exchange.payload.protocolIdentityFingerprint]
+        )
+        XCTAssertEqual(retained[CryptoSuite.xwingMLDSA.wireId], signedKey)
+
+        await store.clearForTesting()
+    }
+
     private func makeSignedKEMRefreshExchange(
         deviceId: String,
         aliases: [String] = [],

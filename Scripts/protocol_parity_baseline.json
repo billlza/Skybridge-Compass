@@ -2,9 +2,9 @@
   "AppMessage.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Messaging/AppMessage.swift",
-    "ios_hash": "d69a03c0e8f277a8b2c9d66a5452a0a84b416d8a01a4f2dd8457dbbe58e0720f",
+    "ios_hash": "8b689b0f5a02fb520ee022c3b290c1145b340b760c0faf9d7a26d9bec6cbe78c",
     "macos": "Sources/SkyBridgeCore/P2P/AppMessage.swift",
-    "macos_hash": "504015c53de3ea94d33ac79c18aab0cfb90279e4d617d74eb39cc635e7b389e5"
+    "macos_hash": "6760d937eb92f9712f7cd32134de7633d0a6d7ff6722f6a3c871db6643f0fb48"
   },
   "ApplePQCProvider.swift": {
     "forked": false,
@@ -46,7 +46,7 @@
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCSignalingPolicy.swift",
     "ios_hash": "386044bd83568c5dcb9b526448da215b0f25916e5137e71ed745c96c6133a4b2",
     "macos": "Sources/SkyBridgeCore/RemoteConnection/WebRTC/CrossNetworkWebRTCSignalingPolicy.swift",
-    "macos_hash": "b649f9c8df21ef18c935b1115bfa65c6f607b0621ef72ffc9ae4c42494a6e119"
+    "macos_hash": "949a71acac9439fd32d682d3d6e89a402402955f8fbafe67037671214d9e6f15"
   },
   "CryptoProviderFactory.swift": {
     "forked": false,
@@ -93,16 +93,16 @@
   "FileTransferNetworkService.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/FileTransfer/FileTransferNetworkService.swift",
-    "ios_hash": "d1a802606b6214403dfe7eac67a7e0bf83359766e67e647fcb0900d52d4b8825",
+    "ios_hash": "5d4b61d77bb88dbe6675ca34110dbcf496968130b51f1e3b6e12ce2a3273977e",
     "macos": "Sources/SkyBridgeCore/FileTransfer/FileTransferNetworkService.swift",
     "macos_hash": "3ab69d38315808bf0529ddb35a5bbfe0c4e4d27f391f7f28d76bd105268063e5"
   },
   "HandshakeDriver.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Handshake/HandshakeDriver.swift",
-    "ios_hash": "f36796e4c5af03dfa7fb2907b481c1ed7c2f7826c1829f6eba186b04194d2855",
+    "ios_hash": "2714a6119c64dd3f0871e29229132432ae5d187ba6c4d0d912977a266a2e4e72",
     "macos": "Sources/SkyBridgeCore/P2P/HandshakeDriver.swift",
-    "macos_hash": "82cc8da942d52299721cbf9393f64e7368bf6b7ecf31747df3f84e0e49b783d5"
+    "macos_hash": "7dce19dce269f1be6ab316ad35379dcd28714f5cf54c389106dfcbb808766d6e"
   },
   "HandshakeMessages.swift": {
     "forked": false,
@@ -159,6 +159,13 @@
     "ios_hash": "9008b882127a0704cfd4f20637aa9dfd3197f467079eac34ad35c0c9d126e880",
     "macos": "Sources/SkyBridgeCore/P2P/PolicyDecisionSnapshot.swift",
     "macos_hash": "f7344f608278616d003fc8bca314924513d0e51750b0fa93110aeaeaefbd534a"
+  },
+  "ProductConnectivitySignedOfferVerifier.swift": {
+    "forked": false,
+    "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/Diagnostics/ProductConnectivitySignedOfferVerifier.swift",
+    "ios_hash": "2c5009a5ea588ab0284ca775ee8d926d504008bf78682025541ae69f43cf3e0e",
+    "macos": "Sources/SkyBridgeCore/P2P/ProductConnectivitySignedOfferVerifier.swift",
+    "macos_hash": "4101cd7a4ec75c31b3528de2ec05467f18cdb530492811ab1615a7590bea1d6a"
   },
   "QPeriaptCryptoProvider.swift": {
     "forked": false,
@@ -247,9 +254,9 @@
   "WebRTCSession.swift": {
     "forked": false,
     "ios": "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/WebRTCSession.swift",
-    "ios_hash": "7c8b6daa14111bb06938113ec7d32ffacbcd9fad07e996535f7b1ed3b3f32632",
+    "ios_hash": "6699d1bc055f7e34542dff05d28ffc46cb086cd4ff1cc8dabc4dbbec5ecbf383",
     "macos": "Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCSession.swift",
-    "macos_hash": "8ad229eded880fb765085b9de602aa27dd8a7d12e577e01593bc55d451658ef4"
+    "macos_hash": "735f1d297c9f4d8e072e5200b66c16f40386d5ffebccad29472d3c99b8739d27"
   },
   "WebRTCSignalingEnvelope.swift": {
     "forked": false,

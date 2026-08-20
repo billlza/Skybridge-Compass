@@ -73,4 +73,39 @@ final class RemoteDesktopStreamConfigurationTransactionTests: XCTestCase {
             acknowledgement
         )
     }
+
+    func testLegacyConfigurationAcknowledgementDecodesWithoutPresentationCapability() throws {
+        let legacy = Data(
+            #"{"acceptedAt":1,"transaction":{"id":"33333333-3333-3333-3333-333333333333"},"audioEndpointPresent":false}"#.utf8
+        )
+        let decoded = try JSONDecoder().decode(
+            RemoteDesktopStreamConfigurationAcknowledgement.self,
+            from: legacy
+        )
+
+        XCTAssertNil(decoded.framePresentationAckVersion)
+    }
+
+    func testFramePresentationAcknowledgementBindsSequenceAndStreamTransaction() throws {
+        let transaction = RemoteDesktopStreamConfigurationTransaction(
+            id: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        )
+        let acknowledgement = RemoteDesktopFramePresentationAcknowledgement(
+            sequenceNumber: 42,
+            streamTransaction: transaction
+        )
+
+        let encoded = try JSONEncoder().encode(acknowledgement)
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                RemoteDesktopFramePresentationAcknowledgement.self,
+                from: encoded
+            ),
+            acknowledgement
+        )
+        XCTAssertEqual(
+            acknowledgement.version,
+            RemoteDesktopFramePresentationAcknowledgement.currentVersion
+        )
+    }
 }

@@ -1139,7 +1139,7 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         )
         let durableAuthorityPersistence = try XCTUnwrap(
             source.range(
-                of: "try await persistAuthenticatedRemoteAuthority(",
+                of: ".commitAuthorityAndKEM(",
                 range: rejectionGuard.upperBound..<source.endIndex
             )
         )
@@ -1456,19 +1456,22 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(script.contains("xcrun stapler validate \"$MAC_ONLINE_APP_BUNDLE\""))
         XCTAssertTrue(script.contains("spctl --assess --type execute \"$MAC_ONLINE_APP_BUNDLE\""))
         XCTAssertTrue(script.contains("register_macos_online_ipad_app_bundle"))
-        XCTAssertTrue(script.contains("find_macos_online_ipad_client_pid"))
+        XCTAssertTrue(script.contains("require_no_external_macos_online_ipad_clients"))
+        XCTAssertTrue(script.contains("skybridge_mac_require_executable_absent"))
         XCTAssertTrue(script.contains("open_macos_online_ipad_app_bundle"))
         XCTAssertTrue(script.contains("start_macos_online_ipad_client"))
         XCTAssertTrue(script.contains("/usr/bin/open \\"))
-        XCTAssertTrue(script.contains("    -n \\"))
+        XCTAssertFalse(script.contains("    -n \\"))
         XCTAssertTrue(script.contains("--stdout \"$MAC_ONLINE_LAUNCH_STDOUT\""))
         XCTAssertTrue(script.contains("--stderr \"$MAC_ONLINE_LAUNCH_STDERR\""))
         XCTAssertTrue(script.contains("2>>\"$MAC_ONLINE_LAUNCH_OPEN_STDERR\""))
         XCTAssertTrue(script.contains("sync_mac_online_launch_stdio"))
         XCTAssertTrue(script.contains("--env \"SKYBRIDGE_SMOKE_ROLE=mac-online-ipad-client\""))
         XCTAssertTrue(script.contains("\"$MAC_ONLINE_APP_BUNDLE\""))
-        XCTAssertTrue(script.contains("MAC_ONLINE_PID=\"$(find_macos_online_ipad_client_pid)\""))
-        XCTAssertTrue(script.contains("launch method=open-app-bundle pid=%s role=mac-online-ipad-client"))
+        XCTAssertTrue(script.contains("skybridge_mac_wait_for_single_exact_process"))
+        XCTAssertTrue(script.contains("skybridge_mac_capture_owned_process"))
+        XCTAssertTrue(script.contains("MAC_ONLINE_PROCESS_IDENTITY"))
+        XCTAssertTrue(script.contains("launch method=open-app-bundle pid=%s role=mac-online-ipad-client ownership=audit-token"))
         XCTAssertTrue(script.contains("launch requested role=mac-online-ipad-client"))
         XCTAssertTrue(script.contains("wait_for_mac_online_pattern 'boot .*role=mac-online-ipad-client .*source=app'"))
         XCTAssertTrue(script.contains("phase=wait-pattern reason=process-exited"))
@@ -1524,33 +1527,37 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
         XCTAssertTrue(source.contains("remoteControlNoticeDisconnected .*transport=webrtc"))
     }
 
-    func testReleaseReadinessConsumesRemoteControlNoticeArtifacts() throws {
+    func testReleaseReadinessConsumesCanonicalCandidateBoundRemoteArtifacts() throws {
         let readiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
-        let workflow = try repositorySource(".github/workflows/macos-release-readiness.yml")
+        let candidateWorkflow = try repositorySource(".github/workflows/macos-release-readiness.yml")
+        let evidenceWorkflow = try repositorySource(".github/workflows/real-device-release-gate.yml")
+        let publishWorkflow = try repositorySource(".github/workflows/macos-release-publish.yml")
         let fastfile = try repositorySource("fastlane/Fastfile")
 
-        XCTAssertTrue(readiness.contains("P2P_NOTICE_ARTIFACT_DIR"))
-        XCTAssertTrue(readiness.contains("WEBRTC_NOTICE_ARTIFACT_DIR"))
-        XCTAssertTrue(readiness.contains("NOTICE_PANEL_ARTIFACT_DIR"))
-        XCTAssertTrue(readiness.contains("run_cli_remote_control_notice_gates"))
-        XCTAssertTrue(readiness.contains("check remote-control-notice"))
-        XCTAssertTrue(readiness.contains("--transport p2p"))
-        XCTAssertTrue(readiness.contains("--transport webrtc"))
-        XCTAssertTrue(
-            readiness.contains("--transport p2p \\\n    --require-panel"),
-            "Physical P2P release artifacts must include LocalLanInteropHost's explicit AppKit panel evidence."
-        )
-        XCTAssertTrue(readiness.contains("--transport webrtc \\\n    --require-panel"))
-        XCTAssertTrue(readiness.contains("P2P and WebRTC remote-control security notice artifacts pass lifecycle and metadata gates"))
-        XCTAssertTrue(workflow.contains("P2P_NOTICE_ARTIFACT_NAME"))
-        XCTAssertTrue(workflow.contains("WEBRTC_NOTICE_ARTIFACT_NAME"))
-        XCTAssertTrue(workflow.contains("NOTICE_PANEL_ARTIFACT_NAME"))
-        XCTAssertTrue(workflow.contains("--p2p-notice-artifact-dir \"Artifacts/release-gate/p2p-notice\""))
-        XCTAssertTrue(workflow.contains("--webrtc-notice-artifact-dir \"Artifacts/release-gate/webrtc-notice\""))
-        XCTAssertTrue(workflow.contains("--notice-panel-artifact-dir \"Artifacts/release-gate/notice-panel\""))
-        XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR"))
-        XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR"))
-        XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR"))
+        XCTAssertTrue(readiness.contains("validate_real_device_release_acceptance_artifact.py"))
+        XCTAssertTrue(readiness.contains("--kind p2p"))
+        XCTAssertTrue(readiness.contains("--kind webrtc"))
+        XCTAssertTrue(readiness.contains("normal-product notice panel, human approval, and disconnect lifecycle"))
+        for removed in [
+            "P2P_NOTICE_ARTIFACT_DIR",
+            "WEBRTC_NOTICE_ARTIFACT_DIR",
+            "NOTICE_PANEL_ARTIFACT_DIR",
+            "--p2p-notice-artifact-dir",
+            "--webrtc-notice-artifact-dir",
+            "--notice-panel-artifact-dir"
+        ] {
+            XCTAssertFalse(readiness.contains(removed))
+            XCTAssertFalse(evidenceWorkflow.contains(removed))
+            XCTAssertFalse(publishWorkflow.contains(removed))
+            XCTAssertFalse(fastfile.contains(removed))
+        }
+        XCTAssertTrue(candidateWorkflow.contains("Create Immutable Candidate Identity"))
+        XCTAssertTrue(evidenceWorkflow.contains("Validate and Stage Four Candidate-Bound Physical Artifacts"))
+        XCTAssertTrue(publishWorkflow.contains("Publish Original Immutable Candidate Bytes"))
+        XCTAssertTrue(evidenceWorkflow.contains("macos_release_candidate_identity.py compare"))
+        XCTAssertTrue(publishWorkflow.contains("macos_release_candidate_identity.py compare"))
+        XCTAssertTrue(fastfile.contains("--package-integrity-only"))
+        XCTAssertFalse(fastfile.contains("SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"))
     }
 
     private func repositorySource(_ relativePath: String) throws -> String {

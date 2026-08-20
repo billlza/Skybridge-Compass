@@ -3,6 +3,35 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class AppUpdateManifestTests: XCTestCase {
+    func testMacOSReleaseVersionConfigurationIsConsistent() throws {
+        let process = Process()
+        let standardOutput = Pipe()
+        let standardError = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.currentDirectoryURL = repositoryRoot()
+        process.arguments = [
+            "Scripts/check_macos_release_version.sh",
+            "--expected-version", "1.0.2",
+        ]
+        process.standardOutput = standardOutput
+        process.standardError = standardError
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(
+            decoding: standardOutput.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        let errorOutput = String(
+            decoding: standardError.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+        XCTAssertEqual(process.terminationStatus, 0, errorOutput)
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "1.0.2")
+        XCTAssertTrue(errorOutput.isEmpty, errorOutput)
+    }
+
     func testManifestWithNewerVersionIsUpdateAvailable() throws {
         let manifest = try decodeManifest(version: "1.2.0", build: "20260524")
         let decision = try SkyBridgeAppUpdateEvaluator.evaluate(
@@ -274,8 +303,12 @@ final class AppUpdateManifestTests: XCTestCase {
         let generator = try repositorySource("Scripts/generate_macos_update_manifest.swift")
         let manifestValidator = try repositorySource("Scripts/validate_macos_update_manifest.sh")
         let publisher = try repositorySource("Scripts/publish_macos_update_release.sh")
+        let buildDMG = try repositorySource("Scripts/build_dmg.sh")
+        let releaseVersionVerifier = try repositorySource("Scripts/check_macos_release_version.sh")
         let releaseReadiness = try repositorySource("Scripts/check_macos_release_readiness.sh")
         let workflow = try repositorySource(".github/workflows/macos-release-readiness.yml")
+        let evidenceWorkflow = try repositorySource(".github/workflows/real-device-release-gate.yml")
+        let publishWorkflow = try repositorySource(".github/workflows/macos-release-publish.yml")
         let cliWorkflow = try repositorySource(".github/workflows/skybridge-cli-release.yml")
         let cliPublisher = try repositorySource("rust/scripts/publish_cli_github_release.sh")
         let fastfile = try repositorySource("fastlane/Fastfile")
@@ -403,83 +436,99 @@ final class AppUpdateManifestTests: XCTestCase {
             workflow.contains("swift-actions/setup-swift"),
             "Apple-platform release builds must use the Xcode 26.6 Apple toolchain, not a separate Swift.org toolchain."
         )
-        XCTAssertTrue(workflow.contains("contents: write"))
+        XCTAssertTrue(publishWorkflow.contains("contents: write"))
         XCTAssertTrue(
-            workflow.contains("actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0")
+            publishWorkflow.contains("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1")
         )
         XCTAssertFalse(
-            workflow.contains("actions/download-artifact@v4"),
+            (workflow + evidenceWorkflow + publishWorkflow).contains("actions/download-artifact@v4"),
             "Release workflows must pin the reviewed download-artifact commit instead of a mutable major tag."
         )
-        XCTAssertTrue(workflow.contains("cancel-in-progress: false"))
-        XCTAssertTrue(workflow.contains("release_artifact_run_attempt:"))
-        XCTAssertFalse(workflow.contains("release_artifact_workflow_path:"))
-        XCTAssertFalse(workflow.contains("release_artifact_event:"))
-        XCTAssertTrue(workflow.contains("Validate Release Artifact Run Provenance"))
-        XCTAssertTrue(workflow.contains("Scripts/validate_macos_release_artifact_run.sh"))
-        XCTAssertTrue(workflow.contains("GH_TOKEN: ${{ github.token }}"))
-        XCTAssertTrue(workflow.contains("RELEASE_ARTIFACT_RUN_ATTEMPT: ${{ inputs.release_artifact_run_attempt }}"))
-        XCTAssertTrue(workflow.contains("RELEASE_ARTIFACT_WORKFLOW_PATH: .github/workflows/real-device-release-gate.yml"))
-        XCTAssertTrue(workflow.contains("RELEASE_ARTIFACT_EVENT: workflow_dispatch"))
-        XCTAssertTrue(workflow.contains(#"--repository "${GITHUB_REPOSITORY}""#))
-        XCTAssertTrue(workflow.contains(#"--expected-run-attempt "${RELEASE_ARTIFACT_RUN_ATTEMPT}""#))
-        XCTAssertTrue(workflow.contains(#"--expected-workflow-path "${RELEASE_ARTIFACT_WORKFLOW_PATH}""#))
-        XCTAssertTrue(workflow.contains(#"--expected-head-sha "${GITHUB_SHA}""#))
-        XCTAssertTrue(workflow.contains(#"--expected-head-branch "${GITHUB_REF_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${CONNECTIVITY_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${P2P_REMOTE_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${WEBRTC_REMOTE_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${FILE_TRANSFER_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${P2P_NOTICE_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${WEBRTC_NOTICE_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains(#"--artifact "${NOTICE_PANEL_ARTIFACT_NAME}""#))
-        XCTAssertTrue(workflow.contains("release-artifact-run-provenance.json"))
-        if
-            let provenanceRange = workflow.range(of: "Validate Release Artifact Run Provenance"),
-            let firstDownloadRange = workflow.range(of: "Download Connectivity Matrix Artifact"),
-            let signingSecretsRange = workflow.range(of: "Validate Release Signing Secrets")
-        {
-            XCTAssertLessThan(
-                provenanceRange.lowerBound,
-                firstDownloadRange.lowerBound,
-                "The release workflow must verify source-run provenance before downloading release-gate artifacts."
-            )
-            XCTAssertLessThan(
-                provenanceRange.lowerBound,
-                signingSecretsRange.lowerBound,
-                "The release workflow must reject untrusted release-gate artifacts before signing secrets are exposed."
-            )
-        } else {
-            XCTFail("Release workflow must keep provenance validation, artifact download, and signing-secret validation steps visible.")
+        XCTAssertTrue(workflow.contains("release_build_id:"))
+        XCTAssertFalse(workflow.contains("evidence_run_id:"))
+        XCTAssertFalse(workflow.contains("publish_release_tag:"))
+        XCTAssertTrue(evidenceWorkflow.contains("candidate_run_id:"))
+        XCTAssertTrue(evidenceWorkflow.contains("environment: release-real-device-evidence"))
+        XCTAssertTrue(evidenceWorkflow.contains("Require Independent Evidence Approval Environment"))
+        XCTAssertTrue(evidenceWorkflow.contains("validate_release_environment_protection.py"))
+        XCTAssertTrue(publishWorkflow.contains("candidate_run_id:"))
+        XCTAssertTrue(publishWorkflow.contains("evidence_run_id:"))
+        XCTAssertTrue(publishWorkflow.contains("publish_release_tag:"))
+        XCTAssertTrue(publishWorkflow.contains("Require Independent Publication Approval Environment"))
+        XCTAssertTrue(publishWorkflow.contains("Scripts/validate_macos_release_artifact_run.sh"))
+        XCTAssertTrue(publishWorkflow.contains(#"--expected-head-sha "$GITHUB_SHA""#))
+        XCTAssertTrue(publishWorkflow.contains(#"--expected-head-branch "$GITHUB_REF_NAME""#))
+        for artifact in [
+            "real-device-connectivity-matrix-public-redacted",
+            "real-device-p2p-remote-smoke-public-redacted",
+            "real-device-webrtc-smoke-public-redacted",
+            "real-device-file-transfer-smoke-public-redacted"
+        ] {
+            XCTAssertTrue(evidenceWorkflow.contains(artifact))
+            XCTAssertTrue(publishWorkflow.contains(artifact))
         }
-        XCTAssertTrue(workflow.contains("Scripts/publish_macos_update_release.sh"))
-        XCTAssertTrue(workflow.contains("Scripts/validate_macos_release_public_artifacts.sh"))
-        XCTAssertTrue(workflow.contains("--require-public-redacted-artifacts"))
-        XCTAssertTrue(workflow.contains("SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64"))
-        XCTAssertTrue(workflow.contains("publish_release_tag:"))
-        XCTAssertTrue(workflow.contains("macos-release-evidence.tar.gz"))
-        XCTAssertTrue(workflow.contains("Upload Immutable Release Publish Proof"))
-        XCTAssertTrue(workflow.contains(#"--expected-source-sha "$GITHUB_SHA""#))
-        XCTAssertTrue(workflow.contains(#"--evidence-provenance-path "$MACOS_PUBLISH_HANDOFF_ROOT/release-artifact-run-provenance.json""#))
-        XCTAssertTrue(workflow.contains(#"--evidence-asset "$MACOS_PUBLISH_HANDOFF_ROOT/macos-release-evidence.tar.gz""#))
-        XCTAssertTrue(workflow.contains("Artifacts/release-gate-raw/connectivity"))
-        XCTAssertTrue(workflow.contains("--connectivity-artifact-dir \"Artifacts/release-gate-public/connectivity\""))
-        XCTAssertTrue(workflow.contains("--p2p-remote-artifact-dir \"Artifacts/release-gate-public/p2p-remote\""))
-        XCTAssertTrue(workflow.contains("--file-transfer-artifact-dir \"Artifacts/release-gate-public/file-transfer\""))
+        for removed in [
+            "real-device-p2p-security-notice-public-redacted",
+            "local-webrtc-security-notice-public-redacted",
+            "local-macos-security-notice-panel-public-redacted"
+        ] {
+            XCTAssertFalse(evidenceWorkflow.contains(removed))
+            XCTAssertFalse(publishWorkflow.contains(removed))
+        }
+        XCTAssertTrue(workflow.contains("Create Immutable Candidate Identity"))
+        XCTAssertTrue(evidenceWorkflow.contains("macos_release_candidate_identity.py compare"))
+        XCTAssertTrue(publishWorkflow.contains("macos_release_candidate_identity.py compare"))
+        XCTAssertTrue(publishWorkflow.contains("Scripts/publish_macos_update_release.sh"))
+        XCTAssertTrue(publishWorkflow.contains("--require-public-redacted-artifacts"))
+        XCTAssertTrue(publishWorkflow.contains("SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64"))
+        XCTAssertTrue(workflow.contains("Resolve Explicit Release Version and Build Transaction"))
+        XCTAssertTrue(workflow.contains("Validate macOS Release Version Configuration"))
+        XCTAssertTrue(workflow.contains("Validate iOS Release Version Configuration"))
+        XCTAssertTrue(workflow.contains("bash Scripts/check_ios_release_version.sh"))
+        XCTAssertTrue(workflow.contains("bash Scripts/test_ios_release_version.sh"))
+        XCTAssertTrue(workflow.contains("python3 Scripts/test_verify_ios_distribution_product.py"))
+        XCTAssertTrue(workflow.contains("PYTHONPATH=Scripts python3 Scripts/test_validate_release_output_directory.py"))
+        XCTAssertTrue(workflow.contains("source_version=\"$(bash Scripts/check_macos_release_version.sh)\""))
+        XCTAssertTrue(workflow.contains("REQUESTED_BUILD_ID: ${{ inputs.release_build_id }}"))
+        XCTAssertFalse(workflow.contains("tag_version=\"${BASH_REMATCH[1]}\""))
+        XCTAssertFalse(workflow.contains("build_id=\"${GITHUB_RUN_ID}${padded_run_attempt}\""))
+        XCTAssertTrue(workflow.contains("--build-id \"$SKYBRIDGE_RELEASE_BUILD_ID\""))
+        XCTAssertTrue(buildDMG.contains("--build-id"))
+        XCTAssertTrue(buildDMG.contains("SKYBRIDGE_PACKAGE_BUILD_ID=\"$BUILD_ID\""))
+        XCTAssertTrue(buildDMG.contains("正式 DMG 构建不得使用时间或隐式构建号"))
+        XCTAssertTrue(buildDMG.contains("PACKAGED_VERSION"))
+        XCTAssertTrue(buildDMG.contains("PACKAGED_BUILD_ID"))
+        XCTAssertTrue(releaseVersionVerifier.contains("project.yml must define exactly one base MARKETING_VERSION"))
+        XCTAssertTrue(releaseVersionVerifier.contains("CFBundleShortVersionString"))
+        XCTAssertTrue(releaseVersionVerifier.contains("SkyBridgeWidgets.xcodeproj/project.pbxproj"))
+        XCTAssertTrue(publishWorkflow.contains("macos-release-evidence.tar.gz"))
+        XCTAssertTrue(publishWorkflow.contains("Upload Immutable Release Publish Proof"))
+        XCTAssertTrue(publishWorkflow.contains(#"--expected-source-sha "$GITHUB_SHA""#))
+        XCTAssertTrue(publishWorkflow.contains("--evidence-provenance-path"))
+        XCTAssertTrue(publishWorkflow.contains(#"--evidence-asset "$MACOS_RELEASE_EVIDENCE_ASSET""#))
+        XCTAssertTrue(publishWorkflow.contains("macos-release-evidence-download/connectivity"))
+        XCTAssertTrue(publishWorkflow.contains("--connectivity-artifact-dir \"$MACOS_PUBLISH_EVIDENCE_ROOT/connectivity\""))
+        XCTAssertTrue(publishWorkflow.contains("--p2p-remote-artifact-dir \"$MACOS_PUBLISH_EVIDENCE_ROOT/p2p-remote\""))
+        XCTAssertTrue(publishWorkflow.contains("--webrtc-remote-artifact-dir \"$MACOS_PUBLISH_EVIDENCE_ROOT/webrtc-remote\""))
+        XCTAssertTrue(publishWorkflow.contains("--file-transfer-artifact-dir \"$MACOS_PUBLISH_EVIDENCE_ROOT/file-transfer\""))
         XCTAssertFalse(
-            workflow.contains("find dist -maxdepth 1 -type f -name 'SkyBridgeCompassPro-*.dmg'"),
+            publishWorkflow.contains("find dist -maxdepth 1 -type f -name 'SkyBridgeCompassPro-*.dmg'"),
             "Release publishing must select the versioned DMG from the packaged app metadata, not the lexicographically last DMG under dist."
         )
         XCTAssertTrue(workflow.contains("CFBundleShortVersionString"))
         XCTAssertTrue(workflow.contains("dmg_path=\"dist/SkyBridgeCompassPro-${app_version}.dmg\""))
-        XCTAssertTrue(workflow.contains("macos-signed-release-gate:"))
-        XCTAssertTrue(workflow.contains("macos-immutable-release-publish:"))
-        XCTAssertTrue(workflow.contains("environment: macos-production-release"))
-        XCTAssertTrue(workflow.contains("persist-credentials: false"))
+        XCTAssertTrue(workflow.contains("macos-signed-release-candidate:"))
+        XCTAssertFalse(workflow.contains("macos-immutable-release-publish:"))
+        XCTAssertTrue(publishWorkflow.contains("environment: macos-production-release"))
+        XCTAssertTrue((workflow + evidenceWorkflow + publishWorkflow).contains("persist-credentials: false"))
         XCTAssertTrue(workflow.contains("Remove Temporary Signing Credentials"))
-        XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"))
+        XCTAssertTrue(fastfile.contains("--package-integrity-only"))
+        XCTAssertFalse(fastfile.contains("SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR"))
+        XCTAssertTrue(fastfile.contains("SKYBRIDGE_RELEASE_BUILD_ID"))
+        XCTAssertTrue(fastfile.contains("--build-id"))
         XCTAssertFalse(fastfile.contains("Scripts/publish_macos_update_release.sh"))
-        XCTAssertTrue(fastfile.contains("远程发布只允许由受保护的 macos-release-readiness GitHub Actions workflow 执行"))
+        XCTAssertTrue(fastfile.contains("远程发布只允许由受保护的候选→物理证据→发布 GitHub Actions 事务执行"))
+        XCTAssertTrue(fastfile.contains("尚未形成发布就绪结论"))
         XCTAssertTrue(cliWorkflow.contains("rust/scripts/publish_cli_github_release.sh"))
         XCTAssertEqual(
             cliPublisher.components(separatedBy: "--latest=false").count - 1,

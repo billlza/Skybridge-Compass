@@ -38,6 +38,44 @@ fi
 echo "[source-quality] Apple PQC iPhoneOS symbols verified: sdk=${SKYBRIDGE_PQC_SDK_VER} target=${SKYBRIDGE_PQC_SWIFT_TARGET}"
 
 run_check_strict_no_warnings \
+  "ios-release-version-configuration" \
+  "release" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/check_ios_release_version.sh"
+
+run_check_strict_no_warnings \
+  "ios-release-version-guardrail" \
+  "release" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_ios_release_version.sh"
+
+run_check_strict_no_warnings \
+  "ios-distribution-product-verifier" \
+  "security" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_verify_ios_distribution_product.py"
+
+run_check_strict_no_warnings \
+  "devicectl-device-selection" \
+  "security" \
+  "source-quality" \
+  env PYTHONPATH="${ROOT_DIR}/Scripts" \
+    python3 "${ROOT_DIR}/Scripts/test_devicectl_device_selection.py"
+
+run_check_strict_no_warnings \
+  "release-output-directory-policy" \
+  "security" \
+  "source-quality" \
+  env PYTHONPATH="${ROOT_DIR}/Scripts" \
+    python3 "${ROOT_DIR}/Scripts/test_validate_release_output_directory.py"
+
+run_check_strict_no_warnings \
+  "gate-log-scanner-selftest" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_gate_common.sh"
+
+run_check_strict_no_warnings \
   "release-no-print-guard" \
   "code" \
   "source-quality" \
@@ -80,10 +118,82 @@ run_check_strict_no_warnings \
   python3 "${ROOT_DIR}/Scripts/test_finalize_release_acceptance_manifests.py"
 
 run_check_strict_no_warnings \
+  "ios-same-archive-release-transaction" \
+  "release" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_ios_app_store_release_transaction.py"
+
+run_check_strict_no_warnings \
   "real-device-release-acceptance-artifact-guardrail" \
   "code" \
   "source-quality" \
-  python3 "${ROOT_DIR}/Scripts/test_validate_real_device_release_acceptance_artifact.py"
+  python3 -W error "${ROOT_DIR}/Scripts/test_validate_real_device_release_acceptance_artifact.py"
+
+run_check_strict_no_warnings \
+  "normal-product-release-evidence-log" \
+  "release" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_validate_product_release_evidence_log.py"
+
+run_check_strict_no_warnings \
+  "ios-product-installation-transaction" \
+  "release" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_ios_product_installation.py"
+
+run_check_strict_no_warnings \
+  "ios-product-evidence-extraction" \
+  "release" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_extract_ios_product_release_evidence.py"
+
+run_check_strict_no_warnings \
+  "formal-product-evidence-manifest" \
+  "release" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_formal_product_evidence_manifest.py"
+
+run_check_strict_no_warnings \
+  "formal-product-evidence-session-contract" \
+  "release" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_formal_product_evidence_session_contract.py"
+
+run_check_strict_no_warnings \
+  "release-environment-protection" \
+  "release" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_validate_release_environment_protection.py"
+
+run_check_strict_no_warnings \
+  "macos-release-candidate-identity" \
+  "release" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_macos_release_candidate_identity.py"
+
+run_check_strict_no_warnings \
+  "macos-release-candidate-handoff" \
+  "security" \
+  "source-quality" \
+  python3 "${ROOT_DIR}/Scripts/test_extract_macos_release_handoff.py"
+
+run_check_strict_no_warnings \
+  "real-device-evidence-file-set" \
+  "security" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_stage_real_device_release_evidence.py"
+
+run_check_strict_no_warnings \
+  "release-workflow-transaction" \
+  "release" \
+  "source-quality" \
+  python3 -W error "${ROOT_DIR}/Scripts/test_real_device_release_workflow_contract.py"
+
+run_check_strict_no_warnings \
+  "real-device-public-artifact-redaction" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_real_device_smoke_redaction.sh"
 
 run_check_strict_no_warnings \
   "real-device-smoke-performance-contract" \
@@ -114,6 +224,18 @@ run_check_strict_no_warnings \
   "code" \
   "source-quality" \
   bash "${ROOT_DIR}/Scripts/test_validate_ios_simulator_runtime_diagnostics.sh"
+
+run_check_strict_no_warnings \
+  "macos-update-manifest-signature-validator" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_validate_macos_update_manifest.sh"
+
+run_check_strict_no_warnings \
+  "macos-update-publish-transaction" \
+  "security" \
+  "source-quality" \
+  bash "${ROOT_DIR}/Scripts/test_publish_macos_update_release.sh"
 
 run_check_strict_no_warnings \
   "swift-build" \

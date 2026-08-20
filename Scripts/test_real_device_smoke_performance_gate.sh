@@ -62,6 +62,7 @@ require_literal 'and ios_product_ready' "$P2P_SCRIPT"
 require_literal '"iosBuildConfiguration": ios_product_proof.get("configuration")' "$P2P_SCRIPT"
 require_literal '"iosGetTaskAllow": ios_product_proof.get("getTaskAllow") is True' "$P2P_SCRIPT"
 require_literal '"iosNestedWidgetVerified": ios_product_proof.get("nestedWidgetVerified") is True' "$P2P_SCRIPT"
+require_literal '"iosReleaseVersionVerified": ios_product_proof.get("releaseVersionVerified") is True' "$P2P_SCRIPT"
 require_literal 'write_ios_p2p_product_proof "$IOS_EMBEDDED_PROFILE" "$IOS_WIDGET_EMBEDDED_PROFILE"' "$P2P_SCRIPT"
 require_literal '"acceptanceEligible": False' "$P2P_SCRIPT"
 require_literal '"diagnosticOnly": True' "$P2P_SCRIPT"
@@ -77,6 +78,10 @@ require_literal 'validate_acceptance_profile' "$WEBRTC_SCRIPT"
 require_literal 'SKYBRIDGE_REAL_DEVICE_WEBRTC_LAB_RUN=1' "$WEBRTC_SCRIPT"
 require_literal 'KEYCHAIN_MODE="${SKYBRIDGE_SMOKE_KEYCHAIN_MODE:-system}"' "$WEBRTC_SCRIPT"
 require_literal 'MAC_HOST_MODE="${SKYBRIDGE_SMOKE_MAC_HOST_MODE:-product}"' "$WEBRTC_SCRIPT"
+require_literal 'CLIENT_VERSION="$(bash "$ROOT_DIR/Scripts/check_macos_release_version.sh")"' "$WEBRTC_SCRIPT"
+if grep -Fq '|| echo "1.0.0"' "$WEBRTC_SCRIPT"; then
+  fail "WebRTC smoke must fail closed instead of substituting version 1.0.0"
+fi
 require_literal 'remoteControlNoticeHumanApproved session=${SESSION_REGEX}' "$WEBRTC_SCRIPT"
 require_literal '"keychainMode": keychain_mode' "$WEBRTC_SCRIPT"
 require_literal '"approvalSurface": "shared-product-panel"' "$WEBRTC_SCRIPT"
@@ -85,6 +90,7 @@ require_literal '"acceptanceEligible": False' "$WEBRTC_SCRIPT"
 require_literal '"cleanupComplete": False' "$WEBRTC_SCRIPT"
 require_literal '"preCleanupCandidate": (' "$WEBRTC_SCRIPT"
 require_literal 'and product_path_proof.get("iosProductionProduct") is True' "$WEBRTC_SCRIPT"
+require_literal 'and product_path_proof.get("iosReleaseVersionVerified") is True' "$WEBRTC_SCRIPT"
 require_literal 'and ios_production_identity_lifecycle_verified' "$WEBRTC_SCRIPT"
 require_literal "python3 \"\$ROOT_DIR/Scripts/finalize_release_acceptance_manifests.py\"" "$WEBRTC_SCRIPT"
 require_literal 'final_payload["cleanupComplete"] = True' "$RELEASE_ACCEPTANCE_FINALIZER"
@@ -102,6 +108,7 @@ require_literal 'installed-only' "$WEBRTC_SCRIPT"
 require_literal 'skybridge_write_ios_distribution_product_proof' "$WEBRTC_SCRIPT"
 require_literal '"iosDistributionSigningVerified": ios_verification.get("distributionSigning") is True' "$WEBRTC_SCRIPT"
 require_literal '"iosNestedWidgetVerified": ios_verification.get("nestedWidgetVerified") is True' "$WEBRTC_SCRIPT"
+require_literal '"iosReleaseVersionVerified": ios_verification.get("releaseVersionVerified") is True' "$WEBRTC_SCRIPT"
 require_literal 'codesign --verify --deep --strict' "$IOS_DISTRIBUTION_SIGNING_HELPERS"
 require_literal '"CODE_SIGN_STYLE=Automatic"' "$IOS_DISTRIBUTION_SIGNING_HELPERS"
 require_literal '"SKYBRIDGE_IOS_APP_DISTRIBUTION_PROFILE_SPECIFIER="' "$IOS_DISTRIBUTION_SIGNING_HELPERS"
@@ -112,6 +119,7 @@ require_literal 'IPA contains duplicate normalized paths' "$IOS_IPA_EXTRACTOR"
 require_literal 'os.replace(staging_app, destination_app)' "$IOS_IPA_EXTRACTOR"
 require_literal 'not get_task_allow' "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"
 require_literal '"nestedWidgetVerified": nested_widget_verified' "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"
+require_literal '"releaseVersionVerified": release_version_verified' "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"
 require_literal 'product_surface == "production"' "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"
 require_literal 'not testing_compilation_condition' "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"
 require_literal 'not binary_test_surface_detected' "$IOS_DISTRIBUTION_PRODUCT_VERIFIER"
@@ -131,7 +139,7 @@ require_literal 'REQUIRED_IDENTITY_ALGORITHM = "mldsa87"' "$RELEASE_ACCEPTANCE_V
 require_literal 'REQUIRED_IDENTITY_PROTECTION = "secureEnclaveRequired"' "$RELEASE_ACCEPTANCE_VALIDATOR"
 require_literal '"handshakePersistenceVerified"' "$RELEASE_ACCEPTANCE_VALIDATOR"
 require_literal '"currentPathAuthorityVerified"' "$RELEASE_ACCEPTANCE_VALIDATOR"
-require_literal 'choices=("p2p", "webrtc", "production-identity")' "$RELEASE_ACCEPTANCE_VALIDATOR"
+require_literal 'choices=("connectivity", "file-transfer", "p2p", "webrtc", "production-identity")' "$RELEASE_ACCEPTANCE_VALIDATOR"
 require_literal 'runs-on: [self-hosted, macOS, skybridge-real-device-release]' "$REAL_DEVICE_RELEASE_WORKFLOW"
 require_literal 'SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}' "$REAL_DEVICE_RELEASE_WORKFLOW"
 require_literal 'SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}' "$REAL_DEVICE_RELEASE_WORKFLOW"
@@ -150,12 +158,11 @@ require_literal '--kind webrtc' "$RELEASE_READINESS_SCRIPT"
 
 p2p_gate_line="$(line_number 'skybridge_smoke_check_performance_gate "$ROOT_DIR" p2p-remote "$ARTIFACT_DIR"' "$P2P_SCRIPT")"
 p2p_public_gate_line="$(line_number 'skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"' "$P2P_SCRIPT")"
-p2p_success_line="$(line_number 'Real-device P2P remote desktop smoke succeeded' "$P2P_SCRIPT")"
 p2p_final_line="$(line_number 'append_ios_status "smoke-final result=success' "$P2P_SCRIPT")"
-[[ -n "$p2p_gate_line" && -n "$p2p_public_gate_line" && -n "$p2p_success_line" && -n "$p2p_final_line" ]] \
-  || fail "P2P script must contain final sentinels, Rust performance gate, and success output"
-(( p2p_final_line < p2p_gate_line && p2p_gate_line < p2p_public_gate_line && p2p_public_gate_line < p2p_success_line )) \
-  || fail "P2P Rust performance and public artifact gates must run after final sentinels and before success output"
+[[ -n "$p2p_gate_line" && -n "$p2p_public_gate_line" && -n "$p2p_final_line" ]] \
+  || fail "P2P script must contain final sentinels and Rust performance gates"
+(( p2p_final_line < p2p_gate_line && p2p_gate_line < p2p_public_gate_line )) \
+  || fail "P2P Rust performance and public artifact gates must run after final sentinels"
 
 file_gate_line="$(line_number 'skybridge_smoke_check_performance_gate "$ROOT_DIR" file-transfer "$ARTIFACT_DIR"' "$FILE_SCRIPT")"
 file_public_gate_line="$(line_number 'skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"' "$FILE_SCRIPT")"
@@ -191,6 +198,23 @@ if cleanup.index(finalize) >= cleanup.index(success):
     raise SystemExit("WebRTC success output must follow cleanup manifest finalization")
 if "original_status == 0 && cleanup_status == 0 && ACCEPTANCE_CANDIDATE_READY == 1" not in cleanup:
     raise SystemExit("WebRTC cleanup success must be gated by a verified acceptance candidate")
+PY
+python3 - "$P2P_SCRIPT" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+cleanup = source.split("cleanup() {", 1)[1].split("\n}\n\nexit_mac_host_only_on_signal", 1)[0]
+success = "Real-device P2P remote desktop smoke succeeded after verified Mac/iOS process cleanup"
+finalize = "finalize_release_acceptance_manifests_after_cleanup"
+if source.count(success) != 1 or success not in cleanup:
+    raise SystemExit("P2P success output must exist exactly once inside cleanup")
+if cleanup.index(finalize) >= cleanup.index(success):
+    raise SystemExit("P2P success output must follow cleanup manifest finalization")
+if 'original_status == 0 && cleanup_status == 0' not in cleanup:
+    raise SystemExit("P2P cleanup success must require a clean main path and cleanup")
+if 'ACCEPTANCE_CANDIDATE_READY" == "1' not in cleanup:
+    raise SystemExit("P2P cleanup success must require a verified acceptance candidate")
 PY
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-smoke-performance-gate-test.XXXXXX")"

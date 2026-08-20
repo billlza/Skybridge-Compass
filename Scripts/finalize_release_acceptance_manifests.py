@@ -17,6 +17,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, NoReturn, Optional
 
+from ios_physical_release_acceptance import expected_binding
+from ios_release_archive_identity import ArchiveIdentityError, load_identity
+
 
 FINALIZATION_ORDER = "private-then-public-v1"
 MANIFEST_FILE_NAME = "release-acceptance.json"
@@ -228,7 +231,11 @@ def _atomic_replace(
         os.close(directory_descriptor)
 
 
-def _validate_pre_cleanup_payload(payload: dict[str, Any]) -> bool:
+def _validate_pre_cleanup_payload(
+    payload: dict[str, Any],
+    *,
+    required_archive_binding: Optional[dict[str, Any]],
+) -> bool:
     candidate = payload.get("preCleanupCandidate")
     if type(candidate) is not bool:
         _fail("preCleanupCandidate must be a boolean")
@@ -240,16 +247,22 @@ def _validate_pre_cleanup_payload(payload: dict[str, Any]) -> bool:
         _fail("pre-cleanup manifest must be diagnostic-only")
     if "finalizationOrder" in payload:
         _fail("pre-cleanup manifest must not claim a finalization order")
+    if required_archive_binding is not None:
+        if payload.get("iosReleaseArchive") != required_archive_binding:
+            _fail("pre-cleanup manifest does not bind the exact iOS archive and IPA")
+    elif candidate:
+        _fail("an acceptance candidate requires an explicit sealed iOS archive identity")
     if candidate:
-        if payload.get("transport") == "p2p":
-            if payload.get("macHostLaunchMode") != "packaged":
-                _fail("P2P acceptance candidate macHostLaunchMode must be packaged")
-            if payload.get("macHostDiagnosticOnly") is not False:
-                _fail("P2P acceptance candidate mac host must not be diagnostic-only")
-            if payload.get("identitySourceStaplerValid") is not True:
-                _fail("P2P acceptance candidate must prove a stapled macOS host identity source")
-            if payload.get("identitySourceGatekeeperAccepted") is not True:
-                _fail("P2P acceptance candidate must prove Gatekeeper acceptance for the macOS host identity source")
+        if payload.get("macRuntimeExecutable") != "SkyBridgeCompassApp":
+            _fail("acceptance candidate must run the normal macOS product executable")
+        if payload.get("macProductSurface") != "production":
+            _fail("acceptance candidate must use the production macOS product surface")
+        if payload.get("macCandidateIdentityVerified") is not True:
+            _fail("acceptance candidate must bind the signed/notarized macOS candidate")
+        if payload.get("macDebugBuild") is not False:
+            _fail("acceptance candidate must not run a debug macOS build")
+        if payload.get("macTestingCompilationCondition") is not False:
+            _fail("acceptance candidate must not use macOS testing conditions")
         if payload.get("iosProductSurface") != "production":
             _fail("acceptance candidate iosProductSurface must be production")
         if payload.get("iosTestingCompilationCondition") is not False:
@@ -291,6 +304,7 @@ def finalize_release_acceptance_manifests(
     private_manifest: Path,
     public_manifest: Path,
     *,
+    archive_identity: Optional[Path] = None,
     fault_injector: Optional[FaultInjector] = None,
 ) -> None:
     """Finalize two manifests in a monotonic, private-first sequence.
@@ -318,12 +332,25 @@ def finalize_release_acceptance_manifests(
     ):
         _fail("private and public manifests must be in different directories")
 
+    required_archive_binding: Optional[dict[str, Any]] = None
+    if archive_identity is not None:
+        try:
+            required_archive_binding = expected_binding(load_identity(archive_identity))
+        except ArchiveIdentityError as exc:
+            _fail(f"sealed iOS archive identity is invalid: {exc}")
+
     _, private_payload = _read_manifest(private_path)
     _, public_payload = _read_manifest(public_path)
     if private_payload != public_payload:
         _fail("private/public pre-cleanup acceptance manifests differ")
-    candidate = _validate_pre_cleanup_payload(private_payload)
-    _validate_pre_cleanup_payload(public_payload)
+    candidate = _validate_pre_cleanup_payload(
+        private_payload,
+        required_archive_binding=required_archive_binding,
+    )
+    _validate_pre_cleanup_payload(
+        public_payload,
+        required_archive_binding=required_archive_binding,
+    )
 
     final_payload = dict(private_payload)
     final_payload["cleanupComplete"] = True
@@ -356,6 +383,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--private-manifest", required=True, type=Path)
     parser.add_argument("--public-manifest", required=True, type=Path)
+    parser.add_argument("--archive-identity", type=Path)
     return parser.parse_args()
 
 
@@ -365,6 +393,7 @@ def main() -> None:
         finalize_release_acceptance_manifests(
             args.private_manifest,
             args.public_manifest,
+            archive_identity=args.archive_identity,
         )
     except (FinalizationError, OSError) as exc:
         raise SystemExit(f"release acceptance manifest finalization failed: {exc}") from exc

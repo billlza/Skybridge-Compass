@@ -781,7 +781,7 @@ struct SkyBridgeCompassApp: App {
         // Development-only path for non-bundled launches where the process has
         // no packaged app icon for LaunchServices to resolve.
         func resolveDevelopmentIconURL() -> URL? {
-            Bundle.module.url(forResource: "AppIcon", withExtension: "png")
+            SkyBridgeResourceBundleLocator.app.url(forResource: "AppIcon", withExtension: "png")
         }
 
         guard let url = resolveDevelopmentIconURL() else {

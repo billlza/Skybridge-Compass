@@ -34,12 +34,6 @@ Options:
                                 Real-device file-transfer smoke artifact for `skybridge check performance`
   --connectivity-artifact-dir <path>
                                 Real-device Mac/iOS connectivity matrix artifact for `skybridge check connectivity`
-  --p2p-notice-artifact-dir <path>
-                                P2P remote-control security notice artifact for `skybridge check remote-control-notice`
-  --webrtc-notice-artifact-dir <path>
-                                WebRTC remote-control security notice artifact for `skybridge check remote-control-notice`
-  --notice-panel-artifact-dir <path>
-                                Production macOS AppKit security notice panel artifact for `skybridge check remote-control-notice --require-panel`
   --coverage-min-percent <n>    Minimum CLI operator check-surface coverage (default: 88)
   --memory-timeout <seconds>    Timeout for `skybridge check memory` leaks scan (default: 60)
   --launch-timeout <seconds>    Seconds to wait for a fresh process to appear (default: 20)
@@ -55,10 +49,9 @@ Checks:
   - codesign identity, signed entitlements, embedded profiles, and source entitlements stay consistent
   - packaged FreeRDP/OpenSSL runtime closure is byte-bound to FreeRDPRuntime.provenance.json and the native dependency lock
   - Gatekeeper/notarization status is surfaced with warnings or failures
-  - Mac/iOS connectivity matrix artifacts cover PQC-XWing, PQC, and Classic interop paths
+  - Candidate-bound Mac/iOS product logs cover three PQC success pairs and two signed Classic policy rejections
   - Rust CLI operator check-surface coverage is at least 88%
-  - P2P and WebRTC remote-control security notice artifacts pass lifecycle and metadata gates
-  - Production macOS AppKit security notice panel artifacts prove top-center placement and approval/disconnect actions
+  - Canonical P2P and WebRTC artifacts prove the normal-product notice panel, human approval, and disconnect lifecycle
   - real-device P2P remote, WebRTC remote, and file-transfer artifacts pass release acceptance gates
   - launched app process passes a CLI memory leak scan
   - release readiness fails if smoke-only trust auto-approval is enabled
@@ -70,6 +63,8 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "${PROJECT_ROOT}/Scripts/notarytool_helpers.sh"
 source "${PROJECT_ROOT}/Scripts/signing_entitlements_helpers.sh"
 source "${PROJECT_ROOT}/Scripts/package_build_policy.sh"
+source "${PROJECT_ROOT}/Scripts/real_device_ios_process_ownership.sh"
+PROCESS_OWNERSHIP_HELPER="${PROJECT_ROOT}/Scripts/webrtc_smoke_process_ownership.py"
 
 validate_core_metal_shader_sources() {
   local core_module_resources_dir="$1"
@@ -115,9 +110,8 @@ P2P_REMOTE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_P2P_REMOTE_ARTIFACT_DIR:-}"
 WEBRTC_REMOTE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_WEBRTC_REMOTE_ARTIFACT_DIR:-}"
 FILE_TRANSFER_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_FILE_TRANSFER_ARTIFACT_DIR:-}"
 CONNECTIVITY_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_CONNECTIVITY_ARTIFACT_DIR:-}"
-P2P_NOTICE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_P2P_NOTICE_ARTIFACT_DIR:-}"
-WEBRTC_NOTICE_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_WEBRTC_NOTICE_ARTIFACT_DIR:-}"
-NOTICE_PANEL_ARTIFACT_DIR="${SKYBRIDGE_RELEASE_GATE_NOTICE_PANEL_ARTIFACT_DIR:-}"
+EXPECTED_SOURCE_REPOSITORY="${SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY:-}"
+EXPECTED_SOURCE_SHA="${SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA:-}"
 CLI_COVERAGE_MIN_PERCENT="${SKYBRIDGE_RELEASE_GATE_COVERAGE_MIN_PERCENT:-88}"
 MEMORY_TIMEOUT_SECONDS="${SKYBRIDGE_RELEASE_GATE_MEMORY_TIMEOUT_SECONDS:-60}"
 LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_RELEASE_GATE_LAUNCH_TIMEOUT_SECONDS:-20}"
@@ -196,18 +190,6 @@ while [[ $# -gt 0 ]]; do
       CONNECTIVITY_ARTIFACT_DIR="${2:-}"
       shift 2
       ;;
-    --p2p-notice-artifact-dir)
-      P2P_NOTICE_ARTIFACT_DIR="${2:-}"
-      shift 2
-      ;;
-    --webrtc-notice-artifact-dir)
-      WEBRTC_NOTICE_ARTIFACT_DIR="${2:-}"
-      shift 2
-      ;;
-    --notice-panel-artifact-dir)
-      NOTICE_PANEL_ARTIFACT_DIR="${2:-}"
-      shift 2
-      ;;
     --coverage-min-percent)
       CLI_COVERAGE_MIN_PERCENT="${2:-}"
       shift 2
@@ -253,15 +235,37 @@ fi
 skybridge_assert_no_smoke_auto_approval_for_release_context "macOS release readiness" || exit 1
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-release-readiness.XXXXXX")"
+chmod 0700 "$TMP_DIR"
 MOUNTED_DMG_DIRS=()
+RELEASE_SMOKE_PID=""
+RELEASE_SMOKE_PROCESS_IDENTITY="${TMP_DIR}/mac-release-smoke-process-identity.json"
 
 cleanup_tmp() {
+  local original_status=$?
+  local cleanup_status=0
   local mounted_dir=""
+  trap - EXIT
+  if [[ -n "${RELEASE_SMOKE_PID:-}" ]] && ! skybridge_mac_terminate_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$RELEASE_SMOKE_PID" \
+    "$RELEASE_SMOKE_PROCESS_IDENTITY" \
+    "macOS release-readiness product"; then
+    echo "[macos-release-readiness] ERROR: exact launch-smoke process cleanup could not be verified" >&2
+    cleanup_status=1
+  fi
   for mounted_dir in "${MOUNTED_DMG_DIRS[@]:-}"; do
     [[ -n "${mounted_dir}" ]] || continue
     diskutil eject "${mounted_dir}" >/dev/null 2>&1 || true
   done
-  rm -rf "${TMP_DIR}"
+  if (( cleanup_status == 0 )); then
+    rm -rf "${TMP_DIR}"
+  else
+    echo "[macos-release-readiness] ERROR: preserving private cleanup diagnostics at ${TMP_DIR}" >&2
+  fi
+  if (( original_status == 0 && cleanup_status != 0 )); then
+    exit "$cleanup_status"
+  fi
+  exit "$original_status"
 }
 
 trap cleanup_tmp EXIT
@@ -452,8 +456,8 @@ run_cli_connectivity_gate() {
 
   [[ -n "${CONNECTIVITY_ARTIFACT_DIR}" ]] \
     || fail "missing --connectivity-artifact-dir for release connectivity gate"
-  [[ -d "${CONNECTIVITY_ARTIFACT_DIR}" ]] \
-    || fail "connectivity artifact dir does not exist: ${CONNECTIVITY_ARTIFACT_DIR}"
+  [[ -d "${CONNECTIVITY_ARTIFACT_DIR}" && ! -L "${CONNECTIVITY_ARTIFACT_DIR}" ]] \
+    || fail "connectivity artifact dir must be a real directory: ${CONNECTIVITY_ARTIFACT_DIR}"
 
   log_info "Running Rust CLI Mac/iOS connectivity matrix gate"
   run_skybridge_cli check connectivity \
@@ -479,6 +483,11 @@ run_cli_performance_gates() {
   [[ -d "${FILE_TRANSFER_ARTIFACT_DIR}" ]] \
     || fail "file-transfer artifact dir does not exist: ${FILE_TRANSFER_ARTIFACT_DIR}"
 
+  [[ -n "${EXPECTED_SOURCE_REPOSITORY}" ]] \
+    || fail "missing SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY for release acceptance validation"
+  [[ -n "${EXPECTED_SOURCE_SHA}" ]] \
+    || fail "missing SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA for release acceptance validation"
+
   local acceptance_validator="${PROJECT_ROOT}/Scripts/validate_real_device_release_acceptance_artifact.py"
   [[ -f "${acceptance_validator}" ]] \
     || fail "missing real-device release acceptance artifact validator: ${acceptance_validator}"
@@ -487,12 +496,16 @@ run_cli_performance_gates() {
   python3 "${acceptance_validator}" \
     --kind p2p \
     --artifact-dir "${P2P_REMOTE_ARTIFACT_DIR}" \
+    --expected-source-repository "${EXPECTED_SOURCE_REPOSITORY}" \
+    --expected-source-sha "${EXPECTED_SOURCE_SHA}" \
     || fail "P2P remote artifact is diagnostic-only and cannot satisfy release acceptance"
 
   log_info "Validating real-device WebRTC relay/audio/preflight/soak artifact"
   python3 "${acceptance_validator}" \
     --kind webrtc \
     --artifact-dir "${WEBRTC_REMOTE_ARTIFACT_DIR}" \
+    --expected-source-repository "${EXPECTED_SOURCE_REPOSITORY}" \
+    --expected-source-sha "${EXPECTED_SOURCE_SHA}" \
     || fail "WebRTC remote artifact does not satisfy release acceptance"
 
   log_info "Running Rust CLI P2P remote performance gate"
@@ -507,43 +520,6 @@ run_cli_performance_gates() {
   run_skybridge_cli check performance \
     --kind file-transfer \
     --artifact-dir "${FILE_TRANSFER_ARTIFACT_DIR}"
-}
-
-run_cli_remote_control_notice_gates() {
-  if [[ "${SKIP_CLI_QUALITY_GATES}" == "1" ]]; then
-    log_warn "Rust CLI remote-control security notice gates were skipped by request"
-    return
-  fi
-
-  [[ -n "${P2P_NOTICE_ARTIFACT_DIR}" ]] \
-    || fail "missing --p2p-notice-artifact-dir for remote-control security notice gate"
-  [[ -d "${P2P_NOTICE_ARTIFACT_DIR}" ]] \
-    || fail "P2P remote-control notice artifact dir does not exist: ${P2P_NOTICE_ARTIFACT_DIR}"
-  [[ -n "${WEBRTC_NOTICE_ARTIFACT_DIR}" ]] \
-    || fail "missing --webrtc-notice-artifact-dir for remote-control security notice gate"
-  [[ -d "${WEBRTC_NOTICE_ARTIFACT_DIR}" ]] \
-    || fail "WebRTC remote-control notice artifact dir does not exist: ${WEBRTC_NOTICE_ARTIFACT_DIR}"
-  [[ -n "${NOTICE_PANEL_ARTIFACT_DIR}" ]] \
-    || fail "missing --notice-panel-artifact-dir for remote-control security notice panel gate"
-  [[ -d "${NOTICE_PANEL_ARTIFACT_DIR}" ]] \
-    || fail "remote-control notice panel artifact dir does not exist: ${NOTICE_PANEL_ARTIFACT_DIR}"
-
-  log_info "Running Rust CLI P2P remote-control security notice gate"
-  run_skybridge_cli check remote-control-notice \
-    --artifact-dir "${P2P_NOTICE_ARTIFACT_DIR}" \
-    --transport p2p \
-    --require-panel
-
-  log_info "Running Rust CLI WebRTC remote-control security notice gate"
-  run_skybridge_cli check remote-control-notice \
-    --artifact-dir "${WEBRTC_NOTICE_ARTIFACT_DIR}" \
-    --transport webrtc
-
-  log_info "Running Rust CLI production AppKit remote-control security notice panel gate"
-  run_skybridge_cli check remote-control-notice \
-    --artifact-dir "${NOTICE_PANEL_ARTIFACT_DIR}" \
-    --transport webrtc \
-    --require-panel
 }
 
 run_cli_memory_check_for_pid() {
@@ -976,25 +952,6 @@ validate_dmg_embedded_app() {
     || fail "DMG app Info.plist privacy usage descriptions drifted from dist app"
 
   eject_mounted_volume "${mount_dir}"
-}
-
-pid_in_list() {
-  local target_pid="$1"
-  local pid_list="$2"
-  local existing_pid=""
-
-  for existing_pid in ${pid_list}; do
-    if [[ "${existing_pid}" == "${target_pid}" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-collect_named_pids() {
-  local executable_name="$1"
-  pgrep -x "${executable_name}" 2>/dev/null || true
 }
 
 redact_release_log_excerpt() {
@@ -1552,60 +1509,79 @@ stapled_notarization_ticket_is_valid() {
 smoke_launch_app() {
   local app_path="$1"
   local executable_name="$2"
-  local before_pids=""
+  local executable_path="${app_path}/Contents/MacOS/${executable_name}"
   local new_pid=""
   local open_output=""
-  local pid=""
   local logs=""
-  local deadline=0
-  local quit_deadline=0
+  local process_status=0
 
-  before_pids="$(collect_named_pids "${executable_name}" | tr '\n' ' ')"
-
-  if ! open_output="$(open -Fn -g "${app_path}" 2>&1)"; then
-    fail "failed to open app bundle: ${open_output}"
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$executable_path" \
+    "macOS release-readiness product"; then
+    fail "app launch smoke requires the exact product executable to be absent before LaunchServices launch"
   fi
 
-  deadline=$((SECONDS + LAUNCH_TIMEOUT_SECONDS))
-  while (( SECONDS < deadline )); do
-    while IFS= read -r pid; do
-      [[ -n "${pid}" ]] || continue
-      if ! pid_in_list "${pid}" "${before_pids}"; then
-        new_pid="${pid}"
-        break 2
-      fi
-    done < <(collect_named_pids "${executable_name}")
-    sleep 1
-  done
-
-  if [[ -z "${new_pid}" ]]; then
+  if ! open_output="$(open -F -g "${app_path}" 2>&1)"; then
+    fail "failed to open app bundle: ${open_output}"
+  fi
+  if ! skybridge_mac_wait_for_single_exact_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$executable_path" \
+    "$LAUNCH_TIMEOUT_SECONDS" \
+    new_pid \
+    "macOS release-readiness product"; then
     fail "app launch smoke did not observe a fresh ${executable_name} process within ${LAUNCH_TIMEOUT_SECONDS}s"
+  fi
+  RELEASE_SMOKE_PID="$new_pid"
+  if ! skybridge_mac_capture_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$new_pid" \
+    "$executable_path" \
+    "$RELEASE_SMOKE_PROCESS_IDENTITY" \
+    "macOS release-readiness product"; then
+    fail "app launch smoke could not bind the launched product to an exact private ownership record"
   fi
 
   log_info "App launch smoke observed pid=${new_pid}; waiting ${STEADY_STATE_SECONDS}s for crash-free startup"
   sleep "${STEADY_STATE_SECONDS}"
 
-  if ! kill -0 "${new_pid}" 2>/dev/null; then
+  if skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$new_pid" \
+    "$RELEASE_SMOKE_PROCESS_IDENTITY"; then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  if (( process_status != 0 )); then
     logs="$(capture_recent_logs "${executable_name}")"
-    fail "app process exited during smoke window.${logs:+ Recent logs: ${logs//$'\n'/ | }}"
+    fail "app process exited or lost exact ownership during smoke window.${logs:+ Recent logs: ${logs//$'\n'/ | }}"
   fi
 
   run_cli_memory_check_for_pid "${new_pid}"
 
-  if ! kill -0 "${new_pid}" 2>/dev/null; then
+  if skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$new_pid" \
+    "$RELEASE_SMOKE_PROCESS_IDENTITY"; then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  if (( process_status != 0 )); then
     logs="$(capture_recent_logs "${executable_name}")"
-    fail "app process exited during memory leak scan.${logs:+ Recent logs: ${logs//$'\n'/ | }}"
+    fail "app process exited or lost exact ownership during memory leak scan.${logs:+ Recent logs: ${logs//$'\n'/ | }}"
   fi
 
-  kill -TERM "${new_pid}" >/dev/null 2>&1 || true
-  quit_deadline=$((SECONDS + 10))
-  while kill -0 "${new_pid}" 2>/dev/null; do
-    if (( SECONDS >= quit_deadline )); then
-      kill -KILL "${new_pid}" >/dev/null 2>&1 || true
-      break
-    fi
-    sleep 1
-  done
+  if ! skybridge_mac_terminate_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$new_pid" \
+    "$RELEASE_SMOKE_PROCESS_IDENTITY" \
+    "macOS release-readiness product"; then
+    fail "app launch smoke could not verify exact process cleanup"
+  fi
+  RELEASE_SMOKE_PID=""
 
   log_info "App launch smoke passed"
 }
@@ -1668,6 +1644,12 @@ CORE_MODULE_RESOURCES_DIR="${APP_RESOURCES_DIR}/SkyBridgeCompassApp_SkyBridgeCor
 [[ -f "${APP_MODULE_RESOURCES_DIR}/default.metallib" ]] \
   || fail "missing compiled App default.metallib inside SkyBridgeCompassApp_SkyBridgeCompassApp.bundle; Metal shaders were not packaged as a release resource bundle"
 validate_core_metal_shader_sources "${CORE_MODULE_RESOURCES_DIR}"
+# Resource-bundle presence gate: every <Package>_<Target>.bundle referenced by
+# the executable must be staged under Contents/Resources, and the binary must
+# carry the non-trapping resolver marker (SkyBridgeResourceBundleLocator/v1).
+# Guards the zh-Hans 100% launch-crash class (SwiftPM Bundle.module fatalError).
+"${SCRIPT_DIR}/verify_app_resource_bundles.sh" "${APP_PATH}" \
+  || fail "resource bundle presence gate failed for ${APP_PATH}; app would fatalError at launch when SwiftPM module bundles cannot be resolved"
 [[ -f "${APP_HELPER_PLIST_PATH}" ]] || fail "missing PowerMetricsHelper launchd plist: ${APP_HELPER_PLIST_PATH}"
 [[ -x "${APP_HELPER_BIN_PATH}" ]] || fail "PowerMetricsHelper binary is missing or not executable: ${APP_HELPER_BIN_PATH}"
 APP_HELPER_VERSION="$(extract_helper_version "${APP_HELPER_BIN_PATH}")"
@@ -1890,7 +1872,6 @@ fi
 
 run_cli_coverage_gate
 run_cli_connectivity_gate
-run_cli_remote_control_notice_gates
 run_cli_performance_gates
 
 if [[ "${SKIP_LAUNCH_SMOKE}" == "1" ]]; then

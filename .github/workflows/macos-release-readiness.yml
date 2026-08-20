@@ -5,9 +5,14 @@ on:
     paths:
       - ".github/actionlint.yaml"
       - ".github/workflows/macos-release-readiness.yml"
+      - ".github/workflows/macos-release-publish.yml"
       - ".github/workflows/real-device-release-gate.yml"
+      - ".github/workflows/ios-app-store-export.yml"
       - "Package.swift"
       - "Packages/**"
+      - "project.yml"
+      - "SkyBridgeWidgets.xcodeproj/**"
+      - "XcodeSupport/**"
       - "SkyBridge Compass iOS/**"
       - "Sources/**"
       - "Tests/**"
@@ -19,9 +24,14 @@ on:
     paths:
       - ".github/actionlint.yaml"
       - ".github/workflows/macos-release-readiness.yml"
+      - ".github/workflows/macos-release-publish.yml"
       - ".github/workflows/real-device-release-gate.yml"
+      - ".github/workflows/ios-app-store-export.yml"
       - "Package.swift"
       - "Packages/**"
+      - "project.yml"
+      - "SkyBridgeWidgets.xcodeproj/**"
+      - "XcodeSupport/**"
       - "SkyBridge Compass iOS/**"
       - "Sources/**"
       - "Tests/**"
@@ -31,22 +41,9 @@ on:
       - "rust/**"
   workflow_dispatch:
     inputs:
-      release_artifact_run_id:
-        description: "Workflow run id containing the real-device release-gate artifacts"
+      release_build_id:
+        description: "Positive integer CFBundleVersion for this immutable signed candidate"
         required: true
-        type: string
-      release_artifact_run_attempt:
-        description: "Workflow run attempt that produced the real-device release-gate artifacts"
-        required: true
-        type: string
-      publish_update_release:
-        description: "Publish a new immutable release after every source, device-evidence, signing, notarization, and asset gate passes"
-        required: true
-        default: false
-        type: boolean
-      publish_release_tag:
-        description: "Exact pre-pushed tag to publish (macos-v<semver>-build-<build>); required when publishing"
-        required: false
         type: string
 
 permissions:
@@ -77,6 +74,14 @@ jobs:
           sudo xcode-select -s "$DEVELOPER_DIR"
           bash Scripts/verify_xcode_toolchain.sh
 
+      - name: Validate macOS Release Version Configuration
+        run: bash Scripts/check_macos_release_version.sh
+
+      - name: Validate iOS Release Version Configuration
+        run: |
+          bash Scripts/check_ios_release_version.sh
+          bash Scripts/test_ios_release_version.sh
+
       - name: Self-Test iOS XCTest Guardrail
         run: bash Scripts/test_check_ios_test_configuration.sh
 
@@ -90,22 +95,46 @@ jobs:
         run: python3 Scripts/check_p2p_no_traps.py
 
       - name: Self-Test Real-Device Release Acceptance Artifacts
-        run: python3 Scripts/test_validate_real_device_release_acceptance_artifact.py
+        run: python3 -W error Scripts/test_validate_real_device_release_acceptance_artifact.py
+
+      - name: Self-Test Normal-Product Release Evidence Log
+        run: python3 -W error Scripts/test_validate_product_release_evidence_log.py
+
+      - name: Self-Test Release Environment Protection
+        run: python3 Scripts/test_validate_release_environment_protection.py
 
       - name: Self-Test Release Acceptance Manifest Finalization
         run: python3 Scripts/test_finalize_release_acceptance_manifests.py
 
+      - name: Self-Test iOS Same-Archive Release Transaction
+        run: python3 Scripts/test_ios_app_store_release_transaction.py
+
       - name: Self-Test iOS Distribution Product Boundary
         run: python3 Scripts/test_verify_ios_distribution_product.py
+
+      - name: Self-Test Physical iOS Device Selection Boundary
+        run: PYTHONPATH=Scripts python3 Scripts/test_devicectl_device_selection.py
+
+      - name: Self-Test Release Output Directory Boundary
+        run: PYTHONPATH=Scripts python3 Scripts/test_validate_release_output_directory.py
 
       - name: Self-Test FreeRDP Runtime Closure Provenance Gate
         run: python3 Scripts/test_verify_packaged_freerdp_runtime.py
 
       - name: Self-Test Real-Device Evidence Workflow Contract
-        run: python3 Scripts/test_real_device_release_workflow_contract.py
+        run: python3 -W error Scripts/test_real_device_release_workflow_contract.py
+
+      - name: Self-Test Real-Device Public Artifact Redaction
+        run: bash Scripts/test_real_device_smoke_redaction.sh
+
+      - name: Validate GitHub Actions Workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -config-file .github/actionlint.yaml
+
+      - name: Self-Test Immutable macOS Candidate Identity
+        run: python3 Scripts/test_macos_release_candidate_identity.py
 
       - name: Self-Test Real-Device Evidence File-Set Contract
-        run: python3 Scripts/test_stage_real_device_release_evidence.py
+        run: python3 -W error Scripts/test_stage_real_device_release_evidence.py
 
       - name: Self-Test macOS Release Handoff Boundary
         run: python3 Scripts/test_extract_macos_release_handoff.py
@@ -198,10 +227,29 @@ jobs:
           [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
           bash Scripts/verify_xcode_toolchain.sh
 
+      - name: Install Q-Periapt Artifact Inspection Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          QPERIAPT_INSPECTION_TOOLCHAIN="$(python3 - <<'PY'
+          import json
+          import pathlib
+
+          record = json.loads(
+              pathlib.Path("VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json").read_text(encoding="utf-8")
+          )
+          print(record["upstream_artifact"]["rust_toolchain"])
+          PY
+          )"
+          rustup toolchain install \
+            "$QPERIAPT_INSPECTION_TOOLCHAIN" \
+            --profile minimal \
+            --component llvm-tools-preview
+
       - name: Run OS27 Source Contracts
         run: bash Scripts/run_os27_beta_compatibility.sh --verify-source-contracts
 
-  macos-signed-release-gate:
+  macos-signed-release-candidate:
     needs: [macos-preflight, os27-source-contracts]
     runs-on: macos-26
     timeout-minutes: 120
@@ -218,17 +266,6 @@ jobs:
       SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
       SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
       SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
-      RELEASE_ARTIFACT_WORKFLOW_PATH: .github/workflows/real-device-release-gate.yml
-      RELEASE_ARTIFACT_EVENT: workflow_dispatch
-      CONNECTIVITY_ARTIFACT_NAME: real-device-connectivity-matrix-public-redacted
-      P2P_REMOTE_ARTIFACT_NAME: real-device-p2p-remote-smoke-public-redacted
-      WEBRTC_REMOTE_ARTIFACT_NAME: real-device-webrtc-smoke-public-redacted
-      FILE_TRANSFER_ARTIFACT_NAME: real-device-file-transfer-smoke-public-redacted
-      P2P_NOTICE_ARTIFACT_NAME: real-device-p2p-security-notice-public-redacted
-      WEBRTC_NOTICE_ARTIFACT_NAME: local-webrtc-security-notice-public-redacted
-      NOTICE_PANEL_ARTIFACT_NAME: local-macos-security-notice-panel-public-redacted
-      SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}
-      SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -242,167 +279,23 @@ jobs:
           sudo xcode-select -s "$DEVELOPER_DIR"
           bash Scripts/verify_xcode_toolchain.sh
 
-      - name: Validate Release Artifact Run Provenance
+      - name: Resolve Explicit Release Version and Build Transaction
         if: needs.macos-preflight.result == 'success'
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ARTIFACT_RUN_ID: ${{ inputs.release_artifact_run_id }}
-          RELEASE_ARTIFACT_RUN_ATTEMPT: ${{ inputs.release_artifact_run_attempt }}
-        run: |
-          bash Scripts/validate_macos_release_artifact_run.sh \
-            --repository "${GITHUB_REPOSITORY}" \
-            --run-id "${RELEASE_ARTIFACT_RUN_ID}" \
-            --expected-run-attempt "${RELEASE_ARTIFACT_RUN_ATTEMPT}" \
-            --expected-workflow-path "${RELEASE_ARTIFACT_WORKFLOW_PATH}" \
-            --expected-event "${RELEASE_ARTIFACT_EVENT}" \
-            --expected-head-sha "${GITHUB_SHA}" \
-            --expected-head-branch "${GITHUB_REF_NAME}" \
-            --artifact "${CONNECTIVITY_ARTIFACT_NAME}" \
-            --artifact "${P2P_REMOTE_ARTIFACT_NAME}" \
-            --artifact "${WEBRTC_REMOTE_ARTIFACT_NAME}" \
-            --artifact "${FILE_TRANSFER_ARTIFACT_NAME}" \
-            --artifact "${P2P_NOTICE_ARTIFACT_NAME}" \
-            --artifact "${WEBRTC_NOTICE_ARTIFACT_NAME}" \
-            --artifact "${NOTICE_PANEL_ARTIFACT_NAME}" \
-            --require-public-redacted-artifacts \
-            --provenance-output "Artifacts/release-gate/release-artifact-run-provenance.json"
-
-      - name: Download Connectivity Matrix Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.CONNECTIVITY_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/connectivity
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Download P2P Remote Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.P2P_REMOTE_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/p2p-remote
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Download WebRTC Remote Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.WEBRTC_REMOTE_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/webrtc-remote
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Download File Transfer Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.FILE_TRANSFER_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/file-transfer
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Download P2P Security Notice Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.P2P_NOTICE_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/p2p-notice
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Download WebRTC Security Notice Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.WEBRTC_NOTICE_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/webrtc-notice
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Download AppKit Security Notice Panel Artifact
-        if: needs.macos-preflight.result == 'success'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.NOTICE_PANEL_ARTIFACT_NAME }}
-          path: Artifacts/release-gate-raw/notice-panel
-          run-id: ${{ inputs.release_artifact_run_id }}
-          github-token: ${{ github.token }}
-
-      - name: Extract Mode-Preserving Release Evidence
-        if: needs.macos-preflight.result == 'success'
-        shell: bash
+          REQUESTED_BUILD_ID: ${{ inputs.release_build_id }}
         run: |
           set -euo pipefail
-          download_directories=(
-            "Artifacts/release-gate-raw/connectivity"
-            "Artifacts/release-gate-raw/p2p-remote"
-            "Artifacts/release-gate-raw/webrtc-remote"
-            "Artifacts/release-gate-raw/file-transfer"
-            "Artifacts/release-gate-raw/p2p-notice"
-            "Artifacts/release-gate-raw/webrtc-notice"
-            "Artifacts/release-gate-raw/notice-panel"
-          )
-          artifact_names=(
-            "$CONNECTIVITY_ARTIFACT_NAME"
-            "$P2P_REMOTE_ARTIFACT_NAME"
-            "$WEBRTC_REMOTE_ARTIFACT_NAME"
-            "$FILE_TRANSFER_ARTIFACT_NAME"
-            "$P2P_NOTICE_ARTIFACT_NAME"
-            "$WEBRTC_NOTICE_ARTIFACT_NAME"
-            "$NOTICE_PANEL_ARTIFACT_NAME"
-          )
-          for (( index = 0; index < ${#download_directories[@]}; index += 1 )); do
-            download_directory="${download_directories[$index]}"
-            artifact_name="${artifact_names[$index]}"
-            archive_path="$download_directory/$artifact_name.tar.gz"
-            extraction_path="$download_directory/public-redacted"
-            [[ -f "$archive_path" && ! -L "$archive_path" ]] || {
-              echo "::error::Missing mode-preserving evidence archive: $artifact_name"
-              exit 1
-            }
-            unexpected_path="$(find "$download_directory" -mindepth 1 -maxdepth 1 ! -name "$artifact_name.tar.gz" -print -quit)"
-            [[ -z "$unexpected_path" ]] || {
-              echo "::error::Evidence artifact contains an unexpected top-level entry: $artifact_name"
-              exit 1
-            }
-            python3 Scripts/extract_real_device_release_evidence_archive.py \
-              --archive "$archive_path" \
-              --destination "$extraction_path"
-          done
+          source_version="$(bash Scripts/check_macos_release_version.sh)"
 
-      - name: Validate Public Release Gate Artifacts
-        if: needs.macos-preflight.result == 'success'
-        run: |
-          bash Scripts/validate_macos_release_public_artifacts.sh \
-            --artifact "connectivity|${CONNECTIVITY_ARTIFACT_NAME}|Artifacts/release-gate-raw/connectivity|Artifacts/release-gate-public/connectivity" \
-            --artifact "p2p-remote|${P2P_REMOTE_ARTIFACT_NAME}|Artifacts/release-gate-raw/p2p-remote|Artifacts/release-gate-public/p2p-remote" \
-            --artifact "webrtc-remote|${WEBRTC_REMOTE_ARTIFACT_NAME}|Artifacts/release-gate-raw/webrtc-remote|Artifacts/release-gate-public/webrtc-remote" \
-            --artifact "file-transfer|${FILE_TRANSFER_ARTIFACT_NAME}|Artifacts/release-gate-raw/file-transfer|Artifacts/release-gate-public/file-transfer" \
-            --artifact "p2p-notice|${P2P_NOTICE_ARTIFACT_NAME}|Artifacts/release-gate-raw/p2p-notice|Artifacts/release-gate/p2p-notice" \
-            --artifact "webrtc-notice|${WEBRTC_NOTICE_ARTIFACT_NAME}|Artifacts/release-gate-raw/webrtc-notice|Artifacts/release-gate/webrtc-notice" \
-            --artifact "notice-panel|${NOTICE_PANEL_ARTIFACT_NAME}|Artifacts/release-gate-raw/notice-panel|Artifacts/release-gate/notice-panel"
-
-      - name: Validate Same-SHA Production iOS Identity Evidence
-        if: needs.macos-preflight.result == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          evidence_directories=(
-            "Artifacts/release-gate-public/connectivity"
-            "Artifacts/release-gate-public/p2p-remote"
-            "Artifacts/release-gate-public/webrtc-remote"
-            "Artifacts/release-gate-public/file-transfer"
-            "Artifacts/release-gate/p2p-notice"
-          )
-          for evidence_directory in "${evidence_directories[@]}"; do
-            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
-              --kind production-identity \
-              --artifact-dir "$evidence_directory" \
-              --expected-source-repository "$GITHUB_REPOSITORY" \
-              --expected-source-sha "$GITHUB_SHA"
-          done
+          [[ "$REQUESTED_BUILD_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::release_build_id must be a positive integer."
+            exit 1
+          }
+          {
+            echo "SKYBRIDGE_RELEASE_VERSION=$source_version"
+            echo "SKYBRIDGE_RELEASE_BUILD_ID=$REQUESTED_BUILD_ID"
+          } >> "$GITHUB_ENV"
 
       - name: Validate Release Signing Secrets
         if: needs.macos-preflight.result == 'success'
@@ -540,73 +433,46 @@ jobs:
           SKYBRIDGE_XCODEBUILD_KEEP_NOISE: "1"
         run: |
           bash Scripts/build_dmg.sh \
+            --build-id "$SKYBRIDGE_RELEASE_BUILD_ID" \
             --identity "$SIGNING_IDENTITY" \
             --notarize-app \
             --notarize-dmg \
             --require-notarization
 
-      - name: Validate Full macOS Release Readiness
+      - name: Validate Signed Candidate Package Boundary
         if: needs.macos-preflight.result == 'success'
         env:
           SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION: "1"
         run: |
           bash Scripts/check_macos_release_readiness.sh \
             --require-notarization \
-            --connectivity-artifact-dir "Artifacts/release-gate-public/connectivity" \
-            --p2p-remote-artifact-dir "Artifacts/release-gate-public/p2p-remote" \
-            --webrtc-remote-artifact-dir "Artifacts/release-gate-public/webrtc-remote" \
-            --file-transfer-artifact-dir "Artifacts/release-gate-public/file-transfer" \
-            --p2p-notice-artifact-dir "Artifacts/release-gate/p2p-notice" \
-            --webrtc-notice-artifact-dir "Artifacts/release-gate/webrtc-notice" \
-            --notice-panel-artifact-dir "Artifacts/release-gate/notice-panel"
+            --package-integrity-only
 
-      - name: Assemble Immutable Release Evidence Asset
-        if: inputs.publish_update_release == true
+      - name: Create Immutable Candidate Identity
         shell: bash
         run: |
           set -euo pipefail
-          evidence_root="$RUNNER_TEMP/macos-release-evidence"
-          evidence_archive="dist/macos-release-evidence.tar.gz"
-          rm -rf "$evidence_root"
-          mkdir -p "$evidence_root"
+          app_path="dist/SkyBridge Compass Pro.app"
+          dmg_path="dist/SkyBridgeCompassPro-${SKYBRIDGE_RELEASE_VERSION}.dmg"
+          identity_path="dist/macos-release-candidate.json"
+          [[ ! -e "$identity_path" && ! -L "$identity_path" ]] || {
+            echo "::error::Candidate identity output already exists."
+            exit 1
+          }
+          python3 Scripts/macos_release_candidate_identity.py create \
+            --app "$app_path" \
+            --dmg "$dmg_path" \
+            --source-repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --expected-version "$SKYBRIDGE_RELEASE_VERSION" \
+            --expected-build "$SKYBRIDGE_RELEASE_BUILD_ID" \
+            --output "$identity_path"
+          python3 Scripts/macos_release_candidate_identity.py verify \
+            --identity "$identity_path" \
+            --app "$app_path" \
+            --dmg "$dmg_path"
 
-          evidence_sources=(
-            "release-artifact-run-provenance|Artifacts/release-gate/release-artifact-run-provenance.json"
-            "connectivity|Artifacts/release-gate-public/connectivity"
-            "p2p-remote|Artifacts/release-gate-public/p2p-remote"
-            "webrtc-remote|Artifacts/release-gate-public/webrtc-remote"
-            "file-transfer|Artifacts/release-gate-public/file-transfer"
-            "p2p-notice|Artifacts/release-gate/p2p-notice"
-            "webrtc-notice|Artifacts/release-gate/webrtc-notice"
-            "notice-panel|Artifacts/release-gate/notice-panel"
-          )
-          for entry in "${evidence_sources[@]}"; do
-            label="${entry%%|*}"
-            source_path="${entry#*|}"
-            [[ -e "$source_path" && ! -L "$source_path" ]] || { echo "::error::Missing or linked release evidence: $source_path"; exit 1; }
-            if [[ -d "$source_path" ]]; then
-              if find "$source_path" ! -type f ! -type d -print -quit | grep -q .; then
-                echo "::error::Release evidence contains a symbolic link or special file: $source_path"
-                exit 1
-              fi
-              mkdir -p "$evidence_root/$label"
-              cp -R "$source_path/." "$evidence_root/$label/"
-            elif [[ -f "$source_path" && -s "$source_path" ]]; then
-              mkdir -p "$evidence_root/$label"
-              cp -p "$source_path" "$evidence_root/$label/"
-            else
-              echo "::error::Release evidence must be a non-empty regular file or directory: $source_path"
-              exit 1
-            fi
-          done
-
-          COPYFILE_DISABLE=1 tar -czf "$evidence_archive" -C "$evidence_root" .
-          [[ -s "$evidence_archive" ]] || { echo "::error::Release evidence archive is empty"; exit 1; }
-          tar -tzf "$evidence_archive" >/dev/null
-          echo "MACOS_RELEASE_EVIDENCE_PATH=$evidence_archive" >> "$GITHUB_ENV"
-
-      - name: Assemble and Verify Signed Release Handoff
-        if: inputs.publish_update_release == true
+      - name: Assemble and Verify Signed Candidate Handoff
         shell: bash
         run: |
           set -euo pipefail
@@ -614,19 +480,17 @@ jobs:
           dmg_path="dist/SkyBridgeCompassPro-${app_version}.dmg"
           [[ -f "$dmg_path" ]] || { echo "::error::Notarized DMG not found at $dmg_path"; exit 1; }
 
-          handoff_archive="$RUNNER_TEMP/macos-signed-release-handoff.tar.gz"
+          handoff_archive="$RUNNER_TEMP/macos-signed-release-candidate.tar.gz"
           handoff_checksum="$handoff_archive.sha256"
-          handoff_verification="$RUNNER_TEMP/macos-signed-release-handoff-verification"
+          handoff_verification="$RUNNER_TEMP/macos-signed-release-candidate-verification"
           rm -f "$handoff_archive" "$handoff_checksum"
           rm -rf "$handoff_verification"
           COPYFILE_DISABLE=1 tar -czf "$handoff_archive" \
             -C dist \
             "SkyBridge Compass Pro.app" \
             "$(basename "$dmg_path")" \
-            "$(basename "$MACOS_RELEASE_EVIDENCE_PATH")" \
-            -C "$GITHUB_WORKSPACE/Artifacts/release-gate" \
-            release-artifact-run-provenance.json
-          [[ -s "$handoff_archive" ]] || { echo "::error::Signed release handoff is empty"; exit 1; }
+            macos-release-candidate.json
+          [[ -s "$handoff_archive" ]] || { echo "::error::Signed candidate handoff is empty"; exit 1; }
           (
             cd "$(dirname "$handoff_archive")"
             shasum -a 256 "$(basename "$handoff_archive")" > "$(basename "$handoff_checksum")"
@@ -642,17 +506,20 @@ jobs:
             echo "::error::Verified handoff is missing the notarized DMG."
             exit 1
           }
+          python3 Scripts/macos_release_candidate_identity.py verify \
+            --identity "$handoff_verification/macos-release-candidate.json" \
+            --app "$handoff_verification/SkyBridge Compass Pro.app" \
+            --dmg "$handoff_verification/$(basename "$dmg_path")"
 
-      - name: Upload Signed Release Handoff
-        if: inputs.publish_update_release == true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload Signed Release Candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-signed-release-handoff
+          name: macos-signed-release-candidate
           path: |
-            ${{ runner.temp }}/macos-signed-release-handoff.tar.gz
-            ${{ runner.temp }}/macos-signed-release-handoff.tar.gz.sha256
+            ${{ runner.temp }}/macos-signed-release-candidate.tar.gz
+            ${{ runner.temp }}/macos-signed-release-candidate.tar.gz.sha256
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
 
       - name: Remove Temporary Signing Credentials
         if: always()
@@ -707,147 +574,3 @@ jobs:
             fi
           done
           exit "$cleanup_failed"
-
-  macos-immutable-release-publish:
-    needs: [macos-preflight, os27-source-contracts, macos-signed-release-gate]
-    runs-on: macos-26
-    timeout-minutes: 30
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.publish_update_release == true &&
-      needs.macos-preflight.result == 'success' &&
-      needs.os27-source-contracts.result == 'success' &&
-      needs.macos-signed-release-gate.result == 'success'
-    environment: macos-production-release
-    permissions:
-      contents: write
-      actions: read
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
-      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
-      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
-
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
-        run: |
-          set -euo pipefail
-          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
-          sudo xcode-select -s "$DEVELOPER_DIR"
-          bash Scripts/verify_xcode_toolchain.sh
-
-      - name: Download Signed Release Handoff
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: macos-signed-release-handoff
-          path: ${{ runner.temp }}/macos-signed-release-handoff-download
-
-      - name: Verify and Extract Signed Release Handoff
-        shell: bash
-        run: |
-          set -euo pipefail
-          download_root="$RUNNER_TEMP/macos-signed-release-handoff-download"
-          handoff_archive="$download_root/macos-signed-release-handoff.tar.gz"
-          handoff_checksum="$handoff_archive.sha256"
-          handoff_root="$RUNNER_TEMP/macos-signed-release-handoff"
-
-          [[ -f "$handoff_archive" && ! -L "$handoff_archive" ]] || {
-            echo "::error::Signed release handoff archive is missing."
-            exit 1
-          }
-          [[ -f "$handoff_checksum" && ! -L "$handoff_checksum" ]] || {
-            echo "::error::Signed release handoff checksum is missing."
-            exit 1
-          }
-          unexpected="$(find "$download_root" -mindepth 1 -maxdepth 1 \
-            ! -name 'macos-signed-release-handoff.tar.gz' \
-            ! -name 'macos-signed-release-handoff.tar.gz.sha256' -print -quit)"
-          [[ -z "$unexpected" ]] || {
-            echo "::error::Signed release handoff artifact contains an unexpected file."
-            exit 1
-          }
-          (
-            cd "$download_root"
-            shasum -a 256 -c "$(basename "$handoff_checksum")"
-          )
-          rm -rf "$handoff_root"
-          python3 Scripts/extract_macos_release_handoff.py \
-            --archive "$handoff_archive" \
-            --destination "$handoff_root"
-
-          dmg_paths=("$handoff_root"/SkyBridgeCompassPro-*.dmg)
-          [[ "${#dmg_paths[@]}" == "1" && -f "${dmg_paths[0]}" ]] || {
-            echo "::error::Signed release handoff must contain exactly one versioned DMG."
-            exit 1
-          }
-          {
-            echo "MACOS_PUBLISH_HANDOFF_ROOT=$handoff_root"
-            echo "MACOS_PUBLISH_DMG_PATH=${dmg_paths[0]}"
-          } >> "$GITHUB_ENV"
-
-      - name: Validate Explicit Publication Approval and Secrets
-        env:
-          PUBLISH_RELEASE_TAG: ${{ inputs.publish_release_tag }}
-          UPDATE_MANIFEST_KEY_ID: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_KEY_ID }}
-          UPDATE_MANIFEST_PRIVATE_KEY_BASE64: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$PUBLISH_RELEASE_TAG" =~ ^macos-v[0-9]+\.[0-9]+\.[0-9]+-build-[0-9]+$ ]] || {
-            echo "::error::publish_release_tag must use macos-v<semver>-build-<build> form."
-            exit 1
-          }
-          [[ -n "$UPDATE_MANIFEST_KEY_ID" ]] || {
-            echo "::error::SKYBRIDGE_UPDATE_MANIFEST_KEY_ID is required for publication."
-            exit 1
-          }
-          [[ -n "$UPDATE_MANIFEST_PRIVATE_KEY_BASE64" ]] || {
-            echo "::error::SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 is required for publication."
-            exit 1
-          }
-
-      - name: Publish Immutable GitHub Update Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 }}
-          UPDATE_MANIFEST_KEY_ID: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_KEY_ID }}
-          PUBLISH_RELEASE_TAG: ${{ inputs.publish_release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          publish_output="$RUNNER_TEMP/macos-update-publish-output"
-          rm -rf "$publish_output"
-          mkdir -m 0700 "$publish_output"
-          bash Scripts/publish_macos_update_release.sh \
-            --repository "${GITHUB_REPOSITORY}" \
-            --tag "$PUBLISH_RELEASE_TAG" \
-            --expected-source-sha "$GITHUB_SHA" \
-            --app-path "$MACOS_PUBLISH_HANDOFF_ROOT/SkyBridge Compass Pro.app" \
-            --dmg-path "$MACOS_PUBLISH_DMG_PATH" \
-            --manifest-path "$publish_output/macos-stable.json" \
-            --proof-summary-path "$publish_output/macos-stable.publish-proof.json" \
-            --evidence-provenance-path "$MACOS_PUBLISH_HANDOFF_ROOT/release-artifact-run-provenance.json" \
-            --evidence-asset "$MACOS_PUBLISH_HANDOFF_ROOT/macos-release-evidence.tar.gz" \
-            --key-id "$UPDATE_MANIFEST_KEY_ID"
-
-      - name: Upload Immutable Release Publish Proof
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: macos-update-publish-proof-${{ inputs.publish_release_tag }}
-          path: ${{ runner.temp }}/macos-update-publish-output/macos-stable.publish-proof.json
-          if-no-files-found: error
-          retention-days: 90
-
-      - name: Remove Publication Handoff
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          /bin/rm -rf \
-            "$RUNNER_TEMP/macos-signed-release-handoff-download" \
-            "$RUNNER_TEMP/macos-signed-release-handoff" \
-            "$RUNNER_TEMP/macos-update-publish-output"

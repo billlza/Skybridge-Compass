@@ -12,7 +12,7 @@ from pathlib import Path
 
 from apple_provisioning_profile import load_verified_profile
 
-EXPECTED_ARGUMENT_COUNT = 27
+EXPECTED_ARGUMENT_COUNT = 29
 
 # A release Widget carries only its own keychain-access-group (a Debug lab
 # Widget deliberately carries none) plus the App Group container with the host
@@ -31,6 +31,17 @@ WIDGET_DISALLOWED_ENTITLEMENTS = (
     "com.apple.developer.ubiquity-container-identifiers",
     "com.apple.developer.ubiquity-kvstore-identifier",
 )
+SIGNED_IDENTITY_ENTITLEMENTS = {
+    "application-identifier",
+    "com.apple.application-identifier",
+    "com.apple.developer.team-identifier",
+}
+SIGNED_SYSTEM_ENTITLEMENTS = {
+    "get-task-allow",
+    "com.apple.security.get-task-allow",
+    "beta-reports-active",
+}
+APPLICATION_GROUP_ENTITLEMENT = "com.apple.security.application-groups"
 
 
 def entitlement_value_is_present(value) -> bool:
@@ -49,12 +60,89 @@ def entitlement_value_is_present(value) -> bool:
     return True
 
 
-def widget_signed_entitlements_conform(signed_entitlements: dict) -> bool:
+def _application_groups_conform(value, expected_team: str) -> bool:
+    if not entitlement_value_is_present(value):
+        return True
+    if not isinstance(value, list):
+        return False
+    groups = {str(item).strip() for item in value if isinstance(item, str)}
+    return groups in (
+        {"group.com.skybridge.compass"},
+        {f"{expected_team}.group.com.skybridge.compass"},
+    )
+
+
+def _signed_system_entitlements_conform(
+    signed_entitlements: dict,
+    *,
+    lab_run: bool,
+) -> bool:
+    for key in ("get-task-allow", "com.apple.security.get-task-allow"):
+        value = signed_entitlements.get(key)
+        if value is not None and not isinstance(value, bool):
+            return False
+        if not lab_run and value is True:
+            return False
+    beta_reports = signed_entitlements.get("beta-reports-active")
+    return beta_reports in (None, True)
+
+
+def widget_signed_entitlements_conform(
+    signed_entitlements: dict,
+    *,
+    expected_team: str = "YKUPL7Z869",
+    lab_run: bool = False,
+) -> bool:
     """The nested Widget must not independently hold the host App's privileged
     entitlements. Returns False if any disallowed capability is present."""
-    return not any(
+    if any(
         entitlement_value_is_present(signed_entitlements.get(key))
         for key in WIDGET_DISALLOWED_ENTITLEMENTS
+    ):
+        return False
+    allowed = (
+        SIGNED_IDENTITY_ENTITLEMENTS
+        | SIGNED_SYSTEM_ENTITLEMENTS
+        | {"keychain-access-groups", APPLICATION_GROUP_ENTITLEMENT}
+    )
+    if any(
+        key not in allowed and entitlement_value_is_present(value)
+        for key, value in signed_entitlements.items()
+    ):
+        return False
+    return _application_groups_conform(
+        signed_entitlements.get(APPLICATION_GROUP_ENTITLEMENT),
+        expected_team,
+    ) and _signed_system_entitlements_conform(
+        signed_entitlements,
+        lab_run=lab_run,
+    )
+
+
+def app_signed_entitlements_conform(
+    signed_entitlements: dict,
+    *,
+    expected_entitlements: dict,
+    expected_team: str,
+    lab_run: bool,
+) -> bool:
+    allowed = (
+        SIGNED_IDENTITY_ENTITLEMENTS
+        | SIGNED_SYSTEM_ENTITLEMENTS
+        | set(expected_entitlements)
+        | {APPLICATION_GROUP_ENTITLEMENT}
+    )
+    if any(
+        key not in allowed and entitlement_value_is_present(value)
+        for key, value in signed_entitlements.items()
+    ):
+        return False
+    return _application_groups_conform(
+        signed_entitlements.get(APPLICATION_GROUP_ENTITLEMENT),
+        expected_team,
+    ) and _signed_system_entitlements_conform(
+        signed_entitlements,
+        lab_run=lab_run,
     )
 
 
@@ -107,6 +195,24 @@ def profile_value_covers(profile_value: str, requested: str) -> bool:
     return profile_value.endswith(".*") and requested.startswith(profile_value[:-1])
 
 
+def profile_entitlement_covers(granted, requested) -> bool:
+    if isinstance(requested, list):
+        if not isinstance(granted, list):
+            return False
+        return all(
+            any(
+                isinstance(granted_value, str)
+                and isinstance(requested_value, str)
+                and profile_value_covers(granted_value, requested_value)
+                for granted_value in granted
+            )
+            for requested_value in requested
+        )
+    if isinstance(requested, str):
+        return isinstance(granted, str) and profile_value_covers(granted, requested)
+    return values_equal(granted, requested)
+
+
 def required_keychain_groups(
     *,
     bundle_identifier: str,
@@ -153,6 +259,15 @@ def analyze_target(
         signed_entitlements.get("application-identifier")
         or signed_entitlements.get("com.apple.application-identifier")
     )
+    signed_application_identifiers = [
+        signed_entitlements[key]
+        for key in ("application-identifier", "com.apple.application-identifier")
+        if key in signed_entitlements
+    ]
+    signed_application_identifiers_match = bool(signed_application_identifiers) and all(
+        value == expected_application_identifier
+        for value in signed_application_identifiers
+    )
     profile_application_identifier = (
         profile_entitlements.get("application-identifier")
         or profile_entitlements.get("com.apple.application-identifier")
@@ -162,7 +277,7 @@ def analyze_target(
             signed_team == expected_team,
             profile_team == expected_team,
             signed_entitlements.get("com.apple.developer.team-identifier") == expected_team,
-            signed_application_identifier == expected_application_identifier,
+            signed_application_identifiers_match,
             profile_application_identifier == expected_application_identifier,
         )
     )
@@ -250,6 +365,11 @@ def analyze_target(
         expected_match = all(
             key in signed_entitlements and values_equal(value, signed_entitlements[key])
             for key, value in expanded_expected.items()
+        ) and app_signed_entitlements_conform(
+            signed_entitlements,
+            expected_entitlements=expanded_expected,
+            expected_team=expected_team,
+            lab_run=lab_run,
         )
     else:
         # The nested Widget has no external expected-entitlements manifest; its
@@ -257,7 +377,17 @@ def analyze_target(
         # privileged capabilities. Previously this branch was hard-coded True,
         # which meant a Widget wrongly granted iCloud/APNs/Sign in with Apple
         # would still pass the formal proof.
-        expected_match = widget_signed_entitlements_conform(signed_entitlements)
+        expected_match = widget_signed_entitlements_conform(
+            signed_entitlements,
+            expected_team=expected_team,
+            lab_run=lab_run,
+        )
+    for optional_key in (APPLICATION_GROUP_ENTITLEMENT, "beta-reports-active"):
+        if optional_key in signed_entitlements and not profile_entitlement_covers(
+            profile_entitlements.get(optional_key),
+            signed_entitlements[optional_key],
+        ):
+            expected_match = False
     return {
         "productBundle": signed_application_identifier == expected_application_identifier,
         "platformVerified": "iOS" in (profile.get("Platform") or []),
@@ -309,6 +439,8 @@ def main(argv: list[str]) -> None:
         product_surface,
         swift_active_compilation_conditions_arg,
         binary_test_surface_detected_arg,
+        app_info_plist_arg,
+        widget_info_plist_arg,
     ) = argv[1:]
     signed_team = signed_team_arg
     app_profile_path = Path(app_profile_arg)
@@ -365,6 +497,45 @@ def main(argv: list[str]) -> None:
             source_repository_verified,
             source_revision_verified,
             production_product,
+        )
+    ):
+        raise RuntimeError(
+            "formal iOS release-product proof requires same-repository, full-SHA, "
+            "production surface without DEBUG/SKYBRIDGE_TESTING or binary test hooks"
+        )
+
+    def load_product_version(label: str, path_arg: str) -> tuple[str, str]:
+        path = Path(path_arg)
+        if not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"iOS {label} Info.plist is missing, linked, or not a regular file")
+        try:
+            with path.open("rb") as handle:
+                info = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException) as error:
+            raise RuntimeError(f"unable to read iOS {label} Info.plist") from error
+        version = info.get("CFBundleShortVersionString")
+        build = info.get("CFBundleVersion")
+        if not isinstance(version, str) or re.fullmatch(
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+            version,
+        ) is None:
+            raise RuntimeError(f"iOS {label} CFBundleShortVersionString is not strict semantic version text")
+        if not isinstance(build, str) or re.fullmatch(r"[1-9][0-9]*", build) is None:
+            raise RuntimeError(f"iOS {label} CFBundleVersion is not a positive integer")
+        return version, build
+
+    app_version, app_build = load_product_version("app", app_info_plist_arg)
+    widget_version, widget_build = load_product_version("Widget", widget_info_plist_arg)
+    release_version_verified = app_version == widget_version and app_build == widget_build
+    if not release_version_verified:
+        raise RuntimeError("iOS app and Widget release version/build do not match")
+
+    if not lab_run and not all(
+        (
+            source_repository_verified,
+            source_revision_verified,
+            production_product,
+            release_version_verified,
         )
     ):
         raise RuntimeError(
@@ -454,6 +625,7 @@ def main(argv: list[str]) -> None:
             source_repository_verified,
             source_revision_verified,
             production_product,
+            release_version_verified,
         )
     ):
         raise RuntimeError("formal iOS release-product acceptance proof failed")
@@ -472,6 +644,9 @@ def main(argv: list[str]) -> None:
         "binaryTestSurfaceDetected": binary_test_surface_detected,
         "productionProduct": production_product,
         "releaseProvenanceVerified": product_provenance_verified,
+        "releaseVersion": app_version,
+        "releaseBuild": app_build,
+        "releaseVersionVerified": release_version_verified,
         "productBundle": app["productBundle"] and widget["productBundle"],
         "signatureVerified": signature_verified,
         "profileVerified": profile_verified,

@@ -52,9 +52,6 @@ ARTIFACT_NAMES=(
   "real-device-p2p-remote-smoke-public-redacted"
   "real-device-webrtc-smoke-public-redacted"
   "real-device-file-transfer-smoke-public-redacted"
-  "real-device-p2p-security-notice-public-redacted"
-  "local-webrtc-security-notice-public-redacted"
-  "local-macos-security-notice-panel-public-redacted"
 )
 
 write_payloads() {
@@ -148,6 +145,11 @@ PY
 run_target() {
   local output_path="$1"
   shift
+  local artifact_name=""
+  local -a artifact_args=()
+  for artifact_name in "${ARTIFACT_NAMES[@]}"; do
+    artifact_args+=(--artifact "$artifact_name")
+  done
 
   PATH="${TMP_DIR}/bin:${PATH}" \
     SKYBRIDGE_FAKE_RUN_JSON="${TMP_DIR}/run.json" \
@@ -160,13 +162,7 @@ run_target() {
       --expected-event "${EVENT}" \
       --expected-head-sha "${HEAD_SHA}" \
       --expected-head-branch "${HEAD_BRANCH}" \
-      --artifact "${ARTIFACT_NAMES[0]}" \
-      --artifact "${ARTIFACT_NAMES[1]}" \
-      --artifact "${ARTIFACT_NAMES[2]}" \
-      --artifact "${ARTIFACT_NAMES[3]}" \
-      --artifact "${ARTIFACT_NAMES[4]}" \
-      --artifact "${ARTIFACT_NAMES[5]}" \
-      --artifact "${ARTIFACT_NAMES[6]}" \
+      "${artifact_args[@]}" \
       --require-public-redacted-artifacts \
       --provenance-output "${output_path}" \
       "$@"

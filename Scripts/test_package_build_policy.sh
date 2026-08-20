@@ -298,6 +298,7 @@ test_package_output_policy \
 package_app_script="${SCRIPT_DIR}/package_app.sh"
 sign_app_script="${SCRIPT_DIR}/sign_app.sh"
 build_dmg_script="${SCRIPT_DIR}/build_dmg.sh"
+build_with_widgets_script="${SCRIPT_DIR}/build_with_widgets.sh"
 [[ "$(grep -c 'skybridge_resolve_package_app_path' "${package_app_script}")" == "1" ]] \
   || fail "package_app must resolve its App Bundle output through package build policy exactly once"
 [[ "$(grep -c 'skybridge_remove_package_app_bundle_for_replacement' "${package_app_script}")" == "1" ]] \
@@ -307,6 +308,42 @@ if grep -F 'rm -rf "${APP_DIR}"' "${package_app_script}" >/dev/null 2>&1; then
 fi
 [[ "$(grep -Fc 'SKYBRIDGE_PACKAGE_OUTPUT_DIR="$DIST_DIR"' "${build_dmg_script}")" == "2" ]] \
   || fail "both build_dmg package_app invocations must pin output to project dist"
+[[ "$(grep -Fc "SKYBRIDGE_PACKAGE_BUILD_ID=\"\$BUILD_ID\"" "${build_dmg_script}")" == "2" ]] \
+  || fail "both build_dmg package_app invocations must carry the explicit release build id"
+grep -Fq '正式 DMG 构建不得使用时间或隐式构建号' "${build_dmg_script}" \
+  || fail "build_dmg must reject an omitted release build id"
+grep -Fq 'release_dmg 打包要求显式 SKYBRIDGE_PACKAGE_BUILD_ID' "${package_app_script}" \
+  || fail "package_app must reject time-derived build ids in release_dmg context"
+grep -Fq 'VERSION="$(bash "$PROJECT_ROOT/Scripts/check_macos_release_version.sh")"' "${build_with_widgets_script}" \
+  || fail "legacy widget build must resolve version through the validated release version source"
+grep -Fq 'if ! codesign --verify --verbose "$APP_BUNDLE"; then' "${build_with_widgets_script}" \
+  || fail "legacy widget build must fail closed when final bundle signature verification fails"
+if grep -Fq '|| echo "1.0.0"' "${build_with_widgets_script}"; then
+  fail "legacy widget build must not hide missing release version metadata behind 1.0.0"
+fi
+if grep -Fq '签名验证警告（ad-hoc 签名正常）' "${build_with_widgets_script}"; then
+  fail "legacy widget build must not downgrade signature verification failure to a warning"
+fi
+
+if missing_build_id_output="$(bash "${build_dmg_script}" 2>&1)"; then
+  fail "build_dmg must fail when --build-id is omitted"
+fi
+grep -Fq '正式 DMG 构建不得使用时间或隐式构建号' <<<"${missing_build_id_output}" \
+  || fail "build_dmg omitted-build-id failure must explain the explicit transaction requirement"
+
+if invalid_build_id_output="$(bash "${build_dmg_script}" --build-id 1.0.2 2>&1)"; then
+  fail "build_dmg must reject non-numeric --build-id values"
+fi
+grep -Fq -- '--build-id 必须是正整数' <<<"${invalid_build_id_output}" \
+  || fail "build_dmg invalid-build-id failure must identify the numeric requirement"
+
+if missing_package_build_id_output="$(
+  SKYBRIDGE_PACKAGE_CONTEXT=release_dmg zsh "${package_app_script}" 2>&1
+)"; then
+  fail "package_app release_dmg must reject a missing SKYBRIDGE_PACKAGE_BUILD_ID"
+fi
+grep -Fq '要求显式 SKYBRIDGE_PACKAGE_BUILD_ID' <<<"${missing_package_build_id_output}" \
+  || fail "package_app release_dmg must explain the missing explicit build id"
 
 test_owner_executable_signing_policy() {
   (
@@ -385,11 +422,11 @@ pqc_probe_mode="symbol_probe"
 pqc_probe_error=""
 
 skybridge_detect_apple_pqc_sdk() {
-  SKYBRIDGE_PQC_SDK_NAME="${1:-macosx}"
-  SKYBRIDGE_PQC_SDK_VER="26.5"
-  SKYBRIDGE_PQC_SWIFT_TARGET="arm64-apple-macosx26.0"
+  export SKYBRIDGE_PQC_SDK_NAME="${1:-macosx}"
+  export SKYBRIDGE_PQC_SDK_VER="26.5"
+  export SKYBRIDGE_PQC_SWIFT_TARGET="arm64-apple-macosx26.0"
   SKYBRIDGE_PQC_PROBE_MODE="${pqc_probe_mode}"
-  SKYBRIDGE_PQC_PROBE_ERROR="${pqc_probe_error}"
+  export SKYBRIDGE_PQC_PROBE_ERROR="${pqc_probe_error}"
   SKYBRIDGE_PQC_SDK_AVAILABLE="${pqc_probe_available}"
 }
 

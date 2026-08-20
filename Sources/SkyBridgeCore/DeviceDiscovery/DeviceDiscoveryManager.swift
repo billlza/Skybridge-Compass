@@ -787,9 +787,22 @@ public class DeviceDiscoveryManager: BaseManager {
         // 并使用本机稳定的身份密钥（DeviceIdentityKeyManager），而不是每次随机生成。
         var sessionKeys: SessionKeys?
         var previousSessionKeysBeforeRekey: SessionKeys?
+        var previousAuthenticatedRemoteAuthorityBeforeRekey: AuthenticatedRemoteAuthority?
         var declaredDeviceIdForVerification: String?
         var lastPairingIdentityExchangeReplyAt: Date?
         var authenticatedRemoteAuthority: AuthenticatedRemoteAuthority?
+        struct PairingOperationState {
+            var sessionKeys: SessionKeys?
+            var authority: AuthenticatedRemoteAuthority?
+            var isRekeying: Bool
+        }
+        let pairingOperationState = OSAllocatedUnfairLock(
+            initialState: PairingOperationState(
+                sessionKeys: nil,
+                authority: nil,
+                isRekeying: false
+            )
+        )
 
         func trimmedIdentifier(_ raw: String?) -> String? {
             guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -959,25 +972,21 @@ public class DeviceDiscoveryManager: BaseManager {
             return try AES.GCM.open(box, using: key)
         }
 
-        func persistAuthenticatedRemoteAuthority(
-            displayName: String,
-            validatedAuthority: ValidatedPairingIdentityAuthority
-        ) async throws {
-            let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-                deviceId: validatedAuthority.declaredDeviceId,
-                displayName: displayName,
-                preferredCurrentDeviceId: validatedAuthority.declaredDeviceId,
-                knownDeviceIds: validatedAuthority.authorizedDeviceIds,
-                protocolSigningAlgorithm: validatedAuthority.protocolSigningAlgorithm,
-                protocolPublicKeyFingerprint: validatedAuthority.protocolPublicKeyFingerprint,
-                authenticatedProtocolPublicKey: validatedAuthority.protocolPublicKey
-            )
-            guard persisted else {
-                throw P2PDiscoveryError.connectionCancelled
+        func isCurrentPairingOperation(
+            keys expectedKeys: SessionKeys,
+            authority expectedAuthority: AuthenticatedRemoteAuthority
+        ) -> Bool {
+            let current = pairingOperationState.withLock { $0 }
+            guard !Task.isCancelled,
+                  !current.isRekeying,
+                  let currentKeys = current.sessionKeys,
+                  currentKeys.sessionId == expectedKeys.sessionId,
+                  currentKeys.transcriptHash == expectedKeys.transcriptHash,
+                  current.authority == expectedAuthority else {
+                return false
             }
-            logger.info(
-                "🔐 inbound current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(validatedAuthority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
-            )
+            if case .ready = connection.state { return true }
+            return false
         }
 
         func handlePreHandshakePlaintextControl(_ frame: Data) async -> Bool {
@@ -1098,6 +1107,8 @@ public class DeviceDiscoveryManager: BaseManager {
                         ))
                     }
                     previousSessionKeysBeforeRekey = sessionKeys
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = authenticatedRemoteAuthority
+                    pairingOperationState.withLock { $0.isRekeying = true }
                     authenticatedRemoteAuthority = nil
                     driver = nil
                     sessionKeys = nil
@@ -1129,6 +1140,33 @@ public class DeviceDiscoveryManager: BaseManager {
                                         "⛔️ inbound pairingIdentityExchange rejected before persistence: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) declared=\(Self.protocolIdentityLogRedaction, privacy: .public) reason=identity_authority_unbound"
                                     )
                                     connection.cancel()
+                                    return
+                                }
+                                guard let pairingAuthorityLease = authenticatedRemoteAuthority else {
+                                    logger.error("⛔️ pairing identity exchange lost authenticated authority owner")
+                                    connection.cancel()
+                                    return
+                                }
+                                let pairingReservation: PairingIdentityExchangeCommitCoordinator.Reservation
+                                do {
+                                    pairingReservation = try await PairingIdentityExchangeCommitCoordinator
+                                        .reserve(deviceIds: validatedAuthority.authorizedDeviceIds)
+                                } catch {
+                                    logger.error(
+                                        "⛔️ pairing commit admission unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                                    )
+                                    connection.cancel()
+                                    return
+                                }
+                                let transportIsCurrent: @MainActor @Sendable () -> Bool = {
+                                    isCurrentPairingOperation(
+                                        keys: keys,
+                                        authority: pairingAuthorityLease
+                                    )
+                                }
+                                guard await transportIsCurrent() else {
+                                    _ = await PairingIdentityExchangeCommitCoordinator
+                                        .rollback(pairingReservation)
                                     return
                                 }
                                 // Pairing / trust UI prompt: Always allow / Allow once / Reject.
@@ -1170,38 +1208,52 @@ public class DeviceDiscoveryManager: BaseManager {
 
                                 let decision = await PairingTrustApprovalService.shared.decide(for: request)
                                 guard decision != PairingTrustApprovalService.Decision.reject else {
+                                    _ = await PairingIdentityExchangeCommitCoordinator
+                                        .rollback(pairingReservation)
                                     logger.info("🛑 Pairing/trust request rejected (no KEM reply): deviceId=\(declaredDiagnosticLabel, privacy: .public)")
                                     break
                                 }
 
+                                let commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt
                                 do {
-                                    try await persistAuthenticatedRemoteAuthority(
+                                    let result = try await PairingIdentityExchangeCommitCoordinator
+                                        .commitAuthorityAndKEM(
+                                        reservation: pairingReservation,
+                                        payload: payload,
+                                        authority: pairingAuthorityLease,
                                         displayName: displayName,
-                                        validatedAuthority: validatedAuthority
+                                        platform: payload.platform ?? info?.platform,
+                                        osVersion: payload.osVersion ?? info?.osVersion ?? info?.version,
+                                        isCurrent: transportIsCurrent
                                     )
+                                    guard case .committed(let receipt) = result else { return }
+                                    commitReceipt = receipt
                                 } catch {
                                     logger.error(
-                                        "⛔️ inbound pairing authority persistence failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+                                        "⛔️ inbound pairing authority/KEM commit failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
                                     )
                                     connection.cancel()
                                     return
                                 }
+                                let shouldReturnFromPairingHandler = try await
+                                    PairingIdentityExchangeCommitCoordinator.withCommittedReceipt(
+                                        commitReceipt
+                                    ) {
                                 recordRemoteControlSecurityIdentity(
                                     from: payload,
                                     validatedAuthority: validatedAuthority
                                 )
-                                await PeerKEMBootstrapStore.shared.upsert(
-                                    deviceIds: validatedAuthority.authorizedDeviceIds,
-                                    kemPublicKeys: payload.kemPublicKeys,
-                                    platform: payload.platform ?? info?.platform,
-                                    osVersion: payload.osVersion ?? info?.osVersion ?? info?.version,
-                                    verifiedProtocolFingerprint: validatedAuthority.protocolPublicKeyFingerprint
-                                )
                                 logger.info(
-                                    "🔑 已缓存对端 KEM 公钥（bootstrap）：declared=\(declaredDiagnosticLabel, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+                                    "🔑 已提交对端 authority-bound KEM：declared=\(declaredDiagnosticLabel, privacy: .public) peer=\(Self.protocolIdentityLogRedaction, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
                                 )
                                 guard await publishClassicTransferSessionSnapshot(keys: keys) else {
-                                    return
+                                    return true
+                                }
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt,
+                                    transportIsCurrent: transportIsCurrent
+                                ) else {
+                                    return true
                                 }
 
                                 let now = Date()
@@ -1210,7 +1262,7 @@ public class DeviceDiscoveryManager: BaseManager {
                                     now: now
                                 ) else {
                                     logger.debug("ℹ️ pairingIdentityExchange reply rate-limited during bootstrap")
-                                    break
+                                    return false
                                 }
 
                                 // Reply with our KEM identity public keys (bootstrap for iOS initiator).
@@ -1227,13 +1279,13 @@ public class DeviceDiscoveryManager: BaseManager {
                                 }
                                 guard !kemKeys.isEmpty else {
                                     logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机无有效 KEM 公钥")
-                                    break
+                                    return false
                                 }
                                 let localIdRaw = localIdentityDeviceId
                                 let localId = localIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
                                 guard !localId.isEmpty else {
                                     logger.warning("⚠️ 跳过 pairingIdentityExchange reply：本机 deviceId 为空")
-                                    break
+                                    return false
                                 }
                                 let localPresentation = LocalDevicePresentation.current()
                                 let endpoints = ServiceEndpointRegistry.shared.snapshot()
@@ -1261,8 +1313,19 @@ public class DeviceDiscoveryManager: BaseManager {
                                     label: "tx"
                                 )
                                 try await sendFramed(outPadded)
+                                guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+                                    commitReceipt,
+                                    transportIsCurrent: transportIsCurrent
+                                ) else {
+                                    return true
+                                }
                                 lastPairingIdentityExchangeReplyAt = now
                                 logger.info("🔑 已回传本机 KEM 公钥：count=\(kemKeys.count, privacy: .public) decision=\(decision.rawValue, privacy: .public)")
+                                return false
+                            }
+                            if shouldReturnFromPairingHandler {
+                                return
+                            }
                             case .heartbeat(let payload):
                                 guard let activeLease = classicTransferSessionLease,
                                       await ClassicTransferSessionRegistry.shared.refreshIfOwned(
@@ -1476,7 +1539,8 @@ public class DeviceDiscoveryManager: BaseManager {
                         }
                     }
                 case .established(let keys):
-                    authenticatedRemoteAuthority = await driver.getAuthenticatedRemoteAuthority()
+                    let establishedAuthority = await driver.getAuthenticatedRemoteAuthority()
+                    authenticatedRemoteAuthority = establishedAuthority
                     let newArbiterLease = await driver.getEstablishedArbiterLease()
                     if let inboundPairKey {
                         guard let newArbiterLease,
@@ -1492,7 +1556,13 @@ public class DeviceDiscoveryManager: BaseManager {
                     establishedArbiterLease = newArbiterLease
                     previousEstablishedArbiterLeaseBeforeRekey = nil
                     sessionKeys = keys
+                    pairingOperationState.withLock {
+                        $0.sessionKeys = keys
+                        $0.authority = establishedAuthority
+                        $0.isRekeying = false
+                    }
                     previousSessionKeysBeforeRekey = nil
+                    previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                     guard await publishClassicTransferSessionSnapshot(keys: keys) else {
                         return
                     }
@@ -1527,7 +1597,15 @@ public class DeviceDiscoveryManager: BaseManager {
                             return
                         }
                         sessionKeys = previousKeys
+                        let restoredAuthority = previousAuthenticatedRemoteAuthorityBeforeRekey
+                        authenticatedRemoteAuthority = restoredAuthority
+                        pairingOperationState.withLock {
+                            $0.sessionKeys = previousKeys
+                            $0.authority = restoredAuthority
+                            $0.isRekeying = false
+                        }
                         previousSessionKeysBeforeRekey = nil
+                        previousAuthenticatedRemoteAuthorityBeforeRekey = nil
                         guard await publishClassicTransferSessionSnapshot(keys: previousKeys) else {
                             return
                         }

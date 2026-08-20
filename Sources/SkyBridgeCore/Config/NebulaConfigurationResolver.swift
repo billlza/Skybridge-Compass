@@ -133,7 +133,7 @@ public enum NebulaConfigurationResolver {
         }
 
 #if SWIFT_PACKAGE
-        if bundle != Bundle.module, let value = plistValue(forKey: key, bundle: Bundle.module) {
+        if bundle != SkyBridgeResourceBundleLocator.core, let value = plistValue(forKey: key, bundle: SkyBridgeResourceBundleLocator.core) {
             return value
         }
 #endif

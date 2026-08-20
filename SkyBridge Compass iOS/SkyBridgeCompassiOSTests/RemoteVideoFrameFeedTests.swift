@@ -2040,6 +2040,10 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
         )
         let applyBody = String(applySuffix[..<applyEnd])
         XCTAssertFalse(applyBody.contains("promoteCameraSessionAfterFirstPresentedFrame"))
+        XCTAssertFalse(
+            applyBody.contains("sendFramePresentationAcknowledgementIfNeeded"),
+            "Decode/admission must never be reported as renderer presentation"
+        )
 
         let enqueueStart = try XCTUnwrap(
             managerSource.range(of: "func handleVideoRendererDidEnqueueFrame")?.lowerBound
@@ -2071,9 +2075,18 @@ final class CameraRemoteDesktopManagerTests: XCTestCase {
             viewSource.contains("cameraPresentationContext: frame.cameraPresentationContext")
         )
         XCTAssertTrue(
+            viewSource.contains("framePresentationContext: frame.framePresentationContext")
+        )
+        XCTAssertTrue(
             viewSource.contains(".AVSampleBufferDisplayLayerReadyForDisplayDidChange")
         )
         XCTAssertTrue(viewSource.contains("layer.isReadyForDisplay"))
+        XCTAssertTrue(viewSource.contains("if !isAwaitingRendererPresentation"))
+        XCTAssertTrue(
+            managerSource.contains(
+                "RemoteMessage(type: .framePresentationAck, payload: payload)"
+            )
+        )
     }
 
     func testCameraFramesAreNeverEligibleForFrozenFrameCaching() {

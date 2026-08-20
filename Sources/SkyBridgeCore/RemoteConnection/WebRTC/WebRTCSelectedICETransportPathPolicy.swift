@@ -15,53 +15,26 @@ enum WebRTCSelectedICETransportPathPolicy {
         let remoteCandidateID: String?
     }
 
-    private static let directCandidateTypes: Set<String> = ["host", "srflx", "prflx"]
-
     static func classify(
         candidatePairs: [CandidatePair],
         candidatesByID: [String: Candidate]
     ) -> WebRTCSession.ICETransportPath {
-        let authoritySelectedPairs = candidatePairs.filter(\.isAuthoritySelected)
-        guard authoritySelectedPairs.count == 1,
-              let selectedPair = authoritySelectedPairs.first else {
-            return .unknown
-        }
-
-        let candidateIDs = [
-            validatedCandidateID(selectedPair.localCandidateID),
-            validatedCandidateID(selectedPair.remoteCandidateID),
-        ]
-
-        for candidateID in candidateIDs.compactMap({ $0 }) {
-            guard let candidate = candidatesByID[candidateID] else { continue }
-            if normalizedCandidateType(candidate.candidateType) == "relay" {
-                return .relay
+        let path = WebRTCSelectedICETransportPathClassifier.classify(
+            candidatePairs: candidatePairs.map {
+                .init(
+                    isAuthoritySelected: $0.isAuthoritySelected,
+                    localCandidateID: $0.localCandidateID,
+                    remoteCandidateID: $0.remoteCandidateID
+                )
+            },
+            candidatesByID: candidatesByID.mapValues {
+                .init(candidateType: $0.candidateType)
             }
+        )
+        switch path {
+        case .unknown: return .unknown
+        case .direct: return .direct
+        case .relay: return .relay
         }
-
-        guard let localCandidateID = candidateIDs[0],
-              let remoteCandidateID = candidateIDs[1],
-              localCandidateID != remoteCandidateID,
-              let localCandidate = candidatesByID[localCandidateID],
-              let remoteCandidate = candidatesByID[remoteCandidateID],
-              let localCandidateType = normalizedCandidateType(localCandidate.candidateType),
-              let remoteCandidateType = normalizedCandidateType(remoteCandidate.candidateType),
-              directCandidateTypes.contains(localCandidateType),
-              directCandidateTypes.contains(remoteCandidateType) else {
-            return .unknown
-        }
-
-        return .direct
-    }
-
-    private static func validatedCandidateID(_ candidateID: String?) -> String? {
-        guard let candidateID, !candidateID.isEmpty else { return nil }
-        return candidateID
-    }
-
-    private static func normalizedCandidateType(_ candidateType: String?) -> String? {
-        guard let candidateType, !candidateType.isEmpty else { return nil }
-        let normalized = candidateType.lowercased()
-        return normalized.isEmpty ? nil : normalized
     }
 }

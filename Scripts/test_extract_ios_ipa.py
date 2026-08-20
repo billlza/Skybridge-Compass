@@ -129,6 +129,18 @@ class IOSIPAExtractorTests(unittest.TestCase):
         )
         self.assertEqual(list(self.destination_parent.glob(".ios-ipa-stage-*")), [])
 
+    def test_extracts_the_explicit_sealed_ipa_without_directory_rediscovery(self) -> None:
+        ipa = self._write_ipa()
+        (self.export_dir / "unrelated.ipa").write_bytes(b"not-the-selected-product")
+
+        result = extract_ios_ipa.extract_ios_app_from_ipa(
+            ipa,
+            self.destination_app,
+        )
+
+        self.assertEqual(result, self.destination_app)
+        self.assertEqual((result / "Test").read_bytes(), b"app-executable")
+
     def test_cli_success_prints_only_the_absolute_app_path(self) -> None:
         self._write_ipa()
 

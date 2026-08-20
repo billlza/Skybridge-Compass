@@ -462,6 +462,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         let peerBinding: AuthenticatedHandshakePeerBinding
         let soaPairKey: Data?
         let arbiterLease: PeerSessionArbiter.EstablishedLease?
+        var connectivityAttemptOwner: ProductConnectivityAttemptOwner? = nil
     }
     @available(macOS 14.0, iOS 17.0, *)
     private struct EstablishedSessionSnapshot: Sendable {
@@ -970,6 +971,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    func matchesTrustInvalidation(_ event: TrustInvalidationEvent) -> Bool {
+        guard let authority = authenticatedRemoteAuthorityLock.withLock({ $0 }) else {
+            return false
+        }
+        return event.matches(authority: authority)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     private func recordRemoteControlSecurityIdentity(
         from payload: AppMessage.PairingIdentityExchangePayload,
         validatedAuthority: ValidatedPairingIdentityAuthority
@@ -1428,6 +1437,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             : .outboundRekey
         let operation = try await beginHandshakeOperation(kind: operationKind)
         var previousSession: EstablishedSessionSnapshot?
+        var pendingConnectivityAttemptOwner: ProductConnectivityAttemptOwner?
         do {
             let gateStaged = handshakeOperationLock.withLock { registry -> Bool in
                 guard registry.owns(operation) else { return false }
@@ -1473,6 +1483,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
 
             let receipt = try await performHandshake(operation: operation)
+            pendingConnectivityAttemptOwner = receipt.connectivityAttemptOwner
             try requireCurrentHandshakeOperation(
                 operation,
                 exactDriver: receipt.owner.driver
@@ -1487,6 +1498,26 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 keys: receipt.keys,
                 operationOwner: receipt.owner
             )
+            if let evidenceOwner = receipt.connectivityAttemptOwner,
+               let sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: receipt.keys.sessionId,
+                transcriptHash: receipt.keys.transcriptHash
+               ) {
+                let recorded = await MainActor.run {
+                    ProductReleaseEvidenceRecorder.shared.authenticateConnectivityAttempt(
+                        owner: evidenceOwner,
+                        sessionReference: sessionReference,
+                        negotiatedSuite: receipt.keys.negotiatedSuite
+                    )
+                }
+                if recorded {
+                    pendingConnectivityAttemptOwner = nil
+                } else {
+                    SkyBridgeLogger.p2p.error(
+                        "Authenticated connectivity evidence rejected its exact local attempt owner"
+                    )
+                }
+            }
             try requireCurrentHandshakeOperation(operation, exactDriver: receipt.owner.driver)
             guard finishHandshakeOperation(receipt.owner) else {
                 throw P2PConnectionError.staleHandshakeOperation
@@ -1498,6 +1529,14 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             startMetricsIfNeeded()
         } catch {
             let originalError = error
+            if let evidenceOwner = pendingConnectivityAttemptOwner {
+                _ = await MainActor.run {
+                    ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
+                        owner: evidenceOwner,
+                        reason: .publicationFailed
+                    )
+                }
+            }
             try await failHandshakeOperation(
                 operation,
                 restoring: previousSession,
@@ -1618,6 +1657,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     ) async throws -> EstablishedHandshakeReceipt {
         try requireCurrentHandshakeOperation(operation)
         let baseProvider = CryptoProviderFactory.make(policy: selectionPolicy)
+        let successfulConnectivityAttemptOwner = OSAllocatedUnfairLock<
+            ProductConnectivityAttemptOwner?
+        >(initialState: nil)
 
         let shouldAdvertiseSOA = allowSOA && shouldUseSOA()
         let previousSession = try await currentEstablishedSessionSnapshot(for: operation)
@@ -1720,6 +1762,30 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                         )
                     }()
 
+                    let connectivityAttemptOwner: ProductConnectivityAttemptOwner?
+                    if let outboundSOA,
+                       let attemptReference = ProductConnectivityAttemptReference.make(
+                        from: outboundSOA.attemptId
+                       ),
+                       let localProfile = ProductConnectivityProfileClassifier
+                        .configuredProfile(
+                            requirePQC: policy.requirePQC,
+                            selectedSuiteWireID: cryptoProvider.activeSuite.wireId
+                        ) {
+                        connectivityAttemptOwner = await MainActor.run {
+                            ProductReleaseEvidenceRecorder.shared.beginConnectivityAttempt(
+                                attemptReference: attemptReference,
+                                role: .initiator,
+                                localProfile: localProfile,
+                                offeredSuites: preparation.offeredSuites,
+                                requirePQC: policy.requirePQC,
+                                allowClassicFallback: policy.allowClassicFallback
+                            )
+                        }
+                    } else {
+                        connectivityAttemptOwner = nil
+                    }
+
                     let cryptoPolicy = HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites)
                     let exactDriverLock = OSAllocatedUnfairLock<HandshakeDriver?>(
                         initialState: nil
@@ -1739,39 +1805,56 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                             exactDriver: exactDriver
                         )
                     })
-                    let driver = try HandshakeDriver(
-                        transport: transport,
-                        cryptoProvider: cryptoProvider,
-                        protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
-                        identityProvider: identityProvider,
-                        sigAAlgorithm: preparation.sigAAlgorithm,
-                        offeredSuites: preparation.offeredSuites,
-                        policy: policy,
-                        cryptoPolicy: cryptoPolicy,
-                        soaMetadata: outboundSOA,
-                        localSOAPeerId: localSOAPeerId,
-                        expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
-                    )
-                    exactDriverLock.withLock { $0 = driver }
-                    let owner = try await self.installHandshakeDriver(
-                        driver,
-                        for: operation
-                    )
-                    let operationPeer = self.handshakePeer
-                    try self.startReceivingIfNeeded(
-                        for: owner,
-                        peer: operationPeer
-                    )
-                    try self.requireCurrentHandshakeOperation(
-                        owner.token,
-                        exactDriver: owner.driver
-                    )
-                    let sessionKeys = try await driver.initiateHandshake(with: operationPeer)
-                    try self.requireCurrentHandshakeOperation(
-                        owner.token,
-                        exactDriver: owner.driver
-                    )
-                    return sessionKeys
+                    do {
+                        let driver = try HandshakeDriver(
+                            transport: transport,
+                            cryptoProvider: cryptoProvider,
+                            protocolSignatureProvider: ProtocolSignatureProviderSelector.select(for: preparation.sigAAlgorithm),
+                            identityProvider: identityProvider,
+                            sigAAlgorithm: preparation.sigAAlgorithm,
+                            offeredSuites: preparation.offeredSuites,
+                            policy: policy,
+                            cryptoPolicy: cryptoPolicy,
+                            soaMetadata: outboundSOA,
+                            localSOAPeerId: localSOAPeerId,
+                            expectedRemoteSOAPeerId: expectedRemoteSOAPeerId
+                        )
+                        exactDriverLock.withLock { $0 = driver }
+                        let owner = try await self.installHandshakeDriver(
+                            driver,
+                            for: operation
+                        )
+                        let operationPeer = self.handshakePeer
+                        try self.startReceivingIfNeeded(
+                            for: owner,
+                            peer: operationPeer
+                        )
+                        try self.requireCurrentHandshakeOperation(
+                            owner.token,
+                            exactDriver: owner.driver
+                        )
+                        let sessionKeys = try await driver.initiateHandshake(with: operationPeer)
+                        try self.requireCurrentHandshakeOperation(
+                            owner.token,
+                            exactDriver: owner.driver
+                        )
+                        successfulConnectivityAttemptOwner.withLock {
+                            $0 = connectivityAttemptOwner
+                        }
+                        return sessionKeys
+                    } catch {
+                        if let connectivityAttemptOwner {
+                            let reason: ProductConnectivityAttemptFailureReason =
+                                Task.isCancelled ? .cancelled : .handshakeFailed
+                            _ = await MainActor.run {
+                                ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
+                                    owner: connectivityAttemptOwner,
+                                    reason: reason
+                                )
+                            }
+                        }
+                        throw error
+                    }
                 },
                 pqcSignatureAlgorithm: outboundProtocolIdentity.selectedAlgorithm
             )
@@ -1815,9 +1898,26 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                 keys: sessionKeys,
                 peerBinding: peerBinding,
                 soaPairKey: pairKey,
-                arbiterLease: newArbiterLease
+                arbiterLease: newArbiterLease,
+                connectivityAttemptOwner: successfulConnectivityAttemptOwner.withLock {
+                    let current = $0
+                    $0 = nil
+                    return current
+                }
             )
         } catch {
+            if let connectivityAttemptOwner = successfulConnectivityAttemptOwner.withLock({
+                let current = $0
+                $0 = nil
+                return current
+            }) {
+                _ = await MainActor.run {
+                    ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
+                        owner: connectivityAttemptOwner,
+                        reason: .publicationFailed
+                    )
+                }
+            }
             if let owner = currentOwnedHandshakeDriver(), owner.token == operation {
                 await detachAndCancelDriverIfOwned(owner)
             }
@@ -4066,10 +4166,43 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    private func isCurrentPairingOperation(
+        keys expectedKeys: SessionKeys,
+        authority expectedAuthority: AuthenticatedRemoteAuthority
+    ) -> Bool {
+        guard !Task.isCancelled,
+              !rekeyInProgressLock.withLock({ $0 }),
+              let currentKeys = sessionKeysLock.withLock({ $0 }),
+              currentKeys.sessionId == expectedKeys.sessionId,
+              currentKeys.transcriptHash == expectedKeys.transcriptHash,
+              authenticatedRemoteAuthorityLock.withLock({ $0 }) == expectedAuthority else {
+            return false
+        }
+        if case .ready = connection.state { return true }
+        return false
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    private func rollbackPairingCommit(
+        _ reservation: PairingIdentityExchangeCommitCoordinator.Reservation
+    ) async {
+        _ = await PairingIdentityExchangeCommitCoordinator.rollback(reservation)
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     private func handlePairingIdentityExchange(_ payload: AppMessage.PairingIdentityExchangePayload) async {
         guard let payload = payload.normalizedBootstrapPayload else {
             SkyBridgeLogger.p2p.error(
                 "⛔️ pairingIdentityExchange rejected: invalid declaredDeviceId or KEM identity payload"
+            )
+            disconnect()
+            return
+        }
+
+        guard let expectedKeys = sessionKeysLock.withLock({ $0 }),
+              let expectedAuthority = authenticatedRemoteAuthorityLock.withLock({ $0 }) else {
+            SkyBridgeLogger.p2p.error(
+                "⛔️ pairingIdentityExchange has no authenticated session owner"
             )
             disconnect()
             return
@@ -4083,33 +4216,79 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return
         }
 
+        let reservation: PairingIdentityExchangeCommitCoordinator.Reservation
+        do {
+            reservation = try await PairingIdentityExchangeCommitCoordinator.reserve(
+                deviceIds: validatedAuthority.authorizedDeviceIds
+            )
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "⛔️ pairing commit admission unavailable: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            disconnect()
+            return
+        }
+
+        guard isCurrentPairingOperation(
+            keys: expectedKeys,
+            authority: expectedAuthority
+        ) else {
+            await rollbackPairingCommit(reservation)
+            return
+        }
+
+        let transportIsCurrent: @MainActor @Sendable () -> Bool = { [weak self] in
+            self?.isCurrentPairingOperation(
+                keys: expectedKeys,
+                authority: expectedAuthority
+            ) == true
+        }
+        let displayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
+            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(device.name)
+            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(handshakePeer.displayName)
+        let commitReceipt: PairingIdentityExchangeCommitCoordinator.CommitReceipt
+        do {
+            let result = try await PairingIdentityExchangeCommitCoordinator
+                .commitAuthorityAndKEM(
+                    reservation: reservation,
+                    payload: payload,
+                    authority: expectedAuthority,
+                    displayName: displayName,
+                    isCurrent: transportIsCurrent
+                )
+            guard case .committed(let receipt) = result else { return }
+            commitReceipt = receipt
+        } catch is CancellationError {
+            return
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "⛔️ pairing authority/KEM commit failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            disconnect()
+            return
+        }
+
+        do {
+            try await PairingIdentityExchangeCommitCoordinator.withCommittedReceipt(
+                commitReceipt
+            ) {
+        guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+            commitReceipt,
+            transportIsCurrent: transportIsCurrent
+        ) else {
+            return
+        }
+
         recordRemoteControlSecurityIdentity(
             from: payload,
             validatedAuthority: validatedAuthority
         )
         let shouldForceIdentityReply = latestRemotePairingIdentityPayloadLock.withLock { current -> Bool in
             let previousDeviceId = normalizedNonEmptyString(current?.deviceId)
-            current = payload
             guard let previousDeviceId else { return true }
             return previousDeviceId.caseInsensitiveCompare(payload.deviceId) != .orderedSame
         }
-
-        do {
-            try await persistAuthenticatedRemoteAuthority(
-                from: payload,
-                validatedAuthority: validatedAuthority
-            )
-            try await persistPeerKEMTrustRecords(
-                from: payload,
-                validatedAuthority: validatedAuthority
-            )
-        } catch {
-            SkyBridgeLogger.p2p.error(
-                "⚠️ pairingIdentityExchange trust persistence failed closed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
-            )
-            disconnect()
-            return
-        }
+        latestRemotePairingIdentityPayloadLock.withLock { $0 = payload }
 
         if let keys = sessionKeysLock.withLock({ $0 }) {
             do {
@@ -4126,12 +4305,32 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
         }
 
+        guard await PairingIdentityExchangeCommitCoordinator.isCurrent(
+            commitReceipt,
+            transportIsCurrent: transportIsCurrent
+        ) else {
+            return
+        }
+
         do {
             try await sendPairingIdentityExchange(force: shouldForceIdentityReply)
         } catch {
             SkyBridgeLogger.p2p.warning(
                 "⚠️ pairingIdentityExchange reply failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
             )
+        }
+
+        SkyBridgeLogger.p2p.info(
+            "🔑 committed generation-bound pairing authority/KEM: peer=\(self.handshakePeerDiagnosticLabel, privacy: .public) keys=\(payload.kemPublicKeys.count, privacy: .public)"
+        )
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            SkyBridgeLogger.p2p.error(
+                "⛔️ pairing post-commit side effects failed: \(SkyBridgeDiagnosticRedaction.errorSummary(error), privacy: .public)"
+            )
+            disconnect()
         }
     }
 
@@ -4234,251 +4433,6 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         )
     }
 
-    @available(macOS 14.0, iOS 17.0, *)
-    private func persistAuthenticatedRemoteAuthority(
-        from payload: AppMessage.PairingIdentityExchangePayload,
-        validatedAuthority: ValidatedPairingIdentityAuthority
-    ) async throws {
-        let displayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
-            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(device.name)
-            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(handshakePeer.displayName)
-
-        let persisted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
-            deviceId: validatedAuthority.declaredDeviceId,
-            displayName: displayName,
-            preferredCurrentDeviceId: validatedAuthority.declaredDeviceId,
-            knownDeviceIds: validatedAuthority.authorizedDeviceIds,
-            protocolSigningAlgorithm: validatedAuthority.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: validatedAuthority.protocolPublicKeyFingerprint,
-            authenticatedProtocolPublicKey: validatedAuthority.protocolPublicKey
-        )
-
-        guard persisted else {
-            throw P2PConnectionError.disconnected
-        }
-
-        _ = await PeerProtocolIdentityBootstrapStore.shared.upsert(
-            deviceIds: validatedAuthority.authorizedDeviceIds,
-            fingerprints: [validatedAuthority.protocolPublicKeyFingerprint]
-        )
-
-        SkyBridgeLogger.p2p.info(
-            "🔐 current-path trust bridge persisted: peer=\(Self.protocolIdentityLogRedaction, privacy: .public) current=\(Self.protocolIdentityLogRedaction, privacy: .public) alg=\(validatedAuthority.protocolSigningAlgorithm.rawValue, privacy: .public) fp=\(Self.protocolIdentityLogRedaction, privacy: .public)"
-        )
-    }
-
-    private func mergedKEMPublicKeys(
-        existing: [KEMPublicKeyInfo]?,
-        incoming: [KEMPublicKeyInfo]
-    ) -> [KEMPublicKeyInfo]? {
-        var bySuite: [UInt16: Data] = [:]
-        for key in KEMPublicKeyInfo.normalizedValidKeys(existing ?? []) {
-            bySuite[key.suiteWireId] = key.publicKey
-        }
-        for key in KEMPublicKeyInfo.normalizedValidKeys(incoming) {
-            bySuite[key.suiteWireId] = key.publicKey
-        }
-        guard !bySuite.isEmpty else { return nil }
-        return bySuite.keys.sorted().compactMap { suite in
-            guard let publicKey = bySuite[suite] else { return nil }
-            return KEMPublicKeyInfo(suiteWireId: suite, publicKey: publicKey)
-        }
-    }
-
-    private func mergedKnownDeviceIds(
-        existing: [String]?,
-        incoming: [String]
-    ) -> [String]? {
-        let merged = Set((existing ?? []) + incoming)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !merged.isEmpty else { return nil }
-        return Array(merged).sorted()
-    }
-
-    private func resolvedCapabilities(
-        existing: [String]?,
-        incoming: [String]
-    ) -> [String] {
-        var flagCapabilities: Set<String> = []
-        var keyedCapabilities: [String: String] = [:]
-
-        func ingest(_ items: [String], preferIncoming: Bool) {
-            for raw in items {
-                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { continue }
-
-                let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
-                if parts.count == 2 {
-                    let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
-                    let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !key.isEmpty, !value.isEmpty else { continue }
-                    if preferIncoming || keyedCapabilities[key] == nil {
-                        keyedCapabilities[key] = value
-                    }
-                } else {
-                    flagCapabilities.insert(trimmed)
-                }
-            }
-        }
-
-        ingest(existing ?? [], preferIncoming: false)
-        ingest(incoming, preferIncoming: true)
-
-        return flagCapabilities.sorted() + keyedCapabilities.keys.sorted().compactMap { key in
-            keyedCapabilities[key].map { "\(key)=\($0)" }
-        }
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
-    private func persistPeerKEMTrustRecords(
-        from payload: AppMessage.PairingIdentityExchangePayload,
-        validatedAuthority: ValidatedPairingIdentityAuthority
-    ) async throws {
-        let declaredDeviceId = validatedAuthority.declaredDeviceId
-        let peerDeviceId = handshakePeer.deviceId
-        let displayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(payload.deviceName)
-            ?? LocalDevicePresentation.sanitizedDisplayNameCandidate(device.name)
-
-        let platform = normalizedNonEmptyString(payload.platform) ?? ""
-        let osVersion = normalizedNonEmptyString(payload.osVersion) ?? ""
-        let modelName = normalizedNonEmptyString(payload.modelName) ?? ""
-        let chip = normalizedNonEmptyString(payload.chip) ?? ""
-
-        var baseCapabilities = [String]()
-        baseCapabilities.append("trusted")
-        baseCapabilities.append("pqc_bootstrap")
-        for capability in payload.capabilities ?? [] {
-            if let capability = normalizedNonEmptyString(capability) {
-                baseCapabilities.append(capability)
-            }
-        }
-        if !platform.isEmpty { baseCapabilities.append("platform=\(platform)") }
-        if !osVersion.isEmpty { baseCapabilities.append("osVersion=\(osVersion)") }
-        if !modelName.isEmpty { baseCapabilities.append("modelName=\(modelName)") }
-        if !chip.isEmpty { baseCapabilities.append("chip=\(chip)") }
-        baseCapabilities.append("peerEndpoint=\(peerDeviceId)")
-        if let fileTransferPort = payload.fileTransferPort, fileTransferPort > 0 {
-            baseCapabilities.append("fileTransferPort=\(fileTransferPort)")
-        }
-        if let remoteControlPort = payload.remoteControlPort, remoteControlPort > 0 {
-            baseCapabilities.append("remoteControlPort=\(remoteControlPort)")
-        }
-
-        let bootstrapIds = validatedAuthority.authorizedDeviceIds
-
-        let bootstrapCacheEnabled = !bootstrapIds.isEmpty && !payload.kemPublicKeys.isEmpty
-        if bootstrapCacheEnabled {
-            await PeerKEMBootstrapStore.shared.upsert(
-                deviceIds: bootstrapIds,
-                kemPublicKeys: payload.kemPublicKeys,
-                platform: payload.platform,
-                osVersion: payload.osVersion,
-                verifiedProtocolFingerprint: validatedAuthority.protocolPublicKeyFingerprint
-            )
-        }
-
-        var savedIds: [String] = []
-        var lastError: Error?
-
-        func upsert(_ deviceId: String, caps: [String]) async {
-            do {
-                try await upsertTrustRecordForBootstrap(
-                    deviceId: deviceId,
-                    displayName: displayName,
-                    incomingKEMKeys: payload.kemPublicKeys,
-                    capabilities: caps,
-                    currentDeviceId: declaredDeviceId,
-                    knownDeviceIds: bootstrapIds,
-                    validatedAuthority: validatedAuthority
-                )
-                savedIds.append(deviceId)
-            } catch {
-                lastError = error
-                let redactedDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(deviceId)
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ KEM trust alias upsert failed: id=\(redactedDeviceId, privacy: .public) err=\(error.localizedDescription, privacy: .private)"
-                )
-            }
-        }
-
-        await upsert(declaredDeviceId, caps: baseCapabilities)
-
-        if savedIds.isEmpty, let lastError {
-            if bootstrapCacheEnabled {
-                await PeerKEMBootstrapStore.shared.clearPairingIdentityExchangeEntries(deviceIds: bootstrapIds)
-                SkyBridgeLogger.p2p.warning(
-                    "⚠️ TrustSync KEM persistence failed; cleared unsigned bootstrap KEM cache and failing closed: err=\(lastError.localizedDescription, privacy: .private)"
-                )
-            }
-            throw lastError
-        }
-
-        let savedSummary = savedIds
-            .map { SkyBridgeDiagnosticRedaction.stableIdentifierLabel($0) }
-            .joined(separator: ",")
-        let cachedSuites = await PeerKEMBootstrapStore.shared.availableSuiteWireIds(
-            forCandidates: bootstrapIds
-        )
-        let cachedSummary = cachedSuites.map(String.init).joined(separator: ",")
-        if !savedIds.isEmpty {
-            let redactedDeclaredDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(declaredDeviceId)
-            let redactedPeerDeviceId = SkyBridgeDiagnosticRedaction.stableIdentifierLabel(peerDeviceId)
-            SkyBridgeLogger.p2p.info(
-                "🔑 已保存对端 KEM 公钥：declared=\(redactedDeclaredDeviceId, privacy: .public) peer=\(redactedPeerDeviceId, privacy: .public) trust=\(savedSummary, privacy: .public) cacheSuites=\(cachedSummary, privacy: .public) keys=\(payload.kemPublicKeys.count)"
-            )
-        }
-    }
-
-    @available(macOS 14.0, iOS 17.0, *)
-    @MainActor
-    private func upsertTrustRecordForBootstrap(
-        deviceId: String,
-        displayName: String?,
-        incomingKEMKeys: [KEMPublicKeyInfo],
-        capabilities: [String],
-        currentDeviceId: String?,
-        knownDeviceIds: [String],
-        validatedAuthority: ValidatedPairingIdentityAuthority
-    ) async throws {
-        let trust = TrustSyncService.shared
-        let existing = trust.getTrustRecord(deviceId: deviceId)
-        let mergedCapabilities = resolvedCapabilities(
-            existing: existing?.capabilities,
-            incoming: capabilities
-        )
-        let mergedKEM = mergedKEMPublicKeys(existing: existing?.kemPublicKeys, incoming: incomingKEMKeys)
-        let resolvedDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(displayName)
-            ?? existing?.deviceName
-        let mergedKnownDeviceIds = mergedKnownDeviceIds(
-            existing: existing?.knownDeviceIdsMetadata,
-            incoming: knownDeviceIds
-        )
-
-        let record = TrustRecord(
-            deviceId: deviceId,
-            pubKeyFP: existing?.pubKeyFP ?? "",
-            publicKey: existing?.publicKey ?? Data(),
-            secureEnclavePublicKey: existing?.secureEnclavePublicKey,
-            protocolPublicKey: validatedAuthority.protocolPublicKey,
-            protocolSigningAlgorithm: validatedAuthority.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: validatedAuthority.protocolPublicKeyFingerprint,
-            protocolIdentityPins: existing?.protocolIdentityPins,
-            protocolIdentityBindingsV2: existing?.protocolIdentityBindingsV2,
-            legacyP256PublicKey: existing?.legacyP256PublicKey,
-            signatureAlgorithm: existing?.signatureAlgorithm,
-            kemPublicKeys: mergedKEM,
-            attestationLevel: existing?.attestationLevel ?? .none,
-            attestationData: existing?.attestationData,
-            capabilities: mergedCapabilities,
-            signature: Data(),
-            deviceName: resolvedDisplayName,
-            currentDeviceId: currentDeviceId ?? existing?.currentDeviceIdMetadata,
-            knownDeviceIds: mergedKnownDeviceIds,
-            lifecycleState: existing?.lifecycleStateMetadata
-        )
-        _ = try await trust.addTrustRecord(record)
-    }
 }
 
 #if DEBUG || SKYBRIDGE_TESTING
@@ -4486,6 +4440,11 @@ extension P2PConnection {
     @MainActor
     func testingSetStatus(_ status: P2PConnectionStatus) {
         self.status = status
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func testingSetAuthenticatedRemoteAuthority(_ authority: AuthenticatedRemoteAuthority?) {
+        authenticatedRemoteAuthorityLock.withLock { $0 = authority }
     }
 }
 #endif

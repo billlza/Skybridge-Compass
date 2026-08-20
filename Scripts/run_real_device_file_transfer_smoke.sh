@@ -9,6 +9,7 @@ source "$ROOT_DIR/Scripts/apple_pqc_sdk_probe.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
 source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
+source "$ROOT_DIR/Scripts/release_candidate_evidence_helpers.sh"
 XCODE_SWIFT_BIN="$(skybridge_xcode_swift_executable)" || {
   echo "Selected Xcode Swift executable is unavailable" >&2
   exit 1
@@ -19,7 +20,11 @@ PUBLIC_ARTIFACT_DIR="${SKYBRIDGE_SMOKE_PUBLIC_ARTIFACT_DIR:-${ARTIFACT_DIR}-publ
 IOS_PROJECT="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj"
 IOS_SCHEME="SkyBridgeCompass-iOS"
 IOS_DEBUG_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSDebug.entitlements"
+IOS_RELEASE_ENTITLEMENTS="$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
 IOS_BUNDLE_ID="com.skybridge.compass.ios"
+IOS_RELEASE_ARCHIVE_IDENTITY="${SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY:-}"
+IOS_RELEASE_TESTING_IPA="${SKYBRIDGE_IOS_RELEASE_TESTING_IPA:-}"
+IOS_FORMAL_EXTRACTED_APP="$ARTIFACT_DIR/ios-release-testing/SkyBridgeCompass-iOS.app"
 SMOKE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_TIMEOUT_SECONDS:-180}"
 HOST_STARTUP_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_HOST_STARTUP_TIMEOUT_SECONDS:-45}"
 IOS_LAUNCH_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_IOS_LAUNCH_TIMEOUT_SECONDS:-$SMOKE_TIMEOUT_SECONDS}"
@@ -293,6 +298,7 @@ IOS_CONSOLE_PID=""
 IOS_CONSOLE_HANDLE_STARTED=0
 IOS_CONSOLE_HANDLE_CAPTURED=0
 PROCESS_OWNERSHIP_PRIVATE_DIR=""
+MAC_PROCESS_IDENTITY=""
 IOS_PROCESS_IDENTITY=""
 IOS_CONSOLE_HANDLE_IDENTITY=""
 IOS_CONSOLE_STDOUT=""
@@ -306,6 +312,7 @@ initialize_process_ownership_session() {
   fi
   rm -f -- "$IOS_PROCESS_CLEANUP_RECEIPT"
   PROCESS_OWNERSHIP_PRIVATE_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/skybridge-file-transfer-process-ownership.XXXXXX")"
+  MAC_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-process-identity.json"
   IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"
   IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"
   IOS_CONSOLE_STDOUT="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stdout"
@@ -319,12 +326,14 @@ destroy_process_ownership_session() {
   if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
     local private_path
     for private_path in \
+      "$MAC_PROCESS_IDENTITY" \
       "$IOS_PROCESS_IDENTITY" \
       "$IOS_CONSOLE_HANDLE_IDENTITY" \
       "$IOS_CONSOLE_STDOUT" \
       "$IOS_CONSOLE_STDERR" \
       "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC"; do
       case "$private_path" in
+        "$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-process-identity.json"|\
         "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"|\
         "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"|\
         "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console.stdout"|\
@@ -353,18 +362,29 @@ destroy_process_ownership_session() {
 cleanup() {
   local original_status=$?
   local cleanup_status=0
+  local ownership_cleanup_safe=1
   trap - EXIT
 
   if [[ "$IOS_CONSOLE_HANDLE_STARTED" == "1" ]] && ! terminate_ios_smoke_app; then
     cleanup_status=1
+    ownership_cleanup_safe=0
     echo "failed stage=cleanup phase=ios-process reason=exact-process-exit-unverified" >&2
   fi
-  if [[ -n "$HOST_PID" ]]; then
-    kill "$HOST_PID" >/dev/null 2>&1 || true
-    wait "$HOST_PID" >/dev/null 2>&1 || true
-  fi
-  if ! destroy_process_ownership_session; then
+  if [[ -n "$HOST_PID" ]] && ! skybridge_mac_terminate_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_PROCESS_IDENTITY" \
+    "macOS file-transfer host"; then
     cleanup_status=1
+    ownership_cleanup_safe=0
+    echo "failed stage=cleanup phase=mac-process reason=exact-process-exit-unverified" >&2
+  fi
+  if (( ownership_cleanup_safe == 1 )); then
+    if ! destroy_process_ownership_session; then
+      cleanup_status=1
+    fi
+  else
+    echo "Preserving private file-transfer process ownership diagnostics after unverifiable cleanup: $PROCESS_OWNERSHIP_PRIVATE_DIR" >&2
   fi
 
   if (( original_status == 0 && cleanup_status != 0 )); then
@@ -397,7 +417,10 @@ capture_host_context() {
     skybridge_smoke_tail_redacted "$IOS_DEVICE_LABEL" 80 "$log_path" "$IOS_DEVICE_ID" >&2 || true
   fi
 
-  if [[ -n "${HOST_PID:-}" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
+  if [[ -n "${HOST_PID:-}" ]] && skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_PROCESS_IDENTITY" >/dev/null 2>&1; then
     local sample_path="$ARTIFACT_DIR/mac-host-${safe_label}.sample.txt"
     sample "$HOST_PID" 2 -file "$sample_path" >/dev/null 2>&1 || true
     echo "    macOS host sample: $sample_path" >&2
@@ -408,7 +431,16 @@ host_process_running() {
   if [[ -z "${HOST_PID:-}" ]]; then
     return 0
   fi
-  if ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+  local ownership_status
+  if skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_PROCESS_IDENTITY"; then
+    ownership_status=0
+  else
+    ownership_status=$?
+  fi
+  if (( ownership_status != 0 )); then
     return 1
   fi
 
@@ -426,54 +458,10 @@ host_completed_file_transfer_smoke() {
   fi
 }
 
-collect_named_pids() {
-  local executable_name="$1"
-  pgrep -x "$executable_name" 2>/dev/null || true
-}
-
 open_supports_env() {
   local help_text
   help_text="$(open -h 2>&1 || true)"
   grep -q -- '--env' <<<"$help_text"
-}
-
-pid_in_list() {
-  local target_pid="$1"
-  local pid_list="$2"
-  local existing_pid
-
-  for existing_pid in $pid_list; do
-    if [[ "$existing_pid" == "$target_pid" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-wait_for_new_named_pid() {
-  local executable_name="$1"
-  local before_pids="$2"
-  local timeout_seconds="$3"
-  local started_at
-  local pid
-  local current_pids
-
-  started_at="$(date +%s)"
-  while true; do
-    current_pids="$(collect_named_pids "$executable_name")"
-    for pid in $current_pids; do
-      if ! pid_in_list "$pid" "$before_pids"; then
-        printf '%s\n' "$pid"
-        return 0
-      fi
-    done
-
-    if (( "$(date +%s)" - started_at >= timeout_seconds )); then
-      return 1
-    fi
-    sleep 0.2
-  done
 }
 
 has_file_transfer_failure_without_phase() {
@@ -1052,6 +1040,16 @@ else
     fi
     "$ROOT_DIR/Scripts/check_macos_release_readiness.sh" "${readiness_args[@]}" >"$ARTIFACT_DIR/macos-release-readiness.log" 2>&1
   fi
+  skybridge_bind_macos_release_candidate_evidence \
+    "$ROOT_DIR" \
+    "$MAC_APP_BUNDLE" \
+    "$ARTIFACT_DIR" \
+    "$((1 - USER_REALISTIC))"
+  if [[ "$USER_REALISTIC" == "1" ]]; then
+    echo "Formal file-transfer evidence is unavailable until the normal SkyBridgeCompassApp product UI owns the measured transfer session without DEBUG or SKYBRIDGE_TESTING." >&2
+    echo "LocalP2PFileTransferSmokeHarness remains diagnostic-only and cannot produce release evidence." >&2
+    exit 2
+  fi
 fi
 
 echo "==> Starting macOS LAN host"
@@ -1087,7 +1085,12 @@ fi
 if [[ "$MAC_HOST_MODE" == "signed-app" ]]; then
   echo "    launching signed app bundle through LaunchServices"
   printf 'launch signed-app method=LaunchServices bundle=%s\n' "$MAC_APP_BUNDLE" >>"$HOST_STATUS"
-  EXISTING_HOST_PIDS="$(collect_named_pids "SkyBridgeCompassApp")"
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "signed macOS file-transfer host"; then
+    exit 1
+  fi
   if ! open_supports_env; then
     echo "This macOS open(1) does not support --env, so signed-app smoke cannot launch through LaunchServices with a realistic environment." >&2
     echo "Use a newer macOS/Xcode toolchain or add an app-level smoke config file reader before running signed-app smoke." >&2
@@ -1096,9 +1099,9 @@ if [[ "$MAC_HOST_MODE" == "signed-app" ]]; then
   if [[ "$USER_REALISTIC" == "1" ]]; then
     echo "    foregrounding signed app so PIB-1 requester approval is visible"
     printf 'launch signed-app approvalSurface=foreground\n' >>"$HOST_STATUS"
-    OPEN_ARGS=(-n --stdout "$HOST_STDOUT" --stderr "$HOST_STDERR")
+    OPEN_ARGS=(--stdout "$HOST_STDOUT" --stderr "$HOST_STDERR")
   else
-    OPEN_ARGS=(-n -g --stdout "$HOST_STDOUT" --stderr "$HOST_STDERR")
+    OPEN_ARGS=(-g --stdout "$HOST_STDOUT" --stderr "$HOST_STDERR")
   fi
   for pair in "${HOST_ENV[@]}"; do
     OPEN_ARGS+=(--env "$pair")
@@ -1109,15 +1112,34 @@ if [[ "$MAC_HOST_MODE" == "signed-app" ]]; then
     capture_host_context "macOS host LaunchServices start"
     exit 1
   fi
-  if ! HOST_PID="$(wait_for_new_named_pid "SkyBridgeCompassApp" "$EXISTING_HOST_PIDS" "$HOST_STARTUP_TIMEOUT_SECONDS")"; then
+  if ! skybridge_mac_wait_for_single_exact_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "$HOST_STARTUP_TIMEOUT_SECONDS" \
+    HOST_PID \
+    "signed macOS file-transfer host"; then
     echo "Timed out waiting for signed macOS app host process after LaunchServices open" >&2
     capture_host_context "macOS host process start"
     exit 1
   fi
   echo "    signed app host pid: $HOST_PID"
 else
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "macOS file-transfer diagnostic host"; then
+    exit 1
+  fi
   env "${HOST_ENV[@]}" "$MAC_APP_BIN" >"$HOST_STDOUT" 2>"$HOST_STDERR" &
   HOST_PID="$!"
+fi
+if ! skybridge_mac_capture_owned_process \
+  "$PROCESS_OWNERSHIP_HELPER" \
+  "$HOST_PID" \
+  "$MAC_APP_BIN" \
+  "$MAC_PROCESS_IDENTITY" \
+  "macOS file-transfer host"; then
+  exit 1
 fi
 
 wait_for_file_pattern "$HOST_STATUS" 'identity ready device=' "$HOST_STARTUP_TIMEOUT_SECONDS" "macOS host identity"
@@ -1172,24 +1194,41 @@ case "$(printf '%s' "$HOST_PREFERRED_SUITE" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-echo "==> Building iOS app for real device"
-skybridge_detect_apple_pqc_sdk iphoneos
-if ! skybridge_apple_pqc_sdk_probe_succeeded; then
-  echo "Apple PQC SDK symbol probe failed for the file-transfer iOS app; refusing to build an X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
-  echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=${SKYBRIDGE_PQC_PROBE_ERROR:-}" >&2
-  exit 1
+if [[ "$USER_REALISTIC" == "1" ]]; then
+  if [[ -z "$IOS_RELEASE_ARCHIVE_IDENTITY" || -z "$IOS_RELEASE_TESTING_IPA" ]]; then
+    echo "Formal file-transfer evidence requires SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY and SKYBRIDGE_IOS_RELEASE_TESTING_IPA." >&2
+    exit 2
+  fi
+  mkdir -m 0700 "$(dirname "$IOS_FORMAL_EXTRACTED_APP")"
+  echo "==> Preparing the sealed release-testing IPA without rebuilding"
+  IOS_APP_PATH="$(
+    python3 "$ROOT_DIR/Scripts/ios_physical_release_acceptance.py" prepare-product \
+      --identity "$IOS_RELEASE_ARCHIVE_IDENTITY" \
+      --release-testing-ipa "$IOS_RELEASE_TESTING_IPA" \
+      --destination-app "$IOS_FORMAL_EXTRACTED_APP"
+  )"
+  IOS_EXPECTED_ENTITLEMENTS="$IOS_RELEASE_ENTITLEMENTS"
+  printf 'formal iOS product source=sealed-release-testing-ipa build=not-performed\n' >"$IOS_BUILD_LOG"
+else
+  echo "==> Building diagnostic iOS app for real device"
+  skybridge_detect_apple_pqc_sdk iphoneos
+  if ! skybridge_apple_pqc_sdk_probe_succeeded; then
+    echo "Apple PQC SDK symbol probe failed for the diagnostic file-transfer iOS app; refusing an X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
+    echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=${SKYBRIDGE_PQC_PROBE_ERROR:-}" >&2
+    exit 1
+  fi
+  echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
+  SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
+    -project "$IOS_PROJECT" \
+    -scheme "$IOS_SCHEME" \
+    -configuration Debug \
+    -destination "id=$IOS_DEVICE_ID" \
+    -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
+    SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
+    build >"$IOS_BUILD_LOG"
+  IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
+  IOS_EXPECTED_ENTITLEMENTS="$IOS_DEBUG_ENTITLEMENTS"
 fi
-echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1 skybridge_run_xcodebuild \
-  -project "$IOS_PROJECT" \
-  -scheme "$IOS_SCHEME" \
-  -configuration Debug \
-  -destination "id=$IOS_DEVICE_ID" \
-  -derivedDataPath "$ARTIFACT_DIR/DerivedData-ios" \
-  SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK \
-  build >"$IOS_BUILD_LOG"
-
-IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/Debug-iphoneos/SkyBridgeCompass-iOS.app"
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
   exit 1
@@ -1198,8 +1237,8 @@ fi
 IOS_EMBEDDED_PROFILE="$IOS_APP_PATH/embedded.mobileprovision"
 if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   "$IOS_EMBEDDED_PROFILE" \
-  "$IOS_DEBUG_ENTITLEMENTS"; then
-  echo "iOS app provisioning profile does not cover requested Debug entitlements; refusing a smoke run that would hide a signing mismatch." >&2
+  "$IOS_EXPECTED_ENTITLEMENTS"; then
+  echo "iOS app provisioning profile does not cover requested entitlements; refusing a smoke run that would hide a signing mismatch." >&2
   echo "profile=<redacted-profile-path> entitlements=<redacted-entitlements-path>" >&2
   exit 1
 fi
@@ -1348,6 +1387,10 @@ echo "==> Running Rust CLI file-transfer performance artifact gate"
 skybridge_smoke_check_performance_gate "$ROOT_DIR" file-transfer "$ARTIFACT_DIR"
 echo "==> Materializing redacted public file-transfer smoke artifacts"
 skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
+skybridge_verify_public_macos_release_candidate_evidence \
+  "$ROOT_DIR" \
+  "$ARTIFACT_DIR" \
+  "$PUBLIC_ARTIFACT_DIR"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
 echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
 

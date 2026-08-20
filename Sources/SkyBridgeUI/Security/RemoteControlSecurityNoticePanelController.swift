@@ -93,6 +93,11 @@ public final class RemoteControlSecurityNoticePanelController: NSObject, Observa
             )
             lastRenderedNotice = notice
             panel.orderFrontRegardless()
+            recordPresentedEvidence(
+                panel: panel,
+                notice: notice,
+                isCollapsed: collapsedNoticeIDs.contains(notice.id)
+            )
             return
         }
 
@@ -124,18 +129,26 @@ public final class RemoteControlSecurityNoticePanelController: NSObject, Observa
         panel = newPanel
         lastRenderedNotice = notice
         newPanel.orderFrontRegardless()
+        recordPresentedEvidence(
+            panel: newPanel,
+            notice: notice,
+            isCollapsed: collapsedNoticeIDs.contains(notice.id)
+        )
     }
 
     private func hidePanel(clearPanel: Bool) {
-        if let lastRenderedNotice {
-            RemoteControlSecurityNoticeCenter.shared.recordPanelHiddenEvidence(
-                descriptor: lastRenderedNotice.descriptor,
-                phase: lastRenderedNotice.phase
-            )
-            collapsedNoticeIDs.remove(lastRenderedNotice.id)
-        }
+        let noticeBeingHidden = lastRenderedNotice
         lastRenderedNotice = nil
         panel?.orderOut(nil)
+        if let noticeBeingHidden,
+           let panel,
+           !panel.isVisible {
+            RemoteControlSecurityNoticeCenter.shared.recordPanelHiddenEvidence(
+                descriptor: noticeBeingHidden.descriptor,
+                phase: noticeBeingHidden.phase
+            )
+            collapsedNoticeIDs.remove(noticeBeingHidden.id)
+        }
         guard clearPanel else { return }
         panel?.contentView = nil
         panel = nil
@@ -190,6 +203,17 @@ public final class RemoteControlSecurityNoticePanelController: NSObject, Observa
             CGRect(origin: origin, size: CGSize(width: width, height: height)),
             display: true
         )
+    }
+
+    /// Records presentation only after `orderFrontRegardless()` has run on the
+    /// real product panel. Layout alone is not proof that AppKit presented it.
+    private func recordPresentedEvidence(
+        panel: NSPanel,
+        notice: RemoteControlSecurityNotice,
+        isCollapsed: Bool
+    ) {
+        guard panel.isVisible else { return }
+        let visibleFrame = currentScreen()?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
         let panelFrame = panel.frame
         let centerDelta = abs(panelFrame.midX - visibleFrame.midX)
         let topOffset = visibleFrame.maxY - panelFrame.maxY

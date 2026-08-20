@@ -273,7 +273,7 @@ public final class FluidRenderer: @unchecked Sendable {
     private func loadShaderLibrary(device: MTLDevice) -> MTLLibrary? {
         SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: ["RemoteDesktopPassthrough"],
             requiredFunctionNames: [
                 "fluidPassthroughVertex",

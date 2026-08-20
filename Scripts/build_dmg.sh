@@ -9,7 +9,7 @@
 # 4. 创建 DMG 磁盘映像（带背景与 Applications 快捷方式）
 #
 # 使用方法：
-#   ./Scripts/build_dmg.sh [--skip-build] [--skip-sign] [--identity "Developer ID"] [--use-existing-app]
+#   ./Scripts/build_dmg.sh --build-id <positive-integer> [--skip-build] [--skip-sign] [--identity "Developer ID"] [--use-existing-app]
 #
 # 发布策略：
 # - build_dmg.sh 会强制 package_app.sh 进入 release_dmg 上下文
@@ -31,8 +31,7 @@ source "$PROJECT_ROOT/Scripts/notarytool_helpers.sh"
 source "$PROJECT_ROOT/Scripts/package_build_policy.sh"
 source "$PROJECT_ROOT/Scripts/xcodebuild_helpers.sh"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
-INFO_PLIST_PATH="$PROJECT_ROOT/Sources/SkyBridgeCompassApp/Info.plist"
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST_PATH" 2>/dev/null || echo "0.0.0")"
+VERSION="$(bash "$PROJECT_ROOT/Scripts/check_macos_release_version.sh")"
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/${DMG_NAME}-${VERSION}.dmg"
@@ -72,6 +71,7 @@ SKIP_SIGN=false
 USE_EXISTING_APP=false
 JUST_BUILT_RELEASE=false
 FINAL_SOURCE_MOUNT_DIR=""
+BUILD_ID=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -87,7 +87,23 @@ while [[ $# -gt 0 ]]; do
             USE_EXISTING_APP=true
             shift
             ;;
+        --build-id)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "❌ --build-id 需要正整数参数。" >&2
+                exit 2
+            fi
+            if [[ -n "$BUILD_ID" ]]; then
+                echo "❌ --build-id 只能指定一次。" >&2
+                exit 2
+            fi
+            BUILD_ID="$2"
+            shift 2
+            ;;
         --identity)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "❌ --identity 需要签名身份参数。" >&2
+                exit 2
+            fi
             SIGNING_IDENTITY="$2"
             shift 2
             ;;
@@ -104,6 +120,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --notarytool-keychain-profile)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                echo "❌ --notarytool-keychain-profile 需要 profile 参数。" >&2
+                exit 2
+            fi
             NOTARYTOOL_KEYCHAIN_PROFILE="$2"
             shift 2
             ;;
@@ -111,6 +131,7 @@ while [[ $# -gt 0 ]]; do
             echo "用法: $0 [选项]"
             echo ""
             echo "选项:"
+            echo "  --build-id ID        必填；本次产物的正整数 CFBundleVersion"
             echo "  --skip-build         跳过构建步骤"
             echo "  --skip-sign          仅配合 --use-existing-app 跳过重签名（新构建发布包仍必须签名）"
             echo "  --use-existing-app   复用 dist/ 下已存在的 .app"
@@ -130,6 +151,15 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -z "$BUILD_ID" ]]; then
+    echo "❌ 缺少必填 --build-id；正式 DMG 构建不得使用时间或隐式构建号。" >&2
+    exit 2
+fi
+if [[ ! "$BUILD_ID" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ --build-id 必须是正整数，实际值: $BUILD_ID" >&2
+    exit 2
+fi
 
 if [[ "$SKIP_SIGN" == true && "$USE_EXISTING_APP" != true ]]; then
     echo "❌ --skip-sign 只允许配合 --use-existing-app 使用；新构建的 release_dmg 必须经过 Developer ID 签名。" >&2
@@ -220,7 +250,6 @@ assess_and_report_gatekeeper() {
 
 artifact_has_stapled_ticket() {
     local artifact="$1"
-    local attempt
 
     for _ in {1..5}; do
         if xcrun stapler validate "$artifact" >/dev/null 2>&1; then
@@ -831,6 +860,10 @@ trap cleanup EXIT
 # 否则 SwiftPM/Xcode 可能穿透到系统应用内的历史工程引用，产生无关 warning 并显著拖慢发布构建。
 rm -rf "$STAGE_DIR" "$TEMP_DMG"
 
+# Release builds must fail on compiler warnings. The shared Xcode helper adds
+# Swift and Clang warning-as-error settings to every xcodebuild invocation.
+export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1
+
 log_info "检测 Apple PQC SDK 可用性（release DMG 必须启用 HAS_APPLE_PQC_SDK）..."
 skybridge_configure_apple_pqc_sdk_for_package_context "release_dmg" "Release DMG" || exit 1
 log_info "Host macOS 版本: ${SKYBRIDGE_PQC_HOST_OS_VER:-unknown}"
@@ -864,6 +897,7 @@ if [[ "$SKIP_BUILD" == false ]]; then
         swift build \
             "${SWIFTPM_BUILD_ARGS[@]}" \
             --product "$XCODE_PACKAGE_SCHEME" \
+            -Xswiftc -warnings-as-errors \
             --disable-automatic-resolution
 
         verify_release_executable_runtime_inputs "$SWIFTPM_PACKAGE_EXECUTABLE"
@@ -953,6 +987,7 @@ else
             SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM="$MAIN_BUILD_SYSTEM" \
             SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH="${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" \
             SKYBRIDGE_PACKAGE_OUTPUT_DIR="$DIST_DIR" \
+            SKYBRIDGE_PACKAGE_BUILD_ID="$BUILD_ID" \
             SKIP_BUILD=1 \
             ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" \
             SKYBRIDGE_PACKAGE_CONTEXT=release_dmg \
@@ -963,6 +998,7 @@ else
             SKYBRIDGE_PACKAGE_MAIN_BUILD_SYSTEM="$MAIN_BUILD_SYSTEM" \
             SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH="${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" \
             SKYBRIDGE_PACKAGE_OUTPUT_DIR="$DIST_DIR" \
+            SKYBRIDGE_PACKAGE_BUILD_ID="$BUILD_ID" \
             SKIP_BUILD=1 \
             ALLOW_STALE_BUILD="$PACKAGE_APP_ALLOW_STALE_BUILD" \
             SKYBRIDGE_PACKAGE_CONTEXT=release_dmg \
@@ -976,6 +1012,18 @@ if [[ ! -d "$APP_BUNDLE" ]]; then
 fi
 
 verify_app_bundle_build_source "$APP_BUNDLE"
+
+PACKAGED_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$PACKAGED_VERSION" != "$VERSION" ]]; then
+    log_error "App Bundle 版本与源码发布版本不一致：expected=$VERSION actual=${PACKAGED_VERSION:-missing}"
+    exit 1
+fi
+PACKAGED_BUILD_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$PACKAGED_BUILD_ID" != "$BUILD_ID" ]]; then
+    log_error "App Bundle 构建号与本次显式事务不一致：expected=$BUILD_ID actual=${PACKAGED_BUILD_ID:-missing}"
+    exit 1
+fi
+log_success "App Bundle 构建号已绑定本次事务: $BUILD_ID"
 
 HELPER_PLIST="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper.plist"
 HELPER_BIN="$APP_BUNDLE/Contents/Library/LaunchDaemons/com.skybridge.PowerMetricsHelper/com.skybridge.PowerMetricsHelper"
@@ -1052,7 +1100,7 @@ verify_app_release_features "$APP_BUNDLE"
 
 log_step "步骤 4: 创建 DMG"
 
-APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || echo "$VERSION")"
+APP_VERSION="$PACKAGED_VERSION"
 DMG_PATH="$DIST_DIR/${DMG_NAME}-${APP_VERSION}.dmg"
 
 rm -f "$DMG_PATH"

@@ -1598,6 +1598,13 @@ public class FileTransferManager: BaseManager {
     private var pendingClassicConnections: [ObjectIdentifier: NWConnection] = [:]
     private var classicPauseRequests: [String: ClassicTransferPauseRequest] = [:]
     private var terminalCleanupTasks: [String: Task<Void, Never>] = [:]
+    private struct ProductFileTransferEvidenceContext {
+        let transferObjectIdentifier: ObjectIdentifier
+        let owner: ProductReleaseEvidenceSessionOwner
+        let transferReference: String
+        let direction: ProductReleaseEvidenceFileDirection
+    }
+    private var productFileTransferEvidenceContext: ProductFileTransferEvidenceContext?
     private var externalTransferTokensByTransferID: [String: ExternalTransferToken] = [:]
     private var externalTransferCancellationHandlersByTransferID: [String: @MainActor () -> Void] = [:]
     private var externalTransportOperations: [
@@ -1734,6 +1741,7 @@ public class FileTransferManager: BaseManager {
     private func beginLifecycleShutdown(removeActiveTransfers: Bool) {
         acceptsNewTransfers = false
         lifecycleGeneration = UUID()
+        retireCurrentProductFileTransferEvidence(reason: .user)
 
         let cancelledWaiters = transferSlotPolicy.cancelAllPending()
         for waiterID in cancelledWaiters {
@@ -2048,6 +2056,13 @@ public class FileTransferManager: BaseManager {
 
     @available(macOS 14.0, iOS 17.0, *)
     private struct ClassicTransferSecurityContext {
+        struct ProductEvidenceBinding {
+            let sessionReference: String
+            let routeClass: ProductReleaseEvidenceRouteClass
+            let handshakeRole: ProductReleaseEvidenceHandshakeRole
+            let negotiatedSuite: CryptoSuite
+        }
+
         let transferKey: SymmetricKey
         let matchDeviceId: String
         let resolvedPeerDeviceId: String
@@ -2055,6 +2070,7 @@ public class FileTransferManager: BaseManager {
         let declaredCandidates: [String]
         let endpointCandidates: [String]
         let supportsClassicResume: Bool
+        let productEvidenceBinding: ProductEvidenceBinding?
     }
 
     private func currentSpeedLimitDescription() -> String {
@@ -2243,7 +2259,7 @@ public class FileTransferManager: BaseManager {
         }
         let authenticatedConnections = Array(deduped.values)
         enum KeyOrigin {
-            case live(P2PConnection)
+            case live(P2PConnection, exactSnapshot: ClassicTransferSessionSnapshot?)
             case snapshot(ClassicTransferSessionSnapshot)
         }
         struct UnkeyedSource {
@@ -2277,6 +2293,11 @@ public class FileTransferManager: BaseManager {
             sourcesByKey[dedupeKey] = source
         }
         for connection in authenticatedConnections {
+            let exactSnapshotPrefix = "p2p-\(connection.id.uuidString)-"
+            let exactSnapshots = registrySessions.filter {
+                $0.sessionId.hasPrefix(exactSnapshotPrefix)
+            }
+            let exactSnapshot = exactSnapshots.count == 1 ? exactSnapshots[0] : nil
             let candidate = Self.classicTransferAuthenticatedPeerCandidate(for: connection)
             let dedupeKey = [
                 candidate.resolvedPeerDeviceId.lowercased(),
@@ -2288,7 +2309,7 @@ public class FileTransferManager: BaseManager {
                     candidate: candidate,
                     lastSeenAt: connection.lastActivity,
                     sourceKind: .liveConnection,
-                    keyOrigin: .live(connection)
+                    keyOrigin: .live(connection, exactSnapshot: exactSnapshot)
                 ),
                 dedupeKey: dedupeKey
             )
@@ -2340,15 +2361,59 @@ public class FileTransferManager: BaseManager {
         }
 
         let transferKey: SymmetricKey
+        var productEvidenceBinding: ClassicTransferSecurityContext.ProductEvidenceBinding?
         switch selectedSource.keyOrigin {
-        case .live(let connection):
+        case .live(let connection, let exactSnapshot):
             transferKey = try connection.deriveClassicFileTransferKey(
                 transferId: peerContext.transferId
             )
+            if let exactSnapshot,
+               Self.symmetricKeyMaterialEquals(
+                transferKey,
+                exactSnapshot.deriveClassicFileTransferKey(
+                    transferId: peerContext.transferId
+                )
+               ),
+               let sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: exactSnapshot.sessionKeys.sessionId,
+                transcriptHash: exactSnapshot.sessionKeys.transcriptHash
+               ),
+               let routeClass = ProductReleaseEvidenceRouteClass.current(
+                for: connection.connection
+               ) {
+                productEvidenceBinding = .init(
+                    sessionReference: sessionReference,
+                    routeClass: routeClass,
+                    handshakeRole: exactSnapshot.sessionKeys.role == .initiator
+                        ? .initiator
+                        : .responder,
+                    negotiatedSuite: exactSnapshot.sessionKeys.negotiatedSuite
+                )
+            }
         case .snapshot(let snapshot):
             transferKey = snapshot.deriveClassicFileTransferKey(
                 transferId: peerContext.transferId
             )
+            let exactLiveConnection = authenticatedConnections.first { connection in
+                snapshot.sessionId.hasPrefix("p2p-\(connection.id.uuidString)-")
+            }
+            if let exactLiveConnection,
+               let sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: snapshot.sessionKeys.sessionId,
+                transcriptHash: snapshot.sessionKeys.transcriptHash
+               ),
+               let routeClass = ProductReleaseEvidenceRouteClass.current(
+                for: exactLiveConnection.connection
+               ) {
+                productEvidenceBinding = .init(
+                    sessionReference: sessionReference,
+                    routeClass: routeClass,
+                    handshakeRole: snapshot.sessionKeys.role == .initiator
+                        ? .initiator
+                        : .responder,
+                    negotiatedSuite: snapshot.sessionKeys.negotiatedSuite
+                )
+            }
         }
 
         logger.info(
@@ -2366,8 +2431,136 @@ public class FileTransferManager: BaseManager {
             matchedBy: resolution.matchedBy,
             declaredCandidates: resolution.declaredCandidates,
             endpointCandidates: resolution.endpointCandidates,
-            supportsClassicResume: resolution.supportsClassicResume
+            supportsClassicResume: resolution.supportsClassicResume,
+            productEvidenceBinding: productEvidenceBinding
         )
+    }
+
+    private nonisolated static func symmetricKeyMaterialEquals(
+        _ lhs: SymmetricKey,
+        _ rhs: SymmetricKey
+    ) -> Bool {
+        lhs.withUnsafeBytes { lhsBytes in
+            rhs.withUnsafeBytes { rhsBytes in
+                guard lhsBytes.count == rhsBytes.count else { return false }
+                var difference: UInt8 = 0
+                for index in lhsBytes.indices {
+                    difference |= lhsBytes[index] ^ rhsBytes[index]
+                }
+                return difference == 0
+            }
+        }
+    }
+
+    private func beginProductFileTransferEvidenceIfPossible(
+        for transfer: FileTransfer,
+        securityContext: ClassicTransferSecurityContext
+    ) {
+        guard let binding = securityContext.productEvidenceBinding,
+              let transferID = UUID(uuidString: transfer.id) else {
+            return
+        }
+        let transferObjectIdentifier = ObjectIdentifier(transfer)
+        if productFileTransferEvidenceContext?.transferObjectIdentifier
+            == transferObjectIdentifier {
+            return
+        }
+        retireCurrentProductFileTransferEvidence(reason: .sessionReplaced)
+
+        guard let owner = ProductReleaseEvidenceRecorder.shared.beginSession(
+            product: .macOSApp,
+            transport: .p2p,
+            sessionReference: binding.sessionReference,
+            routeClass: binding.routeClass
+        ) else {
+            return
+        }
+        guard ProductReleaseEvidenceRecorder.shared.recordP2PSessionAuthenticated(
+            owner: owner,
+            role: binding.handshakeRole,
+            negotiatedSuite: binding.negotiatedSuite
+        ) else {
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: owner,
+                reason: .protocolFailure
+            )
+            return
+        }
+        let transferReference = P2PEvidenceReference.transaction(transferID)
+        let direction: ProductReleaseEvidenceFileDirection = switch transfer.direction {
+        case .outgoing: .send
+        case .incoming: .receive
+        }
+        guard ProductReleaseEvidenceRecorder.shared.recordFileTransferStarted(
+            owner: owner,
+            transferReference: transferReference,
+            direction: direction
+        ) else {
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: owner,
+                reason: .protocolFailure
+            )
+            return
+        }
+        productFileTransferEvidenceContext = ProductFileTransferEvidenceContext(
+            transferObjectIdentifier: transferObjectIdentifier,
+            owner: owner,
+            transferReference: transferReference,
+            direction: direction
+        )
+    }
+
+    private func retireProductFileTransferEvidence(
+        for transfer: FileTransfer,
+        reason: ProductReleaseEvidenceDisconnectReason
+    ) {
+        guard productFileTransferEvidenceContext?.transferObjectIdentifier
+            == ObjectIdentifier(transfer) else {
+            return
+        }
+        retireCurrentProductFileTransferEvidence(reason: reason)
+    }
+
+    private func retireCurrentProductFileTransferEvidence(
+        reason: ProductReleaseEvidenceDisconnectReason
+    ) {
+        guard let context = productFileTransferEvidenceContext else { return }
+        productFileTransferEvidenceContext = nil
+        _ = ProductReleaseEvidenceRecorder.shared.endSession(
+            owner: context.owner,
+            reason: reason
+        )
+    }
+
+    /// Called by the normal SwiftUI transfer row after a completed transfer is
+    /// actually mounted. The manager revalidates exact object ownership and
+    /// terminal success before allowing the visible UI effect to be recorded.
+    @discardableResult
+    public func recordProductFileTransferCompletionVisible(
+        for transfer: FileTransfer
+    ) -> Bool {
+        guard let context = productFileTransferEvidenceContext,
+              context.transferObjectIdentifier == ObjectIdentifier(transfer),
+              transfer.status == .completed,
+              transfer.completedAt != nil,
+              transfer.error == nil,
+              transfer.progress == 1,
+              activeTransfers[transfer.id] === transfer
+                || transferHistory.contains(where: { $0 === transfer }) else {
+            return false
+        }
+        let recorded = ProductReleaseEvidenceRecorder.shared.recordFileTransferCompleted(
+            owner: context.owner,
+            transferReference: context.transferReference,
+            direction: context.direction,
+            uiEffectVisible: true
+        )
+        productFileTransferEvidenceContext = nil
+        _ = ProductReleaseEvidenceRecorder.shared.endSession(
+            owner: context.owner,
+            reason: context.direction == .send ? .user : .peer
+        )
+        return recorded
     }
 
     @available(macOS 14.0, iOS 17.0, *)
@@ -3095,6 +3288,10 @@ public class FileTransferManager: BaseManager {
                     to: connection
                 )
                 try ensureCurrentLifecycle(transferLifecycleGeneration)
+                beginProductFileTransferEvidenceIfPossible(
+                    for: transfer,
+                    securityContext: securityContext
+                )
                 try await sendFileInChunks(
                     from: url,
                     transfer: transfer,
@@ -3229,6 +3426,12 @@ public class FileTransferManager: BaseManager {
             }
             transfer.completedAt = Date()
             transfer.error = terminalTransferError.localizedDescription
+            retireProductFileTransferEvidence(
+                for: transfer,
+                reason: isTransferCancellation(terminalTransferError)
+                    ? .user
+                    : .protocolFailure
+            )
             logger.error("❌ 文件发送失败")
             if didStartNetworkTransfer {
                 lastTransferActivityAt = Date()
@@ -3522,6 +3725,10 @@ public class FileTransferManager: BaseManager {
         registerActiveTransfer(transfer)
         bindClassicConnection(connection, to: transfer.id)
         defer { unbindClassicConnection(connection, from: transfer.id) }
+        beginProductFileTransferEvidenceIfPossible(
+            for: transfer,
+            securityContext: resolvedSecurityContext
+        )
 
         var inboundIOHandle: InboundFileTransferIOHandle?
         var committedURL: URL?
@@ -3670,6 +3877,10 @@ public class FileTransferManager: BaseManager {
                 transfer.status = .failed
                 transfer.completedAt = Date()
                 transfer.error = terminalError.localizedDescription
+                retireProductFileTransferEvidence(
+                    for: transfer,
+                    reason: .protocolFailure
+                )
                 moveToHistory(transfer)
                 logger.error("❌ 文件已落盘，但入站 I/O 终态释放失败")
                 throw terminalError
@@ -3693,6 +3904,12 @@ public class FileTransferManager: BaseManager {
             transfer.status = isTransferCancellation(terminalError) ? .cancelled : .failed
             transfer.completedAt = Date()
             transfer.error = terminalError.localizedDescription
+            retireProductFileTransferEvidence(
+                for: transfer,
+                reason: isTransferCancellation(terminalError)
+                    ? .user
+                    : .protocolFailure
+            )
 
             // 失败路径也尽量回执，避免发送端长时间等待直到超时
             if isCurrentLifecycle(lifecycleGeneration) {
@@ -4664,6 +4881,7 @@ public class FileTransferManager: BaseManager {
             return
         }
         if let transfer = activeTransfers[transferId] {
+            retireProductFileTransferEvidence(for: transfer, reason: .user)
             transfer.status = .cancelled
             transfer.classicControlFailure = FileTransferError.transferCancelled
             transfer.error = FileTransferError.transferCancelled.localizedDescription
@@ -4757,6 +4975,7 @@ public class FileTransferManager: BaseManager {
 
  /// 清理历史记录
     public func clearHistory() {
+        retireCurrentProductFileTransferEvidence(reason: .user)
         transferHistory.removeAll()
         enqueueHistoryClear()
         logger.info("🗑️ 清理传输历史记录")

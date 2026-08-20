@@ -8,6 +8,21 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
         let streamRefreshToken: UInt64?
         let audioEndpointPresent: Bool
         let screenFrameTransport: String?
+        let framePresentationAckVersion: Int?
+
+        init(
+            transaction: RemoteDesktopStreamConfigurationTransaction,
+            streamRefreshToken: UInt64?,
+            audioEndpointPresent: Bool,
+            screenFrameTransport: String?,
+            framePresentationAckVersion: Int? = nil
+        ) {
+            self.transaction = transaction
+            self.streamRefreshToken = streamRefreshToken
+            self.audioEndpointPresent = audioEndpointPresent
+            self.screenFrameTransport = screenFrameTransport
+            self.framePresentationAckVersion = framePresentationAckVersion
+        }
     }
 
     struct PreparationPlan: Equatable {
@@ -77,6 +92,9 @@ enum RemoteDesktopViewerStreamConfigurationPushPolicy {
             && acknowledgement.streamRefreshToken == expectation.streamRefreshToken
             && acknowledgement.audioEndpointPresent == expectation.audioEndpointPresent
             && acknowledgement.screenFrameTransport == expectation.screenFrameTransport
+            && (acknowledgement.framePresentationAckVersion == nil
+                || acknowledgement.framePresentationAckVersion
+                    == expectation.framePresentationAckVersion)
     }
 
     static func allowsMediaAdmission(

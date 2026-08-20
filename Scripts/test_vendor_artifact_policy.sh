@@ -14,12 +14,30 @@ fail() {
 }
 
 command -v rustc >/dev/null 2>&1 || fail "rustc is required to inspect vendored Rust symbols"
+command -v rustup >/dev/null 2>&1 || fail "rustup is required to select the Q-Periapt producer toolchain"
 command -v lipo >/dev/null 2>&1 || fail "lipo is required to inspect vendored Apple architectures"
 command -v shasum >/dev/null 2>&1 || fail "shasum is required to verify vendored artifacts"
-RUST_HOST="$(rustc -vV | awk '/^host:/ { print $2 }')"
-RUST_SYSROOT="$(rustc --print sysroot)"
+QPERIAPT_INSPECTION_TOOLCHAIN="$(python3 - "${ROOT_DIR}/${QPERIAPT_PROVENANCE}" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+toolchain = record.get("upstream_artifact", {}).get("rust_toolchain")
+if not isinstance(toolchain, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", toolchain) is None:
+    raise SystemExit("Q-Periapt provenance has no exact Rust producer toolchain")
+print(toolchain)
+PY
+)"
+RUST_VERSION="$(rustup run "$QPERIAPT_INSPECTION_TOOLCHAIN" rustc --version 2>/dev/null || true)"
+[[ "$RUST_VERSION" == "rustc ${QPERIAPT_INSPECTION_TOOLCHAIN} "* ]] \
+  || fail "Q-Periapt inspection requires Rust ${QPERIAPT_INSPECTION_TOOLCHAIN} with llvm-tools-preview"
+RUST_HOST="$(rustup run "$QPERIAPT_INSPECTION_TOOLCHAIN" rustc -vV | awk '/^host:/ { print $2 }')"
+RUST_SYSROOT="$(rustup run "$QPERIAPT_INSPECTION_TOOLCHAIN" rustc --print sysroot)"
 LLVM_NM="$RUST_SYSROOT/lib/rustlib/$RUST_HOST/bin/llvm-nm"
-[[ -x "$LLVM_NM" ]] || fail "Rust llvm-nm not found: $LLVM_NM"
+[[ -x "$LLVM_NM" ]] \
+  || fail "Rust ${QPERIAPT_INSPECTION_TOOLCHAIN} llvm-nm not found; install llvm-tools-preview"
 
 require_release_file_bound_to_head() {
   local path="$1"
@@ -266,6 +284,8 @@ if record.get("source_commit") != source_commit:
     raise SystemExit("Q-Periapt provenance source commit mismatch")
 if record.get("release_tag") != "v0.1.0-alpha.2-r1" or record.get("release_revision") != "r1":
     raise SystemExit("Q-Periapt provenance release tag mismatch")
+if record.get("upstream_artifact", {}).get("rust_toolchain") != "1.96.1":
+    raise SystemExit("Q-Periapt provenance must pin its exact Rust producer toolchain")
 release = record.get("github_release", {})
 if release.get("immutable") is not True or release.get("attestation_verified") is not True:
     raise SystemExit("Q-Periapt provenance must record immutable release attestation verification")

@@ -48,8 +48,7 @@ def write_valid_archive(path: Path) -> None:
             mode=0o755,
         )
         add_file(archive, "SkyBridgeCompassPro-1.2.3.dmg", b"notarized-dmg\n")
-        add_file(archive, "macos-release-evidence.tar.gz", b"evidence\n")
-        add_file(archive, "release-artifact-run-provenance.json", b"{}\n")
+        add_file(archive, "macos-release-candidate.json", b"{}\n")
 
 
 class MacOSReleaseHandoffExtractorTests(unittest.TestCase):
@@ -89,8 +88,7 @@ class MacOSReleaseHandoffExtractorTests(unittest.TestCase):
                 [
                     "SkyBridge Compass Pro.app",
                     "SkyBridgeCompassPro-1.2.3.dmg",
-                    "macos-release-evidence.tar.gz",
-                    "release-artifact-run-provenance.json",
+                    "macos-release-candidate.json",
                 ],
             )
 
@@ -134,7 +132,7 @@ class MacOSReleaseHandoffExtractorTests(unittest.TestCase):
                     "SkyBridge Compass Pro.app/Contents/Info.plist"
                 )
                 member.type = tarfile.LNKTYPE
-                member.linkname = "macos-release-evidence.tar.gz"
+                member.linkname = "macos-release-candidate.json"
                 output.addfile(member)
             result = self.run_extractor(archive, root / "release")
             self.assertNotEqual(result.returncode, 0)

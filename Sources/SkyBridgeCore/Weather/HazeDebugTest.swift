@@ -78,7 +78,7 @@ public struct HazeDebugTestView: View {
         
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: ["HazeShaders"],
             requiredFunctionNames: ["hazeVertex", "hazeFragment"]
         ) else {

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
-# Shared fail-closed ownership boundary for physical-iOS smoke processes.
+# Shared fail-closed ownership boundary for Apple smoke processes.
+#
+# macOS product processes are discovered by canonical executable path, then
+# bound to a private record containing the PID, start time and audit token.
+# A PID alone is never signal authority, and a pre-existing exact executable
+# makes a formal launch fail closed instead of being terminated or reused.
 #
 # iPadOS 27 exposes PID + executable, but not auditToken, through
 # `devicectl device info processes`. A reusable remote PID is therefore never
@@ -10,6 +15,251 @@
 # launched. Remote process data is used only for fresh-launch and exit proof.
 
 SKYBRIDGE_DEVICETCL_RUNTIME_EXECUTABLE="/Library/Developer/PrivateFrameworks/CoreDevice.framework/Resources/bin/devicectl"
+
+skybridge_mac_exact_executable_pids() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local expected_executable="${2:?missing expected macOS executable}"
+
+  python3 "$ownership_helper" mac-list-exact \
+    --expected-executable "$expected_executable"
+}
+
+skybridge_mac_require_executable_absent() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local expected_executable="${2:?missing expected macOS executable}"
+  local label="${3:?missing macOS process label}"
+  local exact_pids
+
+  if ! exact_pids="$(skybridge_mac_exact_executable_pids \
+    "$ownership_helper" "$expected_executable")"; then
+    echo "Refusing to launch $label because exact executable absence could not be proven." >&2
+    return 2
+  fi
+  if [[ -n "$exact_pids" ]]; then
+    echo "Refusing to launch $label because its exact executable is already running; close it normally before retrying. pids=${exact_pids//$'\n'/,}" >&2
+    return 1
+  fi
+}
+
+skybridge_mac_wait_for_single_exact_process() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local expected_executable="${2:?missing expected macOS executable}"
+  local timeout_seconds="${3:?missing macOS launch timeout}"
+  local pid_output_name="${4:?missing macOS pid output variable}"
+  local label="${5:?missing macOS process label}"
+  local exact_pids
+  local process_count
+  local started_at
+
+  if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    echo "macOS exact process launch timeout must be a positive integer." >&2
+    return 2
+  fi
+  if ! [[ "$pid_output_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "macOS exact process PID output variable name is invalid." >&2
+    return 2
+  fi
+
+  started_at="$(date +%s)"
+  while true; do
+    if ! exact_pids="$(skybridge_mac_exact_executable_pids \
+      "$ownership_helper" "$expected_executable")"; then
+      echo "Unable to enumerate the exact $label executable after launch." >&2
+      return 2
+    fi
+    process_count="$(printf '%s\n' "$exact_pids" | awk 'NF { count += 1 } END { print count + 0 }')"
+    case "$process_count" in
+      0)
+        ;;
+      1)
+        printf -v "$pid_output_name" '%s' "$exact_pids"
+        return 0
+        ;;
+      *)
+        echo "Refusing ambiguous $label ownership because multiple exact executable instances appeared. pids=${exact_pids//$'\n'/,}" >&2
+        return 2
+        ;;
+    esac
+    if (( "$(date +%s)" - started_at >= timeout_seconds )); then
+      echo "Timed out waiting for the exact $label executable." >&2
+      return 1
+    fi
+    sleep 0.2
+  done
+}
+
+skybridge_mac_capture_owned_process() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local process_pid="${2:?missing macOS process pid}"
+  local expected_executable="${3:?missing expected macOS executable}"
+  local identity_path="${4:?missing macOS ownership identity path}"
+  local label="${5:?missing macOS process label}"
+  local recorded_pid
+
+  if ! [[ "$process_pid" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Cannot capture $label ownership for an invalid PID." >&2
+    return 2
+  fi
+  if ! python3 "$ownership_helper" mac-capture \
+    --pid "$process_pid" \
+    --expected-executable "$expected_executable" \
+    --output "$identity_path"; then
+    echo "Unable to capture the exact executable, start time and audit token for $label." >&2
+    return 1
+  fi
+  if ! recorded_pid="$(python3 "$ownership_helper" identity-pid \
+    --platform macos \
+    --identity "$identity_path")" \
+    || [[ "$recorded_pid" != "$process_pid" ]]; then
+    echo "$label launch state and private ownership record disagree." >&2
+    return 1
+  fi
+}
+
+skybridge_mac_owned_process_status() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local process_pid="${2:?missing macOS process pid}"
+  local identity_path="${3:?missing macOS ownership identity path}"
+  local recorded_pid
+
+  if ! recorded_pid="$(python3 "$ownership_helper" identity-pid \
+    --platform macos \
+    --identity "$identity_path")"; then
+    return 2
+  fi
+  if [[ "$recorded_pid" != "$process_pid" ]]; then
+    echo "macOS launch state and private ownership record disagree." >&2
+    return 2
+  fi
+  python3 "$ownership_helper" mac-status --identity "$identity_path"
+}
+
+skybridge_mac_terminate_owned_process() {
+  local ownership_helper="${1:?missing process ownership helper}"
+  local process_pid="${2:-}"
+  local identity_path="${3:?missing macOS ownership identity path}"
+  local label="${4:?missing macOS process label}"
+  local process_status
+  local signal_status
+  local attempt
+
+  [[ -n "$process_pid" ]] || return 0
+  if [[ ! -f "$identity_path" ]]; then
+    echo "Refusing to signal $label without its private ownership record." >&2
+    return 1
+  fi
+
+  if skybridge_mac_owned_process_status \
+    "$ownership_helper" "$process_pid" "$identity_path"; then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  case "$process_status" in
+    0) ;;
+    1)
+      wait "$process_pid" >/dev/null 2>&1 || true
+      return 0
+      ;;
+    *)
+      echo "Refusing to send SIGTERM: $label ownership is unverifiable." >&2
+      return 1
+      ;;
+  esac
+
+  if python3 "$ownership_helper" mac-signal \
+    --identity "$identity_path" \
+    --signal TERM; then
+    signal_status=0
+  else
+    signal_status=$?
+  fi
+  case "$signal_status" in
+    0) ;;
+    1)
+      wait "$process_pid" >/dev/null 2>&1 || true
+      return 0
+      ;;
+    *)
+      echo "SIGTERM was not sent because exact $label ownership could not be preserved." >&2
+      return 1
+      ;;
+  esac
+
+  for (( attempt = 0; attempt < 20; attempt += 1 )); do
+    if skybridge_mac_owned_process_status \
+      "$ownership_helper" "$process_pid" "$identity_path"; then
+      process_status=0
+    else
+      process_status=$?
+    fi
+    if (( process_status == 0 )); then
+      sleep 0.25
+      continue
+    fi
+    if (( process_status == 1 )); then
+      wait "$process_pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    echo "$label ownership became unverifiable after SIGTERM." >&2
+    return 1
+  done
+
+  if skybridge_mac_owned_process_status \
+    "$ownership_helper" "$process_pid" "$identity_path"; then
+    process_status=0
+  else
+    process_status=$?
+  fi
+  if (( process_status == 1 )); then
+    wait "$process_pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if (( process_status != 0 )); then
+    echo "Refusing to send SIGKILL: $label ownership is unverifiable." >&2
+    return 1
+  fi
+
+  if python3 "$ownership_helper" mac-signal \
+    --identity "$identity_path" \
+    --signal KILL; then
+    signal_status=0
+  else
+    signal_status=$?
+  fi
+  case "$signal_status" in
+    0) ;;
+    1)
+      wait "$process_pid" >/dev/null 2>&1 || true
+      return 0
+      ;;
+    *)
+      echo "SIGKILL was not sent because exact $label ownership could not be preserved." >&2
+      return 1
+      ;;
+  esac
+
+  for (( attempt = 0; attempt < 20; attempt += 1 )); do
+    if skybridge_mac_owned_process_status \
+      "$ownership_helper" "$process_pid" "$identity_path"; then
+      process_status=0
+    else
+      process_status=$?
+    fi
+    if (( process_status == 0 )); then
+      sleep 0.25
+      continue
+    fi
+    if (( process_status == 1 )); then
+      wait "$process_pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    echo "$label ownership became unverifiable after SIGKILL." >&2
+    return 1
+  done
+  echo "$label remains alive after audit-token SIGKILL." >&2
+  return 1
+}
 
 skybridge_ios_process_snapshot() {
   local device_id="${1:?missing iOS device id}"

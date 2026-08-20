@@ -66,9 +66,6 @@ names = [
     "real-device-p2p-remote-smoke-public-redacted",
     "real-device-webrtc-smoke-public-redacted",
     "real-device-file-transfer-smoke-public-redacted",
-    "real-device-p2p-security-notice-public-redacted",
-    "local-webrtc-security-notice-public-redacted",
-    "local-macos-security-notice-panel-public-redacted",
 ]
 payload = {
     "schema_version": 1,

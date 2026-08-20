@@ -430,6 +430,31 @@ extension RemoteDesktopManager {
         let generation: UInt64
     }
 
+    struct FramePresentationAcknowledgementGate {
+        private(set) var reservedContext: RemoteDesktopFramePresentationContext?
+
+        mutating func reserve(
+            _ context: RemoteDesktopFramePresentationContext
+        ) -> Bool {
+            guard reservedContext == nil else { return false }
+            reservedContext = context
+            return true
+        }
+
+        func isCurrent(_ context: RemoteDesktopFramePresentationContext) -> Bool {
+            reservedContext == context
+        }
+
+        mutating func release(_ context: RemoteDesktopFramePresentationContext) {
+            guard reservedContext == context else { return }
+            reservedContext = nil
+        }
+
+        mutating func reset() {
+            reservedContext = nil
+        }
+    }
+
     enum DecodedVideoRendererPreference {
         case metal
         case sampleBuffer

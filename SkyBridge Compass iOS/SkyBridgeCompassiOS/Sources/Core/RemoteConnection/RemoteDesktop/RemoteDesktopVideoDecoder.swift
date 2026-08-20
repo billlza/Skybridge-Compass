@@ -1427,7 +1427,8 @@ actor VideoDecoder {
             width: pixelBufferFrame.width,
             height: pixelBufferFrame.height,
             presentationTimeStamp: pixelBufferFrame.presentationTimeStamp,
-            cameraPresentationContext: pixelBufferFrame.cameraPresentationContext
+            cameraPresentationContext: pixelBufferFrame.cameraPresentationContext,
+            framePresentationContext: pixelBufferFrame.framePresentationContext
         )
     }
 

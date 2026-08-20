@@ -39,6 +39,18 @@ public final class SkyBridgeiOSCore {
         let keyHandle: SigningKeyHandle
         let publicKey: Data
         let snapshot: ProtocolIdentitySnapshot
+        let resolutionDisposition: ProtocolSigningIdentityResolutionDisposition
+
+        var productEvidenceDescriptor: ProductIdentityEvidenceDescriptor? {
+            CommittedIOSProtocolIdentitySnapshot(
+                snapshot: snapshot,
+                algorithm: configuration.algorithm,
+                protection: configuration.keyProtection,
+                publicKey: publicKey,
+                keyHandle: keyHandle,
+                resolutionDisposition: resolutionDisposition
+            ).productEvidenceDescriptor
+        }
     }
     
     // MARK: - Singleton
@@ -257,7 +269,8 @@ public final class SkyBridgeiOSCore {
                 signatureProvider: candidateSignatureProvider,
                 keyHandle: keyHandle,
                 publicKey: identity.material.publicKey,
-                snapshot: identity.snapshot
+                snapshot: identity.snapshot,
+                resolutionDisposition: identity.resolutionDisposition
             )
         } catch {
             if activeInitializationToken == token {
@@ -371,6 +384,18 @@ public final class SkyBridgeiOSCore {
         SkyBridgeLogger.shared.info(
             "🧩 HandshakePolicy: requirePQC=\(candidateHandshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(candidateHandshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(candidateHandshakePolicy.minimumTier.rawValue)"
         )
+        if identity.resolutionDisposition == .restoredCommittedAuthority,
+           let descriptor = CommittedIOSProtocolIdentitySnapshot(
+               snapshot: identity.snapshot,
+               algorithm: identity.material.algorithm,
+               protection: identity.material.keyProtection,
+               publicKey: identity.material.publicKey,
+               keyHandle: candidateKeyHandle,
+               resolutionDisposition: identity.resolutionDisposition
+           ).productEvidenceDescriptor {
+            _ = ProductReleaseEvidenceRecorder.shared
+                .recordProductionIdentityRestored(descriptor)
+        }
     }
 
     public func getProtocolSigningKeyHandle(
@@ -451,7 +476,8 @@ public final class SkyBridgeiOSCore {
             algorithm: algorithm,
             protection: protection,
             publicKey: resolved.material.publicKey,
-            keyHandle: keyHandle
+            keyHandle: keyHandle,
+            resolutionDisposition: resolved.resolutionDisposition
         )
     }
 

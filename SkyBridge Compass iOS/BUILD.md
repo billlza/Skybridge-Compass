@@ -188,11 +188,14 @@ xcodebuild test \
 
 ### TestFlight 分发
 
-1. 创建 Archive
-2. 选择 "Distribute App"
-3. 选择 "App Store Connect"
-4. 上传到 TestFlight
-5. 邀请测试用户
+设备验收与商店交付是两个独立门：
+
+1. 冻结并提交 clean release revision。
+2. 运行 `bash Scripts/build_ios_release_candidate.sh` 生成 `release-testing` IPA；脚本会自动执行签名、profile、App/Widget 版本、源码输入和最终 IPA formal verifier。随后运行 `bash Scripts/finalize_ios_release_archive_identity.sh`，将该 IPA 与唯一 archive 封存为防跨轮次误配的可靠性身份。该 IPA 只用于物理设备验收。
+3. 物理 iPhone/iPad 验收必须安装这个 IPA，并将四类正式证据绑定到同一 archive/IPA；不得在验收脚本内重新 archive。全部通过后，由 `Scripts/ios_physical_release_acceptance.py` 重新验证并封存绑定。
+4. 使用 `Scripts/export_ios_app_store_product.sh` 从同一 archive 以 `app-store-connect` 方法导出；固定 `manageAppVersionAndBuildNumber=false`，不得让上传工具改写仓库声明的 `1.0.2 (2)`。导出器不会上传。
+5. 上传属于独立外部发布动作，只能在复核正式导出验证结果并获得明确批准后，通过 `Scripts/upload_ios_app_store_product.sh --confirm-upload` 执行；`release-testing` IPA 或导出成功都不能作为已上传证据。
+6. 在 App Store Connect 验证处理后的 build 版本、签名、entitlements 与 dSYM，再邀请 TestFlight 测试用户或提交审核。完整事务与外部阻塞门见 [`Docs/ops/ios-app-store-release-transaction.md`](../Docs/ops/ios-app-store-release-transaction.md)。
 
 ## 🔐 PQC 加密配置
 

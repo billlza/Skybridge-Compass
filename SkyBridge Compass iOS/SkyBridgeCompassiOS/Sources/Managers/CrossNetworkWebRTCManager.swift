@@ -5,6 +5,7 @@ import struct SkyBridgeProtocolCore.CrossNetworkFileTransferOperationReservation
 import class SkyBridgeProtocolCore.InboundFileTransferIOActor
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
+import enum SkyBridgeProtocolCore.P2PEvidenceReference
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferWireDecoder
 import enum SkyBridgeProtocolCore.DeviceTextMessagePolicy
 import enum SkyBridgeProtocolCore.WebRTCFramedPayloadPolicy
@@ -1175,6 +1176,12 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
     private var strictPQCClassicBootstrapTimeoutTasksBySessionId: [String: Task<Void, Never>] = [:]
     private var rekeyInProgressSessionIds: Set<String> = []
     private var rekeyCompletedSessionIds: Set<String> = []
+    private var productEvidenceOwnersBySessionId: [
+        String: ProductEvidenceSessionOwner
+    ] = [:]
+    private var productEvidenceMediaTasksBySessionId: [
+        String: Task<Void, Never>
+    ] = [:]
     private var activeOutboundRekeyOperationToken: UUID?
     private var inboundRekeyResponderSessionIds: Set<String> = []
     private var strictPQCRequestedBySessionId: [String: Bool] = [:]
@@ -2507,6 +2514,173 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             && lhs.receiveKey == rhs.receiveKey
     }
 
+    private func publishWebRTCProductEvidenceIfCurrent(
+        sessionId: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        driver: HandshakeDriver,
+        attemptSnapshot: ProductConnectivityHandshakeAttemptSnapshot
+    ) async {
+        let sessionObjectIdentifier = ObjectIdentifier(session)
+        guard keys.negotiatedSuite == .xwing,
+              isCurrentSession(
+                sessionId: sessionId,
+                sessionObjectIdentifier: sessionObjectIdentifier
+              ),
+              handshakeDriver === driver,
+              let currentKeys = sessionKeys,
+              Self.isSameWebRTCFileTransferSecureSession(currentKeys, keys),
+              let sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: keys.sessionId,
+                transcriptHash: keys.transcriptHash
+              ) else {
+            return
+        }
+        let selectedPath = await session.currentICETransportPath()
+        guard isCurrentSession(
+                sessionId: sessionId,
+                sessionObjectIdentifier: sessionObjectIdentifier
+              ),
+              handshakeDriver === driver,
+              let postPathKeys = sessionKeys,
+              Self.isSameWebRTCFileTransferSecureSession(postPathKeys, keys) else {
+            return
+        }
+        let selectedTransport: ProductEvidenceSelectedTransport
+        switch selectedPath {
+        case .direct:
+            selectedTransport = .direct
+        case .relay:
+            selectedTransport = .relay
+        case .unknown:
+            return
+        }
+
+        let committedIdentity = try? await SkyBridgeiOSCore.shared
+            .committedActiveProtocolIdentitySnapshot()
+        guard isCurrentSession(
+                sessionId: sessionId,
+                sessionObjectIdentifier: sessionObjectIdentifier
+              ),
+              handshakeDriver === driver,
+              let postIdentityKeys = sessionKeys,
+              Self.isSameWebRTCFileTransferSecureSession(postIdentityKeys, keys),
+              let localAuthority = currentPathLocalAuthorityBySessionId[sessionId],
+              let committedIdentity,
+              committedIdentity.algorithm
+                == attemptSnapshot.localProtocolSigningAlgorithm,
+              committedIdentity.protection
+                == attemptSnapshot.localProtocolSigningKeyProtection,
+              committedIdentity.publicKey
+                == attemptSnapshot.localProtocolPublicKey,
+              localAuthority.identity.algorithm == committedIdentity.algorithm,
+              localAuthority.identity.protection == committedIdentity.protection,
+              localAuthority.identity.publicKey == committedIdentity.publicKey,
+              let identityDescriptor = committedIdentity.productEvidenceDescriptor else {
+            return
+        }
+
+        if let existing = productEvidenceOwnersBySessionId[sessionId] {
+            guard existing.sessionReference != sessionReference else { return }
+            productEvidenceMediaTasksBySessionId.removeValue(
+                forKey: sessionId
+            )?.cancel()
+            productEvidenceOwnersBySessionId.removeValue(forKey: sessionId)
+            _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                owner: existing,
+                reason: .sessionReplaced
+            )
+        }
+        guard let owner = ProductReleaseEvidenceRecorder.shared.beginSession(
+            transport: .webrtc,
+            sessionReference: sessionReference,
+            selectedTransport: selectedTransport
+        ), ProductReleaseEvidenceRecorder.shared
+            .recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .xwing) else {
+            return
+        }
+        productEvidenceOwnersBySessionId[sessionId] = owner
+        _ = ProductReleaseEvidenceRecorder.shared
+            .recordProductionIdentityHandshakeBound(
+                descriptor: identityDescriptor,
+                sessionOwner: owner
+            )
+        beginWebRTCProductEvidenceMediaSampling(
+            sessionId: sessionId,
+            session: session,
+            keys: keys,
+            owner: owner
+        )
+    }
+
+    private func beginWebRTCProductEvidenceMediaSampling(
+        sessionId: String,
+        session: WebRTCSession,
+        keys: SessionKeys,
+        owner: ProductEvidenceSessionOwner
+    ) {
+        productEvidenceMediaTasksBySessionId.removeValue(
+            forKey: sessionId
+        )?.cancel()
+        productEvidenceMediaTasksBySessionId[sessionId] = Task {
+            [weak self, weak session] in
+            guard let self, let session else { return }
+            let clock = ContinuousClock()
+            let deadline = clock.now + .seconds(115)
+            var firstSampleAt: ContinuousClock.Instant?
+            var sequence = 1
+            while !Task.isCancelled, clock.now < deadline, sequence <= 2 {
+                guard self.isCurrentSession(
+                    sessionId: sessionId,
+                    sessionObjectIdentifier: ObjectIdentifier(session)
+                ), let currentKeys = self.sessionKeys,
+                   Self.isSameWebRTCFileTransferSecureSession(
+                    currentKeys,
+                    keys
+                   ), self.productEvidenceOwnersBySessionId[sessionId] == owner else {
+                    return
+                }
+                let stats = await session.incomingMediaRTCStats()
+                guard !Task.isCancelled else { return }
+                let now = clock.now
+                let baseline = firstSampleAt ?? now
+                let duration = baseline.duration(to: now).components
+                let elapsedMilliseconds = UInt64(max(0, duration.seconds))
+                    * 1_000
+                    + UInt64(max(0, duration.attoseconds)
+                        / 1_000_000_000_000_000)
+                if let sample = ProductEvidenceMediaSample(
+                    role: .receiver,
+                    sequence: sequence,
+                    elapsedMilliseconds: elapsedMilliseconds,
+                    videoFrames: stats.videoFrames,
+                    videoBytes: stats.videoBytes,
+                    audioUnits: stats.audioPackets,
+                    audioBytes: stats.audioBytes
+                ), ProductReleaseEvidenceRecorder.shared.recordWebRTCMediaSample(
+                    owner: owner,
+                    sample: sample
+                ) {
+                    if firstSampleAt == nil { firstSampleAt = now }
+                    sequence += 1
+                    if sequence == 2 {
+                        do {
+                            try await Task.sleep(for: .seconds(31))
+                        } catch {
+                            return
+                        }
+                        continue
+                    }
+                }
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
     func currentWebRTCFileTransferOperationOwner()
         -> WebRTCFileTransferOperationOwner? {
         guard let session, let keys = sessionKeys else {
@@ -3743,6 +3917,25 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         }
 
         let disconnectedSessionId = currentSessionId
+        if let disconnectedSessionId {
+            let hadTerminalFailure = pendingDisconnectFailure != nil
+            productEvidenceMediaTasksBySessionId.removeValue(
+                forKey: disconnectedSessionId
+            )?.cancel()
+            if let evidenceOwner = productEvidenceOwnersBySessionId
+                .removeValue(forKey: disconnectedSessionId) {
+                let evidenceReason: ProductEvidenceDisconnectReason =
+                    terminalNotification?.disconnectKind == .remoteLeave
+                        ? .peer
+                        : hadTerminalFailure == false
+                            ? .user
+                            : .protocolFailure
+                _ = ProductReleaseEvidenceRecorder.shared.endSession(
+                    owner: evidenceOwner,
+                    reason: evidenceReason
+                )
+            }
+        }
         let notificationContext = terminalNotificationContext(
             sessionId: terminalNotification?.sessionId ?? disconnectedSessionId
         )
@@ -8382,6 +8575,12 @@ extension CrossNetworkWebRTCManager {
         ), handshakeDriver === driver else { return }
         switch currentState {
         case .established(let keys):
+            let evidenceAttemptSnapshot = await driver
+                .productConnectivityAttemptSnapshot()
+            guard isCurrentSession(
+                sessionId: sessionId,
+                sessionObjectIdentifier: sessionObjectIdentifier
+            ), handshakeDriver === driver else { return }
             if strictPQCRequested,
                !CrossNetworkWebRTCPQCHandshakePolicy.inboundPQCRekeyNegotiatedSuiteAllowed(
                     keys.negotiatedSuite,
@@ -8432,7 +8631,6 @@ extension CrossNetworkWebRTCManager {
             }
             authenticatedHandshakePeerBindingBySessionId[sessionId] = authenticatedBinding
             sessionKeys = keys
-            handshakeDriver = nil
             inboundRekeyResponderSessionIds.remove(sessionId)
             rekeyInProgressSessionIds.remove(sessionId)
             rekeyCompletedSessionIds.insert(sessionId)
@@ -8462,7 +8660,21 @@ extension CrossNetworkWebRTCManager {
             guard isCurrentSession(
                 sessionId: sessionId,
                 sessionObjectIdentifier: sessionObjectIdentifier
-            ) else { return }
+            ), handshakeDriver === driver,
+               let activeSession = self.session,
+               ObjectIdentifier(activeSession) == sessionObjectIdentifier else { return }
+            await publishWebRTCProductEvidenceIfCurrent(
+                sessionId: sessionId,
+                session: activeSession,
+                keys: keys,
+                driver: driver,
+                attemptSnapshot: evidenceAttemptSnapshot
+            )
+            guard isCurrentSession(
+                sessionId: sessionId,
+                sessionObjectIdentifier: sessionObjectIdentifier
+            ), handshakeDriver === driver else { return }
+            handshakeDriver = nil
             let rekeyCompletionEvent = keys.negotiatedSuite.isPQCGroup
                 ? "pqcRekeyComplete"
                 : "classicRekeyComplete"
@@ -9638,6 +9850,9 @@ extension CrossNetworkWebRTCManager {
             )
             let rekeyed = try await driver.initiateHandshake(with: peer)
             guard isCurrentRekeyOperation(), handshakeDriver === driver else { return }
+            let evidenceAttemptSnapshot = await driver
+                .productConnectivityAttemptSnapshot()
+            guard isCurrentRekeyOperation(), handshakeDriver === driver else { return }
             guard let authenticatedBinding = await driver
                 .getAuthenticatedHandshakePeerBinding() else {
                 throw CurrentPathAuthorityCommitError.missingAuthenticatedRemoteAuthority
@@ -9670,6 +9885,15 @@ extension CrossNetworkWebRTCManager {
                     )
                 }
             }
+            guard isCurrentRekeyOperation(), handshakeDriver === driver else { return }
+
+            await publishWebRTCProductEvidenceIfCurrent(
+                sessionId: sessionId,
+                session: session,
+                keys: rekeyed,
+                driver: driver,
+                attemptSnapshot: evidenceAttemptSnapshot
+            )
             guard isCurrentRekeyOperation(), handshakeDriver === driver else { return }
 
             let rekeyCompletionEvent = rekeyed.negotiatedSuite.isPQCGroup

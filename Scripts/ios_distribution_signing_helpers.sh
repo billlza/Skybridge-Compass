@@ -410,5 +410,7 @@ skybridge_write_ios_distribution_product_proof() {
     "$product_source_repository" \
     "$product_surface" \
     "$product_swift_conditions" \
-    "$binary_test_surface_detected"
+    "$binary_test_surface_detected" \
+    "$app_path/Info.plist" \
+    "$widget_path/Info.plist"
 }

@@ -195,7 +195,7 @@ public class InteractiveWeatherParticleSystem: ObservableObject {
         do {
             library = try SkyBridgeMetalShaderLibrary.load(
                 device: device,
-                bundle: Bundle.module,
+                bundle: SkyBridgeResourceBundleLocator.core,
                 sourceResourceNames: ["WeatherParticleShaders"],
                 requiredFunctionNames: [
                     "weather_particle_update",

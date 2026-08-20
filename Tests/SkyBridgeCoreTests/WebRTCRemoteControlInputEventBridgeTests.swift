@@ -119,4 +119,42 @@ final class WebRTCRemoteControlInputEventBridgeTests: XCTestCase {
 
         XCTAssertLessThan(release.lowerBound, acknowledgement.lowerBound)
     }
+
+    func testProductionCaptureMappingUsesExactTransportOwner() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let streamerSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift"
+            ),
+            encoding: .utf8
+        )
+        let p2pSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift"
+            ),
+            encoding: .utf8
+        )
+        let webRTCSource = try String(
+            contentsOf: root.appendingPathComponent(
+                "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(streamerSource.contains("inputOwner: RemoteControlInputOwner? = nil"))
+        XCTAssertTrue(streamerSource.contains("for: inputOwner"))
+        XCTAssertTrue(streamerSource.contains("RemoteControlInjectionMappingStore.clear(publishedLease)"))
+        XCTAssertTrue(p2pSource.contains("inputOwner: peer.inputOwner"))
+        XCTAssertTrue(p2pSource.contains("streamer.stop(inputOwner: peer.inputOwner)"))
+        XCTAssertTrue(
+            webRTCSource.contains(
+                "let inputOwner = RemoteControlInputOwner(\n                transport: .webRTC,\n                sessionID: sessionID,\n                generation: controlTaskToken"
+            )
+        )
+        XCTAssertTrue(webRTCSource.contains("inputOwner: inputOwner"))
+        XCTAssertTrue(webRTCSource.contains("captureStreamer.stop(inputOwner: inputOwner)"))
+    }
 }

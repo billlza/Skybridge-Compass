@@ -197,6 +197,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
     public let mediaFallbackPolicy: String?
     public let streamRefreshToken: UInt64?
     public let remoteControlSecurityIdentity: RemoteControlSecurityIdentity?
+    public let framePresentationAckVersion: Int?
     public let streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction?
     /// 控制端选择要采集的显示器（CGDirectDisplayID）。nil = 主屏（向后兼容旧端：缺键即 nil）。
     public let captureDisplayID: UInt32?
@@ -240,6 +241,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         mediaFallbackPolicy: String? = nil,
         streamRefreshToken: UInt64? = nil,
         remoteControlSecurityIdentity: RemoteControlSecurityIdentity? = nil,
+        framePresentationAckVersion: Int? = nil,
         streamConfigurationTransaction: RemoteDesktopStreamConfigurationTransaction? = nil,
         captureDisplayID: UInt32? = nil,
         sentAt: TimeInterval = Date().timeIntervalSince1970
@@ -281,6 +283,7 @@ public struct RemoteDesktopStreamConfiguration: Codable, Sendable, Equatable {
         self.mediaFallbackPolicy = mediaFallbackPolicy
         self.streamRefreshToken = streamRefreshToken
         self.remoteControlSecurityIdentity = remoteControlSecurityIdentity
+        self.framePresentationAckVersion = framePresentationAckVersion
         self.streamConfigurationTransaction = streamConfigurationTransaction
         self.captureDisplayID = captureDisplayID
         self.sentAt = sentAt

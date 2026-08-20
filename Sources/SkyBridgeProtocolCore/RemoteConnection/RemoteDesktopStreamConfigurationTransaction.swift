@@ -53,18 +53,46 @@ public struct RemoteDesktopStreamConfigurationAcknowledgement: Codable, Equatabl
     public let streamRefreshToken: UInt64?
     public let audioEndpointPresent: Bool
     public let screenFrameTransport: String?
+    /// Version 1 confirms that the host accepts an authenticated acknowledgement
+    /// after the viewer's product renderer presents an exact sequenced frame.
+    /// Absence preserves legacy streaming while leaving presentation evidence
+    /// unavailable.
+    public let framePresentationAckVersion: Int?
 
     public init(
         acceptedAt: TimeInterval,
         transaction: RemoteDesktopStreamConfigurationTransaction,
         streamRefreshToken: UInt64?,
         audioEndpointPresent: Bool,
-        screenFrameTransport: String?
+        screenFrameTransport: String?,
+        framePresentationAckVersion: Int? = nil
     ) {
         self.acceptedAt = acceptedAt
         self.transaction = transaction
         self.streamRefreshToken = streamRefreshToken
         self.audioEndpointPresent = audioEndpointPresent
         self.screenFrameTransport = screenFrameTransport
+        self.framePresentationAckVersion = framePresentationAckVersion
+    }
+}
+
+/// Authenticated receipt emitted only after the viewer's ordinary product
+/// renderer presents the identified source frame. The stream transaction keeps
+/// a delayed renderer callback from acknowledging a replacement configuration.
+public struct RemoteDesktopFramePresentationAcknowledgement: Codable, Equatable, Sendable {
+    public static let currentVersion = 1
+
+    public let version: Int
+    public let sequenceNumber: UInt64
+    public let streamTransaction: RemoteDesktopStreamConfigurationTransaction
+
+    public init(
+        version: Int = Self.currentVersion,
+        sequenceNumber: UInt64,
+        streamTransaction: RemoteDesktopStreamConfigurationTransaction
+    ) {
+        self.version = version
+        self.sequenceNumber = sequenceNumber
+        self.streamTransaction = streamTransaction
     }
 }

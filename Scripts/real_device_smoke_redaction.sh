@@ -596,11 +596,27 @@ skybridge_smoke_private_secret_artifact_file_name() {
   esac
 }
 
+skybridge_smoke_schema_validated_public_artifact_file_name() {
+  local name="${1:?missing artifact file name}"
+  case "${name}" in
+    macos-release-candidate.json|\
+    mac-product-session.log|mac-product-session-capture.json|\
+    ios-product-session.log|ios-product-session-capture.json|\
+    ios-product-installation-capture.json) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 skybridge_smoke_materialize_public_artifacts() {
   local device_label="${1:?missing device label}"
   local artifact_dir="${2:?missing artifact dir}"
   local public_dir="${3:?missing public artifact dir}"
   shift 3
+  local formal_product_mode="${SKYBRIDGE_FORMAL_PRODUCT_ARTIFACTS:-0}"
+  case "${formal_product_mode}" in
+    0|1) ;;
+    *) echo "SKYBRIDGE_FORMAL_PRODUCT_ARTIFACTS must be 0 or 1" >&2; return 2 ;;
+  esac
 
   if [[ ! -d "${artifact_dir}" ]]; then
     echo "real-device smoke artifact directory does not exist: ${artifact_dir}" >&2
@@ -638,7 +654,13 @@ skybridge_smoke_materialize_public_artifacts() {
     echo "refusing unsafe public artifact directory: ${public_dir}" >&2
     return 2
   fi
-  if [[ -d "${public_abs}" && ! -f "${public_abs}/skybridge-public-artifacts.json" ]]; then
+  if [[ "${formal_product_mode}" == "1" && -e "${public_abs}" ]]; then
+    echo "formal public artifact destination must be new: ${public_dir}" >&2
+    return 2
+  fi
+  if [[ "${formal_product_mode}" == "0" \
+     && -d "${public_abs}" \
+     && ! -f "${public_abs}/skybridge-public-artifacts.json" ]]; then
     echo "refusing to replace unowned public artifact directory: ${public_dir}" >&2
     return 2
   fi
@@ -649,6 +671,60 @@ skybridge_smoke_materialize_public_artifacts() {
     set -euo pipefail
     trap 'if [[ -n "${staging_abs:-}" && -d "${staging_abs}" ]]; then rm -rf -- "${staging_abs}"; fi' EXIT
 
+    if [[ "${formal_product_mode}" == "1" ]]; then
+      expected_formal_files="$(cat <<'EOF'
+ios-product-installation-capture.json
+ios-product-session-capture.json
+ios-product-session.log
+ios-production-identity-proof.json
+mac-product-session-capture.json
+mac-product-session.log
+macos-release-candidate.json
+release-acceptance.json
+EOF
+)"
+      actual_formal_files="$(find "${artifact_abs}" -mindepth 1 -maxdepth 1 -type f -print \
+        | sed 's#^.*/##' | LC_ALL=C sort)"
+      [[ "${actual_formal_files}" == "${expected_formal_files}" ]] || {
+        echo "formal product artifact directory does not match the fixed eight-file contract" >&2
+        exit 1
+      }
+    fi
+
+    if [[ -e "${artifact_abs}/ios-product-session.log" \
+       || -L "${artifact_abs}/ios-product-session.log" \
+       || -e "${artifact_abs}/ios-product-session-capture.json" \
+       || -L "${artifact_abs}/ios-product-session-capture.json" ]]; then
+      for product_file in \
+        mac-product-session.log mac-product-session-capture.json \
+        ios-product-session.log ios-product-session-capture.json; do
+        [[ -f "${artifact_abs}/${product_file}" && ! -L "${artifact_abs}/${product_file}" ]] || {
+          echo "paired connectivity product evidence is incomplete: ${product_file}" >&2
+          exit 1
+        }
+      done
+      python3 "${ROOT_DIR}/Scripts/validate_product_release_evidence_log.py" \
+        validate-capture --artifact-dir "${artifact_abs}" >/dev/null
+    elif [[ -e "${artifact_abs}/mac-product-session.log" \
+         || -L "${artifact_abs}/mac-product-session.log" \
+         || -e "${artifact_abs}/mac-product-session-capture.json" \
+         || -L "${artifact_abs}/mac-product-session-capture.json" ]]; then
+      python3 "${ROOT_DIR}/Scripts/validate_product_release_evidence_log.py" \
+        validate-capture --artifact-dir "${artifact_abs}" >/dev/null
+    fi
+    if [[ -e "${artifact_abs}/ios-product-installation-capture.json" \
+       || -L "${artifact_abs}/ios-product-installation-capture.json" ]]; then
+      python3 "${ROOT_DIR}/Scripts/extract_ios_product_release_evidence.py" \
+        validate-installation-capture \
+        --capture "${artifact_abs}/ios-product-installation-capture.json" >/dev/null
+    fi
+    if [[ -f "${artifact_abs}/ios-product-installation-capture.json" \
+       && -f "${artifact_abs}/ios-production-identity-proof.json" ]]; then
+      python3 "${ROOT_DIR}/Scripts/extract_ios_production_identity_evidence.py" \
+        validate-proof \
+        --proof "${artifact_abs}/ios-production-identity-proof.json" >/dev/null
+    fi
+
     local source_path
     local name
     local rel_path
@@ -658,6 +734,11 @@ skybridge_smoke_materialize_public_artifacts() {
       rel_path="${source_path#"${artifact_abs}"/}"
       if [[ "${rel_path}" == "${source_path}" || "${rel_path}" == .* || "${rel_path}" == */../* || "${rel_path}" == ../* ]]; then
         echo "refusing unsafe smoke artifact path: ${source_path}" >&2
+        exit 2
+      fi
+      if skybridge_smoke_schema_validated_public_artifact_file_name "${name}" \
+         && [[ "${rel_path}" != "${name}" ]]; then
+        echo "schema-validated public artifact name must be top-level: ${rel_path}" >&2
         exit 2
       fi
       if skybridge_smoke_private_secret_artifact_file_name "${name}"; then
@@ -672,7 +753,19 @@ skybridge_smoke_materialize_public_artifacts() {
       fi
       dest_path="${staging_abs}/${rel_path}"
       mkdir -p "$(dirname "${dest_path}")"
-      if [[ "${name}" == *.jsonl ]]; then
+      if [[ "${name}" == "macos-release-candidate.json" ]]; then
+        python3 "${ROOT_DIR}/Scripts/macos_release_candidate_identity.py" validate \
+          --identity "${source_path}" >/dev/null
+        /bin/cp -p "${source_path}" "${dest_path}"
+      elif [[ "${name}" == "mac-product-session.log" \
+           || "${name}" == "mac-product-session-capture.json" \
+           || "${name}" == "ios-product-session.log" \
+           || "${name}" == "ios-product-session-capture.json" \
+           || "${name}" == "ios-product-installation-capture.json" \
+           || ( "${name}" == "ios-production-identity-proof.json" \
+             && -f "${artifact_abs}/ios-product-installation-capture.json" ) ]]; then
+        /bin/cp -p "${source_path}" "${dest_path}"
+      elif [[ "${name}" == *.jsonl ]]; then
         SKYBRIDGE_SMOKE_REDACTION_FORMAT=jsonl \
           skybridge_smoke_public_redact_stream "${device_label}" "$@" <"${source_path}" >"${dest_path}"
       else
@@ -684,8 +777,10 @@ skybridge_smoke_materialize_public_artifacts() {
         -o -type f -print0
     )
 
-    printf '%s\n' '{"kind":"skybridge-public-smoke-artifacts","schemaVersion":1}' \
-      >"${staging_abs}/skybridge-public-artifacts.json"
+    if [[ "${formal_product_mode}" == "0" ]]; then
+      printf '%s\n' '{"kind":"skybridge-public-smoke-artifacts","schemaVersion":1}' \
+        >"${staging_abs}/skybridge-public-artifacts.json"
+    fi
     skybridge_smoke_check_public_artifacts "${staging_abs}" "$@"
 
     local backup_abs=""
@@ -720,6 +815,40 @@ skybridge_smoke_check_public_artifacts() {
   if [[ ! -d "${public_dir}" ]]; then
     echo "public smoke artifact directory does not exist: ${public_dir}" >&2
     return 2
+  fi
+
+  if [[ -f "${public_dir}/macos-release-candidate.json" ]]; then
+    python3 "${ROOT_DIR:-$(pwd)}/Scripts/macos_release_candidate_identity.py" validate \
+      --identity "${public_dir}/macos-release-candidate.json" >/dev/null || return 1
+  fi
+  if [[ -e "${public_dir}/ios-product-session.log" \
+     || -L "${public_dir}/ios-product-session.log" \
+     || -e "${public_dir}/ios-product-session-capture.json" \
+     || -L "${public_dir}/ios-product-session-capture.json" ]]; then
+    for product_file in \
+      mac-product-session.log mac-product-session-capture.json \
+      ios-product-session.log ios-product-session-capture.json; do
+      [[ -f "${public_dir}/${product_file}" && ! -L "${public_dir}/${product_file}" ]] || {
+        echo "paired connectivity product evidence is incomplete: ${product_file}" >&2
+        return 1
+      }
+    done
+    python3 "${ROOT_DIR:-$(pwd)}/Scripts/validate_product_release_evidence_log.py" \
+      validate-capture \
+      --artifact-dir "${public_dir}" >/dev/null || return 1
+  elif [[ -e "${public_dir}/mac-product-session.log" \
+     || -L "${public_dir}/mac-product-session.log" \
+     || -e "${public_dir}/mac-product-session-capture.json" \
+     || -L "${public_dir}/mac-product-session-capture.json" ]]; then
+    python3 "${ROOT_DIR:-$(pwd)}/Scripts/validate_product_release_evidence_log.py" \
+      validate-capture \
+      --artifact-dir "${public_dir}" >/dev/null || return 1
+  fi
+  if [[ -e "${public_dir}/ios-product-installation-capture.json" \
+     || -L "${public_dir}/ios-product-installation-capture.json" ]]; then
+    python3 "${ROOT_DIR:-$(pwd)}/Scripts/extract_ios_product_release_evidence.py" \
+      validate-installation-capture \
+      --capture "${public_dir}/ios-product-installation-capture.json" >/dev/null || return 1
   fi
 
   python3 - "${public_dir}" "${ROOT_DIR:-$(pwd)}" "$@" <<'PY'
@@ -915,6 +1044,7 @@ def contains_raw_ipv6_literal(value: str) -> bool:
     return False
 patterns = [
     ("raw connect link", re.compile(r"skybridge://")),
+    ("raw stable production identity reference", re.compile(r"\bid1:[0-9a-f]{32}\b")),
     (
         "raw JWT",
         re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
@@ -1081,6 +1211,16 @@ def inspect_structured_json(text: str, rel_path: str, findings):
 
 findings = []
 scanned_count = 0
+schema_validated_names = {
+    "macos-release-candidate.json",
+    "mac-product-session.log",
+    "mac-product-session-capture.json",
+    "ios-product-session.log",
+    "ios-product-session-capture.json",
+    "ios-product-installation-capture.json",
+}
+if os.path.isfile(os.path.join(public_dir, "ios-product-installation-capture.json")):
+    schema_validated_names.add("ios-production-identity-proof.json")
 for current_root, dirs, files in os.walk(public_dir):
     dirs[:] = [name for name in dirs if name not in {".build", "DerivedData-ios", "DerivedData-mac-online"}]
     for name in files:
@@ -1096,11 +1236,22 @@ for current_root, dirs, files in os.walk(public_dir):
             findings.append((rel_path, "unsupported public artifact file extension"))
             continue
         scanned_count += 1
+        if name in schema_validated_names and rel_path != name:
+            findings.append(
+                (rel_path, "schema-validated public artifact name must be top-level")
+            )
+            continue
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as handle:
                 text = handle.read()
         except OSError as exc:
             findings.append((rel_path, f"unreadable public artifact: {exc}"))
+            continue
+        if re.search(r"\bid1:[0-9a-f]{32}\b", text):
+            findings.append((rel_path, "raw stable production identity reference"))
+        if name in schema_validated_names:
+            # The preceding schema validator establishes this intentionally public
+            # fixed schema. It contains no account, device, address, or input detail.
             continue
         inspect_structured_json(text, rel_path, findings)
         for token in sorted(set(tokens), key=lambda value: (-len(value), value)):

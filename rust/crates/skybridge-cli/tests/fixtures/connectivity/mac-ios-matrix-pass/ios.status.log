@@ -1,3 +1,0 @@
-[2026-05-22T08:30:00Z] ios connectivity boot
-[2026-05-22T08:30:01Z] inbound accepted case=mac-ios-xwing-xwing stableProtocolIdentity=1 pinnedProtocolIdentity=1 suite=X-Wing
-[2026-05-22T08:30:02Z] inbound accepted case=mac-ios-xwing-pqc stableProtocolIdentity=1 pinnedProtocolIdentity=1 suite=ML-KEM-768

@@ -223,6 +223,7 @@ enum RemoteControlStreamRequestPolicy {
             mediaFallbackPolicy: current.mediaFallbackPolicy ?? previous.mediaFallbackPolicy,
             streamRefreshToken: current.streamRefreshToken,
             remoteControlSecurityIdentity: current.remoteControlSecurityIdentity ?? previous.remoteControlSecurityIdentity,
+            framePresentationAckVersion: current.framePresentationAckVersion,
             streamConfigurationTransaction: current.streamConfigurationTransaction,
             sentAt: current.sentAt
         )

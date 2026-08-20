@@ -678,6 +678,16 @@ public class P2PConnectionManager: ObservableObject {
     /// window without weakening the existing driver API.
     private var handshakeDriverConnectionGenerationByPeerId: [String: UUID] = [:]
     private var handshakeDriverOperationTokenByPeerId: [String: UUID] = [:]
+    private struct ProductConnectivityAttemptBinding {
+        let connectionGeneration: UUID
+        let owner: ProductConnectivityAttemptOwner
+        let identityAlgorithm: ProtocolSigningAlgorithm
+        let identityProtection: ProtocolSigningKeyProtection
+        let identityPublicKey: Data
+    }
+    private var productConnectivityAttemptsByDriver: [
+        ObjectIdentifier: ProductConnectivityAttemptBinding
+    ] = [:]
     private struct HandshakeOperationOwner: Equatable, Sendable {
         let token: UUID
         let peerId: String
@@ -5466,7 +5476,6 @@ public class P2PConnectionManager: ObservableObject {
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
             signature: signature
         )
-        try Task.checkCancellation()
         await admissionGate.recordCompletedResponse(
             response,
             requestHashHex: requestHashHex,
@@ -6037,6 +6046,26 @@ public class P2PConnectionManager: ObservableObject {
 
         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
         let previousPolicy = inboundResponderSelectionPolicy(peerHasPQCGroup: peerHasPQCGroup)
+        if !peerHasPQCGroup
+            && pqcManager.enforcePQCHandshake
+            && !pqcManager.allowClassicFallbackForCompatibility {
+            let configuredProvider = CryptoProviderFactory.make(policy: .requirePQC)
+            if let localProfile = ProductConnectivityProfileClassifier.configuredProfile(
+                requirePQC: true,
+                selectedSuiteWireID: configuredProvider.activeSuite.wireId
+            ) {
+                _ = await ProductReleaseEvidenceRecorder.shared
+                    .recordStrictPQCClassicOfferRejection(
+                    peerMessageA: messageA,
+                    localProfile: localProfile,
+                    offeredSuites: CryptoProviderFactory.handshakeOfferedPQCSuites(
+                        using: configuredProvider
+                    )
+                )
+            }
+            _ = rejectStrictPQCClassicBootstrap(for: peerId)
+            return nil
+        }
         let strictTrustContext: (stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)?
         if pqcManager.enforcePQCHandshake {
             guard let context = await strictInboundHandshakeTrustContext(
@@ -6105,6 +6134,24 @@ public class P2PConnectionManager: ObservableObject {
                 handshakeDrivers[peerId] = driver
                 handshakeDriverConnectionGenerationByPeerId[peerId] = originLease.generation
                 handshakeDriverOperationTokenByPeerId[peerId] = operationOwner.token
+                if let attemptID = messageA.soaExtension?.attemptId {
+                    let attemptSnapshot = await driver.productConnectivityAttemptSnapshot()
+                    if let owner = beginProductConnectivityAttempt(
+                        attemptID: attemptID,
+                        role: .responder,
+                        localActiveSuite: attemptSnapshot.localActiveSuite,
+                        localOfferedSuites: attemptSnapshot.localOfferedSuites,
+                        requirePQC: attemptSnapshot.requirePQC,
+                        allowClassicFallback: attemptSnapshot.allowClassicFallback
+                    ) {
+                        bindProductConnectivityAttempt(
+                            owner,
+                            to: driver,
+                            connectionGeneration: originLease.generation,
+                            attemptSnapshot: attemptSnapshot
+                        )
+                    }
+                }
                 operationOwnershipTransferredToDriver = true
                 if let stablePeerId = strictTrustContext?.stablePeerId {
                     strictInboundStablePeerIdByRuntimePeerId[peerId] = stablePeerId
@@ -6199,6 +6246,11 @@ public class P2PConnectionManager: ObservableObject {
                 localSOAPeerId = try localSOAPeerIdBytes()
             } catch {
                 guard isCurrentHandshakeIncarnation() else { return }
+                _ = failProductConnectivityAttempt(
+                    ifOwnedBy: activeDriver,
+                    connectionGeneration: originLease.generation,
+                    reason: .publicationFailed
+                )
                 let message = "认证 authority 无法持久化，已终止握手：\(error.localizedDescription)"
                 currentHandshakeState = "握手失败: \(message)"
                 lastError = message
@@ -6233,6 +6285,11 @@ public class P2PConnectionManager: ObservableObject {
                 )
             } catch {
                 guard isCurrentHandshakeIncarnation() else { return }
+                _ = failProductConnectivityAttempt(
+                    ifOwnedBy: activeDriver,
+                    connectionGeneration: originLease.generation,
+                    reason: .publicationFailed
+                )
                 let message = "认证 authority 无法持久化，已终止握手：\(error.localizedDescription)"
                 currentHandshakeState = "握手失败: \(message)"
                 lastError = message
@@ -6251,7 +6308,14 @@ public class P2PConnectionManager: ObservableObject {
                 keys,
                 for: peerId,
                 connectionGeneration: originLease.generation
-            ) else { return }
+            ) else {
+                _ = failProductConnectivityAttempt(
+                    ifOwnedBy: activeDriver,
+                    connectionGeneration: originLease.generation,
+                    reason: .publicationFailed
+                )
+                return
+            }
             do {
                 try installSessionPairingAuthority(
                     persistedAuthority.binding,
@@ -6261,6 +6325,11 @@ public class P2PConnectionManager: ObservableObject {
                     connection: originLease.connection
                 )
             } catch {
+                _ = failProductConnectivityAttempt(
+                    ifOwnedBy: activeDriver,
+                    connectionGeneration: originLease.generation,
+                    reason: .publicationFailed
+                )
                 await cleanupBrokenInboundConnection(
                     originLease.connection,
                     peerId: peerId,
@@ -6282,6 +6351,11 @@ public class P2PConnectionManager: ObservableObject {
                 )
                 guard establishedArbiterLease.pairKey == expectedPairKey,
                       establishedArbiterLease.sessionId == keys.sessionId else {
+                    _ = failProductConnectivityAttempt(
+                        ifOwnedBy: activeDriver,
+                        connectionGeneration: originLease.generation,
+                        reason: .publicationFailed
+                    )
                     await cleanupBrokenInboundConnection(
                         originLease.connection,
                         peerId: peerId,
@@ -6300,6 +6374,12 @@ public class P2PConnectionManager: ObservableObject {
             } else {
                 arbiterSessionBindingByPeerId.removeValue(forKey: peerId)
             }
+            _ = await authenticateProductConnectivityAttempt(
+                ifOwnedBy: activeDriver,
+                peerId: peerId,
+                connectionGeneration: originLease.generation,
+                keys: keys
+            )
             _ = detachHandshakeDriverIfOwned(
                 for: peerId,
                 connectionGeneration: originLease.generation,
@@ -6336,6 +6416,11 @@ public class P2PConnectionManager: ObservableObject {
             syncPresentationState(for: peerId)
 
         case .failed(let reason):
+            _ = failProductConnectivityAttempt(
+                ifOwnedBy: activeDriver,
+                connectionGeneration: originLease.generation,
+                reason: .handshakeFailed
+            )
             if let rollback = inboundRekeyRollbackByPeerId[peerId],
                rollback.connectionGeneration == originLease.generation,
                rollback.handshakeOperationToken == handshakeOperationToken {
@@ -6420,6 +6505,26 @@ public class P2PConnectionManager: ObservableObject {
 
         let peerHasPQCGroup = messageA.supportedSuites.contains { $0.isPQCGroup }
         let previousPolicy = inboundResponderSelectionPolicy(peerHasPQCGroup: peerHasPQCGroup)
+        if !peerHasPQCGroup
+            && pqcManager.enforcePQCHandshake
+            && !pqcManager.allowClassicFallbackForCompatibility {
+            let configuredProvider = CryptoProviderFactory.make(policy: .requirePQC)
+            if let localProfile = ProductConnectivityProfileClassifier.configuredProfile(
+                requirePQC: true,
+                selectedSuiteWireID: configuredProvider.activeSuite.wireId
+            ) {
+                _ = await ProductReleaseEvidenceRecorder.shared
+                    .recordStrictPQCClassicOfferRejection(
+                    peerMessageA: messageA,
+                    localProfile: localProfile,
+                    offeredSuites: CryptoProviderFactory.handshakeOfferedPQCSuites(
+                        using: configuredProvider
+                    )
+                )
+            }
+            _ = rejectStrictPQCClassicBootstrap(for: peerId)
+            return nil
+        }
         let strictTrustContext: (stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)?
         if pqcManager.enforcePQCHandshake {
             guard let context = await strictInboundHandshakeTrustContext(
@@ -6442,6 +6547,7 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         var createdDriver: HandshakeDriver?
+        var createdAttemptSnapshot: ProductConnectivityHandshakeAttemptSnapshot?
         do {
             if pqcManager.enforcePQCHandshake {
                 try ensureStrictPQCAvailability()
@@ -6478,8 +6584,10 @@ public class P2PConnectionManager: ObservableObject {
                     protocolSigningKeyProtection: skyBridgeCore
                         .preferredProtocolSigningKeyProtection(for: signingAlgorithm)
                 )
+                let attemptSnapshot = await driver.productConnectivityAttemptSnapshot()
                 guard isCurrentHandshakeOperation(operationOwner) else { return nil }
                 createdDriver = driver
+                createdAttemptSnapshot = attemptSnapshot
             }
         } catch {
             guard isCurrentHandshakeOperation(operationOwner) else { return nil }
@@ -6541,6 +6649,23 @@ public class P2PConnectionManager: ObservableObject {
         handshakeDrivers[peerId] = createdDriver
         handshakeDriverConnectionGenerationByPeerId[peerId] = originLease.generation
         handshakeDriverOperationTokenByPeerId[peerId] = operationOwner.token
+        if let attemptID = messageA.soaExtension?.attemptId,
+           let createdAttemptSnapshot,
+           let owner = beginProductConnectivityAttempt(
+            attemptID: attemptID,
+            role: .responder,
+            localActiveSuite: createdAttemptSnapshot.localActiveSuite,
+            localOfferedSuites: createdAttemptSnapshot.localOfferedSuites,
+            requirePQC: createdAttemptSnapshot.requirePQC,
+            allowClassicFallback: createdAttemptSnapshot.allowClassicFallback
+           ) {
+            bindProductConnectivityAttempt(
+                owner,
+                to: createdDriver,
+                connectionGeneration: originLease.generation,
+                attemptSnapshot: createdAttemptSnapshot
+            )
+        }
         operationOwnershipTransferredToDriver = true
         if let stablePeerId = strictTrustContext?.stablePeerId {
             strictInboundStablePeerIdByRuntimePeerId[peerId] = stablePeerId
@@ -11447,10 +11572,156 @@ public class P2PConnectionManager: ObservableObject {
               expectedDriver.map({ driver === $0 }) ?? true else {
             return nil
         }
+        _ = failProductConnectivityAttempt(
+            ifOwnedBy: driver,
+            connectionGeneration: connectionGeneration,
+            reason: .publicationFailed
+        )
         handshakeDrivers.removeValue(forKey: peerId)
         handshakeDriverConnectionGenerationByPeerId.removeValue(forKey: peerId)
         handshakeDriverOperationTokenByPeerId.removeValue(forKey: peerId)
         return driver
+    }
+
+    private func beginProductConnectivityAttempt(
+        attemptID: Data,
+        role: ProductConnectivityHandshakeRole,
+        localActiveSuite: CryptoSuite,
+        localOfferedSuites: [CryptoSuite],
+        requirePQC: Bool,
+        allowClassicFallback: Bool
+    ) -> ProductConnectivityAttemptOwner? {
+        guard let attemptReference = ProductConnectivityAttemptReference.make(
+            from: attemptID
+        ), let localProfile = ProductConnectivityProfileClassifier.configuredProfile(
+            requirePQC: requirePQC,
+            selectedSuiteWireID: localActiveSuite.wireId
+        ) else {
+            return nil
+        }
+        return ProductReleaseEvidenceRecorder.shared.beginAttempt(
+            attemptReference: attemptReference,
+            role: role,
+            localProfile: localProfile,
+            offeredSuites: localOfferedSuites,
+            requirePQC: requirePQC,
+            allowClassicFallback: allowClassicFallback
+        )
+    }
+
+    private func bindProductConnectivityAttempt(
+        _ owner: ProductConnectivityAttemptOwner,
+        to driver: HandshakeDriver,
+        connectionGeneration: UUID,
+        attemptSnapshot: ProductConnectivityHandshakeAttemptSnapshot
+    ) {
+        let identifier = ObjectIdentifier(driver)
+        if let existing = productConnectivityAttemptsByDriver.removeValue(
+            forKey: identifier
+        ) {
+            _ = ProductReleaseEvidenceRecorder.shared.fail(
+                owner: existing.owner,
+                reason: .superseded
+            )
+        }
+        productConnectivityAttemptsByDriver[identifier] = .init(
+            connectionGeneration: connectionGeneration,
+            owner: owner,
+            identityAlgorithm: attemptSnapshot.localProtocolSigningAlgorithm,
+            identityProtection: attemptSnapshot.localProtocolSigningKeyProtection,
+            identityPublicKey: attemptSnapshot.localProtocolPublicKey
+        )
+    }
+
+    @discardableResult
+    private func failProductConnectivityAttempt(
+        ifOwnedBy driver: HandshakeDriver,
+        connectionGeneration: UUID,
+        reason: ProductConnectivityAttemptFailureReason
+    ) -> Bool {
+        let identifier = ObjectIdentifier(driver)
+        guard let binding = productConnectivityAttemptsByDriver[identifier],
+              binding.connectionGeneration == connectionGeneration else {
+            return false
+        }
+        productConnectivityAttemptsByDriver.removeValue(forKey: identifier)
+        return ProductReleaseEvidenceRecorder.shared.fail(
+            owner: binding.owner,
+            reason: reason
+        )
+    }
+
+    @discardableResult
+    private func authenticateProductConnectivityAttempt(
+        ifOwnedBy driver: HandshakeDriver,
+        peerId: String,
+        connectionGeneration: UUID,
+        keys: SessionKeys
+    ) async -> Bool {
+        let identifier = ObjectIdentifier(driver)
+        guard let binding = productConnectivityAttemptsByDriver[identifier],
+              binding.connectionGeneration == connectionGeneration else {
+            return false
+        }
+        guard let sessionReference = P2PEvidenceReference.sessionIncarnation(
+            sessionID: keys.sessionId,
+            transcriptHash: keys.transcriptHash
+        ) else {
+            _ = failProductConnectivityAttempt(
+                ifOwnedBy: driver,
+                connectionGeneration: connectionGeneration,
+                reason: .publicationFailed
+            )
+            return false
+        }
+        let identityDescriptor: ProductIdentityEvidenceDescriptor?
+        if let committed = try? await skyBridgeCore
+            .committedActiveProtocolIdentitySnapshot(),
+           committed.algorithm == binding.identityAlgorithm,
+           committed.protection == binding.identityProtection,
+           committed.publicKey == binding.identityPublicKey {
+            identityDescriptor = committed.productEvidenceDescriptor
+        } else {
+            identityDescriptor = nil
+        }
+        guard let currentBinding = productConnectivityAttemptsByDriver[identifier],
+              currentBinding.connectionGeneration == connectionGeneration,
+              currentBinding.owner === binding.owner,
+              currentBinding.identityAlgorithm == binding.identityAlgorithm,
+              currentBinding.identityProtection == binding.identityProtection,
+              currentBinding.identityPublicKey == binding.identityPublicKey,
+              let currentLease = connections.lease(for: peerId),
+              currentLease.generation == connectionGeneration,
+              connections.isCurrent(currentLease, for: peerId),
+              handshakeDrivers[peerId] === driver,
+              handshakeDriverConnectionGenerationByPeerId[peerId]
+                == connectionGeneration,
+              sessionKeyConnectionGenerationByPeerId[peerId]
+                == connectionGeneration,
+              sessionKeys[peerId]?.sessionId == keys.sessionId else {
+            return false
+        }
+        productConnectivityAttemptsByDriver.removeValue(forKey: identifier)
+        guard ProductReleaseEvidenceRecorder.shared.authenticate(
+            owner: binding.owner,
+            sessionReference: sessionReference,
+            negotiatedSuite: keys.negotiatedSuite
+        ) else {
+            _ = ProductReleaseEvidenceRecorder.shared.fail(
+                owner: binding.owner,
+                reason: .publicationFailed
+            )
+            return false
+        }
+        if let identityDescriptor {
+            _ = ProductReleaseEvidenceRecorder.shared
+                .recordProductionIdentityHandshakeBound(
+                    descriptor: identityDescriptor,
+                    sessionReference: sessionReference,
+                    attemptOwner: binding.owner
+                )
+        }
+        return true
     }
 
     /// Terminal teardown for an exact connection incarnation. Driver state and
@@ -11914,6 +12185,7 @@ public class P2PConnectionManager: ObservableObject {
         _ = try requireCurrentHandshakeOperation(operationOwner)
 
         var publishedSessionId: String?
+        var didCompleteAuthenticatedHandshake = false
         do {
             let strictTrustContext: (stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)?
             if pqcManager.enforcePQCHandshake {
@@ -11970,18 +12242,44 @@ public class P2PConnectionManager: ObservableObject {
                 expectedRemoteSOAPeerId: soaPeerIdBytes(for: strictTrustContext?.stablePeerId ?? peerId) ?? remotePeerId,
                 trustProvider: strictTrustContext?.provider,
                 onDriverCreated: { driver in
+                    let attemptSnapshot = await driver.productConnectivityAttemptSnapshot()
                     // Swift 6 并发：避免在并发回调里捕获/引用 `self`（即使是 weak self）
                     await MainActor.run {
                         let manager = P2PConnectionManager.instance
                         guard manager.isCurrentHandshakeOperation(operationOwner) else { return }
+                        if let previousDriver = manager.handshakeDrivers[peerId],
+                           previousDriver !== driver {
+                            _ = manager.failProductConnectivityAttempt(
+                                ifOwnedBy: previousDriver,
+                                connectionGeneration: handshakeLease.generation,
+                                reason: .handshakeFailed
+                            )
+                        }
                         manager.handshakeDrivers[peerId] = driver
                         manager.handshakeDriverConnectionGenerationByPeerId[peerId] =
                             handshakeLease.generation
                         manager.handshakeDriverOperationTokenByPeerId[peerId] =
                             operationOwner.token
+                        if let attemptID = attemptSnapshot.outboundSOAAttemptID,
+                           let owner = manager.beginProductConnectivityAttempt(
+                            attemptID: attemptID,
+                            role: .initiator,
+                            localActiveSuite: attemptSnapshot.localActiveSuite,
+                            localOfferedSuites: attemptSnapshot.localOfferedSuites,
+                            requirePQC: attemptSnapshot.requirePQC,
+                            allowClassicFallback: attemptSnapshot.allowClassicFallback
+                           ) {
+                            manager.bindProductConnectivityAttempt(
+                                owner,
+                                to: driver,
+                                connectionGeneration: handshakeLease.generation,
+                                attemptSnapshot: attemptSnapshot
+                            )
+                        }
                     }
                 }
             )
+            didCompleteAuthenticatedHandshake = true
             _ = try requireCurrentHandshakeOperation(operationOwner)
             guard let activeDriver = handshakeDrivers[peerId],
                   handshakeDriverConnectionGenerationByPeerId[peerId] == handshakeLease.generation,
@@ -12047,6 +12345,12 @@ public class P2PConnectionManager: ObservableObject {
             } else {
                 arbiterSessionBindingByPeerId.removeValue(forKey: peerId)
             }
+            _ = await authenticateProductConnectivityAttempt(
+                ifOwnedBy: activeDriver,
+                peerId: peerId,
+                connectionGeneration: handshakeLease.generation,
+                keys: keys
+            )
             _ = detachHandshakeDriverIfOwned(
                 for: peerId,
                 connectionGeneration: handshakeLease.generation,
@@ -12058,6 +12362,17 @@ public class P2PConnectionManager: ObservableObject {
             SkyBridgeLogger.shared.info("✅ PQC 握手完成 (Suite: \(keys.negotiatedSuite.rawValue))")
 
         } catch {
+            if let activeDriver = handshakeDrivers[peerId],
+               handshakeDriverConnectionGenerationByPeerId[peerId]
+                    == handshakeLease.generation {
+                _ = failProductConnectivityAttempt(
+                    ifOwnedBy: activeDriver,
+                    connectionGeneration: handshakeLease.generation,
+                    reason: didCompleteAuthenticatedHandshake
+                        ? .publicationFailed
+                        : .handshakeFailed
+                )
+            }
             let detachedDriver = detachHandshakeDriverIfOwned(
                 for: peerId,
                 connectionGeneration: handshakeLease.generation,

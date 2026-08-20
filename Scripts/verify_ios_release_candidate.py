@@ -19,12 +19,13 @@ import json
 import os
 import plistlib
 import re
-import stat
 import subprocess
 import sys
 import tempfile
-import zipfile
 from pathlib import Path
+
+from extract_ios_ipa import IPAValidationError, extract_single_ios_app
+from devicectl_device_selection import installable_physical_ios_profile_identifiers
 
 ROOT = Path(__file__).resolve().parent.parent
 TEAM = "YKUPL7Z869"
@@ -32,6 +33,16 @@ APP_BUNDLE_ID = "com.skybridge.compass.ios"
 WIDGET_BUNDLE_ID = "com.skybridge.compass.ios.widgets"
 VERIFIER = ROOT / "Scripts" / "verify_ios_distribution_product.py"
 EXPECTED_ENTITLEMENTS = ROOT / "SkyBridge Compass iOS" / "SkyBridgeCompass-iOSRelease.entitlements"
+SOURCE_INPUT_PATHS = (
+    "Package.swift",
+    "Package.resolved",
+    "project.yml",
+    "Config",
+    "Sources",
+    "Scripts",
+    "Packages",
+    "SkyBridge Compass iOS",
+)
 
 EXPORT_DIR = Path(
     os.environ.get(
@@ -79,17 +90,10 @@ def connected_target_udids() -> set[str]:
             data = json.loads(Path(handle.name).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return set()
-    udids: set[str] = set()
-    for device in data.get("result", {}).get("devices", []):
-        hardware = device.get("hardwareProperties", {}) or {}
-        product_type = str(hardware.get("productType") or "")
-        if not product_type.startswith(target):
-            continue
-        for key in ("udid", "identifier"):
-            value = hardware.get(key) or device.get(key)
-            if isinstance(value, str) and value.strip():
-                udids.add(value.strip())
-    return udids
+    return installable_physical_ios_profile_identifiers(
+        data,
+        product_prefix=target,
+    )
 
 
 def installed_byte_identical(profile_bytes: bytes) -> Path:
@@ -138,17 +142,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="rc-verify-", dir=scratch_root) as name:
         work = Path(name)
         os.chmod(work, 0o700)
-        with zipfile.ZipFile(ipa_path) as archive:
-            for info in archive.infolist():
-                path = Path(info.filename)
-                if path.is_absolute() or ".." in path.parts or stat.S_ISLNK(info.external_attr >> 16):
-                    fail("unsafe IPA entry")
-            archive.extractall(work)
-
-        apps = list((work / "Payload").glob("*.app"))
-        if len(apps) != 1:
-            fail("invalid app count in IPA")
-        app = apps[0]
+        extracted_app = work / "SkyBridgeCompass-iOS.app"
+        try:
+            app = extract_single_ios_app(EXPORT_DIR, extracted_app)
+        except IPAValidationError as error:
+            fail(f"formal IPA extraction rejected the release candidate: {error}")
         widgets = list((app / "PlugIns").glob("*.appex"))
         if len(widgets) != 1:
             fail("invalid Widget count in IPA")
@@ -170,6 +168,31 @@ def main() -> int:
         run(["/usr/bin/codesign", "--display", f"--extract-certificates={widget_prefix}", str(widget)])
 
         app_info = plistlib.loads((app / "Info.plist").read_bytes())
+        widget_info = plistlib.loads((widget / "Info.plist").read_bytes())
+        source_app_info = plistlib.loads(
+            (ROOT / "SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist").read_bytes()
+        )
+        source_widget_info = plistlib.loads(
+            (ROOT / "SkyBridge Compass iOS/Widgets/Info.plist").read_bytes()
+        )
+        expected_version = source_app_info.get("CFBundleShortVersionString")
+        expected_build = source_app_info.get("CFBundleVersion")
+        if not isinstance(expected_version, str) or re.fullmatch(
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+            expected_version,
+        ) is None:
+            fail("source iOS version is not strict semantic version text")
+        if not isinstance(expected_build, str) or re.fullmatch(r"[1-9][0-9]*", expected_build) is None:
+            fail("source iOS build is not a positive integer")
+        for label, info in (
+            ("source Widget", source_widget_info),
+            ("exported app", app_info),
+            ("exported Widget", widget_info),
+        ):
+            if info.get("CFBundleShortVersionString") != expected_version:
+                fail(f"{label} version does not match the source release version")
+            if info.get("CFBundleVersion") != expected_build:
+                fail(f"{label} build does not match the source release build")
         executable = app / app_info["CFBundleExecutable"]
         strings_out = run(["/usr/bin/strings", "-a", str(executable)]).decode("utf-8", "replace")
         binary_test = bool(
@@ -214,6 +237,29 @@ def main() -> int:
                 bool(source_repository),
             )
         )
+        digest_result = subprocess.run(
+            [
+                "python3",
+                str(ROOT / "Scripts/source_input_digest.py"),
+                "--root",
+                str(ROOT),
+                *SOURCE_INPUT_PATHS,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        digest_parts = digest_result.stdout.strip().split()
+        if (
+            digest_result.returncode != 0
+            or len(digest_parts) != 2
+            or re.fullmatch(r"[0-9a-f]{64}", digest_parts[0]) is None
+            or re.fullmatch(r"[1-9][0-9]*", digest_parts[1]) is None
+        ):
+            fail("unable to compute final iOS release source-input digest")
+        source_input_digest = digest_parts[0]
+        if app_info.get("SkyBridgePackagingSourceInputDigest") != source_input_digest:
+            fail("release-candidate source-input digest does not match current clean source")
         if not provenance_ok:
             fail("release-candidate build provenance metadata does not match clean HEAD")
 
@@ -233,6 +279,7 @@ def main() -> int:
             "1",                # signature_verified
             "1",                # product_provenance_verified
             source_repository, "production", "HAS_APPLE_PQC_SDK", "0",
+            str(app / "Info.plist"), str(widget / "Info.plist"),
         ]
         result = subprocess.run(verifier_args, capture_output=True, text=True, check=False)
         if result.returncode != 0:
@@ -247,6 +294,7 @@ def main() -> int:
             "profileDeviceBound", "distributionSigning", "expectedEntitlementsMatch",
             "widgetEntitlementsConform", "keychainGroupsVerified", "nestedWidgetVerified",
             "releaseProvenanceVerified",
+            "releaseVersionVerified",
         ]
         if not all(proof.get(k) is True for k in required_true):
             missing = [k for k in required_true if proof.get(k) is not True]
@@ -265,9 +313,13 @@ def main() -> int:
             "productSurface": "production",
             "releaseConfiguration": True,
             "distributionSigning": True,
+            "releaseVersion": proof["releaseVersion"],
+            "releaseBuild": proof["releaseBuild"],
+            "releaseVersionVerified": True,
+            "sourceInputDigest": source_input_digest,
             "ipaSha256": ipa_sha,
             "productProofSha256": proof_sha,
-            "productProofPath": str(proof_path.relative_to(ROOT)),
+            "productProofPath": proof_path.name,
         }
         descriptor, tmp_name = tempfile.mkstemp(prefix=f".{OUTPUT_MANIFEST.name}.", dir=OUTPUT_MANIFEST.parent)
         tmp_path = Path(tmp_name)
@@ -285,7 +337,7 @@ def main() -> int:
 
     print("release_candidate_acceptance=pass")
     print(f"ipa_sha256={ipa_sha}")
-    print(f"acceptance_manifest={OUTPUT_MANIFEST.relative_to(ROOT)}")
+    print(f"acceptance_manifest={OUTPUT_MANIFEST}")
     return 0
 
 

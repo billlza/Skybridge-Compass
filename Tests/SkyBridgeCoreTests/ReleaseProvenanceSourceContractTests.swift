@@ -2,6 +2,20 @@ import Foundation
 import XCTest
 
 final class ReleaseProvenanceSourceContractTests: XCTestCase {
+    func testReleasePackagingTreatsCompilerWarningsAsErrors() throws {
+        let buildDMG = try repositorySource("Scripts/build_dmg.sh")
+        let packageApp = try repositorySource("Scripts/package_app.sh")
+
+        XCTAssertTrue(buildDMG.contains("export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1"))
+        XCTAssertTrue(buildDMG.contains("-Xswiftc -warnings-as-errors"))
+        XCTAssertTrue(packageApp.contains("export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1"))
+        XCTAssertGreaterThanOrEqual(
+            packageApp.components(separatedBy: "-Xswiftc -warnings-as-errors").count - 1,
+            2,
+            "Both the release app and privileged helper SwiftPM builds must fail on warnings."
+        )
+    }
+
     func testHelperInstallerDoesNotEmbedSourceCheckoutPaths() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/Performance/HelperInstaller.swift")
 
@@ -39,6 +53,8 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
         XCTAssertTrue(packageApp.contains("git -C \"${git_dir}\" status --porcelain --untracked-files=all"))
         XCTAssertTrue(packageApp.contains("require_release_git_provenance \"${git_commit}\" \"${git_branch}\" \"${git_dirty}\""))
         XCTAssertTrue(packageApp.contains("release_dmg 打包要求 Git worktree 为 clean"))
+        XCTAssertTrue(packageApp.contains("release_dmg 打包要求显式 SKYBRIDGE_PACKAGE_BUILD_ID"))
+        XCTAssertTrue(packageApp.contains("SKYBRIDGE_PACKAGE_BUILD_ID 必须是正整数"))
 
         let liboqsProvenanceGate = try XCTUnwrap(
             packageApp.range(of: "\"${ROOT_DIR}/Sources/Vendor/liboqs.provenance.json\"")
@@ -215,6 +231,11 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
         let sourceQualityGate = try repositorySource("Scripts/gates/source_quality_gate.sh")
         XCTAssertTrue(sourceQualityGate.contains("test_loopback_benchmark_fixture_policy.sh"))
         XCTAssertTrue(sourceQualityGate.contains("check_sensitive_artifacts.sh"))
+        XCTAssertTrue(sourceQualityGate.contains("check_ios_release_version.sh"))
+        XCTAssertTrue(sourceQualityGate.contains("test_ios_release_version.sh"))
+        XCTAssertTrue(sourceQualityGate.contains("test_verify_ios_distribution_product.py"))
+        XCTAssertTrue(sourceQualityGate.contains("test_validate_release_output_directory.py"))
+        XCTAssertTrue(sourceQualityGate.contains("PYTHONPATH="))
     }
 
     func testXPCHelpersBindMessagesToSignedApplicationIdentityWithoutPIDLookup() throws {

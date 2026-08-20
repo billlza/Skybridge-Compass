@@ -12,6 +12,7 @@ source "$ROOT_DIR/Scripts/framework_artifact_helpers.sh"
 source "$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_redaction.sh"
 source "$ROOT_DIR/Scripts/real_device_smoke_performance_gate.sh"
+source "$ROOT_DIR/Scripts/release_candidate_evidence_helpers.sh"
 XCODE_SWIFT_BIN="$(skybridge_xcode_swift_executable)" || {
   echo "Selected Xcode Swift executable is unavailable" >&2
   exit 1
@@ -92,6 +93,7 @@ SOURCE_INPUT_PATHS=(
 )
 IOS_SOURCE_INPUT_DIGEST=""
 IOS_SOURCE_INPUT_FILE_COUNT=""
+ACCEPTANCE_CANDIDATE_READY=0
 
 case "$PQC_TRUST_MODE" in
   user|actual|injected) ;;
@@ -570,7 +572,7 @@ MAC_ONLINE_PACKAGED_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_ONLINE_APP_BUNDLE:-$ROOT_D
 MAC_ONLINE_ALLOW_DEBUG_BUILD="${SKYBRIDGE_SMOKE_MAC_ONLINE_ALLOW_DEBUG_BUILD:-0}"
 MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_VISIBLE_CONNECTABLE_TIMEOUT_SECONDS:-120}"
 MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS="${SKYBRIDGE_SMOKE_MAC_ONLINE_PATTERN_FINAL_GRACE_SECONDS:-3}"
-MAC_HOST_PRODUCT_APP_BUNDLE="$ROOT_DIR/dist/SkyBridge Compass Pro.app"
+MAC_HOST_PRODUCT_APP_BUNDLE="${SKYBRIDGE_SMOKE_MAC_PRODUCT_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}"
 MAC_HOST_PRODUCT_BUNDLE_ID="com.skybridge.compass.pro"
 MAC_HOST_PRODUCT_PROFILE="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/embedded.provisionprofile"
 MAC_HOST_PRODUCT_WIDGET_BUNDLE="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/PlugIns/SkyBridgeCompassWidgetsExtension.appex"
@@ -596,6 +598,7 @@ MAC_HOST_IDENTITY_SOURCE_STAPLER_VALID=0
 MAC_HOST_IDENTITY_SOURCE_GATEKEEPER_ACCEPTED=0
 MAC_HOST_HELPER_REGISTERED=0
 MAC_ONLINE_APP_REGISTERED=0
+MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=0
 MAC_ONLINE_APP_SOURCE="not-run"
 MAC_ONLINE_APP_SOURCE_CURRENT=0
 MAC_APP_BUNDLE="$MAC_ONLINE_RUNTIME_DIR/LocalLanInteropHost.app"
@@ -616,6 +619,18 @@ IOS_TRACE_LOCAL="$ARTIFACT_DIR/${IOS_STATUS_NAME%.status.log}.trace.log"
 IOS_LISTENER_STATUS_NAME="${IOS_STATUS_NAME%.status.log}.listener.status.log"
 IOS_LISTENER_STATUS_LOCAL="$ARTIFACT_DIR/$IOS_LISTENER_STATUS_NAME"
 IOS_CONSOLE_STDERR="$ARTIFACT_DIR/ios-console.stderr.log"
+
+skybridge_bind_macos_release_candidate_evidence \
+  "$ROOT_DIR" \
+  "$MAC_HOST_PRODUCT_APP_BUNDLE" \
+  "$ARTIFACT_DIR" \
+  "$LAB_RUN"
+
+if [[ "$LAB_RUN" != "1" ]]; then
+  echo "Formal P2P evidence is unavailable until inbound remote control and its notice panel run in the normal SkyBridgeCompassApp product entry point." >&2
+  echo "LocalLanInteropHost remains diagnostic-only and cannot produce release evidence." >&2
+  exit 2
+fi
 IOS_COPY_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_TIMEOUT_SECONDS:-15}"
 IOS_COPY_HARD_TIMEOUT_SECONDS="${SKYBRIDGE_IOS_COPY_HARD_TIMEOUT_SECONDS:-25}"
 IOS_COPY_STATUS_APP_CACHE="${SKYBRIDGE_IOS_COPY_STATUS_APP_CACHE:-1}"
@@ -626,6 +641,9 @@ IOS_ARCHIVE_LOG="$ARTIFACT_DIR/ios-archive.log"
 IOS_EXPORT_DIR="$ARTIFACT_DIR/ios-export"
 IOS_EXPORT_LOG="$ARTIFACT_DIR/ios-export.log"
 IOS_EXPORTED_APP="$ARTIFACT_DIR/SkyBridgeCompass-iOS-exported.app"
+IOS_RELEASE_ARCHIVE_IDENTITY="${SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY:-}"
+IOS_RELEASE_TESTING_IPA="${SKYBRIDGE_IOS_RELEASE_TESTING_IPA:-}"
+IOS_FORMAL_EXTRACTED_APP="$ARTIFACT_DIR/ios-release-testing/SkyBridgeCompass-iOS.app"
 IOS_PRODUCT_PROOF="$ARTIFACT_DIR/ios-product-proof.json"
 P2P_APPROVAL_PROOF="$ARTIFACT_DIR/p2p-approval-proof.json"
 IOS_DISTRIBUTION_PREFLIGHT="$MAC_ONLINE_RUNTIME_DIR/ios-distribution-signing-preflight.json"
@@ -654,6 +672,9 @@ IOS_CONSOLE_HANDLE_STARTED=0
 IOS_CONSOLE_HANDLE_CAPTURED=0
 IOS_PREINSTALL_ABSENCE_PROVEN=0
 PROCESS_OWNERSHIP_PRIVATE_DIR=""
+MAC_HOST_PROCESS_IDENTITY=""
+MAC_SOURCE_PROCESS_IDENTITY=""
+MAC_ONLINE_PROCESS_IDENTITY=""
 IOS_PROCESS_IDENTITY=""
 IOS_CONSOLE_HANDLE_IDENTITY=""
 IOS_CONSOLE_CAPTURE_DIAGNOSTIC=""
@@ -815,73 +836,6 @@ sync_macos_smoke_host_artifacts() {
       return 1
     fi
   done
-}
-
-tracked_process_executable() {
-  local pid="$1"
-  /usr/sbin/lsof -a -p "$pid" -d txt -Fn 2>/dev/null \
-    | awk '/^n/ { print substr($0, 2); exit }'
-}
-
-terminate_tracked_process() {
-  local pid="$1"
-  local label="$2"
-  local expected_executable="$3"
-  local actual_executable
-  local expected_canonical
-  local actual_canonical
-  local attempt
-
-  [[ -n "$pid" ]] || return 0
-  if ! kill -0 "$pid" >/dev/null 2>&1; then
-    wait "$pid" >/dev/null 2>&1 || true
-    return 0
-  fi
-  if ! actual_executable="$(tracked_process_executable "$pid")" || [[ -z "$actual_executable" ]]; then
-    echo "Unable to resolve the executable for tracked $label process PID $pid." >&2
-    return 1
-  fi
-  expected_canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$expected_executable")"
-  actual_canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$actual_executable")"
-  if [[ "$actual_canonical" != "$expected_canonical" ]]; then
-    echo "Refusing to terminate $label because PID $pid is not owned by the expected executable." >&2
-    return 1
-  fi
-
-  if ! kill -TERM "$pid" >/dev/null 2>&1; then
-    echo "Unable to signal tracked $label process PID $pid." >&2
-    return 1
-  fi
-  for attempt in {1..50}; do
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
-      wait "$pid" >/dev/null 2>&1 || true
-      return 0
-    fi
-    sleep 0.1
-  done
-
-  if ! actual_executable="$(tracked_process_executable "$pid")"; then
-    echo "Unable to revalidate $label before force termination." >&2
-    return 1
-  fi
-  actual_canonical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$actual_executable")"
-  if [[ "$actual_canonical" != "$expected_canonical" ]]; then
-    echo "Refusing to force-terminate $label after its tracked PID identity changed." >&2
-    return 1
-  fi
-  if ! kill -KILL "$pid" >/dev/null 2>&1; then
-    echo "Unable to force-terminate tracked $label process PID $pid." >&2
-    return 1
-  fi
-  for attempt in {1..20}; do
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
-      wait "$pid" >/dev/null 2>&1 || true
-      return 0
-    fi
-    sleep 0.1
-  done
-  echo "Tracked $label process PID $pid remained alive after bounded termination." >&2
-  return 1
 }
 
 compute_source_input_snapshot() {
@@ -1097,10 +1051,16 @@ verify_ios_product_source_input_binding() {
 finalize_release_acceptance_manifests_after_cleanup() {
   local private_manifest="$ARTIFACT_DIR/release-acceptance.json"
   local public_manifest="$PUBLIC_ARTIFACT_DIR/release-acceptance.json"
+  local identity_arguments=()
+
+  if [[ "$LAB_RUN" != "1" ]]; then
+    identity_arguments=(--archive-identity "$IOS_RELEASE_ARCHIVE_IDENTITY")
+  fi
 
   python3 "$ROOT_DIR/Scripts/finalize_release_acceptance_manifests.py" \
     --private-manifest "$private_manifest" \
-    --public-manifest "$public_manifest"
+    --public-manifest "$public_manifest" \
+    "${identity_arguments[@]}"
 }
 
 initialize_ios_process_ownership_session() {
@@ -1110,6 +1070,9 @@ initialize_ios_process_ownership_session() {
   fi
   rm -f -- "$IOS_PROCESS_CLEANUP_RECEIPT"
   PROCESS_OWNERSHIP_PRIVATE_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/skybridge-p2p-remote-process-ownership.XXXXXX")"
+  MAC_HOST_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-host-process-identity.json"
+  MAC_SOURCE_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-source-process-identity.json"
+  MAC_ONLINE_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-online-process-identity.json"
   IOS_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"
   IOS_CONSOLE_HANDLE_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"
   IOS_CONSOLE_CAPTURE_DIAGNOSTIC="$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log"
@@ -1122,10 +1085,16 @@ destroy_ios_process_ownership_session() {
 
   [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]] || return 0
   for private_path in \
+    "$MAC_HOST_PROCESS_IDENTITY" \
+    "$MAC_SOURCE_PROCESS_IDENTITY" \
+    "$MAC_ONLINE_PROCESS_IDENTITY" \
     "$IOS_PROCESS_IDENTITY" \
     "$IOS_CONSOLE_HANDLE_IDENTITY" \
     "$IOS_CONSOLE_CAPTURE_DIAGNOSTIC"; do
     case "$private_path" in
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-host-process-identity.json"|\
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-source-process-identity.json"|\
+      "$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-online-process-identity.json"|\
       "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-process-identity.json"|\
       "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-handle-identity.json"|\
       "$PROCESS_OWNERSHIP_PRIVATE_DIR/ios-console-capture.log")
@@ -1313,10 +1282,12 @@ cleanup() {
   local original_status=$?
   local cleanup_status=0
   local ios_cleanup_status=0
+  local mac_cleanup_status=0
   local launch_services_was_mutated=0
   trap - EXIT INT TERM
 
-  if [[ "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" || \
+  if [[ "${MAC_LAUNCH_SERVICES_RESTORE_REQUIRED:-0}" == "1" || \
+        "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" || \
         "${MAC_HOST_HELPER_REGISTERED:-0}" == "1" ]]; then
     launch_services_was_mutated=1
   fi
@@ -1336,40 +1307,36 @@ cleanup() {
     copy_ios_status || true
     copy_ios_trace || true
   fi
-  if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
-    if (( ios_cleanup_status == 0 )); then
-      if ! destroy_ios_process_ownership_session; then
-        cleanup_status=1
-        echo "failed stage=cleanup phase=ios-process reason=private-ownership-remove-failed" >&2
-      fi
-    else
-      echo "Preserving private P2P remote ownership diagnostics after unverifiable cleanup: $PROCESS_OWNERSHIP_PRIVATE_DIR" >&2
-    fi
-  fi
   if [[ -n "$HOST_PID" ]]; then
-    local expected_host_executable="$MAC_APP_BIN"
-    case "$MAC_HOST_LAUNCH_MODE" in
-      direct) expected_host_executable="$MAC_DIRECT_BIN" ;;
-      packaged|packaged-lab) ;;
-      *)
-        cleanup_status=1
-        echo "failed stage=cleanup phase=mac-host-process reason=invalid-launch-mode" >&2
-        ;;
-    esac
-    if ! terminate_tracked_process "$HOST_PID" "macOS smoke host" "$expected_host_executable"; then
+    if ! skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$HOST_PID" \
+      "$MAC_HOST_PROCESS_IDENTITY" \
+      "macOS smoke host"; then
       cleanup_status=1
+      mac_cleanup_status=1
       echo "failed stage=cleanup phase=mac-host-process reason=exact-process-exit-unverified" >&2
     fi
   fi
   if [[ -n "$MAC_SOURCE_PID" ]]; then
-    if ! terminate_tracked_process "$MAC_SOURCE_PID" "macOS smoke source" "$MAC_SOURCE_DIRECT_BIN"; then
+    if ! skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_SOURCE_PID" \
+      "$MAC_SOURCE_PROCESS_IDENTITY" \
+      "macOS smoke source"; then
       cleanup_status=1
+      mac_cleanup_status=1
       echo "failed stage=cleanup phase=mac-source-process reason=exact-process-exit-unverified" >&2
     fi
   fi
   if [[ -n "$MAC_ONLINE_PID" ]]; then
-    if ! terminate_tracked_process "$MAC_ONLINE_PID" "macOS online iPad client" "$MAC_ONLINE_APP_BIN"; then
+    if ! skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_ONLINE_PID" \
+      "$MAC_ONLINE_PROCESS_IDENTITY" \
+      "macOS online iPad client"; then
       cleanup_status=1
+      mac_cleanup_status=1
       echo "failed stage=cleanup phase=mac-online-process reason=exact-process-exit-unverified" >&2
     fi
   fi
@@ -1379,7 +1346,10 @@ cleanup() {
       echo "failed stage=cleanup phase=mac-online-launch-services reason=runtime-app-or-widget-registration-remains runtime=preserved-private" >&2
     fi
   elif [[ -n "${MAC_ONLINE_APP_BIN:-}" ]] && \
-       ! terminate_stale_macos_online_ipad_clients >/dev/null 2>&1; then
+       ! skybridge_mac_require_executable_absent \
+         "$PROCESS_OWNERSHIP_HELPER" \
+         "$MAC_ONLINE_APP_BIN" \
+         "macOS online iPad client" >/dev/null 2>&1; then
     cleanup_status=1
     echo "failed stage=cleanup phase=mac-online-process reason=exact-client-process-remains" >&2
   fi
@@ -1392,6 +1362,16 @@ cleanup() {
     cleanup_status=1
     echo "failed stage=cleanup phase=launch-services-restore reason=canonical-app-or-runtime-absence-proof-missing runtime=preserved-private" >&2
   fi
+  if [[ -n "$PROCESS_OWNERSHIP_PRIVATE_DIR" ]]; then
+    if (( ios_cleanup_status == 0 && mac_cleanup_status == 0 )); then
+      if ! destroy_ios_process_ownership_session; then
+        cleanup_status=1
+        echo "failed stage=cleanup phase=process-ownership reason=private-ownership-remove-failed" >&2
+      fi
+    else
+      echo "Preserving private P2P remote ownership diagnostics after unverifiable cleanup: $PROCESS_OWNERSHIP_PRIVATE_DIR" >&2
+    fi
+  fi
   if ! sync_macos_smoke_host_artifacts; then
     cleanup_status=1
     echo "failed stage=cleanup phase=artifact-sync reason=mac-host-runtime-artifact-copy-failed" >&2
@@ -1401,7 +1381,8 @@ cleanup() {
     "$MAC_ONLINE_LAUNCH_STDOUT" \
     "$MAC_ONLINE_LAUNCH_STDERR" \
     "$MAC_ONLINE_LAUNCH_OPEN_STDERR"
-  if [[ "${MAC_HOST_HELPER_REGISTERED:-0}" == "1" || \
+  if [[ "${MAC_LAUNCH_SERVICES_RESTORE_REQUIRED:-0}" == "1" || \
+        "${MAC_HOST_HELPER_REGISTERED:-0}" == "1" || \
         "${MAC_ONLINE_APP_REGISTERED:-0}" == "1" || \
         "$cleanup_status" != "0" ]]; then
     cleanup_status=1
@@ -1413,12 +1394,23 @@ cleanup() {
     fi
   fi
 
-  if (( original_status == 0 && cleanup_status == 0 )) \
-    && [[ "$MAC_HOST_ONLY" != "1" ]]; then
-    if ! finalize_release_acceptance_manifests_after_cleanup; then
+  if (( original_status == 0 && cleanup_status == 0 )); then
+    if [[ "$MAC_HOST_ONLY" != "1" && "$ACCEPTANCE_CANDIDATE_READY" != "1" ]]; then
+      cleanup_status=1
+      echo "failed stage=cleanup phase=release-acceptance reason=candidate-ineligible" >&2
+    elif [[ "$MAC_HOST_ONLY" != "1" ]] \
+      && ! finalize_release_acceptance_manifests_after_cleanup; then
       cleanup_status=1
       echo "failed stage=cleanup phase=release-acceptance reason=manifest-finalization-failed" >&2
     fi
+  fi
+
+  if (( original_status == 0 && cleanup_status == 0 )) \
+    && [[ "$MAC_HOST_ONLY" != "1" && "$ACCEPTANCE_CANDIDATE_READY" == "1" ]]; then
+    echo "==> Real-device P2P remote desktop smoke succeeded after verified Mac/iOS process cleanup"
+    echo "    mac status: $HOST_STATUS_ARTIFACT"
+    echo "    ios status: $IOS_STATUS_LOCAL"
+    echo "    host stdout: $HOST_STDOUT_ARTIFACT"
   fi
 
   if (( cleanup_status != 0 )) \
@@ -1627,17 +1619,53 @@ PY
 }
 
 wait_for_mac_host_only_shutdown() {
+  local ownership_status
   append_host_status "mac-host-only ready=1 diagnosticOnly=1 currentSourceHelper=1 hostPersistentIdentityMutationDenied=1 acceptanceEligible=0"
   echo "==> Signed current-source macOS host is ready (diagnostic-only): $MAC_HOST_READY_FILE"
-  while kill -0 "$HOST_PID" >/dev/null 2>&1; do
-    sleep 0.5
+  while true; do
+    if skybridge_mac_owned_process_status \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$HOST_PID" \
+      "$MAC_HOST_PROCESS_IDENTITY"; then
+      sleep 0.5
+      continue
+    fi
+    ownership_status=$?
+    if (( ownership_status == 1 )); then
+      append_host_status "failed stage=mac-host phase=host-only-lifecycle reason=host-exited-before-runner-shutdown"
+      echo "Signed macOS host exited before the host-only runner was asked to stop." >&2
+    else
+      append_host_status "failed stage=mac-host phase=host-only-lifecycle reason=exact-process-ownership-unverifiable"
+      echo "Signed macOS host ownership became unverifiable before runner shutdown." >&2
+    fi
+    return 1
   done
-  append_host_status "failed stage=mac-host phase=host-only-lifecycle reason=host-exited-before-runner-shutdown"
-  echo "Signed macOS host exited before the host-only runner was asked to stop." >&2
-  return 1
 }
 
 reset_smoke_artifacts() {
+  local runtime_host_executable="$MAC_ONLINE_RUNTIME_DIR/LocalLanInteropHost.app/Contents/MacOS/LocalLanInteropHost"
+  local runtime_online_executable="$MAC_ONLINE_RUNTIME_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+  local canonical_product_executable="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+  local executable_path
+  local process_label
+
+  while IFS='|' read -r executable_path process_label; do
+    [[ -x "$executable_path" ]] || continue
+    if ! skybridge_mac_require_executable_absent \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$executable_path" \
+      "$process_label"; then
+      echo "Refusing to reset smoke artifacts while a prior exact runtime executable remains active." >&2
+      return 1
+    fi
+  done <<EOF
+$MAC_DIRECT_BIN|macOS direct P2P smoke host
+$MAC_SOURCE_DIRECT_BIN|macOS P2P smoke source
+$runtime_host_executable|macOS packaged P2P smoke host
+$runtime_online_executable|macOS online iPad client
+$canonical_product_executable|canonical macOS product
+EOF
+
   # Rust smoke profiles intentionally reuse stable artifact dirs for follow-up checks.
   # Clear per-run evidence so waits cannot match a stale ready/notice line.
   rm -f -- \
@@ -1691,7 +1719,7 @@ reset_smoke_artifacts() {
   /bin/mkdir -m 700 "$MAC_ONLINE_RUNTIME_DIR"
 }
 
-terminate_stale_smoke_scripts() {
+require_no_concurrent_smoke_scripts() {
   local pid
   local pids
   pids="$(pgrep -f 'Scripts/run_real_device_p2p_remote_smoke\.sh' 2>/dev/null | sort -u || true)"
@@ -1701,55 +1729,8 @@ terminate_stale_smoke_scripts() {
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
     [[ "$pid" == "$$" || "$pid" == "${BASHPID:-$$}" || "$pid" == "$PPID" ]] && continue
-    echo "==> Terminating stale real-device smoke script pid=$pid"
-    kill "$pid" >/dev/null 2>&1 || true
-  done <<<"$pids"
-
-  sleep 1
-
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    [[ "$pid" == "$$" || "$pid" == "${BASHPID:-$$}" || "$pid" == "$PPID" ]] && continue
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      echo "==> Force terminating stale real-device smoke script pid=$pid"
-      kill -KILL "$pid" >/dev/null 2>&1 || true
-    fi
-  done <<<"$pids"
-}
-
-terminate_stale_macos_smoke_hosts() {
-  local pid
-  local pids
-  pids="$(
-    {
-      pgrep -x LocalLanInteropHost 2>/dev/null || true
-      pgrep -x LocalLanSmokeSourceHost 2>/dev/null || true
-      pgrep -f "$MAC_DIRECT_BIN" 2>/dev/null || true
-      pgrep -f "$MAC_SOURCE_DIRECT_BIN" 2>/dev/null || true
-      if [[ -n "$MAC_APP_BIN" ]]; then
-        pgrep -f "$MAC_APP_BIN" 2>/dev/null || true
-      fi
-    } | sort -u
-  )"
-
-  [[ -n "$pids" ]] || return 0
-
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    [[ "$pid" == "$$" ]] && continue
-    echo "==> Terminating stale macOS smoke host pid=$pid"
-    kill "$pid" >/dev/null 2>&1 || true
-  done <<<"$pids"
-
-  sleep 1
-
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    [[ "$pid" == "$$" ]] && continue
-    if kill -0 "$pid" >/dev/null 2>&1; then
-      echo "==> Force terminating stale macOS smoke host pid=$pid"
-      kill -KILL "$pid" >/dev/null 2>&1 || true
-    fi
+    echo "Refusing to start while another real-device P2P smoke script may be active: pid=$pid" >&2
+    return 1
   done <<<"$pids"
 }
 
@@ -2622,7 +2603,10 @@ cleanup_macos_smoke_host_launch_services_registration() {
     echo "Refusing unsafe helper cleanup path: ${MAC_APP_BUNDLE:-missing}" >&2
     return 1
   fi
-  if ! terminate_macos_smoke_host_bundle_processes; then
+  local remaining_helper_pids=""
+  if ! remaining_helper_pids="$(skybridge_mac_exact_executable_pids \
+    "$PROCESS_OWNERSHIP_HELPER" "$MAC_APP_BIN")" \
+    || [[ -n "$remaining_helper_pids" ]]; then
     restore_status=1
     helper_terminated=0
   fi
@@ -2680,74 +2664,7 @@ restore_canonical_macos_launch_services_registration_last() {
     echo "LaunchServices retains a runtime app or Widget path after canonical parent restoration." >&2
     return 1
   fi
-}
-
-macos_smoke_host_bundle_pids() {
-  [[ -n "${MAC_APP_BIN:-}" ]] || return 0
-  python3 - "$MAC_APP_BIN" <<'PY'
-import subprocess
-import sys
-from pathlib import Path
-
-executable = sys.argv[1]
-executable_candidates = {executable, str(Path(executable).resolve())}
-completed = subprocess.run(
-    ["/bin/ps", "-axo", "pid=,command="],
-    check=False,
-    capture_output=True,
-    text=True,
-)
-if completed.returncode != 0:
-    print("Unable to enumerate macOS smoke host processes", file=sys.stderr)
-    raise SystemExit(1)
-for raw_line in completed.stdout.splitlines():
-    stripped = raw_line.strip()
-    if not stripped:
-        continue
-    pid, separator, command = stripped.partition(" ")
-    command = command.lstrip()
-    if separator and pid.isdigit() and any(
-        command == candidate or command.startswith(candidate + " ")
-        for candidate in executable_candidates
-    ):
-        print(pid)
-PY
-}
-
-terminate_macos_smoke_host_bundle_processes() {
-  local pid
-  local attempt
-  local initial
-  local remaining
-
-  if ! initial="$(macos_smoke_host_bundle_pids)"; then
-    return 1
-  fi
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    kill "$pid" >/dev/null 2>&1 || true
-  done <<<"$initial"
-
-  for attempt in {1..20}; do
-    if ! remaining="$(macos_smoke_host_bundle_pids)"; then
-      return 1
-    fi
-    [[ -z "$remaining" ]] && return 0
-    sleep 0.1
-  done
-
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    kill -KILL "$pid" >/dev/null 2>&1 || true
-  done <<<"$remaining"
-  sleep 0.1
-  if ! remaining="$(macos_smoke_host_bundle_pids)"; then
-    return 1
-  fi
-  if [[ -n "$remaining" ]]; then
-    echo "Unable to terminate all product-identity smoke host processes before helper cleanup." >&2
-    return 1
-  fi
+  MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=0
 }
 
 clear_runtime_bundle_quarantine_if_present() {
@@ -2772,17 +2689,27 @@ clear_runtime_bundle_quarantine_if_present() {
 }
 
 register_macos_smoke_host_app_bundle() {
+  local canonical_product_executable="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "packaged macOS P2P smoke host"; then
+    return 1
+  fi
+  if [[ "$canonical_product_executable" != "$MAC_APP_BIN" ]] \
+    && ! skybridge_mac_require_executable_absent \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$canonical_product_executable" \
+      "canonical macOS product sharing the P2P host bundle identity"; then
+    return 1
+  fi
   register_launch_services_app_bundle "$MAC_APP_BUNDLE" || return 1
   MAC_HOST_HELPER_REGISTERED=1
-}
-
-find_macos_smoke_host_pid() {
-  macos_smoke_host_bundle_pids | tail -n 1
+  MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=1
 }
 
 open_macos_smoke_host_app_bundle() {
   /usr/bin/open \
-    -n \
     --stdout "$HOST_STDOUT" \
     --stderr "$HOST_STDOUT" \
     --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=$KEYCHAIN_IN_MEMORY" \
@@ -2809,6 +2736,12 @@ start_macos_smoke_host_directly() {
     echo "Direct SwiftPM host launch is diagnostic-only and requires SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1." >&2
     return 2
   fi
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_DIRECT_BIN" \
+    "macOS direct P2P smoke host"; then
+    return 1
+  fi
   SKYBRIDGE_KEYCHAIN_IN_MEMORY="$KEYCHAIN_IN_MEMORY" \
   SB_PQC_PREFERRED_SUITE="$HOST_PREFERRED_SUITE" \
   SKYBRIDGE_SMOKE_ROLE=mac-host \
@@ -2821,6 +2754,12 @@ start_macos_smoke_host_directly() {
   SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID="${SKYBRIDGE_SMOKE_LOCAL_NEBULA_ID:-}" \
   "$MAC_DIRECT_BIN" >"$HOST_STDOUT" 2>&1 &
   HOST_PID="$!"
+  skybridge_mac_capture_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_DIRECT_BIN" \
+    "$MAC_HOST_PROCESS_IDENTITY" \
+    "macOS direct P2P smoke host"
 }
 
 start_macos_smoke_source_host() {
@@ -2830,11 +2769,25 @@ start_macos_smoke_source_host() {
     echo "macOS smoke source helper executable not found: $MAC_SOURCE_DIRECT_BIN" >&2
     return 1
   fi
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_SOURCE_DIRECT_BIN" \
+    "macOS P2P smoke source"; then
+    return 1
+  fi
 
   SKYBRIDGE_SMOKE_STATUS_FILE="$HOST_STATUS" \
   SKYBRIDGE_SMOKE_ROLE=mac-smoke-source \
   "$MAC_SOURCE_DIRECT_BIN" >"$MAC_SOURCE_STDOUT" 2>&1 &
   MAC_SOURCE_PID="$!"
+  if ! skybridge_mac_capture_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_SOURCE_PID" \
+    "$MAC_SOURCE_DIRECT_BIN" \
+    "$MAC_SOURCE_PROCESS_IDENTITY" \
+    "macOS P2P smoke source"; then
+    return 1
+  fi
   append_host_status "launch method=direct-app-binary pid=$MAC_SOURCE_PID role=mac-smoke-source binary=swiftpm-build-product"
 }
 
@@ -3012,6 +2965,21 @@ start_macos_smoke_host() {
       ;;
   esac
 
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    "packaged macOS P2P smoke host"; then
+    return 1
+  fi
+  local canonical_product_executable="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+  if [[ "$canonical_product_executable" != "$MAC_APP_BIN" ]] \
+    && ! skybridge_mac_require_executable_absent \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$canonical_product_executable" \
+      "canonical macOS product sharing the P2P host bundle identity"; then
+    return 1
+  fi
+
   local open_status
   if open_macos_smoke_host_app_bundle; then
     open_status=0
@@ -3020,6 +2988,27 @@ start_macos_smoke_host() {
     append_host_status "failed stage=mac-host phase=launch reason=packaged-product-open-failed status=$open_status"
     echo "LaunchServices failed to open the product-identity smoke host (status=$open_status)." >&2
     return "$open_status"
+  fi
+
+  if ! skybridge_mac_wait_for_single_exact_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_APP_BIN" \
+    15 \
+    HOST_PID \
+    "packaged macOS P2P smoke host"; then
+    append_host_status "failed stage=mac-host phase=launch reason=packaged-product-app-pid-not-found"
+    echo "Timed out waiting for the product-identity LocalLanInteropHost app pid after LaunchServices start." >&2
+    print_smoke_tail_for_operator 80 "$HOST_STDOUT"
+    return 1
+  fi
+  if ! skybridge_mac_capture_owned_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_APP_BIN" \
+    "$MAC_HOST_PROCESS_IDENTITY" \
+    "packaged macOS P2P smoke host"; then
+    append_host_status "failed stage=mac-host phase=launch reason=packaged-product-process-ownership-unverifiable"
+    return 1
   fi
 
   if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
@@ -3040,27 +3029,27 @@ start_macos_smoke_host() {
     done
   fi
 
-  local started_at
-  started_at="$(date +%s)"
-  while true; do
-    HOST_PID="$(find_macos_smoke_host_pid)"
-    if [[ -n "$HOST_PID" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
-      return 0
-    fi
-    if (( "$(date +%s)" - started_at >= 15 )); then
-      append_host_status "failed stage=mac-host phase=launch reason=packaged-product-app-pid-not-found"
-      echo "Timed out waiting for the product-identity LocalLanInteropHost app pid after LaunchServices start." >&2
-      print_smoke_tail_for_operator 80 "$HOST_STDOUT"
-      return 1
-    fi
-    sleep 0.25
-  done
+  return 0
 }
 
 record_macos_smoke_host_launch_evidence() {
-  if [[ -z "$HOST_PID" ]] || ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+  local ownership_status
+  if [[ -z "$HOST_PID" ]]; then
     append_host_status "failed stage=mac-host phase=launch-evidence reason=host-pid-not-running"
     echo "macOS smoke host exited before launch evidence could be bound to its reset status file." >&2
+    return 1
+  fi
+  if skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_HOST_PROCESS_IDENTITY"; then
+    ownership_status=0
+  else
+    ownership_status=$?
+  fi
+  if (( ownership_status != 0 )); then
+    append_host_status "failed stage=mac-host phase=launch-evidence reason=host-process-ownership-unverifiable"
+    echo "macOS smoke host exact process ownership was lost before launch evidence was recorded." >&2
     return 1
   fi
 
@@ -3449,7 +3438,6 @@ build_macos_online_ipad_app() {
     MAC_ONLINE_APP_BUNDLE="$MAC_ONLINE_PACKAGED_APP_BUNDLE"
     MAC_ONLINE_APP_BIN="$MAC_ONLINE_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
     verify_macos_online_ipad_app_bundle "packaged"
-    register_macos_online_ipad_app_bundle
     return 0
   fi
 
@@ -3487,13 +3475,16 @@ build_macos_online_ipad_app() {
   sign_macos_online_ipad_debug_app
   clear_runtime_bundle_quarantine_if_present "$MAC_ONLINE_APP_BUNDLE" "macOS online iPad Debug app"
   verify_macos_online_ipad_app_bundle "debug"
-  register_macos_online_ipad_app_bundle
 }
 
 register_macos_online_ipad_app_bundle() {
+  if ! require_no_external_macos_online_ipad_clients; then
+    return 1
+  fi
   register_launch_services_app_bundle "$MAC_ONLINE_APP_BUNDLE" || return 1
   if [[ "$MAC_ONLINE_APP_BUNDLE" == "$MAC_ONLINE_RUNTIME_APP_BUNDLE" ]]; then
     MAC_ONLINE_APP_REGISTERED=1
+    MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=1
   fi
 }
 
@@ -3582,44 +3573,6 @@ verify_macos_online_ipad_framework_resolution() {
   fi
 }
 
-find_all_macos_online_ipad_client_pids() {
-  local app_bin
-  app_bin="$(canonical_macos_online_ipad_client_bin)" || return 0
-  [[ -n "$app_bin" ]] || return 0
-  python3 - "$app_bin" <<'PY'
-import subprocess
-import sys
-from pathlib import Path
-
-executable = sys.argv[1]
-executable_candidates = {executable, str(Path(executable).resolve())}
-completed = subprocess.run(
-    ["/bin/ps", "-axo", "pid=,command="],
-    check=False,
-    capture_output=True,
-    text=True,
-)
-if completed.returncode != 0:
-    print("Unable to enumerate macOS online iPad client processes", file=sys.stderr)
-    raise SystemExit(1)
-for raw_line in completed.stdout.splitlines():
-    stripped = raw_line.strip()
-    if not stripped:
-        continue
-    pid, separator, command = stripped.partition(" ")
-    command = command.lstrip()
-    if separator and pid.isdigit() and any(
-        command == candidate or command.startswith(candidate + " ")
-        for candidate in executable_candidates
-    ):
-        print(pid)
-PY
-}
-
-find_macos_online_ipad_client_pid() {
-  find_all_macos_online_ipad_client_pids | head -n 1
-}
-
 canonical_macos_online_ipad_client_bin() {
   [[ -n "$MAC_ONLINE_APP_BIN" ]] || return 1
   local app_dir
@@ -3627,42 +3580,23 @@ canonical_macos_online_ipad_client_bin() {
   printf '%s/%s\n' "$app_dir" "$(basename "$MAC_ONLINE_APP_BIN")"
 }
 
-terminate_stale_macos_online_ipad_clients() {
-  local pids
-  local remaining
-  local attempt
-  if ! pids="$(find_all_macos_online_ipad_client_pids)"; then
+require_no_external_macos_online_ipad_clients() {
+  local app_bin
+  local canonical_product_executable="$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/MacOS/SkyBridgeCompassApp"
+  app_bin="$(canonical_macos_online_ipad_client_bin)" || return 1
+  if ! skybridge_mac_require_executable_absent \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$app_bin" \
+    "macOS online iPad client"; then
     return 1
   fi
-  [[ -n "$pids" ]] || return 0
-
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    echo "==> Terminating stale macOS online iPad UI client pid=$pid"
-    kill "$pid" >/dev/null 2>&1 || true
-  done <<<"$pids"
-
-  for attempt in {1..20}; do
-    if ! remaining="$(find_all_macos_online_ipad_client_pids)"; then
-      return 1
-    fi
-    [[ -z "$remaining" ]] && return 0
-    sleep 0.1
-  done
-  while IFS= read -r pid; do
-    [[ -n "$pid" ]] || continue
-    echo "==> Force terminating stale macOS online iPad UI client pid=$pid"
-    kill -KILL "$pid" >/dev/null 2>&1 || true
-  done <<<"$remaining"
-  for attempt in {1..20}; do
-    if ! remaining="$(find_all_macos_online_ipad_client_pids)"; then
-      return 1
-    fi
-    [[ -z "$remaining" ]] && return 0
-    sleep 0.1
-  done
-  echo "The exact macOS online iPad runtime process remained alive after SIGKILL." >&2
-  return 1
+  if [[ "$canonical_product_executable" != "$app_bin" ]] \
+    && ! skybridge_mac_require_executable_absent \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$canonical_product_executable" \
+      "canonical macOS product sharing the online client bundle identity"; then
+    return 1
+  fi
 }
 
 cleanup_macos_online_ipad_launch_services_registration() {
@@ -3682,8 +3616,8 @@ cleanup_macos_online_ipad_launch_services_registration() {
     echo "Registered macOS online iPad runtime app disappeared before cleanup." >&2
     return 1
   fi
-  if ! terminate_stale_macos_online_ipad_clients; then
-    echo "Unable to terminate every process for the exact macOS online iPad runtime executable." >&2
+  if ! require_no_external_macos_online_ipad_clients; then
+    echo "Refusing to unregister the macOS online iPad runtime while its exact executable is still active." >&2
     return 1
   fi
   if ! unregister_launch_services_app_bundle "$runtime_app"; then
@@ -3701,7 +3635,6 @@ open_macos_online_ipad_app_bundle() {
   : >"$MAC_ONLINE_LAUNCH_STDERR"
   : >"$MAC_ONLINE_LAUNCH_OPEN_STDERR"
   /usr/bin/open \
-    -n \
     --stdout "$MAC_ONLINE_LAUNCH_STDOUT" \
     --stderr "$MAC_ONLINE_LAUNCH_STDERR" \
     --env "SKYBRIDGE_KEYCHAIN_IN_MEMORY=$KEYCHAIN_IN_MEMORY" \
@@ -3724,27 +3657,37 @@ start_macos_online_ipad_client() {
   : >"$MAC_ONLINE_APP_STDERR"
   : >"$MAC_ONLINE_OPEN_STDERR"
 
+  if ! register_macos_online_ipad_app_bundle; then
+    printf '%s failed stage=mac-online-ipad phase=launch reason=launch-services-registration-failed\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
+    return 1
+  fi
   local open_attempt=1
   while (( open_attempt <= 3 )); do
-    register_macos_online_ipad_app_bundle
-    local existing_pids
-    existing_pids="$(find_macos_online_ipad_client_pid | tr '\n' ',' | sed 's/,$//')"
-    printf '%s launch method=open-app-bundle attempt=%s preExistingPids=%s\n' "$(timestamp_utc)" "$open_attempt" "${existing_pids:-none}" >>"$MAC_ONLINE_STATUS"
+    if ! require_no_external_macos_online_ipad_clients; then
+      printf '%s failed stage=mac-online-ipad phase=launch reason=pre-existing-exact-executable\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
+      return 1
+    fi
+    printf '%s launch method=open-app-bundle attempt=%s preExistingExactExecutable=0\n' "$(timestamp_utc)" "$open_attempt" >>"$MAC_ONLINE_STATUS"
     if open_macos_online_ipad_app_bundle; then
-      local started_at
-      started_at="$(date +%s)"
-      while true; do
-        MAC_ONLINE_PID="$(find_macos_online_ipad_client_pid)"
-        if [[ -n "$MAC_ONLINE_PID" ]] && kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
-          printf '%s launch method=open-app-bundle pid=%s role=mac-online-ipad-client\n' "$(timestamp_utc)" "$MAC_ONLINE_PID" >>"$MAC_ONLINE_STATUS"
-          return 0
+      if skybridge_mac_wait_for_single_exact_process \
+        "$PROCESS_OWNERSHIP_HELPER" \
+        "$MAC_ONLINE_APP_BIN" \
+        20 \
+        MAC_ONLINE_PID \
+        "macOS online iPad client"; then
+        if ! skybridge_mac_capture_owned_process \
+          "$PROCESS_OWNERSHIP_HELPER" \
+          "$MAC_ONLINE_PID" \
+          "$MAC_ONLINE_APP_BIN" \
+          "$MAC_ONLINE_PROCESS_IDENTITY" \
+          "macOS online iPad client"; then
+          printf '%s failed stage=mac-online-ipad phase=launch reason=process-ownership-unverifiable\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
+          return 1
         fi
-        if (( "$(date +%s)" - started_at >= 20 )); then
-          printf '%s launch method=open-app-bundle attempt=%s result=pid-timeout\n' "$(timestamp_utc)" "$open_attempt" >>"$MAC_ONLINE_STATUS"
-          break
-        fi
-        sleep 0.25
-      done
+        printf '%s launch method=open-app-bundle pid=%s role=mac-online-ipad-client ownership=audit-token\n' "$(timestamp_utc)" "$MAC_ONLINE_PID" >>"$MAC_ONLINE_STATUS"
+        return 0
+      fi
+      printf '%s launch method=open-app-bundle attempt=%s result=pid-timeout\n' "$(timestamp_utc)" "$open_attempt" >>"$MAC_ONLINE_STATUS"
     else
       local open_status=$?
       printf '%s launch method=open-app-bundle attempt=%s result=open-failed status=%s\n' "$(timestamp_utc)" "$open_attempt" "$open_status" >>"$MAC_ONLINE_STATUS"
@@ -3772,7 +3715,10 @@ wait_for_mac_online_pattern() {
   local started_at
   started_at="$(date +%s)"
   while true; do
-    if [[ -n "$MAC_ONLINE_PID" ]] && ! kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
+    if [[ -n "$MAC_ONLINE_PID" ]] && ! skybridge_mac_owned_process_status \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_ONLINE_PID" \
+      "$MAC_ONLINE_PROCESS_IDENTITY"; then
       wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
       printf '%s failed stage=mac-online-ipad phase=wait-pattern reason=process-exited label=%s pid=%s\n' \
         "$(timestamp_utc)" "${label// /_}" "$MAC_ONLINE_PID" >>"$MAC_ONLINE_STATUS"
@@ -4698,7 +4644,10 @@ wait_for_mac_online_connected_row() {
       observe_mac_online_ipad_connected_row >>"$MAC_ONLINE_STDOUT" 2>&1; then
       return 0
     fi
-    if [[ -n "$MAC_ONLINE_PID" ]] && ! kill -0 "$MAC_ONLINE_PID" >/dev/null 2>&1; then
+    if [[ -n "$MAC_ONLINE_PID" ]] && ! skybridge_mac_owned_process_status \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_ONLINE_PID" \
+      "$MAC_ONLINE_PROCESS_IDENTITY"; then
       wait "$MAC_ONLINE_PID" >/dev/null 2>&1 || true
       MAC_ONLINE_PID=""
       printf '%s mac-online-connect-result action=button targetFamily=ipad result=failure source=OnlineDeviceCard evidenceSource=external-ax observer=accessibility status=process-exited identityKey=%s\n' "$(timestamp_utc)" "$IOS_PQC_DEVICE_ID" >>"$MAC_ONLINE_STATUS"
@@ -5101,12 +5050,55 @@ raise SystemExit("missing target-bound product P2P currentPath evidence")
 PY
 }
 
+transition_to_mac_online_ipad_client() {
+  local helper_was_registered="${MAC_HOST_HELPER_REGISTERED:-0}"
+
+  if [[ -n "$MAC_SOURCE_PID" ]]; then
+    if ! skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$MAC_SOURCE_PID" \
+      "$MAC_SOURCE_PROCESS_IDENTITY" \
+      "macOS P2P smoke source"; then
+      echo "Unable to stop the run-owned macOS smoke source before the reverse product launch." >&2
+      return 1
+    fi
+    MAC_SOURCE_PID=""
+  fi
+  if [[ -n "$HOST_PID" ]]; then
+    if ! skybridge_mac_terminate_owned_process \
+      "$PROCESS_OWNERSHIP_HELPER" \
+      "$HOST_PID" \
+      "$MAC_HOST_PROCESS_IDENTITY" \
+      "macOS P2P smoke host"; then
+      echo "Unable to stop the run-owned macOS host before the reverse product launch." >&2
+      return 1
+    fi
+    HOST_PID=""
+  fi
+  if ! sync_macos_smoke_host_artifacts; then
+    echo "Unable to persist the completed iOS-to-Mac evidence before the reverse product launch." >&2
+    return 1
+  fi
+  if [[ "$helper_was_registered" == "1" ]]; then
+    if ! cleanup_macos_smoke_host_launch_services_registration; then
+      echo "Unable to remove the temporary host registration before launching the canonical product." >&2
+      return 1
+    fi
+    if ! restore_canonical_macos_launch_services_registration_last; then
+      echo "Unable to restore the canonical product registration before the reverse product launch." >&2
+      return 1
+    fi
+  fi
+  append_host_status "mac-online-transition hostStopped=1 sourceStopped=1 temporaryRegistrationAbsent=1 canonicalRegistrationRestored=$helper_was_registered"
+}
+
 run_mac_online_ipad_button_smoke() {
   mkdir -p "$MAC_ONLINE_RUNTIME_DIR"
   : >"$MAC_ONLINE_STATUS"
   : >"$MAC_ONLINE_STATUS_ARTIFACT"
+  transition_to_mac_online_ipad_client
   build_macos_online_ipad_app
-  terminate_stale_macos_online_ipad_clients
+  require_no_external_macos_online_ipad_clients
   load_ios_pqc_report_for_mac_online
   echo "==> Starting macOS online iPad UI client"
   printf '%s launch requested role=mac-online-ipad-client process=SkyBridgeCompassApp uiRole=external-accessibility method=open-app-bundle\n' "$(timestamp_utc)" >>"$MAC_ONLINE_STATUS"
@@ -5154,7 +5146,10 @@ run_mac_online_ipad_button_smoke() {
 
 fail_if_host_exited() {
   local label="$1"
-  if [[ -n "$HOST_PID" ]] && ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+  if [[ -n "$HOST_PID" ]] && ! skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_HOST_PROCESS_IDENTITY"; then
     append_host_status "failed stage=mac-host phase=process-exited label=${label// /_}"
     echo "macOS host process exited while waiting for ${label}: ${HOST_STATUS}" >&2
     echo "---- macOS status tail ($HOST_STATUS) ----" >&2
@@ -5167,7 +5162,10 @@ fail_if_host_exited() {
 
 fail_if_smoke_source_exited() {
   local label="$1"
-  if [[ -n "$MAC_SOURCE_PID" ]] && ! kill -0 "$MAC_SOURCE_PID" >/dev/null 2>&1; then
+  if [[ -n "$MAC_SOURCE_PID" ]] && ! skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_SOURCE_PID" \
+    "$MAC_SOURCE_PROCESS_IDENTITY"; then
     append_host_status "failed stage=mac-smoke-source phase=process-exited label=${label// /_}"
     echo "macOS smoke source helper exited while waiting for ${label}: ${HOST_STATUS}" >&2
     echo "---- macOS status tail ($HOST_STATUS) ----" >&2
@@ -5292,7 +5290,10 @@ verify_host_pid_owns_listener_port() {
   local label="$2"
   local owning_pids
 
-  if [[ -z "$HOST_PID" ]] || ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+  if [[ -z "$HOST_PID" ]] || ! skybridge_mac_owned_process_status \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$HOST_PID" \
+    "$MAC_HOST_PROCESS_IDENTITY"; then
     append_host_status "failed stage=mac-host phase=listener-ownership reason=host-pid-not-running label=$label port=$port"
     return 1
   fi
@@ -7347,9 +7348,9 @@ launch_ios_remote_smoke_app() {
   done
 }
 
-terminate_stale_smoke_scripts
-terminate_stale_macos_smoke_hosts
+require_no_concurrent_smoke_scripts
 reset_smoke_artifacts
+initialize_ios_process_ownership_session
 
 echo "==> Artifacts: $ARTIFACT_DIR"
 if [[ "$IDENTITY_AUDIT_ONLY" == "1" ]]; then
@@ -7380,7 +7381,7 @@ else
   capture_ios_release_source_provenance
 fi
 
-if [[ "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+if [[ "$LAB_RUN" == "1" && "$IDENTITY_AUDIT_ONLY" != "1" && "$MAC_HOST_ONLY" != "1" && "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
   echo "==> Resolving installed iOS app and Widget distribution profiles"
   resolve_ios_distribution_signing_inputs
 fi
@@ -7554,15 +7555,30 @@ if [[ -z "$MAC_PQC_DEVICE_ID" || -z "$MAC_PQC_XWING_PUBLIC_KEY_BASE64" ]]; then
   exit 1
 fi
 
-echo "==> Building iOS app for real device"
-skybridge_detect_apple_pqc_sdk iphoneos
-if ! skybridge_apple_pqc_sdk_probe_succeeded; then
-  echo "Apple PQC SDK symbol probe failed for the iOS app; refusing to build a real-device X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
-  echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=$(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR:-}")" >&2
-  exit 1
-fi
-echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
-IOS_XCODEBUILD_SETTINGS=(
+if [[ "$LAB_RUN" != "1" ]]; then
+  if [[ -z "$IOS_RELEASE_ARCHIVE_IDENTITY" || -z "$IOS_RELEASE_TESTING_IPA" ]]; then
+    echo "Formal P2P evidence requires SKYBRIDGE_IOS_RELEASE_ARCHIVE_IDENTITY and SKYBRIDGE_IOS_RELEASE_TESTING_IPA." >&2
+    exit 2
+  fi
+  mkdir -m 0700 "$(dirname "$IOS_FORMAL_EXTRACTED_APP")"
+  echo "==> Preparing the sealed release-testing IPA without rebuilding"
+  IOS_APP_PATH="$(
+    python3 "$ROOT_DIR/Scripts/ios_physical_release_acceptance.py" prepare-product \
+      --identity "$IOS_RELEASE_ARCHIVE_IDENTITY" \
+      --release-testing-ipa "$IOS_RELEASE_TESTING_IPA" \
+      --destination-app "$IOS_FORMAL_EXTRACTED_APP"
+  )"
+  printf 'formal iOS product source=sealed-release-testing-ipa build=not-performed\n' >"$IOS_BUILD_LOG"
+else
+  echo "==> Building diagnostic iOS app for real device"
+  skybridge_detect_apple_pqc_sdk iphoneos
+  if ! skybridge_apple_pqc_sdk_probe_succeeded; then
+    echo "Apple PQC SDK symbol probe failed for the diagnostic iOS app; refusing a real-device X-Wing smoke target without HAS_APPLE_PQC_SDK." >&2
+    echo "probeMode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown} error=$(skybridge_sanitize_pqc_probe_log_value "${SKYBRIDGE_PQC_PROBE_ERROR:-}")" >&2
+    exit 1
+  fi
+  echo "==> iOS Apple PQC SDK gate passed: mode=${SKYBRIDGE_PQC_PROBE_MODE:-unknown} sdk=${SKYBRIDGE_PQC_SDK_VER:-unknown} target=${SKYBRIDGE_PQC_SWIFT_TARGET:-unknown}"
+  IOS_XCODEBUILD_SETTINGS=(
   "SKYBRIDGE_PACKAGING_BUILD_CONFIGURATION=$IOS_BUILD_CONFIGURATION"
   "SKYBRIDGE_PACKAGING_GIT_DIRTY_STATE=$IOS_SOURCE_DIRTY_STATE"
   "SKYBRIDGE_PACKAGING_GIT_COMMIT=$IOS_SOURCE_REVISION"
@@ -7572,8 +7588,8 @@ IOS_XCODEBUILD_SETTINGS=(
   "SKYBRIDGE_PACKAGING_SWIFT_ACTIVE_COMPILATION_CONDITIONS=HAS_APPLE_PQC_SDK,SKYBRIDGE_TESTING"
   SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK
   "OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"
-)
-if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
+  )
+  if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
   echo "==> Archiving iOS testing product with installed-only Automatic signing"
   skybridge_archive_ios_distribution_product \
     "$IOS_PROJECT" \
@@ -7604,7 +7620,7 @@ if [[ "$IOS_BUILD_CONFIGURATION" == "Release" ]]; then
       "$IOS_EXPORTED_APP"
   )"
   verify_source_input_binding_unchanged "ios-exported-product"
-else
+  else
   IOS_XCODEBUILD_ARGS=(
     -project "$IOS_PROJECT"
     -scheme "$IOS_SCHEME"
@@ -7619,6 +7635,7 @@ else
   verify_source_input_binding_unchanged "ios-build"
 
   IOS_APP_PATH="$ARTIFACT_DIR/DerivedData-ios/Build/Products/${IOS_BUILD_CONFIGURATION}-iphoneos/SkyBridgeCompass-iOS.app"
+  fi
 fi
 if [[ ! -d "$IOS_APP_PATH" ]]; then
   echo "iOS app bundle not found: $IOS_APP_PATH" >&2
@@ -7632,6 +7649,10 @@ if [[ ! -d "$IOS_WIDGET_BUNDLE" ]]; then
   echo "iOS Widget bundle not found at the exact product path: $IOS_WIDGET_BUNDLE" >&2
   exit 1
 fi
+if [[ "$LAB_RUN" != "1" ]]; then
+  IOS_APP_DISTRIBUTION_PROFILE="$IOS_EMBEDDED_PROFILE"
+  IOS_WIDGET_DISTRIBUTION_PROFILE="$IOS_WIDGET_EMBEDDED_PROFILE"
+fi
 if ! skybridge_profile_supports_requested_profile_backed_entitlements \
   "$IOS_EMBEDDED_PROFILE" \
   "$IOS_EXPECTED_ENTITLEMENTS"; then
@@ -7642,7 +7663,6 @@ fi
 write_ios_p2p_product_proof "$IOS_EMBEDDED_PROFILE" "$IOS_WIDGET_EMBEDDED_PROFILE"
 verify_ios_product_source_input_binding
 
-initialize_ios_process_ownership_session
 if ! skybridge_ios_require_fresh_app_launch \
   "$PROCESS_OWNERSHIP_HELPER" \
   "$IOS_DEVICE_ID" \
@@ -7882,6 +7902,7 @@ required_ios_true_fields = (
     "keychainGroupsVerified",
     "nestedWidgetVerified",
     "productionProduct",
+    "releaseVersionVerified",
 )
 ios_product_ready = (
     ios_product_proof.get("schemaVersion") == 1
@@ -7905,6 +7926,7 @@ has_formal_mac_host_identity = (
     and mac_host_stapler_valid == "1"
     and mac_host_gatekeeper_accepted == "1"
 )
+normal_product_p2p_inbound = False
 pre_cleanup_candidate = (
     not is_lab
     and trust_mode != "injected"
@@ -7913,6 +7935,7 @@ pre_cleanup_candidate = (
     and has_reverse_crypto
     and has_current_packaged_mac_online
     and has_formal_mac_host_identity
+    and normal_product_p2p_inbound
     and human_approval
     and not runtime_auto_approval
     and ios_product_ready
@@ -7943,6 +7966,16 @@ payload = {
     "macOnlineSourceCurrent": mac_online_source_current == "1",
     "macHostLaunchMode": mac_host_launch_mode,
     "macHostDiagnosticOnly": mac_host_launch_mode != "packaged",
+    "macCandidateIdentityVerified": not is_lab,
+    "macRuntimeExecutable": "LocalLanInteropHost",
+    "macProductSurface": "diagnostic-helper",
+    "macProductPath": normal_product_p2p_inbound,
+    "macDebugBuild": True,
+    "macTestingCompilationCondition": True,
+    "remoteControlNoticeProductPath": normal_product_p2p_inbound,
+    "remoteControlNoticeHumanApproval": human_approval,
+    "remoteControlNoticePanelPresented": approval_proof.get("panelActionsVerified") is True,
+    "noticeEvidenceSource": "diagnostic-helper-session",
     "identitySourceStaplerValid": mac_host_stapler_valid == "1",
     "identitySourceGatekeeperAccepted": mac_host_gatekeeper_accepted == "1",
     "iosBuildConfiguration": ios_product_proof.get("configuration"),
@@ -7956,6 +7989,9 @@ payload = {
     "iosTestingCompilationCondition": ios_product_proof.get("testingCompilationCondition") is True,
     "iosBinaryTestSurfaceDetected": ios_product_proof.get("binaryTestSurfaceDetected") is True,
     "iosProductionProduct": ios_product_proof.get("productionProduct") is True,
+    "iosReleaseVersion": ios_product_proof.get("releaseVersion"),
+    "iosReleaseBuild": ios_product_proof.get("releaseBuild"),
+    "iosReleaseVersionVerified": ios_product_proof.get("releaseVersionVerified") is True,
     "iosProductionIdentityAlgorithm": "unproven",
     "iosProductionIdentityProtection": "unproven",
     "iosProductionIdentityLifecycleVerified": ios_production_identity_lifecycle_verified,
@@ -7980,17 +8016,35 @@ pathlib.Path(output_path).write_text(
     encoding="utf-8",
 )
 PY
+if [[ "$LAB_RUN" != "1" ]]; then
+  python3 "$ROOT_DIR/Scripts/ios_physical_release_acceptance.py" bind-manifest \
+    --identity "$IOS_RELEASE_ARCHIVE_IDENTITY" \
+    --manifest "$ARTIFACT_DIR/release-acceptance.json"
+fi
 echo "==> Materializing redacted public P2P remote smoke artifacts"
 skybridge_smoke_materialize_public_artifacts "$IOS_DEVICE_LABEL" "$ARTIFACT_DIR" "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
+skybridge_verify_public_macos_release_candidate_evidence \
+  "$ROOT_DIR" \
+  "$ARTIFACT_DIR" \
+  "$PUBLIC_ARTIFACT_DIR"
 skybridge_smoke_check_public_artifacts "$PUBLIC_ARTIFACT_DIR" "$IOS_DEVICE_ID"
 echo "==> Redacted public artifacts: $PUBLIC_ARTIFACT_DIR"
+ACCEPTANCE_CANDIDATE_READY="$(python3 - "$ARTIFACT_DIR/release-acceptance.json" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+candidate = payload.get("preCleanupCandidate")
+if type(candidate) is not bool:
+    raise SystemExit("P2P pre-cleanup acceptance candidate flag is not a boolean")
+print("1" if candidate else "0")
+PY
+)"
 
 if [[ "$LAB_RUN" == "1" ]]; then
   echo "Lab run completed, but this is not an acceptance pass because SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1." >&2
   exit 2
 fi
 
-echo "==> Real-device P2P remote desktop smoke succeeded"
-echo "    mac status: $HOST_STATUS_ARTIFACT"
-echo "    ios status: $IOS_STATUS_LOCAL"
-echo "    host stdout: $HOST_STDOUT_ARTIFACT"
+echo "==> P2P acceptance candidate complete; final eligibility waits for verified process cleanup"

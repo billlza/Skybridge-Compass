@@ -72,20 +72,40 @@ export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer   # GA: poi
 
 ## 2. Real-device validation (iPad + Mac) — operator-only
 
-The signed-release gate (`.github/workflows/macos-release-readiness.yml` →
-`Scripts/check_macos_release_readiness.sh`) **fails closed** without seven release-evidence
-artifact directories: five production-identity/real-device sets and two local security-notice
-sets. Producing the real-device sets requires physical hardware and operator interaction:
+The release transaction is deliberately ordered and fail-closed:
+
+1. `.github/workflows/macos-release-readiness.yml` builds, signs, notarizes, staples,
+   and Gatekeeper-validates one candidate. It emits `macos-signed-release-candidate`
+   with `macos-release-candidate.json`.
+2. `.github/workflows/real-device-release-gate.yml` runs only on the protected physical
+   runner and behind `release-real-device-evidence` approval. Every producer must consume
+   that candidate and include the exact candidate manifest in its public artifact.
+3. `.github/workflows/macos-release-publish.yml` downloads the original candidate and the
+   four evidence archives, verifies exact candidate identity in all four, and publishes the
+   original app/DMG bytes. It never rebuilds the candidate.
+
+Both protected workflows first query their named GitHub environment and fail unless it
+exists with at least one required reviewer, `prevent_self_review=true`, and administrator
+bypass disabled. The environment must also enable exactly one protected-branch or custom
+deployment-branch policy; an all-branches environment is not an approval boundary. The
+physical runner must use GitHub Actions Runner 2.327.1 or newer (required by the pinned
+Node 24 artifact actions) and carry the `skybridge-real-device-release` label. Until those
+environments and that labeled runner are provisioned, the transaction remains intentionally
+non-runnable rather than bypassing review.
+
+SHA-256 in the candidate/file-set documents is used only to detect accidental cross-run
+or archive mismatch. Apple code signing, notarization, and Gatekeeper are the security
+boundaries.
+
+Only four evidence artifacts are release contracts. Notice/panel proof belongs inside the
+P2P and WebRTC product-session artifacts; local probes are diagnostic-only:
 
 | Artifact dir | Produced by |
 |---|---|
-| `Artifacts/release-gate/connectivity` | `Scripts/run_real_device_*smoke.sh` (connectivity) |
-| `Artifacts/release-gate/p2p-remote` | `Scripts/run_real_device_p2p_remote_smoke.sh` |
-| `Artifacts/release-gate/webrtc-remote` | `Scripts/run_real_device_webrtc_smoke.sh` |
-| `Artifacts/release-gate/file-transfer` | `Scripts/run_real_device_file_transfer_smoke.sh` |
-| `Artifacts/release-gate/p2p-notice` | remote-control notice probe |
-| `Artifacts/release-gate/webrtc-notice` | WebRTC notice probe |
-| `Artifacts/release-gate/notice-panel` | notice-panel probe |
+| `Artifacts/release-gate/connectivity` | `Scripts/run_formal_product_evidence_session.sh --kind connectivity` |
+| `Artifacts/release-gate/p2p-remote` | `Scripts/run_formal_product_evidence_session.sh --kind p2p` |
+| `Artifacts/release-gate/webrtc-remote` | `Scripts/run_formal_product_evidence_session.sh --kind webrtc` |
+| `Artifacts/release-gate/file-transfer` | `Scripts/run_formal_product_evidence_session.sh --kind file-transfer` |
 
 ### Prerequisites
 1. **iPad**: connected over USB/tunnel, Developer Mode enabled, the app's provisioning
@@ -131,22 +151,130 @@ notarized** `dist/SkyBridge Compass Pro.app` (omit the two `MAC_ONLINE` override
 
 ### Run order
 ```bash
-# 1. iOS device lane (build + on-device tests)
+# 1. Dispatch macos-release-readiness with an approved release_build_id.
+#    Download/extract macos-signed-release-candidate on the protected runner.
+export SKYBRIDGE_RELEASE_CANDIDATE_MANIFEST="<candidate>/macos-release-candidate.json"
+export SKYBRIDGE_RELEASE_CANDIDATE_APP_PATH="<candidate>/SkyBridge Compass Pro.app"
+export SKYBRIDGE_RELEASE_CANDIDATE_DMG_PATH="<candidate>/SkyBridgeCompassPro-1.0.2.dmg"
+
+# 2. iOS device lane (build + on-device tests)
 "SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh"
-# 2. The three real-device smokes (produce the artifact dirs above)
-Scripts/run_real_device_p2p_remote_smoke.sh
-Scripts/run_real_device_file_transfer_smoke.sh
-Scripts/run_real_device_webrtc_smoke.sh
-# 3. Readiness gate over the produced artifacts (seven dirs, including WebRTC remote)
+# 3. Run each ordinary-product evidence session with exact candidate/archive inputs.
+#    See Docs/ops/apple-formal-product-evidence.md for the complete invocation.
+#    First produce the one-time immutable identity lifecycle binding/proof.
+Scripts/run_formal_ios_identity_lifecycle.sh ...
+Scripts/run_formal_product_evidence_session.sh --kind connectivity ...
+Scripts/run_formal_product_evidence_session.sh --kind p2p ...
+Scripts/run_formal_product_evidence_session.sh --kind webrtc ...
+Scripts/run_formal_product_evidence_session.sh --kind file-transfer ...
+# 4. Readiness gate over the four canonical artifacts
 Scripts/check_macos_release_readiness.sh \
   --connectivity-artifact-dir ... \
   --p2p-remote-artifact-dir ... \
   --webrtc-remote-artifact-dir ... \
-  --file-transfer-artifact-dir ... \
-  --p2p-notice-artifact-dir ... \
-  --webrtc-notice-artifact-dir ... \
-  --notice-panel-artifact-dir ...
+  --file-transfer-artifact-dir ...
 ```
+
+### Formal product entry and retained diagnostic lanes
+
+The former P2P inbound receiver uses `LocalLanInteropHost`; the former WebRTC receiver
+uses `LocalWebRTCSmokeHarness`, and the iOS launch path compiles `SKYBRIDGE_TESTING`.
+Those paths remain useful diagnostics but cannot produce release evidence. The
+formal front door is `run_formal_product_evidence_session.sh`; it starts the immutable Mac
+candidate and sealed iOS Release product through ordinary entry points and requires the
+following product evidence, with no hidden smoke environment variables:
+
+| Required product observation | P2P | WebRTC |
+|---|---|---|
+| Normal UI/session start | External AX activates the normal device-row Connect/Accept action | External AX activates the normal cross-network Connect/Accept action |
+| Exact session owner | Paired Mac/iOS owners for two opaque `session_ref` values and both roles | Paired Mac/iOS owners for one opaque `session_ref`, current generations, and selected relay path |
+| Notice lifecycle | panel presented, explicit human approve/reject, active | panel presented, explicit human approve/reject, active |
+| Protected data effect | authenticated secure frame presented by the product renderer | authenticated data/media frame presented by the product renderer |
+| Input/product effect | privacy-safe input event applied and externally visible UI effect | privacy-safe input event applied and externally visible UI effect |
+| Terminal state | same owner/session disconnected and notice hidden | same owner/session disconnected and notice hidden |
+| Candidate binding | exact `macos-release-candidate.json` in artifact, verified against app/DMG | exact `macos-release-candidate.json` in artifact, verified against app/DMG |
+
+The minimal product interface should be a small typed event sink at the existing session
+coordinator/remote-control boundaries, with a production default that writes privacy-safe
+unified logging. It must not start sessions, alter approval, expose a hidden test role, or
+own networking. The producer observes normal UI via Accessibility and captures these
+ordered fields from the product log subsystem:
+
+```text
+releaseSessionOwner transport=<p2p|webrtc> session_ref=ev1:<32hex> owner=SkyBridgeCompassApp generation=<positive> state=active routeClass=<wifi|awdl>|selectedTransport=<direct|relay>
+remoteControlNoticeShown transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=awaitingApproval result=presented
+remoteControlNoticePanelPresented transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=awaitingApproval buttons=approve,reject result=visible
+remoteControlNoticeHumanApproved transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=awaitingApproval decisionSource=user result=approved
+remoteControlNoticeApproved transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=awaitingApproval decisionSource=user result=approved
+remoteControlNoticeActive transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=active result=active
+secureFrameAccepted transport=p2p session_ref=<same> owner=SkyBridgeCompassApp generation=<same> frame_seq=<positive> effect=presented proof=p2p-renderer-ack bytes=<positive> width=<positive> height=<positive>
+secureFrameAccepted transport=webrtc session_ref=<same> owner=SkyBridgeCompassApp generation=<same> frame_seq=<positive> effect=presented proof=webrtc-renderer-receipt bytes=<positive> width=<positive> height=<positive>
+localFramePresented transport=<p2p|webrtc> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> local_frame_seq=<positive> effect=presented proof=local-renderer bytes=<positive> width=<positive> height=<positive>
+remoteInputApplied transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> event_seq=<positive> effect=<pointer|keyboard|scroll> applied=1
+remoteControlNoticeDisconnected transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=terminal result=disconnected
+remoteControlNoticePanelHidden transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> phase=terminal result=hidden
+releaseSessionDisconnected transport=<...> session_ref=<same> owner=SkyBridgeCompassApp generation=<same> noticeHidden=1 reason=<user|peer|trust-invalidated|session-replaced|protocol-failure> result=disconnected
+```
+
+The production recorder caps each owner generation at 20 public evidence lines; the
+collector and parser enforce the same bound. For formal WebRTC evidence the owner must
+report `selectedTransport=relay`; for P2P it reports the measured `routeClass=wifi|awdl`.
+Only `secureFrameAccepted` with the transport-matched peer-renderer acknowledgement satisfies
+the formal protected-frame effect. `localFramePresented` is valid local renderer telemetry but
+cannot substitute for peer-side P2P acknowledgement or WebRTC renderer receipt.
+The out-of-process collector uses the exact candidate PID and this fixed predicate:
+
+```text
+subsystem == "com.skybridge.compass.release-evidence" AND category == "ProductSession"
+```
+
+Raw unified-log NDJSON stays private; only the strict lines above plus
+`mac-product-session-capture.json` enter a public artifact. The capture manifest records
+only the exact PID, public start-time token, executable name, and `ownershipVerified=true`;
+the audit token remains inside the private mode-`0700` capture directory. The collector
+calls the repository's `mac-capture` once and `mac-status` both before and after capture,
+so a same-path PID replacement is rejected without adding another digest:
+
+```bash
+Scripts/collect_product_release_evidence_log.sh \
+  --pid "$CANDIDATE_PID" \
+  --candidate-manifest "$SKYBRIDGE_RELEASE_CANDIDATE_MANIFEST" \
+  --candidate-app "$SKYBRIDGE_RELEASE_CANDIDATE_APP_PATH" \
+  --candidate-dmg "$SKYBRIDGE_RELEASE_CANDIDATE_DMG_PATH" \
+  --timeout-seconds 180 \
+  --artifact-dir "$PRIVATE_EVIDENCE_DIR"
+```
+
+Never log raw account IDs, Nebula IDs,
+device identifiers, addresses, coordinates, keystrokes, tokens, SAS values, or candidate
+paths/digests. Candidate identity remains an out-of-process manifest comparison.
+
+The formal file-transfer session uses the ordinary Send/Accept UI and exposes only
+`fileTransferStarted` and `fileTransferCompleted` with an opaque transfer reference,
+direction, final result, and a visible completion effect. It must not log file names,
+paths, contents, byte/chunk counts, devices, or
+accounts. The connectivity session captures both shipping candidates and the fixed
+`connectivityAttemptStarted`, `connectivityAttemptAuthenticated`,
+`connectivityEndpoint`, and `connectivityPolicyRejected` OSLog events from the exact Mac and
+iOS candidate processes. `mac-product-session.log` remains bound by
+`mac-product-session-capture.json`; connectivity alone additionally requires
+`ios-product-session.log` and `ios-product-session-capture.json`, whose fixed manifest binds
+the `SkyBridgeCompass-iOS` executable, bundle `com.skybridge.compass.ios`, physical iOS
+platform, while event ownership remains `SkyBridgeCompassiOS`, and the
+exact sealed release-testing archive binding. External `connectivityCase`, `connectivity-case`,
+status labels, helpers, simulator processes, debug builds, and synthetic events are not formal
+product evidence.
+
+For the three successful profile pairs (`xwing/xwing`, `xwing/pqc`, and `pqc/xwing`), the
+validator joins one Mac and one iOS endpoint by identical `attempt_ref` and `session_ref`.
+Both endpoints must report the same negotiated suite and `attemptProfile`, complementary roles,
+locally consistent generations, and a suite family actually present in each endpoint's
+`offeredProfiles`. A mixed profile pair is not assigned one hard-coded suite: either X-Wing or
+a negotiable pure-PQC suite is accepted when both actual signed offers contain that family.
+The two classic edges are expected strict-policy rejections, not successful fallback sessions:
+one shipping Mac responder and one shipping iOS responder must each emit exactly
+`started -> policyRejected`, with `peerOfferSignature=verified`, no authenticated session, and
+no endpoint. Every local attempt still has the 20-event hard limit.
 
 The P2P remote smoke defaults to the system Keychain and actual/user trust. Injected
 KEM trust or an in-memory Keychain is permitted only with
@@ -163,13 +291,16 @@ side installs the new pin until the responder's signed final acknowledgement has
 Automatic approval of a new/unpinned identity, a v2 response, a missing/expired transaction, or a
 one-sided pin is a hard failure. Compare the SAS on the Mac and iPad before accepting either prompt.
 
-The real-device WebRTC lane transfers its access token, tenant, connection code, and peer KEM
-material in a bounded one-time `0600` bootstrap file copied into the app data container. The app
-reads it off the main actor, deletes it before use, validates run ID/expiry/JWT-tenant/code/key
-bindings, and installs the session only in the in-memory Keychain. These values must never be
-added back to `devicectl --environment-variables` or the launch-result JSON. Raw smoke evidence
-directories are private (`0700`, files `0600`); only the separately materialized and scanned
-`-public-redacted` directory is shareable.
+Diagnostic WebRTC bootstrap material remains private and must never be added to release
+evidence. The formal product session uses the ordinary signed-in product session,
+system Keychain, and normal UI; it does not inject access tokens, tenant IDs, connection codes,
+peer KEM material, or `SKYBRIDGE_TESTING` through `devicectl`. Raw diagnostic directories remain
+private (`0700`, files `0600`); only separately materialized and scanned candidate-bound
+`-public-redacted` directories are shareable.
+
+The complete operator contract, exact iOS unified-log collection boundary, fixed product-only
+file contract, and private-first cleanup finalization order are documented in
+`Docs/ops/apple-formal-product-evidence.md`.
 
 ---
 

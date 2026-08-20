@@ -902,7 +902,8 @@ enum RemoteControlSecurityAdmissionPolicy {
     ) -> Bool {
         guard !isApproved else { return true }
         switch type {
-        case .streamConfiguration, .streamConfigurationAck, .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
+        case .streamConfiguration, .streamConfigurationAck, .framePresentationAck,
+             .screenData, .damageReport, .cursorUpdate, .overlayUpdate,
              .mouseEvent, .keyboardEvent, .clipboard:
             return false
         }
@@ -934,8 +935,14 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
     private var timeoutTasks: [UUID: Task<Void, Never>] = [:]
     private var disconnectHandlers: [UUID: DisconnectHandler] = [:]
     private var localIdentityProvider: LocalIdentityProvider?
+    private let productEvidenceRecorder: ProductReleaseEvidenceRecorder
+    private var productEvidenceOwnersByNoticeId:
+        [UUID: ProductReleaseEvidenceSessionOwner] = [:]
+    private var productEvidencePanelPresentedNoticeIds = Set<UUID>()
 
-    init() {}
+    init(productEvidenceRecorder: ProductReleaseEvidenceRecorder = .shared) {
+        self.productEvidenceRecorder = productEvidenceRecorder
+    }
 
     public func setLocalIdentityProvider(_ provider: LocalIdentityProvider?) {
         localIdentityProvider = provider
@@ -987,6 +994,13 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             buttons=\(Self.statusValue(buttons.joined(separator: ",")))
             """
         )
+        guard let owner = productEvidenceOwner(for: descriptor) else {
+            return
+        }
+        productEvidencePanelPresentedNoticeIds.insert(descriptor.id)
+        if phase == .awaitingApproval {
+            _ = productEvidenceRecorder.recordPendingNoticePanelPresented(owner: owner)
+        }
     }
 
     public func recordPanelHiddenEvidence(
@@ -1000,11 +1014,16 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             phase=\(phase.rawValue)
             """
         )
+        guard let owner = productEvidenceOwner(for: descriptor) else { return }
+        _ = productEvidenceRecorder.recordNoticePanelHidden(owner: owner)
+        productEvidenceOwnersByNoticeId.removeValue(forKey: descriptor.id)
+        productEvidencePanelPresentedNoticeIds.remove(descriptor.id)
     }
 
     public func requestApproval(
         _ descriptor: RemoteControlSecurityDescriptor
     ) async -> RemoteControlSecurityDecision {
+        bindProductEvidenceOwner(for: descriptor)
         if let notice = currentNotice, notice.phase == .active {
             if notice.descriptor.sessionId == descriptor.sessionId,
                notice.descriptor.transportKind == descriptor.transportKind {
@@ -1275,6 +1294,9 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         timeoutTasks.removeValue(forKey: id)?.cancel()
         approvalContinuations.removeValue(forKey: id)
         disconnectHandlers.removeValue(forKey: id)
+        if !productEvidencePanelPresentedNoticeIds.contains(id) {
+            productEvidenceOwnersByNoticeId.removeValue(forKey: id)
+        }
     }
 
     private func cleanupIncomingNoticeState(
@@ -1303,6 +1325,50 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             device=\(Self.statusValue(descriptor.remoteDeviceName ?? descriptor.remoteDeviceId)) \
             cryptoSuite=\(Self.statusValue(descriptor.cryptoSuite))
             """
+        )
+        guard let owner = productEvidenceOwner(for: descriptor) else { return }
+        let recorder = productEvidenceRecorder
+        switch event {
+        case "Shown":
+            _ = recorder.recordNoticeShown(owner: owner)
+        case "HumanApproved":
+            _ = recorder.recordNoticeHumanApproved(owner: owner)
+        case "Approved":
+            _ = recorder.recordNoticeApproved(owner: owner)
+        case "Active":
+            _ = recorder.recordNoticeActive(owner: owner)
+        case "Rejected":
+            _ = recorder.recordNoticeTerminated(owner: owner, result: .rejected)
+        case "TimedOut":
+            _ = recorder.recordNoticeTerminated(owner: owner, result: .timedOut)
+        case "Disconnected":
+            _ = recorder.recordNoticeTerminated(owner: owner, result: .disconnected)
+        default:
+            break
+        }
+    }
+
+    private func productEvidenceOwner(
+        for descriptor: RemoteControlSecurityDescriptor
+    ) -> ProductReleaseEvidenceSessionOwner? {
+        productEvidenceOwnersByNoticeId[descriptor.id]
+    }
+
+    private func bindProductEvidenceOwner(
+        for descriptor: RemoteControlSecurityDescriptor
+    ) {
+        guard productEvidenceOwnersByNoticeId[descriptor.id] == nil,
+              let sessionReference = descriptor.sessionEvidenceReference else {
+            return
+        }
+        let transport: ProductReleaseEvidenceTransport = switch descriptor.transportKind {
+        case .p2p: .p2p
+        case .webrtc: .webrtc
+        }
+        productEvidenceOwnersByNoticeId[descriptor.id] = productEvidenceRecorder.currentOwner(
+            product: .macOSApp,
+            transport: transport,
+            sessionReference: sessionReference
         )
     }
 

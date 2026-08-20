@@ -11,11 +11,96 @@
 //
 
 import CryptoKit
+import Network
 import XCTest
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
 final class P2PTrustSyncTests: XCTestCase {
+
+    @MainActor
+    func testTrustInvalidationDisconnectsOnlyTheExactCurrentP2PAuthority() async throws {
+        let suffix = UUID().uuidString.lowercased()
+        let oldRecordId = "id:old-invalidation-\(suffix)"
+        let replacementRecordId = "id:replacement-invalidation-\(suffix)"
+        let routeKey = "id:shared-route-\(suffix)"
+        let oldPublicKey = Data(repeating: 0x31, count: 32)
+        let replacementPublicKey = Data(repeating: 0x42, count: 32)
+        let oldFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: oldPublicKey
+        )
+        let replacementFingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: replacementPublicKey
+        )
+        let trust = TrustSyncService.shared
+        trust.setInMemoryPersistenceForTesting(true)
+        try await trust.removeRecordsForTesting(deviceIds: [oldRecordId, replacementRecordId])
+        addTeardownBlock { @MainActor [trust] in
+            try await trust.removeRecordsForTesting(deviceIds: [oldRecordId, replacementRecordId])
+            trust.setInMemoryPersistenceForTesting(false)
+        }
+
+        for (recordId, publicKey, fingerprint) in [
+            (oldRecordId, oldPublicKey, oldFingerprint),
+            (replacementRecordId, replacementPublicKey, replacementFingerprint),
+        ] {
+            _ = try await trust.addTrustRecord(
+                TrustRecord(
+                    deviceId: recordId,
+                    pubKeyFP: "",
+                    publicKey: Data(),
+                    protocolPublicKey: publicKey,
+                    protocolSigningAlgorithm: .ed25519,
+                    protocolPublicKeyFingerprint: fingerprint,
+                    signature: Data(),
+                    currentDeviceId: routeKey,
+                    knownDeviceIds: [routeKey],
+                    lifecycleState: .active
+                )
+            )
+        }
+
+        let networkConnection = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        defer { networkConnection.cancel() }
+        let replacementConnection = P2PConnection(
+            device: P2PDevice(
+                id: routeKey,
+                name: "Replacement peer",
+                type: .macOS,
+                address: "127.0.0.1",
+                port: 9,
+                osVersion: "test",
+                capabilities: [],
+                publicKey: Data(),
+                lastSeen: Date()
+            ),
+            connection: networkConnection
+        )
+        replacementConnection.testingSetStatus(.authenticated)
+        replacementConnection.testingSetAuthenticatedRemoteAuthority(
+            AuthenticatedRemoteAuthority(
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: replacementFingerprint,
+                protocolPublicKey: replacementPublicKey
+            )
+        )
+        let manager = P2PDiscoveryService()
+        manager.testingReplaceAuthenticatedConnections([routeKey: replacementConnection])
+
+        try await trust.revokeTrustRecord(deviceId: oldRecordId)
+        XCTAssertTrue(
+            manager.activeAuthenticatedConnectionsForClassicTransfer().contains {
+                $0 === replacementConnection
+            },
+            "Revoking a stale authority must not disconnect a same-route replacement"
+        )
+
+        try await trust.revokeTrustRecord(deviceId: replacementRecordId)
+        XCTAssertTrue(manager.activeAuthenticatedConnectionsForClassicTransfer().isEmpty)
+        XCTAssertEqual(replacementConnection.status, .disconnected)
+    }
     
  // MARK: - Property 10: Trust Record Round-Trip Serialization
     
@@ -816,11 +901,15 @@ final class P2PTrustSyncTests: XCTestCase {
         XCTAssertTrue(source.contains("private func upsertFallbackRecord(_ record: TrustRecord) throws"))
         XCTAssertTrue(source.contains("private func removeFallbackRecord(deviceId: String) throws"))
         XCTAssertTrue(source.contains("private func deleteFromKeychain(deviceId: String) throws"))
+        XCTAssertTrue(source.contains("fallbackCleanupErrorAfterAuthoritativeCommit"))
+        XCTAssertTrue(source.contains("fallbackCleanupFailedAfterAuthoritativeCommit"))
+        XCTAssertTrue(source.contains("if let postCommitError"))
         XCTAssertTrue(source.contains("let status = SecItemDelete(query as CFDictionary)"))
         XCTAssertTrue(source.contains("throw TrustSyncError.keychainError(status)"))
         XCTAssertFalse(source.contains("SecItemDelete(query as CFDictionary)\n        try removeFallbackRecord"))
         XCTAssertFalse(source.contains("try? storeFallbackRecords"))
         XCTAssertFalse(source.contains("try? Self.protectedFallbackRecordStore.remove()"))
+        XCTAssertFalse(source.contains("stale fallback cleanup failed and will be retried"))
         XCTAssertTrue(source.contains("func removeRecordsForTesting(deviceIds: [String]) async throws"))
         XCTAssertTrue(source.contains("try deleteFromKeychain(deviceId: deviceId)"))
         XCTAssertFalse(source.contains("preconditionFailure(\"failed to remove trust record for testing"))
@@ -829,17 +918,59 @@ final class P2PTrustSyncTests: XCTestCase {
     func testLocalTrustRecordLoadVerifiesSignaturesBeforeMerging() throws {
         let source = try readSource("Sources/SkyBridgeCore/P2P/TrustSyncService.swift")
 
+        // 逐条验签的 hardening 不允许回退：每条记录都必须过 verifyRecordSignature，
+        // legacy 记录只在安全字段状态下才可接受。
         XCTAssertTrue(source.contains("private func verifiedTrustRecordsForLocalLoad("))
-        XCTAssertTrue(source.contains("guard try await verifyRecordSignature(record) else"))
+        XCTAssertTrue(source.contains("isValid = try await verifyRecordSignature(record)"))
         XCTAssertTrue(source.contains("reason=invalid_signature device=redacted"))
         XCTAssertTrue(source.contains("reason=verification_error"))
-        XCTAssertTrue(source.contains("let verifiedRecords = await verifiedTrustRecordsForLocalLoad(allRecords, source: \"Keychain sync\")"))
-        XCTAssertTrue(source.contains("Rejected malformed \\(source, privacy: .public) trust record during local load"))
-        XCTAssertTrue(source.contains("throw TrustSyncError.decodingError(\"trust record index \\(index): \\(error.localizedDescription)"))
+        XCTAssertTrue(source.contains("private func hasSafeLegacyUnsignedFields(_ record: TrustRecord) -> Bool"))
+        XCTAssertTrue(source.contains("hasSafeLegacyUnsignedFields(record)"))
+
+        // 加载契约：单条不可验证的记录只跳过（skip-and-continue），绝不抛错中断，
+        // 否则第一条坏记录就会把整个 trust store 永久打死，撤销检查随之 fail open。
+        let verifierStart = try XCTUnwrap(
+            source.range(of: "private func verifiedTrustRecordsForLocalLoad(")
+        )
+        let verifierEnd = try XCTUnwrap(
+            source.range(
+                of: "private func retainDenyOnlyTombstoneIfNeeded(",
+                range: verifierStart.upperBound..<source.endIndex
+            )
+        )
+        let verifierBody = String(source[verifierStart.lowerBound..<verifierEnd.lowerBound])
+        XCTAssertTrue(verifierBody.contains(") async -> LocalLoadVerification"))
+        XCTAssertFalse(verifierBody.contains("async throws"))
+        XCTAssertFalse(verifierBody.contains("throw "))
+        XCTAssertTrue(verifierBody.contains("continue"))
+
+        // 无法本机验证的 tombstone（iCloud 异设备撤销）保留为仅拒绝记录，
+        // 并与已验证记录走同一条 revoke 优先的合并路径。
+        XCTAssertTrue(source.contains("retainDenyOnlyTombstoneIfNeeded(record, in: &verification, source: source)"))
+        XCTAssertTrue(source.contains("guard record.isTombstone else { return }"))
+        XCTAssertTrue(source.contains("for tombstone in verification.denyOnlyTombstones { merge(tombstone) }"))
+        XCTAssertTrue(source.contains("for record in verification.verifiedRecords { merge(record) }"))
+
+        // 可用性门：keychain 可读时必须提交 mergedCache；只有整库硬失败才置
+        // isLocalStoreAvailable = false，同步准入读取随之 fail closed。
+        XCTAssertTrue(source.contains("localCache = mergedCache"))
+        XCTAssertTrue(source.contains("private(set) var isLocalStoreAvailable = true"))
+        XCTAssertTrue(source.contains("isLocalStoreAvailable = false"))
+        XCTAssertTrue(source.contains("guard isLocalStoreAvailable else { return .quarantinedIdentity }"))
+        XCTAssertFalse(source.contains("loadFailure = .conflictResolutionFailed"))
+
+        // 单条 keychain item 的解码/账户错配错误按条跳过，整库查询失败仍是硬错误。
+        XCTAssertTrue(source.contains("return items.enumerated().compactMap { index, item in"))
+        XCTAssertTrue(source.contains("Skipped keychain trust item during local load"))
+        XCTAssertTrue(source.contains("reason=account_identity_mismatch"))
+        XCTAssertTrue(source.contains("Self.keychainAccount(account, matchesRecordDeviceId: record.deviceId)"))
+        XCTAssertFalse(source.contains("throw TrustSyncError.decodingError(\"Keychain item"))
+        XCTAssertFalse(source.contains("throw TrustSyncError.decodingError(\n                    \"Keychain trust record"))
+
         XCTAssertTrue(source.contains("try Self.protectedFallbackRecordStore.loadOrThrow() ?? []"))
+        XCTAssertTrue(source.contains("items = a + b"))
+        XCTAssertFalse(source.contains("func copyDataItems"))
         XCTAssertFalse(source.contains("for record in allRecords {"))
-        XCTAssertFalse(source.contains("for record in records { merge(record) }"))
-        XCTAssertFalse(source.contains("for record in fallbackRecords { merge(record) }"))
         XCTAssertFalse(source.contains("if let record = try? decoder.decode(TrustRecord.self, from: data)"))
     }
 
@@ -1058,15 +1189,17 @@ final class P2PTrustSyncTests: XCTestCase {
     
  /// Test tombstone expiration
     func testTombstoneExpiration() {
- // Create tombstone with old revokedAt
+        let expiredAt = Date().addingTimeInterval(-31 * 24 * 60 * 60)
+ // Create tombstone with old signed update time
         let expiredTombstone = TrustRecord(
             deviceId: "expired-tombstone",
             pubKeyFP: String(repeating: "a", count: 64),
             publicKey: Data(repeating: 0x01, count: 32),
             attestationLevel: .none,
+            updatedAt: expiredAt,
             signature: Data(repeating: 0xAA, count: 64),
             recordType: .revoke,
-            revokedAt: Date().addingTimeInterval(-31 * 24 * 60 * 60) // 31 days ago
+            revokedAt: expiredAt
         )
         
  // Property: Old tombstone should be expired

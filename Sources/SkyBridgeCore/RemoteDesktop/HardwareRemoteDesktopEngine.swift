@@ -492,7 +492,7 @@ private class MetalFrameProcessor: @unchecked Sendable {
  // 创建计算管线
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: ["RemoteDesktopShaders"],
             requiredFunctionNames: ["scaleFrame"]
         ),

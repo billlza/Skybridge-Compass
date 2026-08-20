@@ -16,7 +16,7 @@ public enum SkyBridgeMetalShaderLibraryError: LocalizedError {
 
 public enum SkyBridgeMetalShaderLibrary {
     internal static var coreResourceBundle: Bundle {
-        Bundle.module
+        SkyBridgeResourceBundleLocator.core
     }
 
     public static let coreShaderResourceNames = [

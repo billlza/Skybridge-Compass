@@ -62,6 +62,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         public let framesSent: UInt64
         public let packetsSent: UInt64
         public let bytesSent: UInt64
+        public let audioPacketsSent: UInt64
+        public let audioBytesSent: UInt64
         public let nackCount: UInt64
         public let pliCount: UInt64
         public let firCount: UInt64
@@ -102,6 +104,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             framesSent: 0,
             packetsSent: 0,
             bytesSent: 0,
+            audioPacketsSent: 0,
+            audioBytesSent: 0,
             nackCount: 0,
             pliCount: 0,
             firCount: 0,
@@ -3019,6 +3023,12 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             let mediaType = stringValue(stat, key: "mediaType")?.lowercased()
             return kind == "video" || mediaType == "video"
         }
+        let outboundAudioStats = statsById.values.filter { stat in
+            guard stat.type.lowercased() == "outbound-rtp" else { return false }
+            let kind = stringValue(stat, key: "kind")?.lowercased()
+            let mediaType = stringValue(stat, key: "mediaType")?.lowercased()
+            return kind == "audio" || mediaType == "audio"
+        }
 
         let remoteInboundVideoStats = statsById.values.filter { stat in
             guard stat.type.lowercased() == "remote-inbound-rtp" else { return false }
@@ -3043,6 +3053,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         var framesSent: UInt64 = 0
         var packetsSent: UInt64 = 0
         var bytesSent: UInt64 = 0
+        var audioPacketsSent: UInt64 = 0
+        var audioBytesSent: UInt64 = 0
         var nackCount: UInt64 = 0
         var pliCount: UInt64 = 0
         var firCount: UInt64 = 0
@@ -3084,6 +3096,10 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
                     ?? stringValue(codecStat, key: "codec")
             }
         }
+        for stat in outboundAudioStats {
+            audioPacketsSent &+= uintValue(stat, keys: ["packetsSent"])
+            audioBytesSent &+= uintValue(stat, keys: ["bytesSent"])
+        }
 
         var remotePacketsLost: Int64 = 0
         var remoteJitter: Double?
@@ -3111,6 +3127,8 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             framesSent: framesSent,
             packetsSent: packetsSent,
             bytesSent: bytesSent,
+            audioPacketsSent: audioPacketsSent,
+            audioBytesSent: audioBytesSent,
             nackCount: nackCount,
             pliCount: pliCount,
             firCount: firCount,

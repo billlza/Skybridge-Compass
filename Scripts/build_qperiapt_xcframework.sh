@@ -54,14 +54,31 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"
 }
 
-for command in curl shasum unzip codesign lipo cmp find grep awk paste tr python3 rustc; do
+for command in curl shasum unzip codesign lipo cmp find grep awk paste tr python3 rustup; do
   need_cmd "$command"
 done
 
-RUST_HOST="$(rustc -vV | awk '/^host:/ { print $2 }')"
-RUST_SYSROOT="$(rustc --print sysroot)"
+QPERIAPT_INSPECTION_TOOLCHAIN="$(python3 - "$PROVENANCE_SOURCE" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+toolchain = record.get("upstream_artifact", {}).get("rust_toolchain")
+if not isinstance(toolchain, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", toolchain) is None:
+    raise SystemExit("Q-Periapt provenance has no exact Rust producer toolchain")
+print(toolchain)
+PY
+)"
+RUST_VERSION="$(rustup run "$QPERIAPT_INSPECTION_TOOLCHAIN" rustc --version 2>/dev/null || true)"
+[[ "$RUST_VERSION" == "rustc ${QPERIAPT_INSPECTION_TOOLCHAIN} "* ]] \
+  || fail "Q-Periapt inspection requires Rust ${QPERIAPT_INSPECTION_TOOLCHAIN} with llvm-tools-preview"
+RUST_HOST="$(rustup run "$QPERIAPT_INSPECTION_TOOLCHAIN" rustc -vV | awk '/^host:/ { print $2 }')"
+RUST_SYSROOT="$(rustup run "$QPERIAPT_INSPECTION_TOOLCHAIN" rustc --print sysroot)"
 LLVM_NM="$RUST_SYSROOT/lib/rustlib/$RUST_HOST/bin/llvm-nm"
-[[ -x "$LLVM_NM" ]] || fail "Rust llvm-nm not found: $LLVM_NM"
+[[ -x "$LLVM_NM" ]] \
+  || fail "Rust ${QPERIAPT_INSPECTION_TOOLCHAIN} llvm-nm not found; install llvm-tools-preview"
 [[ -f "$PROVENANCE_SOURCE" ]] || fail "Missing checked-in Q-Periapt provenance: $PROVENANCE_SOURCE"
 
 sha256_of() {

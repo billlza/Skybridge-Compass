@@ -301,7 +301,7 @@ public final class Metal4RenderingEngine: NSObject, ObservableObject {
             }
             let library = try SkyBridgeMetalShaderLibrary.load(
                 device: device,
-                bundle: Bundle.module,
+                bundle: SkyBridgeResourceBundleLocator.core,
                 sourceResourceNames: ["WeatherShaders"],
                 requiredFunctionNames: [
                     "particle_update_compute",

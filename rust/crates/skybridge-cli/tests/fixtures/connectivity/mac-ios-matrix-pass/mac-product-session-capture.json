@@ -1,0 +1,14 @@
+{
+  "candidateIdentityFile": "macos-release-candidate.json",
+  "candidateIdentityVerified": true,
+  "captureMode": "unified-log-process-bound",
+  "category": "ProductSession",
+  "eventCount": 11,
+  "ownershipVerified": true,
+  "processExecutable": "SkyBridgeCompassApp",
+  "processID": 4321,
+  "profile": "skybridge-product-release-evidence-capture",
+  "schemaVersion": 1,
+  "startTimeToken": "1700000000:123456",
+  "subsystem": "com.skybridge.compass.release-evidence"
+}

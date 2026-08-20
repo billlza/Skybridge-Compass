@@ -809,6 +809,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         let pbxproj = try readSource("SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj")
         let deviceLane = try readSource("SkyBridge Compass iOS/Scripts/test_lane_ios_device.sh")
         let releaseProducer = try readSource("Scripts/build_ios_release_candidate.sh")
+        let releaseVerifier = try readSource("Scripts/verify_ios_release_candidate.py")
 
         let forbiddenPattern = try NSRegularExpression(
             pattern: #"SWIFT_ACTIVE_COMPILATION_CONDITIONS\[sdk=(iphoneos|iphonesimulator)[0-9]+\*\].*HAS_APPLE_PQC_SDK"#
@@ -837,6 +838,15 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(releaseProducer.contains(#"source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh""#))
         XCTAssertTrue(releaseProducer.contains("skybridge_require_apple_pqc_sdk_symbol_probe iphoneos"))
         XCTAssertTrue(releaseProducer.contains("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK"))
+        XCTAssertTrue(releaseProducer.contains("validate_release_output_directory.py"))
+        XCTAssertTrue(releaseProducer.contains("verify_source_snapshot \"archive\""))
+        XCTAssertTrue(releaseProducer.contains("verify_source_snapshot \"export\""))
+        XCTAssertTrue(releaseProducer.contains("verify_ios_release_candidate.py"))
+        XCTAssertTrue(
+            releaseVerifier.contains(
+                "from devicectl_device_selection import installable_physical_ios_profile_identifiers"
+            )
+        )
     }
 
     func testMacOSSwiftPMScopesWebRTCAudioHeaderOverlayAndTestRPath() throws {
@@ -1468,7 +1478,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
 
         guard
             let sourceContractsRange = workflow.range(of: "  os27-source-contracts:"),
-            let signedReleaseRange = workflow.range(of: "  macos-signed-release-gate:")
+            let signedReleaseRange = workflow.range(of: "  macos-signed-release-candidate:")
         else {
             return XCTFail("Release workflow must keep os27-source-contracts as a separate job before signed release evaluation.")
         }

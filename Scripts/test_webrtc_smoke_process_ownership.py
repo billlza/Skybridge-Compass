@@ -24,6 +24,8 @@ import webrtc_smoke_process_ownership as ownership
 SMOKE_SCRIPT = SCRIPT_DIR / "run_real_device_webrtc_smoke.sh"
 FILE_TRANSFER_SMOKE_SCRIPT = SCRIPT_DIR / "run_real_device_file_transfer_smoke.sh"
 P2P_REMOTE_SMOKE_SCRIPT = SCRIPT_DIR / "run_real_device_p2p_remote_smoke.sh"
+MACOS_RELEASE_READINESS_SCRIPT = SCRIPT_DIR / "check_macos_release_readiness.sh"
+SHARED_PROCESS_OWNERSHIP_SCRIPT = SCRIPT_DIR / "real_device_ios_process_ownership.sh"
 
 
 class PrivateWorkspaceTestCase(unittest.TestCase):
@@ -66,6 +68,33 @@ class MacProcessOwnershipTests(PrivateWorkspaceTestCase):
         self.assertEqual(payload["auditToken"][5], self.process.pid)
         self.assertEqual(identity.stat().st_mode & 0o777, 0o600)
         self.assertEqual(ownership.mac_status(identity), ownership.MATCH)
+
+    def test_exact_executable_discovery_uses_canonical_binary_path(self) -> None:
+        matching_pids = ownership.mac_exact_executable_pids(pathlib.Path("/bin/sleep"))
+        unrelated_pids = ownership.mac_exact_executable_pids(pathlib.Path("/bin/echo"))
+
+        self.assertIn(self.process.pid, matching_pids)
+        self.assertNotIn(self.process.pid, unrelated_pids)
+
+    def test_current_user_process_inspection_failure_does_not_prove_absence(self) -> None:
+        bsd_info = ownership.ProcBSDInfo()
+        bsd_info.pbi_uid = os.geteuid()
+        with mock.patch.object(
+            ownership, "_all_mac_process_identifiers", return_value=[4321]
+        ):
+            with mock.patch.object(
+                ownership, "_read_mac_bsd_info_once", return_value=bsd_info
+            ):
+                with mock.patch.object(
+                    ownership,
+                    "_read_mac_executable_path_once",
+                    side_effect=ownership.OwnershipError("fixture"),
+                ):
+                    with self.assertRaisesRegex(
+                        ownership.OwnershipError,
+                        "cannot prove executable absence for current-user PID 4321",
+                    ):
+                        ownership.mac_exact_executable_pids(pathlib.Path("/bin/sleep"))
 
     def test_start_token_mismatch_is_unverifiable_and_does_not_signal_process(self) -> None:
         identity = self.private_directory / "mac.json"
@@ -260,7 +289,7 @@ class SmokeSourceContractTests(unittest.TestCase):
 
     def test_mac_identity_is_captured_immediately_after_launch(self) -> None:
         launch_assignment = self.source.index('MAC_PID="$!"')
-        capture = self.source.index('"$PROCESS_OWNERSHIP_HELPER" mac-capture', launch_assignment)
+        capture = self.source.index("skybridge_mac_capture_owned_process", launch_assignment)
         first_business_wait = self.source.index('wait_for_file_nonempty "$MAC_CODE"', launch_assignment)
 
         self.assertLess(launch_assignment, capture)
@@ -268,15 +297,38 @@ class SmokeSourceContractTests(unittest.TestCase):
 
     def test_mac_term_and_kill_are_both_guarded_by_exact_status_checks(self) -> None:
         body = self.function_body("terminate_mac_host")
-        term = body.index("--signal TERM")
-        kill = body.index("--signal KILL")
-        checks = [match.start() for match in re.finditer(r' mac-status --identity ', body)]
+        shared_source = SHARED_PROCESS_OWNERSHIP_SCRIPT.read_text(encoding="utf-8")
+        shared_match = re.search(
+            r"(?ms)^skybridge_mac_terminate_owned_process\(\) \{\n(.*?)^\}\n",
+            shared_source,
+        )
+        self.assertIsNotNone(shared_match)
+        shared_body = shared_match.group(1)
+        term = shared_body.index("--signal TERM")
+        kill = shared_body.index("--signal KILL")
+        checks = [
+            match.start()
+            for match in re.finditer("skybridge_mac_owned_process_status", shared_body)
+        ]
 
+        self.assertIn("skybridge_mac_terminate_owned_process", body)
         self.assertTrue(any(check < term for check in checks))
         self.assertTrue(any(term < check < kill for check in checks))
-        self.assertNotIn('kill -TERM "$target_pid"', body)
-        self.assertNotIn('kill -KILL "$target_pid"', body)
-        self.assertNotIn('kill -0 "$target_pid"', body)
+        self.assertNotIn("kill -TERM", shared_body)
+        self.assertNotIn("kill -KILL", shared_body)
+        self.assertNotIn("kill -0", shared_body)
+
+    def test_product_launch_fails_on_external_exact_executable_and_avoids_new_instance(self) -> None:
+        product_launch = self.source.index('if [[ "$MAC_HOST_MODE" == "product" ]]')
+        absence = self.source.index("skybridge_mac_require_executable_absent", product_launch)
+        launch = self.source.index('/usr/bin/open "${open_args[@]}"', absence)
+        discovery = self.source.index("skybridge_mac_wait_for_single_exact_process", launch)
+        capture = self.source.index("skybridge_mac_capture_owned_process", discovery)
+
+        self.assertLess(absence, launch)
+        self.assertLess(launch, discovery)
+        self.assertLess(discovery, capture)
+        self.assertNotIn("open_args=(\n    -n", self.source)
 
     def test_ios_console_handle_is_captured_before_launch_returns_success(self) -> None:
         body = self.function_body("launch_ios_app_with_console_handle")
@@ -396,6 +448,19 @@ class FileTransferSmokeSourceContractTests(unittest.TestCase):
         self.assertIn("destroy_process_ownership_session", self.function_body("cleanup"))
         self.assertNotIn('IOS_PROCESS_IDENTITY="$ARTIFACT_DIR/', self.source)
 
+    def test_macos_host_uses_shared_exact_ownership_for_launch_and_cleanup(self) -> None:
+        cleanup = self.function_body("cleanup")
+        self.assertIn(
+            'MAC_PROCESS_IDENTITY="$PROCESS_OWNERSHIP_PRIVATE_DIR/mac-process-identity.json"',
+            self.source,
+        )
+        self.assertIn("skybridge_mac_require_executable_absent", self.source)
+        self.assertIn("skybridge_mac_wait_for_single_exact_process", self.source)
+        self.assertIn("skybridge_mac_capture_owned_process", self.source)
+        self.assertIn("skybridge_mac_terminate_owned_process", cleanup)
+        self.assertNotIn('kill "$HOST_PID"', cleanup)
+        self.assertNotIn("OPEN_ARGS=(-n", self.source)
+
 
 class P2PRemoteSmokeSourceContractTests(unittest.TestCase):
     @classmethod
@@ -409,9 +474,9 @@ class P2PRemoteSmokeSourceContractTests(unittest.TestCase):
             raise AssertionError(f"missing shell function: {name}")
         return match.group(1)
 
-    def test_launch_requires_absence_and_captures_exact_console_handle(self) -> None:
+    def test_launch_requires_preinstall_absence_and_captures_exact_console_handle(self) -> None:
         body = self.function_body("launch_ios_remote_smoke_app")
-        absence = body.index("skybridge_ios_require_fresh_app_launch")
+        absence = body.index("IOS_PREINSTALL_ABSENCE_PROVEN")
         launch = body.index("skybridge_ios_start_console_launch", absence)
         capture = body.index("skybridge_ios_capture_console_handle", launch)
         captured = body.index("IOS_CONSOLE_HANDLE_CAPTURED=1", capture)
@@ -420,7 +485,6 @@ class P2PRemoteSmokeSourceContractTests(unittest.TestCase):
         self.assertLess(launch, capture)
         self.assertLess(capture, captured)
         self.assertIn("else\n      handle_status=$?", body)
-        self.assertNotIn("--terminate-existing", body)
 
     def test_disconnect_cleanup_proves_exact_exit_before_receipt(self) -> None:
         body = self.function_body("terminate_ios_remote_smoke_app_exact")
@@ -473,6 +537,71 @@ class P2PRemoteSmokeSourceContractTests(unittest.TestCase):
         self.assertIn("wait_for_same_session_notice_disconnected", disconnect)
         self.assertNotIn("wait_for_file_pattern", disconnect)
 
+    def test_all_macos_product_roles_use_private_exact_ownership(self) -> None:
+        cleanup = self.function_body("cleanup")
+        for identity_name in (
+            "MAC_HOST_PROCESS_IDENTITY",
+            "MAC_SOURCE_PROCESS_IDENTITY",
+            "MAC_ONLINE_PROCESS_IDENTITY",
+        ):
+            self.assertIn(f'{identity_name}="$PROCESS_OWNERSHIP_PRIVATE_DIR/', self.source)
+            self.assertIn(f'"${identity_name}"', cleanup)
+        self.assertGreaterEqual(self.source.count("skybridge_mac_capture_owned_process"), 3)
+        self.assertGreaterEqual(cleanup.count("skybridge_mac_terminate_owned_process"), 3)
+        self.assertNotIn("terminate_stale_macos_smoke_hosts", self.source)
+        self.assertNotIn("terminate_stale_macos_online_ipad_clients", self.source)
+        self.assertNotRegex(self.source, r"(?m)^\s+-n\s*\\?$")
+
+    def test_reverse_product_launch_stops_same_bundle_identity_host_first(self) -> None:
+        transition = self.function_body("transition_to_mac_online_ipad_client")
+        reverse_smoke = self.function_body("run_mac_online_ipad_button_smoke")
+
+        source_stop = transition.index('"$MAC_SOURCE_PROCESS_IDENTITY"')
+        host_stop = transition.index('"$MAC_HOST_PROCESS_IDENTITY"', source_stop)
+        unregister = transition.index(
+            "cleanup_macos_smoke_host_launch_services_registration", host_stop
+        )
+        restore = transition.index(
+            "restore_canonical_macos_launch_services_registration_last", unregister
+        )
+        transition_call = reverse_smoke.index("transition_to_mac_online_ipad_client")
+        product_build = reverse_smoke.index("build_macos_online_ipad_app", transition_call)
+
+        self.assertLess(source_stop, host_stop)
+        self.assertLess(host_stop, unregister)
+        self.assertLess(unregister, restore)
+        self.assertLess(transition_call, product_build)
+
+    def test_launch_services_restore_obligation_survives_partial_cleanup(self) -> None:
+        cleanup = self.function_body("cleanup")
+        register_host = self.function_body("register_macos_smoke_host_app_bundle")
+        register_online = self.function_body("register_macos_online_ipad_app_bundle")
+        restore = self.function_body(
+            "restore_canonical_macos_launch_services_registration_last"
+        )
+
+        self.assertIn("MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=0", self.source)
+        self.assertIn("MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=1", register_host)
+        self.assertIn("MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=1", register_online)
+        self.assertIn("MAC_LAUNCH_SERVICES_RESTORE_REQUIRED=0", restore)
+        self.assertIn('"${MAC_LAUNCH_SERVICES_RESTORE_REQUIRED:-0}" == "1"', cleanup)
+
+
+class MacOSReleaseReadinessSourceContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = MACOS_RELEASE_READINESS_SCRIPT.read_text(encoding="utf-8")
+
+    def test_launch_smoke_is_single_instance_and_audit_token_owned(self) -> None:
+        self.assertIn("skybridge_mac_require_executable_absent", self.source)
+        self.assertIn("skybridge_mac_wait_for_single_exact_process", self.source)
+        self.assertIn("skybridge_mac_capture_owned_process", self.source)
+        self.assertIn("skybridge_mac_terminate_owned_process", self.source)
+        self.assertIn('open -F -g "${app_path}"', self.source)
+        self.assertNotIn('open -Fn -g "${app_path}"', self.source)
+        self.assertNotIn('kill -TERM "${new_pid}"', self.source)
+        self.assertNotIn('kill -KILL "${new_pid}"', self.source)
+
 
 class CLIFailClosedTests(unittest.TestCase):
     def test_unexpected_helper_failure_is_not_reported_as_process_absence(self) -> None:
@@ -481,6 +610,18 @@ class CLIFailClosedTests(unittest.TestCase):
 
         self.assertEqual(status, ownership.UNVERIFIABLE)
         self.assertNotEqual(status, ownership.ABSENT)
+
+    def test_exact_executable_enumeration_failure_is_unverifiable(self) -> None:
+        with mock.patch.object(
+            ownership,
+            "mac_exact_executable_pids",
+            side_effect=RuntimeError("fixture"),
+        ):
+            status = ownership.main(
+                ["mac-list-exact", "--expected-executable", "/bin/sleep"]
+            )
+
+        self.assertEqual(status, ownership.UNVERIFIABLE)
 
 
 if __name__ == "__main__":

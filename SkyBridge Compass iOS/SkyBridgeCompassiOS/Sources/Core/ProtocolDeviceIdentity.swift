@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Security
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 public enum ProtocolSigningKeyProtection: String, Codable, Sendable, CaseIterable {
@@ -676,6 +677,7 @@ struct CommittedIOSProtocolIdentitySnapshot: Sendable {
     let protection: ProtocolSigningKeyProtection
     let publicKey: Data
     let keyHandle: SigningKeyHandle
+    let resolutionDisposition: ProtocolSigningIdentityResolutionDisposition
 
     var deviceId: String { snapshot.deviceId }
 
@@ -685,12 +687,66 @@ struct CommittedIOSProtocolIdentitySnapshot: Sendable {
             protocolAlgorithm: algorithm
         ).authoritativeFingerprint.lowercased()
     }
+
+    var productEvidenceDescriptor: ProductIdentityEvidenceDescriptor? {
+        let evidenceAlgorithm: ProductIdentityEvidenceAlgorithm
+        switch algorithm {
+        case .mlDSA65:
+            evidenceAlgorithm = .mlDSA65
+        case .mlDSA87:
+            evidenceAlgorithm = .mlDSA87
+        case .ed25519:
+            return nil
+        }
+        let evidenceProtection: ProductIdentityEvidenceProtection = switch protection {
+        case .softwareKeychain: .softwareKeychain
+        case .secureEnclaveRequired: .secureEnclaveRequired
+        }
+        guard let identityReference = ProductIdentityEvidenceReference.make(
+            fromAuthoritativeFingerprint: authoritativeFingerprint
+        ) else {
+            return nil
+        }
+        return ProductIdentityEvidenceDescriptor(
+            identityReference: identityReference,
+            algorithm: evidenceAlgorithm,
+            protection: evidenceProtection
+        )
+    }
+}
+
+@available(iOS 17.0, *)
+enum ProtocolSigningIdentityResolutionDisposition: Sendable, Equatable {
+    /// This process generated the exact key, won both immutable Keychain CAS
+    /// operations, and verified the committed authority.
+    case createdAndCommitted
+    /// Both the immutable key and its authority record existed before this
+    /// process resolved the slot.
+    case restoredCommittedAuthority
+    /// This process completed an interrupted or contended transaction.  It is
+    /// valid runtime state but cannot prove either fresh creation or a prior-
+    /// launch restore, so formal lifecycle evidence must not treat it as one.
+    case reconciledCommittedAuthority
+    /// Explicit smoke identities are process-local and never formal evidence.
+    case ephemeralSmoke
 }
 
 @available(iOS 17.0, *)
 struct ResolvedProtocolSigningIdentity: Equatable, Sendable {
     let snapshot: ProtocolIdentitySnapshot
     let material: ProtocolSigningIdentityMaterial
+    let resolutionDisposition: ProtocolSigningIdentityResolutionDisposition
+
+    init(
+        snapshot: ProtocolIdentitySnapshot,
+        material: ProtocolSigningIdentityMaterial,
+        resolutionDisposition: ProtocolSigningIdentityResolutionDisposition =
+            .restoredCommittedAuthority
+    ) {
+        self.snapshot = snapshot
+        self.material = material
+        self.resolutionDisposition = resolutionDisposition
+    }
 }
 
 @available(iOS 17.0, *)
@@ -1363,7 +1419,11 @@ actor ProtocolDeviceIdentityAuthority {
                 throw ProtocolDeviceIdentityError.signingAuthorityConflict(algorithm)
             }
             try await validate(material)
-            return Self.resolution(deviceId: resolvedDeviceId, material: material)
+            return Self.resolution(
+                deviceId: resolvedDeviceId,
+                material: material,
+                disposition: .ephemeralSmoke
+            )
         }
 
         let persistence = try resolvedPersistence()
@@ -1406,16 +1466,24 @@ actor ProtocolDeviceIdentityAuthority {
             }
             try await validate(key)
             try cleanupLegacySigningState(legacyItems, persistence: persistence)
-            return Self.resolution(deviceId: resolvedDeviceId, material: key)
+            return Self.resolution(
+                deviceId: resolvedDeviceId,
+                material: key,
+                disposition: .restoredCommittedAuthority
+            )
         }
 
         let candidate: ProtocolSigningIdentityMaterial
+        let generatedCandidate: Bool
         if let existing = try loadSigningKey(for: slot, from: persistence) {
             candidate = existing
+            generatedCandidate = false
         } else if !legacyMaterials.isEmpty {
             candidate = legacyMaterials[0]
+            generatedCandidate = false
         } else {
             candidate = try await generate().validated(for: algorithm)
+            generatedCandidate = true
         }
         guard candidate.keyProtection == slot.keyProtection else {
             throw ProtocolDeviceIdentityError.signingAuthorityConflict(algorithm)
@@ -1426,7 +1494,7 @@ actor ProtocolDeviceIdentityAuthority {
             let range = encodedCandidate.indices
             encodedCandidate.resetBytes(in: range)
         }
-        _ = try persistence.insertSigningKeyIfAbsent(
+        let keyInsertResult = try persistence.insertSigningKeyIfAbsent(
             encodedCandidate,
             for: slot
         )
@@ -1445,7 +1513,7 @@ actor ProtocolDeviceIdentityAuthority {
             keyProtection: slot.keyProtection,
             publicKeyFingerprint: Self.fingerprint(winnerKey.publicKey)
         ).validated()
-        _ = try persistence.insertSigningAuthorityIfAbsent(
+        let authorityInsertResult = try persistence.insertSigningAuthorityIfAbsent(
             try Self.encode(binding),
             for: slot
         )
@@ -1456,7 +1524,17 @@ actor ProtocolDeviceIdentityAuthority {
             throw ProtocolDeviceIdentityError.signingAuthorityConflict(algorithm)
         }
         try cleanupLegacySigningState(legacyItems, persistence: persistence)
-        return Self.resolution(deviceId: resolvedDeviceId, material: winnerKey)
+        let disposition: ProtocolSigningIdentityResolutionDisposition =
+            generatedCandidate
+                && keyInsertResult == .inserted
+                && authorityInsertResult == .inserted
+            ? .createdAndCommitted
+            : .reconciledCommittedAuthority
+        return Self.resolution(
+            deviceId: resolvedDeviceId,
+            material: winnerKey,
+            disposition: disposition
+        )
     }
 
     private func resolvedPersistence() throws -> any ProtocolIdentityPersistence {
@@ -1557,7 +1635,8 @@ actor ProtocolDeviceIdentityAuthority {
 
     private static func resolution(
         deviceId: String,
-        material: ProtocolSigningIdentityMaterial
+        material: ProtocolSigningIdentityMaterial,
+        disposition: ProtocolSigningIdentityResolutionDisposition
     ) -> ResolvedProtocolSigningIdentity {
         // Public protocol identity fingerprints are domain-separated by signing algorithm.
         // The Keychain authority record intentionally keeps its legacy raw-key digest as an
@@ -1574,7 +1653,8 @@ actor ProtocolDeviceIdentityAuthority {
                 signingPublicKey: material.publicKey,
                 signingPublicKeyFingerprint: protocolFingerprint
             ),
-            material: material
+            material: material,
+            resolutionDisposition: disposition
         )
     }
 

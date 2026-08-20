@@ -90,7 +90,7 @@ class GlobalHazeRenderer: ObservableObject {
         
         guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.app,
             sourceResourceNames: ["GlobalHazeShaders"],
             requiredFunctionNames: [
                 "globalHazeVertexShader",

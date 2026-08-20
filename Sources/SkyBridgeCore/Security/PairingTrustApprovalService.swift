@@ -154,10 +154,15 @@ public final class PairingTrustApprovalService: ObservableObject {
 
     private var protocolIdentityPinResultOverrideForTesting: Bool?
     private var protocolIdentityPinOperationForTesting: ProtocolIdentityPinOperationForTesting?
+    private var protocolIdentityPinErrorForTesting: (any Error)?
     private var policySaveResultOverrideForTesting: Bool?
 
     func setProtocolIdentityPinResultOverrideForTesting(_ result: Bool?) {
         protocolIdentityPinResultOverrideForTesting = result
+    }
+
+    func setProtocolIdentityPinErrorForTesting(_ error: (any Error)?) {
+        protocolIdentityPinErrorForTesting = error
     }
 
     func setProtocolIdentityPinOperationForTesting(
@@ -803,6 +808,11 @@ public final class PairingTrustApprovalService: ObservableObject {
             return false
         }
         do {
+#if DEBUG || SKYBRIDGE_TESTING
+            if let protocolIdentityPinErrorForTesting {
+                throw protocolIdentityPinErrorForTesting
+            }
+#endif
             let promoted = try await TrustSyncService.shared.recordAuthenticatedRemoteAuthority(
                 deviceId: stableDeviceId,
                 preferredCurrentDeviceId: stableDeviceId,
@@ -818,6 +828,13 @@ public final class PairingTrustApprovalService: ObservableObject {
                 RemoteControlSmokeStatusWriter.append(line)
                 return false
             }
+        } catch TrustSyncError.aliasCleanupFailedAfterAuthoritativeCommit(let cleanupResidue),
+                TrustSyncError.fallbackCleanupFailedAfterAuthoritativeCommit(let cleanupResidue) {
+            // The authority pin is already durable; post-commit cleanup residue
+            // must not reject the approval (mirrors PairingIdentityExchangeCommitCoordinator).
+            let line = "⚠️ PIB-1 requester authority pin committed but post-commit cleanup left residue; authorization remains committed lifecycle=identity-oob>requester-pinned-cleanup-residue"
+            logger.warning("\(line, privacy: .public) residue=\(cleanupResidue, privacy: .public)")
+            RemoteControlSmokeStatusWriter.append(line)
         } catch {
             let line = "⛔️ PIB-1 requester protocol identity pin failed: requester=\(Self.protocolIdentityLogRedaction) fingerprint=\(Self.protocolIdentityLogRedaction) code=\(Self.protocolIdentityLogRedaction) reason=authority_store_error lifecycle=identity-oob>requester-pin-failed"
             logger.error("\(line, privacy: .public) errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public) detail=\(error.localizedDescription, privacy: .private)")

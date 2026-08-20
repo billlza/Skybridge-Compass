@@ -279,7 +279,7 @@ public class Metal4Engine: NSObject, ObservableObject {
 
         let library = try SkyBridgeMetalShaderLibrary.load(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: ["Metal4Shaders"],
             requiredFunctionNames: requiredFunctions
         )

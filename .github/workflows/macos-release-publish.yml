@@ -1,0 +1,364 @@
+name: macos-release-publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: "macos-release-readiness run id containing the immutable signed candidate"
+        required: true
+        type: string
+      candidate_run_attempt:
+        description: "Exact signed candidate run attempt"
+        required: true
+        type: string
+      evidence_run_id:
+        description: "real-device-release-gate run id containing the four candidate-bound evidence artifacts"
+        required: true
+        type: string
+      evidence_run_attempt:
+        description: "Exact physical evidence run attempt"
+        required: true
+        type: string
+      publish_release_tag:
+        description: "Exact pre-pushed tag macos-v<version>-build-<build>"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-release-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-publish-environment-protection:
+    runs-on: macos-26
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Require Independent Publication Approval Environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT_NAME: macos-production-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release-environment.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/environments/$RELEASE_ENVIRONMENT_NAME" \
+            > "$response"
+          python3 Scripts/validate_release_environment_protection.py \
+            --response "$response" \
+            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+
+  publish-immutable-candidate:
+    needs: verify-publish-environment-protection
+    runs-on: macos-26
+    timeout-minutes: 60
+    environment: macos-production-release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      SKYBRIDGE_REQUIRED_XCODE_VERSION: "26.6"
+      SKYBRIDGE_REQUIRED_XCODE_BUILD: "17F113"
+      SKYBRIDGE_REQUIRED_APPLE_SWIFT_VERSION: "6.3.3"
+      CANDIDATE_ARTIFACT_NAME: macos-signed-release-candidate
+      CONNECTIVITY_ARTIFACT_NAME: real-device-connectivity-matrix-public-redacted
+      P2P_REMOTE_ARTIFACT_NAME: real-device-p2p-remote-smoke-public-redacted
+      WEBRTC_REMOTE_ARTIFACT_NAME: real-device-webrtc-smoke-public-redacted
+      FILE_TRANSFER_ARTIFACT_NAME: real-device-file-transfer-smoke-public-redacted
+      SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_REPOSITORY: ${{ github.repository }}
+      SKYBRIDGE_RELEASE_EVIDENCE_EXPECTED_SHA: ${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Revalidate Publication Approval Environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ENVIRONMENT_NAME: macos-production-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/release-environment-after-approval.json"
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/environments/$RELEASE_ENVIRONMENT_NAME" \
+            > "$response"
+          python3 Scripts/validate_release_environment_protection.py \
+            --response "$response" \
+            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+
+      - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -d "$DEVELOPER_DIR" ]] || { echo "::error::Required Xcode 26.6 is missing at $DEVELOPER_DIR"; exit 1; }
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          bash Scripts/verify_xcode_toolchain.sh
+
+      - name: Validate Candidate and Evidence Run Provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ inputs.candidate_run_attempt }}
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          EVIDENCE_RUN_ATTEMPT: ${{ inputs.evidence_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          provenance_root="$RUNNER_TEMP/macos-release-provenance"
+          mkdir -m 0700 "$provenance_root"
+          bash Scripts/validate_macos_release_artifact_run.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-run-attempt "$CANDIDATE_RUN_ATTEMPT" \
+            --expected-workflow-path .github/workflows/macos-release-readiness.yml \
+            --expected-event workflow_dispatch \
+            --expected-head-sha "$GITHUB_SHA" \
+            --expected-head-branch "$GITHUB_REF_NAME" \
+            --artifact "$CANDIDATE_ARTIFACT_NAME" \
+            --provenance-output "$provenance_root/candidate-run-provenance.json"
+          bash Scripts/validate_macos_release_artifact_run.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$EVIDENCE_RUN_ID" \
+            --expected-run-attempt "$EVIDENCE_RUN_ATTEMPT" \
+            --expected-workflow-path .github/workflows/real-device-release-gate.yml \
+            --expected-event workflow_dispatch \
+            --expected-head-sha "$GITHUB_SHA" \
+            --expected-head-branch "$GITHUB_REF_NAME" \
+            --artifact "$CONNECTIVITY_ARTIFACT_NAME" \
+            --artifact "$P2P_REMOTE_ARTIFACT_NAME" \
+            --artifact "$WEBRTC_REMOTE_ARTIFACT_NAME" \
+            --artifact "$FILE_TRANSFER_ARTIFACT_NAME" \
+            --require-public-redacted-artifacts \
+            --provenance-output "$provenance_root/release-artifact-run-provenance.json"
+
+      - name: Download Immutable Signed Candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CANDIDATE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/macos-release-candidate-download
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download Connectivity Evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.CONNECTIVITY_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/macos-release-evidence-download/connectivity
+          run-id: ${{ inputs.evidence_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download P2P Remote Evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.P2P_REMOTE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/macos-release-evidence-download/p2p-remote
+          run-id: ${{ inputs.evidence_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download WebRTC Remote Evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.WEBRTC_REMOTE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/macos-release-evidence-download/webrtc-remote
+          run-id: ${{ inputs.evidence_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download File Transfer Evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.FILE_TRANSFER_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/macos-release-evidence-download/file-transfer
+          run-id: ${{ inputs.evidence_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify Immutable Candidate and Four Evidence Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_download="$RUNNER_TEMP/macos-release-candidate-download"
+          candidate_archive="$candidate_download/macos-signed-release-candidate.tar.gz"
+          candidate_checksum="$candidate_archive.sha256"
+          candidate_root="$RUNNER_TEMP/macos-release-candidate"
+          [[ -f "$candidate_archive" && ! -L "$candidate_archive" && -f "$candidate_checksum" && ! -L "$candidate_checksum" ]] || {
+            echo "::error::Immutable candidate archive or reliability checksum is missing."
+            exit 1
+          }
+          unexpected="$(find "$candidate_download" -mindepth 1 -maxdepth 1 \
+            ! -name 'macos-signed-release-candidate.tar.gz' \
+            ! -name 'macos-signed-release-candidate.tar.gz.sha256' -print -quit)"
+          [[ -z "$unexpected" ]] || { echo "::error::Candidate artifact has an unexpected file."; exit 1; }
+          (
+            cd "$candidate_download"
+            shasum -a 256 -c "$(basename "$candidate_checksum")"
+          )
+          [[ ! -e "$candidate_root" && ! -L "$candidate_root" ]] || { echo "::error::Candidate extraction path already exists."; exit 1; }
+          python3 Scripts/extract_macos_release_handoff.py \
+            --archive "$candidate_archive" \
+            --destination "$candidate_root"
+          dmg_paths=("$candidate_root"/SkyBridgeCompassPro-*.dmg)
+          [[ "${#dmg_paths[@]}" == "1" && -f "${dmg_paths[0]}" ]] || { echo "::error::Candidate must contain one DMG."; exit 1; }
+          python3 Scripts/macos_release_candidate_identity.py verify \
+            --identity "$candidate_root/macos-release-candidate.json" \
+            --app "$candidate_root/SkyBridge Compass Pro.app" \
+            --dmg "${dmg_paths[0]}"
+
+          evidence_specs=(
+            "connectivity|$CONNECTIVITY_ARTIFACT_NAME|connectivity"
+            "p2p-remote|$P2P_REMOTE_ARTIFACT_NAME|p2p-remote"
+            "webrtc-remote|$WEBRTC_REMOTE_ARTIFACT_NAME|webrtc-remote"
+            "file-transfer|$FILE_TRANSFER_ARTIFACT_NAME|file-transfer"
+          )
+          evidence_root="$RUNNER_TEMP/macos-release-evidence"
+          mkdir -m 0700 "$evidence_root"
+          source Scripts/real_device_smoke_redaction.sh
+          for evidence_spec in "${evidence_specs[@]}"; do
+            kind="${evidence_spec%%|*}"
+            remainder="${evidence_spec#*|}"
+            artifact_name="${remainder%%|*}"
+            download_label="${remainder#*|}"
+            download_dir="$RUNNER_TEMP/macos-release-evidence-download/$download_label"
+            archive="$download_dir/$artifact_name.tar.gz"
+            destination="$evidence_root/$download_label"
+            [[ -f "$archive" && ! -L "$archive" ]] || { echo "::error::Missing evidence archive: $artifact_name"; exit 1; }
+            unexpected="$(find "$download_dir" -mindepth 1 -maxdepth 1 ! -name "$artifact_name.tar.gz" -print -quit)"
+            [[ -z "$unexpected" ]] || { echo "::error::Evidence artifact has an unexpected file: $artifact_name"; exit 1; }
+            python3 Scripts/extract_real_device_release_evidence_archive.py \
+              --archive "$archive" \
+              --destination "$destination"
+            python3 Scripts/stage_real_device_release_evidence.py --kind "$kind" --verify "$destination"
+            python3 Scripts/macos_release_candidate_identity.py compare \
+              --expected "$candidate_root/macos-release-candidate.json" \
+              --actual "$destination/macos-release-candidate.json"
+            skybridge_smoke_check_public_artifacts "$destination"
+            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+              --kind production-identity \
+              --artifact-dir "$destination" \
+              --expected-source-repository "$GITHUB_REPOSITORY" \
+              --expected-source-sha "$GITHUB_SHA"
+            acceptance_kind="$kind"
+            [[ "$acceptance_kind" == "p2p-remote" ]] && acceptance_kind="p2p"
+            [[ "$acceptance_kind" == "webrtc-remote" ]] && acceptance_kind="webrtc"
+            python3 Scripts/validate_real_device_release_acceptance_artifact.py \
+              --kind "$acceptance_kind" \
+              --artifact-dir "$destination" \
+              --expected-source-repository "$GITHUB_REPOSITORY" \
+              --expected-source-sha "$GITHUB_SHA"
+          done
+          {
+            echo "MACOS_PUBLISH_CANDIDATE_ROOT=$candidate_root"
+            echo "MACOS_PUBLISH_DMG_PATH=${dmg_paths[0]}"
+            echo "MACOS_PUBLISH_EVIDENCE_ROOT=$evidence_root"
+          } >> "$GITHUB_ENV"
+
+      - name: Validate Full Readiness Against Candidate-Bound Evidence
+        env:
+          SKYBRIDGE_RELEASE_GATE_REQUIRE_NOTARIZATION: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash Scripts/check_macos_release_readiness.sh \
+            --app-path "$MACOS_PUBLISH_CANDIDATE_ROOT/SkyBridge Compass Pro.app" \
+            --dmg-path "$MACOS_PUBLISH_DMG_PATH" \
+            --require-notarization \
+            --connectivity-artifact-dir "$MACOS_PUBLISH_EVIDENCE_ROOT/connectivity" \
+            --p2p-remote-artifact-dir "$MACOS_PUBLISH_EVIDENCE_ROOT/p2p-remote" \
+            --webrtc-remote-artifact-dir "$MACOS_PUBLISH_EVIDENCE_ROOT/webrtc-remote" \
+            --file-transfer-artifact-dir "$MACOS_PUBLISH_EVIDENCE_ROOT/file-transfer"
+
+      - name: Assemble Immutable Four-Artifact Evidence Asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_root="$RUNNER_TEMP/macos-release-evidence-asset"
+          asset_path="$RUNNER_TEMP/macos-release-evidence.tar.gz"
+          mkdir -m 0700 "$asset_root"
+          cp -p "$RUNNER_TEMP/macos-release-provenance/release-artifact-run-provenance.json" "$asset_root/"
+          for label in connectivity p2p-remote webrtc-remote file-transfer; do
+            cp -R "$MACOS_PUBLISH_EVIDENCE_ROOT/$label" "$asset_root/$label"
+          done
+          COPYFILE_DISABLE=1 tar -czf "$asset_path" -C "$asset_root" .
+          [[ -s "$asset_path" ]] || { echo "::error::Release evidence asset is empty."; exit 1; }
+          tar -tzf "$asset_path" >/dev/null
+          echo "MACOS_RELEASE_EVIDENCE_ASSET=$asset_path" >> "$GITHUB_ENV"
+
+      - name: Validate Explicit Publication Transaction
+        env:
+          PUBLISH_RELEASE_TAG: ${{ inputs.publish_release_tag }}
+          UPDATE_MANIFEST_KEY_ID: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_KEY_ID }}
+          UPDATE_MANIFEST_PRIVATE_KEY_BASE64: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MACOS_PUBLISH_CANDIDATE_ROOT/SkyBridge Compass Pro.app/Contents/Info.plist")"
+          build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$MACOS_PUBLISH_CANDIDATE_ROOT/SkyBridge Compass Pro.app/Contents/Info.plist")"
+          [[ "$PUBLISH_RELEASE_TAG" == "macos-v${version}-build-${build}" ]] || {
+            echo "::error::publish_release_tag does not match the immutable candidate version/build."
+            exit 1
+          }
+          [[ -n "$UPDATE_MANIFEST_KEY_ID" && -n "$UPDATE_MANIFEST_PRIVATE_KEY_BASE64" ]] || {
+            echo "::error::Update manifest signing credentials are required for publication."
+            exit 1
+          }
+
+      - name: Publish Original Immutable Candidate Bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_ED25519_PRIVATE_KEY_BASE64 }}
+          UPDATE_MANIFEST_KEY_ID: ${{ secrets.SKYBRIDGE_UPDATE_MANIFEST_KEY_ID }}
+          PUBLISH_RELEASE_TAG: ${{ inputs.publish_release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_output="$RUNNER_TEMP/macos-update-publish-output"
+          mkdir -m 0700 "$publish_output"
+          bash Scripts/publish_macos_update_release.sh \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$PUBLISH_RELEASE_TAG" \
+            --expected-source-sha "$GITHUB_SHA" \
+            --app-path "$MACOS_PUBLISH_CANDIDATE_ROOT/SkyBridge Compass Pro.app" \
+            --dmg-path "$MACOS_PUBLISH_DMG_PATH" \
+            --manifest-path "$publish_output/macos-stable.json" \
+            --proof-summary-path "$publish_output/macos-stable.publish-proof.json" \
+            --evidence-provenance-path "$RUNNER_TEMP/macos-release-provenance/release-artifact-run-provenance.json" \
+            --evidence-asset "$MACOS_RELEASE_EVIDENCE_ASSET" \
+            --key-id "$UPDATE_MANIFEST_KEY_ID"
+
+      - name: Upload Immutable Release Publish Proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-update-publish-proof-${{ inputs.publish_release_tag }}
+          path: ${{ runner.temp }}/macos-update-publish-output/macos-stable.publish-proof.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove Publication Working Copies
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/rm -rf \
+            "$RUNNER_TEMP/macos-release-candidate-download" \
+            "$RUNNER_TEMP/macos-release-candidate" \
+            "$RUNNER_TEMP/macos-release-evidence-download" \
+            "$RUNNER_TEMP/macos-release-evidence" \
+            "$RUNNER_TEMP/macos-release-evidence-asset" \
+            "$RUNNER_TEMP/macos-release-provenance" \
+            "$RUNNER_TEMP/macos-update-publish-output"
+          /bin/rm -f "$RUNNER_TEMP/macos-release-evidence.tar.gz"

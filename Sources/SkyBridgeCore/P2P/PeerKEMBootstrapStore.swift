@@ -75,6 +75,7 @@ public actor PeerKEMBootstrapStore {
         case noTrustMaterialDeviceIds
         case noValidKEMPublicKeys
         case invalidProtocolFingerprint
+        case signedRefreshAuthorityConflict
         case capacityExceeded(limit: Int)
 
         var errorDescription: String? {
@@ -85,6 +86,8 @@ public actor PeerKEMBootstrapStore {
                 return "Authority-bound peer KEM mutation requires at least one valid strict-PQC public key"
             case .invalidProtocolFingerprint:
                 return "Authority-bound peer KEM mutation requires a canonical protocol identity fingerprint"
+            case .signedRefreshAuthorityConflict:
+                return "A current signed KEM refresh is bound to a different protocol authority"
             case .capacityExceeded(let limit):
                 return "Authority-bound peer KEM store capacity exceeded (limit: \(limit))"
             }
@@ -219,6 +222,18 @@ public actor PeerKEMBootstrapStore {
             if let existingEntry,
                existingEntry.source == "signed_lan_kem_refresh",
                existingEntry.expiresAt.map({ $0 > observedAt }) ?? true {
+                guard Self.entry(existingEntry, isBoundToAny: [normalizedFingerprint]) else {
+                    throw AuthorityBoundPairingKEMMutationError.signedRefreshAuthorityConflict
+                }
+                // A valid signed refresh outranks a pairing payload, but it is
+                // still part of this transaction's exact authority/KEM lease.
+                // Capture it as a read-only target so `isCurrent` cannot pass
+                // vacuously and rollback can never remove the signed entry.
+                targetMutations.append(.init(
+                    deviceId: deviceId,
+                    before: existingEntry,
+                    after: existingEntry
+                ))
                 continue
             }
 
@@ -264,10 +279,11 @@ public actor PeerKEMBootstrapStore {
             )
         }
 
-        for mutation in targetMutations {
+        let changedMutations = targetMutations.filter { $0.before != $0.after }
+        for mutation in changedMutations {
             entries[mutation.deviceId] = mutation.after
         }
-        if !targetMutations.isEmpty {
+        if !changedMutations.isEmpty {
             persist()
         }
 
@@ -278,32 +294,49 @@ public actor PeerKEMBootstrapStore {
         )
     }
 
-    /// Restores an authority-bound mutation only while every target still equals the receipt's
-    /// exact `after` value. A later write to any target supersedes the whole rollback transaction.
+    /// Conditionally restores each target that still equals the receipt's exact
+    /// `after` value. A partially-overlapping successor owns its changed targets,
+    /// while disjoint aliases from the failed older transaction are still
+    /// released instead of becoming persistent orphaned bootstrap material.
     @discardableResult
     func rollbackAuthorityBoundPairingKEMMutation(
         _ receipt: AuthorityBoundPairingKEMMutationReceipt
     ) -> Bool {
         guard receipt.storeIdentifier == storeIdentifier else { return false }
-        guard receipt.targetMutations.allSatisfy({ mutation in
-            entries[mutation.deviceId] == mutation.after
-                && Self.normalizedProtocolFingerprint(mutation.after.protocolIdentityFingerprint)
-                    == receipt.authorityFingerprint
-        }) else {
-            return false
-        }
-
+        var everyTargetWasCurrent = true
+        var didChangeEntries = false
         for mutation in receipt.targetMutations {
+            guard entries[mutation.deviceId] == mutation.after,
+                  Self.normalizedProtocolFingerprint(
+                    mutation.after.protocolIdentityFingerprint
+                  ) == receipt.authorityFingerprint else {
+                everyTargetWasCurrent = false
+                continue
+            }
+            guard mutation.before != mutation.after else { continue }
             entries[mutation.deviceId] = mutation.before
+            didChangeEntries = true
         }
-        if !receipt.targetMutations.isEmpty {
+        if didChangeEntries {
             if entries.isEmpty {
                 defaults.removeObject(forKey: Self.defaultsKey)
             } else {
                 persist()
             }
         }
-        return true
+        return everyTargetWasCurrent
+    }
+
+    func isCurrentAuthorityBoundPairingKEMMutation(
+        _ receipt: AuthorityBoundPairingKEMMutationReceipt
+    ) -> Bool {
+        guard receipt.storeIdentifier == storeIdentifier else { return false }
+        return receipt.targetMutations.allSatisfy { mutation in
+            entries[mutation.deviceId] == mutation.after
+                && Self.normalizedProtocolFingerprint(
+                    mutation.after.protocolIdentityFingerprint
+                ) == receipt.authorityFingerprint
+        }
     }
 
     public func upsertSignedKEMRefresh(
@@ -544,27 +577,6 @@ public actor PeerKEMBootstrapStore {
             if entries.removeValue(forKey: deviceId) != nil {
                 changed = true
             }
-        }
-
-        guard changed else { return }
-        if entries.isEmpty {
-            defaults.removeObject(forKey: Self.defaultsKey)
-        } else {
-            persist()
-        }
-    }
-
-    public func clearPairingIdentityExchangeEntries(deviceIds: [String]) {
-        let normalizedIds = trustMaterialIds(deviceIds)
-        guard !normalizedIds.isEmpty else { return }
-
-        var changed = false
-        for deviceId in normalizedIds {
-            guard entries[deviceId]?.source == "pairing_identity_exchange" else {
-                continue
-            }
-            entries.removeValue(forKey: deviceId)
-            changed = true
         }
 
         guard changed else { return }

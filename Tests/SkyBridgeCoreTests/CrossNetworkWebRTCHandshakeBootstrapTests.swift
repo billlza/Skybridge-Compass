@@ -1482,6 +1482,8 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         let remoteSmokeSource = try readSource("Scripts/run_real_device_p2p_remote_smoke.sh")
         let releaseAcceptanceFinalizer = try readSource("Scripts/finalize_release_acceptance_manifests.py")
         let releaseAcceptanceValidator = try readSource("Scripts/validate_real_device_release_acceptance_artifact.py")
+        let processOwnershipShellSource = try readSource("Scripts/real_device_ios_process_ownership.sh")
+        let processOwnershipPythonSource = try readSource("Scripts/webrtc_smoke_process_ownership.py")
         XCTAssertTrue(remoteSmokeSource.contains("MAC_APP_BUNDLE=\"$MAC_ONLINE_RUNTIME_DIR/LocalLanInteropHost.app\""))
         XCTAssertTrue(remoteSmokeSource.contains("prepare_macos_smoke_host_app_bundle()"))
         XCTAssertTrue(remoteSmokeSource.contains("start_macos_smoke_host()"))
@@ -1494,7 +1496,11 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             )
         )
         XCTAssertTrue(remoteSmokeSource.contains("mac_host_uses_signed_app_bundle()"))
-        XCTAssertTrue(remoteSmokeSource.contains("MAC_HOST_PRODUCT_APP_BUNDLE=\"$ROOT_DIR/dist/SkyBridge Compass Pro.app\""))
+        XCTAssertTrue(
+            remoteSmokeSource.contains(
+                "MAC_HOST_PRODUCT_APP_BUNDLE=\"${SKYBRIDGE_SMOKE_MAC_PRODUCT_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}\""
+            )
+        )
         XCTAssertTrue(remoteSmokeSource.contains("MAC_HOST_PRODUCT_BUNDLE_ID=\"com.skybridge.compass.pro\""))
         XCTAssertTrue(remoteSmokeSource.contains("MAC_HOST_PRODUCT_PROFILE=\"$MAC_HOST_PRODUCT_APP_BUNDLE/Contents/embedded.provisionprofile\""))
         XCTAssertTrue(remoteSmokeSource.contains("MAC_HOST_PRODUCT_WIDGET_BUNDLE_ID=\"com.skybridge.compass.pro.widgets\""))
@@ -1531,7 +1537,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(
             remoteSmokeSource.contains(
                 "if (( original_status == 0 && cleanup_status == 0 )) \\\n" +
-                    "    && [[ \"$MAC_HOST_ONLY\" != \"1\" ]]; then"
+                    "    && [[ \"$MAC_HOST_ONLY\" != \"1\" && \"$ACCEPTANCE_CANDIDATE_READY\" == \"1\" ]]; then"
             )
         )
         XCTAssertTrue(remoteSmokeSource.contains("derive_macos_smoke_host_minimal_entitlements"))
@@ -1611,7 +1617,69 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(remoteSmokeSource.contains("/bin/mkdir -m 700 \"$MAC_ONLINE_RUNTIME_DIR\""))
         XCTAssertTrue(remoteSmokeSource.contains("unregister_launch_services_app_bundle \"$MAC_APP_BUNDLE\""))
         XCTAssertTrue(remoteSmokeSource.contains("register_launch_services_app_bundle \"$MAC_HOST_PRODUCT_APP_BUNDLE\""))
-        XCTAssertTrue(remoteSmokeSource.contains("terminate_macos_smoke_host_bundle_processes"))
+        XCTAssertTrue(remoteSmokeSource.contains("source \"$ROOT_DIR/Scripts/real_device_ios_process_ownership.sh\""))
+        let executableAbsenceBody = try sourceSlice(
+            from: "skybridge_mac_require_executable_absent() {",
+            to: "skybridge_mac_wait_for_single_exact_process() {",
+            in: processOwnershipShellSource
+        )
+        XCTAssertTrue(executableAbsenceBody.contains("skybridge_mac_exact_executable_pids"))
+        XCTAssertTrue(executableAbsenceBody.contains("if [[ -n \"$exact_pids\" ]]; then"))
+        XCTAssertTrue(
+            executableAbsenceBody.contains(
+                "Refusing to launch $label because its exact executable is already running; close it normally before retrying."
+            )
+        )
+        let terminateOwnedBody = try sourceSlice(
+            from: "skybridge_mac_terminate_owned_process() {",
+            to: "skybridge_ios_process_snapshot() {",
+            in: processOwnershipShellSource
+        )
+        let ownershipRevalidationRange = try XCTUnwrap(
+            terminateOwnedBody.range(of: "if skybridge_mac_owned_process_status")
+        )
+        let ownedSignalRange = try XCTUnwrap(
+            terminateOwnedBody.range(of: "if python3 \"$ownership_helper\" mac-signal")
+        )
+        XCTAssertLessThan(ownershipRevalidationRange.lowerBound, ownedSignalRange.lowerBound)
+        XCTAssertTrue(processOwnershipPythonSource.contains("\"processIdentifier\": pid"))
+        XCTAssertTrue(processOwnershipPythonSource.contains("\"executablePath\": canonical_expected"))
+        XCTAssertTrue(processOwnershipPythonSource.contains("\"startTimeToken\": snapshot.start_time_token"))
+        XCTAssertTrue(processOwnershipPythonSource.contains("\"auditToken\": list(snapshot.audit_token)"))
+
+        let transitionSource = try sourceSlice(
+            from: "transition_to_mac_online_ipad_client() {",
+            to: "run_mac_online_ipad_button_smoke() {",
+            in: remoteSmokeSource
+        )
+        let terminateHostRange = try XCTUnwrap(
+            transitionSource.range(of: "skybridge_mac_terminate_owned_process")
+        )
+        let unregisterHelperRange = try XCTUnwrap(
+            transitionSource.range(of: "cleanup_macos_smoke_host_launch_services_registration")
+        )
+        let restoreCanonicalRange = try XCTUnwrap(
+            transitionSource.range(of: "restore_canonical_macos_launch_services_registration_last")
+        )
+        XCTAssertLessThan(terminateHostRange.lowerBound, unregisterHelperRange.lowerBound)
+        XCTAssertLessThan(unregisterHelperRange.lowerBound, restoreCanonicalRange.lowerBound)
+        XCTAssertTrue(
+            remoteSmokeSource.contains(
+                "canonical macOS product sharing the P2P host bundle identity"
+            )
+        )
+        let cleanupSource = try sourceSlice(
+            from: "cleanup() {",
+            to: "exit_mac_host_only_on_signal() {",
+            in: remoteSmokeSource
+        )
+        let processCleanupRange = try XCTUnwrap(
+            cleanupSource.range(of: "skybridge_mac_terminate_owned_process")
+        )
+        let acceptanceFinalizationRange = try XCTUnwrap(
+            cleanupSource.range(of: "finalize_release_acceptance_manifests_after_cleanup")
+        )
+        XCTAssertLessThan(processCleanupRange.lowerBound, acceptanceFinalizationRange.lowerBound)
         XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :CFBundlePackageType string APPL'"))
         XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :NSPrincipalClass string NSApplication'"))
         XCTAssertTrue(remoteSmokeSource.contains("-c 'Add :NSLocalNetworkUsageDescription string SkyBridge Compass uses the local network"))
@@ -1727,7 +1795,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     }
 
     func testCurrentPathTrustBridgeLogsRedactStableIdentifiers() throws {
-        let source = try [
+        let handlerSource = try [
             "Sources/SkyBridgeCore/P2P/P2PModels.swift",
             "Sources/SkyBridgeCore/P2P/P2PDiscoveryService.swift",
             "Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManager.swift",
@@ -1735,7 +1803,10 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         ].map { path in
             try readSource(path)
         }.joined(separator: "\n")
-        let currentPathTrustLogLines = source
+        let coordinatorSource = try readSource(
+            "Sources/SkyBridgeCore/P2P/PairingIdentityExchangeCommitCoordinator.swift"
+        )
+        let currentPathTrustLogLines = handlerSource
             .split(separator: "\n", omittingEmptySubsequences: false)
             .filter {
                 $0.contains("current-path trust bridge")
@@ -1743,11 +1814,10 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             }
             .joined(separator: "\n")
 
-        XCTAssertTrue(currentPathTrustLogLines.contains("Self.protocolIdentityLogRedaction"))
-        XCTAssertTrue(currentPathTrustLogLines.contains("fp=\\(Self.protocolIdentityLogRedaction"))
         XCTAssertTrue(
-            currentPathTrustLogLines.contains("privacy: .public"),
-            "Only the literal redaction marker and non-sensitive algorithm metadata may be public."
+            currentPathTrustLogLines.isEmpty ||
+                currentPathTrustLogLines.contains("Self.protocolIdentityLogRedaction"),
+            "A trust-commit log must be absent or use only the literal redaction marker."
         )
 
         [
@@ -1767,11 +1837,11 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         }
 
         XCTAssertTrue(
-            source.contains("recordAuthenticatedRemoteAuthority("),
-            "The trust bridge must continue persisting the authenticated authority; only logs are redacted."
+            coordinatorSource.contains("recordAuthenticatedRemoteAuthorityForPairing("),
+            "The shared transaction must remain the only pairing authority persistence boundary."
         )
         XCTAssertTrue(
-            source.contains("protocolPublicKeyFingerprint: validatedAuthority.protocolPublicKeyFingerprint"),
+            coordinatorSource.contains("protocolPublicKeyFingerprint: authority.protocolPublicKeyFingerprint"),
             "Only the authenticated, validated fingerprint may reach TrustSyncService for fail-closed current-path trust."
         )
     }
@@ -2319,19 +2389,22 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
     func testLegacyBootstrapKEMCacheIsKnownMaterialNotTrustAuthority() throws {
         let source = try readSource("Sources/SkyBridgeCore/P2P/P2PModels.swift")
         let bootstrapStoreSource = try readSource("Sources/SkyBridgeCore/P2P/PeerKEMBootstrapStore.swift")
+        let coordinatorSource = try readSource(
+            "Sources/SkyBridgeCore/P2P/PairingIdentityExchangeCommitCoordinator.swift"
+        )
 
         XCTAssertTrue(source.contains("currentKnownPeerKEMPublicKeysByCanonicalWireId"))
         XCTAssertTrue(source.contains("return \"bootstrapCache\""))
         XCTAssertTrue(source.contains("hasTrust: diagnostic.hasTrust"))
-        XCTAssertTrue(source.contains("clearPairingIdentityExchangeEntries(deviceIds: bootstrapIds)"))
-        XCTAssertTrue(source.contains("cleared unsigned bootstrap KEM cache and failing closed"))
+        XCTAssertTrue(coordinatorSource.contains("upsertAuthorityBoundPairingKEM("))
+        XCTAssertTrue(coordinatorSource.contains("rollbackAuthorityBoundPairingKEMMutation(kemReceipt)"))
+        XCTAssertTrue(coordinatorSource.contains("recordAuthenticatedRemoteAuthorityForPairing("))
         XCTAssertFalse(source.contains("using bootstrap cache only"))
         XCTAssertFalse(source.contains("TrustSync degraded"))
         XCTAssertFalse(source.contains("currentTrustedPeerKEMPublicKeysByCanonicalWireId"))
         XCTAssertFalse(source.contains("hasTrust: diagnostic.hasTrust || !cachedSuites.isEmpty"))
         XCTAssertTrue(bootstrapStoreSource.contains("entry.source == \"signed_lan_kem_refresh\""))
-        XCTAssertTrue(bootstrapStoreSource.contains("public func clearPairingIdentityExchangeEntries(deviceIds: [String])"))
-        XCTAssertTrue(bootstrapStoreSource.contains("entries[deviceId]?.source == \"pairing_identity_exchange\""))
+        XCTAssertFalse(bootstrapStoreSource.contains("clearPairingIdentityExchangeEntries("))
     }
 
     func testSignedAppSmokeHasAppLevelPairingApprovalSurface() throws {
@@ -2363,8 +2436,9 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
             "User-realistic signed-app smoke must launch foreground when operator approval is required."
         )
         XCTAssertTrue(
-            scriptSource.contains("OPEN_ARGS=(-n --stdout \"$HOST_STDOUT\" --stderr \"$HOST_STDERR\")")
+            scriptSource.contains("OPEN_ARGS=(--stdout \"$HOST_STDOUT\" --stderr \"$HOST_STDERR\")")
         )
+        XCTAssertFalse(scriptSource.contains("OPEN_ARGS=(-n"))
         XCTAssertTrue(
             releaseReadiness.contains("--package-integrity-only"),
             "Release readiness should expose a narrow package-integrity verifier for smoke preflight without weakening the full release gate."

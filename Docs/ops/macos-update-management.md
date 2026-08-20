@@ -76,10 +76,12 @@ the workflow; callers cannot substitute a weaker producer or evidence set.
 Build, sign, notarize, and staple the app and DMG:
 
 ```bash
+: "${SKYBRIDGE_RELEASE_BUILD_ID:?set the positive numeric build from the release tag}"
 SKYBRIDGE_REQUIRE_APPLE_SIGN_IN_MODE=web_session \
 SKYBRIDGE_REQUIRE_APP_GROUPS=1 \
 SKYBRIDGE_REQUIRE_WIDGET_EXTENSION=1 \
 bash Scripts/build_dmg.sh \
+  --build-id "$SKYBRIDGE_RELEASE_BUILD_ID" \
   --identity "Developer ID Application: Zi ang Li (YKUPL7Z869)" \
   --notarize-app \
   --notarize-dmg \
@@ -90,9 +92,9 @@ Verify the notarized artifacts:
 
 ```bash
 xcrun stapler validate "dist/SkyBridge Compass Pro.app"
-xcrun stapler validate "dist/SkyBridgeCompassPro-1.0.0.dmg"
+xcrun stapler validate "dist/SkyBridgeCompassPro-1.0.2.dmg"
 spctl --assess --type execute --verbose=4 "dist/SkyBridge Compass Pro.app"
-spctl --assess --type open --verbose=4 "dist/SkyBridgeCompassPro-1.0.0.dmg"
+spctl --assess --type open --verbose=4 "dist/SkyBridgeCompassPro-1.0.2.dmg"
 ```
 
 Create and push the unique annotated release tag before invoking the publisher.
@@ -117,7 +119,7 @@ bash Scripts/publish_macos_update_release.sh \
   --tag "$tag" \
   --expected-source-sha "$source_sha" \
   --app-path "dist/SkyBridge Compass Pro.app" \
-  --dmg-path "dist/SkyBridgeCompassPro-1.0.0.dmg" \
+  --dmg-path "dist/SkyBridgeCompassPro-1.0.2.dmg" \
   --evidence-provenance-path "Artifacts/release-gate/release-artifact-run-provenance.json" \
   --evidence-asset "dist/macos-release-evidence.tar.gz" \
   --key-id skybridge-release-ed25519-2026-05-local \

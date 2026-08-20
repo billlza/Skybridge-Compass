@@ -168,21 +168,15 @@ def _archive_inventory(
     return inventory, app_prefix, next(iter(matching_widgets))
 
 
-def extract_single_ios_app(export_dir: Path, destination_app: Path) -> Path:
-    if not export_dir.is_absolute() or not destination_app.is_absolute():
-        raise IPAValidationError("export and destination paths must be absolute")
+def extract_ios_app_from_ipa(ipa_path: Path, destination_app: Path) -> Path:
+    if not ipa_path.is_absolute() or not destination_app.is_absolute():
+        raise IPAValidationError("IPA and destination paths must be absolute")
     if destination_app.suffix != ".app":
         raise IPAValidationError("destination must use an .app suffix")
-    _require_private_directory(export_dir, "iOS export directory")
+    _require_regular_file(ipa_path, "exported IPA", maximum_size=MAX_IPA_BYTES)
     _require_private_directory(destination_app.parent, "destination parent directory")
     if os.path.lexists(destination_app):
         raise IPAValidationError("destination application already exists")
-
-    ipa_candidates = list(export_dir.glob("*.ipa"))
-    if len(ipa_candidates) != 1:
-        raise IPAValidationError("iOS export must contain exactly one IPA")
-    ipa_path = ipa_candidates[0]
-    _require_regular_file(ipa_path, "exported IPA", maximum_size=MAX_IPA_BYTES)
 
     staging_root = Path(
         tempfile.mkdtemp(prefix=".ios-ipa-stage-", dir=destination_app.parent)
@@ -247,6 +241,16 @@ def extract_single_ios_app(export_dir: Path, destination_app: Path) -> Path:
             raise IPAValidationError("failed extraction unexpectedly published a destination")
 
     return destination_app.resolve(strict=True)
+
+
+def extract_single_ios_app(export_dir: Path, destination_app: Path) -> Path:
+    if not export_dir.is_absolute() or not destination_app.is_absolute():
+        raise IPAValidationError("export and destination paths must be absolute")
+    _require_private_directory(export_dir, "iOS export directory")
+    ipa_candidates = list(export_dir.glob("*.ipa"))
+    if len(ipa_candidates) != 1:
+        raise IPAValidationError("iOS export must contain exactly one IPA")
+    return extract_ios_app_from_ipa(ipa_candidates[0], destination_app)
 
 
 def main(argv: list[str]) -> int:

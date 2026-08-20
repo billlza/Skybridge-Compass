@@ -42,7 +42,7 @@ public class CustomFrameInterpolator {
  // 创建默认库
             guard let library = SkyBridgeMetalShaderLibrary.loadIfAvailable(
                 device: device,
-                bundle: Bundle.module,
+                bundle: SkyBridgeResourceBundleLocator.core,
                 sourceResourceNames: SkyBridgeMetalShaderLibrary.coreShaderResourceNames,
                 requiredFunctionNames: [interpolationKernel]
             ) else {

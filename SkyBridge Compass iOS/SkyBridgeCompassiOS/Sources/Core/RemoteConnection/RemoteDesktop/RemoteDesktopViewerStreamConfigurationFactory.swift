@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 
 @available(iOS 17.0, *)
@@ -124,7 +125,10 @@ enum RemoteDesktopViewerStreamConfigurationFactory {
             performanceValidationMode: strictMediaValidationEnabled ? "extreme" : nil,
             mediaFallbackPolicy: mediaFallbackPolicy(for: activeTransportMode),
             streamRefreshToken: input.streamRefreshToken,
-            remoteControlSecurityIdentity: input.securityIdentity?.isEmpty == true ? nil : input.securityIdentity
+            remoteControlSecurityIdentity: input.securityIdentity?.isEmpty == true ? nil : input.securityIdentity,
+            framePresentationAckVersion: activeTransportMode == .lan
+                ? RemoteDesktopFramePresentationAcknowledgement.currentVersion
+                : nil
         )
     }
 

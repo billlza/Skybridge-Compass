@@ -257,13 +257,15 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
         )
         for marker in [
             "updateCrossNetworkRemoteMetadata(",
-            ".upsertAuthorityBoundPairingKEM("
+            ".commitAuthorityAndKEM("
         ] {
             let mutation = try XCTUnwrap(pairing.range(of: marker))
             XCTAssertLessThan(admission.lowerBound, mutation.lowerBound)
         }
         XCTAssertTrue(pairing.contains("deviceIds: validatedAuthority.authorizedDeviceIds"))
-        XCTAssertTrue(pairing.contains("verifiedProtocolFingerprint:"))
+        XCTAssertTrue(pairing.contains("authority: pairingAuthorityLease"))
+        XCTAssertTrue(pairing.contains("PairingIdentityExchangeCommitCoordinator.isCurrent("))
+        XCTAssertFalse(pairing.contains("PeerKEMBootstrapStore.shared.upsert("))
         XCTAssertFalse(pairing.contains("recordCurrentPathProtocolFingerprints("))
         XCTAssertFalse(pairing.contains("deviceId: payload.deviceId"))
 
@@ -288,8 +290,7 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
             closeCall: "disconnect()",
             persistenceMarkers: [
                 "recordRemoteControlSecurityIdentity(",
-                "persistAuthenticatedRemoteAuthority(",
-                "persistPeerKEMTrustRecords(",
+                ".commitAuthorityAndKEM(",
             ]
         )
 
@@ -303,8 +304,7 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
             closeCall: "connection.cancel()",
             persistenceMarkers: [
                 "recordRemoteControlSecurityIdentity(",
-                "PeerKEMBootstrapStore.shared.upsert(",
-                "persistAuthenticatedRemoteAuthority(",
+                ".commitAuthorityAndKEM(",
             ]
         )
 
@@ -317,9 +317,8 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
             handlerEnd: "case .ping(let payload):",
             closeCall: "connection.cancel()",
             persistenceMarkers: [
-                "persistAuthenticatedRemoteAuthority(",
                 "recordRemoteControlSecurityIdentity(",
-                "PeerKEMBootstrapStore.shared.upsert(",
+                ".commitAuthorityAndKEM(",
             ]
         )
 
@@ -332,9 +331,7 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
             handlerEnd: "case .ping(let payload):",
             closeCall: "connection.cancel()",
             persistenceMarkers: [
-                "persistAuthenticatedRemoteAuthority(",
-                "PeerKEMBootstrapStore.shared.upsert(",
-                "TrustRecord(",
+                ".commitAuthorityAndKEM(",
             ]
         )
 
@@ -354,10 +351,15 @@ final class AuthenticatedPairingIdentityAdmissionTests: XCTestCase {
             )
             XCTAssertTrue(source.contains("validatedAuthority.declaredDeviceId"))
             XCTAssertTrue(source.contains("validatedAuthority.authorizedDeviceIds"))
-            XCTAssertTrue(source.contains("validatedAuthority.protocolSigningAlgorithm"))
-            XCTAssertTrue(source.contains("validatedAuthority.protocolPublicKeyFingerprint"))
-            XCTAssertTrue(source.contains("validatedAuthority.protocolPublicKey"))
         }
+        let coordinatorSource = try repositorySource(
+            "Sources/SkyBridgeCore/P2P/PairingIdentityExchangeCommitCoordinator.swift"
+        )
+        XCTAssertTrue(coordinatorSource.contains("authority.protocolSigningAlgorithm"))
+        XCTAssertTrue(coordinatorSource.contains("authority.protocolPublicKeyFingerprint"))
+        XCTAssertTrue(
+            coordinatorSource.contains("AuthenticatedProtocolIdentityBinding.matchingPublicKey(")
+        )
         for managerSource in [legacySource, optimizedSource] {
             XCTAssertFalse(managerSource.contains("if let msg = try? JSONDecoder().decode"))
             XCTAssertTrue(

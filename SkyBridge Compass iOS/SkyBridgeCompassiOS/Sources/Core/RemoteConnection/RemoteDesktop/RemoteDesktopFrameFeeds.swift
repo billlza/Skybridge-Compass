@@ -3,6 +3,7 @@ import CoreGraphics
 import CoreMedia
 import CoreVideo
 import Foundation
+import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 struct CameraFramePresentationContext: Equatable, Sendable {
@@ -10,6 +11,13 @@ struct CameraFramePresentationContext: Equatable, Sendable {
     let sessionID: String
     let width: Int
     let height: Int
+}
+
+@available(iOS 17.0, *)
+struct RemoteDesktopFramePresentationContext: Equatable, Sendable {
+    let sequenceNumber: UInt64
+    let streamTransaction: RemoteDesktopStreamConfigurationTransaction
+    let streamEpoch: UInt64
 }
 
 @available(iOS 17.0, *)
@@ -28,19 +36,22 @@ final class DecodedPixelBufferFrame: @unchecked Sendable {
     let height: Int
     let presentationTimeStamp: CMTime
     let cameraPresentationContext: CameraFramePresentationContext?
+    let framePresentationContext: RemoteDesktopFramePresentationContext?
 
     init(
         pixelBuffer: CVPixelBuffer,
         width: Int,
         height: Int,
         presentationTimeStamp: CMTime,
-        cameraPresentationContext: CameraFramePresentationContext? = nil
+        cameraPresentationContext: CameraFramePresentationContext? = nil,
+        framePresentationContext: RemoteDesktopFramePresentationContext? = nil
     ) {
         self.pixelBuffer = pixelBuffer
         self.width = width
         self.height = height
         self.presentationTimeStamp = presentationTimeStamp
         self.cameraPresentationContext = cameraPresentationContext
+        self.framePresentationContext = framePresentationContext
     }
 }
 
@@ -51,19 +62,22 @@ final class DisplaySampleBufferFrame: @unchecked Sendable {
     let height: Int
     let presentationTimeStamp: CMTime
     let cameraPresentationContext: CameraFramePresentationContext?
+    let framePresentationContext: RemoteDesktopFramePresentationContext?
 
     init(
         sampleBuffer: CMSampleBuffer,
         width: Int,
         height: Int,
         presentationTimeStamp: CMTime,
-        cameraPresentationContext: CameraFramePresentationContext? = nil
+        cameraPresentationContext: CameraFramePresentationContext? = nil,
+        framePresentationContext: RemoteDesktopFramePresentationContext? = nil
     ) {
         self.sampleBuffer = sampleBuffer
         self.width = width
         self.height = height
         self.presentationTimeStamp = presentationTimeStamp
         self.cameraPresentationContext = cameraPresentationContext
+        self.framePresentationContext = framePresentationContext
     }
 }
 

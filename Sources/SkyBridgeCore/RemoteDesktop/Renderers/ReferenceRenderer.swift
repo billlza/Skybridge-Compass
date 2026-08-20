@@ -494,7 +494,7 @@ public final class ReferenceRenderer: @unchecked Sendable {
     private func loadHDRShaderLibrary(device: MTLDevice) -> MTLLibrary? {
         SkyBridgeMetalShaderLibrary.loadIfAvailable(
             device: device,
-            bundle: Bundle.module,
+            bundle: SkyBridgeResourceBundleLocator.core,
             sourceResourceNames: ["RemoteDesktopHDR"],
             requiredFunctionNames: [
                 "referenceHDRVertex",

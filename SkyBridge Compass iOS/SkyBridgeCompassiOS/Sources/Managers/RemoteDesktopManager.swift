@@ -867,6 +867,9 @@ public class RemoteDesktopManager: ObservableObject {
     private var activeStreamConfigurationSendOwner: ViewerStreamConfigurationSendOwner?
     private var acknowledgedStreamConfigurationTransaction:
         RemoteDesktopStreamConfigurationTransaction?
+    private var negotiatedFramePresentationAckVersion: Int?
+    private var framePresentationAcknowledgementGate =
+        FramePresentationAcknowledgementGate()
     private var lastAcknowledgedMediaAudioEndpointPresent: Bool = false
     private var lastHandledSessionAuthorityLostStreamEpoch: UInt64?
     private var lastCrossNetworkNativeReadyAnnouncementAt: Date?
@@ -1727,7 +1730,28 @@ public class RemoteDesktopManager: ObservableObject {
             width: frame.width,
             height: frame.height,
             presentationTimeStamp: frame.presentationTimeStamp,
-            cameraPresentationContext: context
+            cameraPresentationContext: context,
+            framePresentationContext: frame.framePresentationContext
+        )
+    }
+
+    private func rendererPresentationTrackedFrame(
+        _ frame: DecodedPixelBufferFrame,
+        sourceFrameSequenceNumber: UInt64?
+    ) -> DecodedPixelBufferFrame {
+        let cameraTrackedFrame = cameraPresentationTrackedFrame(frame)
+        guard let context = framePresentationContext(
+            sourceFrameSequenceNumber: sourceFrameSequenceNumber
+        ) else {
+            return cameraTrackedFrame
+        }
+        return DecodedPixelBufferFrame(
+            pixelBuffer: cameraTrackedFrame.pixelBuffer,
+            width: cameraTrackedFrame.width,
+            height: cameraTrackedFrame.height,
+            presentationTimeStamp: cameraTrackedFrame.presentationTimeStamp,
+            cameraPresentationContext: cameraTrackedFrame.cameraPresentationContext,
+            framePresentationContext: context
         )
     }
 
@@ -1745,7 +1769,48 @@ public class RemoteDesktopManager: ObservableObject {
             width: frame.width,
             height: frame.height,
             presentationTimeStamp: frame.presentationTimeStamp,
-            cameraPresentationContext: context
+            cameraPresentationContext: context,
+            framePresentationContext: frame.framePresentationContext
+        )
+    }
+
+    private func rendererPresentationTrackedFrame(
+        _ frame: DisplaySampleBufferFrame,
+        sourceFrameSequenceNumber: UInt64?
+    ) -> DisplaySampleBufferFrame {
+        let cameraTrackedFrame = cameraPresentationTrackedFrame(frame)
+        guard let context = framePresentationContext(
+            sourceFrameSequenceNumber: sourceFrameSequenceNumber
+        ) else {
+            return cameraTrackedFrame
+        }
+        return DisplaySampleBufferFrame(
+            sampleBuffer: cameraTrackedFrame.sampleBuffer,
+            width: cameraTrackedFrame.width,
+            height: cameraTrackedFrame.height,
+            presentationTimeStamp: cameraTrackedFrame.presentationTimeStamp,
+            cameraPresentationContext: cameraTrackedFrame.cameraPresentationContext,
+            framePresentationContext: context
+        )
+    }
+
+    private func framePresentationContext(
+        sourceFrameSequenceNumber: UInt64?
+    ) -> RemoteDesktopFramePresentationContext? {
+        guard activeTransportMode == .lan,
+              negotiatedFramePresentationAckVersion
+                == RemoteDesktopFramePresentationAcknowledgement.currentVersion,
+              let sequenceNumber = sourceFrameSequenceNumber,
+              sequenceNumber > 0,
+              let owner = activeStreamConfigurationSendOwner,
+              isCurrentViewerStreamConfigurationSendOwner(owner),
+              acknowledgedStreamConfigurationTransaction == owner.transaction else {
+            return nil
+        }
+        return RemoteDesktopFramePresentationContext(
+            sequenceNumber: sequenceNumber,
+            streamTransaction: owner.transaction,
+            streamEpoch: streamEpoch
         )
     }
 
@@ -4154,13 +4219,16 @@ public class RemoteDesktopManager: ObservableObject {
                 transaction: transaction,
                 streamRefreshToken: payload.streamRefreshToken,
                 audioEndpointPresent: expectedAudioEndpointPresent,
-                screenFrameTransport: payload.screenFrameTransport
+                screenFrameTransport: payload.screenFrameTransport,
+                framePresentationAckVersion: payload.framePresentationAckVersion
             )
         )
         setStreamMediaAdmission(false, for: owner)
         streamConfigurationAckTask?.cancel()
         streamConfigurationAckTask = nil
         acknowledgedStreamConfigurationTransaction = nil
+        negotiatedFramePresentationAckVersion = nil
+        framePresentationAcknowledgementGate.reset()
         activeStreamConfigurationSendOwner = owner
         return owner
     }
@@ -4189,6 +4257,8 @@ public class RemoteDesktopManager: ObservableObject {
         streamConfigurationOperationGate.invalidate(expected.transaction)
         activeStreamConfigurationSendOwner = nil
         acknowledgedStreamConfigurationTransaction = nil
+        negotiatedFramePresentationAckVersion = nil
+        framePresentationAcknowledgementGate.reset()
         streamConfigurationAckTask?.cancel()
         streamConfigurationAckTask = nil
     }
@@ -4227,6 +4297,8 @@ public class RemoteDesktopManager: ObservableObject {
         streamConfigurationOperationGate.invalidateCurrent()
         activeStreamConfigurationSendOwner = nil
         acknowledgedStreamConfigurationTransaction = nil
+        negotiatedFramePresentationAckVersion = nil
+        framePresentationAcknowledgementGate.reset()
         streamConfigurationAckTask?.cancel()
         streamConfigurationAckTask = nil
     }
@@ -4351,6 +4423,11 @@ public class RemoteDesktopManager: ObservableObject {
             return
         }
         acknowledgedStreamConfigurationTransaction = owner.transaction
+        negotiatedFramePresentationAckVersion = ack.framePresentationAckVersion
+            == RemoteDesktopFramePresentationAcknowledgement.currentVersion
+            ? RemoteDesktopFramePresentationAcknowledgement.currentVersion
+            : nil
+        framePresentationAcknowledgementGate.reset()
         setStreamMediaAdmission(true, for: owner)
         streamConfigurationAckTask?.cancel()
         streamConfigurationAckTask = nil
@@ -5969,6 +6046,8 @@ public class RemoteDesktopManager: ObservableObject {
         lanSOAPairKey = nil
         lanSecureReplayWindow = RemoteControlSecureReplayWindow()
         lanSecureSendCounter = 0
+        negotiatedFramePresentationAckVersion = nil
+        framePresentationAcknowledgementGate.reset()
         lanHandshakePeerId = nil
         lanHandshakeTransport = nil
         resetLANReceiveParserState()
@@ -7254,7 +7333,7 @@ public class RemoteDesktopManager: ObservableObject {
                 from: message.payload
             )
             handleStreamConfigurationAck(ack)
-        case .mouseEvent, .keyboardEvent, .streamConfiguration:
+        case .mouseEvent, .keyboardEvent, .streamConfiguration, .framePresentationAck:
             break
         }
         return .control
@@ -9015,11 +9094,15 @@ public class RemoteDesktopManager: ObservableObject {
 
     func handleVideoRendererDidPresentFrame(
         cameraPresentationContext: CameraFramePresentationContext?,
+        framePresentationContext: RemoteDesktopFramePresentationContext? = nil,
         presentedAt: Date
     ) async {
         guard shouldAcceptRendererPresentation(cameraPresentationContext) else { return }
         videoFrameFeed.markDisplayedFrame()
         noteDisplayedFrame(at: presentedAt)
+        await sendFramePresentationAcknowledgementIfNeeded(
+            framePresentationContext
+        )
         await promoteCameraSessionAfterFirstPresentedFrame(cameraPresentationContext)
         await maybeRestoreMetalRendererAfterStableSampleBuffer(at: presentedAt)
     }
@@ -9028,7 +9111,8 @@ public class RemoteDesktopManager: ObservableObject {
         presentationTimeStamp _: CMTime,
         displayedFrameCount: Int,
         completedAt: Date,
-        cameraPresentationContext: CameraFramePresentationContext?
+        cameraPresentationContext: CameraFramePresentationContext?,
+        framePresentationContext: RemoteDesktopFramePresentationContext? = nil
     ) async {
         guard shouldAcceptRendererPresentation(cameraPresentationContext) else { return }
         metalAwaitingFirstDisplaySince = nil
@@ -9039,7 +9123,63 @@ public class RemoteDesktopManager: ObservableObject {
         stableSampleBufferFramesSinceMetalFallback = 0
         metalVideoFrameFeed.markDisplayedFrame()
         noteDisplayedFrames(count: displayedFrameCount, at: completedAt)
+        await sendFramePresentationAcknowledgementIfNeeded(
+            framePresentationContext
+        )
         await promoteCameraSessionAfterFirstPresentedFrame(cameraPresentationContext)
+    }
+
+    private func sendFramePresentationAcknowledgementIfNeeded(
+        _ context: RemoteDesktopFramePresentationContext?
+    ) async {
+        guard let context,
+              activeTransportMode == .lan,
+              context.streamEpoch == streamEpoch,
+              negotiatedFramePresentationAckVersion
+                == RemoteDesktopFramePresentationAcknowledgement.currentVersion,
+              let owner = activeStreamConfigurationSendOwner,
+              isCurrentViewerStreamConfigurationSendOwner(owner),
+              owner.transaction == context.streamTransaction,
+              acknowledgedStreamConfigurationTransaction == context.streamTransaction,
+              lanSessionKeys != nil,
+              framePresentationAcknowledgementGate.reserve(context) else {
+            return
+        }
+
+        let acknowledgement = RemoteDesktopFramePresentationAcknowledgement(
+            sequenceNumber: context.sequenceNumber,
+            streamTransaction: context.streamTransaction
+        )
+        do {
+            let payload = try JSONEncoder().encode(acknowledgement)
+            try await sendMessage(
+                RemoteMessage(type: .framePresentationAck, payload: payload)
+            )
+        } catch {
+            guard context.streamEpoch == streamEpoch,
+                  let currentOwner = activeStreamConfigurationSendOwner,
+                  isCurrentViewerStreamConfigurationSendOwner(currentOwner),
+                  currentOwner.transaction == context.streamTransaction,
+                  framePresentationAcknowledgementGate.isCurrent(context) else {
+                return
+            }
+            framePresentationAcknowledgementGate.release(context)
+            SkyBridgeLogger.shared.error(
+                "⛔️ 首帧呈现确认发送失败: stream_ref=\(P2PEvidenceReference.transaction(context.streamTransaction.id)) frameSequence=\(context.sequenceNumber) error=\(error.localizedDescription)"
+            )
+            return
+        }
+
+        guard context.streamEpoch == streamEpoch,
+              let currentOwner = activeStreamConfigurationSendOwner,
+              isCurrentViewerStreamConfigurationSendOwner(currentOwner),
+              currentOwner.transaction == context.streamTransaction,
+              framePresentationAcknowledgementGate.isCurrent(context) else {
+            return
+        }
+        SkyBridgeDiagnosticTrace.appendStatus(
+            "event=framePresentedAckSent stream_ref=\(P2PEvidenceReference.transaction(context.streamTransaction.id)) frameSequence=\(context.sequenceNumber) transport=lan"
+        )
     }
 
     private func shouldAcceptRendererPresentation(
@@ -9075,6 +9215,7 @@ public class RemoteDesktopManager: ObservableObject {
     @MainActor
     private func applyDecodedOutput(
         _ decoded: DecodeOutput,
+        sourceFrameSequenceNumber: UInt64?,
         frameTraits: RemoteDesktopVideoFrameTraits,
         format: String,
         decoder: VideoDecoder,
@@ -9115,7 +9256,10 @@ public class RemoteDesktopManager: ObservableObject {
             guard shouldAcceptDecodedFrame(presentationTimeStamp: frame.presentationTimeStamp) else {
                 return false
             }
-            let presentationFrame = cameraPresentationTrackedFrame(frame)
+            let presentationFrame = rendererPresentationTrackedFrame(
+                frame,
+                sourceFrameSequenceNumber: sourceFrameSequenceNumber
+            )
             let independentlyDecodableFrame = frameTraits.isIndependentlyDecodableFrame
             let shouldCacheFrozenFrame = RemoteDesktopFrozenFramePolicy.shouldCache(
                 isIndependentlyDecodableFrame: independentlyDecodableFrame,
@@ -9224,7 +9368,10 @@ public class RemoteDesktopManager: ObservableObject {
             guard shouldAcceptDecodedFrame(presentationTimeStamp: frame.presentationTimeStamp) else {
                 return false
             }
-            let presentationFrame = cameraPresentationTrackedFrame(frame)
+            let presentationFrame = rendererPresentationTrackedFrame(
+                frame,
+                sourceFrameSequenceNumber: sourceFrameSequenceNumber
+            )
             if RemoteDesktopFrozenFramePolicy.shouldCache(
                 isIndependentlyDecodableFrame: frameTraits.isIndependentlyDecodableFrame,
                 renderFallbackForbidden: remoteDesktopRenderFallbackForbidden,
@@ -9506,6 +9653,7 @@ public class RemoteDesktopManager: ObservableObject {
             let now = Date()
             let applied = await applyDecodedOutput(
                 decoded,
+                sourceFrameSequenceNumber: completion.sourceFrameSequenceNumber,
                 frameTraits: completion.frameTraits,
                 format: completion.format,
                 decoder: completion.decoder,

@@ -8,8 +8,49 @@ import SkyBridgeWebRTCRuntime
 #endif
 
 @available(iOS 17.0, *)
+struct WebRTCRemoteMediaAdmissionState: Equatable, Sendable {
+    private(set) var videoEnabled = false
+    private(set) var audioEnabled = false
+    private(set) var isClosed = false
+
+    @discardableResult
+    mutating func setVideoEnabled(_ enabled: Bool) -> Bool {
+        guard !isClosed else { return false }
+        videoEnabled = enabled
+        return true
+    }
+
+    @discardableResult
+    mutating func setAudioEnabled(_ enabled: Bool) -> Bool {
+        guard !isClosed else { return false }
+        audioEnabled = enabled
+        return true
+    }
+
+    mutating func close() {
+        videoEnabled = false
+        audioEnabled = false
+        isClosed = true
+    }
+}
+
+@available(iOS 17.0, *)
 public final class WebRTCSession: NSObject, @unchecked Sendable {
     public enum Role: Sendable { case offerer, answerer }
+
+    public struct IncomingMediaRTCStats: Sendable, Equatable {
+        public let videoFrames: UInt64
+        public let videoBytes: UInt64
+        public let audioPackets: UInt64
+        public let audioBytes: UInt64
+
+        fileprivate static let zero = IncomingMediaRTCStats(
+            videoFrames: 0,
+            videoBytes: 0,
+            audioPackets: 0,
+            audioBytes: 0
+        )
+    }
 
     public struct ICEConfig: Sendable {
         public var stunURL: String
@@ -185,8 +226,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     private var remoteVideoReceiver: RTCRtpReceiver?
     private var videoTransceiver: RTCRtpTransceiver?
     private var audioTransceiver: RTCRtpTransceiver?
-    private var remoteVideoAdmissionEnabled = false
-    private var remoteAudioAdmissionEnabled = false
+    private var remoteMediaAdmission = WebRTCRemoteMediaAdmissionState()
     private var remoteVideoTrackInspectionTask: Task<Void, Never>?
     private var remoteVideoFrameEvidenceTask: Task<Void, Never>?
     private var didEmitRemoteVideoFrameEvidence = false
@@ -367,8 +407,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
             videoTransceiver = nil
             audioTransceiver?.receiver.delegate = nil
             audioTransceiver = nil
-            remoteVideoAdmissionEnabled = false
-            remoteAudioAdmissionEnabled = false
+            remoteMediaAdmission.close()
             remoteVideoTrackInspectionTask?.cancel()
             remoteVideoTrackInspectionTask = nil
             remoteVideoFrameEvidenceTask?.cancel()
@@ -406,8 +445,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func setRemoteAudioAdmissionEnabled(_ enabled: Bool) {
 #if canImport(WebRTC)
         withState {
-            guard !isClosed else { return }
-            remoteAudioAdmissionEnabled = enabled
+            guard remoteMediaAdmission.setAudioEnabled(enabled) else { return }
             audioTransceiver?.receiver.track?.isEnabled = enabled
             onTrace?(
                 "remote-audio-admission session=\(sessionId) enabled=\(enabled ? 1 : 0)"
@@ -421,8 +459,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
     public func setRemoteVideoAdmissionEnabled(_ enabled: Bool) {
 #if canImport(WebRTC)
         withState {
-            guard !isClosed else { return }
-            remoteVideoAdmissionEnabled = enabled
+            guard remoteMediaAdmission.setVideoEnabled(enabled) else { return }
             remoteVideoTrack?.isEnabled = enabled
             onTrace?(
                 "remote-video-admission session=\(sessionId) enabled=\(enabled ? 1 : 0)"
@@ -1299,7 +1336,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         if let audioTransceiver {
             preferOpusCodecIfPossible(factory: factory, transceiver: audioTransceiver)
             audioTransceiver.receiver.delegate = self
-            audioTransceiver.receiver.track?.isEnabled = remoteAudioAdmissionEnabled
+            audioTransceiver.receiver.track?.isEnabled = remoteMediaAdmission.audioEnabled
         }
     }
 
@@ -1401,7 +1438,7 @@ public final class WebRTCSession: NSObject, @unchecked Sendable {
         didEmitRemoteVideoFrameEvidence = isTrackRebind ? didEmitRemoteVideoFrameEvidence : false
         remoteVideoTrack = track
         if let track {
-            track.isEnabled = remoteVideoAdmissionEnabled
+            track.isEnabled = remoteMediaAdmission.videoEnabled
             logger.info("🎬 detected remote native video track. sessionId=\(self.sessionId, privacy: .public)")
             onTrace?("remote-video-track-installed session=\(sessionId) trackId=\(track.trackId) enabled=\(track.isEnabled ? 1 : 0)")
             remoteVideoTrackInspectionTask?.cancel()
@@ -2435,7 +2472,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
                 self.captureRemoteVideoTrack(transceiver.receiver.track as? RTCVideoTrack, receiver: transceiver.receiver)
             case .audio:
                 guard self.nativeAudioReceiveEnabled else { break }
-                transceiver.receiver.track?.isEnabled = self.remoteAudioAdmissionEnabled
+                transceiver.receiver.track?.isEnabled = self.remoteMediaAdmission.audioEnabled
                 transceiver.receiver.delegate = self
             default:
                 break
@@ -2453,7 +2490,7 @@ extension WebRTCSession: RTCPeerConnectionDelegate {
                 self.captureRemoteVideoTrack(videoTrack, receiver: rtpReceiver)
             } else if rtpReceiver.track?.kind == kRTCMediaStreamTrackKindAudio {
                 guard self.nativeAudioReceiveEnabled else { return }
-                rtpReceiver.track?.isEnabled = self.remoteAudioAdmissionEnabled
+                rtpReceiver.track?.isEnabled = self.remoteMediaAdmission.audioEnabled
                 rtpReceiver.delegate = self
             }
         }
@@ -2556,6 +2593,196 @@ extension WebRTCSession: RTCDataChannelDelegate {
                 self.close()
             }
         }
+    }
+}
+#endif
+
+@available(iOS 17.0, *)
+extension WebRTCSession {
+    /// Returns only an exact authority-selected ICE candidate-pair class.
+    /// Incomplete or ambiguous statistics fail closed as `.unknown`.
+    public func currentICETransportPath() async
+        -> WebRTCSelectedICETransportPathClassifier.Path {
+#if canImport(WebRTC)
+        guard let peerConnection = withState({ self.peerConnection }) else {
+            return .unknown
+        }
+        let outcome = await Self.awaitBoundedStatsCallback(
+            timeoutSeconds: Self.remoteVideoStatsCallbackTimeoutSeconds
+        ) { completion in
+            peerConnection.statistics { report in
+                completion(Self.selectedICETransportPath(from: report))
+            }
+        }
+        switch outcome {
+        case .completed(let path): return path
+        case .cancelled, .timedOut: return .unknown
+        }
+#else
+        return .unknown
+#endif
+    }
+
+    /// Reads cumulative inbound RTP counters from the exact live peer
+    /// connection. Missing or timed-out statistics remain zero and therefore
+    /// cannot satisfy the release recorder's non-empty-flow gate.
+    public func incomingMediaRTCStats() async -> IncomingMediaRTCStats {
+#if canImport(WebRTC)
+        guard let peerConnection = withState({ self.peerConnection }) else {
+            return .zero
+        }
+        let outcome = await Self.awaitBoundedStatsCallback(
+            timeoutSeconds: Self.remoteVideoStatsCallbackTimeoutSeconds
+        ) { completion in
+            peerConnection.statistics { report in
+                completion(Self.incomingMediaRTCStats(from: report))
+            }
+        }
+        switch outcome {
+        case .completed(let stats): return stats
+        case .cancelled, .timedOut: return .zero
+        }
+#else
+        return .zero
+#endif
+    }
+}
+
+#if canImport(WebRTC)
+@available(iOS 17.0, *)
+private extension WebRTCSession {
+    static func selectedICETransportPath(
+        from report: RTCStatisticsReport
+    ) -> WebRTCSelectedICETransportPathClassifier.Path {
+        let statistics = report.statistics
+        let pairs = statistics.values.compactMap { statistic
+            -> WebRTCSelectedICETransportPathClassifier.CandidatePair? in
+            guard statistic.type.lowercased() == "candidate-pair" else {
+                return nil
+            }
+            let state = statisticsString(
+                statistic,
+                key: "state"
+            )?.lowercased()
+            let selected = statisticsBool(statistic, key: "selected")
+            let nominated = statisticsBool(statistic, key: "nominated")
+            return .init(
+                isAuthoritySelected: selected || (nominated && state == "succeeded"),
+                localCandidateID: statisticsString(
+                    statistic,
+                    key: "localCandidateId"
+                ),
+                remoteCandidateID: statisticsString(
+                    statistic,
+                    key: "remoteCandidateId"
+                )
+            )
+        }
+        let candidates = statistics.mapValues { statistic in
+            WebRTCSelectedICETransportPathClassifier.Candidate(
+                candidateType: statisticsString(
+                    statistic,
+                    key: "candidateType"
+                )
+            )
+        }
+        return WebRTCSelectedICETransportPathClassifier.classify(
+            candidatePairs: pairs,
+            candidatesByID: candidates
+        )
+    }
+
+    static func incomingMediaRTCStats(
+        from report: RTCStatisticsReport
+    ) -> IncomingMediaRTCStats {
+        var videoFrames: UInt64 = 0
+        var videoBytes: UInt64 = 0
+        var audioPackets: UInt64 = 0
+        var audioBytes: UInt64 = 0
+        for statistic in report.statistics.values
+        where statistic.type.lowercased() == "inbound-rtp" {
+            let kind = statisticsString(statistic, key: "kind")?.lowercased()
+                ?? statisticsString(
+                    statistic,
+                    key: "mediaType"
+                )?.lowercased()
+            switch kind {
+            case "video":
+                videoFrames = max(
+                    videoFrames,
+                    statisticsUInt64(statistic, key: "framesDecoded")
+                        ?? statisticsUInt64(
+                            statistic,
+                            key: "framesReceived"
+                        ) ?? 0
+                )
+                videoBytes = max(
+                    videoBytes,
+                    statisticsUInt64(statistic, key: "bytesReceived") ?? 0
+                )
+            case "audio":
+                audioPackets = max(
+                    audioPackets,
+                    statisticsUInt64(statistic, key: "packetsReceived") ?? 0
+                )
+                audioBytes = max(
+                    audioBytes,
+                    statisticsUInt64(statistic, key: "bytesReceived") ?? 0
+                )
+            default:
+                continue
+            }
+        }
+        return IncomingMediaRTCStats(
+            videoFrames: videoFrames,
+            videoBytes: videoBytes,
+            audioPackets: audioPackets,
+            audioBytes: audioBytes
+        )
+    }
+
+    static func statisticsString(
+        _ statistic: RTCStatistics,
+        key: String
+    ) -> String? {
+        guard let value = statistic.values[key] else { return nil }
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        return nil
+    }
+
+    static func statisticsBool(
+        _ statistic: RTCStatistics,
+        key: String
+    ) -> Bool {
+        guard let value = statistic.values[key] else { return false }
+        if let number = value as? NSNumber { return number.boolValue }
+        if let string = value as? String {
+            return string == "1" || string.lowercased() == "true"
+        }
+        return false
+    }
+
+    static func statisticsUInt64(
+        _ statistic: RTCStatistics,
+        key: String
+    ) -> UInt64? {
+        guard let value = statistic.values[key] else { return nil }
+        let double: Double
+        if let number = value as? NSNumber {
+            double = number.doubleValue
+        } else if let string = value as? String,
+                  let parsed = Double(string) {
+            double = parsed
+        } else {
+            return nil
+        }
+        guard double.isFinite,
+              double >= 0,
+              double <= Double(UInt64.max) else {
+            return nil
+        }
+        return UInt64(double.rounded(.down))
     }
 }
 #endif

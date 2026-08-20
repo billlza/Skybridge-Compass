@@ -198,6 +198,7 @@ def _load_libproc() -> ctypes.CDLL:
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         proc_pidinfo = library.proc_pidinfo
         proc_pidpath = library.proc_pidpath
+        proc_listallpids = library.proc_listallpids
         proc_signal_with_audittoken = library.proc_signal_with_audittoken
     except (AttributeError, OSError) as error:
         raise OwnershipError("macOS libproc is unavailable") from error
@@ -211,9 +212,50 @@ def _load_libproc() -> ctypes.CDLL:
     proc_pidinfo.restype = ctypes.c_int
     proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     proc_pidpath.restype = ctypes.c_int
+    proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    proc_listallpids.restype = ctypes.c_int
     proc_signal_with_audittoken.argtypes = [ctypes.POINTER(AuditToken), ctypes.c_int]
     proc_signal_with_audittoken.restype = ctypes.c_int
     return library
+
+
+def _all_mac_process_identifiers() -> list[int]:
+    """Return a bounded, race-tolerant snapshot of every positive macOS PID."""
+
+    library = _load_libproc()
+    estimated_count = library.proc_listallpids(None, 0)
+    if estimated_count <= 0:
+        raise OwnershipError("cannot enumerate macOS process identifiers")
+
+    capacity = max(estimated_count + 64, 256)
+    for _ in range(4):
+        buffer = (ctypes.c_int * capacity)()
+        returned_count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
+        if returned_count < 0:
+            raise OwnershipError("macOS process enumeration failed")
+        if returned_count < capacity:
+            return sorted({int(pid) for pid in buffer[:returned_count] if pid > 0})
+        capacity *= 2
+    raise OwnershipError("macOS process enumeration changed beyond the bounded retry window")
+
+
+def _read_mac_executable_path_once(pid: int) -> str:
+    library = _load_libproc()
+    path_buffer = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+    ctypes.set_errno(0)
+    path_size = library.proc_pidpath(pid, path_buffer, len(path_buffer))
+    if path_size <= 0:
+        saved_errno = ctypes.get_errno()
+        if saved_errno in {errno.ENOENT, errno.ESRCH} or not _pid_exists(pid):
+            raise ProcessAbsent
+        raise OwnershipError(f"cannot read macOS process executable path (errno={saved_errno})")
+    try:
+        executable_path = os.path.realpath(os.fsdecode(path_buffer.value))
+    except UnicodeError as error:
+        raise OwnershipError("macOS process executable path is not valid text") from error
+    if not executable_path.startswith("/"):
+        raise OwnershipError("macOS process executable path is not absolute")
+    return executable_path
 
 
 def _read_mac_audit_token(pid: int) -> tuple[int, ...]:
@@ -268,7 +310,7 @@ def _read_mac_audit_token(pid: int) -> tuple[int, ...]:
         mach_port_deallocate(current_task, task_name.value)
 
 
-def _read_mac_snapshot_once(pid: int) -> MacProcessSnapshot:
+def _read_mac_bsd_info_once(pid: int) -> ProcBSDInfo:
     library = _load_libproc()
     bsd_info = ProcBSDInfo()
     ctypes.set_errno(0)
@@ -286,24 +328,15 @@ def _read_mac_snapshot_once(pid: int) -> MacProcessSnapshot:
         raise OwnershipError(f"cannot read macOS process start time (errno={saved_errno})")
     if bsd_info.pbi_pid != pid:
         raise OwnershipError("macOS process metadata returned a different PID")
+    return bsd_info
 
-    path_buffer = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
-    ctypes.set_errno(0)
-    path_size = library.proc_pidpath(pid, path_buffer, len(path_buffer))
-    if path_size <= 0:
-        saved_errno = ctypes.get_errno()
-        if saved_errno == errno.ESRCH or not _pid_exists(pid):
-            raise ProcessAbsent
-        raise OwnershipError(f"cannot read macOS process executable path (errno={saved_errno})")
-    try:
-        executable_path = os.path.realpath(os.fsdecode(path_buffer.value))
-    except UnicodeError as error:
-        raise OwnershipError("macOS process executable path is not valid text") from error
-    if not executable_path.startswith("/"):
-        raise OwnershipError("macOS process executable path is not absolute")
+
+def _read_mac_snapshot_once(pid: int) -> MacProcessSnapshot:
+    bsd_info = _read_mac_bsd_info_once(pid)
+
     return MacProcessSnapshot(
         audit_token=_read_mac_audit_token(pid),
-        executable_path=executable_path,
+        executable_path=_read_mac_executable_path_once(pid),
         start_time_token=f"{bsd_info.pbi_start_tvsec}:{bsd_info.pbi_start_tvusec}",
     )
 
@@ -374,6 +407,51 @@ def mac_capture(pid: int, expected_executable: pathlib.Path, output: pathlib.Pat
             "startTimeToken": snapshot.start_time_token,
         },
     )
+
+
+def mac_exact_executable_pids(expected_executable: pathlib.Path) -> list[int]:
+    """Find live processes executing one canonical binary path.
+
+    This is an absence/discovery primitive only.  Signal authority still
+    requires a subsequently captured audit-token ownership record.
+    """
+
+    if not expected_executable.is_absolute():
+        raise OwnershipError("expected macOS executable path must be absolute")
+    canonical_expected = os.path.realpath(expected_executable)
+    if not os.path.isfile(canonical_expected) or not os.access(canonical_expected, os.X_OK):
+        raise OwnershipError("expected macOS executable is not an executable file")
+
+    matching_pids: list[int] = []
+    for pid in _all_mac_process_identifiers():
+        try:
+            bsd_info = _read_mac_bsd_info_once(pid)
+        except ProcessAbsent:
+            continue
+        except OwnershipError:
+            # Processes owned by another security context are irrelevant to
+            # this user's LaunchServices session and may be uninspectable.
+            continue
+        if bsd_info.pbi_uid != os.geteuid():
+            continue
+        try:
+            first_path = _read_mac_executable_path_once(pid)
+            second_path = _read_mac_executable_path_once(pid)
+        except ProcessAbsent:
+            continue
+        except OwnershipError as error:
+            raise OwnershipError(
+                f"cannot prove executable absence for current-user PID {pid}"
+            ) from error
+        if first_path != second_path:
+            raise OwnershipError("macOS process executable changed while it was being inspected")
+        if first_path != canonical_expected:
+            continue
+        snapshot = _read_stable_mac_snapshot(pid)
+        if snapshot.executable_path != canonical_expected:
+            raise OwnershipError("macOS process identity changed during exact executable discovery")
+        matching_pids.append(pid)
+    return matching_pids
 
 
 def mac_status(identity_path: pathlib.Path) -> int:
@@ -647,6 +725,9 @@ def build_parser() -> argparse.ArgumentParser:
     mac_status_parser = subparsers.add_parser("mac-status")
     mac_status_parser.add_argument("--identity", required=True, type=pathlib.Path)
 
+    mac_list_parser = subparsers.add_parser("mac-list-exact")
+    mac_list_parser.add_argument("--expected-executable", required=True, type=pathlib.Path)
+
     mac_signal_parser = subparsers.add_parser("mac-signal")
     mac_signal_parser.add_argument("--identity", required=True, type=pathlib.Path)
     mac_signal_parser.add_argument("--signal", choices=("TERM", "KILL"), required=True)
@@ -679,6 +760,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             return MATCH
         if args.command == "mac-status":
             return mac_status(args.identity)
+        if args.command == "mac-list-exact":
+            for pid in mac_exact_executable_pids(args.expected_executable):
+                print(pid)
+            return MATCH
         if args.command == "mac-signal":
             signal_number = signal.SIGTERM if args.signal == "TERM" else signal.SIGKILL
             return mac_signal(args.identity, signal_number)
