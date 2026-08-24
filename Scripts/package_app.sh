@@ -28,17 +28,27 @@ function codesign_target() {
     return 0
   fi
 
+  # 关键：不要吞掉 codesign 的 stderr。此前这里用 `>/dev/null 2>&1`，任何签名失败
+  # （证书过期、钥匙串被锁、Apple 时间戳服务器超时……症状完全不同却都只剩一句无信息的
+  # “签名失败”），必须手动复现才能定位。现在把真实报错原样打到 stderr。
+  local codesign_output
   if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
-    codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${target}" >/dev/null 2>&1
+    if ! codesign_output="$(codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${target}" 2>&1)"; then
+      echo "codesign 失败 target=${target}: ${codesign_output}" >&2
+      return 1
+    fi
   else
     # 对 ad-hoc 场景：直接强制覆盖签名，清除任何现有签名（包括 runtime/library validation 标志），
     # 避免加载第三方 Framework 时触发 Team ID 校验失败。
     # 使用 --deep 确保 framework 内部的所有组件都被重签名
-    codesign --force --sign - --deep "${target}" >/dev/null 2>&1 || {
+    if ! codesign_output="$(codesign --force --sign - --deep "${target}" 2>&1)"; then
       # 如果 --deep 失败，尝试先移除签名再重签
       codesign --remove-signature "${target}" >/dev/null 2>&1 || true
-      codesign --force --sign - "${target}" >/dev/null 2>&1
-    }
+      if ! codesign_output="$(codesign --force --sign - "${target}" 2>&1)"; then
+        echo "codesign(ad-hoc) 失败 target=${target}: ${codesign_output}" >&2
+        return 1
+      fi
+    fi
   fi
 }
 
@@ -1637,13 +1647,16 @@ if [[ -x "${HELPER_BIN_PATH}" ]]; then
 
   # Helper bundle 在 LaunchDaemons 目录，需显式签名，否则主 App 深度签名可能不会覆盖到它
   if [[ "${IS_ADHOC_SIGNING}" -eq 0 ]]; then
-    codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${HELPER_DST_DIR}" >/dev/null 2>&1 || {
+    local helper_codesign_output
+    if ! helper_codesign_output="$(codesign --force --sign "${SIGN_IDENTITY}" --options runtime --timestamp "${HELPER_DST_DIR}" 2>&1)"; then
+      # 保留真实 codesign 报错（时间戳超时/证书/钥匙串等），不要吞成一句无信息的“签名失败”
+      echo "codesign 失败 target=${HELPER_DST_DIR}: ${helper_codesign_output}" >&2
       if is_release_distribution_context; then
         echo "错误：release_dmg 打包中 Helper 显式签名失败：${HELPER_DST_DIR}" >&2
         exit 1
       fi
       log "警告：Helper 显式签名失败，后续将依赖主 App 深度签名"
-    }
+    fi
   fi
   
   log "PowerMetricsHelper 打包完成"
