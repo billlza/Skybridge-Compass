@@ -166,6 +166,7 @@ final class ReleaseTestSurfaceIsolationTests: XCTestCase {
                     "func recomputeDeviceStatusesForTesting()",
                     "func recomputeLocalFlagsForTesting()",
                     "func setLocalStrongIdentityForTesting(",
+                    "func applyUSBDevicesUpdateForTesting(",
                     "struct SmokeDiscoveryDiagnostic",
                     "func smokeDiscoveryDiagnostics("
                 ]

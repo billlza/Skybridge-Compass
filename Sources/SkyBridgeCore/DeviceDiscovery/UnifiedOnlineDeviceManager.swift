@@ -208,6 +208,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         handleNetworkDevicesUpdate(devices)
     }
 
+    func applyUSBDevicesUpdateForTesting(_ devices: [USBDevice]) {
+        handleUSBDevicesUpdate(devices)
+    }
+
     func reloadPersistedDevicesForTesting() {
         onlineDevices.removeAll()
         deviceMap.removeAll()
@@ -4668,8 +4672,13 @@ private class DeviceStorage {
         }
         var devices = loadDevices()
 
- // 移除旧版本
-        devices.removeAll { $0.id == persistableDevice.id }
+ // 按**稳定身份**(uniqueIdentifier)去重，而不是 ephemeral 的运行时 `id`。
+ // 每次同一台设备被重新发现都会拿到一个全新的 `id`，按 `id` 去重等于从不去重——
+ // 同一 uniqueIdentifier 会不断追加成几十行,且各自带着当时(可能被污染的)名字/类型,
+ // 最终把设备库撑成一堆自相矛盾的重复行(实测 8 个身份被写成 48 行)。
+        devices.removeAll {
+            $0.uniqueIdentifier.caseInsensitiveCompare(persistableDevice.uniqueIdentifier) == .orderedSame
+        }
 
  // 添加新版本
         devices.append(persistableDevice)
@@ -4736,7 +4745,72 @@ private class DeviceStorage {
     }
 
     private static func scrubPersistedDevices(_ devices: [OnlineDevice]) -> [OnlineDevice] {
-        devices.compactMap(scrubPersistedDevice)
+        collapseDuplicateStableIdentities(devices.compactMap(scrubPersistedDevice))
+    }
+
+ /// 折叠「同一稳定身份」的重复持久化行。
+ ///
+ /// 历史写入按 ephemeral `id` 去重(等于不去重),让同一 `uniqueIdentifier` 累积出多行,
+ /// 且各行的名字/类型互相污染(例如 iPad 的身份行里混进了 Mac 的名字 + 路由器类型)。
+ /// 这里把**完全相同的稳定身份**(大小写不敏感)的多行折叠成一行:名字/类型按多数票恢复
+ /// (污染是少数派),硬字段/集合合并,最近可信度取最新。
+ /// **不同的稳定身份绝不合并**——避免过度合并再次制造污染(同一台 iPad 若有两个 UUID,
+ /// 那是身份重复问题,交给 live 发现 + PeerIdentityFusionPolicy 处理,不在这里揉)。
+    private static func collapseDuplicateStableIdentities(_ devices: [OnlineDevice]) -> [OnlineDevice] {
+        guard devices.count > 1 else { return devices }
+        var order: [String] = []
+        var groups: [String: [OnlineDevice]] = [:]
+        for device in devices {
+            let key = device.uniqueIdentifier.lowercased()
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(device)
+        }
+        return order.compactMap { key in
+            groups[key].map(mergePersistedIdentityGroup)
+        }
+    }
+
+    private static func mergePersistedIdentityGroup(_ group: [OnlineDevice]) -> OnlineDevice {
+        guard group.count > 1 else { return group[0] }
+        // 以最新 lastSeen 的行为基底(最接近当前真相),再用多数票纠正被污染的字段。
+        var base = group.max(by: { $0.lastSeen < $1.lastSeen }) ?? group[0]
+        if let name = majorityValue(group.map(\.name)) { base.name = name }
+        if let type = majorityValue(group.map(\.deviceType)) { base.deviceType = type }
+        if let platform = majorityValue(group.compactMap {
+            ($0.platformName?.isEmpty == false) ? $0.platformName : nil
+        }) {
+            base.platformName = platform
+        }
+        base.isAuthorized = group.contains { $0.isAuthorized }
+        // 保序去重合并来源与连接类型。
+        var seenSources = Set<DeviceSource>()
+        base.sources = group.flatMap { $0.sources }.filter { seenSources.insert($0).inserted }
+        base.connectionTypes = group.reduce(into: Set<DeviceConnectionType>()) {
+            $0.formUnion($1.connectionTypes)
+        }
+        if base.serialNumber == nil {
+            base.serialNumber = group.compactMap { $0.serialNumber }.first
+        }
+        if base.modelName == nil {
+            base.modelName = group.compactMap { $0.modelName }.first
+        }
+        base.lastConnectedAt = group.compactMap { $0.lastConnectedAt }.max()
+        return base
+    }
+
+ /// 众数(多数票)。平票时取在输入里最先出现的值,保证确定性。
+    private static func majorityValue<T: Hashable>(_ values: [T]) -> T? {
+        guard !values.isEmpty else { return nil }
+        var counts: [T: Int] = [:]
+        var firstIndex: [T: Int] = [:]
+        for (index, value) in values.enumerated() {
+            counts[value, default: 0] += 1
+            if firstIndex[value] == nil { firstIndex[value] = index }
+        }
+        return counts.keys.sorted { lhs, rhs in
+            if counts[lhs] != counts[rhs] { return counts[lhs]! > counts[rhs]! }
+            return firstIndex[lhs]! < firstIndex[rhs]!
+        }.first
     }
 
     private static func persistedDeviceScrubChanged(
