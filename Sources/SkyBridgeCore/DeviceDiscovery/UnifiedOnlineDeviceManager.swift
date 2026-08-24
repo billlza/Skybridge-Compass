@@ -4323,51 +4323,38 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         _ device: DiscoveredDevice,
         identifier: String
     ) -> Bool {
- // 1) 强身份：广播 deviceId 与本机一致
-        if let selfDeviceId = localProtocolDeviceId, !selfDeviceId.isEmpty {
-            if let deviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
-               deviceId == selfDeviceId {
-                return true
-            }
-            if let persistent = PeerTrustLookup.persistentDeviceId(from: identifier),
-               persistent == selfDeviceId {
-                return true
-            }
-        }
- // 2) 强身份：广播协议公钥指纹与本机一致
-        if let selfFP = localProtocolFingerprint, !selfFP.isEmpty,
-           let fingerprint = BonjourInteropContract.normalizedPubKeyFingerprint(device.pubKeyFP),
-           fingerprint == selfFP {
-            return true
-        }
- // 3) 本机物理网卡 MAC 命中
-        if !localMacAddresses.isEmpty {
-            for mac in device.macSet where localMacAddresses.contains(mac.lowercased()) {
-                return true
-            }
-        }
- // 4) 解析到的地址落在本机接口地址集合内（自广播解析回本机 LAN IP 的常见情形）
-        if !localIPAddresses.isEmpty {
-            for ip in [device.ipv4, device.ipv6].compactMap({ $0 })
-            where localIPAddresses.contains(ip) {
-                return true
-            }
-        }
- // 5) 末位兜底：显示名与本机 hostname 归一化后相等（仅限 SkyBridge 自有来源 + 电脑类型）
-        let eligibleSources: Set<DeviceSource> = [
-            .skybridgeBonjour, .skybridgeP2P, .skybridgeUSB, .skybridgeCloud
-        ]
-        if device.source != .unknown, eligibleSources.contains(device.source),
-           device.deviceType == .computer,
-           let hostname = LocalHostName.localizedName, !hostname.isEmpty {
-            func norm(_ s: String) -> String {
-                s.lowercased().replacingOccurrences(of: " ", with: "")
-            }
-            if norm(device.name) == norm(hostname) {
-                return true
-            }
-        }
-        return false
+ // 自识别统一走 SkyBridgeProtocolCore 的共享规则（与 iOS 同一份 SelfDeviceIdentityPolicy），
+ // 不再自带任何基于显示名/hostname 的兜底——名称不是身份，两台默认同名设备必须仍能互相发现。
+ // 各平台只负责把自己能拿到的身份材料喂进去。
+        let trimmedDeviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidateStableId = (trimmedDeviceId?.isEmpty == false)
+            ? trimmedDeviceId
+            : PeerTrustLookup.persistentDeviceId(from: identifier)
+        let candidateIPs = Set([device.ipv4, device.ipv6].compactMap { $0 })
+
+        let local = SelfDeviceIdentityPolicy.LocalIdentity(
+            stableDeviceId: localProtocolDeviceId,
+            protocolFingerprint: localProtocolFingerprint,
+            ipAddresses: localIPAddresses,
+            macAddresses: localMacAddresses
+        )
+        let candidate = SelfDeviceIdentityPolicy.CandidateIdentity(
+            stableDeviceId: candidateStableId,
+            protocolFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(device.pubKeyFP),
+            ipAddresses: candidateIPs,
+            macAddresses: device.macSet,
+            hasLoopbackAddress: candidateIPs.contains(where: Self.isLoopbackIPAddress)
+        )
+        return SelfDeviceIdentityPolicy.isSelf(local: local, candidate: candidate)
+    }
+
+ /// 纯字符串回环地址判定（无需 Network 依赖），与 iOS 侧口径一致。
+    private nonisolated static func isLoopbackIPAddress(_ raw: String) -> Bool {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "127.0.0.1"
+            || normalized == "::1"
+            || normalized == "::ffff:127.0.0.1"
+            || normalized.hasPrefix("127.")
     }
 
  /// 启动网络路径监控，路径变化时刷新本机IP/MAC 集合并重算本机标记

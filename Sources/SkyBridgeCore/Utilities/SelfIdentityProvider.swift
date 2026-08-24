@@ -323,31 +323,13 @@ import Darwin
 /// 网络接口检查器（获取本机物理网卡 MAC 地址）
 struct NetworkInterfaceInspector {
  /// 获取本机所有物理网卡的 MAC 地址集合
+ ///
+ /// 走 AF_LINK 实现（`getMACAddressesViaAFLink`）。此前这里遍历接口后调用 `getMACAddress(for:)`——
+ /// 而 macOS 不支持 SIOCGIFHWADDR，那个函数恒返回 nil，导致本机 MAC 集合**永远为空**，
+ /// 使得依赖 MAC 的本机自识别与去重信号形同虚设。AF_LINK 版本才是真正能拿到 MAC 的实现。
     static func currentPhysicalMACs() async -> Set<String> {
         return await Task.detached(priority: .utility) {
-            var macs = Set<String>()
-            var ifaddrs: UnsafeMutablePointer<ifaddrs>?
-            
-            guard getifaddrs(&ifaddrs) == 0 else { return macs }
-            defer { freeifaddrs(ifaddrs) }
-            
-            var interface = ifaddrs
-            while interface != nil {
-                defer { interface = interface?.pointee.ifa_next }
-                
-                guard let ifa = interface?.pointee,
-                      let name = decodeOptionalCString(ifa.ifa_name) else { continue }
-                
- // 只获取物理网卡（排除虚拟网卡、lo、utun 等）
-                guard isPhysicalInterface(name) else { continue }
-                
- // 获取 MAC 地址（通过 SIOCGIFHWADDR 或从 link layer 读取）
-                if let mac = getMACAddress(for: name) {
-                    macs.insert(mac)
-                }
-            }
-            
-            return macs
+            getMACAddressesViaAFLink()
         }.value
     }
     
@@ -361,32 +343,6 @@ struct NetworkInterfaceInspector {
         
  // 保留物理网卡：en0（Wi-Fi）、en1（以太网）等
         return name.hasPrefix("en") || name.hasPrefix("eth")
-    }
-    
- /// 获取指定接口的 MAC 地址
-    private static func getMACAddress(for interfaceName: String) -> String? {
-        var ifr = ifreq()
-        let ifnameBytes = interfaceName.utf8CString
-        guard ifnameBytes.count <= MemoryLayout.size(ofValue: ifr.ifr_name) else { return nil }
-        
- // Swift 6.2.1: withUnsafeMutableBytes 返回 Void，不需要 _ =
-        withUnsafeMutableBytes(of: &ifr.ifr_name) { ptr in
-            ifnameBytes.withUnsafeBytes { src in
-                ptr.copyBytes(from: src)
-            }
-        }
-        
-        let sockfd = socket(AF_INET, SOCK_DGRAM, 0)
-        guard sockfd >= 0 else { return nil }
-        defer { close(sockfd) }
-        
- // macOS 使用 AF_LINK 从 if_data 获取 MAC
- // 更简单的方式：直接读取 IOKit（但这里用 BSD 兼容方式）
-        
- // 由于 macOS 不支持 SIOCGIFHWADDR，改用 sysctl 或遍历 AF_LINK
- // 简化实现：返回 nil，依赖 AF_LINK 方法（见下方改进）
-        
-        return nil
     }
     
  /// 使用 BSD 接口直接获取 MAC 地址（简化实现）

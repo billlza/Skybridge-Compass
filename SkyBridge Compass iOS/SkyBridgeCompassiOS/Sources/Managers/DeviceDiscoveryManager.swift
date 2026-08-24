@@ -19,6 +19,7 @@ import Network
 import class SkyBridgeProtocolCore.BonjourRegistrationReadinessGate
 import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
 import enum SkyBridgeProtocolCore.PeerIdentityFusionPolicy
+import enum SkyBridgeProtocolCore.SelfDeviceIdentityPolicy
 import enum SkyBridgeProtocolCore.P2PInboundAdmissionPolicy
 
 #if canImport(UIKit)
@@ -2121,14 +2122,15 @@ public class DeviceDiscoveryManager: ObservableObject {
         remoteDeviceId: String,
         hasLoopbackAddress: Bool
     ) -> Bool {
-        if let localStableDeviceId,
-            remoteDeviceId.caseInsensitiveCompare(localStableDeviceId) == .orderedSame
-        {
-            return true
-        }
-        // Device names and platform labels are presentation metadata, not identity. Two default
-        // "iPhone" devices must remain mutually discoverable when their stable authorities differ.
-        return hasLoopbackAddress
+        // 自识别统一走 SkyBridgeProtocolCore 的共享规则（与 macOS 同一份 SelfDeviceIdentityPolicy）。
+        // 名称与平台仍然不参与判定——两台默认同名设备必须仍能互相发现；这条不变量现在由共享策略保证。
+        SelfDeviceIdentityPolicy.isSelf(
+            local: SelfDeviceIdentityPolicy.LocalIdentity(stableDeviceId: localStableDeviceId),
+            candidate: SelfDeviceIdentityPolicy.CandidateIdentity(
+                stableDeviceId: remoteDeviceId,
+                hasLoopbackAddress: hasLoopbackAddress
+            )
+        )
     }
 
     /// 生成尽可能稳定的设备 id：
