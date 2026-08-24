@@ -3100,6 +3100,17 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  // 同一条路由上，活跃的协议身份可以取代同一台设备的历史 stable id ——
  // 那是「同一台设备换了标识」，不是「两台不同的设备」。
         if hasStableIdentityConflict {
+            // 同一台物理设备的协议身份可以轮换(重装 app / 重置 → 新的 deviceId UUID),
+            // 于是同一台 iPad/iPhone 会在库里留下两个 stable id。若它们共享**同一条强格式
+            // 硬件序列号**(Apple UDID / 24-40 位十六进制),那是铁证的同一台设备 —— 序列号
+            // 全局唯一,不像 IP/MAC 会碰巧相同,可以放心合并。
+            //
+            // ⚠️ 刻意只认强格式序列号,不用 credibleHardwareSerialToken:后者对 USB 来源的
+            // **任意**非空序列号都算可信,而智能家居设备(摄像头等)常报空/默认/短序列号,
+            // 用它会把两台不同的摄像头误并成一台。强格式(高熵)能把这类挡在外面。
+            if sharesStrongHardwareSerial(lhs, rhs) {
+                return true
+            }
             return shouldCoalesceRouteBoundLiveProtocolIdentity(lhs, rhs)
         }
         if hasSharedHardIdentityMatch {
@@ -3965,6 +3976,30 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return nil
     }
 
+    /// 两台设备是否共享同一条**强格式**硬件序列号(高熵、全局唯一)。
+    /// 用于「协议身份不同、但物理上是同一台设备」的合并判定。
+    /// 只认 `looksLikeAppleUSBDeviceIdentifier` 的强格式,把智能家居设备常见的
+    /// 空/默认/短序列号挡在外面,避免两台不同设备被误并。
+    private nonisolated static func sharesStrongHardwareSerial(
+        _ lhs: OnlineDevice,
+        _ rhs: OnlineDevice
+    ) -> Bool {
+        guard let lhsSerial = strongHardwareSerial(from: lhs),
+              let rhsSerial = strongHardwareSerial(from: rhs) else {
+            return false
+        }
+        return lhsSerial.caseInsensitiveCompare(rhsSerial) == .orderedSame
+    }
+
+    private nonisolated static func strongHardwareSerial(from device: OnlineDevice) -> String? {
+        guard let serial = device.serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !serial.isEmpty,
+              looksLikeAppleUSBDeviceIdentifier(serial) else {
+            return nil
+        }
+        return serial
+    }
+
     private nonisolated static func looksLikeAppleUSBDeviceIdentifier(_ raw: String) -> Bool {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return false }
@@ -4352,6 +4387,28 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return SelfDeviceIdentityPolicy.isSelf(local: local, candidate: candidate)
     }
 
+ /// 对一条**已入库的 OnlineDevice** 做本机自识别(与网络发现层同一份共享规则)。
+ /// 用于 recompute / load 路径:哪怕发现层当初因身份预热竞态把某条自广播误判为
+ /// 非本机(并把一个陈旧的 `false` 塞进 authoritative map、短路了后续兜底),
+ /// 这里靠本机强身份 + 接口地址再判一次,把「本机把自己当对端」的泄漏洗掉。
+    private func isSelfOnlineDevice(_ device: OnlineDevice) -> Bool {
+        let candidateIPs = Set([device.ipv4, device.ipv6].compactMap { $0 })
+        let local = SelfDeviceIdentityPolicy.LocalIdentity(
+            stableDeviceId: localProtocolDeviceId,
+            protocolFingerprint: localProtocolFingerprint,
+            ipAddresses: localIPAddresses,
+            macAddresses: localMacAddresses
+        )
+        let candidate = SelfDeviceIdentityPolicy.CandidateIdentity(
+            stableDeviceId: PeerTrustLookup.persistentDeviceId(from: device.uniqueIdentifier),
+            protocolFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(device.protocolFingerprint),
+            ipAddresses: candidateIPs,
+            macAddresses: device.macAddress.map { [$0] } ?? [],
+            hasLoopbackAddress: candidateIPs.contains(where: Self.isLoopbackIPAddress)
+        )
+        return SelfDeviceIdentityPolicy.isSelf(local: local, candidate: candidate)
+    }
+
  /// 纯字符串回环地址判定（无需 Network 依赖），与 iOS 侧口径一致。
     private nonisolated static func isLoopbackIPAddress(_ raw: String) -> Bool {
         let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -4461,7 +4518,9 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private func recomputeLocalFlagsForAllDevices() {
         var localCount = 0
         for (key, var device) in deviceMap {
-            let newFlag = isLocalCandidate(
+            // 本机强身份/接口地址命中优先 —— 不受发现层陈旧 `false` 短路影响,
+            // 这样「本机把自己的广播当成可连接对端」的泄漏会在重算时被洗掉。
+            let newFlag = isSelfOnlineDevice(device) || isLocalCandidate(
                 identifier: device.uniqueIdentifier,
                 protocolFingerprint: device.protocolFingerprint,
                 name: device.name,
@@ -4489,7 +4548,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             var offlineDevice = device
             offlineDevice.connectionStatus = .offline
  // 启动时按严格规则重算本机标记，清理历史污染
-            offlineDevice.isLocalDevice = isLocalCandidate(
+            offlineDevice.isLocalDevice = isSelfOnlineDevice(offlineDevice) || isLocalCandidate(
                 identifier: offlineDevice.uniqueIdentifier,
                 protocolFingerprint: offlineDevice.protocolFingerprint,
                 name: offlineDevice.name,

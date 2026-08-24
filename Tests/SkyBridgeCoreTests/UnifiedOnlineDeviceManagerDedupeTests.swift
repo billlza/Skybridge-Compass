@@ -3209,6 +3209,51 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         XCTAssertFalse(row.isLocalDevice, "真实远端对端不得被误判为本机")
     }
 
+    /// BUG(自识别泄漏)回归:Mac 浏览到自己、被发现层因竞态误判为非本机(留下一条以
+    /// 本机 IP 为地址的「对端」行),recompute 必须凭本机强身份/接口地址把它洗成本机——
+    /// 而不是被 authoritative map 里那个陈旧的 `false` 短路挡住,继续以带连接按钮的对端泄漏。
+    @MainActor
+    func testRecomputeReclaimsSelfLeakedPeerByInterfaceAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let selfLeakUID = "id:e0715a9a-d0d3-47e6-b353-de0a30293e1f"
+
+        let leakedSelf = OnlineDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            deviceType: .computer,
+            ipv4: "192.168.0.104", ipv6: nil,
+            platformName: "macos",
+            osVersion: nil, modelName: nil, chip: nil,
+            macAddress: nil, serialNumber: nil,
+            connectionTypes: [.wifi],
+            services: [], portMap: [:],
+            uniqueIdentifier: selfLeakUID,
+            sources: [.skybridgeBonjour],
+            discoveredAt: Date(), lastSeen: Date(),
+            connectionStatus: .online,
+            isLocalDevice: false,   // 发现层竞态误判
+            isAuthorized: true
+        )
+
+        manager.replaceDevicesForTesting([leakedSelf])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "some-other-cached-id",
+            protocolFingerprint: nil,
+            ipAddresses: ["192.168.0.104"],   // 本机接口地址
+            macAddresses: []
+        )
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeLocalFlagsForTesting()
+
+        let row = try XCTUnwrap(manager.device(withIdentifier: selfLeakUID))
+        XCTAssertTrue(row.isLocalDevice, "解析回本机接口地址的自广播必须被重算为本机")
+        XCTAssertFalse(
+            manager.onlineDevices.contains { !$0.isLocalDevice && $0.uniqueIdentifier == selfLeakUID },
+            "本机自广播不得作为可连接对端出现"
+        )
+    }
+
     private func persistedDevicesForTesting() throws -> [OnlineDevice] {
         let data = try XCTUnwrap(UserDefaults.standard.data(forKey: "skybridge.persistedDevices"))
         let payload = try JSONDecoder().decode(PersistedDevicesPayloadForTesting.self, from: data)
