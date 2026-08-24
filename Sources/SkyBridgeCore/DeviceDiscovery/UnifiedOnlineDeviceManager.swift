@@ -70,6 +70,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
     private var localIPAddresses: Set<String> = []
  /// 本机物理网卡 MAC 地址集合（缓存）
     private var localMacAddresses: Set<String> = []
+ /// 本机广播所用的强身份 deviceId（缓存）。用于把"发现到本机自己的广播"这条网络记录同步判定为本机。
+    private var localProtocolDeviceId: String?
+ /// 本机广播所用的协议公钥指纹（缓存，hex 小写）。与广播 TXT 中的 pubKeyFP 同源。
+    private var localProtocolFingerprint: String?
  /// 当前物理连接的 USB 设备指纹（用于“USB 在线态”判断）
     private var activeUSBPresenceTokens: Set<String> = []
     private var pathMonitor: NWPathMonitor?
@@ -87,6 +91,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         identifyLocalDevice()
         refreshLocalIPs()
         refreshLocalMACs()
+        refreshLocalStrongIdentity()
         startPathMonitor()
         startCleanupTimer()
     }
@@ -178,6 +183,20 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         deviceMap = Dictionary(uniqueKeysWithValues: devices.map { ($0.uniqueIdentifier, $0) })
         authoritativeNetworkLocalClassifications.removeAll()
         updateDeviceStats()
+    }
+
+    /// Deterministically seed the cached local strong identity used by
+    /// `isSelfDiscoveredNetworkDevice`, bypassing the async Keychain/authority load.
+    func setLocalStrongIdentityForTesting(
+        deviceId: String?,
+        protocolFingerprint: String?,
+        ipAddresses: Set<String>? = nil,
+        macAddresses: Set<String>? = nil
+    ) {
+        localProtocolDeviceId = deviceId
+        localProtocolFingerprint = protocolFingerprint?.lowercased()
+        if let ipAddresses { localIPAddresses = ipAddresses }
+        if let macAddresses { localMacAddresses = Set(macAddresses.map { $0.lowercased() }) }
     }
 
     func replaceNetworkDiscoveredDevicesForTesting(_ devices: [DiscoveredDevice]) {
@@ -1062,6 +1081,17 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             return (device: device, preferredMAC: preferredMAC, identifier: identifier)
         }
 
+        // 独立于网络发现层的本机自识别：网络层可能因身份预热竞态/传统 TXT 缺失 deviceId 等原因
+        // 未能把"本机自广播"判为本机。这里以本机强身份（deviceId/协议指纹）+ 接口地址为准再判一次，
+        // 否则该记录会带着 `isLocalDevice=false` 落进 authoritative 分类并把展示层的 MAC/hostname
+        // 兜底短路成 false，本机自广播就会以"可连接对端 + 连接按钮"泄漏到在线设备区。
+        var selfMatchByRecordId: [UUID: Bool] = [:]
+        for identified in identifiedDevices {
+            let selfMatch = identified.device.isLocalDevice
+                || isSelfDiscoveredNetworkDevice(identified.device, identifier: identified.identifier)
+            selfMatchByRecordId[identified.device.id] = selfMatch
+        }
+
         var classifications: [String: Bool] = [:]
         for identified in identifiedDevices {
             let keys = Self.authoritativeLocalIdentityKeys(
@@ -1069,14 +1099,16 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 deviceId: identified.device.deviceId,
                 protocolFingerprint: identified.device.pubKeyFP
             )
+            let selfMatch = selfMatchByRecordId[identified.device.id] ?? identified.device.isLocalDevice
             for key in keys {
-                classifications[key] = (classifications[key] == true) || identified.device.isLocalDevice
+                classifications[key] = (classifications[key] == true) || selfMatch
             }
         }
         authoritativeNetworkLocalClassifications = classifications
 
         for identified in identifiedDevices {
             let device = identified.device
+            let authoritativeIsLocalDevice = selfMatchByRecordId[device.id] ?? device.isLocalDevice
 
             mergeOrCreateDevice(
                 identifier: identified.identifier,
@@ -1101,7 +1133,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 source: DeviceSource.skybridgeBonjour,
                 signalStrength: device.signalStrength,
                 isConnectable: Self.hasResolvedSkyBridgeControlRoute(device),
-                authoritativeIsLocalDevice: device.isLocalDevice
+                authoritativeIsLocalDevice: authoritativeIsLocalDevice
             )
         }
 
@@ -4261,6 +4293,83 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         }
     }
 
+ /// 刷新本机广播强身份缓存（deviceId + 协议公钥指纹）。
+ ///
+ /// 与 Bonjour 广播 TXT 同源（`CanonicalBonjourAdvertisementIdentityProvider`），
+ /// 因此"本机浏览到自己的广播"这条记录携带的 deviceId/pubKeyFP 一定与此处缓存一致。
+ /// 用 `allowCreateDeviceId: false`：这是展示/清理路径，绝不从这里创建身份。
+    private func refreshLocalStrongIdentity() {
+        Task(priority: .utility) {
+            let identity = try? await CanonicalBonjourAdvertisementIdentityProvider.current(
+                allowCreateDeviceId: false
+            )
+            await MainActor.run { [weak self] in
+                guard let self, let identity else { return }
+                self.localProtocolDeviceId = identity.deviceId
+                self.localProtocolFingerprint = identity.protocolPublicKeyFingerprint.lowercased()
+                self.logger.debug("🪪 本机强身份缓存刷新：deviceId=\(identity.deviceId.prefix(8))…")
+ // 缓存刷新后重算，洗掉在身份就绪前被误判为可连接对端的本机自广播记录。
+                self.recomputeLocalFlagsForAllDevices()
+            }
+        }
+    }
+
+ /// 同步判断一条**网络发现记录**是否其实是本机自己的广播。
+ ///
+ /// 判定优先级：强身份（广播 deviceId / 协议公钥指纹）> 本机接口地址 > 本机物理网卡 MAC >
+ /// hostname 归一化相等。强身份与本机接口地址不会与真实远端对端冲突；hostname 仅作末位兜底，
+ /// 且要求来源为 SkyBridge 自有服务、计算类型为电脑，避免两台同名默认 Mac 互相误吞。
+    private func isSelfDiscoveredNetworkDevice(
+        _ device: DiscoveredDevice,
+        identifier: String
+    ) -> Bool {
+ // 1) 强身份：广播 deviceId 与本机一致
+        if let selfDeviceId = localProtocolDeviceId, !selfDeviceId.isEmpty {
+            if let deviceId = device.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               deviceId == selfDeviceId {
+                return true
+            }
+            if let persistent = PeerTrustLookup.persistentDeviceId(from: identifier),
+               persistent == selfDeviceId {
+                return true
+            }
+        }
+ // 2) 强身份：广播协议公钥指纹与本机一致
+        if let selfFP = localProtocolFingerprint, !selfFP.isEmpty,
+           let fingerprint = BonjourInteropContract.normalizedPubKeyFingerprint(device.pubKeyFP),
+           fingerprint == selfFP {
+            return true
+        }
+ // 3) 本机物理网卡 MAC 命中
+        if !localMacAddresses.isEmpty {
+            for mac in device.macSet where localMacAddresses.contains(mac.lowercased()) {
+                return true
+            }
+        }
+ // 4) 解析到的地址落在本机接口地址集合内（自广播解析回本机 LAN IP 的常见情形）
+        if !localIPAddresses.isEmpty {
+            for ip in [device.ipv4, device.ipv6].compactMap({ $0 })
+            where localIPAddresses.contains(ip) {
+                return true
+            }
+        }
+ // 5) 末位兜底：显示名与本机 hostname 归一化后相等（仅限 SkyBridge 自有来源 + 电脑类型）
+        let eligibleSources: Set<DeviceSource> = [
+            .skybridgeBonjour, .skybridgeP2P, .skybridgeUSB, .skybridgeCloud
+        ]
+        if device.source != .unknown, eligibleSources.contains(device.source),
+           device.deviceType == .computer,
+           let hostname = LocalHostName.localizedName, !hostname.isEmpty {
+            func norm(_ s: String) -> String {
+                s.lowercased().replacingOccurrences(of: " ", with: "")
+            }
+            if norm(device.name) == norm(hostname) {
+                return true
+            }
+        }
+        return false
+    }
+
  /// 启动网络路径监控，路径变化时刷新本机IP/MAC 集合并重算本机标记
     private func startPathMonitor() {
         let monitor = NWPathMonitor()
@@ -4269,6 +4378,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             Task { @MainActor in
                 self?.refreshLocalIPs()
                 self?.refreshLocalMACs()
+                self?.refreshLocalStrongIdentity()
                 self?.recomputeLocalFlagsForAllDevices()
             }
         }

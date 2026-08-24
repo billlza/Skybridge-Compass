@@ -3077,6 +3077,138 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         UserDefaults.standard.set(data, forKey: "skybridge.persistedDevices")
     }
 
+    /// BUG B 回归：Mac 浏览到自己的 `_skybridge._tcp` 广播时，即使发现层因身份预热竞态
+    /// 漏判（`isLocalDevice=false`），显示层也必须凭本机强身份把它认成本机，
+    /// 而不是让它带着「连接」按钮以可连接对端的身份泄漏进在线设备区。
+    @MainActor
+    func testSelfAdvertisementFlaggedLocalByStrongIdentityDespiteDiscoveryLayerMiss() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let selfDeviceId = "11111111-2222-4333-8444-555555555555"
+        let selfFP = String(repeating: "a", count: 64)
+
+        manager.replaceDevicesForTesting([])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: selfDeviceId,
+            protocolFingerprint: selfFP,
+            ipAddresses: ["192.168.0.104"],
+            macAddresses: ["aa:bb:cc:dd:ee:ff"]
+        )
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        // 自广播被发现层漏判：携带本机自己的 deviceId，但 isLocalDevice=false。
+        let selfLeak = DiscoveredDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            ipv4: "192.168.0.104",
+            ipv6: nil,
+            platformName: "macos",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 61_163],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(selfDeviceId)",
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: selfDeviceId,
+            pubKeyFP: selfFP
+        )
+        manager.applyNetworkDeviceUpdateForTesting([selfLeak])
+
+        let row = try XCTUnwrap(manager.device(withIdentifier: "id:\(selfDeviceId)"))
+        XCTAssertTrue(row.isLocalDevice, "本机自广播必须被判为本机，不能作为可连接对端泄漏")
+        XCTAssertFalse(
+            manager.onlineDevices.contains {
+                !$0.isLocalDevice && $0.uniqueIdentifier == "id:\(selfDeviceId)"
+            },
+            "本机自广播不得出现在在线对端列表中；实际：\(manager.onlineDevices.map(\.uniqueIdentifier))"
+        )
+    }
+
+    /// BUG B 回归（地址兜底路径）：自广播的 deviceId 缺失/未及时解析时，
+    /// 只要解析回的地址落在本机接口地址集合内，也必须判为本机。
+    @MainActor
+    func testSelfAdvertisementFlaggedLocalByOwnInterfaceAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        manager.replaceDevicesForTesting([])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "00000000-0000-4000-8000-000000000000",
+            protocolFingerprint: String(repeating: "b", count: 64),
+            ipAddresses: ["192.168.0.104"],
+            macAddresses: []
+        )
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        // 无 deviceId/指纹的自广播，但解析回本机 LAN IP。
+        let selfByIP = DiscoveredDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            ipv4: "192.168.0.104",
+            ipv6: nil,
+            platformName: "macos",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 61_163],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "bonjour:Lza的MacBook Pro@local.",
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: nil,
+            pubKeyFP: nil
+        )
+        manager.applyNetworkDeviceUpdateForTesting([selfByIP])
+
+        XCTAssertFalse(
+            manager.onlineDevices.contains { !$0.isLocalDevice && $0.ipv4 == "192.168.0.104" },
+            "解析回本机接口地址的自广播不得作为在线对端出现"
+        )
+    }
+
+    /// BUG B 反向保护：真正的远端对端（不同 deviceId、不同 IP、非本机 MAC）
+    /// 绝不能被自识别误吞成本机。
+    @MainActor
+    func testGenuineRemotePeerIsNotMisclassifiedAsLocal() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        manager.replaceDevicesForTesting([])
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "11111111-2222-4333-8444-555555555555",
+            protocolFingerprint: String(repeating: "a", count: 64),
+            ipAddresses: ["192.168.0.104"],
+            macAddresses: ["aa:bb:cc:dd:ee:ff"]
+        )
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        let remoteId = "99999999-8888-4777-8666-555544443333"
+        let remote = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPhone 16 Pro",
+            ipv4: "192.168.0.101",
+            ipv6: nil,
+            platformName: "ios",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 51_776],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(remoteId)",
+            routeIdentifiers: ["bonjour:Ziang的iPhone 16 Pro@local."],
+            source: .skybridgeBonjour,
+            isLocalDevice: false,
+            deviceId: remoteId,
+            pubKeyFP: String(repeating: "c", count: 64)
+        )
+        manager.applyNetworkDeviceUpdateForTesting([remote])
+
+        let row = try XCTUnwrap(manager.device(withIdentifier: "id:\(remoteId)"))
+        XCTAssertFalse(row.isLocalDevice, "真实远端对端不得被误判为本机")
+    }
+
     private func persistedDevicesForTesting() throws -> [OnlineDevice] {
         let data = try XCTUnwrap(UserDefaults.standard.data(forKey: "skybridge.persistedDevices"))
         let payload = try JSONDecoder().decode(PersistedDevicesPayloadForTesting.self, from: data)
