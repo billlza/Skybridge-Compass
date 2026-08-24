@@ -194,6 +194,24 @@ final class PeerIdentityFusionPolicyContractTests: XCTestCase {
         XCTAssertNotNil(PeerIdentityFusionPolicy.normalizedStableDeviceId("abcdef0123"))
     }
 
+    /// BUG A 回归守卫：发现页用的 USB 枚举器必须同时匹配旧版 `kIOUSBDeviceClassName`
+    /// 与新版 `IOUSBHostDevice`。现代 Apple Silicon Mac 上接入的 iPhone/iPad 只挂在
+    /// 新版栈下，只匹配旧类会让发现页对 USB 在线态全盲（USB 明明插着却判离线）。
+    /// 这条断言防止有人把新版类删回去。
+    func testDiscoveryUSBEnumeratorCoversModernIOUSBHostDeviceClass() throws {
+        let source = try Self.repositorySource(
+            "Sources/SkyBridgeCore/DeviceDiscovery/USBDeviceDiscoveryManager.swift"
+        )
+        XCTAssertTrue(
+            source.contains("IOUSBHostDevice"),
+            "USBDeviceDiscoveryManager 必须枚举新版 IOUSBHostDevice 栈，否则接入的 iPhone/iPad 不会被发现。"
+        )
+        XCTAssertTrue(
+            source.contains("kIOUSBDeviceClassName"),
+            "同时仍需保留旧版 kIOUSBDeviceClassName 以覆盖传统 USB 设备。"
+        )
+    }
+
     // MARK: - Helpers
 
     private static func repositorySource(_ relativePath: String) throws -> String {

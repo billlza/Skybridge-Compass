@@ -26,8 +26,9 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
     
     private let logger = Logger(subsystem: "com.skybridge.usb", category: "USBDeviceDiscovery")
     private var notificationPort: IONotificationPortRef?
-    private var addedIterator: io_iterator_t = 0
-    private var removedIterator: io_iterator_t = 0
+ // 每个 USB 匹配类（旧版 kIOUSBDeviceClassName + 新版 IOUSBHostDevice）各注册一对
+ // 插入/移除通知迭代器；全部持有以便 stopMonitoring 时逐个释放。
+    private var matchingIterators: [io_iterator_t] = []
     
  // MARK: - 初始化
     
@@ -100,37 +101,41 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
         let runLoopSource = IONotificationPortGetRunLoopSource(notificationPort).takeUnretainedValue()
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .defaultMode)
         
- // 匹配 USB 设备
-        let matchingDict = IOServiceMatching(kIOUSBDeviceClassName)
-        
- // 监听设备插入
+ // 为每个匹配类各注册一对插入/移除通知。现代 Apple Silicon Mac 上，接入的
+ // iPhone/iPad 只挂在 IOUSBHostDevice 下；只注册旧版类会让热插拔通知对它们完全不触发。
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        IOServiceAddMatchingNotification(
-            notificationPort,
-            kIOFirstMatchNotification,
-            matchingDict,
-            deviceAdded,
-            selfPtr,
-            &addedIterator
-        )
-        
- // 消费初始迭代器
-        _ = drainUSBIterator(addedIterator)
-        
+        for className in Self.usbMatchingClassNames {
+ // 监听设备插入（IOServiceAddMatchingNotification 会消费 matching dict，每次需新建）
+            var addedIterator: io_iterator_t = 0
+            if let addMatch = IOServiceMatching(className) {
+                IOServiceAddMatchingNotification(
+                    notificationPort,
+                    kIOFirstMatchNotification,
+                    addMatch,
+                    deviceAdded,
+                    selfPtr,
+                    &addedIterator
+                )
+                _ = drainUSBIterator(addedIterator)  // 消费初始迭代器
+                matchingIterators.append(addedIterator)
+            }
+
  // 监听设备移除
-        let matchingDict2 = IOServiceMatching(kIOUSBDeviceClassName)
-        IOServiceAddMatchingNotification(
-            notificationPort,
-            kIOTerminatedNotification,
-            matchingDict2,
-            deviceRemoved,
-            selfPtr,
-            &removedIterator
-        )
-        
- // 消费初始迭代器
-        _ = drainUSBIterator(removedIterator)
-        
+            var removedIterator: io_iterator_t = 0
+            if let removeMatch = IOServiceMatching(className) {
+                IOServiceAddMatchingNotification(
+                    notificationPort,
+                    kIOTerminatedNotification,
+                    removeMatch,
+                    deviceRemoved,
+                    selfPtr,
+                    &removedIterator
+                )
+                _ = drainUSBIterator(removedIterator)  // 消费初始迭代器
+                matchingIterators.append(removedIterator)
+            }
+        }
+
  // 初始扫描
         scanUSBDevices()
     }
@@ -139,16 +144,11 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
     public func stopMonitoring() {
         logger.info("停止监控 USB 设备")
         
-        if addedIterator != 0 {
-            IOObjectRelease(addedIterator)
-            addedIterator = 0
+        for iterator in matchingIterators where iterator != 0 {
+            IOObjectRelease(iterator)
         }
-        
-        if removedIterator != 0 {
-            IOObjectRelease(removedIterator)
-            removedIterator = 0
-        }
-        
+        matchingIterators.removeAll()
+
         if let notificationPort = notificationPort {
             IONotificationPortDestroy(notificationPort)
             self.notificationPort = nil
@@ -157,32 +157,45 @@ public class USBDeviceDiscoveryManager: ObservableObject, Sendable {
     
  // MARK: - 私有方法
     
+ /// 发现页 USB 枚举必须同时覆盖旧版栈（kIOUSBDeviceClassName / "IOUSBDevice"）与新版栈
+ /// （"IOUSBHostDevice"）。现代 Apple Silicon Mac 上，接入的 iPhone/iPad 只会出现在
+ /// 新版栈下——旧版类下往往一个节点都没有——只匹配旧类会让发现页对 USB 在线态“全盲”，
+ /// 于是 USB 明明插着、设备发现却判离线。此处与 USBCConnectionManager 的枚举口径保持一致。
+    private static let usbMatchingClassNames = [kIOUSBDeviceClassName, "IOUSBHostDevice"]
+
     private func performUSBScan() async -> [USBDevice] {
         var devices: [USBDevice] = []
-        
- // 获取 USB 设备迭代器
-        var iterator: io_iterator_t = 0
-        let matchingDict = IOServiceMatching(kIOUSBDeviceClassName)
-        
-        let result = IOServiceGetMatchingServices(kIOMainPortDefault, matchingDict, &iterator)
-        guard result == KERN_SUCCESS else {
-            logger.error("无法获取 USB 设备列表: \(result)")
-            return devices
-        }
-        
-        defer {
-            IOObjectRelease(iterator)
-        }
-        
- // 遍历所有 USB 设备
-        while case let device = IOIteratorNext(iterator), device != 0 {
-            defer { IOObjectRelease(device) }
-            
-            if let usbDevice = extractUSBDeviceInfo(from: device) {
-                devices.append(usbDevice)
+ // 跨栈去重：同一物理设备可能同时出现在两套匹配里，用序列号（无则用 locationID）归一。
+        var seenKeys = Set<String>()
+
+        for className in Self.usbMatchingClassNames {
+            var iterator: io_iterator_t = 0
+            guard let matchingDict = IOServiceMatching(className) else { continue }
+
+            let result = IOServiceGetMatchingServices(kIOMainPortDefault, matchingDict, &iterator)
+            guard result == KERN_SUCCESS else {
+                logger.error("无法获取 USB 设备列表(class=\(className, privacy: .public)): \(result)")
+                continue
+            }
+            defer { IOObjectRelease(iterator) }
+
+            while case let device = IOIteratorNext(iterator), device != 0 {
+                defer { IOObjectRelease(device) }
+
+                if let usbDevice = extractUSBDeviceInfo(from: device) {
+                    let dedupeKey: String = {
+                        if let serial = usbDevice.serialNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !serial.isEmpty {
+                            return "serial:\(serial)"
+                        }
+                        return "loc:\(usbDevice.locationID)"
+                    }()
+                    guard seenKeys.insert(dedupeKey).inserted else { continue }
+                    devices.append(usbDevice)
+                }
             }
         }
-        
+
         return devices
     }
     
