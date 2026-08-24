@@ -302,11 +302,17 @@ final class DeviceDiscoveryManagerOptimizedEndpointTests: XCTestCase {
     func testWeakNameMergeDoesNotCoalesceStableProtocolIdentities() throws {
         let source = try repositorySource("Sources/SkyBridgeCore/DeviceDiscovery/UnifiedOnlineDeviceManager.swift")
 
-        XCTAssertTrue(source.contains("incomingHasProtocolIdentity"))
-        XCTAssertTrue(source.contains("existingHasProtocolIdentity"))
+        // 这条不变量原本由本文件内的两个局部变量（incomingHasProtocolIdentity /
+        // existingHasProtocolIdentity）表达，现在收敛到 SkyBridgeProtocolCore 的
+        // PeerIdentityFusionPolicy —— macOS 与 iOS 共用同一份规则，不再各写一套。
+        // 行为不变量本身由 UnifiedOnlineDeviceManagerDedupeTests 里的实跑用例覆盖。
         XCTAssertTrue(
-            source.contains("guard !incomingHasProtocolIdentity, !existingHasProtocolIdentity else"),
+            source.contains("PeerIdentityFusionPolicy.mayFuseOnDisplayNameAlone("),
             "Stable Bonjour/iCloud identities must not be merged by name-only similarity."
+        )
+        XCTAssertTrue(
+            source.contains("PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal("),
+            "MAC/序列号/IP 这类佐证信号不得推翻一对明确且不同的协议身份。"
         )
     }
 

@@ -14,6 +14,8 @@ import Network
 import os.log
 import Darwin
 import AppKit
+// 设备合并判定的共享规则（macOS / iOS 共用同一份，避免两端再各写一套）
+import SkyBridgeProtocolCore
 
 /// 发现状态结构体
 public struct DiscoveryState {
@@ -134,8 +136,39 @@ public final class DeviceDiscoveryService: ObservableObject {
 
  /// 智能查找是否存在相似设备
  /// 🔧 优化：基于多个标识符进行智能匹配
-    private func findSimilarDevice(name: String, ipv4: String?, ipv6: String?, uniqueIdentifier: String?) -> Int? {
+    private func findSimilarDevice(
+        name: String,
+        ipv4: String?,
+        ipv6: String?,
+        uniqueIdentifier: String?,
+        deviceId: String? = nil,
+        pubKeyFP: String? = nil
+    ) -> Int? {
+ // 身份证据与合并判定全部走 SkyBridgeProtocolCore 的共享规则，
+ // 与 UnifiedOnlineDeviceManager / iOS DeviceDiscoveryManager 保持同一套语义。
+        let incomingEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+            stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(deviceId ?? uniqueIdentifier),
+            publicKeyFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(pubKeyFP)
+        )
+
         return discoveredDevices.firstIndex { existing in
+            let existingEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+                stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(
+                    existing.deviceId ?? existing.uniqueIdentifier
+                ),
+                publicKeyFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(existing.pubKeyFP)
+            )
+
+ // ✅ 身份互相矛盾就绝不合并。
+ // 这里以前完全没有身份闸门：光是共用一个 IPv4（NAT 之后、DHCP 回收）
+ // 就会把两台不同的设备折叠成一条，和 UnifiedOnlineDeviceManager 里那处是同一类缺陷。
+            guard PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal(
+                lhs: incomingEvidence,
+                rhs: existingEvidence
+            ) else {
+                return false
+            }
+
  // 1. 检查唯一标识符（最可靠）
             if let uid = uniqueIdentifier, let existingUid = existing.uniqueIdentifier,
                !uid.isEmpty, !existingUid.isEmpty {
@@ -160,6 +193,14 @@ public final class DeviceDiscoveryService: ObservableObject {
             }
 
  // 3. 检查名称相似度（去除常见前缀后比较）
+ // 名称是最弱的信号：任意一侧已有协议身份时就不允许再靠名字合并。
+            guard PeerIdentityFusionPolicy.mayFuseOnDisplayNameAlone(
+                lhs: incomingEvidence,
+                rhs: existingEvidence
+            ) else {
+                return false
+            }
+
             let normalizedName = normalizeDeviceName(name)
             let normalizedExisting = normalizeDeviceName(existing.name)
 

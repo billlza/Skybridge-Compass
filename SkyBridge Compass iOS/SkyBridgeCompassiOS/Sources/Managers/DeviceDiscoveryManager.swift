@@ -18,6 +18,7 @@ import Network
 
 import class SkyBridgeProtocolCore.BonjourRegistrationReadinessGate
 import enum SkyBridgeProtocolCore.BonjourInteropProtocolContract
+import enum SkyBridgeProtocolCore.PeerIdentityFusionPolicy
 import enum SkyBridgeProtocolCore.P2PInboundAdmissionPolicy
 
 #if canImport(UIKit)
@@ -3924,9 +3925,22 @@ public class DeviceDiscoveryManager: ObservableObject {
     {
         guard lhs.id != rhs.id else { return true }
 
-        let lhsPersistent = PeerIdentityAliasResolver.persistentDeviceId(from: lhs.id)
-        let rhsPersistent = PeerIdentityAliasResolver.persistentDeviceId(from: rhs.id)
-        if let lhsPersistent, let rhsPersistent, lhsPersistent != rhsPersistent {
+        // 身份矛盾判定走 SkyBridgeProtocolCore 的共享规则，与 macOS 侧
+        // (UnifiedOnlineDeviceManager.findSimilarDevice / DeviceDiscoveryService.findSimilarDevice)
+        // 使用同一份实现，避免两端各写一套、修好一端另一端还错。
+        // 语义与原先的 PeerIdentityAliasResolver.persistentDeviceId 比对保持一致。
+        let lhsEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+            stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(lhs.id),
+            publicKeyFingerprint: nil
+        )
+        let rhsEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+            stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(rhs.id),
+            publicKeyFingerprint: nil
+        )
+        guard PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal(
+            lhs: lhsEvidence,
+            rhs: rhsEvidence
+        ) else {
             return false
         }
 

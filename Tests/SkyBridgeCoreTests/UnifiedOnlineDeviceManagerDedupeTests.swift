@@ -2724,6 +2724,290 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         XCTAssertEqual(manager.onlineDevices.first?.guardStatus, "守护中")
     }
 
+    // MARK: - 身份矛盾时禁止合并（Mac 侧“对端全部离线”的回归护栏）
+
+    /// 两台协议身份明确不同的对端，仅仅因为共用一个 IPv4，就被 `findSimilarDevice`
+    /// 折叠成同一行——被吞掉的那一行从可见列表消失，界面只剩过期的持久化行，于是
+    /// iOS / Windows / Android 全部显示「离线」。
+    ///
+    /// 共用 IPv4 在现实里非常常见：NAT 之后、DHCP 地址回收、link-local 冲突。
+    /// 它是佐证，不是身份，绝不能推翻一对明确且不同的协议身份。
+    @MainActor
+    func testDistinctProtocolIdentitiesSharingIPv4DoNotFuse() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedIPv4 = "192.168.0.104"
+        let macDeviceId = "11111111-2222-4333-8444-555555555555"
+        let padDeviceId = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+        let macFingerprint = String(repeating: "a", count: 64)
+        let padFingerprint = String(repeating: "b", count: 64)
+
+        let macPeer = DiscoveredDevice(
+            id: UUID(),
+            name: "Lza的MacBook Pro",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            platformName: "macos",
+            osVersion: "27.0",
+            modelName: "MacBook Pro",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(macDeviceId)",
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            source: .skybridgeBonjour,
+            deviceId: macDeviceId,
+            pubKeyFP: macFingerprint
+        )
+        let padPeer = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPad",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            platformName: "ipados",
+            osVersion: "27.0",
+            modelName: "iPad Pro 11-inch (M4)",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 51_776],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(padDeviceId)",
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            source: .skybridgeBonjour,
+            deviceId: padDeviceId,
+            pubKeyFP: padFingerprint
+        )
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([macPeer, padPeer])
+
+        let resolvedMac = try XCTUnwrap(
+            manager.device(withIdentifier: "id:\(macDeviceId)"),
+            "Mac 对端不应被 IPv4 巧合吞掉"
+        )
+        let resolvedPad = try XCTUnwrap(
+            manager.device(withIdentifier: "id:\(padDeviceId)"),
+            "iPad 对端不应被 IPv4 巧合吞掉"
+        )
+
+        XCTAssertNotEqual(
+            resolvedMac.uniqueIdentifier,
+            resolvedPad.uniqueIdentifier,
+            "协议身份不同的两台设备必须保持两行"
+        )
+        // 各自的元数据不得串台——串台正是旧实现留在持久化存储里的特征。
+        XCTAssertEqual(resolvedMac.platformName, "macos")
+        XCTAssertEqual(resolvedPad.platformName, "ipados")
+        XCTAssertEqual(resolvedPad.modelName, "iPad Pro 11-inch (M4)")
+    }
+
+    /// 同上，但走 MAC 地址这条更「可靠」的佐证：随机化 MAC 复用、虚拟网卡都会撞车，
+    /// 同样不足以推翻一对不同的协议身份。
+    @MainActor
+    func testDistinctProtocolIdentitiesSharingMACDoNotFuse() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedMAC = "02:00:00:00:00:77"
+        let firstDeviceId = "aaaaaaaa-1111-4222-8333-444444444444"
+        let secondDeviceId = "bbbbbbbb-5555-4666-8777-888888888888"
+
+        let first = DiscoveredDevice(
+            id: UUID(),
+            name: "Peer One",
+            ipv4: "192.168.0.10",
+            ipv6: nil,
+            platformName: "macos",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(firstDeviceId)",
+            source: .skybridgeBonjour,
+            deviceId: firstDeviceId,
+            pubKeyFP: String(repeating: "c", count: 64),
+            macSet: [sharedMAC]
+        )
+        let second = DiscoveredDevice(
+            id: UUID(),
+            name: "Peer Two",
+            ipv4: "192.168.0.11",
+            ipv6: nil,
+            platformName: "windows",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_528],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(secondDeviceId)",
+            source: .skybridgeBonjour,
+            deviceId: secondDeviceId,
+            pubKeyFP: String(repeating: "d", count: 64),
+            macSet: [sharedMAC]
+        )
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([first, second])
+
+        // 注意：合并发生时 deviceMap 会把两个 key 都指向同一行，
+        // 所以「两个 key 都能查到」并不能证明没合并——必须比对解析出来的身份本身。
+        let resolvedFirst = try XCTUnwrap(manager.device(withIdentifier: "id:\(firstDeviceId)"))
+        let resolvedSecond = try XCTUnwrap(manager.device(withIdentifier: "id:\(secondDeviceId)"))
+
+        XCTAssertNotEqual(
+            resolvedFirst.uniqueIdentifier,
+            resolvedSecond.uniqueIdentifier,
+            "共用 MAC 不足以推翻两个不同的协议身份"
+        )
+        XCTAssertEqual(resolvedFirst.platformName, "macos")
+        XCTAssertEqual(resolvedSecond.platformName, "windows")
+    }
+
+    /// 信任别名合并曾是绕过身份闸门的后门：信任记录的 knownDeviceIds 里会被
+    /// `P2PDiscoveryKEMAliasRepairPolicy` 塞进裸 IP / `host:<ip>` 这类地址形状的 token，
+    /// 于是两台身份不同、只是恰好同 IP 的设备，只要有一条信任记录同时沾到它们就会被合并。
+    @MainActor
+    func testTrustedAliasDoesNotFuseContradictingIdentitiesSharingOnlyAnAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedIPv4 = "192.168.0.104"
+        let firstStableId = "11111111-2222-4333-8444-555555555555"
+        let secondStableId = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+
+        let first = makeDevice(
+            name: "Lza的MacBook Pro",
+            uniqueIdentifier: "id:\(firstStableId)",
+            ipv4: sharedIPv4,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 9527],
+            routeIdentifiers: ["bonjour:Lza的MacBook Pro@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "macos",
+            modelName: "MacBook Pro",
+            protocolFingerprint: String(repeating: "a", count: 64)
+        )
+        let second = makeDevice(
+            name: "Ziang的iPad",
+            uniqueIdentifier: "id:\(secondStableId)",
+            ipv4: sharedIPv4,
+            status: .online,
+            lastConnectedAt: nil,
+            isConnectable: true,
+            connectionTypes: [.wifi],
+            services: ["_skybridge._tcp"],
+            portMap: ["_skybridge._tcp": 51776],
+            routeIdentifiers: ["bonjour:Ziang的iPad@local."],
+            sources: [.skybridgeBonjour],
+            platformName: "ipados",
+            modelName: "iPad Pro 11-inch (M4)",
+            protocolFingerprint: String(repeating: "b", count: 64)
+        )
+
+        // 这条信任记录唯一同时沾到两台设备的 token 就是那个共享 IP —— 地址，不是身份。
+        let addressOnlyTrustRecord = TrustRecord(
+            deviceId: "id:\(firstStableId)",
+            pubKeyFP: String(repeating: "a", count: 64),
+            publicKey: Data([0x04]),
+            kemPublicKeys: nil,
+            capabilities: ["trusted"],
+            signature: Data(),
+            deviceName: "Lza的MacBook Pro",
+            currentDeviceId: "id:\(firstStableId)",
+            knownDeviceIds: ["id:\(firstStableId)", sharedIPv4, "host:\(sharedIPv4)"]
+        )
+
+        let previousTrustRecords = TrustSyncService.shared.activeTrustRecords
+        TrustSyncService.shared.activeTrustRecords = [addressOnlyTrustRecord]
+        manager.replaceDevicesForTesting([first, second])
+        defer {
+            TrustSyncService.shared.activeTrustRecords = previousTrustRecords
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.recomputeDeviceStatusesForTesting()
+
+        XCTAssertEqual(
+            manager.onlineDevices.count,
+            2,
+            "共享地址的信任 token 不得推翻两个不同的协议身份；实际行："
+                + "\(manager.onlineDevices.map(\.uniqueIdentifier))"
+        )
+    }
+
+    /// 身份「未知」不等于身份「不同」：一侧没有协议身份时，仍然允许靠地址补全，
+    /// 否则 Bonjour 的裸命中就再也接不上已知设备了。
+    @MainActor
+    func testUnknownIdentityStillFusesOnSharedAddress() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+        let sharedIPv4 = "192.168.0.55"
+        let deviceId = "cccccccc-9999-4000-8111-222222222222"
+
+        let identified = DiscoveredDevice(
+            id: UUID(),
+            name: "Ziang的iPhone",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            platformName: "ios",
+            services: [BonjourInteropContract.controlServiceType],
+            portMap: [BonjourInteropContract.controlServiceType: 9_527],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "id:\(deviceId)",
+            source: .skybridgeBonjour,
+            deviceId: deviceId,
+            pubKeyFP: String(repeating: "e", count: 64)
+        )
+        // 没有 deviceId / pubKeyFP 的裸地址命中——身份未知，应当被吸附到已识别的那行。
+        let anonymous = DiscoveredDevice(
+            id: UUID(),
+            name: "192.168.0.55",
+            ipv4: sharedIPv4,
+            ipv6: nil,
+            services: [],
+            portMap: [:],
+            connectionTypes: [.wifi],
+            uniqueIdentifier: "host:\(sharedIPv4)",
+            source: .skybridgeP2P
+        )
+
+        manager.replaceDevicesForTesting([])
+        defer {
+            manager.applyNetworkDeviceUpdateForTesting([])
+            manager.replaceDevicesForTesting([])
+        }
+
+        manager.applyNetworkDeviceUpdateForTesting([identified, anonymous])
+
+        XCTAssertNotNil(
+            manager.device(withIdentifier: "id:\(deviceId)"),
+            "已识别的行必须保留"
+        )
+        // ⚠️ 不要断言 device(withIdentifier: "host:<ip>") == nil：`host:` 从来就不会成为
+        // deviceMap 的 key（generateUniqueIdentifier 会把它归一化成 `id:<ip>`），
+        // 那种断言在「合并了」和「没合并」两种世界里都恒为 nil，毫无鉴别力。
+        // 要断言合并后的形状本身。
+        XCTAssertEqual(
+            manager.onlineDevices.count,
+            1,
+            "身份未知的裸地址命中应当被吸附进已识别的行，而不是自成一行；"
+                + "实际行：\(manager.onlineDevices.map(\.uniqueIdentifier))"
+        )
+        // 活下来的必须是「已识别」的那一行，而不是由路径端点洗出来的幽灵身份。
+        // 注意：合并后 deviceMap 会把裸地址 key 也别名到同一行，所以不能靠
+        // 「该 key 查不到」来判定——要看活下来这行的身份是谁。
+        XCTAssertEqual(
+            manager.onlineDevices.first?.uniqueIdentifier,
+            "id:\(deviceId)",
+            "路径端点不得被当成稳定身份而顶掉真正的协议身份"
+        )
+        XCTAssertEqual(manager.onlineDevices.first?.platformName, "ios")
+    }
+
     private func makeDevice(
         name: String,
         uniqueIdentifier: String,

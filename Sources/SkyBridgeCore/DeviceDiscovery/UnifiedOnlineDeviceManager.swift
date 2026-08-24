@@ -7,6 +7,8 @@ import Foundation
 import Combine
 import OSLog
 import Network
+// 设备合并判定的共享规则（macOS / iOS 共用同一份，避免两端再各写一套）
+import SkyBridgeProtocolCore
 
 /// 统一的在线设备管理器
 ///
@@ -1501,15 +1503,42 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         source: DeviceSource
     ) -> String? {
         let allowsWeakNameMatch = source != .skybridgeCloud
-        let incomingHasProtocolIdentity =
-            Self.canonicalStableIdentifierToken(incomingIdentifier) != nil ||
-            normalizeFingerprint(incomingProtocolFingerprint) != nil
+ // 身份证据统一走 SkyBridgeProtocolCore 的共享判定，避免 macOS / iOS 再各写一套规则。
+ //
+ // ⚠️ 这里必须用 PeerIdentityFusionPolicy.normalizedStableDeviceId，不能用本类的
+ // `canonicalStableIdentifierToken`：后者会剥掉 `host:` 前缀、并且把任何 ≥8 字符的
+ // 串原样接受，于是 `host:192.168.0.55` 会被"洗"成 `id:192.168.0.55` —— 一个路径端点
+ // 冒充成了稳定身份。拿它去做身份比对，两条本该合并的记录会被判成"身份不同"而拒绝合并，
+ // 反而多出一行幽灵设备。归一化和判定必须来自同一份规则，否则分叉只是换了个地方。
+        let incomingEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+            stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(incomingIdentifier),
+            publicKeyFingerprint: normalizeFingerprint(incomingProtocolFingerprint)
+        )
 
         for (identifier, device) in deviceMap {
  // 禁止将“相似设备”合并到本机条目，避免第三方设备覆盖本机
             if identifier.hasPrefix("local:") || device.isLocalDevice {
                 continue
             }
+
+            let existingEvidence = PeerIdentityFusionPolicy.IdentityEvidence(
+                stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(device.uniqueIdentifier),
+                publicKeyFingerprint: normalizeFingerprint(device.protocolFingerprint)
+            )
+
+ // ✅ 修复（Mac 侧“对端全部离线”的根因）：
+ // 以前 MAC / 序列号 / IP 这三条是**无条件**合并的，身份判定却排在它们后面，
+ // 而且只覆盖下面按名字匹配的分支。于是两台协议身份明确不同的对端，只要
+ // 共用一个 IPv4（NAT 之后、DHCP 回收、link-local 冲突都会造成），就会被
+ // 揉进同一行；被吞掉的那一行从可见列表消失，界面上只剩过期的持久化行 → 全部显示离线。
+ // iOS 侧本来就是先比身份再谈合并，这里把 macOS 对齐到同一条规则上。
+            guard PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal(
+                lhs: incomingEvidence,
+                rhs: existingEvidence
+            ) else {
+                continue
+            }
+
  // 1. MAC地址匹配(最可靠)
             if let mac = macAddress, let existingMac = device.macAddress,
                !mac.isEmpty, !existingMac.isEmpty {
@@ -1545,10 +1574,10 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             guard allowsWeakNameMatch else {
                 continue
             }
-            let existingHasProtocolIdentity =
-                Self.canonicalStableIdentifierToken(device.uniqueIdentifier) != nil ||
-                normalizeFingerprint(device.protocolFingerprint) != nil
-            guard !incomingHasProtocolIdentity, !existingHasProtocolIdentity else {
+            guard PeerIdentityFusionPolicy.mayFuseOnDisplayNameAlone(
+                lhs: incomingEvidence,
+                rhs: existingEvidence
+            ) else {
                 continue
             }
 
@@ -2894,13 +2923,42 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         let rhsCandidates = deviceTrustCandidatesById[rhs.id] ?? []
         guard !lhsCandidates.isEmpty, !rhsCandidates.isEmpty else { return false }
 
+ // 信任别名候选集里既有身份形状的 token（deviceId / knownDeviceIds），
+ // 也有地址形状的 token —— P2PDiscoveryKEMAliasRepairPolicy 会把 device.ipv4/ipv6
+ // 展开成裸 IP 和 `host:<ip>` 塞进 knownDeviceIds。
+ // 如果不加区分，两台身份明确不同、只是恰好同 IP 的设备，只要有一条信任记录同时
+ // 沾到它们，就会绕过 shouldCoalesceEquivalentPhysicalDevices 里刚加的身份闸门被合并。
+        let lhsEvidence = Self.trustFusionIdentityEvidence(for: lhs)
+        let rhsEvidence = Self.trustFusionIdentityEvidence(for: rhs)
+        let identitiesContradict = PeerIdentityFusionPolicy.identitiesContradict(lhsEvidence, rhsEvidence)
+
         for recordCandidates in trustRecordCandidateSets {
-            if !lhsCandidates.isDisjoint(with: recordCandidates),
-               !rhsCandidates.isDisjoint(with: recordCandidates) {
-                return true
+            let lhsShared = lhsCandidates.intersection(recordCandidates)
+            let rhsShared = rhsCandidates.intersection(recordCandidates)
+            guard !lhsShared.isEmpty, !rhsShared.isEmpty else { continue }
+
+            if identitiesContradict {
+ // 身份矛盾时，只承认「同一条信任记录把两个身份都列为已知设备」这一种情况——
+ // 那是同一台设备的身份轮换（knownDeviceIds 的本意）。
+ // 仅仅共享一个地址形状的 token 不足以推翻两个不同的协议身份。
+                guard lhsShared.contains(where: { PeerIdentityFusionPolicy.normalizedStableDeviceId($0) != nil }),
+                      rhsShared.contains(where: { PeerIdentityFusionPolicy.normalizedStableDeviceId($0) != nil }) else {
+                    continue
+                }
             }
+            return true
         }
         return false
+    }
+
+ /// 供信任别名合并使用的身份证据（与 findSimilarDevice 走同一份归一化）。
+    private nonisolated static func trustFusionIdentityEvidence(
+        for device: OnlineDevice
+    ) -> PeerIdentityFusionPolicy.IdentityEvidence {
+        PeerIdentityFusionPolicy.IdentityEvidence(
+            stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(device.uniqueIdentifier),
+            publicKeyFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(device.protocolFingerprint)
+        )
     }
 
     private nonisolated static func deviceTrustLookupCandidates(for device: OnlineDevice) -> Set<String> {
@@ -2995,15 +3053,21 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
                 return false
             }
         }
+ // ✅ 修复：身份矛盾必须先于任何佐证匹配判定。
+ //
+ // 以前的顺序是「只要有任意一类硬标识对上就 return true」，而 `stable` 冲突
+ // 只是被记了一笔、`continue` 掉。于是两台 stable id 明确不同的设备，只要
+ // MAC（随机化 MAC 复用、虚拟网卡）或序列号撞上一个，就会被判为同一台。
+ // 这和 `findSimilarDevice` 里那处是同一类缺陷：佐证信号推翻了身份。
+ //
+ // 唯一保留的例外是 `shouldCoalesceRouteBoundLiveProtocolIdentity`：
+ // 同一条路由上，活跃的协议身份可以取代同一台设备的历史 stable id ——
+ // 那是「同一台设备换了标识」，不是「两台不同的设备」。
+        if hasStableIdentityConflict {
+            return shouldCoalesceRouteBoundLiveProtocolIdentity(lhs, rhs)
+        }
         if hasSharedHardIdentityMatch {
             return true
-        }
-        if hasStableIdentityConflict,
-           shouldCoalesceRouteBoundLiveProtocolIdentity(lhs, rhs) {
-            return true
-        }
-        if hasStableIdentityConflict {
-            return false
         }
 
         let lhsLegacyCloudAliases = legacyCloudStableIdentityAliases(for: lhs)
