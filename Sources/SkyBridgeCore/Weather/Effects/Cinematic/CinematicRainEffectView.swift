@@ -14,21 +14,31 @@
 import SwiftUI
 import Combine
 
-/// 物理真实雨滴粒子
+/// 雨滴粒子。
+///
+/// 只保留绘制真正会读的字段。此前还带着 y / velocityX / acceleration / mass /
+/// rotation / deformation / thickness / opacity / trail 九个字段——它们的读取方
+/// 全在逐帧物理模拟里，而现在轨迹是按时间闭式求值的，那套模拟已经删除。
+/// 尤其 thickness / opacity 会误导人：它们看着像是每滴雨的绘制参数，实际上
+/// 绘制读的是 `activeQualityConfiguration`，改这里不会有任何效果。
 struct PhysicsRaindrop: Identifiable {
     let id = UUID()
+ /// 归一化的水平起始位置（0-1）
     var x: CGFloat
-    var y: CGFloat
-    var velocityX: CGFloat  // 水平速度（受风影响）
-    var velocityY: CGFloat  // 垂直速度（受重力影响）
-    var acceleration: CGFloat = 980  // 重力加速度
-    let mass: CGFloat  // 质量（影响惯性）
-    var rotation: CGFloat = 0  // 旋转角度
-    var deformation: CGFloat = 1.0  // 形变系数（下落时拉长）
+ /// 初始垂直速度。首次使用时按屏幕高度归一化（>1 视为像素单位）。
+    var velocityY: CGFloat
+ /// 雨丝基础长度，实际长度再按当前速度拉伸
     let baseLength: CGFloat
-    let thickness: CGFloat
-    let opacity: Double
     let layer: Int  // 景深层次
+ // 预计算的循环相位（0-1）。此前每帧用 `id.hashValue` 现算相位：既是每帧
+ // 每滴一次哈希的白白开销，又因为相位只铺满周期的 3/5，导致雨滴成批同时
+ // 重生，屏幕上能看见一道道“雨带”和空档——这正是雨看起来很假的主因之一。
+    let phase: Double
+ // 每滴雨自己的循环时长（秒），让重生时刻彻底错开，不再整屏同步复位。
+    let cycle: Double
+ // 亮度档位（0=偏暗的更远的一批，1=偏亮的更近的一批）。在同一景深层内再分两档，
+ // 既能让雨幕有层次，又不会破坏批量绘制（一档一次 stroke）。
+    let brightnessTier: Int
     var trail: [CGPoint] = []  // 尾迹点
 }
 
@@ -110,6 +120,15 @@ struct CinematicRainWaterPuddle {
 
 @available(macOS 14.0, *)
 public struct CinematicRainEffectView: View {
+ // 动画时间原点。与其他电影级天气效果保持一致：用相对本次运行的秒数驱动动画，
+ // 而不是 `timeIntervalSinceReferenceDate` 那个 7.8e8 量级的绝对值——后者会把
+ // Double 的有效精度吃掉大半，让 sin/取余在高帧率下产生可见的抖动与跳变。
+    private static let animationEpoch = Date()
+
+ // 模拟子系统的节拍间隔（秒）。挂壁水珠、积水、闪电这些是有状态的模拟，
+ // 无法写成时间的纯函数，仍需按节拍推进。
+    private static let simulationTickInterval: TimeInterval = 0.15
+
  // 物理粒子状态
     @State private var raindrops: [PhysicsRaindrop] = []
     @State private var glassDrops: [DynamicGlassDrop] = []
@@ -122,10 +141,10 @@ public struct CinematicRainEffectView: View {
     @State private var waterPuddle = CinematicRainWaterPuddle()
     
  // 天气状态
-    @State private var windSpeed: CGFloat = 0
-    @State private var windDirection: CGFloat = 0
+ // 风速、风噪、反射闪烁都已改为时间的纯函数（见 `windSpeed(at:multiplier:)` 等），
+ // 不再作为 @State 由计时器写入：既省掉每秒几十次的状态写入与视图失效，
+ // 也让它们的变化在任意帧率下都完全平滑。
     @State private var lightningOpacity: Double = 0
-    @State private var lastFrameTime: TimeInterval = 0
     
  // Perlin噪声云层
  // 云层噪声偏移改为纯时间驱动，不再持久化为状态，避免并发更新期间写入
@@ -146,31 +165,20 @@ public struct CinematicRainEffectView: View {
     
  // 性能配置
     @State private var performanceConfig: PerformanceConfiguration?
-    
+
+ // 质量档位缓存。此前 `getQualityConfiguration()` 每帧都要重新推导一遍
+ // （还在 detect 回调里再算一次）；它只依赖 performanceConfig，配置变了才需要重算。
+    @State private var activeQualityConfiguration: RainQualityConfig = .balanced
+
  // 🌟 动态帧率（根据性能模式）
     @State private var currentFrameRate: Double = 60.0
     
- // 统一计时器管理（远程桌面激活时集中暂停/恢复）
- // 说明：所有特效系统的计时器都以属性持有，便于在需要时取消，防止视图更新期间写入状态导致并发警告
-    @State private var lightningTimer: Timer?
-    @State private var windTimer: Timer?
-    @State private var wallDropDetectTimer: Timer?
-    @State private var wallDropUpdateTimer: Timer?
-    @State private var waterPuddleTimer: Timer?
- // 🌬️ 风噪系统计时器与状态（用于调制雾效强度）
-    @State private var windNoiseTimer: Timer?
-    @State private var ambientWindNoiseLevel: Double = 0.0
- // ✨ 镜面反射闪烁计时器与调制因子（用于积水反射高光）
-    @State private var reflectionFlickerTimer: Timer?
-    @State private var reflectionFlickerFactor: Double = 1.0
+ // 自适应帧率计时器。这是本视图仅存的计时器：它只在自适应模式下按 0.5s
+ // 采样一次目标帧率，不参与任何逐帧绘制。以属性持有以便视图消失时注销。
+    @State private var adaptiveFrameRateTimer: Timer?
 
- // 统一时间累加器（替换原有多个 Timer），借助 TimelineView 的帧节拍触发
-    @State private var lastTick: Date = .now
-    @State private var windAcc: TimeInterval = 0
-    @State private var windNoiseAcc: TimeInterval = 0
-    @State private var reflectionAcc: TimeInterval = 0
-    @State private var wallUpdateAcc: TimeInterval = 0
-    @State private var puddleAcc: TimeInterval = 0
+ // 模拟节拍状态：`lastTickIndex` 让每个节拍只推进一次（幂等门）。
+    @State private var lastTickIndex: Int = -1
     @State private var lightningAcc: TimeInterval = 0
     @State private var nextLightningInterval: TimeInterval = 8.0
     
@@ -218,11 +226,16 @@ public struct CinematicRainEffectView: View {
  // 主雨天效果层
  // 🌟 动态帧率：根据性能模式设置（极致120fps，平衡60fps，节能30fps，自适应30-120fps）
                 TimelineView(.animation(minimumInterval: 1.0/currentFrameRate)) { timeline in
-                    let time = timeline.date.timeIntervalSinceReferenceDate
+                    let time = timeline.date.timeIntervalSince(Self.animationEpoch)
  // ✅ 捕获局部常量，避免在 Sendable 闭包中直接访问主线程隔离的 @State
                     let remoteActive = isRemoteDesktopActive
-                    let _ = scheduleTick(remoteActive: remoteActive, now: timeline.date)
-                    
+                    let _ = scheduleTick(remoteActive: remoteActive, time: time)
+
+ // 说明：这里刻意保持 Canvas 的默认参数。
+ // `colorMode: .nonLinear` 会改变渐变的混合色彩空间，体积云与涟漪都是渐变绘制的，
+ // 换色彩空间就会改变它们的观感；`rendersAsynchronously: true` 则会让绘制闭包
+ // 脱离主线程，而本闭包要读取由节拍任务在主线程改写的 @State（积水、挂壁水珠），
+ // 那是实打实的数据竞争。两者都不值得为这点收益去换。
                     Canvas { context, size in
  // 🔌 远程桌面处于活跃状态时，立即跳过本帧所有绘制（完全暂停渲染）
                         guard !remoteActive else { return }
@@ -262,7 +275,10 @@ public struct CinematicRainEffectView: View {
  // 说明：体积云动画已改为纯时间驱动（见 drawVolumetricClouds），
  // 这里不再在视图更新期间写入任何 @State，避免并发告警。
                 }
-                .opacity(clearManager.globalOpacity)  // 🔥 驱散效果
+ // 🔥 驱散效果。任何小于 1 的不透明度都会让 SwiftUI 走离屏合成（每帧多一张全屏缓冲）。
+ // 未驱散时 globalOpacity 可能是 0.9999… 这类浮点余数，白白把离屏通道一直开着；
+ // 这里吸附到精确的 1.0，让 SwiftUI 能把它当作恒等变换直接跳过。
+                .opacity(clearManager.globalOpacity >= 0.999 ? 1.0 : clearManager.globalOpacity)
             }
             .onAppear {
  // ✅ 保存窗口尺寸，用于检测函数
@@ -381,22 +397,25 @@ public struct CinematicRainEffectView: View {
         }
         
  // 对于自适应模式，启动动态帧率更新
-        do {
-            let manager = try PerformanceModeManager()
-            if manager.currentMode == .adaptive {
-                startAdaptiveFrameRateUpdate()
-            }
-        } catch {
- // 忽略错误
-        }
+        startAdaptiveFrameRateUpdateIfNeeded()
     }
-    
- /// 启动自适应帧率更新（30-120fps动态调整）
-    private func startAdaptiveFrameRateUpdate() {
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] _ in
+
+ /// 启动自适应帧率更新（30-120fps动态调整）。
+ /// ⚠️ 旧实现每次调用都新建一个 0.5s 重复计时器且从不注销：视图每次出现、
+ /// 每次性能模式变化都会再叠一个，计时器越积越多且视图消失后仍在跑。
+ /// 现在以属性持有，重复调用先注销旧的，视图消失时一并停掉。
+    private func startAdaptiveFrameRateUpdateIfNeeded() {
+        adaptiveFrameRateTimer?.invalidate()
+        adaptiveFrameRateTimer = nil
+
+        guard let manager = try? PerformanceModeManager(), manager.currentMode == .adaptive else {
+            return
+        }
+
+        adaptiveFrameRateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [self] _ in
             Task { @MainActor in
                 guard let config = performanceConfig else { return }
-                
+
  // 根据targetFrameRate动态调整（已在30-120范围内）
                 let newFrameRate = min(max(Double(config.targetFrameRate), 30), 120)
                 if abs(newFrameRate - currentFrameRate) > 5 {  // 只在变化超过5fps时更新
@@ -414,9 +433,11 @@ public struct CinematicRainEffectView: View {
     private func initializeAdvancedParticles() {
  // 根据性能模式动态调整雨滴数量
         let (farCount, midCount, nearCount) = getPerformanceBasedCounts()
-        
- // 获取性能配置，优化雨滴效果
+
+ // 获取性能配置，优化雨滴效果。
+ // 质量档只依赖 performanceConfig，这里推导一次并缓存，绘制时直接读缓存。
         let qualityConfig = getQualityConfiguration()
+        activeQualityConfiguration = qualityConfig
         
  // 创建三层景深雨滴
         let layers: [(count: Int, layer: Int)] = [
@@ -426,27 +447,22 @@ public struct CinematicRainEffectView: View {
         ]
         
         for (count, layer) in layers {
-            let baseMass: CGFloat = layer == 0 ? 1.5 : (layer == 1 ? 1.0 : 0.7)
-            
             for _ in 0..<count {
- // 🌟 修复：雨滴必须从云层（顶部，y < 0）开始
- // 根据景深层分配不同的初始高度：远景更高（更接近云层）
-                let startY: CGFloat = layer == 0 ? CGFloat.random(in: -0.5 ... -0.1) :  // 远景从更高位置
-                                      layer == 1 ? CGFloat.random(in: -0.3 ... -0.05) : // 中景
-                                                    CGFloat.random(in: -0.2 ... -0.02)  // 近景
-                
- // 注意：速度将在updateRaindropPhysics中根据屏幕尺寸归一化
- // 这里先使用像素单位，稍后会在首次物理更新时转换
+ // 说明：起始高度不再逐滴随机存进粒子里——绘制按景深层取固定的
+ // startY（远景 -0.5 / 中景 -0.3 / 近景 -0.2），错开靠的是每滴各自的
+ // phase 与 cycle，效果更均匀，也少存一个字段。
+ // 速度先用像素单位，绘制时按屏幕高度归一化。
                 raindrops.append(PhysicsRaindrop(
                     x: CGFloat.random(in: 0...1),
-                    y: startY,  // ✅ 从顶部云层开始
-                    velocityX: CGFloat.random(in: -50...50),  // 将在物理更新中归一化
-                    velocityY: CGFloat.random(in: 100...300),  // 将在物理更新中归一化，初速度较小，会受重力加速
-                    mass: baseMass * CGFloat.random(in: 0.8...1.2),
+ // 初速度较小，下落过程中受重力加速；绘制时按屏幕高度归一化
+                    velocityY: CGFloat.random(in: 100...300),
                     baseLength: qualityConfig.baseLength * CGFloat.random(in: 0.8...1.2),  // 🌟 性能适配长度
-                    thickness: qualityConfig.thickness(layer: layer),  // 🌟 性能适配厚度
-                    opacity: qualityConfig.opacity(layer: layer),     // 🌟 性能适配透明度
-                    layer: layer
+                    layer: layer,
+ // 相位在整个周期内均匀取样，配合各自不同的周期时长，
+ // 让雨幕连续不断而不是一波一波地刷新。
+                    phase: Double.random(in: 0..<1),
+                    cycle: Double.random(in: 3.2...5.4),
+                    brightnessTier: Int.random(in: 0..<Self.rainBrightnessTierCount)
                 ))
             }
         }
@@ -566,108 +582,24 @@ public struct CinematicRainEffectView: View {
         return (far, mid, near)
     }
     
- // MARK: - 闪电系统
-    
-    private func startLightningSystem() {
- // 先取消旧计时器，避免重复启动
-        lightningTimer?.invalidate()
-        lightningTimer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 5...12), repeats: true) { _ in
- // ⏸️ 远程桌面活跃时跳过闪电动画，避免突发亮度计算造成额外负载
-            Task { @MainActor in
- // 在主线程读取状态以满足并发模型
-                guard !isRemoteDesktopActive else { return }
-                withAnimation(.linear(duration: 0.05)) {
-                    lightningOpacity = Double.random(in: 0.5...1.0)
-                }
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                Task { @MainActor in
- // 仅在主线程读取并判断远程桌面状态
-                    guard !isRemoteDesktopActive else { return }
-                    withAnimation(.linear(duration: 0.05)) {
-                        lightningOpacity = 0.3
-                    }
-                }
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                Task { @MainActor in
- // 仅在主线程读取并判断远程桌面状态
-                    guard !isRemoteDesktopActive else { return }
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        lightningOpacity = 0
-                    }
-                }
-            }
-        }
-    }
-    
- // MARK: - 风力系统
-    
- /// 风力系统（动态变化）
-    private func startWindSystem() {
- // 先取消旧计时器，避免重复启动
-        windTimer?.invalidate()
-        windTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [self] _ in
- // ⏸️ 远程桌面活跃时跳过风力更新，避免频繁状态写入
-            Task { @MainActor in
- // 在主线程读取状态以满足并发模型
-                guard !isRemoteDesktopActive else { return }
-                let time = Date().timeIntervalSinceReferenceDate
- // 风速在-150到150之间变化，根据雨强度调整
-                let baseSpeed = sin(time * 0.3) * 150 + cos(time * 0.15) * 50
-                windSpeed = baseSpeed * rainIntensity.windMultiplier
-                windDirection = sin(time * 0.1)
-            }
-        }
-    }
-
- /// 启动风噪系统（调制雾效强度）
- /// 说明：通过低频噪声与风速耦合，生成 0-1 的风噪等级；在 Canvas 内仅读取该状态，不进行写入
-    private func startWindNoiseSystem() {
-        windNoiseTimer?.invalidate()
-        windNoiseTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [self] _ in
-            Task { @MainActor in
- // 仅在主线程读取并判断远程桌面状态
-                guard !isRemoteDesktopActive else { return }
-                let t = Date().timeIntervalSinceReferenceDate
- // 噪声由两组正弦叠加并受风速影响（归一化至 0-1）
-                let base = (sin(t * 0.37) + sin(t * 0.21 + 1.3)) * 0.5
-                let windScale = min(1.0, max(0.0, Double(abs(windSpeed) / 200.0)))
-                ambientWindNoiseLevel = min(1.0, max(0.0, (base * 0.5 + 0.5) * windScale))
-            }
-        }
-    }
-    
-
- /// 更新帧时间
-    private func updateFrameTime(_ time: TimeInterval) {
-        if lastFrameTime == 0 {
-            lastFrameTime = time
-        }
-    }
-    
  // MARK: - 统一暂停/恢复逻辑
-    
- /// 集中暂停所有特效系统（取消计时器）
- /// 说明：只取消计时器，不修改业务状态，避免在视图更新期间写入状态引发并发警告
+
+ /// 集中暂停所有特效系统。
+ /// 逐帧模拟由 TimelineView 的节拍驱动（远程桌面活跃时 `scheduleTick` 直接返回），
+ /// 这里只需要停掉唯一的辅助计时器。
     private func pauseAllEffectSystems() {
-        lightningTimer?.invalidate(); lightningTimer = nil
-        windTimer?.invalidate(); windTimer = nil
-        windNoiseTimer?.invalidate(); windNoiseTimer = nil
-        wallDropDetectTimer?.invalidate(); wallDropDetectTimer = nil
-        wallDropUpdateTimer?.invalidate(); wallDropUpdateTimer = nil
-        waterPuddleTimer?.invalidate(); waterPuddleTimer = nil
-        reflectionFlickerTimer?.invalidate(); reflectionFlickerTimer = nil
+        adaptiveFrameRateTimer?.invalidate()
+        adaptiveFrameRateTimer = nil
     }
-    
- /// 恢复所有特效系统（重新启动计时器）
- /// 说明：TimelineView 已负责帧驱动，这里只恢复依赖计时器的子系统
+
+ /// 恢复所有特效系统。
+ /// 说明：TimelineView 已负责帧驱动，自适应帧率采样会在需要时重新装配。
     private func resumeAllEffectSystems() {
- // 采用 TimelineView 帧驱动，无需恢复任何 Timer
+        if performanceConfig != nil {
+            startAdaptiveFrameRateUpdateIfNeeded()
+        }
     }
-    
+
  // MARK: - 渲染方法
     
  /// 程序化体积云层（Perlin噪声）
@@ -750,432 +682,170 @@ public struct CinematicRainEffectView: View {
         )
     }
     
- /// 更新所有粒子物理状态（在 Canvas 外部调用）
-    private func updateParticlePhysics(time: TimeInterval, screenSize: CGSize) {
- // ✅ 计算 deltaTime，确保有合理的最小值（16ms = 60fps）
-        var deltaTime: CGFloat = lastFrameTime > 0 ? CGFloat(time - lastFrameTime) : 0.016
- // 限制最大 deltaTime（防止跳帧过大）
-        deltaTime = min(deltaTime, 0.1)  // 最大 100ms
- // 确保最小 deltaTime（防止除零）
-        deltaTime = max(deltaTime, 0.001)  // 最小 1ms
-        lastFrameTime = time
-        
- // 更新雨滴
-        for i in 0..<raindrops.count {
-            var drop = raindrops[i]
-            
- // 物理更新
-            updateRaindropPhysics(&drop, deltaTime: deltaTime, screenSize: screenSize)
-            
-            let x = drop.x * screenSize.width
-            let y = drop.y * screenSize.height
-            
- // 检查碰撞
-            if checkCollisionWithGlass(CGPoint(x: x, y: y)) {
-                spawnGlassDrop(at: CGPoint(x: x, y: y), size: screenSize)
- // ✅ 从顶部云层重生（根据景深层分配高度）
-                let startY: CGFloat = drop.layer == 0 ? CGFloat.random(in: -0.5 ... -0.1) :  // 远景
-                                      drop.layer == 1 ? CGFloat.random(in: -0.3 ... -0.05) : // 中景
-                                                          CGFloat.random(in: -0.2 ... -0.02)  // 近景
-                drop.y = startY
-                drop.x = CGFloat.random(in: 0...1)
- // 根据雨强度调整重生的初始速度
-                let baseVelocity = CGFloat.random(in: 100...300)
-                drop.velocityY = baseVelocity * rainIntensity.velocityMultiplier
-                drop.velocityX = CGFloat.random(in: -50...50)  // 重置水平速度
-            }
-            
- // 🔥 雨滴落地效果：当雨滴落到屏幕底部时，生成涟漪并消失
-            if drop.y > 0.95 && drop.y < 1.05 && screenSize.height > 0 {
- // 检查是否在玻璃组件上
-                let isOnGlass = checkCollisionWithGlass(CGPoint(x: x, y: y))
-                
- // 只有在底部且不在玻璃上时才生成涟漪
-                if !isOnGlass && ripples.count < 20 {
-                    ripples.append(CinematicRainWaterRipple(
-                        x: x,
-                        y: screenSize.height * 0.95,
-                        radius: 0,
-                        opacity: 1.0,
-                        lifetime: 0
-                    ))
-                }
-                
- // ✅ 雨滴消失并从顶部云层重生（根据景深层分配高度）
-                let startY: CGFloat = drop.layer == 0 ? CGFloat.random(in: -0.5 ... -0.1) :  // 远景
-                                      drop.layer == 1 ? CGFloat.random(in: -0.3 ... -0.05) : // 中景
-                                                          CGFloat.random(in: -0.2 ... -0.02)  // 近景
-                drop.y = startY
-                drop.x = CGFloat.random(in: 0...1)
-                let baseVelocity = CGFloat.random(in: 100...300)
-                drop.velocityY = baseVelocity * rainIntensity.velocityMultiplier
-                drop.velocityX = CGFloat.random(in: -50...50)  // 重置水平速度
-            }
-            
-            raindrops[i] = drop
-        }
-        
- // 更新玻璃水珠
-        for i in 0..<glassDrops.count {
-            glassDrops[i].lifetime += Double(deltaTime)
-            
- // 如果水珠掉落到底部，移除它
-            let y = (glassDrops[i].y * screenSize.height + glassDrops[i].slideSpeed * CGFloat(glassDrops[i].lifetime))
-            if y > screenSize.height * 0.9 {
-                glassDrops.remove(at: i)
-                break
-            }
-        }
-        
- // 更新涟漪
-        for i in (0..<ripples.count).reversed() {
-            ripples[i].lifetime += Double(deltaTime)
-            ripples[i].radius = CGFloat(ripples[i].lifetime) * 80
-            ripples[i].opacity = max(0, 1.0 - ripples[i].lifetime / 0.8)
-            
-            if ripples[i].opacity <= 0 {
-                ripples.remove(at: i)
-            }
-        }
-        
- // 移除随机生成涟漪的逻辑，改为由雨滴落地触发
-    }
-    
- /// 🌟 Apple Weather风格：基于时间直接计算雨滴位置（每帧重新计算，不依赖State）
+ // MARK: - 雨幕批量渲染
+
+ /// 雨丝颜色：接近中性的冷白。
+ /// 旧实现给每滴雨刷了一条 白→青→蓝→白 的渐变外加一条 0.95 不透明度的白色高光，
+ /// 那既是最贵的一笔绘制开销，也是雨"看着很假"的直接原因——真实雨丝是低对比度的
+ /// 去饱和亮线，不会是饱和的青蓝色霓虹管。
+    private static let rainStreakColor = Color(red: 0.86, green: 0.90, blue: 0.97)
+ /// 驱散档位数量：最后一档（索引 = count-1）表示"完全没被驱散"的快速路径。
+    private static let disperseBucketCount = 5
+ /// 同一景深层内再分的亮度档数。
+    private static let rainBrightnessTierCount = 2
+ /// 各亮度档的透明度 / 线宽系数（档 0 更远更暗更细，档 1 更近更亮更粗）。
+    private static let rainTierAlpha: [Double] = [0.68, 1.0]
+    private static let rainTierThickness: [CGFloat] = [0.78, 1.0]
+    private static let rainDepthLayerCount = 3
+
+ /// 🌧️ 批量渲染雨幕：按「景深层 × 亮度档 × 驱散档」把所有雨丝聚合进极少数几条 Path，
+ /// 每个组合只调用一次 `stroke`。
+ ///
+ /// 旧实现是逐滴绘制：每滴雨都要新建 Path、新建 CGAffineTransform、`path.applying(...)`
+ /// 复制一遍几何，再用 `.linearGradient` 描边（每滴一份渐变着色器），外加一条高光描边。
+ /// 极致档 450 滴 × 2 次描边 = 每帧约 900 次绘制调用、900 次 Path 分配；120fps 下就是每秒
+ /// 十万量级。现在无论多少滴雨，常规情况下每帧只有 6 次描边（3 景深 × 2 亮度档），
+ /// 鼠标驱散时最多 30 次。
     private func drawRaindropsWithTime(context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
-        guard !raindrops.isEmpty else { return }
-        
-        let qualityConfig = getQualityConfiguration()
-        let enableAdvancedEffects = qualityConfig.enableAdvancedEffects
-        
- // 🌟 获取清除区域快照用于粒子驱散
+        guard !raindrops.isEmpty, size.width > 0, size.height > 0 else { return }
+
+        let quality = activeQualityConfiguration
         let zones = clearManager.clearZones
-        
- // 每个雨滴基于其初始状态和时间计算当前位置
+        let hasZones = !zones.isEmpty
+
+        let bucketCount = Self.disperseBucketCount
+        let tierCount = Self.rainBrightnessTierCount
+        let layerCount = Self.rainDepthLayerCount
+        let slotCount = layerCount * tierCount * bucketCount
+        var batches = [Path](repeating: Path(), count: slotCount)
+        var batchUsed = [Bool](repeating: false, count: slotCount)
+
+        let velocityMultiplier = rainIntensity.velocityMultiplier
+        let gravityPerSecond: CGFloat = 980.0 / size.height
+        let terminalVelocity = (1200.0 / size.height) * velocityMultiplier
+ // 风是时间的纯函数，直接在这里求值：既让飘移完全平滑（不再被 20Hz 的
+ // 计时器量化成台阶），也省掉一个每帧都要读的 @State。
+        let normalizedWind = Self.windSpeed(at: time, multiplier: rainIntensity.windMultiplier) / size.width
+
         for drop in raindrops {
- // 计算该雨滴从初始化到现在的经过时间
- // 使用drop的id作为随机种子，确保每个雨滴有不同的相位
-            let dropSeed = Double(drop.id.hashValue % 10000) / 10000.0
-            let dropStartTime = time - dropSeed * 3.0  // 每个雨滴有不同的开始时间（0-3秒偏移）
-            let dropAge = max(0.0, dropStartTime.truncatingRemainder(dividingBy: 5.0))  // 5秒循环
-            
- // 计算当前速度（受重力加速）
-            let gravityPerSecond: CGFloat = 980.0 / size.height  // 归一化重力
-            let initialVelocityY = (drop.velocityY > 1.0 ? drop.velocityY / size.height : drop.velocityY) * rainIntensity.velocityMultiplier
-            let currentVelocityY = min(initialVelocityY + CGFloat(dropAge) * gravityPerSecond * CGFloat(rainIntensity.velocityMultiplier),
-                                     (1200.0 / size.height) * CGFloat(rainIntensity.velocityMultiplier))  // 终端速度限制
-            
- // 计算当前位置 - 确保从云层顶部开始
- // 使用drop的layer信息来确定起始高度
-            let startY: CGFloat = drop.layer == 0 ? -0.5 :  // 远景从更高位置
-                                  drop.layer == 1 ? -0.3 :  // 中景
-                                                    -0.2     // 近景
+ // 各自的相位 + 各自的周期时长 → 雨滴在时间轴上均匀铺开，不再成批重生
+            let dropAge = (time / drop.cycle + drop.phase).truncatingRemainder(dividingBy: 1.0) * drop.cycle
+
+            let initialVelocityY = (drop.velocityY > 1.0 ? drop.velocityY / size.height : drop.velocityY) * velocityMultiplier
+            let currentVelocityY = min(
+                initialVelocityY + CGFloat(dropAge) * gravityPerSecond * velocityMultiplier,
+                terminalVelocity
+            )
+
+ // 起始高度按景深层分配：远景从更高处落下
+            let startY: CGFloat = drop.layer == 0 ? -0.5 : (drop.layer == 1 ? -0.3 : -0.2)
             let currentY = startY + currentVelocityY * CGFloat(dropAge)
-            
- // 横向风力影响
-            let normalizedWind = windSpeed / size.width
-            let windDrift = normalizedWind * CGFloat(dropAge) * 0.3
-            let currentX = drop.x + windDrift
-            
- // 如果雨滴已经落地，循环回到顶部（Apple Weather风格）
+            let currentX = drop.x + normalizedWind * CGFloat(dropAge) * 0.3
+
             let totalHeight = 1.1 - startY
-            let normalizedY = (currentY - startY).truncatingRemainder(dividingBy: totalHeight)
-            let finalY = normalizedY + startY
-            let finalX = currentX.truncatingRemainder(dividingBy: 1.0)
-            
+            let finalY = (currentY - startY).truncatingRemainder(dividingBy: totalHeight) + startY
+ // ✅ 修复：负数取余仍是负数，被风吹到左边的雨滴会被判为屏幕外而整条消失；
+ // 这里回绕到 [0,1)，雨幕在有风时才不会缺一块。
+            var finalX = currentX.truncatingRemainder(dividingBy: 1.0)
+            if finalX < 0 { finalX += 1 }
+
             let x = finalX * size.width
             let y = finalY * size.height
-            
- // 跳过屏幕外的雨滴
-            guard y >= -100 && y <= size.height + 100 && x >= -50 && x <= size.width + 50 else { continue }
-            
- // 🌟 计算清除区域内的驱散强度（降低透明度）
-            var disperseFactor: Double = 1.0
-            for zone in zones {
-                let dx = x - zone.center.x
-                let dy = y - zone.center.y
-                let distanceSquared = dx * dx + dy * dy
-                let radiusSquared = zone.radius * zone.radius
-                
-                if distanceSquared < radiusSquared {
-                    let distance = sqrt(distanceSquared)
-                    let normalizedDist = distance / zone.radius
-                    let falloff = (1.0 - normalizedDist * normalizedDist)
-                    let strength = Double(zone.strength) * falloff
-                    disperseFactor = min(disperseFactor, 1.0 - strength * 0.9)
+
+            guard y >= -100, y <= size.height + 100 else { continue }
+
+ // 只有真的存在驱散区域时才做逐滴的距离判定（常态是零成本）
+            var bucket = bucketCount - 1
+            if hasZones {
+                var disperseFactor: Double = 1.0
+                for zone in zones {
+                    let dx = x - zone.center.x
+                    let dy = y - zone.center.y
+                    let distanceSquared = dx * dx + dy * dy
+                    let radiusSquared = zone.radius * zone.radius
+                    guard distanceSquared < radiusSquared, radiusSquared > 0 else { continue }
+                    let normalizedDist = sqrt(distanceSquared) / zone.radius
+                    let falloff = 1.0 - normalizedDist * normalizedDist
+                    disperseFactor = min(disperseFactor, 1.0 - Double(zone.strength) * falloff * 0.9)
+                }
+                guard disperseFactor > 0.05 else { continue }
+                if disperseFactor < 0.999 {
+                    bucket = min(bucketCount - 2, max(0, Int(disperseFactor * Double(bucketCount - 1))))
                 }
             }
-            
- // 如果完全被驱散，跳过绘制
-            guard disperseFactor > 0.05 else { continue }
-            
- // 计算雨滴长度（速度越快越长）
+
+ // 速度越快拉得越长——这是雨丝该有的运动模糊
             let speedFactor = min(currentVelocityY / (800.0 / size.height), 1.5)
-            let currentLength = drop.baseLength * speedFactor
-            
- // 计算倾斜角度
+            let length = drop.baseLength * speedFactor
+ // 倾斜由风与下落速度的比值决定；直接算出线段终点，
+ // 省掉逐滴的 CGAffineTransform 构造与 Path 复制。
+ // ✅ 修复：旧代码用 `rotated(by:)` 旋转 (0, length)，得到的水平分量是 -sin(angle)，
+ // 于是雨丝的倾斜方向和它自己被风吹的漂移方向恰好相反——雨往右飘、线却往左倒。
+ // 这里取 +sin(angle)，让倾斜与漂移一致。
             let angle = atan2(normalizedWind * 0.5, currentVelocityY)
-            
- // 应用变换
-            var transform = CGAffineTransform.identity
-            transform = transform.translatedBy(x: x, y: y)
-            transform = transform.rotated(by: angle)
-            
- // 🌟 根据性能模式选择绘制方式（应用驱散因子）
-            if enableAdvancedEffects {
-                drawSingleAdvancedRaindrop(context: &context, drop: drop, currentLength: currentLength, transform: transform, disperseFactor: disperseFactor)
-            } else {
-                drawSingleSimpleRaindrop(context: &context, drop: drop, currentLength: currentLength, transform: transform, disperseFactor: disperseFactor)
-            }
+
+            let slot = ((drop.layer * tierCount) + drop.brightnessTier) * bucketCount + bucket
+            batches[slot].move(to: CGPoint(x: x, y: y))
+            batches[slot].addLine(to: CGPoint(x: x + sin(angle) * length, y: y + cos(angle) * length))
+            batchUsed[slot] = true
         }
-    }
-    
- /// 绘制单个高级雨滴
-    private func drawSingleAdvancedRaindrop(context: inout GraphicsContext, drop: PhysicsRaindrop, currentLength: CGFloat, transform: CGAffineTransform, disperseFactor: Double = 1.0) {
-        let rainPath = Path { path in
-            path.move(to: .zero)
-            path.addLine(to: CGPoint(x: 0, y: currentLength))
-        }
-        
- // 🌟 应用驱散因子到透明度
-        let effectiveOpacity = drop.opacity * disperseFactor
-        
-        let gradient = Gradient(colors: [
-            Color.white.opacity(effectiveOpacity),
-            Color.cyan.opacity(effectiveOpacity * 0.8),
-            Color.blue.opacity(effectiveOpacity * 0.6),
-            Color.white.opacity(effectiveOpacity * 0.3)
-        ])
-        
-        context.stroke(
-            rainPath.applying(transform),
-            with: .linearGradient(
-                gradient,
-                startPoint: .zero,
-                endPoint: CGPoint(x: 0, y: currentLength)
-            ),
-            style: StrokeStyle(
-                lineWidth: drop.thickness,
-                lineCap: .round,
-                lineJoin: .round
-            )
-        )
-        
- // 高光
-        let highlightPath = Path { path in
-            path.move(to: .zero)
-            path.addLine(to: CGPoint(x: 0, y: currentLength * 0.3))
-        }
-        
-        context.stroke(
-            highlightPath.applying(transform),
-            with: .color(.white.opacity(0.95 * disperseFactor)),
-            style: StrokeStyle(lineWidth: drop.thickness * 0.5, lineCap: .round)
-        )
-    }
-    
- /// 绘制单个简化雨滴
-    private func drawSingleSimpleRaindrop(context: inout GraphicsContext, drop: PhysicsRaindrop, currentLength: CGFloat, transform: CGAffineTransform, disperseFactor: Double = 1.0) {
-        let rainPath = Path { path in
-            path.move(to: .zero)
-            path.addLine(to: CGPoint(x: 0, y: currentLength))
-        }
-        
- // 🌟 应用驱散因子到透明度
-        let effectiveOpacity = drop.opacity * disperseFactor
-        
-        context.stroke(
-            rainPath.applying(transform),
-            with: .color(Color.white.opacity(effectiveOpacity)),
-            style: StrokeStyle(
-                lineWidth: drop.thickness,
-                lineCap: .round,
-                lineJoin: .round
-            )
-        )
-    }
-    
- /// 绘制雨滴（纯绘制，不修改状态）- 保留作为备用
-    private func drawRaindrops(context: inout GraphicsContext, size: CGSize) {
-        let qualityConfig = getQualityConfiguration()
-        let enableAdvancedEffects = qualityConfig.enableAdvancedEffects
-        
-        for drop in raindrops {
-            let x = drop.x * size.width
-            let y = drop.y * size.height
-            
- // 雨滴形变（速度越快越拉长）
-            let speedFactor = min(drop.velocityY / 1500, 1.5)
-            let currentLength = drop.baseLength * speedFactor
-            
- // 计算倾斜角度（受风影响）
-            let angle = atan2(drop.velocityX, drop.velocityY)
-            
- // 雨滴主体（带旋转）
-            var transform = CGAffineTransform.identity
-            transform = transform.translatedBy(x: x, y: y)
-            transform = transform.rotated(by: angle)
-            
- // 🌟 根据性能模式选择绘制方式
-            if enableAdvancedEffects {
- // 极致/自适应(高)：完整渐变雨滴
-                drawAdvancedRaindrop(context: &context, x: x, y: y, drop: drop, 
-                                   currentLength: currentLength, transform: transform)
-            } else {
- // 平衡/节能/自适应(低)：简化雨滴
-                drawSimpleRaindrop(context: &context, x: x, y: y, drop: drop, 
-                                  currentLength: currentLength, transform: transform)
-            }
-        }
-    }
-    
- /// 绘制高级雨滴（极致模式）- 完整渐变和特效
-    private func drawAdvancedRaindrop(context: inout GraphicsContext, x: CGFloat, y: CGFloat, 
-                                     drop: PhysicsRaindrop, currentLength: CGFloat, 
-                                     transform: CGAffineTransform) {
- // 主雨滴（三色渐变，模拟光线折射）
-            let rainPath = Path { path in
-                path.move(to: .zero)
-                path.addLine(to: CGPoint(x: 0, y: currentLength))
-            }
-        
- // 渐变：顶部（白）-> 中部（青）-> 底部（蓝）
-        let gradient = Gradient(colors: [
-            Color.white.opacity(drop.opacity),
-            Color.cyan.opacity(drop.opacity * 0.8),
-            Color.blue.opacity(drop.opacity * 0.6),
-            Color.white.opacity(drop.opacity * 0.3)
-        ])
-            
-            context.stroke(
-                rainPath.applying(transform),
-            with: .linearGradient(
-                gradient,
-                startPoint: .zero,
-                endPoint: CGPoint(x: 0, y: currentLength)
-            ),
-                style: StrokeStyle(
-                    lineWidth: drop.thickness,
-                    lineCap: .round,
-                    lineJoin: .round
-                )
-            )
-            
- // 高光效果（前景所有层，30%头部）
-                let highlightPath = Path { path in
-                    path.move(to: .zero)
-                    path.addLine(to: CGPoint(x: 0, y: currentLength * 0.3))
+
+ // 高质量档再补一层更宽更淡的底衬，模拟离焦/运动模糊的柔和感。
+ // 这是整层一次描边，不是逐滴，所以代价只有几次绘制调用。
+        let drawsGlow = quality.enableAdvancedEffects
+
+        for layer in 0..<layerCount {
+            let layerAlpha = quality.opacity(layer: layer)
+            let layerThickness = quality.thickness(layer: layer)
+            for tier in 0..<tierCount {
+                let alphaScale = Self.rainTierAlpha[tier]
+                let thicknessScale = Self.rainTierThickness[tier]
+                for bucket in 0..<bucketCount {
+                    let slot = ((layer * tierCount) + tier) * bucketCount + bucket
+                    guard batchUsed[slot] else { continue }
+
+                    let disperse = bucket == bucketCount - 1
+                        ? 1.0
+                        : (Double(bucket) + 0.5) / Double(bucketCount - 1)
+                    let alpha = layerAlpha * alphaScale * disperse
+                    guard alpha > 0.004 else { continue }
+                    let width = layerThickness * thicknessScale
+
+                    if drawsGlow {
+                        context.stroke(
+                            batches[slot],
+                            with: .color(Self.rainStreakColor.opacity(alpha * 0.28)),
+                            style: StrokeStyle(lineWidth: width * 2.6, lineCap: .round)
+                        )
+                    }
+
+                    context.stroke(
+                        batches[slot],
+                        with: .color(Self.rainStreakColor.opacity(alpha)),
+                        style: StrokeStyle(lineWidth: width, lineCap: .round)
+                    )
                 }
-                
-                context.stroke(
-                    highlightPath.applying(transform),
-                    with: .color(.white.opacity(0.95)),
-            style: StrokeStyle(lineWidth: drop.thickness * 0.5, lineCap: .round)
-                )
-            
- // 雨滴尾迹（高速雨滴）- 仅远景
-            if drop.velocityY > 800 && drop.layer == 0 {
-                let trailPath = Path { path in
-                path.move(to: CGPoint(x: x, y: y - currentLength * 0.3))
-                    path.addLine(to: CGPoint(x: x, y: y))
-                }
-                
-                context.stroke(
-                    trailPath,
-                    with: .linearGradient(
-                        Gradient(colors: [
-                        Color.cyan.opacity(0.35),
-                        Color.white.opacity(0.6)
-                        ]),
-                    startPoint: CGPoint(x: x, y: y - currentLength * 0.3),
-                        endPoint: CGPoint(x: x, y: y)
-                    ),
-                style: StrokeStyle(lineWidth: drop.thickness * 0.3, lineCap: .round)
-            )
-        }
-    }
-    
- /// 绘制简化雨滴（节能模式）- 单一颜色
-    private func drawSimpleRaindrop(context: inout GraphicsContext, x: CGFloat, y: CGFloat, 
-                                   drop: PhysicsRaindrop, currentLength: CGFloat, 
-                                   transform: CGAffineTransform) {
-        let rainPath = Path { path in
-            path.move(to: .zero)
-            path.addLine(to: CGPoint(x: 0, y: currentLength))
-        }
-        
-        context.stroke(
-            rainPath.applying(transform),
-            with: .color(Color.white.opacity(drop.opacity)),
-            style: StrokeStyle(
-                lineWidth: drop.thickness,
-                lineCap: .round,
-                lineJoin: .round
-            )
-        )
-        
- // 仅在平衡模式下添加简单高光
-        if let config = performanceConfig, config.targetFrameRate >= 60 && config.maxParticles >= 2000 {
-            if drop.layer == 0 {
-                let highlightPath = Path { path in
-                    path.move(to: .zero)
-                    path.addLine(to: CGPoint(x: 0, y: currentLength * 0.3))
-                }
-                
-                context.stroke(
-                    highlightPath.applying(transform),
-                    with: .color(.white.opacity(0.9)),
-                    style: StrokeStyle(lineWidth: drop.thickness * 0.4, lineCap: .round)
-                )
             }
         }
     }
-    
- /// 物理更新雨滴
-    private func updateRaindropPhysics(_ drop: inout PhysicsRaindrop, deltaTime: CGFloat, screenSize: CGSize) {
- // ✅ 首次运行时，将像素单位的速度归一化（转换为相对于屏幕尺寸的单位）
- // 如果速度看起来像像素单位（> 1），则归一化
-        if drop.velocityY > 1.0 || drop.velocityX > 1.0 || drop.velocityX < -1.0 {
-            drop.velocityX = drop.velocityX / screenSize.width
-            drop.velocityY = drop.velocityY / screenSize.height
-        }
-        
- // ✅ 修复：速度单位统一为"归一化单位/秒"（相对于屏幕高度）
- // 重力加速度转换为归一化单位：980 px/s² -> 归一化单位/s²
-        let normalizedGravity: CGFloat = (drop.acceleration / screenSize.height) * rainIntensity.velocityMultiplier
-        drop.velocityY += normalizedGravity * deltaTime
-        
- // 风力影响（横向）- 归一化为相对于屏幕宽度
-        let normalizedWindSpeed = windSpeed / screenSize.width
-        drop.velocityX += (normalizedWindSpeed - drop.velocityX) * 0.1 * deltaTime * 60  // 乘以60以保持响应速度
-        
- // 空气阻力（终端速度约为屏幕高度的1.2-1.5倍/秒，暴风雨更快）
-        let terminalVelocityNormalized: CGFloat = (1200 / screenSize.height) * rainIntensity.velocityMultiplier
-        let drag: CGFloat = 0.002
-        let speedSquared = drop.velocityY * drop.velocityY
-        let dragForce = drag * speedSquared / drop.mass
-        drop.velocityY = min(drop.velocityY - dragForce * deltaTime, terminalVelocityNormalized)
-        
- // ✅ 更新位置（速度单位已经是归一化的）
-        drop.x += drop.velocityX * deltaTime
-        drop.y += drop.velocityY * deltaTime
-        
- // ✅ 雨滴超出底部后，从顶部云层重生
-        if drop.y > 1.1 {
- // 根据景深层分配不同的重生高度
-            let startY: CGFloat = drop.layer == 0 ? CGFloat.random(in: -0.5 ... -0.1) :  // 远景
-                                  drop.layer == 1 ? CGFloat.random(in: -0.3 ... -0.05) : // 中景
-                                                      CGFloat.random(in: -0.2 ... -0.02)  // 近景
-            drop.y = startY
-            drop.x = CGFloat.random(in: 0...1)
-            let baseVelocity = CGFloat.random(in: 100...300)
-            drop.velocityY = baseVelocity * rainIntensity.velocityMultiplier
-            drop.velocityX = CGFloat.random(in: -50...50)
-        }
-        
-        if drop.x < -0.1 || drop.x > 1.1 {
-            drop.x = CGFloat.random(in: 0...1)
-        }
+
+ /// 风速是时间的纯函数（原先由 20Hz 计时器写进 @State）。
+ /// 直接求值可以让飘移平滑，并且让绘制路径不再依赖任何计时器节拍。
+    private static func windSpeed(at time: TimeInterval, multiplier: CGFloat) -> CGFloat {
+        (sin(time * 0.3) * 150 + cos(time * 0.15) * 50) * multiplier
+    }
+
+ /// 风噪等级（0-1），同样改为时间的纯函数，用于调制大气雾层。
+    private static func ambientWindNoise(at time: TimeInterval, multiplier: CGFloat) -> Double {
+        let base = (sin(time * 0.37) + sin(time * 0.21 + 1.3)) * 0.5
+        let windScale = min(1.0, max(0.0, Double(abs(windSpeed(at: time, multiplier: multiplier)) / 200.0)))
+        return min(1.0, max(0.0, (base * 0.5 + 0.5) * windScale))
+    }
+
+ /// 积水反射的细微闪烁，时间的纯函数。
+    private static func reflectionFlicker(at time: TimeInterval) -> Double {
+        let s = sin(time * 2.4) * 0.5 + sin(time * 3.8 + 1.2) * 0.3
+        return 0.95 + max(-0.1, min(0.1, s))
     }
     
  /// 检测与液态玻璃组件碰撞
@@ -1490,8 +1160,9 @@ public struct CinematicRainEffectView: View {
         }
         
  // 4. 绘制水面反射高光（模拟光线反射，加入微弱闪烁调制）
- // 说明：反射高光的透明度受 reflectionFlickerFactor 调制，范围约在 0.9-1.1 之间，保持细腻变化
-        let flicker = max(0.8, min(1.2, reflectionFlickerFactor))
+ // 说明：闪烁因子范围约在 0.9-1.1 之间，保持细腻变化。
+ // 改为按当前帧时间直接求值，取代原先由 12.5Hz 计时器写入的 @State。
+        let flicker = max(0.8, min(1.2, Self.reflectionFlicker(at: time)))
         for x in stride(from: 0, through: size.width, by: 80) {
             let shimmer = sin(time * 3.0 + Double(x) * 0.1) * 0.5 + 0.5
             let highlightY = waterY + CGFloat(shimmer) * 5
@@ -1518,97 +1189,6 @@ public struct CinematicRainEffectView: View {
         #endif
     }
     
- // MARK: - 🌟 挂壁水珠系统（OPPO风格）
-    
- /// 启动挂壁水珠系统
-    private func startWallWaterDropsSystem() {
- // ✅ 性能优化：降低检测频率（从0.1秒改为0.2秒）
- // 先取消旧计时器，避免重复启动
-        wallDropDetectTimer?.invalidate()
-        wallDropDetectTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [self] _ in
- // ⏸️ 远程桌面活跃时暂停挂壁水珠的碰撞检测与生成
-            Task { @MainActor in
-                guard !isRemoteDesktopActive else { return }
-                detectAndSpawnWallDrops()
-            }
-        }
- // ✅ 性能优化：分离更新逻辑，降低频率
-        wallDropUpdateTimer?.invalidate()
-        wallDropUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [self] _ in
- // ⏸️ 远程桌面活跃时暂停挂壁水珠的状态更新
-            Task { @MainActor in
-                guard !isRemoteDesktopActive else { return }
-                updateWallWaterDrops()
-            }
-        }
-        #if DEBUG
-        SkyBridgeLogger.ui.debugOnly("💧 挂壁水珠系统已启动（性能优化）")
-        #endif
-    }
-    
- /// 检测雨滴碰撞并生成挂壁水珠
-    private func detectAndSpawnWallDrops() {
-        guard !glassComponentRects.isEmpty else { return }
-        
- // ✅ 修复：使用实际窗口尺寸，而不是硬编码的屏幕尺寸
-        let screenSize = currentWindowSize
-        
- // ✅ 性能优化：采样检测（只检测部分雨滴，而不是全部）
-        let step = max(1, raindrops.count / 50)  // 最多检测50个
-        for dropIndex in stride(from: 0, to: raindrops.count, by: step) {
-            let drop = raindrops[dropIndex]
- // 使用雨滴ID和时间计算位置（与drawRaindropsWithTime保持一致）
-            let dropSeed = Double(drop.id.hashValue % 10000) / 10000.0
-            let time = Date().timeIntervalSinceReferenceDate
-            let dropStartTime = time - dropSeed * 3.0
-            let dropAge = max(0.0, dropStartTime.truncatingRemainder(dividingBy: 5.0))
-            
- // 计算雨滴当前位置
-            let gravityPerSecond: CGFloat = 980.0 / screenSize.height
-            let initialVelocityY = (drop.velocityY > 1.0 ? drop.velocityY / screenSize.height : drop.velocityY) * rainIntensity.velocityMultiplier
-            let currentVelocityY = min(initialVelocityY + CGFloat(dropAge) * gravityPerSecond * CGFloat(rainIntensity.velocityMultiplier),
-                                     (1200.0 / screenSize.height) * CGFloat(rainIntensity.velocityMultiplier))
-            
-            let startY: CGFloat = drop.layer == 0 ? -0.5 : (drop.layer == 1 ? -0.3 : -0.2)
-            let currentY = startY + currentVelocityY * CGFloat(dropAge)
-            let normalizedWind = windSpeed / screenSize.width
-            let windDrift = normalizedWind * CGFloat(dropAge) * 0.3
-            let currentX = (drop.x + windDrift).truncatingRemainder(dividingBy: 1.0)
-            
-            let x = currentX * screenSize.width
-            let y = currentY * screenSize.height
-            
- // 检查是否碰撞玻璃组件（仅在组件上半部分碰撞时生成，模拟顶部附着）
-            for (index, glassRect) in glassComponentRects.enumerated() {
-                let collisionPoint = CGPoint(x: x, y: y)
-                if glassRect.contains(collisionPoint) {
- // 只在上半部分生成水珠（模拟在顶部附着）
-                    let relativeY = (y - glassRect.minY) / glassRect.height
- // ✅ 性能优化：限制挂壁水珠数量（从50降到30）
-                    if relativeY < 0.6 && Double.random(in: 0...1) < 0.15 && wallWaterDrops.count < 30 {
- // 检查该位置是否已经有水珠（避免重叠）
-                        let existingDrop = wallWaterDrops.first { existing in
-                            existing.glassRectIndex == index &&
-                            abs(existing.x - (x - glassRect.minX) / glassRect.width) < 0.05 &&
-                            abs(existing.y - relativeY) < 0.05
-                        }
-                        
-                        if existingDrop == nil {
-                            let normalizedX = (x - glassRect.minX) / glassRect.width
- // ✅ 更真实：挂壁水珠更细（从8-16改为5-10）
-                            wallWaterDrops.append(WallWaterDrop(
-                                x: normalizedX,
-                                y: relativeY,
-                                size: CGFloat.random(in: 5...10),
-                                glassRectIndex: index
-                            ))
-                            break
-                        }
-                    }
-                }
-            }
-        }
-    }
     
  /// 更新挂壁水珠（下滑动画 + 形变 + 自由下落）
     private func updateWallWaterDrops() {
@@ -1739,51 +1319,43 @@ public struct CinematicRainEffectView: View {
     
  // MARK: - 🌟 底部积水系统
     
- /// 启动积水系统
-    private func startWaterPuddleSystem() {
- // ✅ 性能优化：降低检测频率（从0.05秒改为0.15秒）
- // 先取消旧计时器，避免重复启动
-        waterPuddleTimer?.invalidate()
-        waterPuddleTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [self] _ in
- // ⏸️ 远程桌面活跃时暂停积水检测与更新，避免额外计算
-            Task { @MainActor in
-                guard !isRemoteDesktopActive else { return }
-                detectRaindropsHittingGround()
-                updateWaterPuddle()
-            }
-        }
-        #if DEBUG
-        SkyBridgeLogger.ui.debugOnly("💧 底部积水系统已启动（性能优化）")
-        #endif
-    }
-    
- /// 检测雨滴落地，增加积水
-    private func detectRaindropsHittingGround() {
+ /// 检测雨滴落地，增加积水。
+ /// 轨迹公式必须与 `drawRaindropsWithTime` 完全一致，否则涟漪会在看不见雨滴的
+ /// 地方冒出来；这里改用同一套 `phase`/`cycle` 相位，并把时间从调用方传入
+ /// （原先在循环里逐滴调用 `Date()`）。
+    private func detectRaindropsHittingGround(time: TimeInterval) {
  // ✅ 修复：使用实际窗口尺寸
         let screenSize = currentWindowSize
+        guard screenSize.height > 0 else { return }
         let groundLevel = screenSize.height * 0.95
-        
+
         var hitCount = 0
-        
+
+        let velocityMultiplier = rainIntensity.velocityMultiplier
+        let gravityPerSecond: CGFloat = 980.0 / screenSize.height
+        let terminalVelocity = (1200.0 / screenSize.height) * velocityMultiplier
+
  // ✅ 性能优化：采样检测（只检测部分雨滴，而不是全部）
         let step = max(1, raindrops.count / 100)  // 最多检测100个
         for dropIndex in stride(from: 0, to: raindrops.count, by: step) {
             let drop = raindrops[dropIndex]
-            
-            let dropSeed = Double(drop.id.hashValue % 10000) / 10000.0
-            let time = Date().timeIntervalSinceReferenceDate
-            let dropStartTime = time - dropSeed * 3.0
-            let dropAge = max(0.0, dropStartTime.truncatingRemainder(dividingBy: 5.0))
-            
-            let gravityPerSecond: CGFloat = 980.0 / screenSize.height
-            let initialVelocityY = (drop.velocityY > 1.0 ? drop.velocityY / screenSize.height : drop.velocityY) * rainIntensity.velocityMultiplier
-            let currentVelocityY = min(initialVelocityY + CGFloat(dropAge) * gravityPerSecond * CGFloat(rainIntensity.velocityMultiplier),
-                                     (1200.0 / screenSize.height) * CGFloat(rainIntensity.velocityMultiplier))
-            
+
+            let dropAge = (time / drop.cycle + drop.phase).truncatingRemainder(dividingBy: 1.0) * drop.cycle
+
+            let initialVelocityY = (drop.velocityY > 1.0 ? drop.velocityY / screenSize.height : drop.velocityY) * velocityMultiplier
+            let currentVelocityY = min(
+                initialVelocityY + CGFloat(dropAge) * gravityPerSecond * velocityMultiplier,
+                terminalVelocity
+            )
+
             let startY: CGFloat = drop.layer == 0 ? -0.5 : (drop.layer == 1 ? -0.3 : -0.2)
+ // ⚠️ 这里刻意**不做**回绕，与绘制路径不同。
+ // 落地检测统计的是「一个下落周期里穿过底部检测带的次数」：不回绕时每个周期只算一次，
+ // 回绕后每次屏幕穿越都会再算一次，命中数会涨 2.5-10 倍——积水几分钟就涨满、
+ // 涟漪常年顶在 30 个上限。积水与涟漪的观感是要保持原样的，所以保持原有口径。
             let currentY = startY + currentVelocityY * CGFloat(dropAge)
             let y = currentY * screenSize.height
-            
+
  // 检测落地（接近底部）
             if y >= groundLevel - 10 && y <= groundLevel + 10 {
                 hitCount += 1
@@ -1835,9 +1407,11 @@ public struct CinematicRainEffectView: View {
     
  /// 大气雾效
     private func drawAtmosphericFog(context: inout GraphicsContext, size: CGSize, time: TimeInterval) {
- // 🌫️ 根据风噪等级动态调制雾层透明度，风越大雾层扰动越明显
-        let mod1 = max(0.0, min(0.12, ambientWindNoiseLevel * 0.06 + 0.05))
-        let mod2 = max(0.0, min(0.10, ambientWindNoiseLevel * 0.04 + 0.03))
+ // 🌫️ 根据风噪等级动态调制雾层透明度，风越大雾层扰动越明显。
+ // 风噪同样改为按帧时间直接求值，取代原先由 8.3Hz 计时器写入的 @State。
+        let noise = Self.ambientWindNoise(at: time, multiplier: rainIntensity.windMultiplier)
+        let mod1 = max(0.0, min(0.12, noise * 0.06 + 0.05))
+        let mod2 = max(0.0, min(0.10, noise * 0.04 + 0.03))
         let fogGradient = Gradient(colors: [
             Color.clear,
             Color(red: 0.5, green: 0.5, blue: 0.55).opacity(mod1),
@@ -1854,99 +1428,38 @@ public struct CinematicRainEffectView: View {
         )
     }
 
- /// 启动镜面反射闪烁系统（积水反射的细微抖动）
-    private func startReflectionFlickerSystem() {
-        reflectionFlickerTimer?.invalidate()
-        reflectionFlickerTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [self] _ in
-            Task { @MainActor in
-                guard !isRemoteDesktopActive else { return }
-                let t = Date().timeIntervalSinceReferenceDate
- // 两组较快的正弦叠加，产生细微闪烁（范围约 0.9 - 1.1）
-                let s = sin(t * 2.4) * 0.5 + sin(t * 3.8 + 1.2) * 0.3
-                reflectionFlickerFactor = 0.95 + max(-0.1, min(0.1, s))
-            }
-        }
-    }
-
  // MARK: - 统一调度用的更新方法（替代原 Timer 回调）
-    private func scheduleTick(remoteActive: Bool, now: Date) {
- // 统一帧调度入口，计算dt并按节拍驱动各子系统
+
+ /// 按节拍推进有状态的模拟子系统。
+ ///
+ /// 旧实现每帧都 `Task { @MainActor in ... }` 派发一次：120fps 下每秒 120 次
+ /// MainActor 任务入队，而里面绝大多数分支只是把累加器加一点点然后什么也不做。
+ /// 风速 / 风噪 / 反射闪烁本来就是时间的纯函数，已改为在绘制时直接求值；
+ /// 剩下真正有状态的（挂壁水珠、积水、闪电）按 `simulationTickInterval` 推进，
+ /// 每秒只派发约 6.7 次任务。
+    private func scheduleTick(remoteActive: Bool, time: TimeInterval) {
+        guard !remoteActive else { return }
+        let tickIndex = Int(time / Self.simulationTickInterval)
+        guard tickIndex != lastTickIndex else { return }
+
         Task { @MainActor in
-            let dt = max(0, now.timeIntervalSince(lastTick))
-            lastTick = now
-            guard !remoteActive else { return }
- // 风力：每 0.05s 更新一次
-            windAcc += dt
-            if windAcc >= 0.05 {
-                updateWind()
-                windAcc = 0
-            }
- // 风噪：每 0.12s 更新一次
-            windNoiseAcc += dt
-            if windNoiseAcc >= 0.12 {
-                updateWindNoise()
-                windNoiseAcc = 0
-            }
- // 镜面反射闪烁：按配置自适应更新间隔（极致0.08/平衡0.10/节能0.12）
-            let refInterval: TimeInterval = {
-                if let cfg = performanceConfig {
-                    switch cfg.postProcessingLevel {
-                    case 2: return 0.08
-                    case 1: return 0.10
-                    default: return 0.12
-                    }
-                } else {
-                    return 0.10
-                }
-            }()
-            reflectionAcc += dt
-            if reflectionAcc >= refInterval {
-                updateReflectionFlicker()
-                reflectionAcc = 0
-            }
- // 挂壁水珠更新：每 0.15s 一次
-            wallUpdateAcc += dt
-            if wallUpdateAcc >= 0.15 {
-                updateWallWaterDrops()
-                wallUpdateAcc = 0
-            }
- // 积水系统更新：每 0.15s 一次
-            puddleAcc += dt
-            if puddleAcc >= 0.15 {
-                detectRaindropsHittingGround()
-                updateWaterPuddle()
-                puddleAcc = 0
-            }
+ // 同一节拍可能在任务真正执行前被多帧命中；这里做一次幂等门，
+ // 保证每个节拍只推进一次模拟。
+            guard tickIndex != lastTickIndex else { return }
+            lastTickIndex = tickIndex
+
+            updateWallWaterDrops()
+            detectRaindropsHittingGround(time: time)
+            updateWaterPuddle()
+
  // 闪电事件：随机 5-12 秒一次
-            lightningAcc += dt
+            lightningAcc += Self.simulationTickInterval
             if lightningAcc >= nextLightningInterval {
-                triggerLightningFlash()
                 lightningAcc = 0
                 nextLightningInterval = Double.random(in: 5...12)
+                triggerLightningFlash()
             }
         }
-    }
-    private func updateWind() {
- // 风速与方向按时间驱动，并受雨强度影响
-        let t = Date().timeIntervalSinceReferenceDate
-        let baseSpeed = sin(t * 0.3) * 150 + cos(t * 0.15) * 50
-        windSpeed = baseSpeed * rainIntensity.windMultiplier
-        windDirection = sin(t * 0.1)
-    }
-
-    private func updateWindNoise() {
- // 风噪等级 0-1，受风速幅值影响
-        let t = Date().timeIntervalSinceReferenceDate
-        let base = (sin(t * 0.37) + sin(t * 0.21 + 1.3)) * 0.5
-        let windScale = min(1.0, max(0.0, Double(abs(windSpeed) / 200.0)))
-        ambientWindNoiseLevel = min(1.0, max(0.0, (base * 0.5 + 0.5) * windScale))
-    }
-
-    private func updateReflectionFlicker() {
- // 积水反射的细微闪烁调制
-        let t = Date().timeIntervalSinceReferenceDate
-        let s = sin(t * 2.4) * 0.5 + sin(t * 3.8 + 1.2) * 0.3
-        reflectionFlickerFactor = 0.95 + max(-0.1, min(0.1, s))
     }
 
     private func triggerLightningFlash() {
@@ -2036,69 +1549,74 @@ struct RainQualityConfig {
         self.nearOpacity = energySaving.nearOpacity + (extreme.nearOpacity - energySaving.nearOpacity) * Double(t)
     }
     
+ // ⚠️ 景深修正：旧数值把远景做成了「最粗最亮」（far 3.5px / 0.9），近景反而最细最淡，
+ // 深度线索完全是反的——远处的雨看起来比眼前的还实，这是雨"很假"的另一半原因。
+ // 现在改回物理正确的排序：远景又细又淡（但数量最多，撑起雨幕），近景更粗更亮（数量最少）。
+ // 线宽也整体收窄：3.5px 的雨丝在 Retina 上是一根粗管子，真实雨丝是亚像素到 2px 的细线。
+
  /// 极致模式：最精细的雨滴效果
     static let extreme = RainQualityConfig(
         name: "极致",
-        baseLength: 30.0,  // 长雨滴
-        enableAdvancedEffects: true,  // ✅ 启用完整效果
-        farThickness: 3.5,  // 远景清晰
-        midThickness: 3.0,  // 中景清晰
-        nearThickness: 2.5, // 近景清晰
-        farOpacity: 0.9,    // 远景高可见度
-        midOpacity: 0.75,   // 中景高可见度
-        nearOpacity: 0.6    // 近景高可见度
+        baseLength: 34.0,  // 长雨滴（速度越快拉得越长）
+        enableAdvancedEffects: true,  // ✅ 启用柔化底衬
+        farThickness: 1.1,  // 远景纤细
+        midThickness: 1.6,  // 中景
+        nearThickness: 2.3, // 近景最粗
+        farOpacity: 0.28,   // 远景最淡
+        midOpacity: 0.42,   // 中景
+        nearOpacity: 0.58   // 近景最亮
     )
-    
+
  /// 自适应模式（优质）：高质量雨滴
     static let adaptiveHigh = RainQualityConfig(
         name: "自适应(优质)",
-        baseLength: 25.0,  // 较长雨滴
-        enableAdvancedEffects: true,  // ✅ 启用完整效果
-        farThickness: 3.0,
-        midThickness: 2.5,
-        nearThickness: 2.0,
-        farOpacity: 0.85,
-        midOpacity: 0.7,
-        nearOpacity: 0.55
+        baseLength: 30.0,
+        enableAdvancedEffects: true,  // ✅ 启用柔化底衬
+        farThickness: 1.0,
+        midThickness: 1.5,
+        nearThickness: 2.1,
+        farOpacity: 0.26,
+        midOpacity: 0.39,
+        nearOpacity: 0.54
     )
-    
+
  /// 平衡模式：标准雨滴效果
     static let balanced = RainQualityConfig(
         name: "平衡",
-        baseLength: 22.0,  // 标准长度
-        enableAdvancedEffects: false,  // ❌ 简化效果
-        farThickness: 2.5,
-        midThickness: 2.0,
-        nearThickness: 1.8,
-        farOpacity: 0.8,
-        midOpacity: 0.65,
-        nearOpacity: 0.5
+        baseLength: 28.0,
+        enableAdvancedEffects: false,  // ❌ 不画柔化底衬
+        farThickness: 0.9,
+        midThickness: 1.4,
+        nearThickness: 2.0,
+        farOpacity: 0.25,
+        midOpacity: 0.38,
+        nearOpacity: 0.52
     )
-    
+
  /// 节能模式：简化雨滴效果
     static let energySaving = RainQualityConfig(
         name: "节能",
-        baseLength: 18.0,  // 较短雨滴
-        enableAdvancedEffects: false,  // ❌ 简化效果
-        farThickness: 2.0,
-        midThickness: 1.5,
-        nearThickness: 1.5,
-        farOpacity: 0.7,
-        midOpacity: 0.55,
-        nearOpacity: 0.4
+        baseLength: 23.0,
+        enableAdvancedEffects: false,  // ❌ 不画柔化底衬
+        farThickness: 0.8,
+        midThickness: 1.2,
+        nearThickness: 1.7,
+        farOpacity: 0.23,
+        midOpacity: 0.34,
+        nearOpacity: 0.47
     )
-    
+
  /// 自适应模式（节能）：最少效果
     static let adaptiveLow = RainQualityConfig(
         name: "自适应(节能)",
-        baseLength: 15.0,  // 短雨滴
-        enableAdvancedEffects: false,  // ❌ 简化效果
-        farThickness: 1.8,
-        midThickness: 1.5,
-        nearThickness: 1.2,
-        farOpacity: 0.6,
-        midOpacity: 0.45,
-        nearOpacity: 0.3
+        baseLength: 20.0,
+        enableAdvancedEffects: false,  // ❌ 不画柔化底衬
+        farThickness: 0.8,
+        midThickness: 1.1,
+        nearThickness: 1.5,
+        farOpacity: 0.21,
+        midOpacity: 0.31,
+        nearOpacity: 0.43
     )
 }
 
