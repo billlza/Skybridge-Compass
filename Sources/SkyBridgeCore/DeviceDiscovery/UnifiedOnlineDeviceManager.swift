@@ -4392,11 +4392,18 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
  /// 非本机(并把一个陈旧的 `false` 塞进 authoritative map、短路了后续兜底),
  /// 这里靠本机强身份 + 接口地址再判一次,把「本机把自己当对端」的泄漏洗掉。
     private func isSelfOnlineDevice(_ device: OnlineDevice) -> Bool {
+        // ⚠️ 在「重算全部设备」的语境里,回环/占位地址(127.0.0.1 / ::1)是本机误判的祸首:
+        // 多条陈旧或未解析的行都带着回环地址,而本机接口集合里也有回环,于是它们全部撞上、
+        // 被判成本机(实测重算出 5 个本机)。回环在这里**不作为**本机信号,并从两侧地址集合中
+        // 剔除。剩下的都是唯一性信号:强身份(deviceId/协议指纹)、本机真实网卡 IP/MAC ——
+        // 远端对端不可能持有本机的真实 LAN IP 或物理 MAC,不会误判。
+        let nonLoopbackLocalIPs = localIPAddresses.filter { !Self.isLoopbackIPAddress($0) }
         let candidateIPs = Set([device.ipv4, device.ipv6].compactMap { $0 })
+            .filter { !Self.isLoopbackIPAddress($0) }
         let local = SelfDeviceIdentityPolicy.LocalIdentity(
             stableDeviceId: localProtocolDeviceId,
             protocolFingerprint: localProtocolFingerprint,
-            ipAddresses: localIPAddresses,
+            ipAddresses: nonLoopbackLocalIPs,
             macAddresses: localMacAddresses
         )
         let candidate = SelfDeviceIdentityPolicy.CandidateIdentity(
@@ -4404,7 +4411,7 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
             protocolFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(device.protocolFingerprint),
             ipAddresses: candidateIPs,
             macAddresses: device.macAddress.map { [$0] } ?? [],
-            hasLoopbackAddress: candidateIPs.contains(where: Self.isLoopbackIPAddress)
+            hasLoopbackAddress: false
         )
         return SelfDeviceIdentityPolicy.isSelf(local: local, candidate: candidate)
     }

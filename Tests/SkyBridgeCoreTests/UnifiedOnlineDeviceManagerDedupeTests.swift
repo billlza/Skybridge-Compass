@@ -3254,6 +3254,50 @@ final class UnifiedOnlineDeviceManagerDedupeTests: XCTestCase {
         )
     }
 
+    /// BUG(自识别过度匹配)回归:重算时,多条带回环/占位地址(127.0.0.1)的陈旧行
+    /// 不得因撞上本机回环地址而**全部**被判成本机(现场实测"重算出 5 个本机")。
+    /// 回环不作为本机信号;真远端对端不持有本机真实 LAN IP,因此不会误判。
+    @MainActor
+    func testRecomputeDoesNotFlagLoopbackRowsAsMultipleLocals() throws {
+        let manager = UnifiedOnlineDeviceManager.shared
+
+        var rows: [OnlineDevice] = []
+        for i in 0..<5 {
+            rows.append(OnlineDevice(
+                id: UUID(),
+                name: "Peer \(i)",
+                deviceType: .computer,
+                ipv4: "127.0.0.1", ipv6: nil,   // 占位/回环
+                platformName: nil, osVersion: nil, modelName: nil, chip: nil,
+                macAddress: nil, serialNumber: nil,
+                connectionTypes: [.wifi],
+                services: [], portMap: [:],
+                uniqueIdentifier: "id:\(UUID().uuidString.lowercased())",
+                sources: [.skybridgeBonjour],
+                discoveredAt: Date(), lastSeen: Date(),
+                connectionStatus: .online,
+                isLocalDevice: false,
+                isAuthorized: true
+            ))
+        }
+        manager.replaceDevicesForTesting(rows)
+        manager.setLocalStrongIdentityForTesting(
+            deviceId: "self-device-id",
+            protocolFingerprint: nil,
+            ipAddresses: ["10.11.19.50", "127.0.0.1", "::1"],   // 本机 IP 含回环
+            macAddresses: []
+        )
+        defer { manager.replaceDevicesForTesting([]) }
+
+        manager.recomputeLocalFlagsForTesting()
+
+        let locals = manager.onlineDevices.filter(\.isLocalDevice)
+        XCTAssertTrue(
+            locals.isEmpty,
+            "带回环占位地址的远端行不得被判成本机;实际本机数=\(locals.count):\(locals.map(\.name))"
+        )
+    }
+
     private func persistedDevicesForTesting() throws -> [OnlineDevice] {
         let data = try XCTUnwrap(UserDefaults.standard.data(forKey: "skybridge.persistedDevices"))
         let payload = try JSONDecoder().decode(PersistedDevicesPayloadForTesting.self, from: data)
