@@ -554,6 +554,9 @@ app.get('/api/turn/credentials', (req, res) => {
   res.json({
     mode: 'compat',
     username: 'local',
+    // The production control plane names this field `password`; the Rust
+    // client requires it. `credential` is kept for older local callers.
+    password: 'local',
     credential: 'local',
     ttl: 60,
     uris: TURN_URIS
