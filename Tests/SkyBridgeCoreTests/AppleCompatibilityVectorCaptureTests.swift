@@ -715,7 +715,7 @@ private extension AppleCompatibilityVectorCaptureTests {
         fileTransferShippingCallerPath:
             "9e8a2dbfc0e22eced3b6cd0ddd2e135104318643e3d9dca2d4dc25df87d21c5f",
         fileTransferMacResponseCallerPath:
-            "e5319b219c930445ba27fe01caa529cdcf1feac90b16c6ae5e13955abb0974f8",
+            "cd6920782c95f0d66835329b7049bd04a9aeaa80032fa594d0470be73e59ff7d",
         fileTransferIOSCallerPath:
             "0e8abdbce52fda3c6904c8eedc7d0ae1fbbf00a0aa0e35757e941439384232f7",
         cryptoCapabilitiesPath:

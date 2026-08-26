@@ -56,7 +56,13 @@ enum P2PDiscoveryKEMAliasRepairPolicy {
         let displayNames = trustDisplayNameCandidates(for: device)
 
         var matchesByDeviceId: [String: TrustRecord] = [:]
-        for record in records where !record.isTombstone && !record.isExpired {
+        // A record carrying any revocation timestamp is never repair-eligible,
+        // whatever its type: tombstone retention is governed by the
+        // signature-covered `updatedAt` (see TrustRecord.isExpired), but alias
+        // repair must only ever bind to records with no revocation history at
+        // all — refusing more than retention requires is the safe direction.
+        for record in records
+        where !record.isTombstone && !record.isExpired && record.revokedAt == nil {
             guard let kemKeys = record.kemPublicKeys,
                   !KEMPublicKeyInfo.normalizedValidKeys(kemKeys).isEmpty else {
                 continue

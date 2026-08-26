@@ -72,21 +72,21 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
         let tombstoneRecord = trustRecord(
             deviceId: "id:tombstone-kem",
             deviceName: "Other Device",
-            kemPublicKeys: [validXWingKey()],
+            kemPublicKeys: [validKEMKey()],
             recordType: .revoke,
             knownDeviceIds: [matchingAlias]
         )
         let expiredRecord = trustRecord(
             deviceId: "id:expired-kem",
             deviceName: "Other Device",
-            kemPublicKeys: [validXWingKey()],
+            kemPublicKeys: [validKEMKey()],
             revokedAt: Date(timeIntervalSinceNow: -31 * 24 * 60 * 60),
             knownDeviceIds: [matchingAlias]
         )
         let activeValidRecord = trustRecord(
             deviceId: "id:active-valid-kem",
             deviceName: "Other Device",
-            kemPublicKeys: [validXWingKey()],
+            kemPublicKeys: [validKEMKey()],
             knownDeviceIds: [matchingAlias]
         )
 
@@ -110,7 +110,7 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
         let trustedRecord = trustRecord(
             deviceId: "id:trusted-qa-iphone",
             deviceName: "QA iPhone",
-            kemPublicKeys: [validXWingKey()],
+            kemPublicKeys: [validKEMKey()],
             knownDeviceIds: []
         )
 
@@ -181,10 +181,16 @@ final class P2PDiscoveryKEMAliasRepairPolicyTests: XCTestCase {
         )
     }
 
-    private func validXWingKey() -> KEMPublicKeyInfo {
+    private func validKEMKey() -> KEMPublicKeyInfo {
+        // Deliberately the liboqs ML-KEM-768 suite: its negotiability does not
+        // depend on the HAS_APPLE_PQC_SDK compilation condition, so this test
+        // exercises the alias-repair filtering identically on gated and
+        // ungated builds. (An X-Wing sample is only negotiable when the Apple
+        // PQC gate is compiled in, which made this test's outcome depend on
+        // the build environment rather than on the policy under test.)
         KEMPublicKeyInfo(
-            suiteWireId: CryptoSuite.xwingMLDSA.wireId,
-            publicKey: Data(repeating: 0xCC, count: 1_216)
+            suiteWireId: CryptoSuite.mlkem768MLDSA65.wireId,
+            publicKey: Data(repeating: 0xCC, count: 1_184)
         )
     }
 }
