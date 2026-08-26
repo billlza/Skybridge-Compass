@@ -859,8 +859,16 @@ extension HandshakeFaultInjectionBenchTests {
                     }
                 }
 
- // Wait for events to be processed
-                try await Task.sleep(for: .milliseconds(50))
+ // Event delivery is asynchronous and a fixed sleep can undercount on a loaded host;
+ // poll until this scenario's emitted failures have drained (deadline-bounded so the
+ // CSV run can never hang), which also keeps the next scenario's reset() from racing
+ // stragglers from this one.
+                let drainClock = ContinuousClock()
+                let drainDeadline = drainClock.now.advanced(by: .seconds(10))
+                while await eventCollector.handshakeFailedCount < failureCount,
+                      drainClock.now < drainDeadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
 
  // Collect event counts (Requirements 2.1, 2.2)
                 let handshakeFailedCount = await eventCollector.handshakeFailedCount

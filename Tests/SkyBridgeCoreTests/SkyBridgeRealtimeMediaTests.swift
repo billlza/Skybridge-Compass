@@ -1214,9 +1214,18 @@ final class SkyBridgeRealtimeMediaTests: XCTestCase {
             }
         }
 
-        let deadline = Date().addingTimeInterval(2)
-        while await transport.packetCount < packetCount, Date() < deadline {
-            try await Task.sleep(for: .milliseconds(20))
+        // close() cancels in-flight sends, so all packets must land before it runs; on a
+        // loaded host Task.sleep can overshoot by seconds, so the deadline must be generous.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(30))
+        while true {
+            let landed = await transport.packetCount
+            if landed >= packetCount { break }
+            if clock.now >= deadline {
+                XCTFail("transport received \(landed) of \(packetCount) packets before deadline")
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
         }
         await sender.close()
 

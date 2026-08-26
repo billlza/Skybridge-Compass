@@ -89,25 +89,62 @@ final class SSHLaunchContextTests: XCTestCase {
     }
 
     func testCancelledOlderExpirationCannotClearNewerRequest() async throws {
-        let context = SSHLaunchContext(credentialLifetime: .milliseconds(80))
-        let olderRequestID = try context.configure(
-            host: "older.home",
-            port: 22,
-            username: "older",
-            password: "older-secret"
-        )
-        try await Task.sleep(for: .milliseconds(30))
-        XCTAssertNotNil(context.consumeConnectionRequest(requestID: olderRequestID))
+        // The property needs the older request's (cancelled) expiration
+        // deadline to pass while the newer request is live — but fixed sleeps
+        // near a tight deadline are unreliable on a loaded host, where
+        // Task.sleep can overshoot by seconds. Each attempt therefore measures
+        // its own timing with a ContinuousClock and only evaluates the
+        // assertion when the window provably held; an invalid window escalates
+        // the lifetime instead of blaming the product for a scheduling stall.
+        let clock = ContinuousClock()
+        for lifetimeMilliseconds in [200, 1_000, 5_000] {
+            let lifetime = Duration.milliseconds(lifetimeMilliseconds)
+            let context = SSHLaunchContext(credentialLifetime: lifetime)
+            let olderConfiguredAt = clock.now
+            let olderRequestID = try context.configure(
+                host: "older.home",
+                port: 22,
+                username: "older",
+                password: "older-secret"
+            )
+            let olderDeadline = olderConfiguredAt.advanced(by: lifetime)
 
-        let newerRequestID = try context.configure(
-            host: "newer.home",
-            port: 22,
-            username: "newer",
-            password: "newer-secret"
-        )
-        try await Task.sleep(for: .milliseconds(60))
+            // Consuming the older request cancels its expiration task. A nil
+            // here means the host already stalled past the deadline — an
+            // invalid window, not a product failure.
+            guard context.consumeConnectionRequest(requestID: olderRequestID) != nil else {
+                continue
+            }
 
-        XCTAssertNotNil(context.consumeConnectionRequest(requestID: newerRequestID))
+            // Let real time approach (but provably not reach) the older
+            // deadline before the newer request exists, so the cancelled
+            // task's fire moment lands while the newer request is live.
+            try await Task.sleep(for: lifetime * 6 / 10)
+            let newerConfiguredAt = clock.now
+            guard newerConfiguredAt < olderDeadline else { continue }
+            let newerRequestID = try context.configure(
+                host: "newer.home",
+                port: 22,
+                username: "newer",
+                password: "newer-secret"
+            )
+            let newerDeadline = newerConfiguredAt.advanced(by: lifetime)
+
+            // Check halfway between the two deadlines: after the older one has
+            // certainly passed, before the newer one certainly has not.
+            let halfGap = (newerDeadline - olderDeadline) / 2
+            try await Task.sleep(until: olderDeadline.advanced(by: halfGap), clock: clock)
+            guard clock.now < newerDeadline else { continue }
+
+            XCTAssertNotNil(
+                context.consumeConnectionRequest(requestID: newerRequestID),
+                "A cancelled older expiration task must not clear the newer request whose lifetime has not elapsed"
+            )
+            return
+        }
+        XCTFail(
+            "Unable to establish a conclusive expiration timing window even with a 5s lifetime; the host is pathologically stalled."
+        )
     }
 
     func testPendingCredentialQueueIsBoundedWithoutEvictingExistingRequests() throws {

@@ -188,16 +188,28 @@ final class SSHSessionLifecycleTests: XCTestCase {
         var expected = ""
         var publishedWhileProducerWasActive = false
 
-        for index in 0..<20 {
+        // A fixed fragment count paced by Task.sleep is unsafe on loaded hosts where
+        // sleeps can overshoot by seconds; produce until the publisher observably
+        // fires, bounded only by a generous deadline.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        var index = 0
+        while clock.now < deadline {
             let fragment = "\(index),"
+            index += 1
             expected.append(fragment)
             session.appendTerminalOutputForLifecycleTesting(fragment)
-            try await Task.sleep(for: .milliseconds(20))
-            publishedWhileProducerWasActive = publishedWhileProducerWasActive
-                || !session.outputText.isEmpty
+            try await Task.sleep(for: .milliseconds(10))
+            if !session.outputText.isEmpty {
+                publishedWhileProducerWasActive = true
+                break
+            }
         }
 
-        XCTAssertTrue(publishedWhileProducerWasActive)
+        XCTAssertTrue(
+            publishedWhileProducerWasActive,
+            "The compatibility output publisher never fired while output was being produced"
+        )
         try await waitForCompatibilityOutput(expected, from: session)
     }
 
