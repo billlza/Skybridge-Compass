@@ -2270,7 +2270,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     XCTAssertTrue(remoteViewSource.contains("shouldAutoConnectP2PSmoke"))
     XCTAssertTrue(remoteViewSource.contains("attemptAutoConnectP2PSmoke()"))
-    XCTAssertTrue(remoteViewSource.contains("connectToDevice(connection)"))
+    XCTAssertTrue(remoteViewSource.contains("connectToDevice(connection, routeIntent: .directLAN)"))
 
     XCTAssertTrue(appSource.contains("requiresVisibleRemoteView"))
     XCTAssertTrue(appSource.contains("remote-desktop ui-gate waiting-for-RemoteDesktopView"))
@@ -2407,7 +2407,7 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertLessThan(copyStatus.lowerBound, reverseSmoke.lowerBound)
     let launchBody = try sourceSlice(
       from: "launch_ios_remote_smoke_app()",
-      to: "terminate_stale_smoke_scripts",
+      to: "require_no_concurrent_smoke_scripts",
       in: scriptSource
     )
     let launchCommand = try sourceSlice(
@@ -2707,7 +2707,12 @@ final class RegressionHardeningTests: XCTestCase {
     XCTAssertTrue(scriptSource.contains("start_macos_smoke_host()"))
     XCTAssertTrue(scriptSource.contains("/usr/bin/open"))
     XCTAssertTrue(scriptSource.contains("register_macos_smoke_host_app_bundle()"))
-    XCTAssertTrue(scriptSource.contains("MAC_HOST_PRODUCT_APP_BUNDLE=\"$ROOT_DIR/dist/SkyBridge Compass Pro.app\""))
+    XCTAssertTrue(
+      scriptSource.contains(
+        "MAC_HOST_PRODUCT_APP_BUNDLE=\"${SKYBRIDGE_SMOKE_MAC_PRODUCT_APP_BUNDLE:-$ROOT_DIR/dist/SkyBridge Compass Pro.app}\""
+      ),
+      "The product bundle path may be relocated for lab runs, but its identity is enforced by the codesign/stapler/spctl checks, not the path."
+    )
     XCTAssertTrue(scriptSource.contains("MAC_HOST_PRODUCT_BUNDLE_ID=\"com.skybridge.compass.pro\""))
     XCTAssertTrue(scriptSource.contains("skybridge_resolve_profile_bound_codesign_identity_hash"))
     XCTAssertTrue(scriptSource.contains("derive_macos_smoke_host_minimal_entitlements"))
@@ -3225,7 +3230,19 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
 
-    XCTAssertTrue(inboundBody.contains("strictInboundHandshakeTrustContext("))
+    let admissionBody = try sourceSlice(
+      from: "private func resolveInboundHandshakeAdmission(",
+      to: "private func durablyPinnedStablePeerIds(",
+      in: source
+    )
+
+    XCTAssertTrue(inboundBody.contains("resolveInboundHandshakeAdmission("))
+    // The admission resolver must keep consulting the strict pinned-identity
+    // context first, and route every non-pinned presentation through the
+    // shared InboundHandshakeTrustPolicy — never a platform-local decision.
+    XCTAssertTrue(admissionBody.contains("strictInboundHandshakeTrustContext("))
+    XCTAssertTrue(admissionBody.contains("InboundHandshakeTrustPolicy.disposition("))
+    XCTAssertTrue(admissionBody.contains("InboundHandshakeTrustPolicy.action(for:"))
     XCTAssertTrue(inboundBody.contains("messageA: messageA"))
     XCTAssertTrue(inboundBody.contains("trustProvider: strictTrustContext?.provider"))
     XCTAssertTrue(
@@ -13481,7 +13498,8 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
     let connectBody = try sourceSlice(
-      from: "public func connect(to device: DiscoveredDevice) async throws",
+      from:
+        "public func connect(\n        to device: DiscoveredDevice,\n        routeIntent: PeerTransportRouteIntent\n    ) async throws",
       to: "public func startStreaming() async throws",
       in: source
     )

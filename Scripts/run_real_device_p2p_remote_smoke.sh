@@ -46,7 +46,7 @@ SMOKE_SOAK_SECONDS="${SKYBRIDGE_SMOKE_SOAK_SECONDS:-10}"
 SMOKE_VIDEO_WIDTH="${SKYBRIDGE_SMOKE_VIDEO_WIDTH:-2056}"
 SMOKE_VIDEO_HEIGHT="${SKYBRIDGE_SMOKE_VIDEO_HEIGHT:-1329}"
 SMOKE_EXPECT_RENDER_ORIENTATION="${SKYBRIDGE_SMOKE_EXPECT_RENDER_ORIENTATION:-upright}"
-SMOKE_REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-0}"
+SMOKE_REQUIRE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH:-1}"
 SMOKE_FORCE_SIGNED_KEM_REFRESH="${SKYBRIDGE_SMOKE_FORCE_SIGNED_KEM_REFRESH:-$SMOKE_REQUIRE_SIGNED_KEM_REFRESH}"
 ALLOW_PERSISTENT_TRUST_MUTATION="${SKYBRIDGE_SMOKE_ALLOW_PERSISTENT_TRUST_MUTATION:-0}"
 RUN_MAC_ONLINE_IPAD_SMOKE="${SKYBRIDGE_SMOKE_RUN_MAC_ONLINE_IPAD:-1}"
@@ -218,6 +218,11 @@ if [[ "$MAC_HOST_ONLY" == "1" ]]; then
     echo "The signed macOS host-only mode requires SKYBRIDGE_REMOTE_CONTROL_NOTICE_AUTO_APPROVE=0." >&2
     exit 2
   fi
+fi
+
+if [[ "$LAB_RUN" != "1" && "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" != "1" ]]; then
+  echo "The acceptance lane requires a fresh signed KEM refresh proof; only lab runs (SKYBRIDGE_REAL_DEVICE_P2P_LAB_RUN=1) may set SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH=0." >&2
+  exit 2
 fi
 
 case "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH:$SMOKE_FORCE_SIGNED_KEM_REFRESH" in
@@ -5894,6 +5899,13 @@ wait_for_ios_status_pattern() {
 
 validate_protocol_identity_bootstrap_evidence() {
   local identity_bootstrap_mode
+  if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" != "1" ]]; then
+    # Only lab runs may reach this branch: the acceptance lane refuses to
+    # start with SKYBRIDGE_SMOKE_REQUIRE_SIGNED_KEM_REFRESH=0.
+    append_host_status "identity-refresh evidence=not-requested persistentTrustMutation=0"
+    append_ios_status "identity-refresh evidence=not-requested persistentTrustMutation=0"
+    return 0
+  fi
   if [[ ! -s "$IOS_STATUS_APP_CACHE_LOCAL" || -L "$IOS_STATUS_APP_CACHE_LOCAL" ]]; then
     echo "The authoritative on-device iOS status is unavailable for identity refresh validation: $IOS_STATUS_APP_CACHE_LOCAL" >&2
     return 1
@@ -7799,12 +7811,7 @@ wait_for_remote_control_notice_lifecycle
 wait_for_ios_status_pattern "success .*suite=${EXPECTED_TARGET_SUITE} .*handshakeOnly=1 .*remoteDesktop=1" "$SMOKE_TIMEOUT_SECONDS" "iOS P2P remote desktop success"
 wait_for_ios_status_pattern "remote-desktop-pass .*renderOrientation=${SMOKE_EXPECT_RENDER_ORIENTATION}" "$SMOKE_TIMEOUT_SECONDS" "P2P remote desktop pass window"
 copy_ios_status
-if [[ "$SMOKE_REQUIRE_SIGNED_KEM_REFRESH" == "1" ]]; then
-  validate_protocol_identity_bootstrap_evidence
-else
-  append_host_status "identity-refresh evidence=not-requested persistentTrustMutation=0"
-  append_ios_status "identity-refresh evidence=not-requested persistentTrustMutation=0"
-fi
+validate_protocol_identity_bootstrap_evidence
 validate_remote_desktop_route_evidence
 validate_remote_desktop_operation_evidence
 validate_remote_desktop_performance_window
