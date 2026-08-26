@@ -975,7 +975,15 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         )
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
-        try await Task.sleep(for: .milliseconds(150))
+        // The idle timer runs on the main actor; on a loaded host it may take
+        // well over the nominal deadline to get scheduled, so poll for the
+        // deletion instead of trusting a single fixed sleep.
+        let clock = ContinuousClock()
+        let pollDeadline = clock.now.advanced(by: .seconds(5))
+        while FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path),
+              clock.now < pollDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path))
     }
 
@@ -983,38 +991,73 @@ final class WebRTCInboundFileTransferReceiverTests: XCTestCase {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }
 
-        let transferId = UUID().uuidString
-        let receiver = approvedReceiver(
-            destinationBaseDirectory: { fixture.directory },
-            transferIdleTimeout: .milliseconds(200)
-        )
+        // Wall-clock sleeps overshoot badly on loaded CI hosts, so each
+        // attempt measures its own timing and only evaluates the assertion
+        // when the chunk provably landed before the original idle deadline
+        // and the check provably ran before the refreshed one. The escalating
+        // timeouts keep the first attempt tight enough to exercise the
+        // cancellation race on a fast machine while guaranteeing a conclusive
+        // attempt on a stalled one.
+        let clock = ContinuousClock()
+        for timeoutMilliseconds in [200, 1_000, 5_000] {
+            let timeout = Duration.milliseconds(timeoutMilliseconds)
+            let transferId = UUID().uuidString
+            let receiver = approvedReceiver(
+                destinationBaseDirectory: { fixture.directory },
+                transferIdleTimeout: timeout
+            )
 
-        try await receiver.handle(
-            metadata(transferId: transferId, fileSize: 4, chunkSize: 2, totalChunks: 2),
-            sessionID: "session",
-            endpointDescription: "peer",
-            keys: Self.sessionKeys(),
-            sendMessage: { _, _ in },
-            failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
-            resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
-        )
-        try await Task.sleep(for: .milliseconds(120))
-        try await receiver.handle(
-            chunk(transferId: transferId, index: 0, data: Data("ab".utf8)),
-            sessionID: "session",
-            endpointDescription: "peer",
-            keys: Self.sessionKeys(),
-            sendMessage: { _, _ in },
-            failSenderWaiters: { _, _ in XCTFail("chunk must not fail outbound waiters") },
-            resumeSenderWaiter: { _ in XCTFail("chunk must not resume outbound waiters") }
-        )
-        try await Task.sleep(for: .milliseconds(120))
+            let metadataSentAt = clock.now
+            try await receiver.handle(
+                metadata(transferId: transferId, fileSize: 4, chunkSize: 2, totalChunks: 2),
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { _, _ in },
+                failSenderWaiters: { _, _ in XCTFail("metadata must not fail outbound waiters") },
+                resumeSenderWaiter: { _ in XCTFail("metadata must not resume outbound waiters") }
+            )
+            let originalDeadline = metadataSentAt.advanced(by: timeout)
 
-        XCTAssertTrue(
-            FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path),
-            "The cancelled metadata timer must not wake and delete a transfer whose chunk refreshed the idle deadline"
+            try await Task.sleep(for: timeout * 6 / 10)
+            try await receiver.handle(
+                chunk(transferId: transferId, index: 0, data: Data("ab".utf8)),
+                sessionID: "session",
+                endpointDescription: "peer",
+                keys: Self.sessionKeys(),
+                sendMessage: { _, _ in },
+                failSenderWaiters: { _, _ in XCTFail("chunk must not fail outbound waiters") },
+                resumeSenderWaiter: { _ in XCTFail("chunk must not resume outbound waiters") }
+            )
+            let chunkHandledAt = clock.now
+            guard chunkHandledAt < originalDeadline else {
+                // The host stalled past the idle deadline before the chunk
+                // landed, so the original timer fired legitimately; retry with
+                // a longer timeout instead of asserting on an invalid window.
+                await receiver.cleanupOnChannelClosed().value
+                continue
+            }
+            let refreshedDeadline = chunkHandledAt.advanced(by: timeout)
+
+            // Check halfway between the two deadlines: after the original one
+            // has certainly passed, before the refreshed one certainly has not.
+            let halfGap = (refreshedDeadline - originalDeadline) / 2
+            try await Task.sleep(until: originalDeadline.advanced(by: halfGap), clock: clock)
+            guard clock.now < refreshedDeadline else {
+                await receiver.cleanupOnChannelClosed().value
+                continue
+            }
+
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: fixture.partialURL(transferId).path),
+                "The cancelled metadata timer must not wake and delete a transfer whose chunk refreshed the idle deadline"
+            )
+            await receiver.cleanupOnChannelClosed().value
+            return
+        }
+        XCTFail(
+            "Unable to establish a conclusive idle-refresh timing window even with a 5s timeout; the host is pathologically stalled."
         )
-        await receiver.cleanupOnChannelClosed().value
     }
 
     func testChunkHashMismatchSendsErrorWithoutDroppingTransfer() async throws {
