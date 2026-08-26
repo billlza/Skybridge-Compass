@@ -138,45 +138,72 @@ fn operator_capability_contract_covers_requested_surface_without_fake_success() 
         .iter()
         .find(|capability| capability.id == "crossnet.status.watch")
         .expect("crossnet status watch capability must be declared");
-    assert_eq!(status_watch.status, OperatorCapabilityStatus::Planned);
+    // The app now pushes a real coalesced status stream; a build that wires no
+    // push source still answers watch_not_supported, which the boundary must
+    // keep disclosing.
+    assert_eq!(
+        status_watch.status,
+        OperatorCapabilityStatus::PendingLiveProof
+    );
     assert_eq!(
         status_watch.runtime_target,
         OperatorRuntimeTarget::MacAppRuntime
     );
-    assert_eq!(
-        status_watch.control_effect,
-        OperatorControlEffect::PlannedFailClosed
-    );
+    assert_eq!(status_watch.control_effect, OperatorControlEffect::ReadOnly);
     assert!(
         status_watch
             .authority_boundary
-            .contains("watch_not_supported")
-            && status_watch.authority_boundary.contains("fail-closed"),
-        "crossnet.status.watch must keep the fail-closed stream gate visible"
+            .contains("implemented and enabled")
+            && status_watch
+                .authority_boundary
+                .contains("watch_not_supported")
+            && status_watch.authority_boundary.contains("fails closed")
+            && status_watch
+                .authority_boundary
+                .contains("live signed-app socket smoke"),
+        "crossnet.status.watch must disclose the stream, its unwired fallback, and missing live proof"
+    );
+    assert!(
+        !status_watch.command.contains("planned/"),
+        "crossnet.status.watch is implemented, so its command must not be labelled planned"
     );
 
+    // The Swift router now calls a real runtime closure for these three and
+    // validates the read-back, so `planned` would understate them. They stay
+    // `pending_live_proof` because the signed-app socket smoke is uncaptured.
     for required in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
         let capability = capabilities
             .iter()
             .find(|capability| capability.id == required)
             .expect("app-bound crossnet capability must be declared");
-        assert_eq!(capability.status, OperatorCapabilityStatus::Planned);
+        assert_eq!(
+            capability.status,
+            OperatorCapabilityStatus::PendingLiveProof
+        );
         assert_eq!(
             capability.runtime_target,
             OperatorRuntimeTarget::MacAppRuntime
         );
         assert_eq!(
             capability.control_effect,
-            OperatorControlEffect::MacMutationNotEnabled
+            OperatorControlEffect::MacSessionMutation
         );
         assert!(
             capability.command.contains("app-bound"),
             "{required} must advertise the Mac app authority boundary"
         );
         assert!(
+            !capability.command.contains("planned/"),
+            "{required} is implemented and enabled, so it must not advertise itself as planned"
+        );
+        assert!(
             capability.authority_boundary.contains("Mac-only")
-                && capability.authority_boundary.contains("signed Mac app")
-                && capability.authority_boundary.contains("live socket smoke"),
+                && capability
+                    .authority_boundary
+                    .contains("implemented and enabled")
+                && capability
+                    .authority_boundary
+                    .contains("live signed-app socket smoke"),
             "{required} must keep the Mac-only signed-app smoke gate visible"
         );
     }
@@ -185,22 +212,33 @@ fn operator_capability_contract_covers_requested_surface_without_fake_success() 
         .iter()
         .find(|capability| capability.id == "crossnet.navigation")
         .expect("Mac navigation boundary must be declared");
-    assert_eq!(navigation.status, OperatorCapabilityStatus::Planned);
+    assert_eq!(
+        navigation.status,
+        OperatorCapabilityStatus::PendingLiveProof
+    );
     assert_eq!(
         navigation.control_effect,
-        OperatorControlEffect::MacMutationNotEnabled
+        OperatorControlEffect::MacRuntimeMutation
     );
-    assert!(navigation.command.contains("<dashboard|settings>"));
+    assert!(
+        navigation
+            .command
+            .contains("crossnet navigate <destination>")
+    );
     assert!(
         navigation
             .authority_boundary
             .contains("injected navigation coordinator")
             && navigation
                 .authority_boundary
-                .contains("global notifications")
+                .contains("navigation_apply_failed")
             && navigation
                 .authority_boundary
-                .contains("direct view-state writes")
+                .contains("not emulated through global notifications")
+            && navigation
+                .authority_boundary
+                .contains("live signed-app socket smoke"),
+        "crossnet.navigation must disclose its coordinator, read-back refusal, and missing live proof"
     );
 
     let code_create = capabilities
@@ -391,18 +429,12 @@ fn operator_capability_matrix_keeps_ios_out_of_rust_runtime_control() {
             );
         }
 
-        if capability.control_effect == OperatorControlEffect::MacMutationNotEnabled {
-            assert_eq!(
-                capability.status,
-                OperatorCapabilityStatus::Planned,
-                "{} must not claim an enabled Mac GUI mutation before signed-app runtime proof",
-                capability.id
-            );
-        }
-
         // A verb that really mutates the Mac runtime may only be reported as
         // proven (`available`) or explicitly unproven (`pending_live_proof`).
-        if capability.control_effect == OperatorControlEffect::MacRuntimeMutation {
+        if matches!(
+            capability.control_effect,
+            OperatorControlEffect::MacRuntimeMutation | OperatorControlEffect::MacSessionMutation
+        ) {
             assert!(
                 matches!(
                     capability.status,
@@ -432,6 +464,139 @@ fn operator_capability_matrix_keeps_ios_out_of_rust_runtime_control() {
                         .authority_boundary
                         .contains("real-device cross-platform"),
                 "{} must state which live evidence is still missing",
+                capability.id
+            );
+        }
+    }
+}
+
+/// The capability contract, the crossnet preflight method lists, and the
+/// remote-desktop command contracts are three independent descriptions of the
+/// same operator surface. Nothing previously compared them, so a capability
+/// could be promoted while `skybridge crossnet preflight` still reported it as
+/// disabled — an internally inconsistent release that every other test passed.
+#[test]
+fn operator_capability_contract_agrees_with_the_command_surface_registries() {
+    let capabilities = operator_capabilities();
+
+    #[cfg(target_os = "macos")]
+    {
+        use crate::crossnet_commands::{DISABLED_MUTATION_METHODS, ENABLED_MUTATION_METHODS};
+
+        for method in ENABLED_MUTATION_METHODS {
+            assert!(
+                !DISABLED_MUTATION_METHODS.contains(method),
+                "{method} must not be reported both enabled and disabled"
+            );
+        }
+
+        for capability in capabilities {
+            if !capability.id.starts_with("crossnet.") {
+                continue;
+            }
+            let mutating = matches!(
+                capability.control_effect,
+                OperatorControlEffect::MacRuntimeMutation
+                    | OperatorControlEffect::MacSessionMutation
+            );
+            if !mutating {
+                continue;
+            }
+            let enabled = ENABLED_MUTATION_METHODS.contains(&capability.id);
+            match capability.status {
+                OperatorCapabilityStatus::Available
+                | OperatorCapabilityStatus::PendingLiveProof => {
+                    assert!(
+                        enabled,
+                        "{} is declared as an enabled code path but preflight reports it disabled",
+                        capability.id
+                    );
+                }
+                OperatorCapabilityStatus::Unavailable | OperatorCapabilityStatus::ReadOnly => {}
+            }
+        }
+    }
+
+    // Remote-desktop mutating verbs: the capability status and the per-command
+    // contract row must agree about whether a mutation is supported.
+    for (capability_id, command_fragment) in [
+        ("remote_desktop.start", "remote-desktop start"),
+        ("remote_desktop.stop", "remote-desktop stop"),
+        (
+            "remote_desktop.resolution.set",
+            "remote-desktop set-resolution",
+        ),
+        ("remote_desktop.fps.set", "remote-desktop set-fps"),
+    ] {
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability.id == capability_id)
+            .expect("remote desktop mutating capability must be declared");
+        let contract = crate::remote_desktop_commands::COMMAND_CONTRACTS
+            .iter()
+            .find(|contract| contract.command.contains(command_fragment))
+            .expect("remote desktop command contract row must exist");
+
+        let capability_claims_mutation = matches!(
+            capability.status,
+            OperatorCapabilityStatus::Available | OperatorCapabilityStatus::PendingLiveProof
+        );
+        assert_eq!(
+            capability_claims_mutation, contract.mutation_supported,
+            "{capability_id} and its command contract disagree about mutation support"
+        );
+        if !capability_claims_mutation {
+            assert_eq!(
+                contract.status, "unavailable",
+                "{capability_id} is not an enabled code path, so its command contract must say so"
+            );
+        }
+    }
+}
+
+/// Every test name a `verification_gate` cites must actually exist.
+///
+/// 0.3.0 shipped six gate names that existed nowhere but the gate strings
+/// themselves — `file_send_wait_decision_and_json_contract`,
+/// `file_receive_list_and_decision_json_contract`,
+/// `inbound_approval_registry_and_receiver_tests`, `crossnet_preflight_json_contract`,
+/// `active_scan_duration_bounds`, and `active_scan_locator_free_snapshot`. A
+/// capability that cites evidence nobody wrote is exactly the over-claim this
+/// contract exists to prevent, and nothing detected it.
+#[test]
+fn operator_capability_verification_gates_cite_evidence_that_exists() {
+    let source = crate::check_source_catalog::cli_check_coverage_source();
+
+    for capability in operator_capabilities() {
+        for token in capability.verification_gate.split(" + ") {
+            let token = token.trim();
+            // Only audit tokens shaped like a Rust item path. Prose fragments
+            // ("live signed-app socket smoke") are human-readable release
+            // conditions, not code references.
+            let is_item_path = !token.is_empty()
+                && token.chars().all(|character| {
+                    character.is_ascii_lowercase()
+                        || character.is_ascii_digit()
+                        || character == '_'
+                        || character == ':'
+                })
+                && token.contains('_');
+            if !is_item_path {
+                continue;
+            }
+            // `*_gate` names are check-coverage entry ids, audited by the
+            // coverage gate itself rather than by symbol lookup.
+            if token.ends_with("_gate") {
+                continue;
+            }
+            // A path like `connection_code::connect::tests` names a module.
+            let leaf = token.rsplit("::").next().unwrap_or(token);
+            let found =
+                source.contains(&format!("fn {leaf}")) || source.contains(&format!("mod {leaf}"));
+            assert!(
+                found,
+                "{} cites `{token}` as verification evidence, but no `fn {leaf}` or `mod {leaf}` \
+                 exists in the catalogued CLI source",
                 capability.id
             );
         }

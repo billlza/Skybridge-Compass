@@ -45,6 +45,22 @@ public enum CrossnetControlWire {
         ))
     }
 
+    /// Encodes one unsolicited stream frame, e.g. a `status` watch event.
+    ///
+    /// Distinct on the wire from a request/response envelope: it carries
+    /// `event`/`data` instead of `id`/`ok`/`result`, so a client can tell a
+    /// pushed frame from the initial response it correlated by id.
+    public static func eventData<Payload: Encodable>(
+        event: String,
+        data: Payload
+    ) throws -> Data {
+        try encoder.encode(CrossnetControlEventEnvelope(
+            v: protocolVersion,
+            event: event,
+            data: data
+        ))
+    }
+
     public static func failureData(
         id: String?,
         failure: CrossnetControlFailure
@@ -149,6 +165,11 @@ public struct CrossnetControlParams: Equatable, Sendable, Decodable {
         guard case .bool(let value) = values[key] else { return nil }
         return value
     }
+
+    public func int(_ key: String) -> Int? {
+        guard case .int(let value) = values[key] else { return nil }
+        return value
+    }
 }
 
 public enum CrossnetControlJSONValue: Equatable, Sendable, Codable {
@@ -213,6 +234,26 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
     /// The write was accepted but the runtime did not read back the requested
     /// value, so no apply is claimed.
     case settingRuntimeApplyFailed
+    /// The session verb ran against the live runtime but the state read back
+    /// afterwards does not support the result, so no mutation is claimed.
+    ///
+    /// This is the session-plane twin of ``settingRuntimeApplyFailed``: the
+    /// router refuses to report a host/connect/disconnect that the app's own
+    /// runtime cannot corroborate.
+    case sessionRuntimeApplyFailed
+    /// The app refused the session mutation for an operator-visible reason that
+    /// is not an auth, tenant, or code-format problem (for example no signaling
+    /// route, or an admission lease the app could not obtain).
+    case sessionMutationRejected(String)
+    /// The requested destination is not part of the typed navigation vocabulary.
+    case navigationDestinationInvalid
+    /// The navigation coordinator ran but the UI did not confirm presenting the
+    /// destination (for example the dashboard window is not mounted), so no
+    /// navigation is claimed.
+    case navigationApplyFailed
+    /// The requested device reference matches no entry in the app's current
+    /// online-device snapshot.
+    case deviceNotFound
     case internalError(String)
 
     public var code: String {
@@ -245,6 +286,16 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
             return "setting_invalid_value"
         case .settingRuntimeApplyFailed:
             return "setting_runtime_apply_failed"
+        case .sessionRuntimeApplyFailed:
+            return "session_runtime_apply_failed"
+        case .sessionMutationRejected:
+            return "session_mutation_rejected"
+        case .navigationDestinationInvalid:
+            return "navigation_destination_invalid"
+        case .navigationApplyFailed:
+            return "navigation_apply_failed"
+        case .deviceNotFound:
+            return "device_not_found"
         case .internalError:
             return "internal"
         }
@@ -280,6 +331,16 @@ public enum CrossnetControlFailure: Error, Equatable, Sendable {
             return "crossnet-control setting value is outside its declared domain"
         case .settingRuntimeApplyFailed:
             return "crossnet-control setting write did not read back from the Mac app runtime"
+        case .sessionRuntimeApplyFailed:
+            return "crossnet-control session mutation did not read back from the Mac app runtime"
+        case .sessionMutationRejected(let reason):
+            return "crossnet-control session mutation was refused by the Mac app: \(Self.sanitized(reason))"
+        case .navigationDestinationInvalid:
+            return "unknown crossnet-control navigation destination"
+        case .navigationApplyFailed:
+            return "crossnet-control navigation was not confirmed by the Mac app UI"
+        case .deviceNotFound:
+            return "unknown crossnet-control device reference"
         case .internalError(let detail):
             return "crossnet-control internal error: \(Self.sanitized(detail))"
         }
@@ -322,17 +383,27 @@ public struct CrossnetControlHelloResult: Codable, Equatable, Sendable {
     public let proto: Int
     public let authLoaded: Bool
     public let tenantBound: Bool
+    /// The mutating methods THIS app build actually implements.
+    ///
+    /// The CLI ships separately from the Mac app, so a newer CLI can be pointed
+    /// at an older app. Without this list the CLI could only report its own
+    /// compile-time expectations and would tell an operator that
+    /// `crossnet.disconnect` is enabled while the installed app still answers
+    /// `method_not_enabled`.
+    public let enabledMutationMethods: [String]
 
     public init(
         engineVersion: String,
         proto: Int = CrossnetControlWire.protocolVersion,
         authLoaded: Bool,
-        tenantBound: Bool
+        tenantBound: Bool,
+        enabledMutationMethods: [String] = CrossnetControlMethods.enabledMutationMethods
     ) {
         self.engineVersion = engineVersion
         self.proto = proto
         self.authLoaded = authLoaded
         self.tenantBound = tenantBound
+        self.enabledMutationMethods = enabledMutationMethods
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -340,7 +411,42 @@ public struct CrossnetControlHelloResult: Codable, Equatable, Sendable {
         case proto
         case authLoaded = "auth_loaded"
         case tenantBound = "tenant_bound"
+        case enabledMutationMethods = "enabled_mutation_methods"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        engineVersion = try container.decode(String.self, forKey: .engineVersion)
+        proto = try container.decode(Int.self, forKey: .proto)
+        authLoaded = try container.decode(Bool.self, forKey: .authLoaded)
+        tenantBound = try container.decode(Bool.self, forKey: .tenantBound)
+        // Absent on pre-0.3.1 app builds; an empty list means "this app did not
+        // say", which the CLI reports as unknown rather than as none.
+        enabledMutationMethods =
+            try container.decodeIfPresent([String].self, forKey: .enabledMutationMethods) ?? []
+    }
+}
+
+/// The single source of truth for which mutating methods this app build serves.
+///
+/// ``CrossnetControlRouter`` is the only thing that can enable a method, so this
+/// list lives next to it and is reported over `crossnet.hello`.
+public enum CrossnetControlMethods {
+    public static let enabledMutationMethods: [String] = [
+        "crossnet.settings.set",
+        "crossnet.host",
+        "crossnet.connect",
+        "crossnet.connect_device",
+        "crossnet.disconnect",
+        "crossnet.navigation"
+    ]
+
+    /// Mutating or mutation-adjacent methods this build still refuses.
+    ///
+    /// Empty since `crossnet.navigate` landed and `crossnet.status` gained a
+    /// real watch stream; kept so a future gap has a declared home instead of
+    /// being silently undisclosed.
+    public static let disabledMutationMethods: [String] = []
 }
 
 public struct CrossnetControlHostResult: Codable, Equatable, Sendable {
@@ -366,6 +472,425 @@ public struct CrossnetControlHostResult: Codable, Equatable, Sendable {
         case sessionRef = "session_ref"
         case expiresAt = "expires_at"
         case leaseMode = "lease_mode"
+    }
+}
+
+/// Result of `crossnet.connect` — the session formed by redeeming a code.
+///
+/// `readiness` is the app's own readiness read back **after** the connect call
+/// returns, never a constant. `CrossNetworkConnectionManager.connectWithCode`
+/// returns once the WebRTC offer session has started, which is well before the
+/// peer answers, so a hardcoded "connected" here would be a lie the operator
+/// could not detect.
+public struct CrossnetControlConnectResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let sessionRef: String
+    public let remoteDeviceName: String?
+    public let readiness: String
+    public let connectionStatus: String
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "mac_session_mutation",
+        sessionRef: String,
+        remoteDeviceName: String?,
+        readiness: String,
+        connectionStatus: String
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.sessionRef = sessionRef
+        self.remoteDeviceName = remoteDeviceName
+        self.readiness = readiness
+        self.connectionStatus = connectionStatus
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case sessionRef = "session_ref"
+        case remoteDeviceName = "remote_device_name"
+        case readiness
+        case connectionStatus = "connection_status"
+    }
+}
+
+/// Result of `crossnet.disconnect`.
+///
+/// `disconnected` reports whether a session was actually torn down, so an
+/// operator can tell "I ended a session" from "there was nothing to end".
+/// `sessionPresentAfter` is the post-teardown read-back the router validates.
+public struct CrossnetControlDisconnectResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let disconnected: Bool
+    public let sessionPresentBefore: Bool
+    public let sessionPresentAfter: Bool
+    public let connectionStatus: String
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "mac_session_mutation",
+        disconnected: Bool,
+        sessionPresentBefore: Bool,
+        sessionPresentAfter: Bool,
+        connectionStatus: String
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.disconnected = disconnected
+        self.sessionPresentBefore = sessionPresentBefore
+        self.sessionPresentAfter = sessionPresentAfter
+        self.connectionStatus = connectionStatus
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case disconnected
+        case sessionPresentBefore = "session_present_before"
+        case sessionPresentAfter = "session_present_after"
+        case connectionStatus = "connection_status"
+    }
+}
+
+/// Fail-closed validation for the three session-plane verbs.
+///
+/// This is the session twin of ``CrossnetControlSettingsMutationPolicy``: the
+/// router refuses to report a mutation the app's own read-back does not
+/// corroborate, so a runtime that silently no-ops cannot present as success.
+public enum CrossnetControlSessionMutationPolicy {
+    /// Readiness strings ``CrossnetControlRuntimeProjection`` can emit.
+    ///
+    /// Kept as an explicit set so a runtime cannot invent a readiness the
+    /// status projection would never produce.
+    static let knownReadiness: Set<String> = [
+        "idle",
+        "transport_ready",
+        "handshake_complete"
+    ]
+
+    static let knownConnectionStatus: Set<String> = [
+        "idle",
+        "generating",
+        "waiting",
+        "connecting",
+        "connected",
+        "failed"
+    ]
+
+    public static func validate(
+        _ result: CrossnetControlHostResult,
+        request leaseMode: CrossnetControlHostLeaseMode
+    ) throws -> CrossnetControlHostResult {
+        guard result.leaseMode == leaseMode else {
+            throw CrossnetControlFailure.internalError("host_lease_mode_mismatch")
+        }
+        let code = result.code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty, code == result.code else {
+            throw CrossnetControlFailure.sessionRuntimeApplyFailed
+        }
+        // The hosting session must be identified by a redacted ref, never a raw
+        // session id — the CLI prints this field verbatim.
+        try requireRedactedSessionRef(result.sessionRef)
+        return result
+    }
+
+    public static func validate(
+        _ result: CrossnetControlConnectResult
+    ) throws -> CrossnetControlConnectResult {
+        try requireSessionPlane(
+            runtimeTarget: result.runtimeTarget,
+            controlEffect: result.controlEffect
+        )
+        try requireRedactedSessionRef(result.sessionRef)
+        guard knownReadiness.contains(result.readiness) else {
+            throw CrossnetControlFailure.internalError("connect_unknown_readiness")
+        }
+        guard knownConnectionStatus.contains(result.connectionStatus) else {
+            throw CrossnetControlFailure.internalError("connect_unknown_connection_status")
+        }
+        // `handshake_complete` is the one readiness an operator would act on as
+        // proof of a live secure session, so it may only be reported when the
+        // app's own connection status agrees.
+        if result.readiness == "handshake_complete", result.connectionStatus != "connected" {
+            throw CrossnetControlFailure.sessionRuntimeApplyFailed
+        }
+        // A connect that left the app in `failed` is not a connect.
+        if result.connectionStatus == "failed" {
+            throw CrossnetControlFailure.sessionRuntimeApplyFailed
+        }
+        return result
+    }
+
+    public static func validate(
+        _ result: CrossnetControlDisconnectResult
+    ) throws -> CrossnetControlDisconnectResult {
+        try requireSessionPlane(
+            runtimeTarget: result.runtimeTarget,
+            controlEffect: result.controlEffect
+        )
+        guard knownConnectionStatus.contains(result.connectionStatus) else {
+            throw CrossnetControlFailure.internalError("disconnect_unknown_connection_status")
+        }
+        // Teardown must ALWAYS be proven by the read-back, whether or not there
+        // was a session to tear down. `disconnect()` cannot fail loudly, so this
+        // is the only evidence that it did anything.
+        guard !result.sessionPresentAfter, result.connectionStatus == "idle" else {
+            throw CrossnetControlFailure.sessionRuntimeApplyFailed
+        }
+        // `disconnected` reports only whether there was anything to end, so it
+        // must match the observed before-state rather than being asserted by the
+        // runtime. Having nothing to disconnect is a legitimate `false`, not a
+        // failure — the CLI renders it as "No cross-network session to
+        // disconnect".
+        guard result.disconnected == result.sessionPresentBefore else {
+            throw CrossnetControlFailure.internalError("disconnect_claim_mismatch")
+        }
+        return result
+    }
+
+    private static func requireSessionPlane(
+        runtimeTarget: String,
+        controlEffect: String
+    ) throws {
+        guard runtimeTarget == "mac_app_runtime" else {
+            throw CrossnetControlFailure.internalError("session_mutation_invalid_runtime")
+        }
+        guard controlEffect == "mac_session_mutation" else {
+            throw CrossnetControlFailure.internalError("session_mutation_invalid_effect")
+        }
+    }
+
+    private static func requireRedactedSessionRef(_ sessionRef: String?) throws {
+        guard let sessionRef,
+              sessionRef.hasPrefix("sha256:"),
+              sessionRef.count > "sha256:".count else {
+            throw CrossnetControlFailure.internalError("session_ref_required")
+        }
+    }
+}
+
+/// The typed navigation vocabulary exposed over `crossnet-control/1`.
+///
+/// The wire vocabulary is owned here so the operator surface cannot silently
+/// grow a destination the app never mapped; the app layer maps these onto its
+/// own sidebar items and the coordinator's read-back confirms what the UI
+/// actually presented.
+public enum CrossnetControlNavigationDestination: String, Codable, CaseIterable, Sendable {
+    case dashboard
+    case deviceManagement = "device_management"
+    case usbDeviceManagement = "usb_device_management"
+    case fileTransfer = "file_transfer"
+    case remoteDesktop = "remote_desktop"
+    case quantumCommunication = "quantum_communication"
+    case systemMonitor = "system_monitor"
+    case settings
+
+    public static func parse(params: CrossnetControlParams) throws
+        -> CrossnetControlNavigationDestination {
+        guard let raw = params.string("destination"),
+              raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+              let destination = CrossnetControlNavigationDestination(rawValue: raw) else {
+            throw CrossnetControlFailure.navigationDestinationInvalid
+        }
+        return destination
+    }
+}
+
+/// Result of `crossnet.navigate` — the destination the UI actually presented.
+public struct CrossnetControlNavigateResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let destination: String
+    public let presentedDestination: String
+    public let runtimeApplied: Bool
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "mac_ui_navigation",
+        destination: String,
+        presentedDestination: String,
+        runtimeApplied: Bool
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.destination = destination
+        self.presentedDestination = presentedDestination
+        self.runtimeApplied = runtimeApplied
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case destination
+        case presentedDestination = "presented_destination"
+        case runtimeApplied = "runtime_applied"
+    }
+}
+
+/// One online account device, redacted for the operator surface.
+///
+/// `deviceRef` is the only identifier that crosses the wire; raw device ids,
+/// IP addresses, MAC addresses, and serial numbers never do.
+public struct CrossnetControlDeviceEntry: Codable, Equatable, Sendable {
+    public let deviceRef: String
+    public let name: String
+    public let platform: String?
+    public let online: Bool
+
+    public init(deviceRef: String, name: String, platform: String?, online: Bool) {
+        self.deviceRef = deviceRef
+        self.name = name
+        self.platform = platform
+        self.online = online
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case deviceRef = "device_ref"
+        case name
+        case platform
+        case online
+    }
+}
+
+/// Result of `crossnet.devices`.
+public struct CrossnetControlDevicesResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let devices: [CrossnetControlDeviceEntry]
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "read_only",
+        devices: [CrossnetControlDeviceEntry]
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.devices = devices
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case devices
+    }
+}
+
+/// Result of `crossnet.connect_device` — the one-click join outcome.
+public struct CrossnetControlConnectDeviceResult: Codable, Equatable, Sendable {
+    public let runtimeTarget: String
+    public let controlEffect: String
+    public let deviceRef: String
+    public let name: String?
+    public let connected: Bool
+
+    public init(
+        runtimeTarget: String = "mac_app_runtime",
+        controlEffect: String = "mac_session_mutation",
+        deviceRef: String,
+        name: String?,
+        connected: Bool
+    ) {
+        self.runtimeTarget = runtimeTarget
+        self.controlEffect = controlEffect
+        self.deviceRef = deviceRef
+        self.name = name
+        self.connected = connected
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtimeTarget = "runtime_target"
+        case controlEffect = "control_effect"
+        case deviceRef = "device_ref"
+        case name
+        case connected
+    }
+}
+
+/// Fail-closed validation for the online-device surface.
+public enum CrossnetControlDevicePolicy {
+    public static func validate(
+        _ result: CrossnetControlDevicesResult
+    ) throws -> CrossnetControlDevicesResult {
+        guard result.runtimeTarget == "mac_app_runtime" else {
+            throw CrossnetControlFailure.internalError("devices_invalid_runtime")
+        }
+        guard result.controlEffect == "read_only" else {
+            throw CrossnetControlFailure.internalError("devices_not_read_only")
+        }
+        var seen = Set<String>()
+        for device in result.devices {
+            guard device.deviceRef.hasPrefix("sha256:"),
+                  device.deviceRef.count > "sha256:".count else {
+                throw CrossnetControlFailure.internalError("devices_unredacted_ref")
+            }
+            guard seen.insert(device.deviceRef).inserted else {
+                throw CrossnetControlFailure.internalError("devices_duplicate_ref")
+            }
+        }
+        return result
+    }
+
+    public static func parseDeviceRef(params: CrossnetControlParams) throws -> String {
+        guard let raw = params.string("device_ref"),
+              raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+              raw.hasPrefix("sha256:"),
+              raw.count > "sha256:".count else {
+            throw CrossnetControlFailure.malformedRequest("invalid device_ref")
+        }
+        return raw
+    }
+
+    public static func validate(
+        _ result: CrossnetControlConnectDeviceResult,
+        request deviceRef: String
+    ) throws -> CrossnetControlConnectDeviceResult {
+        guard result.runtimeTarget == "mac_app_runtime" else {
+            throw CrossnetControlFailure.internalError("connect_device_invalid_runtime")
+        }
+        guard result.controlEffect == "mac_session_mutation" else {
+            throw CrossnetControlFailure.internalError("connect_device_invalid_effect")
+        }
+        guard result.deviceRef == deviceRef else {
+            throw CrossnetControlFailure.internalError("connect_device_ref_mismatch")
+        }
+        // A dial the device manager does not read back as connected is not a
+        // join, whatever the coordinator returned.
+        guard result.connected else {
+            throw CrossnetControlFailure.sessionRuntimeApplyFailed
+        }
+        return result
+    }
+}
+
+/// Fail-closed validation for `crossnet.navigate`.
+///
+/// Navigation read-back is inherently the UI's own confirmation: the router
+/// refuses to report a navigation the view did not confirm presenting.
+public enum CrossnetControlNavigationPolicy {
+    public static func validate(
+        _ result: CrossnetControlNavigateResult,
+        request destination: CrossnetControlNavigationDestination
+    ) throws -> CrossnetControlNavigateResult {
+        guard result.runtimeTarget == "mac_app_runtime" else {
+            throw CrossnetControlFailure.internalError("navigation_invalid_runtime")
+        }
+        guard result.controlEffect == "mac_ui_navigation" else {
+            throw CrossnetControlFailure.internalError("navigation_invalid_effect")
+        }
+        guard result.destination == destination.rawValue else {
+            throw CrossnetControlFailure.internalError("navigation_destination_mismatch")
+        }
+        guard CrossnetControlNavigationDestination(rawValue: result.presentedDestination) != nil
+        else {
+            throw CrossnetControlFailure.internalError("navigation_unknown_presented")
+        }
+        guard result.runtimeApplied, result.presentedDestination == destination.rawValue else {
+            throw CrossnetControlFailure.navigationApplyFailed
+        }
+        return result
     }
 }
 
@@ -491,8 +1016,19 @@ enum CrossnetControlSettingsProjectionPolicy {
         "ui.top_bar_network_speed",
         "ui.top_bar_network_latency",
         "pqc.prefer_xwing_hybrid",
-        "pqc.signature_algorithm"
+        "pqc.signature_algorithm",
+        "remote_desktop.target_fps",
+        "remote_desktop.resolution"
     ]
+
+    /// `ScreenCaptureKitStreamer` reads its target size and frame rate only in
+    /// `start(...)` and refuses to restart while running, so writing these
+    /// changes what the NEXT capture uses — it does not retune a live stream.
+    /// The note is part of the wire contract so an operator is never told a
+    /// running session was reconfigured.
+    static let remoteDesktopCaptureNote = "applies_at_next_capture_start"
+
+    static let allowedRemoteDesktopFrameRates: Set<Int> = [30, 60, 120]
 
     static func validate(
         _ snapshot: CrossnetControlSettingsSnapshotResult
@@ -552,6 +1088,18 @@ enum CrossnetControlSettingsProjectionPolicy {
                 throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
             }
             try validateNote("policy_preference_not_runtime_proof", for: setting)
+        case "remote_desktop.target_fps":
+            guard case .int(let value) = setting.value,
+                  allowedRemoteDesktopFrameRates.contains(value) else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote(remoteDesktopCaptureNote, for: setting)
+        case "remote_desktop.resolution":
+            guard case .string(let value) = setting.value,
+                  ResolutionSetting(rawValue: value) != nil else {
+                throw CrossnetControlFailure.internalError("settings_projection_invalid_value")
+            }
+            try validateNote(remoteDesktopCaptureNote, for: setting)
         default:
             throw CrossnetControlFailure.internalError("settings_projection_not_allowlisted")
         }
@@ -660,7 +1208,9 @@ enum CrossnetControlSettingsMutationPolicy {
         "ui.show_realtime_fps",
         "ui.top_bar_ip_location",
         "ui.top_bar_network_speed",
-        "ui.top_bar_network_latency"
+        "ui.top_bar_network_latency",
+        "remote_desktop.target_fps",
+        "remote_desktop.resolution"
     ]
 
     /// Readable settings whose real authority is the versioned protocol identity
@@ -721,6 +1271,22 @@ enum CrossnetControlSettingsMutationPolicy {
                 throw CrossnetControlFailure.settingInvalidValue
             }
             return .string(canonical)
+        case "remote_desktop.target_fps":
+            guard let value = params.int("value"),
+                  CrossnetControlSettingsProjectionPolicy
+                      .allowedRemoteDesktopFrameRates.contains(value) else {
+                throw CrossnetControlFailure.settingInvalidValue
+            }
+            return .int(value)
+        case "remote_desktop.resolution":
+            // Only presets the app can actually represent are accepted; a
+            // preset the CLI knows but `ResolutionSetting` cannot express must
+            // be refused rather than silently coerced to `auto`.
+            guard let raw = params.string("value"),
+                  ResolutionSetting(rawValue: raw) != nil else {
+                throw CrossnetControlFailure.settingInvalidValue
+            }
+            return .string(raw)
         default:
             throw CrossnetControlFailure.settingNotFound
         }
@@ -821,4 +1387,10 @@ private struct CrossnetControlFailureEnvelope: Encodable {
 private struct CrossnetControlErrorBody: Encodable {
     let code: String
     let message: String
+}
+
+private struct CrossnetControlEventEnvelope<Payload: Encodable>: Encodable {
+    let v: Int
+    let event: String
+    let data: Payload
 }

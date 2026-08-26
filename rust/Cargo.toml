@@ -12,7 +12,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-version = "0.3.0"
+version = "0.3.1"
 rust-version = "1.94"
 
 [workspace.dependencies]
@@ -67,3 +67,14 @@ uuid = { version = "1.24.0", features = ["serde", "v4", "v7"] }
 webbrowser = "1.2.2"
 webrtc = "0.20.0"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom"] }
+
+[patch.crates-io]
+# rtc 0.20.0 with a surgical stats fix: the selected ICE pair's candidates are
+# registered into the stats accumulator before each snapshot, so a
+# peer-reflexive remote (created inside the agent, never signaled) is
+# resolvable by `get_stats` consumers. Without this, the native transport's
+# selected-route observation can never complete when the nominated remote is
+# prflx, and every fresh Rust-agent session is torn down after the 5s
+# observation window. Upstream 0.21 is still in beta; drop this patch when a
+# stable release lands with the fix. See rust/vendor/rtc/README-SKYBRIDGE.md.
+rtc = { path = "vendor/rtc" }

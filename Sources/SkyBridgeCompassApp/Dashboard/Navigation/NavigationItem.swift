@@ -94,3 +94,37 @@ public struct NavigationItemView: View {
     }
 }
 
+// MARK: - Operator control wire mapping
+
+/// Single mapping between the app's sidebar items and the
+/// `crossnet-control/1` navigation vocabulary. Owning it here — next to the
+/// enum it mirrors — keeps the operator surface and the sidebar from drifting
+/// apart without a compile error.
+public extension NavigationItem {
+    init?(operatorWire: String) {
+        switch operatorWire {
+        case "dashboard": self = .dashboard
+        case "device_management": self = .deviceManagement
+        case "usb_device_management": self = .usbDeviceManagement
+        case "file_transfer": self = .fileTransfer
+        case "remote_desktop": self = .remoteDesktop
+        case "quantum_communication": self = .quantumCommunication
+        case "system_monitor": self = .systemMonitor
+        case "settings": self = .settings
+        default: return nil
+        }
+    }
+
+    var operatorWire: String {
+        switch self {
+        case .dashboard: return "dashboard"
+        case .deviceManagement: return "device_management"
+        case .usbDeviceManagement: return "usb_device_management"
+        case .fileTransfer: return "file_transfer"
+        case .remoteDesktop: return "remote_desktop"
+        case .quantumCommunication: return "quantum_communication"
+        case .systemMonitor: return "system_monitor"
+        case .settings: return "settings"
+        }
+    }
+}

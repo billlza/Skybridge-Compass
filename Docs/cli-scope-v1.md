@@ -122,12 +122,25 @@ allowlisted, non-secret settings snapshot from the running Mac app. A strict
 subset is mutable through `crossnet settings set`; the app requires auth and
 tenant binding, applies the typed value, and re-reads runtime state before
 reporting success. PQC identity settings remain immutable on this surface.
-`crossnet.host`, `crossnet.connect`, and `crossnet.disconnect` still return
-explicit `method_not_enabled`. Sidebar navigation is not part of
-`crossnet-control/1`; adding it requires an app-owned injected navigation
-coordinator and must not be emulated with global notifications or direct view
-state writes. Status watch and all release claims for settings mutation remain
-gated on signed-app socket evidence.
+`crossnet.navigate` and `crossnet.status --watch` are implemented and enabled
+(see above). `crossnet.host`, `crossnet.connect`, and `crossnet.disconnect` are implemented
+and enabled: the app calls `CrossNetworkConnectionManager` and the router
+rejects any result its own read-back does not corroborate — a downgraded host
+lease, a connect that claims `handshake_complete` while the app is not
+connected, or a disconnect after which a session survives. They are serialized
+against each other so a read-back always describes its own mutation, and they
+stay `pending_live_proof` until a signed-app socket smoke is captured.
+`crossnet host --lease` is session-affecting: requesting a lease that differs
+from the active one tears the current session down before issuing the new code.
+`crossnet settings set` additionally exposes `remote_desktop.target_fps` and
+`remote_desktop.resolution`, which are read-back verified but carry an
+`applies_at_next_capture_start` note because ScreenCaptureKit reads capture
+parameters only when a stream starts. Sidebar navigation is part of
+`crossnet-control/1` through the app-owned injected `OperatorNavigationCoordinator`
+with typed destinations and UI-confirmed read-back; it is not emulated with
+global notifications or direct view state writes. All release claims for the
+mutating and streaming verbs remain gated on signed-app socket evidence
+(`pending_live_proof`).
 
 Native/headless commands:
 
@@ -263,19 +276,30 @@ As of this commit, the runnable subset is:
 - `skybridge metrics`
 - `skybridge version`
 
-Still intentionally gated:
+Nothing on the crossnet surface is gated any more; every declared verb reaches
+the live runtime.
 
-- `skybridge crossnet host`
-- `skybridge crossnet connect <code>`
-- `skybridge crossnet disconnect`
-- `skybridge crossnet status --watch`
+`crossnet status --watch` is real server push: the Mac app streams coalesced,
+deduplicated status snapshots over the same connection after the initial
+response, each frame re-reads auth flags, the per-client send is
+timeout-bounded, and a build with no wired push source still fails closed with
+`watch_not_supported`.
 
-The gated `crossnet` host/connect/disconnect commands have a runnable CLI parser
-and Rust UDS client, and the Mac app source now exposes an initial read-only
-`crossnet-control/1` server. They remain release-gated until a signed Mac app
-live socket smoke proves the runtime path. `crossnet settings set` is implemented
-with a typed allowlist and runtime read-back but remains `pending_live_proof`
-until a signed-app socket smoke proves the packaged runtime path. The gated
+`crossnet navigate <destination>` drives an app-owned injected navigation
+coordinator with typed destinations. The dashboard view applies the request
+through its own selection state and confirms what it actually presented — user
+clicks confirm through the same path — and the router refuses any result the
+UI did not confirm (`navigation_apply_failed`).
+
+`crossnet` host/connect/disconnect reach the live runtime. They remain
+`pending_live_proof` rather than `available` until a signed Mac app live socket
+smoke proves the packaged runtime path. Because the CLI ships separately from
+the app, `crossnet preflight` reports the method list the *installed app* says
+it serves (`mutation_methods_source: app_reported`) and falls back to the CLI's
+own expectation only when the app does not report one. `crossnet settings set` is
+implemented with a typed allowlist and runtime read-back but remains
+`pending_live_proof` until a signed-app socket smoke proves the packaged runtime
+path. The gated
 `file receive --list` reads the persistent inbound approval registry. Accept
 and reject require a health-fresh active agent and a current session/runtime,
 transfer UUID, authenticated peer device-id, and protocol-fingerprint binding.

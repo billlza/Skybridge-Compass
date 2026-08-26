@@ -15,7 +15,6 @@ enum OperatorCapabilityStatus {
     /// mislabelled `planned` (which would deny an enabled code path) or
     /// `available` (which would claim proof nobody produced).
     PendingLiveProof,
-    Planned,
 }
 
 impl OperatorCapabilityStatus {
@@ -25,7 +24,6 @@ impl OperatorCapabilityStatus {
             Self::ReadOnly => "read_only",
             Self::Unavailable => "unavailable",
             Self::PendingLiveProof => "pending_live_proof",
-            Self::Planned => "planned",
         }
     }
 }
@@ -58,9 +56,13 @@ enum OperatorControlEffect {
     /// The Mac app applies the change to its live runtime and reports the value
     /// it reads back afterwards.
     MacRuntimeMutation,
-    MacMutationNotEnabled,
+    /// The Mac app creates or tears down a cross-network *session* and reports
+    /// the session state it reads back afterwards.
+    ///
+    /// Distinct from ``MacRuntimeMutation`` so an operator can tell "I changed a
+    /// setting" from "I moved this machine onto or off a live peer session".
+    MacSessionMutation,
     ContractOnly,
-    PlannedFailClosed,
     UnavailableFailClosed,
     ArtifactOnly,
 }
@@ -71,9 +73,8 @@ impl OperatorControlEffect {
             Self::ReadOnly => "read_only",
             Self::NativeMutation => "native_mutation",
             Self::MacRuntimeMutation => "mac_runtime_mutation",
-            Self::MacMutationNotEnabled => "mac_mutation_not_enabled",
+            Self::MacSessionMutation => "mac_session_mutation",
             Self::ContractOnly => "contract_only",
-            Self::PlannedFailClosed => "planned_fail_closed",
             Self::UnavailableFailClosed => "unavailable_fail_closed",
             Self::ArtifactOnly => "artifact_only",
         }
@@ -104,37 +105,57 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             command: "app-bound/read-only: skybridge crossnet preflight [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
             authority_boundary: "Reads the running Mac app's crossnet-control/1 hello state and reports protocol/auth/tenant preconditions plus per-method mutation availability; when auth and tenant are ready, crossnet.settings.set may be enabled while host/connect/disconnect remain disabled, but the signed-app socket smoke release gate still blocks an end-to-end release claim; preflight itself does not generate codes, connect peers, mutate settings, or control iOS runtime",
-            verification_gate: "crossnet_preflight_json_contract + Mac OperatorControlServer hello round-trip + signed Mac app socket smoke",
+            verification_gate: "preflight_payload_reports_ready_mac_app_without_mutation_claims + crossnet_cli_json_contract_uses_fake_socket_for_preflight_status_connect_json + Mac OperatorControlServer hello round-trip + signed Mac app socket smoke",
         },
         OperatorCapability {
             id: "crossnet.host",
-            status: OperatorCapabilityStatus::Planned,
+            status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
-            control_effect: OperatorControlEffect::MacMutationNotEnabled,
-            command: "planned/app-bound: skybridge crossnet host [--lease short|long] [--json]",
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "app-bound: skybridge crossnet host [--lease short|long] [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Rust CLI client, crossnet-control/1 wire contract, and initial Mac-only socket server source are present; host must still fail closed with method_not_enabled until the signed Mac app owns auth_loaded=true, tenant_bound=true, real code issuance, and live socket smoke evidence",
-            verification_gate: "Mac OperatorControlServer auth/tenant gate tests + live signed-app socket smoke + real code issuance evidence",
+            authority_boundary: "Mac-only session issuance is implemented and enabled: the signed Mac app calls CrossNetworkConnectionManager.issueConnectionCode with the operator-supplied lease instead of writing the GUI lease preference, requires auth_loaded=true and tenant_bound=true, and the router rejects the response unless the applied lease equals the requested lease and the hosting session is reported as a redacted session_ref; a code is real server-issued material, so a host that cannot reach signaling fails closed rather than returning a placeholder; this verb is NOT read-only with respect to an existing session, because the manager tears the current session down when the requested lease differs from the active one, and it returns the app's existing code unchanged when the lease and authority already match, so an operator must treat `host --lease` as a session-affecting command; status stays pending_live_proof until live signed-app socket smoke is captured",
+            verification_gate: "Mac OperatorControlServer auth/tenant gate tests + host lease read-back rejection tests + live signed-app socket smoke + real code issuance evidence",
         },
         OperatorCapability {
             id: "crossnet.connect",
-            status: OperatorCapabilityStatus::Planned,
+            status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
-            control_effect: OperatorControlEffect::MacMutationNotEnabled,
-            command: "planned/app-bound: skybridge crossnet connect <code> [--json]",
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "app-bound: skybridge crossnet connect <code> [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Rust CLI client, crossnet-control/1 wire contract, and initial Mac-only socket server source are present; connect validates the code contract but must still fail closed with method_not_enabled until the signed Mac app mutates CrossNetworkConnectionManager after app auth, tenant preflight, and live socket smoke pass",
-            verification_gate: "Mac OperatorControlServer auth/tenant gate tests + live signed-app socket smoke + CrossNetworkConnectionManager mutation evidence",
+            authority_boundary: "Mac-only code redemption is implemented and enabled: the signed Mac app calls CrossNetworkConnectionManager.connectWithCode after auth_loaded=true and tenant_bound=true, and reports the readiness it reads back from its own runtime rather than a constant; connectWithCode returns when the offer session starts and not when the peer answers, so this verb never claims handshake_complete unless the app's connection status agrees, and a run that leaves the app failed is rejected; status stays pending_live_proof until live signed-app socket smoke is captured with a real peer",
+            verification_gate: "Mac OperatorControlServer auth/tenant gate tests + connect readiness read-back rejection tests + live signed-app socket smoke + CrossNetworkConnectionManager mutation evidence",
+        },
+        OperatorCapability {
+            id: "crossnet.devices",
+            status: OperatorCapabilityStatus::ReadOnly,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "app-bound/read-only: skybridge crossnet devices [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
+            authority_boundary: "Reads the Mac app's unified online-device snapshot through crossnet-control/1 after auth and tenant preflight; entries carry a redacted device_ref plus display name, platform, and online state only — raw device ids, IP addresses, MAC addresses, and serial numbers never cross this surface; the list mutates nothing and does not dial any device",
+            verification_gate: "Mac OperatorControlServer devices redaction tests + signed Mac app socket smoke before release readiness claims",
+        },
+        OperatorCapability {
+            id: "crossnet.connect_device",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "app-bound: skybridge crossnet connect-device <device_ref> [--json]",
+            owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer + OnlineDeviceConnectionCoordinator",
+            authority_boundary: "Mac-only one-click device join is implemented and enabled: the signed Mac app resolves the redacted device_ref against its unified online-device snapshot, dials the device's discovered and pinned-trust control routes through the app's own online-device coordinator (the peer admits automatically, nothing is typed on it), and reports the device manager's own connected read-back; a dial the manager does not read back as connected fails closed rather than claiming a join, and status stays pending_live_proof until live signed-app socket smoke is captured with a real peer device",
+            verification_gate: "typed device-ref resolution tests + connected read-back rejection tests + live signed-app socket smoke",
         },
         OperatorCapability {
             id: "crossnet.disconnect",
-            status: OperatorCapabilityStatus::Planned,
+            status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
-            control_effect: OperatorControlEffect::MacMutationNotEnabled,
-            command: "planned/app-bound: skybridge crossnet disconnect [--json]",
+            control_effect: OperatorControlEffect::MacSessionMutation,
+            command: "app-bound: skybridge crossnet disconnect [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Rust CLI client, crossnet-control/1 wire contract, and initial Mac-only socket server source are present; disconnect must still fail closed with method_not_enabled until app auth, tenant binding, app session presence, and live socket smoke are enforced by the signed Mac app",
-            verification_gate: "Mac OperatorControlServer disconnect auth gate tests + live signed-app socket smoke + app session teardown evidence",
+            authority_boundary: "Mac-only session teardown is implemented and enabled: the signed Mac app calls CrossNetworkConnectionManager.disconnect after auth_loaded=true and tenant_bound=true, then re-reads its own connection state; because disconnect cannot fail loudly, teardown is only reported when the read-back shows no surviving session, and having nothing to tear down is reported as disconnected=false rather than as success; status stays pending_live_proof until live signed-app socket smoke is captured",
+            verification_gate: "Mac OperatorControlServer disconnect auth gate tests + post-teardown read-back rejection tests + live signed-app socket smoke + app session teardown evidence",
         },
         OperatorCapability {
             id: "crossnet.status.snapshot",
@@ -163,28 +184,28 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             control_effect: OperatorControlEffect::MacRuntimeMutation,
             command: "app-bound: skybridge crossnet settings set <id> <value> [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "Mac-app-bound settings mutation is implemented and enabled: the app applies one entry from a typed allowlist that is a strict subset of the readable projection, requires auth_loaded=true and tenant_bound=true, re-reads the property from its runtime after the apply hook, and fails closed with setting_runtime_apply_failed when the read-back differs; pqc.* ids stay immutable here because their authority is the versioned protocol identity prepare/commit flow, which can require peer re-pinning; Rust state_dir/UserDefaults direct writes are not valid GUI control and status stays pending_live_proof until live signed-app socket smoke is captured",
+            authority_boundary: "Mac-app-bound settings mutation is implemented and enabled: the app applies one entry from a typed allowlist that is a strict subset of the readable projection, requires auth_loaded=true and tenant_bound=true, re-reads the property from its runtime after the apply hook, and fails closed with setting_runtime_apply_failed when the read-back differs; pqc.* ids stay immutable here because their authority is the versioned protocol identity prepare/commit flow, which can require peer re-pinning; the remote_desktop.* capture ids are mutable but carry an applies_at_next_capture_start note because ScreenCaptureKit reads size and frame rate only when a stream starts, so writing them never retunes a running session; Rust state_dir/UserDefaults direct writes are not valid GUI control and status stays pending_live_proof until live signed-app socket smoke is captured",
             verification_gate: "Mac OperatorControlServer auth/tenant and settings allowlist tests + runtime observation tests + live signed-app socket smoke",
         },
         OperatorCapability {
             id: "crossnet.navigation",
-            status: OperatorCapabilityStatus::Planned,
+            status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
-            control_effect: OperatorControlEffect::MacMutationNotEnabled,
-            command: "planned/app-bound: skybridge crossnet navigate <dashboard|settings> [--json]",
+            control_effect: OperatorControlEffect::MacRuntimeMutation,
+            command: "app-bound: skybridge crossnet navigate <destination> [--json]",
             owner_module: "Mac OperatorControlServer + app-owned injected navigation coordinator",
-            authority_boundary: "crossnet-control/1 does not currently expose navigation; this must remain method_not_enabled until the Mac app owns an injected navigation coordinator with typed destinations and read-back, and it must not be emulated through global notifications or direct view-state writes",
-            verification_gate: "typed navigation destination tests + app-owned coordinator read-back + live signed-app socket smoke",
+            authority_boundary: "Mac-only UI navigation is implemented and enabled through an app-owned injected navigation coordinator with typed destinations: the dashboard view applies the request through its own selection state and confirms what it actually presented, the router refuses any result the UI did not confirm (navigation_apply_failed), it is not emulated through global notifications or direct view-state writes, and status stays pending_live_proof until live signed-app socket smoke is captured",
+            verification_gate: "typed navigation destination tests + app-owned coordinator read-back rejection tests + live signed-app socket smoke",
         },
         OperatorCapability {
             id: "crossnet.status.watch",
-            status: OperatorCapabilityStatus::Planned,
+            status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
-            control_effect: OperatorControlEffect::PlannedFailClosed,
-            command: "planned/fail-closed: skybridge crossnet status --watch [--json]",
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "app-bound/read-only: skybridge crossnet status --watch [--json]",
             owner_module: "crossnet_commands + skybridge-crossnet-client + Mac OperatorControlServer",
-            authority_boundary: "The Mac-only status watch parser/client shape exists, but the server currently returns watch_not_supported; watch must stay fail-closed until stream lifecycle, backpressure, and signed Mac app socket smoke are proven",
-            verification_gate: "Mac OperatorControlServer watch_not_supported tests + stream lifecycle/backpressure tests + live signed-app socket smoke",
+            authority_boundary: "Mac-only status streaming is implemented and enabled: the app pushes a coalesced, deduplicated redacted status snapshot over the same one-connection stream whenever the connection manager's state settles, each frame re-reads auth flags, the per-client send is timeout-bounded so a stalled watcher cannot wedge the app, and a build without a wired push source still fails closed with watch_not_supported; the stream mutates nothing, and status stays pending_live_proof until live signed-app socket smoke is captured",
+            verification_gate: "Mac OperatorControlServer watch stream tests (initial response + coalesced events + fail-closed unwired source) + send-timeout bound + live signed-app socket smoke",
         },
         OperatorCapability {
             id: "device.status",
@@ -214,7 +235,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             command: "skybridge device discover --nearby --scan [--scan-seconds <1..30>] [--show-addresses] [--json]",
             owner_module: "device_commands + skybridge-agent discovery service",
             authority_boundary: "performs one bounded foreground mDNS scan without requiring a running Desktop app or long-running agent; persists only locator-free candidate device refs and never authorizes connection; addresses stay omitted unless --show-addresses is explicit, then remain short-lived advertised_unverified observations with authenticated=false, connectable=false, and persisted=false",
-            verification_gate: "active_scan_duration_bounds + active_scan_locator_free_snapshot + explicit_address_disclosure_json_contract + controlled-LAN real-device scan gate",
+            verification_gate: "active_scan_cli_enforces_nearby_address_and_duration_boundaries + active_scan_persistence_keeps_ephemeral_address_out_of_registry + active_scan_json_hides_addresses_by_default_and_labels_explicit_disclosure + controlled-LAN real-device scan gate",
         },
         OperatorCapability {
             id: "native.code.create",
@@ -274,7 +295,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             command: "skybridge file send <path> --to <peer> --session-id <id> [--detach] [--timeout-seconds <1..3600>] [--json]",
             owner_module: "file_commands + FileTransferControlRequestRegistry + agent file_transfer coordinator",
             authority_boundary: "requires a health-fresh lock-owning agent, current handshake-complete session proof, bound remote protocol identity, and local regular-file SHA-256 snapshot; by default the CLI waits and reports success only after TransferCompleted with a verified matching SHA-256 receipt, while --detach reports only request registration for the still-active agent, never agent observation, and never transfer success; outcome remains observable via `file history`; status remains pending_live_proof until a real-device cross-platform file-transfer artifact is captured",
-            verification_gate: "file_send_wait_decision_and_json_contract + file_transfer_agent_observation_request_registry_gate + file_transfer_json_contract_fails_closed_without_path_or_peer_leakage + real_device_file_transfer_gate",
+            verification_gate: "file_send_wait_decision_requires_verified_matching_receipt + file_send_wait_decision_surfaces_failure_and_rejection + file_send_json_only_claims_success_for_verified_completion + file_transfer_agent_observation_request_registry_gate + file_transfer_json_contract_fails_closed_without_path_or_peer_leakage + real_device_file_transfer_gate",
         },
         OperatorCapability {
             id: "file.transfer.receive",
@@ -284,7 +305,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             command: "skybridge file receive --list [--json] | --session-id <id> (--accept|--reject) <transfer-uuid> [--json]",
             owner_module: "file_commands + InboundFileTransferApprovalRegistry + agent file_transfer coordinator",
             authority_boundary: "listing is a read-only projection of persisted inbound approval records; accept/reject requires a health-fresh lock-owning agent and the current runtime incarnation, stable authenticated peer device id, and protocol fingerprint, then records only a pending agent decision (applied=false); the agent owns the live native sender and emits metadata ACK/error, and allocates staging/storage only after approval; status remains pending_live_proof until a real-device cross-platform inbound transfer artifact is captured",
-            verification_gate: "inbound_approval_registry_and_receiver_tests + file_receive_list_and_decision_json_contract + real_device_file_transfer_gate",
+            verification_gate: "persistent_approval_registry_is_the_pending_timeout_authority + stale_inbound_approvals_are_terminalized_before_capacity_reuse + file_receive_list_and_decision_json_contract + real_device_file_transfer_gate",
         },
         OperatorCapability {
             id: "file.transfer.history",
@@ -333,7 +354,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             control_effect: OperatorControlEffect::UnavailableFailClosed,
             command: "unavailable/fail-closed: skybridge remote-desktop start --session-id <id> [--resolution <preset>] [--fps <value>] [--json]",
             owner_module: "remote_desktop_commands + authenticated RuntimeSessionRecord evidence",
-            authority_boundary: "verifies the authenticated peer capability boundary, then rejects without a registry write because the standalone Rust runtime has no screen-capture/media/input backend or applied readback receipt",
+            authority_boundary: "verifies the authenticated peer capability boundary, then rejects without a registry write: the standalone Rust runtime has no screen-capture/media/input backend, and remote desktop admission on the Mac app requires an already-accepted inbound authenticated transport that the operator CLI does not own, so there is no entry point to promote on either side",
             verification_gate: "standalone remote desktop backend + authenticated SBWC control/apply receipt + real_device_p2p_remote_gate + remote_control_notice_artifact_gate",
         },
         OperatorCapability {
@@ -343,7 +364,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             control_effect: OperatorControlEffect::UnavailableFailClosed,
             command: "unavailable/fail-closed: skybridge remote-desktop stop --session-id <id> [--json]",
             owner_module: "remote_desktop_commands + authenticated RuntimeSessionRecord evidence",
-            authority_boundary: "rejects without claiming a stream stop because the standalone runtime does not own a remote desktop backend or live stream state",
+            authority_boundary: "rejects without claiming a stream stop because the standalone runtime does not own a remote desktop backend or live stream state; the Mac app can tear a peer down but addresses peers by device id rather than by this command's agent session id, so a targeted stop needs an app-side session listing method that does not exist yet",
             verification_gate: "standalone remote desktop backend + runtime applied readback receipt + real_device_p2p_remote_gate",
         },
         OperatorCapability {
@@ -363,7 +384,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             control_effect: OperatorControlEffect::UnavailableFailClosed,
             command: "unavailable/fail-closed: skybridge remote-desktop set-resolution --session-id <id> --resolution <preset> [--json]",
             owner_module: "remote_desktop_commands + authenticated RuntimeSessionRecord evidence",
-            authority_boundary: "validates bounded input, then rejects without a registry write because no standalone sender can apply and read back the requested mode",
+            authority_boundary: "validates bounded input, then rejects without a registry write because no standalone sender can apply and read back the requested mode for an agent-owned session; the Mac app's own capture resolution is settable and read-back-verified through `skybridge crossnet settings set remote_desktop.resolution <preset>`, which is host-scoped and takes effect at the next capture start rather than retuning a running stream",
             verification_gate: "standalone sender mode backend + authenticated applied readback receipt + real_device_p2p_remote_gate",
         },
         OperatorCapability {
@@ -373,7 +394,7 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             control_effect: OperatorControlEffect::UnavailableFailClosed,
             command: "unavailable/fail-closed: skybridge remote-desktop set-fps --session-id <id> --fps <value> [--json]",
             owner_module: "remote_desktop_commands + authenticated RuntimeSessionRecord evidence",
-            authority_boundary: "validates bounded input, then rejects without a registry write because no standalone sender can apply and read back FPS",
+            authority_boundary: "validates the bounded fps contract, then rejects without a registry write because no standalone sender can apply and read back a frame rate for an agent-owned session; the Mac app's own capture frame rate is settable and read-back-verified through `skybridge crossnet settings set remote_desktop.target_fps <30|60|120>`, which is host-scoped and takes effect at the next capture start rather than retuning a running stream",
             verification_gate: "standalone sender FPS backend + authenticated applied readback receipt + performance_p2p_remote_final_window_fps_gate",
         },
         OperatorCapability {

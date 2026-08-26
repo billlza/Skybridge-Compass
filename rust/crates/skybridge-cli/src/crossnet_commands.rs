@@ -40,6 +40,83 @@ pub(crate) async fn disconnect(as_json: bool) -> Result<()> {
     print_disconnect(&result, as_json)
 }
 
+pub(crate) async fn devices(as_json: bool) -> Result<()> {
+    let result = skybridge_crossnet_client::devices().await?;
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "capability_id": "crossnet.devices",
+                "runtime_target": "mac_app_runtime",
+                "control_effect": "read_only",
+                "devices": result.devices,
+            }))?
+        );
+    } else if result.devices.is_empty() {
+        println!("No online account devices visible to the Mac app.");
+    } else {
+        for device in &result.devices {
+            println!(
+                "{}  {}  [{}]{}",
+                device.device_ref,
+                device.name,
+                if device.online { "online" } else { "offline" },
+                device
+                    .platform
+                    .as_deref()
+                    .map(|platform| format!(" ({platform})"))
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn connect_device(args: crate::CrossnetConnectDeviceArgs) -> Result<()> {
+    let result = skybridge_crossnet_client::connect_device(&args.device_ref).await?;
+    if args.output.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "capability_id": "crossnet.connect_device",
+                "runtime_target": "mac_app_runtime",
+                "control_effect": "mac_session_mutation",
+                "device_ref": result.device_ref,
+                "name": result.name,
+                "connected": result.connected,
+            }))?
+        );
+    } else {
+        println!(
+            "Connected to {} ({})",
+            result.name.as_deref().unwrap_or("device"),
+            result.device_ref
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn navigate(args: crate::CrossnetNavigateArgs) -> Result<()> {
+    let destination = args.destination.as_wire();
+    let result = skybridge_crossnet_client::navigate(destination).await?;
+    if args.output.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "capability_id": "crossnet.navigation",
+                "runtime_target": "mac_app_runtime",
+                "control_effect": "mac_ui_navigation",
+                "destination": result.destination,
+                "presented_destination": result.presented_destination,
+                "runtime_applied": result.runtime_applied,
+            }))?
+        );
+    } else {
+        println!("Navigated Mac app to: {}", result.presented_destination);
+    }
+    Ok(())
+}
+
 pub(crate) async fn status(args: CrossnetStatusArgs) -> Result<()> {
     match skybridge_crossnet_client::status(args.watch).await? {
         StatusOutcome::Snapshot(snapshot) => print_status(&snapshot, args.output.json),
@@ -66,15 +143,25 @@ pub(crate) async fn settings_set(args: CrossnetSettingsSetArgs) -> Result<()> {
 
 /// Maps the operator-typed argument onto a wire value.
 ///
-/// `true`/`false` become booleans so boolean settings work without quoting;
-/// everything else stays a string and the Mac app validates the domain. Numbers
-/// are intentionally not inferred — no allowlisted mutable setting is numeric, and
-/// guessing would turn a typo into a silently different type.
+/// `true`/`false` become booleans and a bare integer becomes a number, so
+/// boolean and numeric settings work without quoting; everything else stays a
+/// string. This is safe against typos because the Mac app validates the value
+/// against the setting's declared type per id and answers
+/// `setting_invalid_value` — a number sent to a string setting is rejected, not
+/// coerced.
+///
+/// It relies on no mutable string setting having a purely numeric domain, which
+/// holds today: `logging.level` is a word and `remote_desktop.resolution`
+/// always contains an `x` or is `auto`. A future numeric-looking string setting
+/// would need an explicit type lookup here.
 fn parse_setting_value(raw: &str) -> Value {
     match raw {
         "true" => Value::Bool(true),
         "false" => Value::Bool(false),
-        other => Value::String(other.to_owned()),
+        other => match other.parse::<i64>() {
+            Ok(parsed) => Value::Number(parsed.into()),
+            Err(_) => Value::String(other.to_owned()),
+        },
     }
 }
 
@@ -126,15 +213,22 @@ const MAC_GUI_CONTROL_RELEASE_GATE: &str = "signed_mac_app_socket_smoke_required
 /// Reported explicitly because `mutation_methods_enabled` is a single bool and
 /// the truth is per-method: refusing to enumerate would let an operator read
 /// "enabled" and assume `crossnet connect` works.
-const ENABLED_MUTATION_METHODS: &[&str] = &["crossnet.settings.set"];
-
-/// Mutating methods that still fail closed with `method_not_enabled`.
-const DISABLED_MUTATION_METHODS: &[&str] = &[
+pub(crate) const ENABLED_MUTATION_METHODS: &[&str] = &[
+    "crossnet.settings.set",
     "crossnet.host",
     "crossnet.connect",
+    "crossnet.connect_device",
     "crossnet.disconnect",
-    "crossnet.status.watch",
+    "crossnet.navigation",
 ];
+
+/// Mutating methods that still fail closed.
+///
+/// Empty since `crossnet.navigate` landed and `crossnet.status --watch`
+/// gained a real server-push stream. Kept so a future gap has a declared home
+/// instead of being silently undisclosed, and so preflight keeps rendering an
+/// explicit (possibly empty) disabled list.
+pub(crate) const DISABLED_MUTATION_METHODS: &[&str] = &[];
 
 fn preflight_state(result: &HelloResult) -> PreflightState {
     if result.proto != CONTROL_PROTOCOL_VERSION {
@@ -175,12 +269,49 @@ fn preflight_state(result: &HelloResult) -> PreflightState {
         ready_for_mutation: !ENABLED_MUTATION_METHODS.is_empty(),
         failure_code: None,
         failure_class: None,
-        next_required_action: "settings mutation method is enabled; signed Mac app socket smoke is still required for release readiness, and session mutation remains disabled",
+        next_required_action: "settings, session, and navigation mutation methods are enabled and status watch streams; signed Mac app socket smoke is still required for release readiness",
     }
+}
+
+/// What the CLI can honestly say about per-method availability.
+///
+/// The CLI's own constants describe the app build it was compiled alongside.
+/// When the running app reports its own method list we use that instead, so a
+/// newer CLI pointed at an older app does not advertise verbs the app will
+/// refuse.
+fn resolved_mutation_methods(result: &HelloResult) -> (Vec<String>, Vec<String>, &'static str) {
+    if result.enabled_mutation_methods.is_empty() {
+        return (
+            ENABLED_MUTATION_METHODS
+                .iter()
+                .map(|method| (*method).to_owned())
+                .collect(),
+            DISABLED_MUTATION_METHODS
+                .iter()
+                .map(|method| (*method).to_owned())
+                .collect(),
+            "cli_expectation_app_did_not_report",
+        );
+    }
+    let enabled = result.enabled_mutation_methods.clone();
+    // Anything this CLI knows about that the app did not claim is, from the
+    // operator's point of view, disabled on the machine they are driving.
+    let mut disabled = DISABLED_MUTATION_METHODS
+        .iter()
+        .map(|method| (*method).to_owned())
+        .collect::<Vec<_>>();
+    for method in ENABLED_MUTATION_METHODS {
+        let method = (*method).to_owned();
+        if !enabled.contains(&method) && !disabled.contains(&method) {
+            disabled.push(method);
+        }
+    }
+    (enabled, disabled, "app_reported")
 }
 
 fn preflight_payload(result: &HelloResult) -> serde_json::Value {
     let state = preflight_state(result);
+    let (enabled_methods, disabled_methods, methods_source) = resolved_mutation_methods(result);
     json!({
         "schema_version": 1,
         "capability_id": "crossnet.preflight",
@@ -194,8 +325,9 @@ fn preflight_payload(result: &HelloResult) -> serde_json::Value {
         "tenant_bound": result.tenant_bound,
         "preconditions_ready": state.preconditions_ready,
         "mutation_methods_enabled": state.mutation_methods_enabled,
-        "enabled_mutation_methods": ENABLED_MUTATION_METHODS,
-        "disabled_mutation_methods": DISABLED_MUTATION_METHODS,
+        "enabled_mutation_methods": enabled_methods,
+        "disabled_mutation_methods": disabled_methods,
+        "mutation_methods_source": methods_source,
         "ready_for_mutation": state.ready_for_mutation,
         "release_gate": MAC_GUI_CONTROL_RELEASE_GATE,
         "failure_code": state.failure_code,
@@ -429,6 +561,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: true,
             tenant_bound: true,
+            enabled_mutation_methods: Vec::new(),
         };
 
         let payload = preflight_payload(&result);
@@ -446,7 +579,14 @@ mod tests {
         assert_eq!(payload["ready_for_mutation"].as_bool(), Some(true));
         assert_eq!(
             payload["enabled_mutation_methods"],
-            serde_json::json!(["crossnet.settings.set"])
+            serde_json::json!([
+                "crossnet.settings.set",
+                "crossnet.host",
+                "crossnet.connect",
+                "crossnet.connect_device",
+                "crossnet.disconnect",
+                "crossnet.navigation"
+            ])
         );
         let disabled = payload["disabled_mutation_methods"]
             .as_array()
@@ -454,23 +594,23 @@ mod tests {
             .iter()
             .map(|value| value.as_str().unwrap_or_default().to_owned())
             .collect::<Vec<_>>();
-        for still_disabled in [
-            "crossnet.host",
-            "crossnet.connect",
-            "crossnet.disconnect",
-            "crossnet.status.watch",
-        ] {
+        // Nothing on the crossnet surface fails closed any more; the list must
+        // stay present (and empty) so an operator sees an explicit answer.
+        assert_eq!(disabled, Vec::<String>::new());
+        let enabled = payload["enabled_mutation_methods"]
+            .as_array()
+            .expect("enabled mutation methods must be enumerated")
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        // A method reported as both enabled and disabled would let an operator
+        // read whichever half suited them.
+        for entry in &enabled {
             assert!(
-                disabled.iter().any(|entry| entry == still_disabled),
-                "{still_disabled} must stay reported as disabled: {payload}"
+                !disabled.contains(entry),
+                "{entry} must not be reported both enabled and disabled: {payload}"
             );
         }
-        assert!(
-            !disabled
-                .iter()
-                .any(|entry| entry == "crossnet.settings.set"),
-            "settings.set must not be reported both enabled and disabled: {payload}"
-        );
         assert_eq!(
             payload["release_gate"],
             "signed_mac_app_socket_smoke_required"
@@ -484,12 +624,94 @@ mod tests {
     }
 
     #[test]
+    fn setting_values_are_typed_so_numeric_settings_do_not_need_quoting() {
+        assert_eq!(parse_setting_value("true"), Value::Bool(true));
+        assert_eq!(parse_setting_value("false"), Value::Bool(false));
+        // `remote_desktop.target_fps` is numeric on the wire; sending "60" as a
+        // string would be rejected by the app's typed allowlist.
+        assert_eq!(parse_setting_value("60"), Value::Number(60.into()));
+        assert_eq!(parse_setting_value("-1"), Value::Number((-1).into()));
+        // Resolution presets and log levels must stay strings.
+        assert_eq!(
+            parse_setting_value("1920x1080"),
+            Value::String("1920x1080".to_owned())
+        );
+        assert_eq!(
+            parse_setting_value("auto"),
+            Value::String("auto".to_owned())
+        );
+        assert_eq!(
+            parse_setting_value("Warning"),
+            Value::String("Warning".to_owned())
+        );
+    }
+
+    /// The CLI ships separately from the Mac app, so its compile-time method
+    /// list describes the app it was built alongside, not the app that is
+    /// running. When the app reports its own list, that wins.
+    #[test]
+    fn preflight_reports_the_installed_app_method_list_over_cli_expectations() {
+        // An older app that does not report a list at all: fall back to the
+        // CLI's expectation and say so, rather than claiming the app agreed.
+        let silent_app = HelloResult {
+            engine_version: "1.0.1+900".to_owned(),
+            proto: CONTROL_PROTOCOL_VERSION,
+            auth_loaded: true,
+            tenant_bound: true,
+            enabled_mutation_methods: Vec::new(),
+        };
+        let payload = preflight_payload(&silent_app);
+        assert_eq!(
+            payload["mutation_methods_source"],
+            "cli_expectation_app_did_not_report"
+        );
+
+        // An app that serves only the settings verb must not have the session
+        // verbs advertised on its behalf.
+        let older_app = HelloResult {
+            engine_version: "1.0.2+901".to_owned(),
+            proto: CONTROL_PROTOCOL_VERSION,
+            auth_loaded: true,
+            tenant_bound: true,
+            enabled_mutation_methods: vec!["crossnet.settings.set".to_owned()],
+        };
+        let payload = preflight_payload(&older_app);
+        assert_eq!(payload["mutation_methods_source"], "app_reported");
+        let enabled = payload["enabled_mutation_methods"]
+            .as_array()
+            .expect("enabled methods must be enumerated")
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(enabled, vec!["crossnet.settings.set".to_owned()]);
+        let disabled = payload["disabled_mutation_methods"]
+            .as_array()
+            .expect("disabled methods must be enumerated")
+            .iter()
+            .map(|value| value.as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        for unsupported in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
+            assert!(
+                disabled.iter().any(|entry| entry == unsupported),
+                "{unsupported} is not served by this app build and must not read as enabled: {payload}"
+            );
+        }
+        assert!(
+            !disabled
+                .iter()
+                .any(|entry| entry == "crossnet.settings.set"),
+            "a method the app reported must not also read as disabled: {payload}"
+        );
+    }
+
+    #[test]
     fn preflight_payload_reports_auth_and_tenant_readiness_failures() {
         let missing_auth = HelloResult {
             engine_version: "test-app".to_owned(),
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: false,
             tenant_bound: true,
+            enabled_mutation_methods: Vec::new(),
         };
         let missing_auth_payload = preflight_payload(&missing_auth);
         assert_eq!(
@@ -512,6 +734,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION,
             auth_loaded: true,
             tenant_bound: false,
+            enabled_mutation_methods: Vec::new(),
         };
         let missing_tenant_payload = preflight_payload(&missing_tenant);
         assert_eq!(
@@ -532,6 +755,7 @@ mod tests {
             proto: CONTROL_PROTOCOL_VERSION + 1,
             auth_loaded: true,
             tenant_bound: true,
+            enabled_mutation_methods: Vec::new(),
         };
 
         let payload = preflight_payload(&result);

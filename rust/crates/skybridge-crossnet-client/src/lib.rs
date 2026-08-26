@@ -65,6 +65,8 @@ const PUBLIC_SETTINGS_ALLOWLIST: &[&str] = &[
     "ui.top_bar_network_latency",
     "pqc.prefer_xwing_hybrid",
     "pqc.signature_algorithm",
+    "remote_desktop.target_fps",
+    "remote_desktop.resolution",
 ];
 
 /// Resolves the default path of the `crossnet-control/1` Unix-domain socket:
@@ -127,6 +129,14 @@ pub struct HelloResult {
     pub auth_loaded: bool,
     /// Whether the Mac app currently has a tenant binding.
     pub tenant_bound: bool,
+    /// The mutating methods the installed Mac app says it actually serves.
+    ///
+    /// The CLI ships independently of the app, so this is the only trustworthy
+    /// source for what the running app supports. Absent on app builds older
+    /// than the one that introduced it, which the CLI must report as unknown
+    /// rather than as an empty set.
+    #[serde(default)]
+    pub enabled_mutation_methods: Vec<String>,
 }
 
 /// Result of `crossnet.host` — a freshly issued connection code plus the
@@ -166,6 +176,51 @@ pub struct ConnectResult {
     pub remote_device_name: Option<String>,
     /// Human-readable readiness string.
     pub readiness: String,
+}
+
+/// One online account device visible to the Mac app.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnlineDevice {
+    /// Short non-secret reference for the device, used by `connect-device`.
+    pub device_ref: String,
+    /// The device's display name as advertised to the account.
+    pub name: String,
+    /// Platform hint, when the presence service advertised one.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Whether the presence service currently reports the device online.
+    pub online: bool,
+}
+
+/// Result of `crossnet.devices` — the Mac app's online-device snapshot.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DevicesResult {
+    /// Runtime authority that produced the snapshot.
+    #[serde(default)]
+    pub runtime_target: Option<String>,
+    /// Effect of this request. The supported value is `read_only`.
+    #[serde(default)]
+    pub control_effect: Option<String>,
+    /// The account devices the app can currently see.
+    pub devices: Vec<OnlineDevice>,
+}
+
+/// Result of `crossnet.navigate` — the destination the Mac app UI confirmed
+/// presenting.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NavigateResult {
+    /// Runtime authority that applied the navigation.
+    #[serde(default)]
+    pub runtime_target: Option<String>,
+    /// Effect of this request. The only accepted value is `mac_ui_navigation`.
+    #[serde(default)]
+    pub control_effect: Option<String>,
+    /// The destination the operator asked for.
+    pub destination: String,
+    /// The destination the UI read back as actually presented.
+    pub presented_destination: String,
+    /// Whether the app's navigation coordinator confirmed the apply.
+    pub runtime_applied: bool,
 }
 
 /// Result of `crossnet.disconnect`.
@@ -366,6 +421,87 @@ pub async fn disconnect() -> Result<DisconnectResult> {
     preflight_app_session_at_path(&path).await?;
     let result = call_at_path(&path, "crossnet.disconnect", json!({})).await?;
     parse_result("crossnet.disconnect", result)
+}
+
+/// Lists the online account devices the Mac app can see (`crossnet.devices`).
+#[cfg(target_os = "macos")]
+pub async fn devices() -> Result<DevicesResult> {
+    let path = default_socket_path()?;
+    preflight_app_session_at_path(&path).await?;
+    let result = call_at_path(&path, "crossnet.devices", json!({})).await?;
+    parse_result("crossnet.devices", result)
+}
+
+/// Result of `crossnet.connect_device` — the one-click join outcome.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConnectDeviceResult {
+    /// Runtime authority that applied the connect.
+    #[serde(default)]
+    pub runtime_target: Option<String>,
+    /// Effect of this request. The only accepted value is `mac_session_mutation`.
+    #[serde(default)]
+    pub control_effect: Option<String>,
+    /// Echo of the requested redacted device reference.
+    pub device_ref: String,
+    /// The device's display name, when known.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Whether the app's device manager reads the device back as connected.
+    pub connected: bool,
+}
+
+/// Connects to an online account device by its redacted reference
+/// (`crossnet.connect_device`).
+///
+/// This is the one-click flow: the app dials its discovered/pinned-trust
+/// routes and the peer admits automatically, so no action is needed on the
+/// remote device. `connected` is the device manager's own read-back after the
+/// dial, never an echo.
+#[cfg(target_os = "macos")]
+pub async fn connect_device(device_ref: &str) -> Result<ConnectDeviceResult> {
+    let path = default_socket_path()?;
+    preflight_app_session_at_path(&path).await?;
+    let result = call_at_path(
+        &path,
+        "crossnet.connect_device",
+        json!({ "device_ref": device_ref }),
+    )
+    .await?;
+    let connected: ConnectDeviceResult = parse_result("crossnet.connect_device", result)?;
+    if connected.device_ref != device_ref {
+        bail!("crossnet.connect_device echoed a different device than was requested");
+    }
+    if !connected.connected {
+        bail!(
+            "crossnet.connect_device did not read the device back as connected (code: device_connect_apply_failed)"
+        );
+    }
+    Ok(connected)
+}
+
+/// Navigates the Mac app UI to a typed destination (`crossnet.navigate`).
+///
+/// The app validates the destination against its own vocabulary and only
+/// reports success when its UI confirms presenting it, so the projection is
+/// validated here for shape, not re-derived.
+#[cfg(target_os = "macos")]
+pub async fn navigate(destination: &str) -> Result<NavigateResult> {
+    let path = default_socket_path()?;
+    preflight_app_session_at_path(&path).await?;
+    let result = call_at_path(
+        &path,
+        "crossnet.navigate",
+        json!({ "destination": destination }),
+    )
+    .await?;
+    let navigated: NavigateResult = parse_result("crossnet.navigate", result)?;
+    if !navigated.runtime_applied || navigated.presented_destination != destination {
+        bail!(
+            "crossnet.navigate reported presenting `{}` instead of the requested `{destination}` (code: navigation_apply_failed)",
+            navigated.presented_destination
+        );
+    }
+    Ok(navigated)
 }
 
 /// Queries cross-network control status (`crossnet.status`).

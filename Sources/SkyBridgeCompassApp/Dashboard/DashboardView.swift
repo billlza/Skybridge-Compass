@@ -130,6 +130,25 @@ public struct DashboardView: View {
                         showingUserProfileOverlay = true
                     }
                 }
+            .onReceive(
+                OperatorNavigationCoordinator.shared.$requestedDestination
+            ) { requested in
+                guard let requested,
+                      let item = NavigationItem(operatorWire: requested) else { return }
+                if item == selectedNavigation {
+                    // Already there: confirm without a redundant state change so
+                    // the operator still gets an honest read-back.
+                    OperatorNavigationCoordinator.shared.confirmPresented(item.operatorWire)
+                } else {
+                    selectedNavigation = item
+                }
+            }
+            .onChange(of: selectedNavigation) { _, newValue in
+                // Every real selection change — operator-requested or user-made —
+                // is confirmed from the same place, so read-back cannot drift
+                // from what the UI actually shows.
+                OperatorNavigationCoordinator.shared.confirmPresented(newValue.operatorWire)
+            }
             .onReceive(NotificationCenter.default.publisher(for: .skybridgeNavigateToDeviceDiscovery)) { _ in
                 DispatchQueue.main.async {
                     selectedNavigation = .deviceManagement
@@ -404,6 +423,7 @@ public struct DashboardView: View {
     }
 
     private func setupOnAppear() {
+        OperatorNavigationCoordinator.shared.confirmPresented(selectedNavigation.operatorWire)
         appModel.onNavigateToSettings = {
             selectedNavigation = .settings
         }

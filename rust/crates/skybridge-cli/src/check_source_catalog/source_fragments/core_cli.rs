@@ -49,10 +49,7 @@ pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
         "agent_runtime_guard.rs",
         include_str!("../../agent_runtime_guard.rs"),
     ),
-    (
-        "android_bridge.rs",
-        include_str!("../../android_bridge.rs"),
-    ),
+    ("android_bridge.rs", include_str!("../../android_bridge.rs")),
     (
         "android_commands.rs",
         include_str!("../../android_commands.rs"),

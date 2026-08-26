@@ -385,7 +385,10 @@ final class OperatorControlRouterTests: XCTestCase {
         )
     }
 
-    func testStatusWatchFailsClosedUntilStreamingIsImplemented() async throws {
+    /// A build that wires no push source must keep refusing watch — silently
+    /// downgrading to a one-shot answer would let a monitoring script hang on a
+    /// stream that never comes.
+    func testStatusWatchFailsClosedWhenNoPushSourceIsWired() async throws {
         let router = CrossnetControlRouter(runtime: operatorControlTestRuntime())
 
         let response: WireResponse<NoResult> = try await route(
@@ -397,6 +400,131 @@ final class OperatorControlRouterTests: XCTestCase {
         XCTAssertEqual(response.id, "watch-1")
         XCTAssertEqual(response.error?.code, "watch_not_supported")
         XCTAssertNil(response.result)
+
+        // The streaming entry point must agree with the one-shot one.
+        let outcome = await router.handleLineStreaming(
+            Data(#"{"v":1,"id":"watch-2","method":"crossnet.status","params":{"watch":true}}"#.utf8)
+        )
+        guard case .response(let data) = outcome else {
+            return XCTFail("unwired watch must not produce a stream")
+        }
+        let decoded = try JSONDecoder().decode(WireResponse<NoResult>.self, from: data)
+        XCTAssertEqual(decoded.error?.code, "watch_not_supported")
+    }
+
+    func testStatusWatchStreamsInitialResponseThenCoalescedEvents() async throws {
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            statusEvents: {
+                AsyncStream { continuation in
+                    continuation.yield(operatorControlWatchSnapshot(readiness: "transport_ready"))
+                    continuation.yield(operatorControlWatchSnapshot(readiness: "handshake_complete"))
+                    continuation.finish()
+                }
+            }
+        ))
+
+        let outcome = await router.handleLineStreaming(
+            Data(#"{"v":1,"id":"watch-live","method":"crossnet.status","params":{"watch":true}}"#.utf8)
+        )
+        guard case .stream(let initial, let events) = outcome else {
+            return XCTFail("wired watch must produce a stream")
+        }
+
+        let initialResponse = try JSONDecoder().decode(
+            WireResponse<CrossnetControlStatusResult>.self,
+            from: initial
+        )
+        XCTAssertEqual(initialResponse.ok, true)
+        XCTAssertEqual(initialResponse.id, "watch-live")
+
+        var seen: [String] = []
+        for await frame in events {
+            let event = try JSONDecoder().decode(WatchEventFrame.self, from: frame)
+            XCTAssertEqual(event.event, "status")
+            seen.append(event.data.readiness)
+        }
+        XCTAssertEqual(seen, ["transport_ready", "handshake_complete"])
+    }
+
+    func testStatusWatchStreamRequiresTheWatchFlag() async throws {
+        // A plain status request on a wired runtime must stay one-shot.
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            statusEvents: { AsyncStream { $0.finish() } }
+        ))
+        let outcome = await router.handleLineStreaming(
+            Data(#"{"v":1,"id":"status-oneshot","method":"crossnet.status"}"#.utf8)
+        )
+        guard case .response(let data) = outcome else {
+            return XCTFail("a non-watch status must not stream")
+        }
+        let decoded = try JSONDecoder().decode(
+            WireResponse<CrossnetControlStatusResult>.self,
+            from: data
+        )
+        XCTAssertEqual(decoded.ok, true)
+    }
+
+    func testNavigateAppliesDestinationAndReportsUIConfirmedReadBack() async throws {
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            navigate: { destination in
+                CrossnetControlNavigateResult(
+                    destination: destination.rawValue,
+                    presentedDestination: destination.rawValue,
+                    runtimeApplied: true
+                )
+            }
+        ))
+
+        let response: WireResponse<CrossnetControlNavigateResult> = try await route(
+            router,
+            #"{"v":1,"id":"nav-1","method":"crossnet.navigate","params":{"destination":"settings"}}"#
+        )
+        XCTAssertEqual(response.ok, true)
+        XCTAssertEqual(response.result?.destination, "settings")
+        XCTAssertEqual(response.result?.presentedDestination, "settings")
+        XCTAssertEqual(response.result?.controlEffect, "mac_ui_navigation")
+    }
+
+    func testNavigateFailsClosedForUnwiredRuntimeInvalidAndUnconfirmed() async throws {
+        // Unwired runtime keeps the previous refusal.
+        let unwired = CrossnetControlRouter(runtime: operatorControlTestRuntime())
+        let refused: WireResponse<NoResult> = try await route(
+            unwired,
+            #"{"v":1,"id":"nav-unwired","method":"crossnet.navigate","params":{"destination":"settings"}}"#
+        )
+        XCTAssertEqual(refused.ok, false)
+        XCTAssertEqual(refused.error?.code, "method_not_enabled")
+
+        // Unknown destination is rejected before auth or the runtime run.
+        let wired = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            navigate: { _ in
+                XCTFail("an invalid destination must never reach the runtime")
+                throw CrossnetControlFailure.internalError("unreachable")
+            }
+        ))
+        let invalid: WireResponse<NoResult> = try await route(
+            wired,
+            #"{"v":1,"id":"nav-bad","method":"crossnet.navigate","params":{"destination":"about_box"}}"#
+        )
+        XCTAssertEqual(invalid.ok, false)
+        XCTAssertEqual(invalid.error?.code, "navigation_destination_invalid")
+
+        // A run the UI did not confirm must not be reported as applied.
+        let unconfirmed = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            navigate: { destination in
+                CrossnetControlNavigateResult(
+                    destination: destination.rawValue,
+                    presentedDestination: "dashboard",
+                    runtimeApplied: true
+                )
+            }
+        ))
+        let mismatch: WireResponse<NoResult> = try await route(
+            unconfirmed,
+            #"{"v":1,"id":"nav-mismatch","method":"crossnet.navigate","params":{"destination":"settings"}}"#
+        )
+        XCTAssertEqual(mismatch.ok, false)
+        XCTAssertEqual(mismatch.error?.code, "navigation_apply_failed")
     }
 
     func testMutatingMethodsAreNotEnabledInReadOnlySlice() async throws {
@@ -519,6 +647,515 @@ final class OperatorControlRouterTests: XCTestCase {
             #"{"v":1,"id":"disconnect-tenant","method":"crossnet.disconnect"}"#
         )
         XCTAssertEqual(missingTenantDisconnectResponse.error?.code, "tenant_required")
+    }
+
+    func testRemoteDesktopCaptureSettingsMutateWithNextCaptureCaveat() async throws {
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            applySetting: operatorControlEchoingSettingsMutation()
+        ))
+
+        let fpsResponse: WireResponse<CrossnetControlSettingsMutationResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-fps","method":"crossnet.settings.set","params":{"id":"remote_desktop.target_fps","value":120}}"#
+        )
+        XCTAssertEqual(fpsResponse.ok, true)
+        XCTAssertEqual(fpsResponse.result?.valueType, "int")
+        XCTAssertEqual(fpsResponse.result?.observedValue, .int(120))
+
+        let resolutionResponse: WireResponse<CrossnetControlSettingsMutationResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-res","method":"crossnet.settings.set","params":{"id":"remote_desktop.resolution","value":"2560x1440"}}"#
+        )
+        XCTAssertEqual(resolutionResponse.ok, true)
+        XCTAssertEqual(resolutionResponse.result?.observedValue, .string("2560x1440"))
+
+        // A frame rate outside the declared contract must be refused, not clamped.
+        let outOfDomain: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-fps-bad","method":"crossnet.settings.set","params":{"id":"remote_desktop.target_fps","value":45}}"#
+        )
+        XCTAssertEqual(outOfDomain.ok, false)
+        XCTAssertEqual(outOfDomain.error?.code, "setting_invalid_value")
+
+        // A preset the CLI contract knows but `ResolutionSetting` cannot express
+        // must be refused rather than silently coerced to `auto`.
+        let unrepresentable: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-res-bad","method":"crossnet.settings.set","params":{"id":"remote_desktop.resolution","value":"2056x1329"}}"#
+        )
+        XCTAssertEqual(unrepresentable.ok, false)
+        XCTAssertEqual(unrepresentable.error?.code, "setting_invalid_value")
+
+        // Wrong wire type for an int setting is a rejection, not a coercion.
+        let wrongType: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"set-fps-string","method":"crossnet.settings.set","params":{"id":"remote_desktop.target_fps","value":"60"}}"#
+        )
+        XCTAssertEqual(wrongType.ok, false)
+        XCTAssertEqual(wrongType.error?.code, "setting_invalid_value")
+    }
+
+    func testDevicesListIsAuthGatedRedactedAndFailClosedWhenUnwired() async throws {
+        // Unwired runtime keeps the previous refusal.
+        let unwired = CrossnetControlRouter(runtime: operatorControlTestRuntime())
+        let refused: WireResponse<NoResult> = try await route(
+            unwired,
+            #"{"v":1,"id":"devices-unwired","method":"crossnet.devices"}"#
+        )
+        XCTAssertEqual(refused.error?.code, "method_not_enabled")
+
+        // A projection leaking an unredacted reference must be rejected whole.
+        let leaky = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            listOnlineDevices: {
+                CrossnetControlDevicesResult(devices: [
+                    CrossnetControlDeviceEntry(
+                        deviceRef: "raw-device-id",
+                        name: "iPad",
+                        platform: "iPadOS",
+                        online: true
+                    )
+                ])
+            }
+        ))
+        let leaked: WireResponse<NoResult> = try await route(
+            leaky,
+            #"{"v":1,"id":"devices-leaky","method":"crossnet.devices"}"#
+        )
+        XCTAssertEqual(leaked.ok, false)
+        XCTAssertEqual(leaked.error?.code, "internal")
+
+        // Honest projection round-trips.
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            listOnlineDevices: {
+                CrossnetControlDevicesResult(devices: [
+                    CrossnetControlDeviceEntry(
+                        deviceRef: CrossnetControlSessionRef.redacted("ipad-unique-id"),
+                        name: "Ziang iPad",
+                        platform: "iPadOS",
+                        online: true
+                    )
+                ])
+            }
+        ))
+        let response: WireResponse<CrossnetControlDevicesResult> = try await route(
+            router,
+            #"{"v":1,"id":"devices-live","method":"crossnet.devices"}"#
+        )
+        XCTAssertEqual(response.ok, true)
+        XCTAssertEqual(response.result?.devices.count, 1)
+        XCTAssertEqual(response.result?.devices.first?.name, "Ziang iPad")
+        XCTAssertEqual(
+            response.result?.devices.first?.deviceRef.hasPrefix("sha256:"),
+            true
+        )
+
+        // Auth gate applies to the read too: account device names are account
+        // data.
+        let unauthenticated = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            authLoaded: true,
+            tenantBound: false,
+            listOnlineDevices: {
+                XCTFail("device list must not be produced without a bound tenant")
+                return CrossnetControlDevicesResult(devices: [])
+            }
+        ))
+        let gated: WireResponse<NoResult> = try await route(
+            unauthenticated,
+            #"{"v":1,"id":"devices-gated","method":"crossnet.devices"}"#
+        )
+        XCTAssertEqual(gated.error?.code, "tenant_required")
+    }
+
+    func testConnectDeviceHonestReadBackAndFailClosedPaths() async throws {
+        let goodRef = CrossnetControlSessionRef.redacted("ipad-unique-id")
+
+        // Unwired refusal.
+        let unwired = CrossnetControlRouter(runtime: operatorControlTestRuntime())
+        let refused: WireResponse<NoResult> = try await route(
+            unwired,
+            #"{"v":1,"id":"cd-unwired","method":"crossnet.connect_device","params":{"device_ref":"\(goodRef)"}}"#
+                .replacingOccurrences(of: "\\(goodRef)", with: goodRef)
+        )
+        XCTAssertEqual(refused.error?.code, "method_not_enabled")
+
+        // Malformed reference is rejected before auth or the runtime.
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectOnlineDevice: { _ in
+                XCTFail("malformed refs must never reach the runtime")
+                throw CrossnetControlFailure.internalError("unreachable")
+            }
+        ))
+        let malformed: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"cd-malformed","method":"crossnet.connect_device","params":{"device_ref":"raw-id"}}"#
+        )
+        XCTAssertEqual(malformed.error?.code, "malformed_request")
+
+        // Unknown reference surfaces as device_not_found.
+        let missing = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectOnlineDevice: { _ in throw CrossnetControlFailure.deviceNotFound }
+        ))
+        let notFound: WireResponse<NoResult> = try await route(
+            missing,
+            "{\"v\":1,\"id\":\"cd-missing\",\"method\":\"crossnet.connect_device\",\"params\":{\"device_ref\":\"\(goodRef)\"}}"
+        )
+        XCTAssertEqual(notFound.error?.code, "device_not_found")
+
+        // A dial the manager does not read back as connected is refused.
+        let unconfirmed = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectOnlineDevice: { deviceRef in
+                CrossnetControlConnectDeviceResult(
+                    deviceRef: deviceRef,
+                    name: "Ziang iPad",
+                    connected: false
+                )
+            }
+        ))
+        let failed: WireResponse<NoResult> = try await route(
+            unconfirmed,
+            "{\"v\":1,\"id\":\"cd-unconfirmed\",\"method\":\"crossnet.connect_device\",\"params\":{\"device_ref\":\"\(goodRef)\"}}"
+        )
+        XCTAssertEqual(failed.error?.code, "session_runtime_apply_failed")
+
+        // Honest join round-trips.
+        let joined = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectOnlineDevice: { deviceRef in
+                CrossnetControlConnectDeviceResult(
+                    deviceRef: deviceRef,
+                    name: "Ziang iPad",
+                    connected: true
+                )
+            }
+        ))
+        let success: WireResponse<CrossnetControlConnectDeviceResult> = try await route(
+            joined,
+            "{\"v\":1,\"id\":\"cd-live\",\"method\":\"crossnet.connect_device\",\"params\":{\"device_ref\":\"\(goodRef)\"}}"
+        )
+        XCTAssertEqual(success.ok, true)
+        XCTAssertEqual(success.result?.connected, true)
+        XCTAssertEqual(success.result?.deviceRef, goodRef)
+    }
+
+    // MARK: - Wired session plane
+    //
+    // The tests above cover the fail-closed default runtime, which is still a
+    // real deployment state (a host that does not grant session authority).
+    // These cover the opposite: a runtime that DOES wire the verbs up.
+
+    func testHostIssuesCodeAndReportsRedactedSessionRefAndAppliedLease() async throws {
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            hostSession: { leaseMode in
+                CrossnetControlHostResult(
+                    code: "K7M2QP4X",
+                    sessionRef: CrossnetControlSessionRef.redacted("raw-host-session"),
+                    expiresAt: "2026-08-25T12:00:00Z",
+                    leaseMode: leaseMode
+                )
+            }
+        ))
+
+        let response: WireResponse<CrossnetControlHostResult> = try await route(
+            router,
+            #"{"v":1,"id":"host-live","method":"crossnet.host","params":{"lease_mode":"long"}}"#
+        )
+        XCTAssertEqual(response.ok, true)
+        XCTAssertEqual(response.error?.code, nil)
+        XCTAssertEqual(response.result?.code, "K7M2QP4X")
+        XCTAssertEqual(response.result?.leaseMode, .long)
+        XCTAssertEqual(response.result?.expiresAt, "2026-08-25T12:00:00Z")
+        // The raw session id must never reach the wire.
+        XCTAssertEqual(response.result?.sessionRef?.hasPrefix("sha256:"), true)
+        XCTAssertEqual(response.result?.sessionRef?.contains("raw-host-session"), false)
+    }
+
+    func testHostRejectsLeaseDowngradeAndMissingSessionRef() async throws {
+        // A runtime that quietly issues a short lease for a long request must
+        // not be reported as having honoured the request.
+        let downgradeRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            hostSession: { _ in
+                CrossnetControlHostResult(
+                    code: "K7M2QP4X",
+                    sessionRef: CrossnetControlSessionRef.redacted("raw-host-session"),
+                    expiresAt: nil,
+                    leaseMode: .short
+                )
+            }
+        ))
+        let downgraded: WireResponse<NoResult> = try await route(
+            downgradeRouter,
+            #"{"v":1,"id":"host-downgrade","method":"crossnet.host","params":{"lease_mode":"long"}}"#
+        )
+        XCTAssertEqual(downgraded.ok, false)
+        XCTAssertEqual(downgraded.error?.code, "internal")
+
+        let rawRefRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            hostSession: { leaseMode in
+                CrossnetControlHostResult(
+                    code: "K7M2QP4X",
+                    sessionRef: "raw-host-session",
+                    expiresAt: nil,
+                    leaseMode: leaseMode
+                )
+            }
+        ))
+        let rawRef: WireResponse<NoResult> = try await route(
+            rawRefRouter,
+            #"{"v":1,"id":"host-raw-ref","method":"crossnet.host","params":{"lease_mode":"short"}}"#
+        )
+        XCTAssertEqual(rawRef.ok, false)
+        XCTAssertEqual(rawRef.error?.code, "internal")
+    }
+
+    func testConnectReportsRedactedSessionRefAndHonestReadiness() async throws {
+        // `connectWithCode` returns before the peer answers, so an honest
+        // result reports the readiness actually observed, not "connected".
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectSession: { _ in
+                CrossnetControlConnectResult(
+                    sessionRef: CrossnetControlSessionRef.redacted("raw-connect-session"),
+                    remoteDeviceName: "Studio Mac",
+                    readiness: "transport_ready",
+                    connectionStatus: "connecting"
+                )
+            }
+        ))
+
+        let response: WireResponse<CrossnetControlConnectResult> = try await route(
+            router,
+            #"{"v":1,"id":"connect-live","method":"crossnet.connect","params":{"code":"K7M2QP4X"}}"#
+        )
+        XCTAssertEqual(response.ok, true)
+        XCTAssertEqual(response.result?.readiness, "transport_ready")
+        XCTAssertEqual(response.result?.connectionStatus, "connecting")
+        XCTAssertEqual(response.result?.remoteDeviceName, "Studio Mac")
+        XCTAssertEqual(response.result?.controlEffect, "mac_session_mutation")
+        XCTAssertEqual(response.result?.sessionRef.hasPrefix("sha256:"), true)
+        XCTAssertEqual(response.result?.sessionRef.contains("raw-connect-session"), false)
+    }
+
+    func testConnectRefusesUnsupportableReadinessAndFailedRuntime() async throws {
+        // `handshake_complete` is the one readiness an operator would treat as
+        // proof of a live secure session, so it may only be reported when the
+        // app's own connection status agrees.
+        let unsupportedRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectSession: { _ in
+                CrossnetControlConnectResult(
+                    sessionRef: CrossnetControlSessionRef.redacted("raw-connect-session"),
+                    remoteDeviceName: nil,
+                    readiness: "handshake_complete",
+                    connectionStatus: "connecting"
+                )
+            }
+        ))
+        let unsupported: WireResponse<NoResult> = try await route(
+            unsupportedRouter,
+            #"{"v":1,"id":"connect-unsupported","method":"crossnet.connect","params":{"code":"K7M2QP4X"}}"#
+        )
+        XCTAssertEqual(unsupported.ok, false)
+        XCTAssertEqual(unsupported.error?.code, "session_runtime_apply_failed")
+
+        let failedRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            connectSession: { _ in
+                CrossnetControlConnectResult(
+                    sessionRef: CrossnetControlSessionRef.redacted("raw-connect-session"),
+                    remoteDeviceName: nil,
+                    readiness: "idle",
+                    connectionStatus: "failed"
+                )
+            }
+        ))
+        let failed: WireResponse<NoResult> = try await route(
+            failedRouter,
+            #"{"v":1,"id":"connect-failed","method":"crossnet.connect","params":{"code":"K7M2QP4X"}}"#
+        )
+        XCTAssertEqual(failed.ok, false)
+        XCTAssertEqual(failed.error?.code, "session_runtime_apply_failed")
+    }
+
+    func testDisconnectReportsTeardownAndRefusesSurvivingSession() async throws {
+        let tornDownRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            disconnectSession: {
+                CrossnetControlDisconnectResult(
+                    disconnected: true,
+                    sessionPresentBefore: true,
+                    sessionPresentAfter: false,
+                    connectionStatus: "idle"
+                )
+            }
+        ))
+        let tornDown: WireResponse<CrossnetControlDisconnectResult> = try await route(
+            tornDownRouter,
+            #"{"v":1,"id":"disconnect-live","method":"crossnet.disconnect"}"#
+        )
+        XCTAssertEqual(tornDown.ok, true)
+        XCTAssertEqual(tornDown.result?.disconnected, true)
+        XCTAssertEqual(tornDown.result?.sessionPresentAfter, false)
+
+        // Nothing to tear down is a successful, honest `false`.
+        let idleRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            disconnectSession: {
+                CrossnetControlDisconnectResult(
+                    disconnected: false,
+                    sessionPresentBefore: false,
+                    sessionPresentAfter: false,
+                    connectionStatus: "idle"
+                )
+            }
+        ))
+        let idle: WireResponse<CrossnetControlDisconnectResult> = try await route(
+            idleRouter,
+            #"{"v":1,"id":"disconnect-idle","method":"crossnet.disconnect"}"#
+        )
+        XCTAssertEqual(idle.ok, true)
+        XCTAssertEqual(idle.result?.disconnected, false)
+
+        // A runtime that still holds the session after disconnect must not be
+        // reported as having torn it down.
+        let survivingRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            disconnectSession: {
+                CrossnetControlDisconnectResult(
+                    disconnected: true,
+                    sessionPresentBefore: true,
+                    sessionPresentAfter: true,
+                    connectionStatus: "connected"
+                )
+            }
+        ))
+        let surviving: WireResponse<NoResult> = try await route(
+            survivingRouter,
+            #"{"v":1,"id":"disconnect-surviving","method":"crossnet.disconnect"}"#
+        )
+        XCTAssertEqual(surviving.ok, false)
+        XCTAssertEqual(surviving.error?.code, "session_runtime_apply_failed")
+    }
+
+    func testDisconnectRefusesAClaimItsOwnReadBackDoesNotSupport() async throws {
+        // Claiming a teardown when nothing was there is a fabricated mutation
+        // even though the post-state looks clean.
+        let overclaimRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            disconnectSession: {
+                CrossnetControlDisconnectResult(
+                    disconnected: true,
+                    sessionPresentBefore: false,
+                    sessionPresentAfter: false,
+                    connectionStatus: "idle"
+                )
+            }
+        ))
+        let overclaimed: WireResponse<NoResult> = try await route(
+            overclaimRouter,
+            #"{"v":1,"id":"disconnect-overclaim","method":"crossnet.disconnect"}"#
+        )
+        XCTAssertEqual(overclaimed.ok, false)
+        XCTAssertEqual(overclaimed.error?.code, "internal")
+
+        // A runtime left in a non-idle status has not proven teardown, even if
+        // it reports no surviving session object.
+        let nonIdleRouter = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            disconnectSession: {
+                CrossnetControlDisconnectResult(
+                    disconnected: true,
+                    sessionPresentBefore: true,
+                    sessionPresentAfter: false,
+                    connectionStatus: "connecting"
+                )
+            }
+        ))
+        let nonIdle: WireResponse<NoResult> = try await route(
+            nonIdleRouter,
+            #"{"v":1,"id":"disconnect-non-idle","method":"crossnet.disconnect"}"#
+        )
+        XCTAssertEqual(nonIdle.ok, false)
+        XCTAssertEqual(nonIdle.error?.code, "session_runtime_apply_failed")
+    }
+
+    func testConcurrentSessionMutationsAreRefusedRatherThanInterleaved() async throws {
+        // The server handles every client on its own detached task and these
+        // verbs suspend between mutating and re-reading, so a second concurrent
+        // call must be refused instead of racing the first one's read-back.
+        let started = AsyncStreamGate()
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            disconnectSession: {
+                await started.signal()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                return CrossnetControlDisconnectResult(
+                    disconnected: true,
+                    sessionPresentBefore: true,
+                    sessionPresentAfter: false,
+                    connectionStatus: "idle"
+                )
+            }
+        ))
+
+        // Driven through `router.handleLine` directly so the concurrent task
+        // captures only the Sendable router, not the test case.
+        let first = Task { () -> Data in
+            await router.handleLine(
+                Data(#"{"v":1,"id":"disconnect-a","method":"crossnet.disconnect"}"#.utf8)
+            )
+        }
+        await started.wait()
+        let second: WireResponse<NoResult> = try await route(
+            router,
+            #"{"v":1,"id":"disconnect-b","method":"crossnet.disconnect"}"#
+        )
+        XCTAssertEqual(second.ok, false)
+        XCTAssertEqual(second.error?.code, "session_mutation_rejected")
+
+        let firstResponse = try JSONDecoder().decode(
+            WireResponse<CrossnetControlDisconnectResult>.self,
+            from: await first.value
+        )
+        XCTAssertEqual(firstResponse.ok, true)
+        XCTAssertEqual(firstResponse.result?.disconnected, true)
+    }
+
+    func testWiredSessionVerbsStillRequireAuthAndTenant() async throws {
+        // Wiring the runtime must not bypass the operator context gate.
+        let router = CrossnetControlRouter(runtime: operatorControlTestRuntime(
+            authLoaded: true,
+            tenantBound: false,
+            hostSession: { leaseMode in
+                XCTFail("host runtime must not run without a bound tenant")
+                return CrossnetControlHostResult(
+                    code: "K7M2QP4X",
+                    sessionRef: CrossnetControlSessionRef.redacted("raw"),
+                    expiresAt: nil,
+                    leaseMode: leaseMode
+                )
+            },
+            connectSession: { _ in
+                XCTFail("connect runtime must not run without a bound tenant")
+                return CrossnetControlConnectResult(
+                    sessionRef: CrossnetControlSessionRef.redacted("raw"),
+                    remoteDeviceName: nil,
+                    readiness: "idle",
+                    connectionStatus: "idle"
+                )
+            },
+            disconnectSession: {
+                XCTFail("disconnect runtime must not run without a bound tenant")
+                return CrossnetControlDisconnectResult(
+                    disconnected: false,
+                    sessionPresentBefore: false,
+                    sessionPresentAfter: false,
+                    connectionStatus: "idle"
+                )
+            }
+        ))
+
+        for (id, method, params) in [
+            ("host-gate", "crossnet.host", #"{"lease_mode":"short"}"#),
+            ("connect-gate", "crossnet.connect", #"{"code":"K7M2QP4X"}"#),
+            ("disconnect-gate", "crossnet.disconnect", "{}")
+        ] {
+            let response: WireResponse<NoResult> = try await route(
+                router,
+                #"{"v":1,"id":"\#(id)","method":"\#(method)","params":\#(params)}"#
+            )
+            XCTAssertEqual(response.ok, false, method)
+            XCTAssertEqual(response.error?.code, "tenant_required", method)
+        }
     }
 
     func testMalformedRequestAndUnknownMethodReturnMachineReadableErrors() async throws {
@@ -830,7 +1467,9 @@ final class OperatorControlRuntimeProjectionTests: XCTestCase {
                 showTopBarNetworkSpeed: false,
                 showTopBarNetworkLatency: true,
                 preferXWingHybrid: true,
-                pqcSignatureAlgorithm: "ML-DSA-65"
+                pqcSignatureAlgorithm: "ML-DSA-65",
+                remoteDesktopTargetFrameRate: 60,
+                remoteDesktopResolution: "1920x1080"
             )
         )
 
@@ -846,8 +1485,28 @@ final class OperatorControlRuntimeProjectionTests: XCTestCase {
                 "ui.top_bar_network_speed",
                 "ui.top_bar_network_latency",
                 "pqc.prefer_xwing_hybrid",
-                "pqc.signature_algorithm"
+                "pqc.signature_algorithm",
+                "remote_desktop.target_fps",
+                "remote_desktop.resolution"
             ]
+        )
+        // Capture parameters are read only when a stream starts, so the
+        // projection must carry that caveat rather than implying a live retune.
+        XCTAssertEqual(
+            snapshot.settings.first { $0.id == "remote_desktop.target_fps" }?.valueType,
+            "int"
+        )
+        XCTAssertEqual(
+            snapshot.settings.first { $0.id == "remote_desktop.target_fps" }?.value,
+            .int(60)
+        )
+        XCTAssertEqual(
+            snapshot.settings.first { $0.id == "remote_desktop.target_fps" }?.note,
+            "applies_at_next_capture_start"
+        )
+        XCTAssertEqual(
+            snapshot.settings.first { $0.id == "remote_desktop.resolution" }?.value,
+            .string("1920x1080")
         )
         XCTAssertTrue(snapshot.settings.allSatisfy { $0.mutable == false })
         XCTAssertEqual(snapshot.settings.first { $0.id == "logging.verbose" }?.valueType, "bool")
@@ -906,6 +1565,144 @@ final class OperatorControlServerRoundTripTests: XCTestCase {
         }
     }
 
+    /// End-to-end proof that the session verbs are live over the real socket,
+    /// not just at the router API.
+    ///
+    /// This is the strongest evidence obtainable without a signed app and a
+    /// real peer: the actual `OperatorControlServer`, the actual wire framing,
+    /// and the actual router, driven over a real AF_UNIX connection.
+    func testServerHostAndDisconnectRoundTripOverUnixSocket() async throws {
+        let runtime = operatorControlTestRuntime(
+            hostSession: { leaseMode in
+                CrossnetControlHostResult(
+                    code: "K7M2QP4X",
+                    sessionRef: CrossnetControlSessionRef.redacted("raw-host-session"),
+                    expiresAt: "2026-08-25T12:00:00Z",
+                    leaseMode: leaseMode
+                )
+            },
+            disconnectSession: {
+                CrossnetControlDisconnectResult(
+                    disconnected: true,
+                    sessionPresentBefore: true,
+                    sessionPresentAfter: false,
+                    connectionStatus: "idle"
+                )
+            }
+        )
+
+        try await withStartedServer(runtime: runtime) { socketURL in
+            let hosted: WireResponse<CrossnetControlHostResult> = try sendRequest(
+                #"{"v":1,"id":"host-socket","method":"crossnet.host","params":{"lease_mode":"long"}}"# + "\n",
+                to: socketURL
+            )
+            XCTAssertEqual(hosted.ok, true)
+            XCTAssertEqual(hosted.id, "host-socket")
+            XCTAssertEqual(hosted.result?.code, "K7M2QP4X")
+            XCTAssertEqual(hosted.result?.leaseMode, .long)
+            XCTAssertNil(hosted.error)
+
+            let torn: WireResponse<CrossnetControlDisconnectResult> = try sendRequest(
+                #"{"v":1,"id":"disconnect-socket","method":"crossnet.disconnect"}"# + "\n",
+                to: socketURL
+            )
+            XCTAssertEqual(torn.ok, true)
+            XCTAssertEqual(torn.result?.disconnected, true)
+            XCTAssertEqual(torn.result?.sessionPresentAfter, false)
+        }
+    }
+
+    /// A build that does not wire the session runtime must still answer
+    /// `method_not_enabled` over the socket, so an older app cannot be mistaken
+    /// for a capable one.
+    func testServerKeepsUnwiredSessionVerbsDisabledOverUnixSocket() async throws {
+        try await withStartedServer { socketURL in
+            let hosted: WireResponse<NoResult> = try sendRequest(
+                #"{"v":1,"id":"host-unwired","method":"crossnet.host"}"# + "\n",
+                to: socketURL
+            )
+            XCTAssertEqual(hosted.ok, false)
+            XCTAssertEqual(hosted.error?.code, "method_not_enabled")
+        }
+    }
+
+    /// End-to-end: the real server streams the initial response plus events
+    /// over a genuine AF_UNIX connection, then closes when the source ends.
+    func testServerStreamsWatchFramesOverUnixSocket() async throws {
+        let runtime = operatorControlTestRuntime(
+            statusEvents: {
+                AsyncStream { continuation in
+                    continuation.yield(operatorControlWatchSnapshot(readiness: "transport_ready"))
+                    continuation.yield(
+                        operatorControlWatchSnapshot(readiness: "handshake_complete")
+                    )
+                    continuation.finish()
+                }
+            }
+        )
+
+        try await withStartedServer(runtime: runtime) { socketURL in
+            let descriptor = try connectUnixSocket(path: socketURL.path)
+            defer { close(descriptor) }
+            try writeAll(
+                Data(
+                    (#"{"v":1,"id":"watch-socket","method":"crossnet.status","params":{"watch":true}}"#
+                        + "\n").utf8
+                ),
+                to: descriptor
+            )
+
+            let initial = try readResponseLine(from: descriptor)
+            let initialResponse = try JSONDecoder().decode(
+                WireResponse<CrossnetControlStatusResult>.self,
+                from: initial
+            )
+            XCTAssertEqual(initialResponse.ok, true)
+            XCTAssertEqual(initialResponse.id, "watch-socket")
+
+            let firstEvent = try JSONDecoder().decode(
+                WatchEventFrame.self,
+                from: try readResponseLine(from: descriptor)
+            )
+            XCTAssertEqual(firstEvent.event, "status")
+            XCTAssertEqual(firstEvent.data.readiness, "transport_ready")
+
+            let secondEvent = try JSONDecoder().decode(
+                WatchEventFrame.self,
+                from: try readResponseLine(from: descriptor)
+            )
+            XCTAssertEqual(secondEvent.data.readiness, "handshake_complete")
+        }
+    }
+
+    /// A client that writes a request and closes before reading the response
+    /// must not be able to kill the host process.
+    ///
+    /// Without `SO_NOSIGPIPE` on the accepted descriptor, `Darwin.write` to the
+    /// closed peer raises SIGPIPE and the default disposition terminates the
+    /// whole Mac app. The assertion is that the server is still serving
+    /// afterwards.
+    func testServerSurvivesClientThatClosesBeforeReadingTheResponse() async throws {
+        try await withStartedServer { socketURL in
+            // Reuse the same connect helper the other socket tests use.
+            let descriptor = try connectUnixSocket(path: socketURL.path)
+            try writeAll(
+                Data((#"{"v":1,"id":"abandoned","method":"crossnet.hello"}"# + "\n").utf8),
+                to: descriptor
+            )
+            // Close immediately, before the server has written its reply.
+            close(descriptor)
+
+            // The server must still answer a fresh client.
+            let followUp: WireResponse<CrossnetControlHelloResult> = try sendRequest(
+                #"{"v":1,"id":"after-abandon","method":"crossnet.hello"}"# + "\n",
+                to: socketURL
+            )
+            XCTAssertEqual(followUp.ok, true)
+            XCTAssertEqual(followUp.result?.engineVersion, "test-engine")
+        }
+    }
+
     func testServerReturnsRequestTooLargeForOversizedRequest() async throws {
         try await withStartedServer { socketURL in
             var request = Data(repeating: UInt8(ascii: "x"), count: CrossnetControlWire.maxLineByteCount + 1)
@@ -960,6 +1757,7 @@ final class OperatorControlServerRoundTripTests: XCTestCase {
     }
 
     private func withStartedServer(
+        runtime: CrossnetControlRuntime? = nil,
         _ body: (URL) async throws -> Void
     ) async throws {
         let root = temporaryRoot()
@@ -967,7 +1765,7 @@ final class OperatorControlServerRoundTripTests: XCTestCase {
         let socketURL = root.appendingPathComponent("crossnet-control.sock", isDirectory: false)
         let server = OperatorControlServer(
             socketURL: socketURL,
-            router: CrossnetControlRouter(runtime: operatorControlTestRuntime())
+            router: CrossnetControlRouter(runtime: runtime ?? operatorControlTestRuntime())
         )
 
         try await server.start()
@@ -1210,7 +2008,27 @@ private func operatorControlTestRuntime(
     applySetting: (
         @Sendable (CrossnetControlSettingsMutationRequest) async throws
             -> CrossnetControlSettingsMutationResult
-    )? = nil
+    )? = nil,
+    hostSession: (
+        @Sendable (CrossnetControlHostLeaseMode) async throws -> CrossnetControlHostResult
+    )? = nil,
+    connectSession: (
+        @Sendable (String) async throws -> CrossnetControlConnectResult
+    )? = nil,
+    disconnectSession: (
+        @Sendable () async throws -> CrossnetControlDisconnectResult
+    )? = nil,
+    navigate: (
+        @Sendable (CrossnetControlNavigationDestination) async throws
+            -> CrossnetControlNavigateResult
+    )? = nil,
+    listOnlineDevices: (
+        @Sendable () async throws -> CrossnetControlDevicesResult
+    )? = nil,
+    connectOnlineDevice: (
+        @Sendable (String) async throws -> CrossnetControlConnectDeviceResult
+    )? = nil,
+    statusEvents: (@Sendable () -> AsyncStream<CrossnetControlStatusResult>)? = nil
 ) -> CrossnetControlRuntime {
     CrossnetControlRuntime(
         hello: {
@@ -1241,7 +2059,17 @@ private func operatorControlTestRuntime(
         settingsSnapshot: {
             settingsSnapshot ?? operatorControlDefaultSettingsSnapshot()
         },
-        applySetting: applySetting ?? CrossnetControlRuntime.unavailableSettingsMutation
+        applySetting: applySetting ?? CrossnetControlRuntime.unavailableSettingsMutation,
+        hostSession: hostSession ?? CrossnetControlRuntime.unavailableHostSession,
+        connectSession: connectSession ?? CrossnetControlRuntime.unavailableConnectSession,
+        disconnectSession: disconnectSession
+            ?? CrossnetControlRuntime.unavailableDisconnectSession,
+        navigate: navigate ?? CrossnetControlRuntime.unavailableNavigation,
+        listOnlineDevices: listOnlineDevices
+            ?? CrossnetControlRuntime.unavailableListOnlineDevices,
+        connectOnlineDevice: connectOnlineDevice
+            ?? CrossnetControlRuntime.unavailableConnectOnlineDevice,
+        statusEvents: statusEvents
     )
 }
 
@@ -1373,3 +2201,103 @@ private enum TestSocketError: Error, LocalizedError {
     }
 }
 #endif
+
+/// One-shot async signal used to prove the session gate is actually held while
+/// the first mutation is suspended.
+private actor AsyncStreamGate {
+    private var signalled = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        guard !signalled else { return }
+        signalled = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+
+    func wait() async {
+        if signalled { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+}
+
+/// Builds a distinct status snapshot for watch streaming tests.
+private func operatorControlWatchSnapshot(readiness: String) -> CrossnetControlStatusResult {
+    CrossnetControlStatusResult(
+        connectionStatus: "connecting",
+        readiness: readiness,
+        sessionPresent: true,
+        sessionRef: CrossnetControlSessionRef.redacted("watch-session"),
+        suite: nil,
+        signalingHealth: "healthy",
+        failureCode: nil,
+        failureClass: nil,
+        authLoaded: true,
+        tenantBound: true
+    )
+}
+
+private struct WatchEventFrame: Decodable {
+    let v: Int
+    let event: String
+    let data: CrossnetControlStatusResult
+}
+
+@MainActor
+final class OperatorNavigationCoordinatorTests: XCTestCase {
+    func testRequestConfirmAndAwaitRoundTrip() async {
+        let coordinator = OperatorNavigationCoordinator()
+        coordinator.requestNavigation(to: "settings")
+        XCTAssertEqual(coordinator.requestedDestination, "settings")
+
+        // The owning view applies the request and confirms from its own
+        // selection change.
+        coordinator.confirmPresented("settings")
+        XCTAssertNil(coordinator.requestedDestination)
+        XCTAssertEqual(coordinator.presentedDestination, "settings")
+
+        let confirmed = await coordinator.awaitPresentation(
+            of: "settings",
+            timeout: .milliseconds(200)
+        )
+        XCTAssertTrue(confirmed)
+    }
+
+    func testAwaitFailsClosedWhenNoViewConfirms() async {
+        let coordinator = OperatorNavigationCoordinator()
+        coordinator.requestNavigation(to: "settings")
+        // Nothing confirms — the timeout is the honest "no mounted view" answer.
+        let confirmed = await coordinator.awaitPresentation(
+            of: "settings",
+            timeout: .milliseconds(120)
+        )
+        XCTAssertFalse(confirmed)
+    }
+
+    func testSupersededRequestIsNotReportedAsPresented() async {
+        let coordinator = OperatorNavigationCoordinator()
+        coordinator.requestNavigation(to: "settings")
+        // A user (or second operator call) drives the UI elsewhere instead.
+        coordinator.confirmPresented("dashboard")
+        let confirmed = await coordinator.awaitPresentation(
+            of: "settings",
+            timeout: .milliseconds(120)
+        )
+        XCTAssertFalse(confirmed)
+        XCTAssertEqual(coordinator.presentedDestination, "dashboard")
+    }
+
+    func testUserDrivenChangesKeepReadBackCurrent() {
+        let coordinator = OperatorNavigationCoordinator()
+        // No operator request at all: user clicks are still confirmed, so a
+        // later navigate to the already-current destination reads back honestly.
+        coordinator.confirmPresented("remote_desktop")
+        XCTAssertEqual(coordinator.presentedDestination, "remote_desktop")
+        XCTAssertNil(coordinator.requestedDestination)
+    }
+}

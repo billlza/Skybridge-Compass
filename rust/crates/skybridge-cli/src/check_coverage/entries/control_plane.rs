@@ -13,7 +13,7 @@ pub(super) fn append_entries(
             source,
             &[
                 "Signaling(SignalingDoctorArgs)",
-                "Some(DoctorSubcommand::Signaling(signaling))",
+                "DoctorSubcommand::Signaling(",
                 "doctor_signaling",
                 "build_signaling_doctor_report",
             ],
@@ -50,7 +50,7 @@ pub(super) fn append_entries(
             source,
             &[
                 "MediaLease(MediaLeaseDoctorArgs)",
-                "Some(DoctorSubcommand::MediaLease(media_lease))",
+                "DoctorSubcommand::MediaLease(",
                 "doctor_media_lease",
                 "build_media_lease_doctor_report",
             ],

@@ -229,19 +229,40 @@ public actor OperatorControlServer {
 
         switch readRequestLine(descriptor) {
         case .line(let line):
-            let response = await router.handleLine(line)
-            writeResponse(response, descriptor: descriptor)
+            switch await router.handleLineStreaming(line) {
+            case .response(let response):
+                _ = writeResponse(response, descriptor: descriptor)
+            case .stream(let initial, let events):
+                await pumpStream(initial: initial, events: events, descriptor: descriptor)
+            }
         case .tooLarge:
             let response = CrossnetControlWire.failureData(id: nil, failure: .requestTooLarge)
-            writeResponse(response, descriptor: descriptor)
+            _ = writeResponse(response, descriptor: descriptor)
         case .unterminated:
             let response = CrossnetControlWire.failureData(
                 id: nil,
                 failure: .malformedRequest("missing newline terminator")
             )
-            writeResponse(response, descriptor: descriptor)
+            _ = writeResponse(response, descriptor: descriptor)
         case .empty, .ioFailure:
             return
+        }
+    }
+
+    /// Writes the initial response frame, then each event frame as it arrives,
+    /// until the client disconnects (a write fails), the source stream ends, or
+    /// the task is cancelled (server shutdown). SO_NOSIGPIPE keeps a client
+    /// that closed early from raising SIGPIPE, and SO_SNDTIMEO keeps a client
+    /// that stops reading from wedging this task forever.
+    private nonisolated static func pumpStream(
+        initial: Data,
+        events: AsyncStream<Data>,
+        descriptor: Int32
+    ) async {
+        guard writeResponse(initial, descriptor: descriptor) else { return }
+        for await frame in events {
+            if Task.isCancelled { break }
+            guard writeResponse(frame, descriptor: descriptor) else { break }
         }
     }
 
@@ -288,11 +309,15 @@ public actor OperatorControlServer {
         }
     }
 
-    private nonisolated static func writeResponse(_ response: Data, descriptor: Int32) {
+    /// Writes one newline-terminated frame. Returns `true` only if the whole
+    /// frame reached the socket, so a streaming caller can stop on the first
+    /// failed write (client gone or send-stalled) instead of spinning.
+    @discardableResult
+    private nonisolated static func writeResponse(_ response: Data, descriptor: Int32) -> Bool {
         var framed = response
         framed.append(0x0A)
-        framed.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
+        return framed.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return true }
             var offset = 0
             while offset < rawBuffer.count {
                 let written = Darwin.write(
@@ -307,8 +332,9 @@ public actor OperatorControlServer {
                 if written < 0, errno == EINTR {
                     continue
                 }
-                return
+                return false
             }
+            return true
         }
     }
 
@@ -325,12 +351,41 @@ public actor OperatorControlServer {
     private nonisolated static func configureAcceptedClientDescriptor(_ descriptor: Int32) -> Bool {
         do {
             try setCloseOnExec(descriptor)
+            // Without SO_NOSIGPIPE, `Darwin.write` to a peer that has already
+            // closed raises SIGPIPE, whose default disposition terminates the
+            // process. A CLI client that exits early — `skybridge crossnet
+            // status | head -1`, or Ctrl-C mid-request — would take the whole
+            // Mac app down with it. With this set, the write returns EPIPE and
+            // `writeResponse` simply stops.
+            var noSigPipe: Int32 = 1
+            guard setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                &noSigPipe,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0 else {
+                return false
+            }
             var timeout = timeval(tv_sec: 5, tv_usec: 0)
-            let result = setsockopt(
+            guard setsockopt(
                 descriptor,
                 SOL_SOCKET,
                 SO_RCVTIMEO,
                 &timeout,
+                socklen_t(MemoryLayout<timeval>.size)
+            ) == 0 else {
+                return false
+            }
+            // Bound each write too: a `crossnet.status --watch` client that
+            // stops reading must not be able to wedge the per-client task on a
+            // full send buffer indefinitely.
+            var sendTimeout = timeval(tv_sec: 5, tv_usec: 0)
+            let result = setsockopt(
+                descriptor,
+                SOL_SOCKET,
+                SO_SNDTIMEO,
+                &sendTimeout,
                 socklen_t(MemoryLayout<timeval>.size)
             )
             return result == 0

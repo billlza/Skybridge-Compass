@@ -345,7 +345,7 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     );
     assert_eq!(
         capability_status(capabilities, "crossnet.status.watch")?,
-        "planned"
+        "pending_live_proof"
     );
     assert_eq!(
         capability_runtime_target(capabilities, "crossnet.status.watch")?,
@@ -353,35 +353,54 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     );
     assert_eq!(
         capability_control_effect(capabilities, "crossnet.status.watch")?,
-        "planned_fail_closed"
+        "read_only"
     );
     let status_watch_boundary =
         capability_authority_boundary(capabilities, "crossnet.status.watch")?;
     assert!(
-        status_watch_boundary.contains("watch_not_supported")
-            && status_watch_boundary.contains("fail-closed"),
-        "crossnet.status.watch must keep the fail-closed stream gate visible"
+        status_watch_boundary.contains("implemented and enabled")
+            && status_watch_boundary.contains("watch_not_supported")
+            && status_watch_boundary.contains("live signed-app socket smoke"),
+        "crossnet.status.watch must disclose the stream, its unwired fallback, and missing live proof"
+    );
+    assert_eq!(
+        capability_status(capabilities, "crossnet.navigation")?,
+        "pending_live_proof"
+    );
+    assert_eq!(
+        capability_control_effect(capabilities, "crossnet.navigation")?,
+        "mac_runtime_mutation"
+    );
+    let navigation_boundary = capability_authority_boundary(capabilities, "crossnet.navigation")?;
+    assert!(
+        navigation_boundary.contains("injected navigation coordinator")
+            && navigation_boundary.contains("navigation_apply_failed")
+            && navigation_boundary.contains("live signed-app socket smoke"),
+        "crossnet.navigation must disclose its coordinator read-back and missing live proof"
     );
 
-    for planned_crossnet in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
+    // These three now reach a real Mac runtime closure that validates its own
+    // read-back, so `planned` would understate them — but the signed-app socket
+    // smoke is still uncaptured, so `available` would overstate them.
+    for session_crossnet in ["crossnet.host", "crossnet.connect", "crossnet.disconnect"] {
         assert_eq!(
-            capability_status(capabilities, planned_crossnet)?,
-            "planned",
-            "{planned_crossnet} must not claim end-to-end availability before signed Mac app socket smoke exists"
+            capability_status(capabilities, session_crossnet)?,
+            "pending_live_proof",
+            "{session_crossnet} must not claim end-to-end availability before signed Mac app socket smoke exists"
         );
-        let boundary = capability_authority_boundary(capabilities, planned_crossnet)?;
+        let boundary = capability_authority_boundary(capabilities, session_crossnet)?;
         assert_eq!(
-            capability_runtime_target(capabilities, planned_crossnet)?,
+            capability_runtime_target(capabilities, session_crossnet)?,
             "mac_app_runtime",
-            "{planned_crossnet} must remain Mac-app scoped, not iOS or native-headless scoped"
+            "{session_crossnet} must remain Mac-app scoped, not iOS or native-headless scoped"
         );
-        let effect = capability_control_effect(capabilities, planned_crossnet)?;
-        assert_eq!(effect, "mac_mutation_not_enabled");
+        let effect = capability_control_effect(capabilities, session_crossnet)?;
+        assert_eq!(effect, "mac_session_mutation");
         assert!(
             boundary.contains("Mac-only")
-                && boundary.contains("signed Mac app")
-                && boundary.contains("live socket smoke"),
-            "{planned_crossnet} must keep the Mac-only signed-app smoke gate visible"
+                && boundary.contains("implemented and enabled")
+                && boundary.contains("live signed-app socket smoke"),
+            "{session_crossnet} must keep the Mac-only signed-app smoke gate visible"
         );
     }
     let discovery_command = capability_command(capabilities, "device.discovery.nearby")?;
@@ -464,7 +483,7 @@ fn capabilities_json_contract_is_machine_readable_without_live_success_claims()
     );
     let file_receive_gate = capability_verification_gate(capabilities, "file.transfer.receive")?;
     assert!(
-        file_receive_gate.contains("inbound_approval_registry_and_receiver_tests")
+        file_receive_gate.contains("persistent_approval_registry_is_the_pending_timeout_authority")
             && file_receive_gate.contains("real_device_file_transfer_gate"),
         "file receive must retain approval-registry and real-device evidence gates"
     );

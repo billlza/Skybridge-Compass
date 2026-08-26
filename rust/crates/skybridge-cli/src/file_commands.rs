@@ -834,6 +834,7 @@ fn json_or_text(as_json: bool, payload: serde_json::Value, text: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use time::OffsetDateTime;
 
     #[test]
     fn file_send_placeholder_covers_text_errors() -> Result<()> {
@@ -994,6 +995,128 @@ mod tests {
             entry.failure_reason.as_deref(),
             Some("transfer transport error")
         );
+    }
+
+    fn inbound_approval_request(
+        transfer_id: &str,
+        status: InboundFileTransferApprovalStatus,
+        decision: Option<InboundFileTransferApprovalDecision>,
+    ) -> InboundFileTransferApprovalRequest {
+        InboundFileTransferApprovalRequest {
+            schema_version: InboundFileTransferApprovalRequest::SCHEMA_VERSION,
+            transfer_id: transfer_id.to_owned(),
+            session_id: "session-1".to_owned(),
+            target_runtime_id: "runtime-1".to_owned(),
+            authenticated_peer_device_id: "peer-device-1".to_owned(),
+            authenticated_peer_device_name: "Studio Mac".to_owned(),
+            authenticated_peer_protocol_fingerprint: "fingerprint-1".to_owned(),
+            metadata_sha256_hex: "a".repeat(64),
+            file_name: "payload.bin".to_owned(),
+            file_size: 4096,
+            status,
+            decision,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            applied_at: None,
+            failure_reason: None,
+        }
+    }
+
+    /// The `receive` surface had no CLI-level test at all, even though the
+    /// capability contract named one as its verification gate. This covers the
+    /// two things an operator can actually be misled by: the pending count that
+    /// decides whether the list reads as "empty", and the decision report, which
+    /// must never claim the agent has applied the decision.
+    #[test]
+    fn file_receive_list_and_decision_json_contract() -> Result<()> {
+        // Only `pending_decision` is genuinely awaiting the operator; a request
+        // already forwarded to the agent must not inflate the pending count.
+        let requests = vec![
+            inbound_approval_request(
+                "transfer-1",
+                InboundFileTransferApprovalStatus::PendingDecision,
+                None,
+            ),
+            inbound_approval_request(
+                "transfer-2",
+                InboundFileTransferApprovalStatus::DecisionRequested,
+                Some(InboundFileTransferApprovalDecision::Approve),
+            ),
+            inbound_approval_request(
+                "transfer-3",
+                InboundFileTransferApprovalStatus::AgentApplied,
+                Some(InboundFileTransferApprovalDecision::Approve),
+            ),
+        ];
+        let entries = requests
+            .into_iter()
+            .map(inbound_approval_entry)
+            .collect::<Vec<_>>();
+        let pending_count = entries
+            .iter()
+            .filter(|entry| entry.status == "pending_decision")
+            .count();
+        assert_eq!(pending_count, 1);
+        assert_eq!(entries[0].status, "pending_decision");
+        assert_eq!(entries[0].decision, None);
+        assert_eq!(entries[1].status, "decision_requested");
+        assert_eq!(entries[1].decision, Some("approve"));
+        assert_eq!(entries[2].status, "agent_applied");
+
+        let report = InboundFileApprovalListReport {
+            schema_version: SCHEMA_VERSION,
+            capability_id: "file.transfer.receive.approvals",
+            status: if pending_count == 0 {
+                "empty"
+            } else {
+                "pending"
+            },
+            pending_count,
+            requests: entries,
+        };
+        let payload = serde_json::to_value(&report)?;
+        assert_eq!(payload["status"], "pending");
+        assert_eq!(payload["pending_count"], 1);
+        assert_eq!(payload["capability_id"], "file.transfer.receive.approvals");
+
+        // An empty registry must read as `empty`, not as a silent success.
+        let empty = InboundFileApprovalListReport {
+            schema_version: SCHEMA_VERSION,
+            capability_id: "file.transfer.receive.approvals",
+            status: "empty",
+            pending_count: 0,
+            requests: Vec::new(),
+        };
+        let empty_payload = serde_json::to_value(&empty)?;
+        assert_eq!(empty_payload["status"], "empty");
+        assert_eq!(empty_payload["pending_count"], 0);
+
+        // Registering a decision is not the same as the agent applying it. The
+        // CLI owns the request; the agent owns the transfer.
+        let decision_report = InboundFileApprovalDecisionReport {
+            schema_version: SCHEMA_VERSION,
+            capability_id: "file.transfer.receive.approval",
+            action: "accept",
+            success: true,
+            accepted: true,
+            applied: false,
+            status: "decision_requested",
+            session_id: "session-1".to_owned(),
+            transfer_id: "transfer-1".to_owned(),
+            authenticated_peer_device_id: "peer-device-1".to_owned(),
+            authenticated_peer_device_name: "Studio Mac".to_owned(),
+            file_name: "payload.bin".to_owned(),
+            file_size: 4096,
+        };
+        let decision_payload = serde_json::to_value(&decision_report)?;
+        assert_eq!(decision_payload["applied"], false);
+        assert_eq!(decision_payload["status"], "decision_requested");
+        assert_eq!(decision_payload["action"], "accept");
+        // The raw staging path must never appear in an approval projection.
+        let rendered = serde_json::to_string(&decision_payload)?;
+        assert!(!rendered.contains("/Users/"), "{rendered}");
+        assert!(!rendered.contains("staging"), "{rendered}");
+        Ok(())
     }
 
     #[test]

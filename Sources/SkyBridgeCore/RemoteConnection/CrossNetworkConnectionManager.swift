@@ -515,7 +515,7 @@ public final class CrossNetworkConnectionManager: ObservableObject {
         readiness = .idle
     }
 
-    static func currentSignalServerAuthoritySnapshot() -> (
+    public static func currentSignalServerAuthoritySnapshot() -> (
         accessToken: String?,
         sessionTenantID: String?,
         sessionUserIdentifier: String?

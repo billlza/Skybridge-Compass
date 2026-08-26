@@ -41,7 +41,7 @@ const EVIDENCE_SOURCES: &[&str] = &[
     "skybridge check remote-control-notice --log-file <path> [--json]",
 ];
 
-const COMMAND_CONTRACTS: &[RemoteDesktopCommandContract] = &[
+pub(crate) const COMMAND_CONTRACTS: &[RemoteDesktopCommandContract] = &[
     RemoteDesktopCommandContract {
         command: "skybridge remote-desktop contract [--json]",
         status: "read_only",
@@ -87,10 +87,10 @@ const COMMAND_CONTRACTS: &[RemoteDesktopCommandContract] = &[
 ];
 
 #[derive(Debug, Clone, Copy, Serialize)]
-struct RemoteDesktopCommandContract {
-    command: &'static str,
-    status: &'static str,
-    mutation_supported: bool,
+pub(crate) struct RemoteDesktopCommandContract {
+    pub(crate) command: &'static str,
+    pub(crate) status: &'static str,
+    pub(crate) mutation_supported: bool,
     agent_observation_required: bool,
 }
 

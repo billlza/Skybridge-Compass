@@ -41,6 +41,8 @@ public struct CrossnetControlSettingsRuntimeSnapshot: Sendable, Equatable {
     public let showTopBarNetworkLatency: Bool
     public let preferXWingHybrid: Bool
     public let pqcSignatureAlgorithm: String
+    public let remoteDesktopTargetFrameRate: Int
+    public let remoteDesktopResolution: String
 
     public init(
         enableVerboseLogging: Bool,
@@ -50,7 +52,9 @@ public struct CrossnetControlSettingsRuntimeSnapshot: Sendable, Equatable {
         showTopBarNetworkSpeed: Bool,
         showTopBarNetworkLatency: Bool,
         preferXWingHybrid: Bool,
-        pqcSignatureAlgorithm: String
+        pqcSignatureAlgorithm: String,
+        remoteDesktopTargetFrameRate: Int,
+        remoteDesktopResolution: String
     ) {
         self.enableVerboseLogging = enableVerboseLogging
         self.logLevel = logLevel
@@ -60,6 +64,8 @@ public struct CrossnetControlSettingsRuntimeSnapshot: Sendable, Equatable {
         self.showTopBarNetworkLatency = showTopBarNetworkLatency
         self.preferXWingHybrid = preferXWingHybrid
         self.pqcSignatureAlgorithm = pqcSignatureAlgorithm
+        self.remoteDesktopTargetFrameRate = remoteDesktopTargetFrameRate
+        self.remoteDesktopResolution = remoteDesktopResolution
     }
 }
 
@@ -116,6 +122,16 @@ public enum CrossnetControlRuntimeProjection {
                 id: "pqc.signature_algorithm",
                 value: .string(settings.pqcSignatureAlgorithm),
                 note: "policy_preference_not_runtime_proof"
+            ),
+            setting(
+                id: "remote_desktop.target_fps",
+                value: .int(settings.remoteDesktopTargetFrameRate),
+                note: CrossnetControlSettingsProjectionPolicy.remoteDesktopCaptureNote
+            ),
+            setting(
+                id: "remote_desktop.resolution",
+                value: .string(settings.remoteDesktopResolution),
+                note: CrossnetControlSettingsProjectionPolicy.remoteDesktopCaptureNote
             )
         ])
     }
@@ -134,7 +150,7 @@ public enum CrossnetControlRuntimeProjection {
         )
     }
 
-    private static func connectionStatusString(
+    public static func connectionStatusString(
         _ status: CrossNetworkConnectionManager.CrossNetworkConnectionStatus
     ) -> String {
         switch status {
@@ -153,7 +169,7 @@ public enum CrossnetControlRuntimeProjection {
         }
     }
 
-    private static func readinessString(
+    public static func readinessString(
         _ readiness: CrossNetworkConnectionManager.CrossNetworkReadiness
     ) -> String {
         switch readiness {

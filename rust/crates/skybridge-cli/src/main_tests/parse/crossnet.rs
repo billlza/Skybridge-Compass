@@ -38,6 +38,32 @@ fn crossnet_subcommands_parse_app_bound_surface() {
     assert!(Cli::try_parse_from(["skybridge", "crossnet", "connect", "123456", "--json"]).is_ok());
     assert!(Cli::try_parse_from(["skybridge", "crossnet", "disconnect", "--json"]).is_ok());
     assert!(Cli::try_parse_from(["skybridge", "crossnet", "status", "--watch", "--json"]).is_ok());
+    assert!(
+        Cli::try_parse_from(["skybridge", "crossnet", "navigate", "settings", "--json"]).is_ok()
+    );
+    assert!(
+        Cli::try_parse_from(["skybridge", "crossnet", "navigate", "remote-desktop"]).is_ok(),
+        "kebab-case value-enum destinations must parse"
+    );
+    assert!(
+        Cli::try_parse_from(["skybridge", "crossnet", "navigate", "about_box"]).is_err(),
+        "unknown destinations must be rejected at the parser"
+    );
+    assert!(Cli::try_parse_from(["skybridge", "crossnet", "devices", "--json"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "skybridge",
+            "crossnet",
+            "connect-device",
+            "sha256:00ff",
+            "--json"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from(["skybridge", "crossnet", "connect-device"]).is_err(),
+        "connect-device requires a device_ref"
+    );
     let settings = Cli::try_parse_from(["skybridge", "crossnet", "settings", "--json"])
         .expect("crossnet settings should parse");
     let Commands::Crossnet(command) = settings.command else {

@@ -64,6 +64,13 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 crate::crossnet_commands::disconnect(output.json).await
             }
             CrossnetSubcommand::Status(args) => crate::crossnet_commands::status(args).await,
+            CrossnetSubcommand::Navigate(args) => crate::crossnet_commands::navigate(args).await,
+            CrossnetSubcommand::Devices(output) => {
+                crate::crossnet_commands::devices(output.json).await
+            }
+            CrossnetSubcommand::ConnectDevice(args) => {
+                crate::crossnet_commands::connect_device(args).await
+            }
             CrossnetSubcommand::Settings(args) => {
                 let outer_json = args.output.json;
                 match args.command {

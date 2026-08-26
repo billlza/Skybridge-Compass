@@ -85,6 +85,9 @@ impl Cli {
                 CrossnetSubcommand::Connect(args) => args.output.json,
                 CrossnetSubcommand::Disconnect(output) => output.json,
                 CrossnetSubcommand::Status(args) => args.output.json,
+                CrossnetSubcommand::Navigate(args) => args.output.json,
+                CrossnetSubcommand::Devices(output) => output.json,
+                CrossnetSubcommand::ConnectDevice(args) => args.output.json,
                 CrossnetSubcommand::Settings(args) => match &args.command {
                     None => args.output.json,
                     Some(CrossnetSettingsSubcommand::Set(set_args)) => {
