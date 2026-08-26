@@ -2,7 +2,7 @@ import XCTest
 @testable import SkyBridgeCore
 
 final class OrderedInboundChunkRelayTests: XCTestCase {
-    func testSubmitPreservesArrivalOrderAcrossSuspension() async {
+    func testSubmitPreservesArrivalOrderAcrossSuspension() async throws {
         let relay = CrossNetworkConnectionManager.OrderedInboundChunkRelay()
         let recorder = RelayEventRecorder()
 
@@ -20,7 +20,10 @@ final class OrderedInboundChunkRelayTests: XCTestCase {
             await recorder.record("third-end")
         })
 
-        try? await Task.sleep(for: .milliseconds(200))
+        // Wait for the chain to actually finish before snapshotting: a fixed
+        // sleep races the third operation's final record on a loaded host,
+        // and cancelling early turns a scheduling stall into a false failure.
+        try await waitForRelayEvent("third-end", recorder: recorder, timeout: .seconds(10))
         relay.cancel()
 
         let events = await recorder.snapshot()
@@ -120,10 +123,11 @@ private enum RelayTestError: Error {
 
 private func waitForRelayEvent(
     _ expected: String,
-    recorder: RelayEventRecorder
+    recorder: RelayEventRecorder,
+    timeout: Duration = .seconds(2)
 ) async throws {
     let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: .seconds(2))
+    let deadline = clock.now.advanced(by: timeout)
     while !(await recorder.snapshot().contains(expected)) {
         guard clock.now < deadline else {
             XCTFail("Timed out waiting for relay event \(expected)")
