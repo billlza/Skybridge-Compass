@@ -128,7 +128,31 @@ jobs:
         run: bash Scripts/test_real_device_smoke_redaction.sh
 
       - name: Validate GitHub Actions Workflows
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -config-file .github/actionlint.yaml
+        # The macOS runner image ships no Go toolchain, so install the pinned
+        # official actionlint binary and verify its published SHA-256 digest
+        # before executing anything.
+        run: |
+          set -euo pipefail
+          case "$(/usr/bin/uname -m)" in
+            arm64)
+              actionlint_archive="actionlint_1.7.12_darwin_arm64.tar.gz"
+              actionlint_sha256="aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f"
+              ;;
+            x86_64)
+              actionlint_archive="actionlint_1.7.12_darwin_amd64.tar.gz"
+              actionlint_sha256="5b44c3bc2255115c9b69e30efc0fecdf498fdb63c5d58e17084fd5f16324c644"
+              ;;
+            *)
+              echo "::error::Unsupported runner architecture for the pinned actionlint binary."
+              exit 1
+              ;;
+          esac
+          actionlint_dir="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "$actionlint_dir/$actionlint_archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$actionlint_archive"
+          echo "$actionlint_sha256  $actionlint_dir/$actionlint_archive" | shasum -a 256 -c -
+          tar -xzf "$actionlint_dir/$actionlint_archive" -C "$actionlint_dir" actionlint
+          "$actionlint_dir/actionlint" -config-file .github/actionlint.yaml
 
       - name: Self-Test Immutable macOS Candidate Identity
         run: python3 Scripts/test_macos_release_candidate_identity.py

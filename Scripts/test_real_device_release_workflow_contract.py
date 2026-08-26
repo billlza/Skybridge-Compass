@@ -337,8 +337,17 @@ class ReleaseWorkflowTransactionTests(unittest.TestCase):
             self.candidate.count('.github/workflows/ios-app-store-export.yml'),
             2,
         )
+        # The readiness lane must run the pinned actionlint release binary,
+        # verify its published SHA-256 digest before executing it, and lint
+        # with the repository configuration. (The macOS runner image ships no
+        # Go toolchain, so `go run` is not a usable invocation there.)
         self.assertIn(
-            "go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12",
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/",
+            self.candidate,
+        )
+        self.assertIn("| shasum -a 256 -c -", self.candidate)
+        self.assertIn(
+            'actionlint" -config-file .github/actionlint.yaml',
             self.candidate,
         )
 
