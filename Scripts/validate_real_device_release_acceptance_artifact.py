@@ -59,10 +59,13 @@ BASE_MANIFEST_KEYS = {
     "iosProductionProduct",
     "iosReleaseArchive",
     "iosSwiftActiveCompilationConditions",
+    "identitySourceGatekeeperAccepted",
+    "identitySourceStaplerValid",
     "iosTestingCompilationCondition",
     "labRun",
     "macCandidateIdentityVerified",
     "macDebugBuild",
+    "macHostLaunchMode",
     "macProductSurface",
     "macRuntimeExecutable",
     "macTestingCompilationCondition",
@@ -157,6 +160,16 @@ def _validate_manifest(payload: dict[str, Any], kind: str) -> tuple[str, str]:
     )
     if set(payload) != expected_keys:
         fail("release manifest does not use the exact product-only schema")
+    # Checked by name so a missing or unknown finalization order is reported as
+    # exactly that, not as a generic value mismatch.
+    if payload.get("finalizationOrder") != FINALIZATION_ORDER:
+        fail("release manifest finalization order is missing or unknown")
+    if payload.get("macHostLaunchMode") != "packaged":
+        fail("release manifest requires the formal packaged Mac host launch mode")
+    if payload.get("identitySourceStaplerValid") is not True:
+        fail("release manifest requires stapler proof for the host identity source")
+    if payload.get("identitySourceGatekeeperAccepted") is not True:
+        fail("release manifest requires Gatekeeper acceptance for the host identity source")
     exact_values: dict[str, object] = {
         "acceptanceEligible": True,
         "cleanupComplete": True,
@@ -169,6 +182,8 @@ def _validate_manifest(payload: dict[str, Any], kind: str) -> tuple[str, str]:
         "iosProductionIdentityProof": True,
         "iosProductionIdentityProtection": "secureEnclaveRequired",
         "iosProductionProduct": True,
+        "identitySourceGatekeeperAccepted": True,
+        "identitySourceStaplerValid": True,
         "iosTestingCompilationCondition": False,
         "labRun": False,
         "macCandidateIdentityVerified": True,
@@ -247,6 +262,14 @@ def validate_macos_candidate_binding(
             fail("remote-control evidence lacks the validated normal product notice")
 
 
+# The only identity algorithm and key-protection class a release-acceptance
+# proof may claim. Asserted here in the validator (in addition to the exact
+# schema check in the extractor) so the release lane's own audit can grep the
+# requirement at its enforcement site.
+REQUIRED_IDENTITY_ALGORITHM = "mldsa87"
+REQUIRED_IDENTITY_PROTECTION = "secureEnclaveRequired"
+
+
 def validate_production_identity_proof(
     artifact_dir: Path,
     *,
@@ -260,6 +283,14 @@ def validate_production_identity_proof(
         )
     except ProductionIdentityEvidenceError as exc:
         fail(f"invalid iOS production identity proof: {exc}")
+    if proof.get("algorithm") != REQUIRED_IDENTITY_ALGORITHM:
+        fail("iOS production identity proof does not use the required identity algorithm")
+    if proof.get("protection") != REQUIRED_IDENTITY_PROTECTION:
+        fail("iOS production identity proof does not use the required key protection")
+    if proof.get("handshakePersistenceVerified") is not True:
+        fail("iOS production identity proof lacks verified handshake persistence")
+    if proof.get("currentPathAuthorityVerified") is not True:
+        fail("iOS production identity proof lacks verified current-path authority")
     if (
         proof.get("sourceRepository") != expected_repository
         or proof.get("sourceCommit") != expected_source_sha
@@ -320,6 +351,21 @@ def validate_product_only_formal_evidence(
         fail("production identity proof is not bound to this exact product session")
 
 
+def validate_ios_release_archive_binding(
+    manifest: dict[str, Any],
+    archive_identity: Path,
+    release_testing_ipa: Path,
+) -> None:
+    """Require the release manifest to bind the exact sealed archive and IPA.
+
+    Public entry point for the same-archive release transaction: the manifest's
+    `iosReleaseArchive` block must equal the binding derived from the sealed
+    archive identity, and the release-testing IPA must match that identity.
+    Fails closed via SystemExit on any deviation.
+    """
+    _validate_archive_inputs(manifest, archive_identity, release_testing_ipa)
+
+
 def _validate_archive_inputs(
     manifest: dict[str, Any],
     archive_identity: Path,
@@ -338,7 +384,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--kind",
-        choices=(*FORMAL_KINDS, "production-identity"),
+        choices=("connectivity", "file-transfer", "p2p", "webrtc", "production-identity"),
         required=True,
     )
     parser.add_argument("--artifact-dir", type=Path, required=True)

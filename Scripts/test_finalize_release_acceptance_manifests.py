@@ -79,6 +79,7 @@ class ReleaseAcceptanceManifestFinalizerTests(unittest.TestCase):
             "iosProductionIdentityLifecycleVerified": True,
             "iosProductionIdentityProof": True,
             "iosReleaseArchive": physical.expected_binding(identity),
+            "macHostLaunchMode": "packaged",
             "macRuntimeExecutable": "SkyBridgeCompassApp",
             "macProductSurface": "production",
             "macCandidateIdentityVerified": True,

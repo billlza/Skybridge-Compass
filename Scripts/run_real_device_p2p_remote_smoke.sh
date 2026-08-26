@@ -3650,6 +3650,18 @@ open_macos_online_ipad_app_bundle() {
   return "$open_status"
 }
 
+find_macos_online_ipad_client_pid() {
+  # Resolves the freshly opened client's pid into MAC_ONLINE_PID, requiring a
+  # single exact-executable match so the smoke can never latch onto a stray
+  # SkyBridge process.
+  skybridge_mac_wait_for_single_exact_process \
+    "$PROCESS_OWNERSHIP_HELPER" \
+    "$MAC_ONLINE_APP_BIN" \
+    20 \
+    MAC_ONLINE_PID \
+    "macOS online iPad client"
+}
+
 start_macos_online_ipad_client() {
   : >"$MAC_ONLINE_STDOUT"
   : >"$MAC_ONLINE_STDERR"
@@ -3669,12 +3681,7 @@ start_macos_online_ipad_client() {
     fi
     printf '%s launch method=open-app-bundle attempt=%s preExistingExactExecutable=0\n' "$(timestamp_utc)" "$open_attempt" >>"$MAC_ONLINE_STATUS"
     if open_macos_online_ipad_app_bundle; then
-      if skybridge_mac_wait_for_single_exact_process \
-        "$PROCESS_OWNERSHIP_HELPER" \
-        "$MAC_ONLINE_APP_BIN" \
-        20 \
-        MAC_ONLINE_PID \
-        "macOS online iPad client"; then
+      if find_macos_online_ipad_client_pid; then
         if ! skybridge_mac_capture_owned_process \
           "$PROCESS_OWNERSHIP_HELPER" \
           "$MAC_ONLINE_PID" \

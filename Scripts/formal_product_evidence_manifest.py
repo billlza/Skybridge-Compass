@@ -189,10 +189,13 @@ def build_manifest(
         "iosSwiftActiveCompilationConditions": archive[
             "swiftActiveCompilationConditions"
         ],
+        "identitySourceGatekeeperAccepted": True,
+        "identitySourceStaplerValid": True,
         "iosTestingCompilationCondition": False,
         "labRun": False,
         "macCandidateIdentityVerified": True,
         "macDebugBuild": False,
+        "macHostLaunchMode": "packaged",
         "macProductSurface": "production",
         "macRuntimeExecutable": "SkyBridgeCompassApp",
         "macTestingCompilationCondition": False,

@@ -13,7 +13,7 @@ Produce all four formal Apple product evidence directories in one invocation.
 Usage:
   run_all_formal_product_evidence.sh \
     --private-evidence-root <new local directory> \
-    --public-evidence-root <new uploadable directory> \
+    --public-evidence-root <new public result directory> \
     --candidate-manifest <macos-release-candidate.json> \
     --candidate-app <signed/notarized SkyBridge Compass Pro.app> \
     --candidate-dmg <same immutable candidate DMG> \

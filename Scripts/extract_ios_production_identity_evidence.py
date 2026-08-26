@@ -92,6 +92,35 @@ SESSION_PROOF_KEYS = {
     "verified",
 }
 
+# Exact schema of the redacted public proof written by extract(): the 19
+# fixed-value fields plus the four provenance/session fields validated
+# individually below. validate_public_proof() rejects any deviation.
+PUBLIC_PROOF_KEYS = {
+    "algorithm",
+    "binaryTestSurfaceDetected",
+    "created",
+    "currentPathAuthorityVerified",
+    "deviceRef",
+    "evidenceSessionRef",
+    "handshakePersistenceVerified",
+    "measurementSource",
+    "persisted",
+    "privateKeyExported",
+    "productSurface",
+    "protection",
+    "realDevice",
+    "restoredAfterRelaunch",
+    "schemaVersion",
+    "secureEnclaveBacked",
+    "signed",
+    "softwareFallbackUsed",
+    "sourceCommit",
+    "sourceRepository",
+    "swiftActiveCompilationConditions",
+    "testingCompilationCondition",
+    "verified",
+}
+
 
 class ProductionIdentityEvidenceError(RuntimeError):
     """The two product launches do not prove the required identity lifecycle."""
@@ -251,6 +280,53 @@ def _atomic_new_file(path: Path, content: bytes) -> None:
             pass
 
 
+def validate_lifecycle_proof(proof_path: Path) -> dict[str, Any]:
+    """Validate the redacted public identity lifecycle proof."""
+
+    try:
+        proof = json.loads(
+            _read_regular(proof_path, "public iOS identity lifecycle proof", 64 * 1024)
+            .decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail(f"public iOS identity lifecycle proof is invalid UTF-8 JSON: {exc}")
+    if not isinstance(proof, dict) or set(proof) != LIFECYCLE_PROOF_KEYS:
+        _fail("public lifecycle proof does not use the exact schema")
+    if proof.get("deviceRef") != "identity-1":
+        _fail("public lifecycle proof deviceRef must be the artifact-local identity-1 alias")
+    exact_values: dict[str, object] = {
+        "algorithm": "mldsa87",
+        "created": True,
+        "deviceRef": "identity-1",
+        "firstLaunchFresh": True,
+        "measurementSource": "signed-production-app-runtime",
+        "persistence": "keychain-authority",
+        "privateKeyExported": False,
+        "productSurface": "production",
+        "protection": "secureEnclaveRequired",
+        "realDevice": True,
+        "restoredAfterRelaunch": True,
+        "schemaVersion": 1,
+        "secureEnclaveBacked": True,
+        "selfTestVerified": True,
+        "softwareFallbackUsed": False,
+        "testingCompilationCondition": False,
+    }
+    for key, expected in exact_values.items():
+        if proof.get(key) != expected or type(proof.get(key)) is not type(expected):
+            _fail(f"public lifecycle proof {key} mismatch")
+    if (
+        SOURCE_REPOSITORY.fullmatch(proof.get("sourceRepository", "")) is None
+        or SOURCE_COMMIT.fullmatch(proof.get("sourceCommit", "")) is None
+        or proof.get("swiftActiveCompilationConditions") != ["HAS_APPLE_PQC_SDK"]
+    ):
+        _fail("public lifecycle proof provenance is malformed")
+    encoded = json.dumps(proof, sort_keys=True)
+    if "id1:" in encoded or "identity_ref" in encoded or "identityRef" in encoded:
+        _fail("public lifecycle proof contains a private cross-launch identity field")
+    return proof
+
+
 def validate_public_proof(
     proof_path: Path,
     *,
@@ -267,6 +343,13 @@ def validate_public_proof(
         _fail(f"public iOS production identity proof is invalid UTF-8 JSON: {exc}")
     if not isinstance(proof, dict) or set(proof) != PUBLIC_PROOF_KEYS:
         _fail("public identity proof does not use the exact schema")
+    # The public proof must never carry a stable cross-launch identity
+    # reference; the only accepted device reference is the artifact-local
+    # identity-1 alias, checked separately so the violation is named.
+    if proof.get("deviceRef") != "identity-1":
+        _fail(
+            "public identity proof deviceRef must be the artifact-local identity-1 alias"
+        )
     exact_values: dict[str, object] = {
         "algorithm": "mldsa87",
         "binaryTestSurfaceDetected": False,
@@ -445,9 +528,16 @@ def main() -> int:
     )
     validate_parser.add_argument("--proof", type=Path, required=True)
     validate_parser.add_argument("--archive-identity", type=Path)
+    lifecycle_parser = subparsers.add_parser(
+        "validate-lifecycle-proof",
+        description="Validate one redacted public identity lifecycle proof.",
+    )
+    lifecycle_parser.add_argument("--proof", type=Path, required=True)
     arguments = parser.parse_args()
     try:
-        if arguments.command == "extract":
+        if arguments.command == "validate-lifecycle-proof":
+            validate_lifecycle_proof(arguments.proof)
+        elif arguments.command == "extract":
             extract(
                 first_raw_oslog=arguments.first_raw_oslog,
                 first_launch_identity=arguments.first_launch_identity,

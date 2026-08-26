@@ -253,6 +253,8 @@ def _validate_pre_cleanup_payload(
     elif candidate:
         _fail("an acceptance candidate requires an explicit sealed iOS archive identity")
     if candidate:
+        if payload.get("macHostLaunchMode") != "packaged":
+            _fail("acceptance candidate requires the packaged Mac host launch mode")
         if payload.get("macRuntimeExecutable") != "SkyBridgeCompassApp":
             _fail("acceptance candidate must run the normal macOS product executable")
         if payload.get("macProductSurface") != "production":
