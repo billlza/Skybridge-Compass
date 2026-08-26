@@ -1726,13 +1726,27 @@ impl NativeWebRtcInner {
         if !pair.nominated || pair.state != RTCStatsIceCandidatePairState::Succeeded {
             return Ok(None);
         }
-        let Some(RTCStatsReportEntry::LocalCandidate(local)) = report.get(&pair.local_candidate_id)
-        else {
+        // rtc 0.20 registers candidate stats under prefixed report keys
+        // (`RTCLocalIceCandidate_<id>` / `RTCRemoteIceCandidate_<id>`, see
+        // `internal.rs::add_ice_local_candidate`), while the candidate-pair
+        // accumulator records the RAW ice-agent ids. A lookup by the pair's ids
+        // alone therefore never resolves, which silently starved this
+        // observation until its timeout tore down healthy sessions. Try the raw
+        // id first so an upstream fix wins automatically, then the prefixed
+        // form the current release actually uses.
+        let local_entry = report
+            .get(&pair.local_candidate_id)
+            .or_else(|| report.get(&format!("RTCLocalIceCandidate_{}", pair.local_candidate_id)));
+        let Some(RTCStatsReportEntry::LocalCandidate(local)) = local_entry else {
             return Ok(None);
         };
-        let Some(RTCStatsReportEntry::RemoteCandidate(remote)) =
-            report.get(&pair.remote_candidate_id)
-        else {
+        let remote_entry = report.get(&pair.remote_candidate_id).or_else(|| {
+            report.get(&format!(
+                "RTCRemoteIceCandidate_{}",
+                pair.remote_candidate_id
+            ))
+        });
+        let Some(RTCStatsReportEntry::RemoteCandidate(remote)) = remote_entry else {
             return Ok(None);
         };
         let Some(remote_address) = remote.address.clone() else {

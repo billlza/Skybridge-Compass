@@ -302,6 +302,110 @@ fn established_classic_initiator() -> Result<(NativeSessionHandshake, ClassicSes
     Ok((initiator, keys))
 }
 
+/// The selected-ICE-route observation is what `native.connect` ultimately
+/// gates on: five seconds after transport-ready, a session whose stats never
+/// yield a nominated pair is torn down. This pins that path against a REAL
+/// in-process loopback pair, so a stats regression in the WebRTC stack fails
+/// here instead of only on live two-agent runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_ice_route_is_observed_on_a_real_loopback_pair() -> Result<()> {
+    let (mut initiator, mut responder) = new_started_classic_pair("route-observation").await?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let mut route_events = 0usize;
+    let mut disconnects: Vec<String> = Vec::new();
+    while tokio::time::Instant::now() < deadline && route_events < 2 {
+        tokio::select! {
+            event = initiator.next_event() => {
+                if let Some(event) = event {
+                    match &event {
+                        NativeWebRtcEvent::SignalingEnvelope(envelope) => {
+                            responder.handle_signaling_envelope(envelope).await?;
+                        }
+                        NativeWebRtcEvent::SelectedIceRoute(observation) => {
+                            assert_eq!(observation.remote_address, "127.0.0.1");
+                            assert!(observation.remote_port > 0);
+                            assert_eq!(observation.protocol, "udp");
+                            route_events += 1;
+                        }
+                        NativeWebRtcEvent::TransportDisconnected { reason } => {
+                            disconnects.push(format!("initiator:{reason:?}"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            event = responder.next_event() => {
+                if let Some(event) = event {
+                    match &event {
+                        NativeWebRtcEvent::SignalingEnvelope(envelope) => {
+                            initiator.handle_signaling_envelope(envelope).await?;
+                        }
+                        NativeWebRtcEvent::SelectedIceRoute(observation) => {
+                            assert_eq!(observation.remote_address, "127.0.0.1");
+                            assert!(observation.remote_port > 0);
+                            assert_eq!(observation.protocol, "udp");
+                            route_events += 1;
+                        }
+                        NativeWebRtcEvent::TransportDisconnected { reason } => {
+                            disconnects.push(format!("responder:{reason:?}"));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        if !disconnects.is_empty() {
+            break;
+        }
+    }
+
+    assert!(
+        disconnects.is_empty(),
+        "transport must not disconnect while awaiting the route observation: {disconnects:?}"
+    );
+    assert_eq!(
+        route_events, 2,
+        "both sides must observe their selected ICE route within the observation window"
+    );
+    Ok(())
+}
+
+/// Builds and starts a REAL classic loopback pair (actual UDP sockets and ICE),
+/// pinned to 127.0.0.1 so the test is hermetic.
+async fn new_started_classic_pair(
+    session_id: &str,
+) -> Result<(NativeWebRtcSession, NativeWebRtcSession)> {
+    let (classic_initiator, classic_responder) = classic_config_pair()?;
+    let initiator = NativeWebRtcSession::new(NativeWebRtcConfig {
+        session_id: session_id.to_owned(),
+        local_device_id: "device-a".to_owned(),
+        role: RuntimeSessionRole::Initiator,
+        turn_credentials: None,
+        classic_initiator: Some(classic_initiator),
+        classic_responder: None,
+        pqc_initiator: None,
+        pqc_responder: None,
+    })
+    .await?;
+    let responder = NativeWebRtcSession::new(NativeWebRtcConfig {
+        session_id: session_id.to_owned(),
+        local_device_id: "device-b".to_owned(),
+        role: RuntimeSessionRole::Responder,
+        turn_credentials: None,
+        classic_initiator: None,
+        classic_responder: Some(classic_responder),
+        pqc_initiator: None,
+        pqc_responder: None,
+    })
+    .await?;
+    initiator.start().await?;
+    responder.start().await?;
+    initiator.notify_remote_join("device-b").await?;
+    Ok((initiator, responder))
+}
+
 async fn pump_events(
     initiator: &mut NativeWebRtcSession,
     responder: &mut NativeWebRtcSession,

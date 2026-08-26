@@ -774,3 +774,84 @@ fn ownerless_managed_session_control_deserializes_only_for_fail_closed_migration
         serde_json::from_value(payload).expect("legacy control shape decodes");
     assert!(decoded.registration_id.is_empty());
 }
+
+/// Regression: the route observation is stamped by the transport task, the
+/// handshake receipt by the registry writer — two clocks, milliseconds apart,
+/// same establishment. A strict ordering check killed healthy sessions
+/// whenever the observation clock landed first. Slightly-early observations
+/// must apply; genuinely stale ones (a previous handshake) must still fail
+/// closed.
+#[test]
+fn selected_ice_route_tolerates_millisecond_observation_skew_but_rejects_stale_routes() {
+    let mut registry = SessionRegistry::default();
+    let mut record = RuntimeSessionRecord::new(
+        "runtime-skew",
+        "session-skew",
+        RuntimeSessionRole::Initiator,
+        RuntimeSessionSource::Code,
+        "https://signal.example.com",
+        "local-device",
+        Some("remote-device".to_owned()),
+        Some("Remote Device".to_owned()),
+        Some("peer-fingerprint".to_owned()),
+        RuntimeSessionState::Connecting,
+    );
+    let handshake_completed_at = OffsetDateTime::now_utc();
+    record.readiness = SessionReadiness::HandshakeComplete {
+        session_id: "session-skew".to_owned(),
+        negotiated_suite: "X25519".to_owned(),
+    };
+    record.handshake_completed_at = Some(handshake_completed_at);
+    registry.insert(record).expect("insert session");
+
+    let route = |observed_at: OffsetDateTime| RuntimeSelectedIceRouteObservation {
+        remote_address: "127.0.0.1".to_owned(),
+        remote_port: 61000,
+        protocol: "udp".to_owned(),
+        local_candidate_type: "host".to_owned(),
+        remote_candidate_type: "host".to_owned(),
+        kind: RuntimeSessionRouteKind::Direct,
+        observed_at,
+    };
+
+    // Observed 800ms before the handshake receipt was persisted: same
+    // establishment, benign clock skew — must apply.
+    assert!(registry.record_selected_ice_route(
+        "session-skew",
+        route(handshake_completed_at - time::Duration::milliseconds(800)),
+    ));
+    let record = registry.get("session-skew").expect("session");
+    assert_eq!(record.state, RuntimeSessionState::Connecting);
+    assert!(record.selected_ice_route.is_some());
+
+    // A route from a genuinely earlier handshake must still fail closed.
+    let mut registry = SessionRegistry::default();
+    let mut stale = RuntimeSessionRecord::new(
+        "runtime-stale",
+        "session-stale",
+        RuntimeSessionRole::Initiator,
+        RuntimeSessionSource::Code,
+        "https://signal.example.com",
+        "local-device",
+        Some("remote-device".to_owned()),
+        Some("Remote Device".to_owned()),
+        Some("peer-fingerprint".to_owned()),
+        RuntimeSessionState::Connecting,
+    );
+    stale.readiness = SessionReadiness::HandshakeComplete {
+        session_id: "session-stale".to_owned(),
+        negotiated_suite: "X25519".to_owned(),
+    };
+    stale.handshake_completed_at = Some(handshake_completed_at);
+    registry.insert(stale).expect("insert stale session");
+    assert!(!registry.record_selected_ice_route(
+        "session-stale",
+        route(handshake_completed_at - time::Duration::minutes(10)),
+    ));
+    let record = registry.get("session-stale").expect("stale session");
+    assert_eq!(record.state, RuntimeSessionState::Failed);
+    assert_eq!(
+        record.last_error.as_deref(),
+        Some("selected ICE route observation predates the current handshake")
+    );
+}

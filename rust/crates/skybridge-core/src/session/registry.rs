@@ -447,10 +447,20 @@ impl SessionRegistry {
         if observation.kind != expected_kind {
             return fail_runtime_protocol(record, "selected ICE route kind is inconsistent");
         }
-        if record
-            .handshake_completed_at
-            .is_none_or(|completed_at| observation.observed_at < completed_at)
-        {
+        // The observation is stamped by the native transport task while
+        // `handshake_completed_at` is stamped later, by the registry write under
+        // its own lock. Both events belong to the same establishment and land
+        // within milliseconds of each other, but the two clocks are written by
+        // different actors, so a strict `<` raced: a route observed a few
+        // milliseconds before the handshake receipt was persisted read as
+        // "stale" and killed a fully healthy session. The guard exists to
+        // reject observations from a PREVIOUS handshake — separated by whole
+        // reconnect cycles — so a small bounded allowance removes the race
+        // without weakening what the guard is for.
+        const HANDSHAKE_OBSERVATION_SKEW_ALLOWANCE: time::Duration = time::Duration::seconds(5);
+        if record.handshake_completed_at.is_none_or(|completed_at| {
+            observation.observed_at + HANDSHAKE_OBSERVATION_SKEW_ALLOWANCE < completed_at
+        }) {
             return fail_runtime_protocol(
                 record,
                 "selected ICE route observation predates the current handshake",
