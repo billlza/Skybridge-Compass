@@ -71,9 +71,7 @@ pub(crate) fn validate_serial(serial: &str) -> Result<()> {
         .chars()
         .any(|character| character.is_whitespace() || character.is_control())
     {
-        bail!(
-            "device serial contains whitespace or control characters (code: serial_invalid)"
-        );
+        bail!("device serial contains whitespace or control characters (code: serial_invalid)");
     }
     Ok(())
 }
@@ -337,10 +335,9 @@ pub(crate) fn decode_bridge_response(expected_id: &str, line: &str) -> Result<Va
         bail!("adb-bridge response is missing the boolean `ok` field (code: response_unparsed)");
     };
     if ok {
-        return value
-            .get("result")
-            .cloned()
-            .ok_or_else(|| anyhow!("adb-bridge ok response omitted `result` (code: response_unparsed)"));
+        return value.get("result").cloned().ok_or_else(|| {
+            anyhow!("adb-bridge ok response omitted `result` (code: response_unparsed)")
+        });
     }
     let error = value.get("error").cloned().unwrap_or(Value::Null);
     let code = error
@@ -485,8 +482,8 @@ mod tests {
         let missing = resolve_target_serial(std::slice::from_ref(&ready), Some("Z"))
             .expect_err("unknown serial should fail");
         assert!(missing.to_string().contains("device_not_found"));
-        let not_ready = resolve_target_serial(&[offline], Some("B"))
-            .expect_err("offline serial should fail");
+        let not_ready =
+            resolve_target_serial(&[offline], Some("B")).expect_err("offline serial should fail");
         assert!(not_ready.to_string().contains("device_not_ready"));
     }
 
@@ -535,16 +532,19 @@ mod tests {
         assert_eq!(endpoint.token, "0123456789abcdef0123");
 
         assert!(parse_endpoint_document("run-as: package not debuggable").is_err());
-        let defaulted = parse_endpoint_document(
-            r#"{"proto":"adb-bridge/1","token":"0123456789abcdef0123"}"#,
-        )
-        .expect("missing socket field should fall back to the canonical name");
+        let defaulted =
+            parse_endpoint_document(r#"{"proto":"adb-bridge/1","token":"0123456789abcdef0123"}"#)
+                .expect("missing socket field should fall back to the canonical name");
         assert_eq!(defaulted.socket, BRIDGE_ABSTRACT_SOCKET);
         let wrong_proto = parse_endpoint_document(
             r#"{"proto":"other/9","socket":"s","token":"0123456789abcdef0123"}"#,
         )
         .expect_err("wrong protocol must be rejected");
-        assert!(wrong_proto.to_string().contains("endpoint_protocol_mismatch"));
+        assert!(
+            wrong_proto
+                .to_string()
+                .contains("endpoint_protocol_mismatch")
+        );
         let short_token =
             parse_endpoint_document(r#"{"proto":"adb-bridge/1","socket":"s","token":"short"}"#)
                 .expect_err("short token must be rejected");
@@ -600,9 +600,7 @@ mod tests {
         );
 
         assert!(decode_bridge_response("req-1", "garbage").is_err());
-        assert!(
-            decode_bridge_response("req-1", r#"{"v":1,"id":"req-1","ok":true}"#).is_err()
-        );
+        assert!(decode_bridge_response("req-1", r#"{"v":1,"id":"req-1","ok":true}"#).is_err());
     }
 
     #[test]

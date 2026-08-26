@@ -567,13 +567,14 @@ fn build_responder_message_b_and_keys(
     let mut rng_seed = [0u8; 32];
     fill_random(&mut rng_seed)?;
     let mut rng = StdRng::from_seed(rng_seed);
-    let (encapsulated_key, mut sender) = setup_sender_with_rng::<ClassicAead, ClassicKdf, ClassicKem>(
-        &OpModeS::Base,
-        &initiator_public_key,
-        KEM_DEM_INFO,
-        &mut rng,
-    )
-    .map_err(|error| anyhow!("failed to set up classic HPKE sender: {error}"))?;
+    let (encapsulated_key, mut sender) =
+        setup_sender_with_rng::<ClassicAead, ClassicKdf, ClassicKem>(
+            &OpModeS::Base,
+            &initiator_public_key,
+            KEM_DEM_INFO,
+            &mut rng,
+        )
+        .map_err(|error| anyhow!("failed to set up classic HPKE sender: {error}"))?;
     let payload_ciphertext = sender
         .seal(&classic_capabilities_bytes(), KEM_DEM_INFO)
         .map_err(|error| anyhow!("failed to seal classic MessageB payload: {error}"))?;

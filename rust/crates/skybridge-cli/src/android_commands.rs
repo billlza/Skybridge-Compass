@@ -257,10 +257,7 @@ fn print_doctor_text(result: &Value) {
     print_advertising_line(&nsd);
     let signaling = result.get("signaling").cloned().unwrap_or(Value::Null);
     println!("Signaling Server: {}", field(&signaling, "serverUrl"));
-    println!(
-        "Signaling WebSocket: {}",
-        field(&signaling, "webSocketUrl")
-    );
+    println!("Signaling WebSocket: {}", field(&signaling, "webSocketUrl"));
     println!("STUN: {}", field(&signaling, "stunUrl"));
     println!("TURN: {}", field(&signaling, "turnUrls"));
     println!(
@@ -333,8 +330,7 @@ fn field(container: &Value, key: &str) -> String {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Bool(flag)) => flag.to_string(),
         Some(Value::Number(number)) => number.to_string(),
-        Some(other) => serde_json::to_string(other)
-            .unwrap_or_else(|_| "<unrenderable>".to_owned()),
+        Some(other) => serde_json::to_string(other).unwrap_or_else(|_| "<unrenderable>".to_owned()),
     }
 }
 
@@ -402,8 +398,7 @@ mod tests {
 
         // Bind then drop to get a port that is very likely closed.
         let port = {
-            let listener =
-                TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind probe port");
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind probe port");
             listener.local_addr().expect("probe address").port()
         };
         let error = bridge_round_trip(port, "0123456789abcdef0123", "status")

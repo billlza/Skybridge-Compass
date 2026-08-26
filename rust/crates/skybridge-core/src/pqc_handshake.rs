@@ -797,8 +797,8 @@ fn open_payload_with_shared_secret(
         .map_err(|_| anyhow!("failed to derive PQC payload key"))?;
     let cipher = Aes256Gcm::new_from_slice(&payload_key)
         .map_err(|error| anyhow!("invalid AES-256 key: {error}"))?;
-    let nonce = Nonce::try_from(nonce)
-        .map_err(|_| anyhow!("invalid PQC MessageB payload nonce length"))?;
+    let nonce =
+        Nonce::try_from(nonce).map_err(|_| anyhow!("invalid PQC MessageB payload nonce length"))?;
     let mut combined = ciphertext.to_vec();
     combined.extend_from_slice(tag);
     cipher
