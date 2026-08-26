@@ -6748,6 +6748,30 @@ public class P2PDiscoveryService: BaseManager {
                             )
                             return
                         }
+                        // Shared inbound admission (InboundHandshakeTrustPolicy):
+                        // a uniquely pinned presented identity gets its pin
+                        // enforced for this handshake; everything else keeps the
+                        // existing deferred pairing-confirmation admission.
+                        let inboundTrustDisposition = await InboundHandshakeTrustResolution
+                            .disposition(for: messageA)
+                        let inboundTrustProvider: (any HandshakeTrustProvider)?
+                        switch InboundHandshakeTrustPolicy.action(for: inboundTrustDisposition) {
+                        case .admitPinned(let stablePeerId):
+                            inboundTrustProvider = PinnedStablePeerHandshakeTrustProvider(
+                                stablePeerId: stablePeerId
+                            )
+                            logger.info(
+                                "🔐 inbound admission: pinned peer resolved from presented protocol identity (endpointId=\(peerDiagnosticLabel, privacy: .public))"
+                            )
+                        case .admitDeferringPairingConfirmation:
+                            inboundTrustProvider = nil
+                            if case .ambiguousPinnedIdentity(let stablePeerIds) = inboundTrustDisposition {
+                                logger.warning(
+                                    "⚠️ inbound admission: presented protocol identity matches \(stablePeerIds.count, privacy: .public) pinned records; deferring to pairing confirmation (endpointId=\(peerDiagnosticLabel, privacy: .public))"
+                                )
+                            }
+                        }
+                        try Task.checkCancellation()
                         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
                         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
                         let capability = CryptoProviderFactory.detectCapability()
@@ -6841,6 +6865,7 @@ public class P2PDiscoveryService: BaseManager {
                                 offeredSuites: offeredSuites,
                                 policy: effectivePolicy,
                                 cryptoPolicy: cryptoPolicy,
+                                trustProvider: inboundTrustProvider,
                                 localSOAPeerId: activeLocalSOAPeerId,
                                 expectedRemoteSOAPeerId: expectedRemoteSOAPeerId,
                                 authenticatedIncomingEstablishedPolicy: effectivePolicy.requirePQC

@@ -66,6 +66,12 @@ struct DeviceDiscoveryView: View {
                         isBrowseAuthorizationBlocked: discoveryManager.isBrowseAuthorizationBlocked
                     )
 
+                    if let notice = connectionManager.inboundConnectionNotice {
+                        InboundConnectionNoticeBanner(notice: notice) {
+                            connectionManager.dismissInboundConnectionNotice()
+                        }
+                    }
+
                     if discoveryManager.discoveredDevices.isEmpty {
                         emptyStateView
                     } else {
@@ -386,6 +392,64 @@ struct AdvertisingLifecycleBanner: View {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
 #endif
+    }
+}
+
+// MARK: - Inbound Connection Notice Banner
+
+/// Surfaces a refused or failed inbound connection.
+///
+/// The shared inbound-admission contract (`InboundHandshakeTrustPolicy`) forbids
+/// silent drops: whenever the responder closes an inbound handshake, the reason
+/// must reach the operator. This banner is that surface on iOS.
+struct InboundConnectionNoticeBanner: View {
+    let notice: P2PConnectionManager.InboundConnectionNotice
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "bolt.horizontal.circle.fill")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("入站连接未建立")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+
+                Text(notice.message)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(notice.occurredAt, style: .time)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Spacer(minLength: 0)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel(Text("关闭入站连接通知"))
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.orange.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text("入站连接未建立"))
+        .accessibilityValue(Text(notice.message))
     }
 }
 

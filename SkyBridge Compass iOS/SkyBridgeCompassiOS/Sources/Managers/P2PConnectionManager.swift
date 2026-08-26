@@ -464,6 +464,11 @@ public class P2PConnectionManager: ObservableObject {
     @Published public private(set) var advertisingLifecycle: AdvertisingLifecycleState = .idle
     @Published public private(set) var currentHandshakeState: String = "空闲"
     @Published public private(set) var lastError: String?
+    /// 最近一次入站连接被拒/失败的用户可见通知。
+    ///
+    /// 入站受理的每个拒绝分支都必须写这里（共享的 `InboundHandshakeTrustPolicy`
+    /// 契约禁止静默断开）；UI 以横幅呈现并可手动关闭。
+    @Published public private(set) var inboundConnectionNotice: InboundConnectionNotice?
     /// 每个设备的连接状态（用于 UI 展示“已连接/连接中/已断开”等）
     @Published public private(set) var connectionStatusByDeviceId: [String: ConnectionStatus] = [:]
     /// 每个设备最近一次连接错误（用于定位“莫名其妙断开”原因）
@@ -994,6 +999,37 @@ public class P2PConnectionManager: ObservableObject {
     private func smokeInboundTrace(_ line: String) {
         SkyBridgeDiagnosticTrace.appendStatus(line)
         SkyBridgeDiagnosticTrace.append(line)
+    }
+
+    public struct InboundConnectionNotice: Equatable, Sendable {
+        public let message: String
+        public let occurredAt: Date
+    }
+
+    /// Publishes a user-visible inbound-connection failure notice.
+    ///
+    /// `coalescingWithinSeconds` keeps a specific notice (e.g. an admission
+    /// rejection reason) from being immediately overwritten by the generic
+    /// close that follows it on the same connection.
+    func surfaceInboundConnectionNotice(
+        _ message: String,
+        coalescingWithinSeconds: TimeInterval = 0
+    ) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if coalescingWithinSeconds > 0,
+           let existing = inboundConnectionNotice,
+           Date().timeIntervalSince(existing.occurredAt) < coalescingWithinSeconds {
+            return
+        }
+        inboundConnectionNotice = InboundConnectionNotice(
+            message: trimmed,
+            occurredAt: Date()
+        )
+    }
+
+    public func dismissInboundConnectionNotice() {
+        inboundConnectionNotice = nil
     }
 
     private nonisolated static func smokeSanitize(_ value: String) -> String {
@@ -1593,6 +1629,137 @@ public class P2PConnectionManager: ObservableObject {
         }
 
         return (stablePeerId, provider)
+    }
+
+    /// Inbound admission decision for one strict-PQC responder handshake.
+    ///
+    /// Both cases admit the handshake (see `InboundHandshakeTrustPolicy`);
+    /// silently dropping an inbound connection is a protocol-contract
+    /// violation, so any later refusal must surface a user-visible notice.
+    private enum InboundHandshakeAdmission {
+        case pinned(stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)
+        case deferredPairingConfirmation
+    }
+
+    /// Resolves how an inbound MessageA is admitted in strict PQC mode.
+    ///
+    /// Order matters: the legacy SOA/alias resolution runs first so every warm
+    /// path keeps its exact current behavior, then the durable fingerprint
+    /// resolution covers the cold state where no runtime alias/session state
+    /// exists yet (a cold inbound previously died here as a silent close), and
+    /// the shared `InboundHandshakeTrustPolicy` decides everything unresolved:
+    /// unpinned peers are admitted into the handshake and confirmed by the
+    /// post-handshake pairing flow instead of being dropped.
+    private func resolveInboundHandshakeAdmission(
+        for peerId: String,
+        stage: String,
+        messageA: HandshakeMessageA
+    ) async -> InboundHandshakeAdmission {
+        if let context = await strictInboundHandshakeTrustContext(
+            for: peerId,
+            stage: stage,
+            messageA: messageA
+        ) {
+            return .pinned(stablePeerId: context.stablePeerId, provider: context.provider)
+        }
+
+        let presentedFingerprint: String?
+        do {
+            presentedFingerprint = try messageA
+                .decodedIdentityPublicKeys()
+                .authoritativeProtocolFingerprint()
+        } catch {
+            presentedFingerprint = nil
+        }
+
+        let matchedStablePeerIds = await durablyPinnedStablePeerIds(
+            matchingProtocolFingerprint: presentedFingerprint
+        )
+        let disposition = InboundHandshakeTrustPolicy.disposition(
+            presentedProtocolIdentityFingerprint: presentedFingerprint,
+            pinnedStablePeerIdsMatchingPresentedIdentity: matchedStablePeerIds
+        )
+        switch InboundHandshakeTrustPolicy.action(for: disposition) {
+        case .admitPinned(let stablePeerId):
+            let provider = P2PStoredHandshakeTrustProvider(
+                trustMaterialCandidates: [stablePeerId],
+                requirePinnedProtocolIdentity: true
+            )
+            let pinnedFingerprints = await provider.trustedFingerprints(for: stablePeerId)
+            guard !pinnedFingerprints.isEmpty else {
+                // The store changed between the fingerprint match and the
+                // provider read; admit with deferred confirmation instead of
+                // dropping the connection.
+                smokeInboundTrace(
+                    "p2p-inbound admission pinned-material-raced peer=\(Self.protocolIdentityLogRedaction) stage=\(stage)"
+                )
+                return .deferredPairingConfirmation
+            }
+            SkyBridgeLogger.shared.info(
+                "🔐 strict PQC \(stage) admitted pinned peer via durable fingerprint: peer=\(Self.protocolIdentityLogRedaction) stablePeer=\(Self.protocolIdentityLogRedaction)"
+            )
+            smokeInboundTrace(
+                "p2p-inbound admission pinned-by-fingerprint peer=\(Self.protocolIdentityLogRedaction) stage=\(stage)"
+            )
+            return .pinned(stablePeerId: stablePeerId, provider: provider)
+        case .admitDeferringPairingConfirmation:
+            if case .ambiguousPinnedIdentity(let stablePeerIds) = disposition {
+                SkyBridgeLogger.shared.warning(
+                    "⚠️ strict PQC \(stage) pinned identity ambiguous (\(stablePeerIds.count) records); admitting with deferred pairing confirmation: peer=\(Self.protocolIdentityLogRedaction)"
+                )
+                smokeInboundTrace(
+                    "p2p-inbound admission ambiguous-pin-deferred peer=\(Self.protocolIdentityLogRedaction) stage=\(stage) matchCount=\(stablePeerIds.count)"
+                )
+            } else {
+                SkyBridgeLogger.shared.info(
+                    "🔓 strict PQC \(stage) admitted unpinned peer for post-handshake pairing confirmation: peer=\(Self.protocolIdentityLogRedaction)"
+                )
+                smokeInboundTrace(
+                    "p2p-inbound admission deferred-pairing-confirmation peer=\(Self.protocolIdentityLogRedaction) stage=\(stage)"
+                )
+            }
+            return .deferredPairingConfirmation
+        }
+    }
+
+    /// Stable peer ids whose durable pinned protocol identity contains the
+    /// presented fingerprint. Reads persistent stores only, so the result is
+    /// identical whether or not any runtime session state exists.
+    private func durablyPinnedStablePeerIds(
+        matchingProtocolFingerprint fingerprint: String?
+    ) async -> [String] {
+        guard let fingerprint = fingerprint?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            !fingerprint.isEmpty else {
+            return []
+        }
+
+        var ordered: [String] = []
+        var seen = Set<String>()
+
+        func append(_ raw: String?) {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else {
+                return
+            }
+            let canonical = PeerIdentityAliasResolver.persistentDeviceId(from: trimmed)
+                ?? TrustedDeviceStore.shared.uniqueCanonicalTrustedDeviceId(for: trimmed)
+                ?? trimmed.lowercased()
+            guard seen.insert(canonical.lowercased()).inserted else { return }
+            ordered.append(canonical)
+        }
+
+        if let record = TrustedDeviceStore.shared.currentPathTrustRecord(fingerprint: fingerprint),
+           (record.currentPathLifecycleState ?? .active) == .active {
+            append(record.currentDeviceId ?? record.id)
+        }
+        for deviceId in await ProtocolIdentityTrustStore.shared.deviceIds(
+            containingFingerprint: fingerprint
+        ) where TrustedDeviceStore.shared.hasActiveDurableTrust(forAny: [deviceId]) {
+            append(deviceId)
+        }
+        return ordered
     }
 
     private func preferredStrictPQCHandshakeTargetSuite() -> CryptoSuite? {
@@ -4908,10 +5075,18 @@ public class P2PConnectionManager: ObservableObject {
             smokeInboundTrace(
                 "p2p-inbound provisional-closed peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.smokeSanitize(reason))"
             )
+            surfaceInboundConnectionNotice(
+                "入站连接失败：\(reason)",
+                coalescingWithinSeconds: 3
+            )
             connection.cancel()
             return
         }
 
+        surfaceInboundConnectionNotice(
+            "入站连接失败：\(reason)",
+            coalescingWithinSeconds: 3
+        )
         await cleanupBrokenInboundConnection(connection, peerId: peerId, reason: reason)
     }
 
@@ -6068,21 +6243,24 @@ public class P2PConnectionManager: ObservableObject {
         }
         let strictTrustContext: (stablePeerId: String, provider: P2PStoredHandshakeTrustProvider)?
         if pqcManager.enforcePQCHandshake {
-            guard let context = await strictInboundHandshakeTrustContext(
+            switch await resolveInboundHandshakeAdmission(
                 for: peerId,
                 stage: "inbound-handshake",
                 messageA: messageA
-            ) else {
+            ) {
+            case .pinned(let stablePeerId, let provider):
+                guard isCurrentHandshakeOperation(operationOwner) else { return nil }
+                strictTrustContext = (stablePeerId, provider)
                 smokeInboundTrace(
-                    "p2p-inbound strict-trust-missing peer=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake"
+                    "p2p-inbound strict-trust-ready peer=\(Self.protocolIdentityLogRedaction) stable=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake"
                 )
-                return nil
+            case .deferredPairingConfirmation:
+                guard isCurrentHandshakeOperation(operationOwner) else { return nil }
+                // Admit the handshake without a pin: the authenticated authority
+                // stays session-scoped (`.pendingOperatorApproval`) and the
+                // post-handshake pairing confirmation decides durable trust.
+                strictTrustContext = nil
             }
-            guard isCurrentHandshakeOperation(operationOwner) else { return nil }
-            strictTrustContext = context
-            smokeInboundTrace(
-                "p2p-inbound strict-trust-ready peer=\(Self.protocolIdentityLogRedaction) stable=\(Self.protocolIdentityLogRedaction) stage=inbound-handshake"
-            )
         } else {
             strictTrustContext = nil
         }
@@ -6443,6 +6621,10 @@ public class P2PConnectionManager: ObservableObject {
             lastError = message
             connectionStatusByDeviceId[peerId] = .failed
             connectionErrorByDeviceId[peerId] = message
+            surfaceInboundConnectionNotice(
+                "入站握手失败：\(message)",
+                coalescingWithinSeconds: 3
+            )
             SkyBridgeLogger.shared.error("❌ 握手失败: \(Self.protocolIdentityLogRedaction) reason=\(Self.diagnosticHandshakeFailureCode(reason))")
             smokeInboundTrace(
                 "p2p-inbound handshake-failed peer=\(Self.protocolIdentityLogRedaction) reason=\(Self.diagnosticHandshakeFailureCode(reason))"
