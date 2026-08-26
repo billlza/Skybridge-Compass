@@ -141,6 +141,21 @@ PY
       return 0
     fi
     echo "$log_prefix rejected simulator that failed to boot: $candidate_id" >&2
+    # A half-booted candidate keeps its processes alive and shrinks the
+    # process budget for every later candidate — release it before moving on.
+    _skybridge_run_command_with_timeout \
+      "$boot_timeout_seconds" /dev/null \
+      "$xcrun_bin" simctl shutdown "$candidate_id" || true
+    if grep -q "insufficient system resources" "$boot_log_file"; then
+      # The host refuses to boot ANY simulator (per-user process limit
+      # exhausted). That verdict is host-wide, not per-device: scanning the
+      # remaining candidates would burn the boot timeout on each one and
+      # cannot succeed. Fail fast with the host diagnostics instead.
+      echo "$log_prefix aborting simulator scan: the host cannot boot any simulator (user process limit exhausted); raise the process limits (launchctl limit maxproc / kern.maxprocperuid) or free user processes, then retry." >&2
+      cat "$boot_log_file" >&2
+      cleanup_ios_simulator_selection
+      return 1
+    fi
   done <"$candidates_file"
 
   if [[ -s "$boot_log_file" ]]; then

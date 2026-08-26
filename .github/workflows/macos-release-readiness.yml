@@ -172,6 +172,27 @@ jobs:
       - name: Validate iOS XCTest Configuration
         run: bash Scripts/check_ios_test_configuration.sh --static-only
 
+      - name: Raise Simulator Process Capacity
+        # The hosted macOS runner boots with a per-user process budget that
+        # CoreSimulator can judge too small to boot any simulator at all
+        # (POSIX 67: "insufficient system resources", observed as
+        # maxUserProcs 1333 vs ~1240 already running). Raise the limits
+        # best-effort, reset CoreSimulator so stale device processes are
+        # released, and print the resulting budget for diagnosis.
+        run: |
+          set -uo pipefail
+          echo "limits before: maxproc=$(sysctl -n kern.maxproc) maxprocperuid=$(sysctl -n kern.maxprocperuid)"
+          sudo launchctl limit maxproc 2500 2500 \
+            || echo "::warning::launchctl limit maxproc was refused"
+          sudo sysctl -w kern.maxproc=2500 \
+            || echo "::warning::kern.maxproc is not writable on this host"
+          sudo sysctl -w kern.maxprocperuid=2176 \
+            || echo "::warning::kern.maxprocperuid is not writable on this host"
+          sudo /usr/bin/killall -9 com.apple.CoreSimulator.CoreSimulatorService 2>/dev/null \
+            || true
+          echo "limits after: maxproc=$(sysctl -n kern.maxproc) maxprocperuid=$(sysctl -n kern.maxprocperuid)"
+          echo "running user processes: $(ps -u "$(id -u)" -o pid= | wc -l | tr -d ' ')"
+
       - name: Run iOS XCTest Lane
         run: bash "SkyBridge Compass iOS/Scripts/test_lane_ios.sh"
 
