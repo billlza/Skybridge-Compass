@@ -1142,10 +1142,11 @@ actor TrustMutationAdmissionGate {
             ContinuousClock().now
         }
     ) {
-        precondition(maximumWaiters >= 0)
-        precondition(maximumWaitDuration > .zero)
-        self.maximumWaiters = maximumWaiters
-        self.maximumWaitDuration = maximumWaitDuration
+        // Clamp instead of trapping: a non-positive configuration degrades to
+        // the smallest well-defined domain (no queued waiters / an immediate
+        // deadline) rather than terminating the process over a caller bug.
+        self.maximumWaiters = max(maximumWaiters, 0)
+        self.maximumWaitDuration = max(maximumWaitDuration, .milliseconds(1))
         self.sleepUntilDeadline = sleepUntilDeadline
         self.now = now
     }
@@ -1255,7 +1256,12 @@ actor TrustMutationAdmissionGate {
     }
 
     private func release(token: UUID) {
-        precondition(ownerToken == token, "Only the active trust mutation owner may release it")
+        // Only the active owner may release the mutation permit. A foreign
+        // token is refused rather than trapping: ignoring it keeps mutual
+        // exclusion intact (the real owner still holds the permit and will
+        // release it), while a trap would let one buggy caller take down the
+        // whole trust service.
+        guard ownerToken == token else { return }
         while !waiters.isEmpty {
             let next = waiters.removeFirst()
             notifyWaiterCountObserversForTesting()

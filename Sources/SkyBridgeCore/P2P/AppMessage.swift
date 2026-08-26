@@ -1836,8 +1836,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
     }
 
     private static func millisecondsSinceEpoch(_ date: Date) -> Int64 {
+        // A Date outside the Int64-millisecond range (or non-finite) cannot be
+        // represented; saturate instead of trapping so an absurd wall clock can
+        // never take the process down. Receivers already reject timestamps
+        // outside their freshness windows, so a saturated extreme behaves like
+        // any other stale/out-of-range message.
         guard let milliseconds = canonicalMillisecondsSinceEpoch(date) else {
-            preconditionFailure("Canonical timestamp is not representable as Int64 milliseconds")
+            let seconds = date.timeIntervalSince1970
+            return seconds < 0 ? Int64.min : Int64.max
         }
         return milliseconds
     }
