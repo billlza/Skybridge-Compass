@@ -711,8 +711,15 @@ pub async fn verify_managed_handshake_receipt(
         let handshake_completed_at = session.handshake_completed_at.ok_or_else(|| {
             anyhow!("managed connection receipt is missing handshake completion time")
         })?;
-        if authenticated_peer.observed_at < handshake_completed_at
-            || selected_ice_route.observed_at < handshake_completed_at
+        // Evidence timestamps are written by the transport task while
+        // `handshake_completed_at` is written by the registry, so within one
+        // establishment the evidence clock can land a few milliseconds early.
+        // The guard exists to reject evidence from a PREVIOUS handshake —
+        // separated by whole reconnect cycles — mirroring the identical
+        // allowance in `SessionRegistry::record_selected_ice_route`.
+        let skew_allowance = time::Duration::seconds(5);
+        if authenticated_peer.observed_at + skew_allowance < handshake_completed_at
+            || selected_ice_route.observed_at + skew_allowance < handshake_completed_at
         {
             bail!("managed connection receipt reused evidence from an earlier handshake");
         }
@@ -1862,16 +1869,40 @@ pub(crate) async fn observe_inbound_file_transfer_decisions_for_runtime(
         if session.runtime_id != expected_runtime_id || !session.is_active() {
             bail!("inbound file decision no longer belongs to the active runtime incarnation");
         }
+
+        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
+        let now = OffsetDateTime::now_utc();
+        let changed = reconcile_inbound_file_approvals(&mut registry, &sessions, now)?;
+        let matching = registry
+            .requests
+            .values()
+            .filter(|request| {
+                request.session_id == session_id && request.target_runtime_id == expected_runtime_id
+            })
+            .count();
+
+        // Peer evidence gates the DECISIONS, not the poll. The worker runs this
+        // observation on a 1-second interval whose first tick fires immediately
+        // — milliseconds after the session worker starts, long before the
+        // handshake can complete. Demanding authenticated-peer evidence before
+        // even looking at the registry killed every fresh session on its first
+        // tick (`local_close` ~30ms in), which made two-agent `connect`
+        // structurally impossible. With nothing to observe there is nothing the
+        // evidence could protect, so an empty poll is simply empty — exactly
+        // how `observe_file_transfer_requests_for_runtime` already behaves.
+        if matching == 0 {
+            if changed {
+                store_inbound_file_transfer_approval_registry_unlocked(&registry_path, &registry)?;
+            }
+            return Ok(Vec::new());
+        }
+
         let authenticated_peer = session.authenticated_peer.as_ref().ok_or_else(|| {
             anyhow!("inbound file decision is missing authenticated peer evidence")
         })?;
         if session.remote_device_id.as_deref() != Some(authenticated_peer.device_id.as_str()) {
             bail!("inbound file decision authenticated peer identity changed");
         }
-
-        let mut registry = load_inbound_file_transfer_approval_registry_unlocked(&registry_path)?;
-        let now = OffsetDateTime::now_utc();
-        let changed = reconcile_inbound_file_approvals(&mut registry, &sessions, now)?;
         let mut decisions = Vec::new();
         for request in registry.requests.values_mut().filter(|request| {
             request.session_id == session_id && request.target_runtime_id == expected_runtime_id
@@ -5202,6 +5233,65 @@ mod tests {
         )
     }
 
+    /// Regression: the worker polls this observation on an interval whose
+    /// first tick fires immediately — milliseconds after the session worker
+    /// starts and long before any handshake. Demanding authenticated-peer
+    /// evidence before reading the (empty) registry killed every fresh session
+    /// on its first tick, making two-agent `connect` structurally impossible.
+    #[tokio::test]
+    async fn empty_inbound_decision_poll_survives_a_pre_handshake_session() {
+        let paths = test_paths("inbound-decision-pre-handshake");
+        let (session, control) = managed_registration_pair("fresh-session");
+        // A genuinely fresh session: Connecting, no handshake, no peer.
+        assert!(session.authenticated_peer.is_none());
+        let runtime_id = session.runtime_id.clone();
+        register_managed_session(&paths, session, control)
+            .await
+            .expect("register fresh session");
+
+        let decisions = observe_inbound_file_transfer_decisions_for_runtime(
+            &paths,
+            "fresh-session",
+            &runtime_id,
+        )
+        .await
+        .expect("an empty poll must not demand peer evidence the handshake has not produced");
+        assert!(decisions.is_empty());
+
+        // With actual pending work the evidence requirement must return in
+        // full force: a matching request and no authenticated peer fails.
+        {
+            let mut registry = InboundFileTransferApprovalRegistry::default();
+            registry
+                .insert(inbound_approval_request(
+                    "fresh-session",
+                    &runtime_id,
+                    77,
+                    "Remote Device",
+                ))
+                .expect("insert pending approval");
+            store_inbound_file_transfer_approval_registry_unlocked(
+                &inbound_file_transfer_approval_registry_file(&paths),
+                &registry,
+            )
+            .expect("persist pending approval");
+        }
+        let error = observe_inbound_file_transfer_decisions_for_runtime(
+            &paths,
+            "fresh-session",
+            &runtime_id,
+        )
+        .await
+        .expect_err("pending work without peer evidence must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("missing authenticated peer evidence"),
+            "{error:#}"
+        );
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
     #[test]
     fn stale_inbound_approvals_are_terminalized_before_capacity_reuse() {
         let now = OffsetDateTime::now_utc();
@@ -5818,6 +5908,86 @@ mod tests {
         assert_eq!(terminal.readiness, SessionReadiness::Idle);
         assert_eq!(terminal.last_error.as_deref(), Some("operator_requested"));
         assert!(terminal.closed_at.is_some());
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+    }
+
+    /// Regression: evidence timestamps are written by the transport task while
+    /// `handshake_completed_at` is written by the registry, so within one
+    /// establishment the evidence clock can land milliseconds early. The
+    /// receipt verifier's strict ordering check rejected such receipts as
+    /// "reused evidence", failing healthy `connect` runs at the final step.
+    #[tokio::test]
+    async fn receipt_verification_tolerates_millisecond_evidence_skew_but_rejects_stale() {
+        let paths = test_paths("receipt-evidence-skew");
+        let (mut session, control) = managed_registration_pair("receipt-skew");
+        session.state = RuntimeSessionState::Bound;
+        session.readiness = SessionReadiness::HandshakeComplete {
+            session_id: session.session_id.clone(),
+            negotiated_suite: "X25519".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut session);
+        let handshake_completed_at = OffsetDateTime::now_utc();
+        session.handshake_completed_at = Some(handshake_completed_at);
+        // Evidence stamped 800ms BEFORE the handshake receipt was persisted:
+        // same establishment, benign two-writer skew.
+        let slightly_early = handshake_completed_at - time::Duration::milliseconds(800);
+        if let Some(peer) = session.authenticated_peer.as_mut() {
+            peer.observed_at = slightly_early;
+        }
+        if let Some(route) = session.selected_ice_route.as_mut() {
+            route.observed_at = slightly_early;
+        }
+        let runtime_id = session.runtime_id.clone();
+        let registration_id = control.registration_id.clone();
+        register_managed_session(&paths, session, control)
+            .await
+            .expect("register skewed session");
+        verify_managed_handshake_receipt(
+            &paths,
+            "receipt-skew",
+            &registration_id,
+            &runtime_id,
+            "X25519",
+        )
+        .await
+        .expect("millisecond-early evidence must verify");
+        let _ = tokio::fs::remove_dir_all(&paths.root).await;
+
+        // Evidence from a genuinely earlier handshake must still be rejected.
+        let paths = test_paths("receipt-evidence-stale");
+        let (mut session, control) = managed_registration_pair("receipt-stale");
+        session.state = RuntimeSessionState::Bound;
+        session.readiness = SessionReadiness::HandshakeComplete {
+            session_id: session.session_id.clone(),
+            negotiated_suite: "X25519".to_owned(),
+        };
+        attach_verified_connection_evidence(&mut session);
+        let handshake_completed_at = OffsetDateTime::now_utc();
+        session.handshake_completed_at = Some(handshake_completed_at);
+        let stale = handshake_completed_at - time::Duration::minutes(10);
+        if let Some(route) = session.selected_ice_route.as_mut() {
+            route.observed_at = stale;
+        }
+        let runtime_id = session.runtime_id.clone();
+        let registration_id = control.registration_id.clone();
+        register_managed_session(&paths, session, control)
+            .await
+            .expect("register stale session");
+        // The receipt type holds a runtime permit and implements no Debug, so
+        // match instead of expect_err (same pattern as the other receipt tests).
+        let error = match verify_managed_handshake_receipt(
+            &paths,
+            "receipt-stale",
+            &registration_id,
+            &runtime_id,
+            "X25519",
+        )
+        .await
+        {
+            Ok(_) => panic!("stale evidence must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("reused evidence"), "{error:#}");
         let _ = tokio::fs::remove_dir_all(&paths.root).await;
     }
 
