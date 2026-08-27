@@ -16,6 +16,7 @@ fn doctor_check<'a>(report: &'a DoctorProbeReport, name: &str) -> &'a DoctorChec
         .unwrap_or_else(|| panic!("{name} check missing"))
 }
 
+#[cfg(unix)]
 fn make_test_dir(name: &str) -> Result<PathBuf> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
