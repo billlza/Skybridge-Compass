@@ -1,7 +1,11 @@
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use super::*;
 
+// The fake leaks tools are shell scripts and the timeout paths exercise
+// unix process-group semantics; neither exists on Windows.
+#[cfg(unix)]
 #[test]
 fn memory_check_times_out_and_fails_without_fake_no_leaks() -> Result<()> {
     #[cfg(unix)]
@@ -37,6 +41,9 @@ fn memory_check_times_out_and_fails_without_fake_no_leaks() -> Result<()> {
     Ok(())
 }
 
+// The fake leaks tools are shell scripts and the timeout paths exercise
+// unix process-group semantics; neither exists on Windows.
+#[cfg(unix)]
 #[test]
 fn memory_check_timeout_kills_grandchild_pipe_holders() -> Result<()> {
     #[cfg(unix)]
@@ -74,6 +81,9 @@ fn memory_check_timeout_kills_grandchild_pipe_holders() -> Result<()> {
     Ok(())
 }
 
+// The fake leaks tools are shell scripts and the timeout paths exercise
+// unix process-group semantics; neither exists on Windows.
+#[cfg(unix)]
 #[test]
 fn memory_check_launch_scan_success_reports_no_leaks() -> Result<()> {
     #[cfg(unix)]
@@ -127,6 +137,9 @@ fn memory_check_missing_leaks_tool_reports_execution_failure() -> Result<()> {
     Ok(())
 }
 
+// The fake leaks tools are shell scripts and the timeout paths exercise
+// unix process-group semantics; neither exists on Windows.
+#[cfg(unix)]
 #[test]
 fn memory_check_failed_leaks_exit_fails_without_fake_no_leaks() -> Result<()> {
     #[cfg(unix)]

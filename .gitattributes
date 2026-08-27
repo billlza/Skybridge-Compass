@@ -1,2 +1,5 @@
 Tests/Fixtures/loopback_test_server_certificate.der binary
 Tests/Fixtures/loopback_test_server_private_key.x963 binary
+# Test fixtures are byte-exact evidence files; eol conversion on Windows
+# checkouts breaks their LF-termination and digest contracts.
+rust/crates/skybridge-cli/tests/fixtures/** -text
