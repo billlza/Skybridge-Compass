@@ -383,9 +383,7 @@ fn read_opened_regular_file(
 }
 
 fn validate_evidence_metadata(metadata: &Metadata, path: &Path, maximum_bytes: u64) -> Result<()> {
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || !path_level_single_link(metadata)
+    if metadata.file_type().is_symlink() || !metadata.is_file() || !path_level_single_link(metadata)
     {
         bail!(
             "required evidence must be a single-link regular file: {}",
