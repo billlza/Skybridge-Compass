@@ -579,9 +579,7 @@ jobs:
             --rust-toolchain "${RUST_TOOLCHAIN}" \
             --source-date-epoch "${SOURCE_DATE_EPOCH}" \
             --workflow-run-id "${GITHUB_RUN_ID}" \
-            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
-            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
-            --workflow-sha "${GITHUB_WORKFLOW_SHA}"
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}"
           mkdir -p "${RUNNER_TEMP}/handoff"
           python rust/scripts/cli_release_handoff.py create \
             --assets-dir "${RUNNER_TEMP}/release-assets" \
@@ -593,7 +591,9 @@ jobs:
             --rust-toolchain "${RUST_TOOLCHAIN}" \
             --source-date-epoch "${SOURCE_DATE_EPOCH}" \
             --workflow-run-id "${GITHUB_RUN_ID}" \
-            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}"
+            --workflow-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --workflow-sha "${GITHUB_WORKFLOW_SHA}"
 
       - id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
