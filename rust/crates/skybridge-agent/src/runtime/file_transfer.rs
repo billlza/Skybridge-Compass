@@ -3050,11 +3050,35 @@ fn receive_capacity_allows(
 }
 
 async fn remove_file_if_present(path: &Path) -> Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).context("failed to remove file-transfer staging file"),
+    // Windows filters (Defender, indexers) briefly hold freshly written
+    // files, so a first deletion attempt can fail with a sharing violation
+    // or access denied even though nothing durable owns the file. Retry for
+    // a bounded window before treating the deletion as failed; on unix the
+    // first attempt is always authoritative and the loop exits immediately.
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let mut last_error = None;
+    for _ in 0..40 {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if cfg!(windows)
+                    && (error.kind() == std::io::ErrorKind::PermissionDenied
+                        || error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => {
+                return Err(error).context("failed to remove file-transfer staging file");
+            }
+        }
     }
+    Err(last_error.map_or_else(
+        || anyhow!("file removal retries exhausted without a recorded error"),
+        anyhow::Error::from,
+    ))
+    .context("failed to remove file-transfer staging file after bounded sharing retries")
 }
 
 /// Atomically place the verified temp file under a collision-free name in
