@@ -148,14 +148,20 @@ jobs:
 
       - name: Check workspace tests
         env:
-          # The hosted 4-vCPU/16GB runner dies with a runner-service shutdown
-          # (kernel OOM) when full-debuginfo test binaries link in parallel
-          # while earlier test binaries are already executing. Debuginfo is
-          # not needed to prove the suite passes, and bounding the build jobs
-          # keeps the linker's peak memory inside the runner's budget.
+          # The hosted 4-vCPU/16GB runner has died with a runner-service
+          # shutdown mid-suite. Build every test binary first (bounded jobs,
+          # no debuginfo) so nothing links while tests execute, and stream
+          # memory telemetry to the live log so a repeat is attributable.
           CARGO_PROFILE_DEV_DEBUG: "0"
           CARGO_PROFILE_TEST_DEBUG: "0"
-        run: CARGO_TARGET_DIR=/tmp/skybridge-release-tests cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --jobs 3
+          CARGO_TARGET_DIR: /tmp/skybridge-release-tests
+        run: |
+          set -euo pipefail
+          ( while true; do free -m | awk 'NR==2 {print "[mem-telemetry] used="$3"MiB free="$4"MiB available="$7"MiB"}'; sleep 5; done ) &
+          MEM_TELEMETRY_PID=$!
+          trap 'kill "${MEM_TELEMETRY_PID}" 2>/dev/null || true' EXIT
+          cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --jobs 2 --no-run
+          cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --jobs 2
 
       - name: Check workspace lint
         run: CARGO_TARGET_DIR=/tmp/skybridge-release-clippy cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings

@@ -105,15 +105,19 @@ fn configure_child_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn terminate_timed_out_child(child: &mut Child) {
+    // "--" ends option parsing so the negative process-group argument can
+    // never be misread as an option or signal spec by any kill(1) flavor.
     let process_group = format!("-{}", child.id());
     let _ = Command::new("kill")
         .arg("-TERM")
+        .arg("--")
         .arg(&process_group)
         .status();
     thread::sleep(Duration::from_millis(100));
     if child.try_wait().ok().flatten().is_none() {
         let _ = Command::new("kill")
             .arg("-KILL")
+            .arg("--")
             .arg(&process_group)
             .status();
         let _ = child.kill();
