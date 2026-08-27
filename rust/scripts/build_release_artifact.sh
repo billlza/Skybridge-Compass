@@ -109,6 +109,30 @@ if [[ "${SKYBRIDGE_RELEASE_STRIP:-0}" == "1" ]] && [[ "${BINARY_NAME}" == "skybr
   strip "${STAGING_DIR}/${BINARY_NAME}"
 fi
 
+if [[ -n "${SKYBRIDGE_DARWIN_SIGNING_IDENTITY:-}" ]]; then
+  # The archive must contain the signed bytes, so signing happens on the
+  # staged binary before packaging. The identity is only meaningful for the
+  # darwin target; anything else indicates a misconfigured invocation.
+  [[ "${TARGET}" == *apple-darwin* ]] || {
+    echo "SKYBRIDGE_DARWIN_SIGNING_IDENTITY is set for a non-darwin target: ${TARGET}" >&2
+    exit 1
+  }
+  /usr/bin/codesign --force \
+    --options runtime \
+    --timestamp \
+    --sign "${SKYBRIDGE_DARWIN_SIGNING_IDENTITY}" \
+    "${STAGING_DIR}/${BINARY_NAME}"
+  /usr/bin/codesign --verify --strict --verbose=2 "${STAGING_DIR}/${BINARY_NAME}"
+  SIGNED_AUTHORITY="$(/usr/bin/codesign --display --verbose=2 "${STAGING_DIR}/${BINARY_NAME}" 2>&1 | grep '^Authority=' | head -1)"
+  [[ "${SIGNED_AUTHORITY}" == "Authority=Developer ID Application:"* ]] || {
+    echo "signed CLI authority is not a Developer ID Application certificate: ${SIGNED_AUTHORITY}" >&2
+    exit 1
+  }
+elif [[ "${TARGET}" == *apple-darwin* && "${SKYBRIDGE_REQUIRE_DARWIN_SIGNING:-0}" == "1" ]]; then
+  echo "SKYBRIDGE_REQUIRE_DARWIN_SIGNING=1 but SKYBRIDGE_DARWIN_SIGNING_IDENTITY is not set" >&2
+  exit 1
+fi
+
 ARCHIVE_NAME="skybridge-${TARGET}.${ARCHIVE_EXT}"
 ARCHIVE_PATH="${OUT_DIR}/${ARCHIVE_NAME}"
 [[ ! -e "${ARCHIVE_PATH}" && ! -L "${ARCHIVE_PATH}" ]] || {

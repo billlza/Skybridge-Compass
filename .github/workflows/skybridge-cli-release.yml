@@ -24,7 +24,6 @@ jobs:
       source_date_epoch: ${{ steps.meta.outputs.source_date_epoch }}
       rust_toolchain: ${{ steps.meta.outputs.rust_toolchain }}
       publish_requested: ${{ steps.meta.outputs.publish_requested }}
-      publication_blocked: ${{ steps.meta.outputs.publication_blocked }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,7 +54,6 @@ jobs:
           )"
           RELEASE_TAG="skybridge-cli-v${VERSION}"
           PUBLISH_REQUESTED=false
-          PUBLICATION_BLOCKED=false
 
           [[ "${SOURCE_SHA}" == "${GITHUB_SHA}" ]]
           python rust/scripts/finalize_cli_release_assets.py validate-metadata \
@@ -78,10 +76,12 @@ jobs:
               "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
             git merge-base --is-ancestor \
               "${SOURCE_SHA}" "refs/remotes/origin/${RELEASE_BRANCH}"
-            # Public archives are intentionally blocked until the workflow
-            # produces and verifies platform publisher signatures/notarization.
-            # The tag lane still builds and validates the exact release bundle.
-            PUBLICATION_BLOCKED=true
+            # Every source binding above held, so this tag may publish —
+            # but only after the public-release-signing-gate job verifies
+            # the macOS Developer ID signature and notarization proof
+            # produced by the darwin build. Publication stays fail-closed:
+            # every publish job requires that gate's success.
+            PUBLISH_REQUESTED=true
           fi
 
           {
@@ -91,7 +91,6 @@ jobs:
             echo "source_date_epoch=${SOURCE_DATE_EPOCH}"
             echo "rust_toolchain=${RUST_TOOLCHAIN}"
             echo "publish_requested=${PUBLISH_REQUESTED}"
-            echo "publication_blocked=${PUBLICATION_BLOCKED}"
           } >>"${GITHUB_OUTPUT}"
 
   verify:
@@ -167,12 +166,16 @@ jobs:
           bash -n rust/scripts/render_homebrew_formula.sh
           bash -n rust/scripts/publish_cli_github_release.sh
           bash -n rust/scripts/publish_homebrew_formula.sh
+          bash -n rust/scripts/write_darwin_signing_proof.sh
+          bash -n rust/scripts/verify_darwin_signing_proof.sh
           shellcheck \
             rust/scripts/build_release_artifact.sh \
             rust/scripts/assemble_release_assets.sh \
             rust/scripts/render_homebrew_formula.sh \
             rust/scripts/publish_cli_github_release.sh \
-            rust/scripts/publish_homebrew_formula.sh
+            rust/scripts/publish_homebrew_formula.sh \
+            rust/scripts/write_darwin_signing_proof.sh \
+            rust/scripts/verify_darwin_signing_proof.sh
 
       - name: Run release contract and fault-injection tests
         run: |
@@ -266,6 +269,46 @@ jobs:
             --all-targets \
             --target "${TARGET}"
 
+      - name: Import the Developer ID signing certificate
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-skybridge-cli
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/skybridge-cli-release.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          echo "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            echo "::error::Unable to resolve a Developer ID Application identity for CLI signing."
+            exit 1
+          fi
+          echo "SKYBRIDGE_DARWIN_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
       - name: Build the exact release asset
         shell: bash
         env:
@@ -281,6 +324,76 @@ jobs:
             --target "${{ matrix.target }}" \
             --out-dir "${RUNNER_TEMP}/release-asset"
           test -f "${RUNNER_TEMP}/release-asset/${{ matrix.asset }}"
+
+      - name: Notarize the signed darwin binary and record the proof
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+          ASSET_NAME: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          umask 077
+          NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
+          echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+
+          WORK_DIR="$(mktemp -d)"
+          tar -xzf "${RUNNER_TEMP}/release-asset/${ASSET_NAME}" -C "$WORK_DIR"
+          [[ -f "$WORK_DIR/skybridge" ]]
+          /usr/bin/ditto -c -k "$WORK_DIR" "$WORK_DIR/skybridge-notarization.zip"
+
+          xcrun notarytool submit "$WORK_DIR/skybridge-notarization.zip" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARYTOOL_KEY_ID" \
+            --issuer "$NOTARYTOOL_ISSUER" \
+            --wait \
+            --output-format json > "$WORK_DIR/notarytool-submit.json"
+          SUBMISSION_ID="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$WORK_DIR/notarytool-submit.json")"
+          SUBMISSION_STATUS="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$WORK_DIR/notarytool-submit.json")"
+          if [[ "$SUBMISSION_STATUS" != "Accepted" ]]; then
+            echo "::error::Notarization was not accepted (status: $SUBMISSION_STATUS, submission: $SUBMISSION_ID)."
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key "$NOTARY_KEY_PATH" \
+              --key-id "$NOTARYTOOL_KEY_ID" \
+              --issuer "$NOTARYTOOL_ISSUER" || true
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/signing-proof"
+          bash rust/scripts/write_darwin_signing_proof.sh \
+            --binary "$WORK_DIR/skybridge" \
+            --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --submission-id "$SUBMISSION_ID" \
+            --submission-status "$SUBMISSION_STATUS" \
+            --output "${RUNNER_TEMP}/signing-proof/darwin-signing-proof.json"
+          rm -f "$NOTARY_KEY_PATH"
+          rm -rf "$WORK_DIR"
+
+      - name: Upload the darwin signing proof
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skybridge-cli-darwin-signing-proof
+          path: ${{ runner.temp }}/signing-proof/darwin-signing-proof.json
+          if-no-files-found: error
+          retention-days: 90
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Remove the temporary signing keychain
+        if: always() && matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -u
+          if [[ -n "${KEYCHAIN_PATH:-}" && -e "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" || exit 1
+          fi
+          /bin/rm -f "$RUNNER_TEMP/developer-id.p12" "$RUNNER_TEMP/notarytool-authkey.p8"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -460,33 +573,76 @@ jobs:
           [[ "${ARTIFACT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
 
   public-release-signing-gate:
-    if: always() && needs.metadata.outputs.publication_blocked == 'true'
+    if: needs.metadata.outputs.publish_requested == 'true'
     needs:
       - metadata
+      - build
       - assemble
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    runs-on: macos-14
+    timeout-minutes: 15
     permissions:
+      actions: read
       contents: read
     steps:
-      - name: Reject publication without platform publisher proof
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-aarch64-apple-darwin
+          path: ${{ runner.temp }}/darwin-asset
+          digest-mismatch: error
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: skybridge-cli-darwin-signing-proof
+          path: ${{ runner.temp }}/signing-proof
+          digest-mismatch: error
+
+      - name: Verify macOS signing and notarization before any publication
         shell: bash
         env:
-          ASSEMBLE_RESULT: ${{ needs.assemble.result }}
+          NOTARYTOOL_KEY_P8_BASE64: ${{ secrets.NOTARYTOOL_KEY_P8_BASE64 }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.NOTARYTOOL_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.NOTARYTOOL_ISSUER }}
+          EXPECTED_VERSION: ${{ needs.metadata.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
         run: |
           set -euo pipefail
-          [[ "${ASSEMBLE_RESULT}" == "success" ]] || {
-            echo "release bundle validation did not complete successfully" >&2
-            exit 1
-          }
-          echo "public CLI publication is blocked until macOS signing/notarization and Windows publisher-signature proofs are produced and verified" >&2
-          exit 1
+          umask 077
+          NOTARY_KEY_PATH="$RUNNER_TEMP/notarytool-authkey.p8"
+          echo "$NOTARYTOOL_KEY_P8_BASE64" | base64 --decode > "$NOTARY_KEY_PATH"
+          SUBMISSION_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notarization_submission_id"])' "$RUNNER_TEMP/signing-proof/darwin-signing-proof.json")"
+          xcrun notarytool info "$SUBMISSION_ID" \
+            --key "$NOTARY_KEY_PATH" \
+            --key-id "$NOTARYTOOL_KEY_ID" \
+            --issuer "$NOTARYTOOL_ISSUER" \
+            --output-format json > "$RUNNER_TEMP/notary-info.json"
+          rm -f "$NOTARY_KEY_PATH"
+
+          # The macOS binary must carry a verified Developer ID signature and
+          # an Apple-accepted notarization before anything publishes.
+          # Windows publisher-signature proofs remain unavailable (no
+          # publisher certificate exists); Windows and Linux archives are
+          # published checksummed with the immutable CI handoff provenance,
+          # exactly as every published 0.2.x release was.
+          bash rust/scripts/verify_darwin_signing_proof.sh \
+            --archive "$RUNNER_TEMP/darwin-asset/skybridge-aarch64-apple-darwin.tar.gz" \
+            --proof "$RUNNER_TEMP/signing-proof/darwin-signing-proof.json" \
+            --expected-version "$EXPECTED_VERSION" \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-team-id "YKUPL7Z869" \
+            --notary-info-json "$RUNNER_TEMP/notary-info.json"
 
   publish-github:
     if: needs.metadata.outputs.publish_requested == 'true'
     needs:
       - metadata
       - assemble
+      - public-release-signing-gate
     permissions:
       actions: read
       contents: write
@@ -561,7 +717,13 @@ jobs:
           include-hidden-files: false
 
   publish-npm:
-    if: needs.metadata.outputs.publish_requested == 'true'
+    # npm publication uses OIDC trusted publishing, which must first be
+    # configured for the skybridge-cli package on npmjs.com; the explicit
+    # repository variable records that this one-time setup happened. Without
+    # it the channel is skipped honestly instead of failing the release.
+    if: >-
+      needs.metadata.outputs.publish_requested == 'true' &&
+      vars.SKYBRIDGE_CLI_NPM_TRUSTED_PUBLISHING == 'true'
     needs:
       - metadata
       - assemble
@@ -663,7 +825,14 @@ jobs:
           include-hidden-files: false
 
   validate-homebrew:
-    if: needs.metadata.outputs.publish_requested == 'true'
+    # The npm channel may be legitimately skipped (trusted publishing not yet
+    # configured); the Homebrew channel then still validates and publishes
+    # against the immutable GitHub release.
+    if: >-
+      always() &&
+      needs.metadata.outputs.publish_requested == 'true' &&
+      needs.publish-github.result == 'success' &&
+      (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped')
     needs:
       - metadata
       - assemble
@@ -697,7 +866,8 @@ jobs:
           path: ${{ runner.temp }}/github-proof
           digest-mismatch: error
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - if: needs.publish-npm.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.publish-npm.outputs.proof_artifact_id }}
           path: ${{ runner.temp }}/npm-proof
@@ -730,6 +900,11 @@ jobs:
             --workflow-run-attempt "${{ needs.assemble.outputs.producer_run_attempt }}" \
             --handoff-artifact-id "${{ needs.assemble.outputs.artifact_id }}" \
             --handoff-artifact-digest "${{ needs.assemble.outputs.artifact_digest }}"
+
+      - name: Verify the npm channel proof
+        if: needs.publish-npm.result == 'success'
+        shell: bash
+        run: |
           python rust/scripts/verify_cli_release_proof.py npm \
             --proof "${RUNNER_TEMP}/npm-proof/npm-release-proof.json" \
             --package-file "${RUNNER_TEMP}/release-assets/skybridge-cli-${{ needs.metadata.outputs.version }}.tgz" \
@@ -765,7 +940,12 @@ jobs:
           fi
 
   publish-homebrew:
-    if: needs.metadata.outputs.publish_requested == 'true'
+    if: >-
+      always() &&
+      needs.metadata.outputs.publish_requested == 'true' &&
+      needs.publish-github.result == 'success' &&
+      (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped') &&
+      needs.validate-homebrew.result == 'success'
     needs:
       - metadata
       - assemble

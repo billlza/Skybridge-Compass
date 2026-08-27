@@ -146,15 +146,65 @@ class SkyBridgeCLIReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_publication_is_blocked_until_platform_signatures_are_verified(self) -> None:
         metadata = job_block(self.workflow, "metadata")
+        build = job_block(self.workflow, "build")
         signing_gate = job_block(self.workflow, "public-release-signing-gate")
+        github = job_block(self.workflow, "publish-github")
+        npm = job_block(self.workflow, "publish-npm")
 
-        self.assertIn("publication_blocked:", metadata)
-        self.assertIn("PUBLICATION_BLOCKED=true", metadata)
-        self.assertNotIn("PUBLISH_REQUESTED=true", metadata)
+        # The tag lane requests publication only after every source binding
+        # held, and every publish job sits behind the signing gate's success.
+        self.assertIn("PUBLISH_REQUESTED=true", metadata)
+        self.assertNotIn("PUBLICATION_BLOCKED", metadata)
+        self.assertIn("- public-release-signing-gate", github)
+
+        # The darwin build signs with the imported Developer ID identity and
+        # records an Apple-accepted notarization proof; the packaging script
+        # signs the staged binary so the archive ships the signed bytes.
+        self.assertIn("name: Import the Developer ID signing certificate", build)
+        self.assertIn("SKYBRIDGE_DARWIN_SIGNING_IDENTITY", build)
+        self.assertIn("xcrun notarytool submit", build)
+        self.assertIn("--wait", build)
+        self.assertIn("write_darwin_signing_proof.sh", build)
+        self.assertIn("name: skybridge-cli-darwin-signing-proof", build)
+        packaging_script = (ROOT / "rust/scripts/build_release_artifact.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SKYBRIDGE_DARWIN_SIGNING_IDENTITY", packaging_script)
+        self.assertIn("--options runtime", packaging_script)
+        self.assertIn("codesign --verify --strict", packaging_script.replace("/usr/bin/", ""))
+
+        # The gate re-verifies the released archive on a mac: strict codesign
+        # verification, the pinned team, byte and cdhash equality with the
+        # proof, and a live Accepted answer from Apple's notary service.
+        self.assertIn("- build", signing_gate)
         self.assertIn("- assemble", signing_gate)
-        self.assertIn("macOS signing/notarization", signing_gate)
-        self.assertIn("Windows publisher-signature proofs", signing_gate)
-        self.assertIn("exit 1", signing_gate)
+        self.assertIn("runs-on: macos-14", signing_gate)
+        self.assertIn("name: skybridge-cli-darwin-signing-proof", signing_gate)
+        self.assertIn("xcrun notarytool info", signing_gate)
+        self.assertIn("verify_darwin_signing_proof.sh", signing_gate)
+        self.assertIn('--expected-team-id "YKUPL7Z869"', signing_gate)
+        # Windows publisher signing remains unavailable; the exception must be
+        # documented in the gate, never silently dropped.
+        self.assertIn("Windows publisher-signature proofs remain unavailable", signing_gate)
+        verifier = (ROOT / "rust/scripts/verify_darwin_signing_proof.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("codesign --verify --strict", verifier.replace("/usr/bin/", ""))
+        self.assertIn("CDHash=", verifier)
+        self.assertIn('info.get("status") != "Accepted"', verifier)
+
+        # npm trusted publishing needs one-time registry configuration; the
+        # channel is gated on an explicit repository variable and downstream
+        # Homebrew publication tolerates the skip but never an npm failure.
+        self.assertIn("SKYBRIDGE_CLI_NPM_TRUSTED_PUBLISHING == 'true'", npm)
+        validate_homebrew = job_block(self.workflow, "validate-homebrew")
+        homebrew = job_block(self.workflow, "publish-homebrew")
+        for dependent in (validate_homebrew, homebrew):
+            self.assertIn("needs.publish-github.result == 'success'", dependent)
+            self.assertIn(
+                "(needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped')",
+                dependent,
+            )
 
     def test_exact_assets_and_lifecycle_boundaries_are_enforced(self) -> None:
         exact_assets = (
