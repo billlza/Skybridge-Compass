@@ -969,8 +969,13 @@ jobs:
             echo "skybridge is unexpectedly preinstalled on the release validator" >&2
             exit 1
           fi
-          brew audit --strict --online "${RUNNER_TEMP}/release-assets/skybridge.rb"
-          brew install --formula "${RUNNER_TEMP}/release-assets/skybridge.rb"
+          # Modern Homebrew refuses audits by path; stage the released
+          # formula into a throwaway local tap and audit/install it by name.
+          TAP_STAGING="$(brew --repository)/Library/Taps/skybridge-staging/homebrew-staging"
+          mkdir -p "${TAP_STAGING}/Formula"
+          cp "${RUNNER_TEMP}/release-assets/skybridge.rb" "${TAP_STAGING}/Formula/skybridge.rb"
+          brew audit --strict --online skybridge-staging/staging/skybridge
+          brew install --formula skybridge-staging/staging/skybridge
           VERSION_OUTPUT="$(skybridge version)"
           [[ "${VERSION_OUTPUT}" == *"${{ needs.metadata.outputs.version }}"* ]]
           [[ "${VERSION_OUTPUT}" == *"phase_5_signaling_plane"* ]]
@@ -983,6 +988,7 @@ jobs:
           if brew list --formula skybridge >/dev/null 2>&1; then
             brew uninstall --force skybridge
           fi
+          /bin/rm -rf "$(brew --repository)/Library/Taps/skybridge-staging"
 
   publish-homebrew:
     if: >-
