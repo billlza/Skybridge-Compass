@@ -357,7 +357,7 @@ mod tests {
         lock_file.lock()?;
         let lease = AgentRuntimeLease::new("lease-owner", 1, paths.root.display().to_string());
         std::fs::write(
-            &paths.agent_runtime_lock_file,
+            &paths.agent_runtime_lease_file,
             serde_json::to_vec_pretty(&lease)?,
         )?;
         let forged_health = AgentHealthSnapshot::new_for_instance(

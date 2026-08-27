@@ -12,6 +12,7 @@ pub struct AgentPaths {
     pub received_dir: PathBuf,
     pub identity_file: PathBuf,
     pub agent_runtime_lock_file: PathBuf,
+    pub agent_runtime_lease_file: PathBuf,
     pub session_controls_file: PathBuf,
     pub session_controls_lock_file: PathBuf,
     pub nearby_discovery_snapshots_file: PathBuf,
@@ -42,6 +43,10 @@ pub fn resolve_paths(state_dir_override: Option<PathBuf>) -> Result<AgentPaths> 
         received_dir: root.join("received"),
         identity_file: root.join("identity").join("device.json"),
         agent_runtime_lock_file: root.join("runtime").join("agent.lock"),
+        // The lease lives beside the lock, never inside it: Windows file
+        // locks are mandatory, so readers of a lease stored in the locked
+        // file itself would fail while the owning agent is alive.
+        agent_runtime_lease_file: root.join("runtime").join("agent-lease.json"),
         session_controls_file: root.join("runtime").join("session-controls.json"),
         session_controls_lock_file: root.join("runtime").join("session-controls.json.lock"),
         nearby_discovery_snapshots_file: root

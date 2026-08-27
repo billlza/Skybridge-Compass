@@ -331,6 +331,19 @@ jobs:
 
           SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
           if [[ -z "$SIGNING_IDENTITY" ]]; then
+            # Diagnose exactly why no valid Developer ID identity resolved:
+            # names and validity of everything the keychain holds are public.
+            echo "--- identities (valid, codesigning) ---"
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            echo "--- identities (all) ---"
+            security find-identity "$KEYCHAIN_PATH" || true
+            echo "--- certificates in the keychain ---"
+            security find-certificate -a "$KEYCHAIN_PATH" -p \
+              | awk 'BEGIN{n=0} /BEGIN CERT/{n+=1} {print > ("/tmp/kc-cert-" n ".pem")}' || true
+            for cert in /tmp/kc-cert-*.pem; do
+              [[ -s "$cert" ]] || continue
+              openssl x509 -noout -subject -issuer -enddate -in "$cert" || true
+            done
             echo "::error::Unable to resolve a Developer ID Application identity for CLI signing."
             exit 1
           fi

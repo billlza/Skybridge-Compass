@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::future::Future;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -220,7 +220,7 @@ fn open_agent_runtime_lock_file(paths: &AgentPaths) -> Result<File> {
 }
 
 fn acquire_agent_runtime_lock(paths: &AgentPaths) -> Result<AgentRuntimeLock> {
-    let mut file = open_agent_runtime_lock_file(paths)?;
+    let file = open_agent_runtime_lock_file(paths)?;
     match file.try_lock() {
         Ok(()) => {
             let lease = AgentRuntimeLease::new(
@@ -228,7 +228,7 @@ fn acquire_agent_runtime_lock(paths: &AgentPaths) -> Result<AgentRuntimeLock> {
                 std::process::id(),
                 paths.root.display().to_string(),
             );
-            write_agent_runtime_lease(&mut file, &paths.agent_runtime_lock_file, &lease)?;
+            write_agent_runtime_lease(paths, &lease)?;
             Ok(AgentRuntimeLock { _file: file, lease })
         }
         Err(TryLockError::WouldBlock) => bail!(
@@ -244,20 +244,44 @@ fn acquire_agent_runtime_lock(paths: &AgentPaths) -> Result<AgentRuntimeLock> {
     }
 }
 
-fn write_agent_runtime_lease(
-    file: &mut File,
-    path: &std::path::Path,
-    lease: &AgentRuntimeLease,
-) -> Result<()> {
+fn write_agent_runtime_lease(paths: &AgentPaths, lease: &AgentRuntimeLease) -> Result<()> {
+    // The lease is published in its own file rather than the locked lock
+    // file: Windows file locks are mandatory, so lease readers would fail
+    // with a sharing violation for as long as the owning agent lives. The
+    // write is atomic (temp + rename) so readers never observe a torn lease.
+    let path = &paths.agent_runtime_lease_file;
     let body = serde_json::to_vec_pretty(lease).context("failed to encode agent runtime lease")?;
-    file.set_len(0)
-        .with_context(|| format!("failed to truncate agent runtime lease {}", path.display()))?;
-    file.seek(SeekFrom::Start(0))
-        .with_context(|| format!("failed to rewind agent runtime lease {}", path.display()))?;
-    file.write_all(&body)
-        .with_context(|| format!("failed to write agent runtime lease {}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync agent runtime lease {}", path.display()))?;
+    let temp_path = path.with_extension("json.tmp");
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp_path)
+            .with_context(|| {
+                format!(
+                    "failed to stage agent runtime lease {}",
+                    temp_path.display()
+                )
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .with_context(|| {
+                    format!(
+                        "failed to restrict agent runtime lease {}",
+                        temp_path.display()
+                    )
+                })?;
+        }
+        file.write_all(&body)
+            .with_context(|| format!("failed to write agent runtime lease {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync agent runtime lease {}", path.display()))?;
+    }
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("failed to publish agent runtime lease {}", path.display()))?;
     Ok(())
 }
 
@@ -424,7 +448,7 @@ pub async fn load_health_snapshot(paths: &AgentPaths) -> Result<Option<AgentHeal
 }
 
 pub async fn load_agent_runtime_lease(paths: &AgentPaths) -> Result<Option<AgentRuntimeLease>> {
-    load_json::<AgentRuntimeLease>(&paths.agent_runtime_lock_file).await
+    load_json::<AgentRuntimeLease>(&paths.agent_runtime_lease_file).await
 }
 
 fn spawn_heartbeat(

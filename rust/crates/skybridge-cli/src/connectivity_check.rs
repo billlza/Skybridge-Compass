@@ -378,6 +378,7 @@ fn read_opened_regular_file(
         if reopened_identity != opened_identity_before {
             bail!("evidence file changed while reading: {}", path.display());
         }
+        drop(reopened);
     }
     Ok(content)
 }
@@ -435,13 +436,12 @@ fn same_stable_evidence_metadata(left: &Metadata, right: &Metadata) -> bool {
 fn same_stable_evidence_metadata(left: &Metadata, right: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     // Volume/file-index/link identity at the stat level needs the unstable
-    // windows_by_handle std feature; file identity and the single-link rule
-    // are enforced from the opened handle instead, so this compares the
-    // stable mutation-visible fields.
-    left.file_attributes() == right.file_attributes()
-        && left.len() == right.len()
-        && left.last_write_time() == right.last_write_time()
-        && left.creation_time() == right.creation_time()
+    // windows_by_handle std feature; file identity, the single-link rule,
+    // and write-time stability are enforced from the opened handle instead.
+    // Timestamps are excluded here deliberately: NTFS updates directory-entry
+    // timestamps lazily, so a path stat and a handle stat of the same
+    // untouched file can legitimately disagree.
+    left.file_attributes() == right.file_attributes() && left.len() == right.len()
 }
 
 #[cfg(windows)]
@@ -451,6 +451,10 @@ struct OpenedEvidenceIdentity {
     file_index_high: u32,
     file_index_low: u32,
     number_of_links: u32,
+    last_write_time_low: u32,
+    last_write_time_high: u32,
+    file_size_high: u32,
+    file_size_low: u32,
 }
 
 #[cfg(windows)]
@@ -476,6 +480,10 @@ fn opened_evidence_identity(file: &File, path: &Path) -> Result<OpenedEvidenceId
         file_index_high: information.nFileIndexHigh,
         file_index_low: information.nFileIndexLow,
         number_of_links: information.nNumberOfLinks,
+        last_write_time_low: information.ftLastWriteTime.dwLowDateTime,
+        last_write_time_high: information.ftLastWriteTime.dwHighDateTime,
+        file_size_high: information.nFileSizeHigh,
+        file_size_low: information.nFileSizeLow,
     })
 }
 

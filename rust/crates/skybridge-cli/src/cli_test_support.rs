@@ -116,7 +116,7 @@ pub(crate) fn activate_test_agent(
         paths.root.display().to_string(),
     );
     std::fs::write(
-        &paths.agent_runtime_lock_file,
+        &paths.agent_runtime_lease_file,
         serde_json::to_vec_pretty(&lease)?,
     )?;
     std::fs::write(&paths.health_file, serde_json::to_vec_pretty(&health)?)?;
