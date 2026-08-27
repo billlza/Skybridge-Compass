@@ -322,6 +322,17 @@ fn read_opened_regular_file(
             path.display()
         );
     }
+    #[cfg(windows)]
+    let opened_identity_before = {
+        let identity = opened_evidence_identity(&file, path)?;
+        if identity.number_of_links != 1 {
+            bail!(
+                "required evidence must be a single-link regular file: {}",
+                path.display()
+            );
+        }
+        identity
+    };
 
     let mut content = Vec::with_capacity(opened_metadata_before.len() as usize);
     file.by_ref()
@@ -351,13 +362,30 @@ fn read_opened_regular_file(
     {
         bail!("evidence file changed while reading: {}", path.display());
     }
+    #[cfg(windows)]
+    {
+        // Bind the handle identity across the read, and bind the path to the
+        // same physical file by re-opening it and comparing identities — the
+        // stable-std replacement for stat-level volume/file-index equality.
+        let opened_identity_after = opened_evidence_identity(&file, path)?;
+        if opened_identity_after != opened_identity_before
+            || opened_identity_after.number_of_links != 1
+        {
+            bail!("evidence file changed while reading: {}", path.display());
+        }
+        let reopened = open_evidence_file_no_follow(path)?;
+        let reopened_identity = opened_evidence_identity(&reopened, path)?;
+        if reopened_identity != opened_identity_before {
+            bail!("evidence file changed while reading: {}", path.display());
+        }
+    }
     Ok(content)
 }
 
 fn validate_evidence_metadata(metadata: &Metadata, path: &Path, maximum_bytes: u64) -> Result<()> {
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
-        || evidence_link_count(metadata) != Some(1)
+        || !path_level_single_link(metadata)
     {
         bail!(
             "required evidence must be a single-link regular file: {}",
@@ -374,20 +402,23 @@ fn validate_evidence_metadata(metadata: &Metadata, path: &Path, maximum_bytes: u
 }
 
 #[cfg(unix)]
-fn evidence_link_count(metadata: &Metadata) -> Option<u64> {
+fn path_level_single_link(metadata: &Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    Some(metadata.nlink())
+    metadata.nlink() == 1
 }
 
 #[cfg(windows)]
-fn evidence_link_count(metadata: &Metadata) -> Option<u64> {
-    use std::os::windows::fs::MetadataExt;
-    metadata.number_of_links().map(u64::from)
+fn path_level_single_link(metadata: &Metadata) -> bool {
+    // Stat-level link counts on Windows need the unstable windows_by_handle
+    // std feature; the single-link rule is enforced from the opened handle
+    // in read_opened_regular_file instead, which is the stronger check.
+    let _ = metadata;
+    true
 }
 
 #[cfg(not(any(unix, windows)))]
-fn evidence_link_count(_metadata: &Metadata) -> Option<u64> {
-    None
+fn path_level_single_link(_metadata: &Metadata) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -405,12 +436,49 @@ fn same_stable_evidence_metadata(left: &Metadata, right: &Metadata) -> bool {
 #[cfg(windows)]
 fn same_stable_evidence_metadata(left: &Metadata, right: &Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
-    left.volume_serial_number() == right.volume_serial_number()
-        && left.file_index() == right.file_index()
-        && left.file_attributes() == right.file_attributes()
-        && left.number_of_links() == right.number_of_links()
+    // Volume/file-index/link identity at the stat level needs the unstable
+    // windows_by_handle std feature; file identity and the single-link rule
+    // are enforced from the opened handle instead, so this compares the
+    // stable mutation-visible fields.
+    left.file_attributes() == right.file_attributes()
         && left.len() == right.len()
         && left.last_write_time() == right.last_write_time()
+        && left.creation_time() == right.creation_time()
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OpenedEvidenceIdentity {
+    volume_serial_number: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+    number_of_links: u32,
+}
+
+#[cfg(windows)]
+fn opened_evidence_identity(file: &File, path: &Path) -> Result<OpenedEvidenceIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: the handle is owned by `file` and stays open for the duration
+    // of the call; the structure is plain data the kernel fills on success.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut information) };
+    if succeeded == 0 {
+        bail!(
+            "unable to read the opened evidence file identity: {}",
+            path.display()
+        );
+    }
+    Ok(OpenedEvidenceIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index_high: information.nFileIndexHigh,
+        file_index_low: information.nFileIndexLow,
+        number_of_links: information.nNumberOfLinks,
+    })
 }
 
 #[cfg(not(any(unix, windows)))]

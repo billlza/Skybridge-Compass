@@ -305,6 +305,19 @@ jobs:
           security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          # The hosted runner's keychains lack Apple's Developer ID G2
+          # intermediate, so the imported leaf never validates and
+          # find-identity reports no usable identity. Import the vendored
+          # public intermediate after pinning its SHA-256 fingerprint.
+          G2_CA_PATH="VendorProvenance/Apple/apple-developer-id-g2-ca.pem"
+          G2_FP="$(openssl x509 -noout -fingerprint -sha256 -in "$G2_CA_PATH" | cut -d= -f2 | tr -d ':')"
+          if [[ "$G2_FP" != "F16CD3C54C7F83CEA4BF1A3E6A0819C8AAA8E4A1528FD144715F350643D2DF3A" ]]; then
+            echo "::error::Vendored Apple Developer ID G2 CA fingerprint mismatch: $G2_FP"
+            exit 1
+          fi
+          security import "$G2_CA_PATH" -k "$KEYCHAIN_PATH"
+
           security import "$CERT_PATH" \
             -k "$KEYCHAIN_PATH" \
             -P "$DEVELOPER_ID_CERT_PASSWORD" \
