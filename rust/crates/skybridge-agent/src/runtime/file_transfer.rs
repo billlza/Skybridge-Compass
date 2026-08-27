@@ -3159,8 +3159,11 @@ async fn sync_received_directory_metadata(path: &Path) -> Result<()> {
         let directory = {
             use std::os::windows::fs::OpenOptionsExt;
             const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            // FlushFileBuffers demands a write-access handle; a read-only
+            // directory handle fails the flush with ACCESS_DENIED every time.
             std::fs::OpenOptions::new()
                 .read(true)
+                .write(true)
                 .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
                 .open(&path)
                 .with_context(|| format!("failed to open {} for directory sync", path.display()))?
