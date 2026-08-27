@@ -76,7 +76,13 @@ jobs:
         run: cargo fmt --manifest-path rust/Cargo.toml --all --check
 
       - name: Check workspace tests
-        run: CARGO_TARGET_DIR=/tmp/skybridge-workspace-tests cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets
+        env:
+          # Same memory budget as the release lane: no debuginfo and bounded
+          # build jobs, or the hosted runner OOMs mid-suite and reports a
+          # runner-service shutdown instead of a test result.
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        run: CARGO_TARGET_DIR=/tmp/skybridge-workspace-tests cargo test --locked --manifest-path rust/Cargo.toml --workspace --all-targets --jobs 3
 
       - name: Check workspace lint
         run: CARGO_TARGET_DIR=/tmp/skybridge-workspace-clippy cargo clippy --locked --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
