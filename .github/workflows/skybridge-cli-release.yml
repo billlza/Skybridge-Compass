@@ -532,7 +532,10 @@ jobs:
           npm pack "${RUNNER_TEMP}/npm-package" \
             --pack-destination "${RUNNER_TEMP}/release-assets" \
             --ignore-scripts
-          python - "${RUNNER_TEMP}/release-assets/skybridge-cli-${VERSION}.tgz" "${VERSION}" <<'PY'
+          python - \
+            "${RUNNER_TEMP}/release-assets/skybridge-cli-${VERSION}.tgz" \
+            "${VERSION}" \
+            "${RUNNER_TEMP}/release-assets" <<'PY'
           import pathlib
           import sys
           sys.path.insert(0, "rust/scripts")
@@ -542,7 +545,9 @@ jobs:
               version=sys.argv[2],
               source_repository="billlza/Skybridge-Compass",
               source_sha="${{ needs.metadata.outputs.source_sha }}",
-              native_assets_dir=pathlib.Path("${RUNNER_TEMP}/release-assets"),
+              # The heredoc is quoted, so shell variables never expand inside
+              # it; every runtime path must arrive through argv.
+              native_assets_dir=pathlib.Path(sys.argv[3]),
           )
           PY
 
