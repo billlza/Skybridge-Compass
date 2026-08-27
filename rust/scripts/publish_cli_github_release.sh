@@ -101,14 +101,31 @@ verify_remote_tag() {
 }
 verify_remote_tag
 
-immutable_enabled="$(
+# The immutable-releases setting is an administration read that the
+# workflow's integration token is not allowed to see (HTTP 403). That exact
+# refusal is tolerated here — the published release's isImmutable flag is
+# asserted after publication either way, which is the enforcing check. Any
+# readable answer other than enabled=true still fails closed.
+immutable_probe_stderr="$(mktemp "${TMPDIR:-/tmp}/skybridge-immutable-probe.XXXXXX")"
+if immutable_enabled="$(
   gh api \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2026-03-10" \
     "repos/${REPOSITORY}/immutable-releases" \
-    --jq '.enabled'
-)"
-[[ "${immutable_enabled}" == "true" ]] || fail "repository immutable releases must be enabled"
+    --jq '.enabled' 2>"${immutable_probe_stderr}"
+)"; then
+  /bin/rm -f "${immutable_probe_stderr}"
+  [[ "${immutable_enabled}" == "true" ]] || fail "repository immutable releases must be enabled"
+else
+  if grep -q "HTTP 403" "${immutable_probe_stderr}"; then
+    /bin/rm -f "${immutable_probe_stderr}"
+    echo "[cli-github-release] immutable-releases setting is not readable by this token; relying on the post-publish isImmutable assertion"
+  else
+    cat "${immutable_probe_stderr}" >&2
+    /bin/rm -f "${immutable_probe_stderr}"
+    fail "unable to read the repository immutable-releases setting"
+  fi
+fi
 
 asset_names=(
   "skybridge-aarch64-apple-darwin.tar.gz"
