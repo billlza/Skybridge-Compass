@@ -404,6 +404,16 @@ class PhysicalAcceptanceTests(unittest.TestCase):
 
 
 class AppStoreProductPolicyTests(unittest.TestCase):
+    def test_release_source_and_app_store_require_the_same_production_environment(self) -> None:
+        release_entitlements = plistlib.loads(
+            (ROOT / "SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements").read_bytes()
+        )
+        key = app_store_verifier.ICLOUD_CONTAINER_ENVIRONMENT
+        self.assertEqual(release_entitlements[key], "Production")
+        self.assertEqual(app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES[key], "Production")
+        self.assertFalse(app_store_verifier._profile_value_covers(["Production"], "Production"))
+        self.assertTrue(app_store_verifier._profile_value_covers(["TEAM.*"], ["TEAM.app"]))
+
     def test_archive_and_exported_metadata_must_match(self) -> None:
         identity = {
             "releaseVersion": VERSION,
@@ -446,6 +456,8 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                 **app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
             }
             profile_entitlements = dict(entitlements)
+            environment_key = app_store_verifier.ICLOUD_CONTAINER_ENVIRONMENT
+            profile_entitlements[environment_key] = ["Production", "Development"]
             profile = {
                 "Entitlements": profile_entitlements,
                 "TeamIdentifier": [app_store_verifier.EXPECTED_TEAM],
@@ -456,6 +468,10 @@ class AppStoreProductPolicyTests(unittest.TestCase):
 
             def fake_run(args: list[str], _label: str) -> bytes:
                 if "--entitlements" in args:
+                    self.assertEqual(
+                        args[:-1],
+                        ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml"],
+                    )
                     return plistlib.dumps(entitlements)
                 return b""
 
@@ -476,6 +492,49 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                     expected_bundle_identifier=archive_identity.APP_BUNDLE_IDENTIFIER,
                     expected_entitlements=app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
                 )
+                for target_name, target, invalid_values in (
+                    (
+                        "signed", entitlements,
+                        (None, "Development", "production", "Unknown", "", ["Production"], True),
+                    ),
+                    (
+                        "profile", profile_entitlements,
+                        (None, "Development", ["Development"], "*", [], ["Production", True], ["Production", "Unknown"]),
+                    ),
+                ):
+                    original = target[environment_key]
+                    for value in invalid_values:
+                        with self.subTest(target=target_name, value=value):
+                            if value is None:
+                                target.pop(environment_key, None)
+                            else:
+                                target[environment_key] = value
+                            with self.assertRaisesRegex(
+                                app_store_verifier.AppStoreVerificationError,
+                                environment_key,
+                            ):
+                                app_store_verifier._validate_target(
+                                    label="App Store app", bundle=bundle,
+                                    expected_bundle_identifier=archive_identity.APP_BUNDLE_IDENTIFIER,
+                                    expected_entitlements=app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
+                                )
+                    target[environment_key] = original
+                for value in (None, "Development", ["Production"]):
+                    with self.subTest(expected_environment=value):
+                        expected = dict(app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES)
+                        if value is None:
+                            expected.pop(environment_key)
+                        else:
+                            expected[environment_key] = value
+                        with self.assertRaisesRegex(
+                            app_store_verifier.AppStoreVerificationError,
+                            "policy must require Production",
+                        ):
+                            app_store_verifier._validate_target(
+                                label="App Store app", bundle=bundle,
+                                expected_bundle_identifier=archive_identity.APP_BUNDLE_IDENTIFIER,
+                                expected_entitlements=expected,
+                            )
                 for unexpected_key, unexpected_value in (
                     ("com.apple.developer.associated-domains", ["applinks:example.invalid"]),
                     ("com.example.unreviewed-capability", True),
@@ -562,6 +621,7 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                         ("aps-environment", "production"),
                         ("com.apple.developer.associated-domains", ["applinks:example.invalid"]),
                         ("com.apple.developer.icloud-services", ["CloudKit"]),
+                        (environment_key, "Production"),
                         ("com.example.unreviewed-widget-capability", True),
                     ):
                         entitlements[unexpected_key] = unexpected_value

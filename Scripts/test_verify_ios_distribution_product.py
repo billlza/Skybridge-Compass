@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import plistlib
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -168,6 +170,111 @@ class IOSDistributionProductSurfaceTests(unittest.TestCase):
             self.assertRegex(result.stdout, r"strict semantic version|positive integer")
 
 
+class ReleaseICloudEntitlementTests(unittest.TestCase):
+    TEAM = "YKUPL7Z869"
+    BUNDLE = "com.skybridge.compass.ios"
+    ENVIRONMENT = verifier.ICLOUD_CONTAINER_ENVIRONMENT
+
+    def setUp(self) -> None:
+        self.work = tempfile.TemporaryDirectory()
+        self.addCleanup(self.work.cleanup)
+        self.root = Path(self.work.name)
+        self.profile_path = self.root / "app.mobileprovision"
+        self.profile_path.write_bytes(b"unit-test-profile")
+        self.certificate_path = self.root / "certificate.der"
+        self.certificate_path.write_bytes(b"unit-test-certificate")
+        self.signed_path = self.root / "signed.plist"
+        self.expected = plistlib.loads(
+            (ROOT_DIR / "SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements").read_bytes()
+        )
+        self.signed = {
+            **verifier.expand_tokens(self.expected, self.TEAM, self.TEAM),
+            "application-identifier": f"{self.TEAM}.{self.BUNDLE}",
+            "com.apple.developer.team-identifier": self.TEAM,
+        }
+        self.profile_entitlements = {
+            **self.signed,
+            self.ENVIRONMENT: ["Production", "Development"],
+        }
+
+    def analyze(self, *, configuration: str = "Release", lab_run: bool = False) -> dict:
+        self.signed_path.write_bytes(plistlib.dumps(self.signed))
+        profile = {
+            "Entitlements": self.profile_entitlements,
+            "TeamIdentifier": [self.TEAM],
+            "ApplicationIdentifierPrefix": [self.TEAM],
+            "Platform": ["iOS"],
+            "ProvisionedDevices": ["unit-test-device"],
+            "ExpirationDate": dt.datetime.now() + dt.timedelta(days=30),
+            "DeveloperCertificates": [b"unit-test-certificate"],
+        }
+        # Isolate CMS/certificate I/O; exercise the real entitlement decisions.
+        # Authentication itself is covered by test_apple_provisioning_profile.
+        with (
+            mock.patch.object(verifier, "load_profile", return_value=profile),
+            mock.patch.object(verifier.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)),
+        ):
+            return verifier.analyze_target(
+                self.profile_path, self.signed_path, self.certificate_path,
+                self.BUNDLE, "apple-distribution", is_app=True,
+                selected_profile_arg="", signed_team=self.TEAM,
+                expected_team=self.TEAM, device_identifier="unit-test-device",
+                expected_entitlements=self.expected, configuration=configuration,
+                lab_run=lab_run,
+            )
+
+    def test_release_source_policy_requires_production_and_real_array_grant_passes(self) -> None:
+        self.assertEqual(self.expected[self.ENVIRONMENT], "Production")
+        self.assertIsInstance(self.expected[self.ENVIRONMENT], str)
+        for grant in ("Production", ["Production"], ["Production", "Development"]):
+            with self.subTest(grant=grant):
+                self.profile_entitlements[self.ENVIRONMENT] = grant
+                result = self.analyze()
+                self.assertIs(result["expectedEntitlementsMatch"], True)
+                self.assertIs(result["teamMatch"], True)
+                self.assertIs(result["keychainGroupsVerified"], True)
+                self.assertIs(result["getTaskAllow"], False)
+
+    def test_release_rejects_missing_wrong_or_nonscalar_signed_environment(self) -> None:
+        for value in ("Development", "production", "Production ", "Unknown", "", ["Production"], True, 1):
+            with self.subTest(value=value):
+                self.signed[self.ENVIRONMENT] = value
+                self.assertIs(self.analyze()["expectedEntitlementsMatch"], False)
+        self.signed.pop(self.ENVIRONMENT)
+        self.assertIs(self.analyze()["expectedEntitlementsMatch"], False)
+
+    def test_release_rejects_profile_without_an_exact_production_grant(self) -> None:
+        for value in ("Development", ["Development"], "*", ["*"], [], ["Production", True], ["Production", "Unknown"]):
+            with self.subTest(value=value):
+                self.profile_entitlements[self.ENVIRONMENT] = value
+                self.assertIs(self.analyze()["expectedEntitlementsMatch"], False)
+        self.profile_entitlements.pop(self.ENVIRONMENT)
+        self.assertIs(self.analyze()["expectedEntitlementsMatch"], False)
+
+    def test_formal_release_cannot_weaken_expected_policy_to_development_or_missing(self) -> None:
+        self.expected[self.ENVIRONMENT] = "Development"
+        self.signed[self.ENVIRONMENT] = "Development"
+        self.assertIs(self.analyze()["expectedEntitlementsMatch"], False)
+        self.expected.pop(self.ENVIRONMENT)
+        self.signed.pop(self.ENVIRONMENT)
+        self.assertIs(self.analyze()["expectedEntitlementsMatch"], False)
+
+    def test_debug_and_lab_keep_their_existing_expected_policy_semantics(self) -> None:
+        self.expected.pop(self.ENVIRONMENT)
+        self.signed.pop(self.ENVIRONMENT)
+        self.profile_entitlements.pop(self.ENVIRONMENT)
+        for configuration in ("Debug", "Release"):
+            with self.subTest(configuration=configuration):
+                self.assertIs(
+                    self.analyze(configuration=configuration, lab_run=True)["expectedEntitlementsMatch"],
+                    True,
+                )
+
+    def test_unrelated_profile_coverage_does_not_gain_scalar_array_coercion(self) -> None:
+        self.assertFalse(verifier.profile_entitlement_covers(["Production"], "Production"))
+        self.assertTrue(verifier.profile_entitlement_covers(["TEAM.*"], ["TEAM.app"]))
+
+
 class WidgetEntitlementConformanceTests(unittest.TestCase):
     """The nested Widget must not independently carry the host App's privileged
     entitlements. This guards against the previous always-true branch that let a
@@ -252,6 +359,13 @@ class WidgetEntitlementConformanceTests(unittest.TestCase):
                 self.assertTrue(
                     verifier.widget_signed_entitlements_conform(entitlements)
                 )
+
+    def test_widget_rejects_scalar_icloud_environment(self) -> None:
+        for environment in ("Production", "Development"):
+            with self.subTest(environment=environment):
+                entitlements = dict(self.CONFORMING_WIDGET_ENTITLEMENTS)
+                entitlements[verifier.ICLOUD_CONTAINER_ENVIRONMENT] = environment
+                self.assertFalse(verifier.widget_signed_entitlements_conform(entitlements))
 
     def test_entitlement_value_presence_semantics(self) -> None:
         self.assertFalse(verifier.entitlement_value_is_present(None))

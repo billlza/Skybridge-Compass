@@ -71,6 +71,13 @@ def run(args, **kwargs) -> bytes:
     return result.stdout
 
 
+def run_product_verifier(arguments: list[str]) -> None:
+    result = subprocess.run(arguments, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").replace(str(ROOT), "<repo>").strip()
+        fail(f"formal product verifier rejected the release candidate: {detail}")
+
+
 def connected_target_udids() -> set[str]:
     """UDIDs of currently connected/paired iPad devices, from devicectl JSON.
 
@@ -159,8 +166,8 @@ def main() -> int:
 
         app_ent = work / "app-entitlements.plist"
         widget_ent = work / "widget-entitlements.plist"
-        app_ent.write_bytes(run(["/usr/bin/codesign", "-d", "--entitlements", ":-", "--xml", str(app)]))
-        widget_ent.write_bytes(run(["/usr/bin/codesign", "-d", "--entitlements", ":-", "--xml", str(widget)]))
+        app_ent.write_bytes(run(["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(app)]))
+        widget_ent.write_bytes(run(["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(widget)]))
 
         app_prefix = str(work / "app-cert-")
         widget_prefix = str(work / "widget-cert-")
@@ -281,10 +288,7 @@ def main() -> int:
             source_repository, "production", "HAS_APPLE_PQC_SDK", "0",
             str(app / "Info.plist"), str(widget / "Info.plist"),
         ]
-        result = subprocess.run(verifier_args, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").replace(str(ROOT), "<repo>").strip()[:400]
-            fail(f"formal product verifier rejected the release candidate: {detail}")
+        run_product_verifier(verifier_args)
 
         proof = json.loads(proof_path.read_text())
         required_true = [

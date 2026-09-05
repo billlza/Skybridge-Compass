@@ -16,7 +16,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from apple_provisioning_profile import load_verified_profile
+from apple_provisioning_profile import (
+    ICLOUD_CONTAINER_ENVIRONMENT,
+    load_verified_profile,
+    profile_icloud_environment_covers,
+)
 from extract_ios_ipa import IPAValidationError, extract_single_ios_app
 import ios_physical_release_acceptance as physical_acceptance
 from ios_release_archive_identity import (
@@ -147,7 +151,7 @@ def _read_plist(path: Path, label: str) -> dict[str, Any]:
 
 def _signed_entitlements(bundle: Path) -> dict[str, Any]:
     payload = _run(
-        ["/usr/bin/codesign", "-d", "--entitlements", ":-", "--xml", str(bundle)],
+        ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(bundle)],
         "codesign entitlement extraction",
     )
     try:
@@ -281,6 +285,11 @@ def _validate_target(
         _fail(f"{label} signed application identifier is incorrect")
     if entitlements.get("com.apple.developer.team-identifier") != EXPECTED_TEAM:
         _fail(f"{label} signed team entitlement is incorrect")
+    if (
+        expected_bundle_identifier == APP_BUNDLE_IDENTIFIER
+        and expected_entitlements.get(ICLOUD_CONTAINER_ENVIRONMENT) != "Production"
+    ):
+        _fail(f"{label} iCloud environment policy must require Production")
     allowed_signed_entitlements = (
         SIGNED_IDENTITY_ENTITLEMENTS
         | set(OPTIONAL_SIGNED_SYSTEM_ENTITLEMENT_VALUES)
@@ -335,7 +344,13 @@ def _validate_target(
     if not isinstance(expiration, dt.datetime) or expiration <= now:
         _fail(f"{label} provisioning profile is expired")
     for key, requested in expected_entitlements.items():
-        if not _profile_value_covers(profile_entitlements.get(key), requested):
+        granted = profile_entitlements.get(key)
+        covered = (
+            profile_icloud_environment_covers(granted, requested)
+            if key == ICLOUD_CONTAINER_ENVIRONMENT
+            else _profile_value_covers(granted, requested)
+        )
+        if not covered:
             _fail(f"{label} provisioning profile does not cover entitlement {key}")
     if not _certificate_matches_profile(bundle, profile):
         _fail(f"{label} signing certificate does not match a current trusted profile certificate")

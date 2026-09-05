@@ -46,10 +46,31 @@ OPENSSL_BIN = "/usr/bin/openssl"
 
 _PROVISIONING_PROFILE_SIGNING_MARKER = "Provisioning Profile Signing"
 _APPLE_ORGANIZATION_MARKER = "Apple"
+ICLOUD_CONTAINER_ENVIRONMENT = "com.apple.developer.icloud-container-environment"
+_ICLOUD_CONTAINER_ENVIRONMENTS = frozenset({"Development", "Production"})
 
 
 class ProfileAuthenticityError(ValueError):
     """Raised when a provisioning profile is not an authentic Apple CMS blob."""
+
+
+def profile_icloud_environment_covers(granted: object, requested: object) -> bool:
+    """Match a signed scalar environment against an authenticated profile grant.
+
+    Profiles may grant one environment or a list of environments. These are
+    finite enum values, not the wildcard identifiers used by other entitlements.
+    Profile authenticity must still be verified by the caller's profile loader.
+    """
+    if not isinstance(requested, str) or requested not in _ICLOUD_CONTAINER_ENVIRONMENTS:
+        return False
+    if isinstance(granted, str):
+        return granted == requested
+    if not isinstance(granted, list) or not granted:
+        return False
+    return all(
+        isinstance(value, str) and value in _ICLOUD_CONTAINER_ENVIRONMENTS
+        for value in granted
+    ) and requested in granted
 
 
 def _cms_verify_signature(path: Path, signer_out: Path, payload_out: Path) -> None:
