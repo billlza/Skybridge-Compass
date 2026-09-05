@@ -54,11 +54,7 @@ struct Arguments {
     swift_out: PathBuf,
 }
 
-fn assign_path(
-    slot: &mut Option<PathBuf>,
-    flag: &str,
-    value: String,
-) -> Result<(), CeremonyError> {
+fn assign_path(slot: &mut Option<PathBuf>, flag: &str, value: String) -> Result<(), CeremonyError> {
     if slot.replace(PathBuf::from(value)).is_some() {
         return Err(format!("{flag} was given twice").into());
     }
@@ -327,10 +323,7 @@ fn swift_doc_comment_lines(policy_toml: &str, indent: &str) -> String {
     body
 }
 
-fn generated_swift_material(
-    arguments: &Arguments,
-    artifacts: &SignedPolicyArtifacts,
-) -> String {
+fn generated_swift_material(arguments: &Arguments, artifacts: &SignedPolicyArtifacts) -> String {
     format!(
         r#"// GENERATED FILE - DO NOT EDIT BY HAND.
 //
@@ -422,9 +415,13 @@ fn run() -> Result<(), CeremonyError> {
         .ok_or_else(|| format!("signer returned out-of-range length {signature_length}"))?;
 
     // 4. Full independent re-verification of what will ship.
-    let authenticated =
-        Policy::load_signed(&MlDsa65, &verification_key, policy_toml.as_bytes(), signature)
-            .map_err(|error| format!("signed policy failed re-verification: {error}"))?;
+    let authenticated = Policy::load_signed(
+        &MlDsa65,
+        &verification_key,
+        policy_toml.as_bytes(),
+        signature,
+    )
+    .map_err(|error| format!("signed policy failed re-verification: {error}"))?;
     let decision = authenticated
         .resolve_suite(&[HybridSuite::MlKem768X25519])
         .map_err(|error| format!("signed policy failed re-resolution: {error}"))?;
@@ -460,13 +457,28 @@ fn run() -> Result<(), CeremonyError> {
     fs::write(&arguments.swift_out, &swift)
         .map_err(|error| format!("cannot write {}: {error}", arguments.swift_out.display()))?;
 
-    println!("ceremony complete: trust root {}", arguments.trust_root_identifier);
+    println!(
+        "ceremony complete: trust root {}",
+        arguments.trust_root_identifier
+    );
     println!("  policy version:            {policy_version}");
     println!("  policy digest (sha-256):   {}", hex(&policy_digest));
-    println!("  verification key pin:      {}", hex(&verification_key_pin));
-    println!("  private seed record:       {}", arguments.signing_key_out.display());
-    println!("  public provisioning record:{}", arguments.record_out.display());
-    println!("  swift material (shared):   {}", arguments.swift_out.display());
+    println!(
+        "  verification key pin:      {}",
+        hex(&verification_key_pin)
+    );
+    println!(
+        "  private seed record:       {}",
+        arguments.signing_key_out.display()
+    );
+    println!(
+        "  public provisioning record:{}",
+        arguments.record_out.display()
+    );
+    println!(
+        "  swift material (shared):   {}",
+        arguments.swift_out.display()
+    );
     Ok(())
 }
 
@@ -477,5 +489,55 @@ fn main() -> ExitCode {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{from_hex, hex, seed_record_field, HybridSuite, MlDsa65, Policy};
+    use sha2::{Digest, Sha256};
+
+    const PUBLIC_PRODUCTION_RECORD: &str =
+        include_str!("../../../Config/qperiapt-production-trust-root.json");
+
+    fn public_fixture_field(name: &str) -> Result<String, String> {
+        seed_record_field(PUBLIC_PRODUCTION_RECORD, name).map_err(|error| error.0)
+    }
+
+    fn public_fixture_bytes(name: &str) -> Result<Vec<u8>, String> {
+        from_hex(&public_fixture_field(name)?).map_err(|error| error.0)
+    }
+
+    #[test]
+    fn existing_production_policy_verifies_without_signing_or_key_rotation() -> Result<(), String> {
+        let policy = public_fixture_field("policy_toml")?;
+        let signature = public_fixture_bytes("detached_signature_hex")?;
+        let verification_key = public_fixture_bytes("verification_key_hex")?;
+        let expected_pin = public_fixture_field("verification_key_sha256_pin_hex")?;
+        assert!(
+            hex(&Sha256::digest(&verification_key)) == expected_pin,
+            "the original public verification-key pin must remain exact"
+        );
+        let authenticated =
+            Policy::load_signed(&MlDsa65, &verification_key, policy.as_bytes(), &signature)
+                .map_err(|error| error.to_string())?;
+        let decision = authenticated
+            .resolve_suite(&[HybridSuite::MlKem768X25519])
+            .map_err(|error| error.to_string())?;
+        assert!(decision.resolved().policy_version() == 1);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_production_policy_rejects_a_modified_signature() -> Result<(), String> {
+        let policy = public_fixture_field("policy_toml")?;
+        let mut signature = public_fixture_bytes("detached_signature_hex")?;
+        let verification_key = public_fixture_bytes("verification_key_hex")?;
+        signature[0] ^= 1;
+        assert!(
+            Policy::load_signed(&MlDsa65, &verification_key, policy.as_bytes(), &signature)
+                .is_err()
+        );
+        Ok(())
     }
 }

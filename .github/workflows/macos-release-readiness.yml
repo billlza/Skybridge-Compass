@@ -251,7 +251,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: billlza/q-periapt
-          ref: 2b9c485f6c72f99b4cb8942269063692f3f2498e
+          ref: fabe003ddc3507b88af7a67a7138344e4b9634fd
           path: External/pqt_hybrid_suite
           persist-credentials: false
 

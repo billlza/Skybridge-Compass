@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_READINESS_WORKFLOW="${ROOT_DIR}/.github/workflows/macos-release-readiness.yml"
 QPERIAPT_SOURCE_COMMIT="2b9c485f6c72f99b4cb8942269063692f3f2498e"
+# The public tag is the results-only successor of the signed SDK's source.
+QPERIAPT_CHECKOUT_COMMIT="fabe003ddc3507b88af7a67a7138344e4b9634fd"
 QPERIAPT_HEADER_SHA256="4a9d92c5eca4b9330da340ec8d07b2e578aea3e143890b34b8f25f7e91743e66"
 QPERIAPT_PROVENANCE="VendorProvenance/QPeriapt/abi2-v0.1.5.json"
 QPERIAPT_LIBRARY_NAME="libq_periapt_ffi_abi2.a"
@@ -255,7 +257,7 @@ fi
 
 grep -Fq "repository: billlza/q-periapt" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness must checkout q-periapt explicitly for clean CI source contracts"
-grep -Fq "ref: ${QPERIAPT_SOURCE_COMMIT}" "${RELEASE_READINESS_WORKFLOW}" \
+grep -Fq "ref: ${QPERIAPT_CHECKOUT_COMMIT}" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness q-periapt checkout must be pinned to a full commit SHA"
 grep -Fq "path: External/pqt_hybrid_suite" "${RELEASE_READINESS_WORKFLOW}" \
   || fail "macos-release-readiness q-periapt checkout must land in External/pqt_hybrid_suite"
