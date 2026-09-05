@@ -88,6 +88,9 @@ jobs:
       - name: Self-Test Swift Filter Guardrail
         run: bash Scripts/test_run_swift_test_filter.sh
 
+      - name: Self-Test Notarization Outcome Reconciliation
+        run: python3 -B -W error -m unittest discover -s Scripts -p test_notarytool_helpers.py
+
       - name: Self-Test Apple P2P No-Trap Guardrail
         run: python3 Scripts/test_check_p2p_no_traps.py
 

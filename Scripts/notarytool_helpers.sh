@@ -80,20 +80,16 @@ skybridge_notarytool_validate_credentials() {
 
 skybridge_notarytool_submission_id_from_output() {
   local output="$1"
+  local submission_id=""
 
-  printf '%s\n' "${output}" \
-    | awk '
-        /^[[:space:]]*id:[[:space:]]*/ { print $2; exit }
-        /^[[:space:]]*ID:[[:space:]]*/ { print $2; exit }
-	      '
-}
-
-skybridge_notarytool_output_has_upload_transport_error() {
-  local output="$1"
-
-  [[ "${output}" == *"abortedUpload"* \
-    || "${output}" == *"HTTPClientError.deadlineExceeded"* \
-    || "${output}" == *"HTTPClientError.connectTimeout"* ]]
+  if ! submission_id="$(printf '%s\n' "${output}" | plutil -extract id raw -expect string -o - -)"; then
+    return 1
+  fi
+  if [[ ! "${submission_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "notarytool returned an invalid submission UUID" >&2
+    return 1
+  fi
+  printf '%s\n' "${submission_id}" | tr '[:upper:]' '[:lower:]'
 }
 
 skybridge_notarytool_wait_for_submission_id() {
@@ -102,18 +98,36 @@ skybridge_notarytool_wait_for_submission_id() {
   local max_attempts="${SKYBRIDGE_NOTARYTOOL_MAX_POLL_ATTEMPTS:-40}"
   local attempt=1
   local output=""
+  local observed_id=""
   local status_text=""
+  local exit_code=0
 
+  if [[ ! "${submission_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    echo "notarytool polling requires a submission UUID" >&2
+    return 1
+  fi
+  submission_id="$(printf '%s\n' "${submission_id}" | tr '[:upper:]' '[:lower:]')"
   skybridge_notarytool_require_args || return 1
 
   while (( attempt <= max_attempts )); do
-    if ! output="$(xcrun notarytool info "${submission_id}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" 2>&1)"; then
+    if output="$(xcrun notarytool info "${submission_id}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --output-format json --no-progress)"; then
+      printf '%s\n' "${output}"
+    else
+      exit_code=$?
       printf '%s\n' "${output}" >&2
-      return 1
+      echo "notarytool submission ${submission_id} remains unresolved; no new upload was attempted" >&2
+      return "${exit_code}"
     fi
 
-    printf '%s\n' "${output}"
-    status_text="$(printf '%s\n' "${output}" | awk -F': ' '/^[[:space:]]*status:/ { print $2; exit }')"
+    if ! observed_id="$(skybridge_notarytool_submission_id_from_output "${output}")" \
+      || [[ "${observed_id}" != "${submission_id}" ]]; then
+      echo "notarytool info did not identify the requested submission ${submission_id}" >&2
+      return 1
+    fi
+    if ! status_text="$(printf '%s\n' "${output}" | plutil -extract status raw -expect string -o - -)"; then
+      echo "notarytool submission ${submission_id} has no valid status" >&2
+      return 1
+    fi
 
     case "${status_text}" in
       Accepted)
@@ -123,29 +137,51 @@ skybridge_notarytool_wait_for_submission_id() {
         echo "notarytool submission ${submission_id} finished with status ${status_text}" >&2
         return 1
         ;;
+      "In Progress")
+        ;;
+      *)
+        echo "notarytool submission ${submission_id} returned an unrecognized status" >&2
+        return 1
+        ;;
     esac
 
     if (( attempt == max_attempts )); then
       break
     fi
 
-    echo "notarytool submission ${submission_id} still ${status_text:-unknown}; retrying in ${poll_seconds}s (${attempt}/${max_attempts})" >&2
+    echo "notarytool submission ${submission_id} still In Progress; polling again in ${poll_seconds}s (${attempt}/${max_attempts})" >&2
     sleep "${poll_seconds}"
     attempt=$((attempt + 1))
   done
 
-  echo "notarytool submission ${submission_id} did not finish after ${max_attempts} polls" >&2
+  echo "notarytool submission ${submission_id} did not finish after ${max_attempts} polls; reconcile this ID before another upload" >&2
   return 1
 }
 
 skybridge_notarytool_submit_and_wait() {
   local artifact="$1"
-  shift || true
+  shift
   local -a extra_args=("$@")
   local -a cmd=()
+  local argument=""
+
+  # This helper owns the result format and completion contract. Keeping these
+  # options fixed prevents a caller from turning an upload receipt into success.
+  for argument in ${extra_args[@]+"${extra_args[@]}"}; do
+    case "${argument}" in
+      --wait|--no-wait|--output-format|--output-format=*|-f|-f=*|--progress|--no-progress)
+        echo "submit_and_wait manages wait, output-format and progress options" >&2
+        return 1
+        ;;
+    esac
+  done
 
   if ! command -v xcrun >/dev/null 2>&1 || ! xcrun -f notarytool >/dev/null 2>&1; then
     echo "未找到 xcrun notarytool，无法执行 notarization。" >&2
+    return 1
+  fi
+  if ! command -v plutil >/dev/null 2>&1; then
+    echo "未找到 plutil，无法验证 notarization 响应。" >&2
     return 1
   fi
 
@@ -154,78 +190,40 @@ skybridge_notarytool_submit_and_wait() {
     extra_args+=(--force)
   fi
 
-  cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait)
+  cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait --output-format json --no-progress)
   if ((${#extra_args[@]} > 0)); then
     cmd+=("${extra_args[@]}")
   fi
 
   local output=""
   local exit_code=0
-  if output="$("${cmd[@]}" 2>&1)"; then
+  if output="$("${cmd[@]}")"; then
     printf '%s\n' "${output}"
-    return 0
-  fi
-  exit_code=$?
-  printf '%s\n' "${output}" >&2
-
-  local submission_id=""
-  submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"
-  local had_upload_transport_error=0
-  if skybridge_notarytool_output_has_upload_transport_error "${output}"; then
-    had_upload_transport_error=1
-  fi
-  local wait_status=0
-  if [[ -n "${submission_id}" ]]; then
-    echo "notarytool submit returned ${exit_code} after creating submission ${submission_id}; polling final status" >&2
-    if skybridge_notarytool_wait_for_submission_id "${submission_id}"; then
-      return 0
-    fi
-    wait_status=$?
-    if [[ "${had_upload_transport_error}" == "1" ]]; then
-      echo "notarytool submission ${submission_id} did not finish after upload transport error; retrying once with --no-s3-acceleration" >&2
-      cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait --no-s3-acceleration)
-      if ((${#extra_args[@]} > 0)); then
-        cmd+=("${extra_args[@]}")
-      fi
-      if output="$("${cmd[@]}" 2>&1)"; then
-        printf '%s\n' "${output}"
-        return 0
-      fi
-      exit_code=$?
-      printf '%s\n' "${output}" >&2
-      submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"
-      if [[ -n "${submission_id}" ]]; then
-        echo "notarytool retry returned ${exit_code} after creating submission ${submission_id}; polling final status" >&2
-        skybridge_notarytool_wait_for_submission_id "${submission_id}"
-        return $?
-      fi
-      return "${exit_code}"
-    fi
-    return "${wait_status}"
-  fi
-
-  if [[ "${had_upload_transport_error}" == "1" ]]; then
-    echo "notarytool upload timed out; retrying once with --no-s3-acceleration" >&2
-    cmd=(xcrun notarytool submit "${artifact}" "${SKYBRIDGE_NOTARYTOOL_ARGS[@]}" --wait --no-s3-acceleration)
-    if ((${#extra_args[@]} > 0)); then
-      cmd+=("${extra_args[@]}")
-    fi
-    if output="$("${cmd[@]}" 2>&1)"; then
-      printf '%s\n' "${output}"
-      return 0
-    fi
+  else
     exit_code=$?
     printf '%s\n' "${output}" >&2
-    submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"
-    if [[ -n "${submission_id}" ]]; then
-      echo "notarytool retry returned ${exit_code} after creating submission ${submission_id}; polling final status" >&2
-      skybridge_notarytool_wait_for_submission_id "${submission_id}"
-      return $?
-    fi
-    return "${exit_code}"
   fi
 
-  return "${exit_code}"
+  local submission_id=""
+  if ! submission_id="$(skybridge_notarytool_submission_id_from_output "${output}")"; then
+    echo "notarytool returned no valid submission identity; reconcile history before another upload" >&2
+    if (( exit_code != 0 )); then
+      return "${exit_code}"
+    fi
+    return 1
+  fi
+
+  # A failed submit may still have created a remote job. Reconcile that exact
+  # identity only; transport failure and poll timeout never authorize resubmit.
+  # A zero CLI status alone also does not establish acceptance.
+  if (( exit_code != 0 )); then
+    echo "notarytool submit returned ${exit_code} for submission ${submission_id}; checking that same submission" >&2
+  fi
+  if skybridge_notarytool_wait_for_submission_id "${submission_id}"; then
+    return 0
+  else
+    return $?
+  fi
 }
 
 skybridge_staple_artifact() {
