@@ -251,7 +251,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: billlza/q-periapt
-          ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
+          ref: 2b9c485f6c72f99b4cb8942269063692f3f2498e
           path: External/pqt_hybrid_suite
           persist-credentials: false
 
@@ -281,7 +281,7 @@ jobs:
           import pathlib
 
           record = json.loads(
-              pathlib.Path("VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json").read_text(encoding="utf-8")
+              pathlib.Path("VendorProvenance/QPeriapt/abi2-v0.1.5.json").read_text(encoding="utf-8")
           )
           print(record["upstream_artifact"]["rust_toolchain"])
           PY

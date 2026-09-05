@@ -177,13 +177,13 @@ final class ReleaseProvenanceSourceContractTests: XCTestCase {
 
     func testQPeriaptVendorPolicyInstallsOnlyTheAuthenticatedABI2Release() throws {
         let builder = try repositorySource("Scripts/build_qperiapt_xcframework.sh")
-        XCTAssertTrue(builder.contains("QPERIAPT_RELEASE_TAG=\"v0.1.0-alpha.2-r1\""))
+        XCTAssertTrue(builder.contains("QPERIAPT_RELEASE_TAG=\"v0.1.5\""))
         XCTAssertTrue(builder.contains("releases/download/${QPERIAPT_RELEASE_TAG}"))
         XCTAssertTrue(builder.contains("require_sha256 \"$DOWNLOAD_DIR/CQPeriapt.xcframework.zip\""))
         XCTAssertTrue(builder.contains("validate_archive_shape"))
         XCTAssertTrue(builder.contains("codesign --verify --deep --strict"))
         XCTAssertTrue(builder.contains("assert_exact_symbols \"$header\" \"$library\""))
-        XCTAssertTrue(builder.contains("PROVENANCE_SOURCE=\"$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json\""))
+        XCTAssertTrue(builder.contains("PROVENANCE_SOURCE=\"$ROOT_DIR/VendorProvenance/QPeriapt/abi2-v0.1.5.json\""))
         XCTAssertFalse(builder.contains("QPERIAPT_REPO"))
         XCTAssertFalse(builder.contains("CARGO_ENCODED_RUSTFLAGS"))
         XCTAssertFalse(builder.contains("IOS_VENDOR_OUT"))

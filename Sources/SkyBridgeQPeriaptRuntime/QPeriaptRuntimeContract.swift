@@ -30,7 +30,7 @@ public enum QPeriaptRuntimeContractError: Error, LocalizedError, Sendable, Equat
 /// Frozen host-side contract for the published Q-Periapt ABI2 binary.
 public enum QPeriaptRuntimeContract {
     public static let expectedABIVersion: UInt32 = 2
-    public static let expectedRuntimeVersion = "0.1.0-alpha.2"
+    public static let expectedRuntimeVersion = "0.1.5"
     public static let expectedSuiteID = Array("ML-KEM-768+X25519".utf8)
 
     private static let validationResult = validateRuntime()

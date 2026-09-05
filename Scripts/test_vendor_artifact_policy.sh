@@ -3,9 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE_READINESS_WORKFLOW="${ROOT_DIR}/.github/workflows/macos-release-readiness.yml"
-QPERIAPT_SOURCE_COMMIT="5664fd86a617f92b620ea37e7692d3417d0e307d"
-QPERIAPT_HEADER_SHA256="6e5be78c9b43fa245777eabd84dea4a137ecd6ebdb0266fa018a8aa4e3f1771f"
-QPERIAPT_PROVENANCE="VendorProvenance/QPeriapt/abi2-v0.1.0-alpha.2-r1.json"
+QPERIAPT_SOURCE_COMMIT="2b9c485f6c72f99b4cb8942269063692f3f2498e"
+QPERIAPT_HEADER_SHA256="4a9d92c5eca4b9330da340ec8d07b2e578aea3e143890b34b8f25f7e91743e66"
+QPERIAPT_PROVENANCE="VendorProvenance/QPeriapt/abi2-v0.1.5.json"
 QPERIAPT_LIBRARY_NAME="libq_periapt_ffi_abi2.a"
 
 fail() {
@@ -278,11 +278,11 @@ record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 source_commit = sys.argv[2]
 if record.get("schema_version") != 1:
     raise SystemExit("unexpected Q-Periapt provenance schema")
-if record.get("version") != "0.1.0-alpha.2" or record.get("abi_major") != 2:
+if record.get("version") != "0.1.5" or record.get("abi_major") != 2:
     raise SystemExit("Q-Periapt provenance version/ABI mismatch")
 if record.get("source_commit") != source_commit:
     raise SystemExit("Q-Periapt provenance source commit mismatch")
-if record.get("release_tag") != "v0.1.0-alpha.2-r1" or record.get("release_revision") != "r1":
+if record.get("release_tag") != "v0.1.5" or record.get("release_revision") != "r1":
     raise SystemExit("Q-Periapt provenance release tag mismatch")
 if record.get("upstream_artifact", {}).get("rust_toolchain") != "1.96.1":
     raise SystemExit("Q-Periapt provenance must pin its exact Rust producer toolchain")
@@ -318,9 +318,9 @@ while IFS='|' read -r slice expected_hash expected_architectures; do
   assert_qperiapt_symbols "$mac_path"
   assert_qperiapt_header_matches "Sources/Vendor/qperiapt.xcframework/${slice}/Headers/q_periapt.h"
 done <<'SLICES'
-macos-arm64_x86_64|7c64f5ff2bd166458bf68d95667066bf85612737a6d65f885fe1038157bdc6cb|arm64 x86_64
-ios-arm64|7088a0b5a26becd28728136dcf5fe2d0ce736914ee112f11ef3bfa7710ed6d6a|arm64
-ios-arm64_x86_64-simulator|ff7b7e6c47a96d0a53e4ca940b3be1d9bdcdfc7f1975ceb28f6813086f476335|arm64 x86_64
+macos-arm64_x86_64|786ba548b1051e67a8408a42e5502adc3420405dfd928403b694ed002cc48f21|arm64 x86_64
+ios-arm64|2b5acc096d3f4acbcf393f12b96b83d8d6e6b29f5c69171d6c6f64d66e577289|arm64
+ios-arm64_x86_64-simulator|42070a0f975cb3cd6b991f5bd1bd1a01c1eacc1f1c047579188ef3d82016707a|arm64 x86_64
 SLICES
 
 assert_no_large_vendor_files

@@ -185,9 +185,9 @@ grep -Fq 'qperiapt_transaction_install_all' "$BUILD_SCRIPT" \
   || fail "build script does not install through the transaction"
 grep -Fq 'qperiapt_transaction_commit' "$BUILD_SCRIPT" \
   || fail "build script does not commit the transaction"
-grep -Fq 'QPERIAPT_RELEASE_TAG="v0.1.0-alpha.2-r1"' "$BUILD_SCRIPT" \
+grep -Fq 'QPERIAPT_RELEASE_TAG="v0.1.5"' "$BUILD_SCRIPT" \
   || fail "build script lost the immutable ABI2 release tag"
-grep -Fq 'QPERIAPT_SOURCE_COMMIT="5664fd86a617f92b620ea37e7692d3417d0e307d"' "$BUILD_SCRIPT" \
+grep -Fq 'QPERIAPT_SOURCE_COMMIT="2b9c485f6c72f99b4cb8942269063692f3f2498e"' "$BUILD_SCRIPT" \
   || fail "build script lost the pinned ABI2 source commit"
 grep -Fq "require_sha256 \"${LITERAL_DOLLAR}DOWNLOAD_DIR/CQPeriapt.xcframework.zip\" \"${LITERAL_DOLLAR}QPERIAPT_ZIP_SHA256\"" "$BUILD_SCRIPT" \
   || fail "build script lost the release archive hash gate"
