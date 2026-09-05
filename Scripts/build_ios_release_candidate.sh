@@ -22,6 +22,8 @@ IOS_SCHEME="SkyBridgeCompass-iOS"
 EXPORT_OPTIONS="${ROOT_DIR}/Scripts/ios_release_candidate_export_options.plist"
 # shellcheck source=Scripts/apple_pqc_sdk_probe.sh
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
+# shellcheck source=Scripts/xcodebuild_helpers.sh
+source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
 
 IOS_RELEASE_VERSION_RECORD="$(
   bash "${ROOT_DIR}/Scripts/check_ios_release_version.sh"
@@ -126,6 +128,12 @@ if ! skybridge_require_apple_pqc_sdk_symbol_probe iphoneos; then
 fi
 log "Apple PQC symbols verified (sdk=${SKYBRIDGE_PQC_SDK_VER}, target=${SKYBRIDGE_PQC_SWIFT_TARGET}, secure-enclave=${SKYBRIDGE_PQC_INCLUDED_SECURE_ENCLAVE})"
 
+# Xcode build settings do not configure the local Swift package manifest.
+# Bind the shared package to the same verified production surface as the app.
+export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1
+export SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT=1
+export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1
+
 rm -rf -- "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(
@@ -136,7 +144,7 @@ OUTPUT_DIR="$(
 )"
 
 log "archiving ${IOS_SCHEME} (Release, production surface, Automatic signing) from ${SOURCE_COMMIT}"
-xcodebuild archive \
+skybridge_run_xcodebuild archive \
   -project "${IOS_PROJECT}" \
   -scheme "${IOS_SCHEME}" \
   -configuration Release \
@@ -179,7 +187,7 @@ plutil -replace SkyBridgePackagingSwiftActiveCompilationConditions -string "HAS_
 log "verified iOS ${IOS_RELEASE_VERSION} (${IOS_RELEASE_BUILD}) and stamped production provenance"
 
 log "exporting release-testing IPA"
-xcodebuild -exportArchive \
+skybridge_run_xcodebuild -exportArchive \
   -archivePath "${ARCHIVE_PATH}" \
   -exportOptionsPlist "${EXPORT_OPTIONS}" \
   -exportPath "${EXPORT_DIR}" \
