@@ -941,6 +941,8 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // UI 状态
     @State private var selectedConnectionMode: DiscoveryMode = .localScan
+    /// 由主控台等外部入口请求预选的标签；消费后清空，避免视图重建时旧请求再次生效。
+    @Binding private var requestedMode: DiscoveryMode?
     @State private var searchText = ""
     @State private var connectionCodeInput = ""
  // 控制二维码扫描弹窗显示与错误提示。
@@ -986,6 +988,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             ScrollView {
                 LazyVStack(spacing: 20) {
                     switch selectedConnectionMode {
+                    case .accountDevices:
+                        accountDevicesSection
                     case .localScan:
                         localScanSection
                     case .qrCode:
@@ -1000,6 +1004,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
         .navigationTitle(LocalizationManager.shared.localizedString("discovery.title"))
+        .onAppear { applyRequestedModeIfNeeded() }
+        .onChange(of: requestedMode) { _, _ in applyRequestedModeIfNeeded() }
         .task {
 #if DEBUG || SKYBRIDGE_TESTING
             if isMacOnlineIPadSmokeClient {
@@ -3313,8 +3319,31 @@ public struct EnhancedDeviceDiscoveryView: View {
  // MARK: - View Models
     @StateObject private var deviceChainViewModel: CloudDeviceListViewModel
 
-    public init(deviceChainViewModel: CloudDeviceListViewModel = CloudDeviceListViewModel()) {
+    public init(
+        deviceChainViewModel: CloudDeviceListViewModel = CloudDeviceListViewModel(),
+        requestedMode: Binding<DiscoveryMode?> = .constant(nil)
+    ) {
         _deviceChainViewModel = StateObject(wrappedValue: deviceChainViewModel)
+        _requestedMode = requestedMode
+    }
+
+    private func applyRequestedModeIfNeeded() {
+        guard let mode = requestedMode else { return }
+        withAnimation(.spring(response: 0.3)) { selectedConnectionMode = mode }
+        requestedMode = nil
+    }
+
+    // MARK: - 0️⃣ 账号设备
+
+    private var accountDevicesSection: some View {
+        AccountDevicesSectionView(
+            onConnect: { device in connectToOnlineDevice(device) },
+            onOpenConnectionCode: {
+                withAnimation(.spring(response: 0.3)) { selectedConnectionMode = .connectionCode }
+            },
+            connectingDeviceIDs: connectingOnlineDeviceIds,
+            connectionErrorMessage: onlineDeviceConnectionErrorMessage
+        )
     }
 
  // MARK: - 3️⃣ iCloud 设备链（统一设备显示）
@@ -4809,17 +4838,20 @@ private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unc
 
 // MARK: - 发现模式枚举
 
-enum DiscoveryMode: String, CaseIterable, Identifiable {
+public enum DiscoveryMode: String, CaseIterable, Identifiable {
+    /// 登录同一账号的设备（信令服务器账号设备列表）。放在最前：竞品式的"我的设备"入口。
+    case accountDevices = "account"
     case localScan = "local"
     case qrCode = "qr"
     case cloudLink = "cloud"
     case connectionCode = "code"
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     @MainActor
     var title: String {
         switch self {
+        case .accountDevices: return LocalizationManager.shared.localizedString("discovery.mode.accountDevices")
         case .localScan: return LocalizationManager.shared.localizedString("discovery.mode.localScan")
         case .qrCode: return LocalizationManager.shared.localizedString("discovery.mode.qrCode")
         case .cloudLink: return LocalizationManager.shared.localizedString("discovery.mode.cloudLink")
@@ -4830,6 +4862,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
     @MainActor
     var subtitle: String {
         switch self {
+        case .accountDevices: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.accountDevices")
         case .localScan: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.localScan")
         case .qrCode: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.qrCode")
         case .cloudLink: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.cloudLink")
@@ -4839,6 +4872,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
 
     var iconName: String {
         switch self {
+        case .accountDevices: return "person.crop.rectangle.stack.fill"
         case .localScan: return "wifi.router"
         case .qrCode: return "qrcode.viewfinder"
         case .cloudLink: return "icloud.fill"
@@ -4847,6 +4881,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
     }
     var accentColor: Color {
         switch self {
+        case .accountDevices: return .cyan
         case .localScan: return .green
         case .qrCode: return .blue
         case .cloudLink: return .purple

@@ -1,59 +1,52 @@
 import Foundation
 import Combine
-import OSLog
-#if canImport(AppKit)
-import AppKit
-#endif
+import SkyBridgeProtocolCore
 
-/// 跨网在线状态服务（F2-B / 向日葵·ToDesk 式）：
-/// - 周期性向信令服务器注册本设备在线（心跳），使本账号的其它设备能看到自己在线（即使跨网络）。
-/// - 周期性查询「本账号受信设备」中当前在线的子集，发布给 UI 显示「在线」指示。
+/// 跨网在线状态服务（F2-B / 向日葵·ToDesk 式）——macOS 端对共享引擎 `AccountPresenceRefreshEngine` 的薄封装：
+/// - 周期性向信令服务器注册本设备在线（心跳），携带本机元数据（名称/平台/机型/系统版本/局域网地址/能力）。
+/// - 周期性拉取「本账号设备列表」（`/api/devices/list`）：同一账号下所有已注册设备 + 服务端实时在线状态，
+///   既驱动设备发现页/主控台的「账号设备」面板，也派生受信设备的在线子集（`onlinePeerDeviceIds`）。
+///   历史上这里分别调用 presence 注册与 presence 查询两个接口；列表是查询的超集，现在只保留一次轮询。
 ///
+/// 失败语义、单飞/世代/TTL 不变量都在引擎里实现并被测试锁定；本类只负责把引擎状态发布为 `@Published`。
 /// 复用 `CrossNetworkConnectionManager` 已配置的 `SignalServerClient`（bearer/tenant 鉴权）。presence 键由服务端
-/// 用已验证 JWT 的 tenantId:userId:deviceId 构成，因此只能看到「自己账号」的设备在线状态（隐私安全）。
-/// 端到端验证需要：把更新后的 `Server/skybridge-signaling/server.js` 部署到信令服务器。
+/// 用已验证 JWT 的 tenantId:userId:deviceId 构成，因此只能看到「自己账号」的设备（隐私安全）。
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
 public final class PresenceService: ObservableObject {
     public static let shared = PresenceService()
-    private static let maximumQueryBatchSize = 200
 
-    typealias RegistrationOperation = @MainActor () async throws -> Void
-    typealias QueryOperation = @MainActor ([String]) async throws -> [String]
-    typealias TrustedDeviceIDsProvider = @MainActor () -> Set<String>
-    typealias NowProvider = @MainActor () -> Date
+    typealias RegistrationOperation = AccountPresenceRefreshEngine.RegistrationOperation
+    typealias AccountDeviceListOperation = AccountPresenceRefreshEngine.AccountDeviceListOperation
+    typealias TrustedDeviceIDsProvider = AccountPresenceRefreshEngine.TrustedDeviceIDsProvider
+    typealias NowProvider = AccountPresenceRefreshEngine.NowProvider
+    typealias FailureClassifier = AccountPresenceRefreshEngine.FailureClassifier
 
     /// 当前在线的受信设备 id 集合（以 TrustRecord.currentDeviceId 为键）。
     @Published public private(set) var onlinePeerDeviceIds: Set<String> = []
+    /// 本账号设备列表的最近一次成功快照；未登录/尚未拉取/已登出时为 nil。
+    @Published public private(set) var accountDevices: AccountDeviceListSnapshot?
+    @Published public private(set) var lastSuccessfulListAt: Date?
+    /// 最近一次列表拉取失败（成功后清空）。UI 据此显示「列表可能已过期」而不是假装最新。
+    @Published public private(set) var lastListFailure: AccountPresenceFailure?
+    /// 最近一次心跳失败（成功后清空）。
+    @Published public private(set) var lastHeartbeatFailure: AccountPresenceFailure?
+    /// 服务是否处于运行态（登录后由 DashboardViewModel 启动；登出/访客模式为 false）。UI 据此区分「未登录」与「同步中」。
+    @Published public private(set) var isActive = false
 
-    private var loopTask: Task<Void, Never>?
-    private var refreshTask: Task<Void, Never>?
-    private var refreshToken: UUID?
-    private var started = false
-    private var lifecycleGeneration: UInt64 = 0
-    private var lastSuccessfulQueryAt: Date?
-    private let logger = Logger(subsystem: "com.skybridge.compass", category: "Presence")
-    private let refreshInterval: Duration
-    private let onlineStateTTL: TimeInterval
-    private let now: NowProvider
-    private let registerPresence: RegistrationOperation
-    private let queryPresence: QueryOperation
-    private let trustedDeviceIDs: TrustedDeviceIDsProvider
+    private var engine: AccountPresenceRefreshEngine!
 
     private convenience init() {
         self.init(
-            refreshInterval: .seconds(30),
-            onlineStateTTL: 90,
+            refreshInterval: .seconds(AccountPresenceRefreshPolicy.heartbeatInterval),
+            onlineStateTTL: AccountPresenceRefreshPolicy.snapshotTTL,
             now: Date.init,
             registerPresence: {
-                _ = try await CrossNetworkConnectionManager.shared.registerDevicePresence(
-                    deviceName: Self.localDeviceName()
-                )
+                let report = try LocalDevicePresenceReportBuilder.currentReport()
+                _ = try await CrossNetworkConnectionManager.shared.registerDevicePresence(report: report)
             },
-            queryPresence: { deviceIDs in
-                try await CrossNetworkConnectionManager.shared.queryDevicePresence(
-                    deviceIDs: deviceIDs
-                )
+            listAccountDevices: {
+                try await CrossNetworkConnectionManager.shared.listAccountDevices()
             },
             trustedDeviceIDs: {
                 Set(
@@ -70,168 +63,55 @@ public final class PresenceService: ObservableObject {
         onlineStateTTL: TimeInterval,
         now: @escaping NowProvider,
         registerPresence: @escaping RegistrationOperation,
-        queryPresence: @escaping QueryOperation,
-        trustedDeviceIDs: @escaping TrustedDeviceIDsProvider
+        listAccountDevices: @escaping AccountDeviceListOperation,
+        trustedDeviceIDs: @escaping TrustedDeviceIDsProvider,
+        classifyFailure: @escaping FailureClassifier = SignalServerClient.presenceFailure(for:)
     ) {
-        precondition(onlineStateTTL > 0, "Presence online-state TTL must be positive")
-        self.refreshInterval = refreshInterval
-        self.onlineStateTTL = onlineStateTTL
-        self.now = now
-        self.registerPresence = registerPresence
-        self.queryPresence = queryPresence
-        self.trustedDeviceIDs = trustedDeviceIDs
+        let (seconds, attoseconds) = refreshInterval.components
+        engine = AccountPresenceRefreshEngine(
+            refreshInterval: TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18,
+            onlineStateTTL: onlineStateTTL,
+            now: now,
+            registerPresence: registerPresence,
+            listAccountDevices: listAccountDevices,
+            trustedDeviceIDs: trustedDeviceIDs,
+            classifyFailure: classifyFailure,
+            onStateChange: { [weak self] state in
+                self?.apply(state)
+            }
+        )
     }
 
-    /// 启动心跳 + 轮询（幂等）。失败会记录错误类别；查询持续失败超过 TTL 后在线状态会失效。
+    /// 启动心跳 + 列表轮询（幂等）。失败会记录类别；列表持续失败超过 TTL 后在线状态会失效。
     public func start() {
-        guard !started else { return }
-        started = true
-        lifecycleGeneration &+= 1
-        let generation = lifecycleGeneration
-        scheduleRefresh(for: generation)
-        loopTask = Task { @MainActor [weak self] in
-            while let self, self.isCurrentRefresh(generation) {
-                do {
-                    try await Task.sleep(for: self.refreshInterval)
-                } catch {
-                    return
-                }
-                guard self.isCurrentRefresh(generation) else { return }
-                self.expireOnlineStateIfStale(at: self.now())
-                self.scheduleRefresh(for: generation)
-            }
-        }
+        engine.start()
+        isActive = engine.isStarted
     }
 
+    /// 停止并清空快照（登出/账号切换）。
     public func stop() {
-        lifecycleGeneration &+= 1
-        loopTask?.cancel()
-        loopTask = nil
-        refreshTask?.cancel()
-        refreshTask = nil
-        refreshToken = nil
-        started = false
-        lastSuccessfulQueryAt = nil
-        onlinePeerDeviceIds = []
+        engine.stop()
+        isActive = false
     }
 
-    /// 立即触发一次（例如前台恢复时）。
-    public func triggerRefresh() {
-        guard started else { return }
-        expireOnlineStateIfStale(at: now())
-        scheduleRefresh(for: lifecycleGeneration)
-    }
+    /// 立即触发一次（例如前台恢复、用户点刷新）。
+    public func triggerRefresh() { engine.triggerRefresh() }
 
-    func waitForCurrentRefresh() async {
-        let task = refreshTask
-        await task?.value
-    }
-
-    private func scheduleRefresh(for generation: UInt64) {
-        guard isCurrentGeneration(generation), refreshTask == nil else { return }
-        let token = UUID()
-        refreshToken = token
-        refreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.tick(generation: generation)
-            self.finishRefresh(token: token, generation: generation)
-        }
-    }
-
-    private func finishRefresh(token: UUID, generation: UInt64) {
-        guard lifecycleGeneration == generation, refreshToken == token else { return }
-        refreshTask = nil
-        refreshToken = nil
-    }
-
-    private func tick(generation: UInt64) async {
-        // 1) 注册本设备在线（心跳）。未登录/网络失败不会中断其它功能，但必须可观测。
-        do {
-            try await registerPresence()
-        } catch {
-            guard isCurrentRefresh(generation) else { return }
-            logger.warning(
-                "Presence registration failed: errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
-            )
-        }
-        guard isCurrentRefresh(generation) else { return }
-
-        // 2) 查询本账号受信设备的在线子集。
-        let trustedIds = trustedDeviceIDs()
-        guard !trustedIds.isEmpty else {
-            if !onlinePeerDeviceIds.isEmpty { onlinePeerDeviceIds = [] }
-            lastSuccessfulQueryAt = now()
-            return
-        }
-        do {
-            let sortedTrustedIds = trustedIds.sorted()
-            var queriedOnlineIds = Set<String>()
-            for batchStart in stride(
-                from: 0,
-                to: sortedTrustedIds.count,
-                by: Self.maximumQueryBatchSize
-            ) {
-                let batchEnd = min(
-                    batchStart + Self.maximumQueryBatchSize,
-                    sortedTrustedIds.count
-                )
-                let onlineBatch = try await queryPresence(
-                    Array(sortedTrustedIds[batchStart..<batchEnd])
-                )
-                guard isCurrentRefresh(generation) else { return }
-                queriedOnlineIds.formUnion(onlineBatch)
-            }
-
-            // Trust may be revoked while requests are in flight. Publish once, only after every
-            // batch succeeds, and intersect with both the queried snapshot and current trust.
-            let currentTrustedIds = trustedDeviceIDs()
-            let set = queriedOnlineIds
-                .intersection(trustedIds)
-                .intersection(currentTrustedIds)
-            if set != onlinePeerDeviceIds { onlinePeerDeviceIds = set }
-            lastSuccessfulQueryAt = now()
-        } catch {
-            guard isCurrentRefresh(generation) else { return }
-            logger.warning(
-                "Presence query failed: errorClass=\(String(reflecting: Swift.type(of: error)), privacy: .public)"
-            )
-            expireOnlineStateIfStale(at: now())
-        }
-    }
-
-    private func expireOnlineStateIfStale(at currentTime: Date) {
-        guard !onlinePeerDeviceIds.isEmpty else { return }
-        guard let lastSuccessfulQueryAt else {
-            onlinePeerDeviceIds = []
-            return
-        }
-        let age = currentTime.timeIntervalSince(lastSuccessfulQueryAt)
-        guard age >= 0, age < onlineStateTTL else {
-            // Wall-clock rollback is not proof that a peer remains online; fail closed.
-            onlinePeerDeviceIds = []
-            return
-        }
-    }
-
-    private func isCurrentGeneration(_ generation: UInt64) -> Bool {
-        started && lifecycleGeneration == generation
-    }
-
-    private func isCurrentRefresh(_ generation: UInt64) -> Bool {
-        isCurrentGeneration(generation) && !Task.isCancelled
-    }
+    func waitForCurrentRefresh() async { await engine.waitForCurrentRefresh() }
 
     /// 该设备是否在线（按 TrustRecord 的任一已知 id 命中）。
-    public func isOnline(deviceId: String) -> Bool {
-        !deviceId.isEmpty && onlinePeerDeviceIds.contains(deviceId)
+    public func isOnline(deviceId: String) -> Bool { engine.isOnline(deviceId: deviceId) }
+
+    /// 快照是否已超过 TTL 未刷新（UI 用于显示过期提示）。
+    public func isAccountDevicesSnapshotStale(at currentTime: Date? = nil) -> Bool {
+        engine.isSnapshotStale(at: currentTime)
     }
 
-    private static func localDeviceName() -> String {
-        #if canImport(AppKit)
-        let name = LocalHostName.localizedName ?? ProcessInfo.processInfo.hostName
-        #else
-        let name = ProcessInfo.processInfo.hostName
-        #endif
-        return String(name.prefix(128))
+    private func apply(_ state: AccountPresenceRefreshEngine.State) {
+        if onlinePeerDeviceIds != state.onlinePeerDeviceIds { onlinePeerDeviceIds = state.onlinePeerDeviceIds }
+        if accountDevices != state.accountDevices { accountDevices = state.accountDevices }
+        if lastSuccessfulListAt != state.lastSuccessfulListAt { lastSuccessfulListAt = state.lastSuccessfulListAt }
+        if lastListFailure != state.lastListFailure { lastListFailure = state.lastListFailure }
+        if lastHeartbeatFailure != state.lastHeartbeatFailure { lastHeartbeatFailure = state.lastHeartbeatFailure }
     }
 }

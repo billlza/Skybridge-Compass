@@ -1064,6 +1064,84 @@ struct WebRTCSignalingCurrentPathTests {
     func controlPlaneClientAPIKeyDefaultIsPresent() {
         #expect(!SkyBridgeServerConfig.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
+    @Test("presence 心跳与账号设备列表走既定端点、携带身份绑定与本机元数据")
+    func presenceAndAccountDeviceListRequestShapes() async throws {
+        #expect(SignalServerClient.presenceRegisterPath == "/api/presence/register")
+        #expect(SignalServerClient.accountDevicesListPath == "/api/devices/list")
+
+        let urlSession = makeSignalBoundaryURLSession()
+        defer { urlSession.invalidateAndCancel() }
+        func makeClient(mode: String) -> SignalServerClient {
+            SignalServerClient(
+                urlSession: urlSession,
+                baseURLProvider: { "https://signal-boundary.invalid" },
+                apiKeyProvider: { mode },
+                authenticatedRequestContextProvider: {
+                    SignalServerClient.AuthenticatedRequestContext(
+                        bearerToken: "token-presence",
+                        tenantID: "tenant-presence",
+                        userID: "user-presence"
+                    )
+                },
+                tenantIDProvider: { "must-not-be-used-for-authenticated-request" },
+                clientVersionProvider: { "1.0.2" },
+                protocolVersionProvider: { "1" }
+            )
+        }
+        let binding = try makeSignalBoundaryBinding()
+        let report = try AccountDevicePresenceReport(
+            deviceName: "Boundary Mac",
+            platform: .macOS,
+            deviceModel: "Mac16,7",
+            osVersion: "26.6.0",
+            lanAddresses: ["fd12::1", "10.0.0.5"],
+            capabilities: [.remoteDesktop, .clipboard]
+        )
+
+        let response = try await makeClient(mode: "presence-register").registerPresence(binding: binding, report: report)
+        #expect(response.online)
+        #expect(response.persisted == true)
+        #expect(response.persistReason == "written")
+        let registerRequest = try #require(SignalBoundaryURLProtocol.request(for: "presence-register"))
+        #expect(registerRequest.httpMethod == "POST")
+        #expect(registerRequest.url?.path == "/api/presence/register")
+        #expect(registerRequest.value(forHTTPHeaderField: "Authorization") == "Bearer token-presence")
+        #expect(registerRequest.value(forHTTPHeaderField: "X-SkyBridge-Tenant-Id") == "tenant-presence")
+        let bodyData = try #require(signalBoundaryRequestBody(registerRequest))
+        let bodyObject = try JSONSerialization.jsonObject(with: bodyData)
+        let body = try #require(bodyObject as? [String: Any])
+        #expect(body["deviceId"] as? String == binding.deviceId)
+        #expect(body["protocolSigningAlgorithm"] as? String == "Ed25519")
+        #expect(body["protocolPublicKeyFingerprint"] as? String == binding.protocolPublicKeyFingerprint)
+        #expect(body["clientVersion"] as? String == "1.0.2")
+        #expect(body["protocolVersion"] as? String == "1")
+        #expect(body["deviceName"] as? String == "Boundary Mac")
+        #expect(body["platform"] as? String == "macos")
+        #expect(body["deviceModel"] as? String == "Mac16,7")
+        #expect(body["osVersion"] as? String == "26.6.0")
+        #expect(body["lanAddresses"] as? [String] == ["fd12::1", "10.0.0.5"], "reporter order reaches the wire untouched")
+        #expect(body["capabilities"] as? [String] == ["clipboard", "remote_desktop"])
+        #expect(body["appVersion"] == nil, "the server derives appVersion from clientVersion")
+
+        let snapshot = try await makeClient(mode: "account-devices-list").listAccountDevices(binding: binding)
+        #expect(snapshot.callerDeviceId == binding.deviceId)
+        #expect(snapshot.devices.count == 1)
+        #expect(snapshot.devices.first?.isCaller == true)
+        #expect(snapshot.devices.first?.platform == .macOS)
+        #expect(snapshot.onlineDeviceIds == [binding.deviceId])
+        let listRequest = try #require(SignalBoundaryURLProtocol.request(for: "account-devices-list"))
+        #expect(listRequest.httpMethod == "GET")
+        #expect(listRequest.url?.path == "/api/devices/list")
+        #expect(listRequest.value(forHTTPHeaderField: "Authorization") == "Bearer token-presence")
+        let listURL = try #require(listRequest.url)
+        let listComponents = try #require(URLComponents(url: listURL, resolvingAgainstBaseURL: false))
+        let queryItems = try #require(listComponents.queryItems)
+        let query = Dictionary(uniqueKeysWithValues: queryItems.map { ($0.name, $0.value ?? "") })
+        #expect(query["deviceId"] == binding.deviceId)
+        #expect(query["protocolSigningAlgorithm"] == "Ed25519")
+        #expect(query["protocolPublicKeyFingerprint"] == binding.protocolPublicKeyFingerprint)
+        #expect(query.count == 3)
+    }
 }
 
 private func queryDictionary(for url: URL) -> [String: String] {
@@ -1140,6 +1218,21 @@ private func makeSignalBoundaryBinding() throws -> ProtocolIdentityBinding {
         protocolSigningAlgorithm: .ed25519,
         protocolPublicKeyBytes: Data(repeating: 0x11, count: 32)
     )
+}
+
+private func signalBoundaryRequestBody(_ request: URLRequest) -> Data? {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return nil }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4_096)
+    while stream.hasBytesAvailable {
+        let read = stream.read(&buffer, maxLength: buffer.count)
+        if read <= 0 { break }
+        data.append(buffer, count: read)
+    }
+    return data
 }
 
 private func makeSignalBoundaryURLSession() -> URLSession {
@@ -1327,6 +1420,36 @@ private final class SignalBoundaryURLProtocol: URLProtocol, @unchecked Sendable 
                     "protocolPublicKeyFingerprint":
                         newIdentity?.protocolPublicKeyFingerprint ?? "missing",
                     "state": "active"
+                ]
+            ]
+        } else if mode == "presence-register" {
+            body = [
+                "online": true,
+                "ttlMs": 90_000,
+                "expiresAt": 2_000_000_090_000 as Int64,
+                "persisted": true,
+                "persistReason": "written"
+            ]
+        } else if mode == "account-devices-list" {
+            let binding = try? makeSignalBoundaryBinding()
+            body = [
+                "generatedAt": 2_000_000_000_000 as Int64,
+                "callerDeviceId": binding?.deviceId ?? "missing",
+                "truncated": false,
+                "devices": [
+                    [
+                        "deviceId": binding?.deviceId ?? "missing",
+                        "deviceName": "Boundary Mac",
+                        "status": "active",
+                        "protocolSigningAlgorithm": ProtocolSigningAlgorithm.ed25519.rawValue,
+                        "protocolPublicKeyFingerprint": binding?.protocolPublicKeyFingerprint ?? "missing",
+                        "platform": "macos",
+                        "lanAddresses": ["10.0.0.5"],
+                        "capabilities": ["remote_desktop"],
+                        "lastSeenAt": 1_999_999_999_000 as Int64,
+                        "online": true,
+                        "isCaller": true
+                    ]
                 ]
             ]
         } else {

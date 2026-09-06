@@ -52,6 +52,9 @@ struct DeviceDiscoveryView: View {
     @State private var selectedDevice: DiscoveredDevice?
     @State private var showConnectionSheet = false
     @State private var searchText = ""
+
+    /// 账号设备行「用连接码连接」→ 由首页打开扫码/跨网连接入口。
+    var onOpenCrossNetworkConnect: () -> Void = {}
     
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     
@@ -59,6 +62,12 @@ struct DeviceDiscoveryView: View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 16) {
+                    // 账号设备（同一账号下的全部设备）放在附近扫描之前。
+                    AccountDevicesSectionView(
+                        onOpenNearbyDevice: { device in selectedDevice = device },
+                        onOpenCrossNetworkConnect: onOpenCrossNetworkConnect
+                    )
+
                     scanStatusHeader
 
                     AdvertisingLifecycleBanner(

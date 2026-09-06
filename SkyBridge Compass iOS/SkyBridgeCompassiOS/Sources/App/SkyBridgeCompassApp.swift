@@ -110,6 +110,8 @@ struct SkyBridgeCompassApp: App {
                     await IOSCurrentPathDeviceActivationCoordinator.shared.syncIfNeeded(
                         authenticationPrincipal: principal
                     )
+                    // 账号设备心跳/列表跟随登录主体：登录即启动，登出/切号即停止并清空。
+                    AccountPresenceService.shared.updateAuthentication(principal: principal)
                 }
                 .onChange(of: scenePhase) { _, newPhase in
                     Task { @MainActor in
@@ -533,6 +535,9 @@ struct SkyBridgeCompassApp: App {
 
         switch phase {
         case .active:
+            // 账号设备心跳/列表只依赖登录态与信令服务器，与局域网配对 authority 无关：
+            // 必须在配对恢复闸门之前恢复，否则一次配对恢复失败会让 presence 在整个前台会话里保持挂起。
+            AccountPresenceService.shared.handleScenePhase(isActive: true)
             do {
                 try await PairingAcceptancePersistence.recoverIfNeeded(
                     policyParticipant: connectionManager
@@ -577,6 +582,8 @@ struct SkyBridgeCompassApp: App {
             scheduleCloudKitTrustedDeviceSync(trigger: .foreground)
 
         case .background:
+            // 账号设备心跳在后台无法维持：挂起计时、保留快照，前台恢复后立即刷新。
+            AccountPresenceService.shared.handleScenePhase(isActive: false)
             // 后台：若不允许后台连接，则关掉 discovery + listener（省电）
             guard !settings.allowBackgroundConnection else { return }
             backgroundTeardownTask?.cancel()

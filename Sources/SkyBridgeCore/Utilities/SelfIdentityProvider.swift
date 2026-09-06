@@ -196,22 +196,7 @@ public actor SelfIdentityProvider {
     
  /// 获取硬件型号（避免使用已废弃的 String(cString:)）
     private func getHardwareModel() -> String {
-        var size = 0
-        sysctlbyname("hw.model", nil, &size, nil, 0)
-        
-        guard size > 0 else { return "" }
-        
-        var model = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.model", &model, &size, nil, 0)
-        
- // 转为 UInt8 并截断到首个 `\\0`，再用 UTF8 解码，兼容 Swift 6.2.1
-        let bytes: [UInt8] = model.map { UInt8(bitPattern: $0) }
-        if let terminator = bytes.firstIndex(of: 0) {
-            let slice = bytes.prefix(terminator)
-            return String(decoding: slice, as: UTF8.self)
-        } else {
-            return String(decoding: bytes, as: UTF8.self)
-        }
+        HardwareModelIdentifier.current() ?? ""
     }
     
  // MARK: - 私有加载逻辑

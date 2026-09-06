@@ -1,5 +1,6 @@
 import Foundation
 import OSLog
+import SkyBridgeProtocolCore
 import SkyBridgeRealtimeMedia
 
 @available(iOS 17.0, macOS 14.0, *)
@@ -370,6 +371,21 @@ actor SignalServerClientCompat {
         let clientVersion: String
         let protocolVersion: String
         let deviceName: String
+    }
+
+    /// 心跳请求体：身份绑定 + 版本 + 本机元数据（与 macOS `SignalServerClient.PresenceRegisterRequestBody` 同一 wire 形状）。
+    private struct PresenceRegisterRequestBody: Encodable {
+        let deviceId: String
+        let protocolSigningAlgorithm: String
+        let protocolPublicKeyFingerprint: String
+        let clientVersion: String
+        let protocolVersion: String
+        let deviceName: String
+        let platform: String
+        let deviceModel: String?
+        let osVersion: String?
+        let lanAddresses: [String]
+        let capabilities: [String]
     }
 
     private struct RegisteredCurrentDeviceResponseBody: Decodable {
@@ -775,6 +791,86 @@ actor SignalServerClientCompat {
             approvalMethod: response.device.approvalMethod,
             activated: response.activated
         )
+    }
+
+    /// 注册/续约本设备在线状态（presence 心跳）并上报本机元数据。
+    @discardableResult
+    func registerPresence(
+        binding: ProtocolIdentityBindingCompat,
+        report: AccountDevicePresenceReport
+    ) async throws -> SignalServerClient.PresenceRegisterResponseBody {
+        let body = PresenceRegisterRequestBody(
+            deviceId: binding.deviceId,
+            protocolSigningAlgorithm: binding.protocolSigningAlgorithm.rawValue,
+            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+            clientVersion: clientVersion(),
+            protocolVersion: protocolVersion(),
+            deviceName: report.deviceName,
+            platform: report.platform.rawValue,
+            deviceModel: report.deviceModel,
+            osVersion: report.osVersion,
+            lanAddresses: report.lanAddresses,
+            capabilities: report.capabilities
+        )
+        return try await performJSONRequest(
+            path: SignalServerClient.presenceRegisterPath,
+            method: "POST",
+            body: try JSONEncoder().encode(body),
+            requiresUserAuthentication: true
+        )
+    }
+
+    /// 拉取本账号（JWT 的 tenant+user）下的全部设备及实时在线状态。
+    func listAccountDevices(binding: ProtocolIdentityBindingCompat) async throws -> AccountDeviceListSnapshot {
+        try await performJSONRequest(
+            path: SignalServerClient.accountDevicesListPath,
+            method: "GET",
+            queryItems: [
+                URLQueryItem(name: "deviceId", value: binding.deviceId),
+                URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
+                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
+            ],
+            requiresUserAuthentication: true
+        )
+    }
+
+    /// 把 presence/账号设备列表请求抛出的错误归类为共享的 `AccountPresenceFailure`。
+    nonisolated static func presenceFailure(for error: Error) -> AccountPresenceFailure {
+        if let clientError = error as? ClientError {
+            switch clientError {
+            case .serverRejected(let status, let description):
+                return AccountPresenceRefreshPolicy.classify(
+                    status: status,
+                    code: SignalServerClient.serverRejectedErrorCode(fromSanitizedDescription: description)
+                )
+            // 只有"确实没有会话"才是未登录；本地存储/声明校验故障是错误，不能被渲染成登录引导。
+            case .missingAuthentication, .missingTenantID, .authenticationSessionChanged:
+                return .notAuthenticated
+            case .authenticationStorageUnavailable:
+                return .localAuthenticationUnavailable(code: "authentication_storage_unavailable")
+            case .missingTenantClaim:
+                return .localAuthenticationUnavailable(code: "missing_tenant_claim")
+            case .tenantIdentityMismatch:
+                return .localAuthenticationUnavailable(code: "tenant_identity_mismatch")
+            case .userIdentityMismatch:
+                return .localAuthenticationUnavailable(code: "user_identity_mismatch")
+            case .invalidAuthenticationClaims:
+                return .localAuthenticationUnavailable(code: "invalid_authentication_claims")
+            case .conflictingTenantClaims:
+                return .localAuthenticationUnavailable(code: "conflicting_tenant_claims")
+            case .malformedResponse:
+                return .malformedResponse
+            default:
+                return .transport
+            }
+        }
+        if let presenceError = error as? AccountPresenceClientError {
+            switch presenceError {
+            case .localIdentityUnavailable:
+                return .localIdentityUnavailable
+            }
+        }
+        return .transport
     }
 
     func requestAdmissionChallenge(binding: ProtocolIdentityBindingCompat) async throws -> AdmissionChallenge {

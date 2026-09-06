@@ -4010,18 +4010,30 @@ public final class CrossNetworkConnectionManager: ObservableObject {
 
     // MARK: - 跨网在线 presence（F2-B）：复用已配置的 signalServer（含 bearer/tenant 鉴权）与本机绑定。
 
-    /// 向信令服务器注册/续约本设备在线状态（心跳）。返回是否成功。
+    /// 向信令服务器注册/续约本设备在线状态（心跳），并上报本机元数据。
     @discardableResult
-    public func registerDevicePresence(deviceName: String) async throws -> Bool {
-        let binding = try await currentPathLocalBinding()
-        return try await signalServer.registerPresence(binding: binding, deviceName: deviceName)
+    public func registerDevicePresence(
+        report: AccountDevicePresenceReport
+    ) async throws -> SignalServerClient.PresenceRegisterResponseBody {
+        let binding = try await presenceLocalBinding()
+        return try await signalServer.registerPresence(binding: binding, report: report)
     }
 
-    /// 查询给定（本账号自有）设备 id 中当前在线的子集。
-    public func queryDevicePresence(deviceIDs: [String]) async throws -> [String] {
-        guard !deviceIDs.isEmpty else { return [] }
-        let binding = try await currentPathLocalBinding()
-        return try await signalServer.queryPresence(binding: binding, deviceIDs: deviceIDs)
+    /// 拉取本账号（JWT 的 tenant+user）下的全部设备及实时在线状态。
+    public func listAccountDevices() async throws -> AccountDeviceListSnapshot {
+        let binding = try await presenceLocalBinding()
+        return try await signalServer.listAccountDevices(binding: binding)
+    }
+
+    /// 身份未就绪是一种独立的失败类别（不是网络故障，也不是未登录）。
+    private func presenceLocalBinding() async throws -> ProtocolIdentityBinding {
+        do {
+            return try await currentPathLocalBinding()
+        } catch {
+            throw AccountPresenceClientError.localIdentityUnavailable(
+                underlying: String(reflecting: type(of: error))
+            )
+        }
     }
 
     private func activeConnectionCodeMatchesCurrentAuthority(_ binding: ProtocolIdentityBinding) -> Bool {

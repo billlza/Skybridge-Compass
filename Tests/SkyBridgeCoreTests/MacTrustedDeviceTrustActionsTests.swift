@@ -787,12 +787,17 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertTrue(macICloudSource.contains("public var listenerReady: Bool?"))
         XCTAssertTrue(macICloudSource.contains("public var controlPort: UInt16?"))
         XCTAssertTrue(macICloudSource.contains("继续使用 iCloud KV Store 做设备在线心跳"))
+        let iosAddressInspectorSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Utilities/LocalNetworkAddressInspector.swift")
+        let sharedAddressPolicySource = try repositorySource("Sources/SkyBridgeProtocolCore/Discovery/LANAddressRoutabilityPolicy.swift")
         XCTAssertTrue(
-            iosPresenceSource.contains("isAdvertisableRoutableIPv4") &&
-            iosPresenceSource.contains("!value.hasPrefix(\"169.254.\")") &&
-            macICloudSource.contains("isAdvertisableRoutableIPv4") &&
-            macICloudSource.contains("!value.hasPrefix(\"169.254.\")"),
-            "iOS and Mac iCloud KVS presence must not publish link-local IPv4 addresses as cross-device dial targets."
+            iosPresenceSource.contains("LocalNetworkAddressInspector.routableAddresses().first") &&
+            iosAddressInspectorSource.contains("LANAddressRoutabilityPolicy.parse(host)") &&
+            iosAddressInspectorSource.contains("literal.isRoutableLANAddress") &&
+            sharedAddressPolicySource.contains("if first == 169, bytes[1] == 254 { return false }") &&
+            macICloudSource.contains("LocalNetworkAdvertisementAddressProvider.routableLANAddresses().first") &&
+            !macICloudSource.contains("getifaddrs(") &&
+            !macICloudSource.contains("isAdvertisableRoutableIPv4"),
+            "iOS and Mac iCloud KVS presence must publish the same shared-policy LAN address (no private getifaddrs copy, never link-local)."
         )
         XCTAssertFalse(
             macICloudSource.contains("iCloud 容器不可用：请检查 iCloud Drive"),

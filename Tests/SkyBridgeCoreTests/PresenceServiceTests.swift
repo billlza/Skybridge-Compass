@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import SkyBridgeProtocolCore
 @testable import SkyBridgeCore
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -7,14 +8,14 @@ import XCTest
 final class PresenceServiceTests: XCTestCase {
     func testRefreshIsSingleFlightWhileRegistrationIsSuspended() async {
         let registrationGate = PresenceSuspensionGate()
-        let queryState = PresenceQueryCounter()
+        let listState = PresenceListCounter()
         let service = makeService(
             registerPresence: {
                 await registrationGate.enter()
             },
-            queryPresence: { _ in
-                queryState.count += 1
-                return ["peer"]
+            listAccountDevices: {
+                listState.count += 1
+                return Self.snapshot(online: ["peer"])
             }
         )
 
@@ -26,51 +27,54 @@ final class PresenceServiceTests: XCTestCase {
 
         let entryCount = await registrationGate.entryCount
         XCTAssertEqual(entryCount, 1)
-        XCTAssertEqual(queryState.count, 0)
+        XCTAssertEqual(listState.count, 0)
 
         await registrationGate.releaseAll()
         await service.waitForCurrentRefresh()
-        XCTAssertEqual(queryState.count, 1)
+        XCTAssertEqual(listState.count, 1)
+        XCTAssertEqual(service.onlinePeerDeviceIds, ["peer"])
         service.stop()
     }
 
     func testStoppedGenerationCannotOverwriteRestartedGeneration() async {
-        let queryProbe = SequencedPresenceQuery()
+        let listProbe = SequencedPresenceList()
         let service = makeService(
-            queryPresence: { _ in
-                await queryProbe.execute()
+            listAccountDevices: {
+                await listProbe.execute()
             },
             trustedDeviceIDs: { ["stale-peer", "current-peer"] }
         )
 
         service.start()
-        await queryProbe.waitForCallCount(1)
+        await listProbe.waitForCallCount(1)
         service.stop()
 
         service.start()
         await service.waitForCurrentRefresh()
         XCTAssertEqual(service.onlinePeerDeviceIds, ["current-peer"])
+        XCTAssertEqual(service.accountDevices?.callerDeviceId, "current")
 
-        await queryProbe.releaseFirstCall()
-        await queryProbe.waitForFirstCallReturn()
+        await listProbe.releaseFirstCall()
+        await listProbe.waitForFirstCallReturn()
         for _ in 0..<20 {
             await Task.yield()
         }
 
         XCTAssertEqual(service.onlinePeerDeviceIds, ["current-peer"])
+        XCTAssertEqual(service.accountDevices?.callerDeviceId, "current")
         service.stop()
     }
 
-    func testQueryFailureExpiresOnlineStateAtTTLAndFiltersUntrustedIDs() async {
-        let queryState = PresenceTimedQueryState()
+    func testListFailureExpiresOnlineStateAtTTLAndFiltersUntrustedIDs() async throws {
+        let listState = PresenceTimedListState()
         let service = makeService(
             onlineStateTTL: 90,
-            now: { queryState.currentTime },
-            queryPresence: { _ in
-                if queryState.shouldFail {
-                    throw PresenceTestError.queryFailed
+            now: { listState.currentTime },
+            listAccountDevices: {
+                if listState.shouldFail {
+                    throw PresenceTestError.listFailed
                 }
-                return ["trusted-peer", "server-injected-untrusted-peer"]
+                return Self.snapshot(online: ["trusted-peer", "server-injected-untrusted-peer"])
             },
             trustedDeviceIDs: { ["trusted-peer"] }
         )
@@ -78,29 +82,45 @@ final class PresenceServiceTests: XCTestCase {
         service.start()
         await service.waitForCurrentRefresh()
         XCTAssertEqual(service.onlinePeerDeviceIds, ["trusted-peer"])
+        XCTAssertNil(service.lastListFailure)
+        let successfulSnapshot = service.accountDevices
+        XCTAssertNotNil(successfulSnapshot)
 
-        queryState.shouldFail = true
-        queryState.currentTime = queryState.currentTime.addingTimeInterval(89)
+        listState.shouldFail = true
+        listState.currentTime = listState.currentTime.addingTimeInterval(89)
         service.triggerRefresh()
         await service.waitForCurrentRefresh()
         XCTAssertEqual(service.onlinePeerDeviceIds, ["trusted-peer"])
+        XCTAssertEqual(service.lastListFailure, .transport)
+        XCTAssertEqual(service.accountDevices, successfulSnapshot, "a failed refresh keeps the last good snapshot")
 
-        queryState.currentTime = queryState.currentTime.addingTimeInterval(1)
+        listState.currentTime = listState.currentTime.addingTimeInterval(1)
         service.triggerRefresh()
         await service.waitForCurrentRefresh()
         XCTAssertTrue(service.onlinePeerDeviceIds.isEmpty)
+        XCTAssertTrue(service.isAccountDevicesSnapshotStale())
+        let expired = try XCTUnwrap(service.accountDevices)
+        XCTAssertEqual(
+            expired.devices.map(\.deviceId),
+            successfulSnapshot?.devices.map(\.deviceId),
+            "static device data survives expiry so names/addresses stay visible"
+        )
+        XCTAssertTrue(expired.onlineDeviceIds.isEmpty, "no device may still read as online after the TTL")
+        XCTAssertFalse(expired.hasOnlineDevices)
+        XCTAssertEqual(expired.callerDeviceId, successfulSnapshot?.callerDeviceId)
+        XCTAssertNotEqual(service.accountDevices, successfulSnapshot, "the published snapshot must change so observers re-render")
         service.stop()
     }
 
     func testClockRollbackFailsClosedInsteadOfExtendingStalePresence() async {
-        let queryState = PresenceTimedQueryState()
+        let listState = PresenceTimedListState()
         let service = makeService(
-            now: { queryState.currentTime },
-            queryPresence: { _ in
-                if queryState.shouldFail {
-                    throw PresenceTestError.queryFailed
+            now: { listState.currentTime },
+            listAccountDevices: {
+                if listState.shouldFail {
+                    throw PresenceTestError.listFailed
                 }
-                return ["peer"]
+                return Self.snapshot(online: ["peer"])
             }
         )
 
@@ -108,133 +128,204 @@ final class PresenceServiceTests: XCTestCase {
         await service.waitForCurrentRefresh()
         XCTAssertEqual(service.onlinePeerDeviceIds, ["peer"])
 
-        queryState.shouldFail = true
-        queryState.currentTime = queryState.currentTime.addingTimeInterval(-1)
+        listState.shouldFail = true
+        listState.currentTime = listState.currentTime.addingTimeInterval(-1)
         service.triggerRefresh()
         await service.waitForCurrentRefresh()
 
         XCTAssertTrue(service.onlinePeerDeviceIds.isEmpty)
+        XCTAssertEqual(service.accountDevices?.hasOnlineDevices, false, "clock rollback must also clear snapshot online flags")
         service.stop()
     }
 
-    func testMoreThanTwoHundredTrustedDevicesAreQueriedInStableBoundedBatches() async {
-        let trustedIDs = Set((0..<451).map { String(format: "peer-%03d", $0) })
-        let batchRecorder = PresenceBatchRecorder()
+    func testHeartbeatFailureIsTypedAndDoesNotBlockTheList() async {
+        let heartbeatState = PresenceTimedListState()
         let service = makeService(
-            queryPresence: { batch in
-                batchRecorder.batches.append(batch)
-                return batch
-            },
-            trustedDeviceIDs: { trustedIDs }
-        )
-
-        service.start()
-        await service.waitForCurrentRefresh()
-
-        XCTAssertEqual(batchRecorder.batches.map(\.count), [200, 200, 51])
-        XCTAssertEqual(batchRecorder.batches.flatMap { $0 }, trustedIDs.sorted())
-        XCTAssertEqual(service.onlinePeerDeviceIds, trustedIDs)
-        service.stop()
-    }
-
-    func testBatchFailureDoesNotPublishPartialPresenceResult() async {
-        let batchState = PresenceAtomicBatchState()
-        let service = makeService(
-            queryPresence: { batch in
-                batchState.currentRefreshBatchCount += 1
-                if batchState.shouldFailSecondBatch,
-                   batchState.currentRefreshBatchCount == 2 {
-                    throw PresenceTestError.queryFailed
+            registerPresence: {
+                if heartbeatState.shouldFail {
+                    throw PresenceTestError.listFailed
                 }
-                return batch
             },
-            trustedDeviceIDs: { batchState.trustedIDs }
+            listAccountDevices: { Self.snapshot(online: ["peer"]) },
+            classifyFailure: { _ in .deviceNotActive(code: "device_revoked") }
         )
 
         service.start()
         await service.waitForCurrentRefresh()
-        XCTAssertEqual(service.onlinePeerDeviceIds, ["existing-peer"])
+        XCTAssertNil(service.lastHeartbeatFailure)
 
-        batchState.trustedIDs = Set((0..<401).map { String(format: "new-peer-%03d", $0) })
-        batchState.trustedIDs.insert("existing-peer")
-        batchState.shouldFailSecondBatch = true
-        batchState.currentRefreshBatchCount = 0
+        heartbeatState.shouldFail = true
         service.triggerRefresh()
         await service.waitForCurrentRefresh()
+        XCTAssertEqual(service.lastHeartbeatFailure, .deviceNotActive(code: "device_revoked"))
+        XCTAssertEqual(service.onlinePeerDeviceIds, ["peer"], "the list still refreshes when the heartbeat fails")
+        XCTAssertNil(service.lastListFailure)
 
-        XCTAssertEqual(batchState.currentRefreshBatchCount, 2)
-        XCTAssertEqual(service.onlinePeerDeviceIds, ["existing-peer"])
+        heartbeatState.shouldFail = false
+        service.triggerRefresh()
+        await service.waitForCurrentRefresh()
+        XCTAssertNil(service.lastHeartbeatFailure)
         service.stop()
+    }
+
+    func testTrustRevokedWhileListingIsHonoredBeforePublishing() async {
+        let trust = PresenceMutableTrust(ids: ["peer-a", "peer-b"])
+        let service = makeService(
+            listAccountDevices: {
+                trust.ids = ["peer-a"]
+                return Self.snapshot(online: ["peer-a", "peer-b"])
+            },
+            trustedDeviceIDs: { trust.ids }
+        )
+
+        service.start()
+        await service.waitForCurrentRefresh()
+        XCTAssertEqual(service.onlinePeerDeviceIds, ["peer-a"])
+        service.stop()
+    }
+
+    func testStopClearsSnapshotOnlineStateAndFailures() async {
+        let listState = PresenceTimedListState()
+        let service = makeService(
+            listAccountDevices: {
+                if listState.shouldFail {
+                    throw PresenceTestError.listFailed
+                }
+                return Self.snapshot(online: ["peer"])
+            }
+        )
+
+        service.start()
+        await service.waitForCurrentRefresh()
+        listState.shouldFail = true
+        service.triggerRefresh()
+        await service.waitForCurrentRefresh()
+        XCTAssertNotNil(service.accountDevices)
+        XCTAssertNotNil(service.lastListFailure)
+
+        service.stop()
+        XCTAssertNil(service.accountDevices)
+        XCTAssertNil(service.lastListFailure)
+        XCTAssertNil(service.lastHeartbeatFailure)
+        XCTAssertNil(service.lastSuccessfulListAt)
+        XCTAssertTrue(service.onlinePeerDeviceIds.isEmpty)
+        XCTAssertTrue(service.isAccountDevicesSnapshotStale())
     }
 
     func testPresenceLifecycleAndTTLSourceContract() throws {
-        let source = try presenceServiceSource()
+        let engine = try repositorySource("Sources/SkyBridgeProtocolCore/AccountDevices/AccountPresenceRefreshEngine.swift")
+        XCTAssertTrue(engine.contains("private var refreshTask: Task<Void, Never>?"))
+        XCTAssertTrue(engine.contains("guard isCurrentGeneration(generation), refreshTask == nil"))
+        XCTAssertTrue(engine.contains("private var lifecycleGeneration: UInt64"))
+        XCTAssertTrue(engine.contains("refreshToken == token"))
+        XCTAssertTrue(engine.contains("snapshot.onlineDeviceIds.intersection(trustedDeviceIDs())"))
+        XCTAssertTrue(engine.contains("guard age >= 0, age < onlineStateTTL"))
+        XCTAssertTrue(engine.contains("next.onlinePeerDeviceIds = []"))
+        XCTAssertTrue(
+            engine.contains("next.accountDevices = next.accountDevices?.markingAllOffline()"),
+            "expiry must fail closed in the published snapshot, not only in the trusted-online set"
+        )
+        XCTAssertTrue(
+            engine.contains("AccountPresenceRefreshPolicy.loopSleepInterval(") &&
+                engine.contains("untilOnlineStateExpires: self.timeUntilOnlineStateExpires(at: current)"),
+            "the loop must wake for TTL expiry even while refresh is in a long backoff"
+        )
+        XCTAssertTrue(engine.contains("AccountPresenceRefreshPolicy.retryDelay("))
+        XCTAssertFalse(engine.contains("try? await Task.sleep"))
+        XCTAssertFalse(engine.contains("while let self"), "never hold the engine strongly across the sleep")
 
-        XCTAssertTrue(source.contains("private var refreshTask: Task<Void, Never>?"))
-        XCTAssertTrue(source.contains("guard isCurrentGeneration(generation), refreshTask == nil"))
-        XCTAssertTrue(source.contains("private var lifecycleGeneration: UInt64"))
-        XCTAssertTrue(source.contains("refreshToken == token"))
-        XCTAssertTrue(source.contains("private static let maximumQueryBatchSize = 200"))
-        XCTAssertTrue(source.contains("queriedOnlineIds.formUnion(onlineBatch)"))
-        XCTAssertTrue(source.contains(".intersection(currentTrustedIds)"))
-        XCTAssertTrue(source.contains("guard age >= 0, age < onlineStateTTL"))
-        XCTAssertTrue(source.contains("onlinePeerDeviceIds = []"))
-        XCTAssertFalse(source.contains("try? await Task.sleep"))
+        let service = try repositorySource("Sources/SkyBridgeCore/RemoteConnection/PresenceService.swift")
+        XCTAssertTrue(service.contains("AccountPresenceRefreshEngine("), "macOS must wrap the shared engine, not re-implement the loop")
+        XCTAssertFalse(service.contains("Task.sleep"), "no second scheduler on macOS")
+        XCTAssertTrue(service.contains("LocalDevicePresenceReportBuilder.currentReport()"))
+        XCTAssertTrue(service.contains("CrossNetworkConnectionManager.shared.listAccountDevices()"))
+        XCTAssertFalse(service.contains("queryDevicePresence"), "the list endpoint replaces the presence/query poll")
+        XCTAssertFalse(service.contains("presence/query"))
+    }
+
+    // MARK: - Helpers
+
+    static func snapshot(
+        online: [String],
+        offline: [String] = [],
+        caller: String = "current"
+    ) -> AccountDeviceListSnapshot {
+        func record(_ id: String, online: Bool) -> AccountDeviceRecord {
+            AccountDeviceRecord(
+                deviceId: id,
+                deviceName: id,
+                status: "active",
+                protocolSigningAlgorithm: "Ed25519",
+                protocolPublicKeyFingerprint: String(repeating: "a", count: 64),
+                platformRawValue: "macos",
+                deviceModel: nil,
+                osVersion: nil,
+                appVersion: nil,
+                lanAddresses: [],
+                publicAddress: nil,
+                capabilities: [],
+                registeredAtEpochMilliseconds: nil,
+                lastSeenAtEpochMilliseconds: nil,
+                presenceUpdatedAtEpochMilliseconds: nil,
+                online: online,
+                isCaller: id == caller
+            )
+        }
+        return AccountDeviceListSnapshot(
+            generatedAtEpochMilliseconds: 1,
+            callerDeviceId: caller,
+            truncated: false,
+            devices: online.map { record($0, online: true) } + offline.map { record($0, online: false) }
+        )
     }
 
     private func makeService(
         onlineStateTTL: TimeInterval = 90,
         now: @escaping PresenceService.NowProvider = { Date(timeIntervalSince1970: 0) },
         registerPresence: @escaping PresenceService.RegistrationOperation = {},
-        queryPresence: @escaping PresenceService.QueryOperation = { _ in ["peer"] },
-        trustedDeviceIDs: @escaping PresenceService.TrustedDeviceIDsProvider = { ["peer"] }
+        listAccountDevices: @escaping PresenceService.AccountDeviceListOperation = { PresenceServiceTests.snapshot(online: ["peer"]) },
+        trustedDeviceIDs: @escaping PresenceService.TrustedDeviceIDsProvider = { ["peer"] },
+        classifyFailure: @escaping PresenceService.FailureClassifier = { _ in .transport }
     ) -> PresenceService {
         PresenceService(
             refreshInterval: .seconds(3_600),
             onlineStateTTL: onlineStateTTL,
             now: now,
             registerPresence: registerPresence,
-            queryPresence: queryPresence,
-            trustedDeviceIDs: trustedDeviceIDs
+            listAccountDevices: listAccountDevices,
+            trustedDeviceIDs: trustedDeviceIDs,
+            classifyFailure: classifyFailure
         )
     }
 
-    private func presenceServiceSource() throws -> String {
+    private func repositorySource(_ relativePath: String) throws -> String {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let sourceURL = repositoryRoot
-            .appendingPathComponent("Sources/SkyBridgeCore/RemoteConnection/PresenceService.swift")
-        return try String(contentsOf: sourceURL, encoding: .utf8)
+        return try String(contentsOf: repositoryRoot.appendingPathComponent(relativePath), encoding: .utf8)
     }
 }
 
 private enum PresenceTestError: Error {
-    case queryFailed
+    case listFailed
 }
 
 @MainActor
-private final class PresenceQueryCounter {
+private final class PresenceListCounter {
     var count = 0
 }
 
 @MainActor
-private final class PresenceTimedQueryState {
+private final class PresenceTimedListState {
     var currentTime = Date(timeIntervalSince1970: 1_000)
     var shouldFail = false
 }
 
 @MainActor
-private final class PresenceBatchRecorder {
-    var batches: [[String]] = []
-}
-
-@MainActor
-private final class PresenceAtomicBatchState {
-    var trustedIDs: Set<String> = ["existing-peer"]
-    var shouldFailSecondBatch = false
-    var currentRefreshBatchCount = 0
+private final class PresenceMutableTrust {
+    var ids: Set<String>
+    init(ids: Set<String>) { self.ids = ids }
 }
 
 private actor PresenceSuspensionGate {
@@ -265,19 +356,21 @@ private actor PresenceSuspensionGate {
     }
 }
 
-private actor SequencedPresenceQuery {
+private actor SequencedPresenceList {
     private var calls = 0
     private var firstCallContinuation: CheckedContinuation<Void, Never>?
     private var firstCallReturned = false
 
-    func execute() async -> [String] {
+    func execute() async -> AccountDeviceListSnapshot {
         calls += 1
-        guard calls == 1 else { return ["current-peer"] }
+        guard calls == 1 else {
+            return await PresenceServiceTests.snapshot(online: ["current-peer"], caller: "current")
+        }
         await withCheckedContinuation { continuation in
             firstCallContinuation = continuation
         }
         firstCallReturned = true
-        return ["stale-peer"]
+        return await PresenceServiceTests.snapshot(online: ["stale-peer"], caller: "stale")
     }
 
     func waitForCallCount(_ expectedCount: Int) async {

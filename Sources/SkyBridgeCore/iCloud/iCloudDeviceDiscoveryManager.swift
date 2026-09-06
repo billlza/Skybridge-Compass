@@ -7,7 +7,6 @@ import Foundation
 import CloudKit
 import Combine
 import OSLog
-import Network
 import Security
 
 /// 🌟 iCloud设备发现管理器 - macOS 26.0 + Swift 6.2最佳实践
@@ -444,13 +443,7 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
 
  /// 获取设备型号
     private func getDeviceModel() -> String {
-        var size = 0
-        sysctlbyname("hw.model", nil, &size, nil, 0)
-        var model = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.model", &model, &size, nil, 0)
-        let data = Data(bytes: model, count: size)
-        let trimmed = data.prefix { $0 != 0 }
-        return String(decoding: trimmed, as: UTF8.self)
+        HardwareModelIdentifier.current() ?? ""
     }
 
  /// 获取系统版本
@@ -466,66 +459,12 @@ public final class iCloudDeviceDiscoveryManager: ObservableObject, @unchecked Se
         return "\(version).\(build)"
     }
 
- /// 获取本地IP地址
+ /// 获取本地IP地址。
+ /// 与 iOS `LocalNetworkAddressInspector.routableAddresses().first` 同一规则：接口枚举与排序走
+ /// `LocalNetworkAdvertisementAddressProvider`，字面量可路由判定走共享 `LANAddressRoutabilityPolicy`；
+ /// 这里不再维护第二份 getifaddrs 拷贝。
     private func getLocalIPAddress() -> String? {
-        var ifaddr: UnsafeMutablePointer<ifaddrs>?
-
-        guard getifaddrs(&ifaddr) == 0 else { return nil }
-        defer { freeifaddrs(ifaddr) }
-
-        var en0IPv4: String?
-        var wifiIPv4: String?
-        var otherIPv4: String?
-        var ptr = ifaddr
-        while ptr != nil {
-            defer { ptr = ptr?.pointee.ifa_next }
-
-            guard let interface = ptr?.pointee,
-                  let addressPtr = interface.ifa_addr,
-                  let namePtr = interface.ifa_name else { continue }
-            let addrFamily = addressPtr.pointee.sa_family
-
-            if addrFamily == UInt8(AF_INET) {
-                let name = decodeCString(namePtr)
-                guard let ipAddress = numericHost(from: addressPtr),
-                      isAdvertisableRoutableIPv4(ipAddress) else { continue }
-                if name == "en0", en0IPv4 == nil {
-                    en0IPv4 = ipAddress
-                } else if name.hasPrefix("en"), wifiIPv4 == nil {
-                    wifiIPv4 = ipAddress
-                } else if otherIPv4 == nil {
-                    otherIPv4 = ipAddress
-                }
-            }
-        }
-
-        return en0IPv4 ?? wifiIPv4 ?? otherIPv4
-    }
-
-    private func numericHost(from address: UnsafePointer<sockaddr>) -> String? {
-        var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let result = getnameinfo(
-            address,
-            socklen_t(address.pointee.sa_len),
-            &hostname,
-            socklen_t(hostname.count),
-            nil,
-            0,
-            NI_NUMERICHOST
-        )
-        guard result == 0 else { return nil }
-        let data = Data(bytes: hostname, count: hostname.count)
-        let trimmed = data.prefix { $0 != 0 }
-        return String(decoding: trimmed, as: UTF8.self)
-    }
-
-    private func isAdvertisableRoutableIPv4(_ raw: String) -> Bool {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard IPv4Address(value) != nil else { return false }
-        return !value.hasPrefix("169.254.")
-            && !value.hasPrefix("127.")
-            && !value.hasPrefix("0.")
-            && value != "255.255.255.255"
+        LocalNetworkAdvertisementAddressProvider.routableLANAddresses().first
     }
 }
 

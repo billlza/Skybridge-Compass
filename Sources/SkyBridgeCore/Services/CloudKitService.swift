@@ -605,13 +605,7 @@ public final class CloudKitService: CloudDeviceService {
     }
 
     private func getDeviceModel() -> String {
-        var size = 0
-        sysctlbyname("hw.model", nil, &size, nil, 0)
-        var machine = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.model", &machine, &size, nil, 0)
- // 去除空字符
-        let data = Data(bytes: &machine, count: Int(size)).filter { $0 != 0 }
-        return String(decoding: data, as: UTF8.self)
+        HardwareModelIdentifier.current() ?? ""
     }
 }
 

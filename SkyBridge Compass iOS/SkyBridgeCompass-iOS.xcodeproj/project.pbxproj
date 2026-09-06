@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04B7FF99A666CC78AB77133C /* AccountPresenceRefreshEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4287E8721AD4994F1CBB47E3 /* AccountPresenceRefreshEngineTests.swift */; };
+		5DFB6E37A5FDA91BACB768DF /* AccountDeviceLANMatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FB2DEFCBBD719919D6FB073 /* AccountDeviceLANMatchTests.swift */; };
+		3642F6FAD1ED15F68F0C16C5 /* AccountDeviceLANMatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4909A0AAB10C8438C432F61 /* AccountDeviceLANMatch.swift */; };
 		01E0150ED98E7893DC8F1DAE /* WebRTCSession+SDP.swift in Sources */ = {isa = PBXBuildFile; fileRef = 225D013EA6242F1DC344BC82 /* WebRTCSession+SDP.swift */; };
 		0250313E65CDD5EFC68A0DA7 /* CrossNetworkWebRTCPQCHandshakePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAA25EE2004133095AF6F4A0 /* CrossNetworkWebRTCPQCHandshakePolicyTests.swift */; };
 		04076E229294D9656744F5A1 /* ConnectionCodeFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9478092B3A3B83EBEE873237 /* ConnectionCodeFormatTests.swift */; };
@@ -256,6 +259,18 @@
 		FB925A46A50EB95DE907CE9E /* AppMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = D745F1B7ED48440187298913 /* AppMessage.swift */; };
 		FE869ABE4C2C6C95FB392BA4 /* CurrentPathSecurityCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3BC29D605F0C16E407A8242 /* CurrentPathSecurityCompat.swift */; };
 		FF73CD76A313DBC5DA1AA5D8 /* UnifiedDeviceMessagingRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86ED648F57C63B2DBDD924DB /* UnifiedDeviceMessagingRuntime.swift */; };
+		507E8CBDADBD669EEAD27B52 /* LocalNetworkAddressInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11BE418FFD5D7BEFE60DB199 /* LocalNetworkAddressInspector.swift */; };
+		C1356B0BF18E8499D81C551E /* AccountPresenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A414FE35D42A16A642862C0 /* AccountPresenceService.swift */; };
+		65A57D3529D9DCC593D7294A /* AccountDevicePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 361F5C780B14C2FC62BCBB86 /* AccountDevicePresentation.swift */; };
+		74946ACE8831B2EBFC395290 /* AccountDevicesCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9494554261CE947ACFD4D9B0 /* AccountDevicesCardView.swift */; };
+		0382258933BC209E5D65B495 /* AccountDevicesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30D4F56A4383EBA0F05C67A2 /* AccountDevicesSectionView.swift */; };
+		DE3965615BD1F9219A384675 /* AccountDevicePresentationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BE8C0F9E5EEC073F006EE73 /* AccountDevicePresentationPolicyTests.swift */; };
+		FC6AEC4BD606BA78D6E13652 /* AccountDeviceRecordDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C25D013071062BCE8B5FF4 /* AccountDeviceRecordDecodingTests.swift */; };
+		1D4E870540D029789685318C /* AccountDevicePresenceReportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBBA50788B4F768ED60A7256 /* AccountDevicePresenceReportTests.swift */; };
+		CE7E99FECCF4B9C8FDE293F2 /* AccountPresenceRefreshPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2E0B0643DBA59B6D814D3EB /* AccountPresenceRefreshPolicyTests.swift */; };
+		766056851BB27CD3F129446B /* LANAddressRoutabilityPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5A14B50967C0D34CFF41BE2 /* LANAddressRoutabilityPolicyTests.swift */; };
+		1AAB1C7736D1557178E6E862 /* SignalServerClientPresenceFailureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9072CF63DF4A9E27B581F502 /* SignalServerClientPresenceFailureTests.swift */; };
+		1859B2247B16600470EDDADA /* AccountPresenceServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7D2E4CB57BF12F28F63A749 /* AccountPresenceServiceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -290,6 +305,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		4287E8721AD4994F1CBB47E3 /* AccountPresenceRefreshEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccountPresenceRefreshEngineTests.swift; path = ../../Tests/SkyBridgeCoreTests/AccountPresenceRefreshEngineTests.swift; sourceTree = "<group>"; };
+		8FB2DEFCBBD719919D6FB073 /* AccountDeviceLANMatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDeviceLANMatchTests.swift; sourceTree = "<group>"; };
+		E4909A0AAB10C8438C432F61 /* AccountDeviceLANMatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDeviceLANMatch.swift; sourceTree = "<group>"; };
 		001505F5673FFCF06BE76D36 /* DeviceMessagingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessagingView.swift; sourceTree = "<group>"; };
 		011E95C36447B9AFE62080C1 /* CrossNetworkWebRTCManagerDirectProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkWebRTCManagerDirectProbeTests.swift; sourceTree = "<group>"; };
 		012CEF6A5262DE73E1E965A0 /* SmokeStatusReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeStatusReporter.swift; sourceTree = "<group>"; };
@@ -537,6 +555,18 @@
 		FD6CE3E346837A1B1449284F /* NebulaIDGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NebulaIDGenerator.swift; sourceTree = "<group>"; };
 		FD9359D6F3BEC2B4CD7B2E88 /* RemoteControlSecureEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlSecureEnvelope.swift; sourceTree = "<group>"; };
 		FE81F8C0CF7F6D51E5BFA894 /* CrossNetworkWebRTCManagerModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkWebRTCManagerModels.swift; sourceTree = "<group>"; };
+		11BE418FFD5D7BEFE60DB199 /* LocalNetworkAddressInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetworkAddressInspector.swift; sourceTree = "<group>"; };
+		3A414FE35D42A16A642862C0 /* AccountPresenceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPresenceService.swift; sourceTree = "<group>"; };
+		361F5C780B14C2FC62BCBB86 /* AccountDevicePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicePresentation.swift; sourceTree = "<group>"; };
+		9494554261CE947ACFD4D9B0 /* AccountDevicesCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesCardView.swift; sourceTree = "<group>"; };
+		30D4F56A4383EBA0F05C67A2 /* AccountDevicesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesSectionView.swift; sourceTree = "<group>"; };
+		2BE8C0F9E5EEC073F006EE73 /* AccountDevicePresentationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccountDevicePresentationPolicyTests.swift; path = ../../Tests/SkyBridgeCoreTests/AccountDevicePresentationPolicyTests.swift; sourceTree = "<group>"; };
+		69C25D013071062BCE8B5FF4 /* AccountDeviceRecordDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccountDeviceRecordDecodingTests.swift; path = ../../Tests/SkyBridgeCoreTests/AccountDeviceRecordDecodingTests.swift; sourceTree = "<group>"; };
+		DBBA50788B4F768ED60A7256 /* AccountDevicePresenceReportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccountDevicePresenceReportTests.swift; path = ../../Tests/SkyBridgeCoreTests/AccountDevicePresenceReportTests.swift; sourceTree = "<group>"; };
+		B2E0B0643DBA59B6D814D3EB /* AccountPresenceRefreshPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AccountPresenceRefreshPolicyTests.swift; path = ../../Tests/SkyBridgeCoreTests/AccountPresenceRefreshPolicyTests.swift; sourceTree = "<group>"; };
+		F5A14B50967C0D34CFF41BE2 /* LANAddressRoutabilityPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = LANAddressRoutabilityPolicyTests.swift; path = ../../Tests/SkyBridgeCoreTests/LANAddressRoutabilityPolicyTests.swift; sourceTree = "<group>"; };
+		9072CF63DF4A9E27B581F502 /* SignalServerClientPresenceFailureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SignalServerClientPresenceFailureTests.swift; path = ../../Tests/SkyBridgeCoreTests/SignalServerClientPresenceFailureTests.swift; sourceTree = "<group>"; };
+		E7D2E4CB57BF12F28F63A749 /* AccountPresenceServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountPresenceServiceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -648,6 +678,15 @@
 		39BB4D8E9F48D029BFDD9F57 /* SkyBridgeCompassiOSTests */ = {
 			isa = PBXGroup;
 			children = (
+				4287E8721AD4994F1CBB47E3 /* AccountPresenceRefreshEngineTests.swift */,
+				8FB2DEFCBBD719919D6FB073 /* AccountDeviceLANMatchTests.swift */,
+				E7D2E4CB57BF12F28F63A749 /* AccountPresenceServiceTests.swift */,
+				9072CF63DF4A9E27B581F502 /* SignalServerClientPresenceFailureTests.swift */,
+				F5A14B50967C0D34CFF41BE2 /* LANAddressRoutabilityPolicyTests.swift */,
+				B2E0B0643DBA59B6D814D3EB /* AccountPresenceRefreshPolicyTests.swift */,
+				DBBA50788B4F768ED60A7256 /* AccountDevicePresenceReportTests.swift */,
+				69C25D013071062BCE8B5FF4 /* AccountDeviceRecordDecodingTests.swift */,
+				2BE8C0F9E5EEC073F006EE73 /* AccountDevicePresentationPolicyTests.swift */,
 				9D3CF9A668365D5E3A8B0C13 /* AppleMobileDeviceIdentityTests.swift */,
 				ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */,
 				9478092B3A3B83EBEE873237 /* ConnectionCodeFormatTests.swift */,
@@ -965,6 +1004,7 @@
 		BEE33A38459F1934E678C2F7 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				11BE418FFD5D7BEFE60DB199 /* LocalNetworkAddressInspector.swift */,
 				96686BD469796B5833E0C8E5 /* LiquidGlass.swift */,
 				A36B559F342929CA0C046D28 /* LogStore.swift */,
 				2644747BDCE427234AD51832 /* SkyBridgeDiagnosticTrace.swift */,
@@ -984,6 +1024,8 @@
 		C77B40AED8E13597D9A6FCAE /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				E4909A0AAB10C8438C432F61 /* AccountDeviceLANMatch.swift */,
+				30D4F56A4383EBA0F05C67A2 /* AccountDevicesSectionView.swift */,
 				B68E3A442804F03C62887E08 /* AuthenticationView.swift */,
 				392C43BFC3AF2C36DD4D7E06 /* BetaBannerView.swift */,
 				E8C00600750038AF17C8EB31 /* DeviceDiscoveryView.swift */,
@@ -1071,6 +1113,7 @@
 		E5EAA9BBCF55F761BC8A6B6F /* Managers */ = {
 			isa = PBXGroup;
 			children = (
+				3A414FE35D42A16A642862C0 /* AccountPresenceService.swift */,
 				D419853E6E8712FCEE05FD16 /* AuthenticatedPairingIdentityAuthority.swift */,
 				DF504A11EB980FBB3004D271 /* AuthenticationManager.swift */,
 				831AD13F1950B5F99A30CD7A /* ClipboardManager.swift */,
@@ -1127,6 +1170,8 @@
 		EF37498AD29FD044F6F150EE /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				9494554261CE947ACFD4D9B0 /* AccountDevicesCardView.swift */,
+				361F5C780B14C2FC62BCBB86 /* AccountDevicePresentation.swift */,
 				920CB7EAE7C04D712E34DF01 /* DeviceRowView.swift */,
 				56BC016A1595D3C5E14E5591 /* QuickActionButtonView.swift */,
 				74C91A71B2D7745DA114BC0D /* StatCardView.swift */,
@@ -1319,6 +1364,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				04B7FF99A666CC78AB77133C /* AccountPresenceRefreshEngineTests.swift in Sources */,
+				5DFB6E37A5FDA91BACB768DF /* AccountDeviceLANMatchTests.swift in Sources */,
+				1859B2247B16600470EDDADA /* AccountPresenceServiceTests.swift in Sources */,
+				1AAB1C7736D1557178E6E862 /* SignalServerClientPresenceFailureTests.swift in Sources */,
+				766056851BB27CD3F129446B /* LANAddressRoutabilityPolicyTests.swift in Sources */,
+				CE7E99FECCF4B9C8FDE293F2 /* AccountPresenceRefreshPolicyTests.swift in Sources */,
+				1D4E870540D029789685318C /* AccountDevicePresenceReportTests.swift in Sources */,
+				FC6AEC4BD606BA78D6E13652 /* AccountDeviceRecordDecodingTests.swift in Sources */,
+				DE3965615BD1F9219A384675 /* AccountDevicePresentationPolicyTests.swift in Sources */,
 				F0F02E7316BA964F558A2C26 /* AppleMobileDeviceIdentityTests.swift in Sources */,
 				DCEFA18F51EEAC5A498234D7 /* CapabilityResolutionParityTests.swift in Sources */,
 				583C16868866DF91809BA256 /* ConnectLinkFormatTests.swift in Sources */,
@@ -1375,6 +1429,12 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3642F6FAD1ED15F68F0C16C5 /* AccountDeviceLANMatch.swift in Sources */,
+				0382258933BC209E5D65B495 /* AccountDevicesSectionView.swift in Sources */,
+				74946ACE8831B2EBFC395290 /* AccountDevicesCardView.swift in Sources */,
+				65A57D3529D9DCC593D7294A /* AccountDevicePresentation.swift in Sources */,
+				C1356B0BF18E8499D81C551E /* AccountPresenceService.swift in Sources */,
+				507E8CBDADBD669EEAD27B52 /* LocalNetworkAddressInspector.swift in Sources */,
 				2AC5969FD5067F73C165417F /* AppMessage+ClipboardPayload.swift in Sources */,
 				4E417B7BAADA079147756846 /* AppMessage+HeartbeatPayload.swift in Sources */,
 				9DA3B2A416BBE0AA35C701D7 /* AppMessage+KEMRefreshFailurePayload.swift in Sources */,

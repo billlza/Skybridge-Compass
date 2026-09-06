@@ -419,6 +419,11 @@ private struct QuantumStarLayer: View {
                         
                         // Weather: full width
                         WeatherCardView()
+
+                        // 账号设备：实时天气之下、统计卡片之上（与 macOS 主控台同位）
+                        AccountDevicesCardView {
+                            selectedTab = .devices
+                        }
                         
                         // Stats: side by side
                         statsSection
@@ -989,7 +994,9 @@ private struct QuantumStarLayer: View {
     // MARK: - Devices Tab
     
     private var devicesTab: some View {
-        DeviceDiscoveryView()
+        DeviceDiscoveryView(onOpenCrossNetworkConnect: {
+            showingQRScanner = true
+        })
     }
     
     // MARK: - Files Tab

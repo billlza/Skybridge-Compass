@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import Network
+import SkyBridgeProtocolCore
 
 enum LocalNetworkAdvertisementAddressProvider {
     static func routableLANAddresses() -> [String] {
@@ -46,24 +46,9 @@ enum LocalNetworkAdvertisementAddressProvider {
             }
     }
 
+    /// 字面量规则与 iOS 共享（`LANAddressRoutabilityPolicy`）；本文件只负责接口枚举与排序。
     static func isAdvertisableRoutableLANAddress(_ raw: String) -> Bool {
-        let address = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !address.isEmpty else { return false }
-
-        if let ipv4 = IPv4Address(address) {
-            let octets = String(describing: ipv4).split(separator: ".").compactMap { Int($0) }
-            guard octets.count == 4 else { return false }
-            return octets[0] != 0
-                && octets[0] != 127
-                && !(octets[0] == 169 && octets[1] == 254)
-        }
-
-        let unscoped = stripInterfaceScope(address)
-        guard IPv6Address(unscoped) != nil else { return false }
-        return unscoped != "::"
-            && unscoped != "::1"
-            && !unscoped.hasPrefix("fe80:")
-            && !unscoped.hasPrefix("fc00:")
+        LANAddressRoutabilityPolicy.isAdvertisableRoutableLANAddress(raw)
     }
 
     private static func isCandidateInterface(_ name: String) -> Bool {
@@ -100,7 +85,7 @@ enum LocalNetworkAdvertisementAddressProvider {
 
     private static func routeScore(interface: String, address: String) -> Int {
         var score = 0
-        if IPv4Address(address) != nil { score += 100 }
+        if LANAddressRoutabilityPolicy.parse(address)?.family == .ipv4 { score += 100 }
         if interface == "en0" {
             score += 50
         } else if interface.hasPrefix("en") {
@@ -111,8 +96,4 @@ enum LocalNetworkAdvertisementAddressProvider {
         return score
     }
 
-    private static func stripInterfaceScope(_ raw: String) -> String {
-        guard let percent = raw.firstIndex(of: "%") else { return raw }
-        return String(raw[..<percent])
-    }
 }

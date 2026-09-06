@@ -54,6 +54,8 @@ public struct DashboardView: View {
  // 本地UI状态 - 使用@State管理组件内部状态
     @State private var selectedSession: RemoteSessionSummary?
     @State private var selectedNavigation: NavigationItem
+    /// 主控台面板请求设备发现页预选的标签（消费即清空）。
+    @State private var requestedDiscoveryMode: DiscoveryMode?
     @State private var showingUserProfile = false
     @State private var showingUserProfileOverlay = false
     @State private var signalSortTimerEnabled = false
@@ -299,13 +301,14 @@ public struct DashboardView: View {
                         showManualConnectSheet: $showManualConnectSheet,
                         extendedSearchCountdown: $extendedSearchCountdown,
                         systemPerformanceMonitor: $systemPerformanceMonitor,
+                        requestedDiscoveryMode: $requestedDiscoveryMode,
                         showDeferredContent: presentationPhase.enablesDeferredContent
                     )
                     .padding(.bottom, 32)
                 }
                 .scrollIndicators(.hidden)
             case .deviceManagement:
-                EnhancedDeviceDiscoveryView()
+                EnhancedDeviceDiscoveryView(requestedMode: $requestedDiscoveryMode)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .scrollIndicators(.hidden)
             case .usbDeviceManagement:

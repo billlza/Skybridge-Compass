@@ -2339,6 +2339,17 @@ public class DeviceDiscoveryManager: ObservableObject {
         }
     }
 
+    /// 发现侧已验证的协议指纹（来自 Bonjour v2 广播），供账号设备列表做身份一致性匹配；没有即 nil。
+    func validatedProtocolFingerprint(for device: DiscoveredDevice) -> String? {
+        advertisementSnapshotsByServiceType.values
+            .flatMap(\.values)
+            .first { snapshot in
+                snapshot.deviceId == device.id
+                    && !(snapshot.protocolIdentityFingerprint ?? "").isEmpty
+            }?
+            .protocolIdentityFingerprint
+    }
+
     private func hasConflictingAdvertisementIdentity(
         deviceId: String,
         protocolIdentityFingerprint: String?

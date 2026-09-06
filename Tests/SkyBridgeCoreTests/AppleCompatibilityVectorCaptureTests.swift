@@ -731,7 +731,7 @@ private extension AppleCompatibilityVectorCaptureTests {
         bonjourContractPath:
             "4d8bbf100a52d92e14a2b38cd2c1738aac4a6970212330b93f15118b36d9cc87",
         iosBonjourDiscoveryCallerPath:
-            "bc7720e0e64be2dc3e73e9a3e6ab2be0123991f124bef740f4a99c2939bfb22f",
+            "415a9eb0b03812fa14b6eb6d801a0265c6abe87dc377ab14ed0ff778c7c98780",
         iosBonjourFileTransferCallerPath:
             "74b00f720fb6bb1699b1286973aa214d2fbde068e43974883ee10f3d1401bf89"
     ]
