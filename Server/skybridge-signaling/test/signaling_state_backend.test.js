@@ -282,3 +282,100 @@ test('updateEphemeral retries once after a redis watch conflict', async () => {
   assert.equal(isolated.watchCalls, 2);
   assert.equal(isolated.unwatchCalls, 1);
 });
+
+test('memory backend upsertEphemeral creates, refreshes and validates presence-style records', async () => {
+  const backend = createSignalingStateBackend({
+    backendName: 'memory',
+    instanceId: 'upsert-memory-test',
+    codeTtlMs: 300_000,
+    iceTtlMs: 300_000,
+    iceMaxPerSession: 40,
+    roomMembershipTtlMs: 120_000,
+    legacyBindingTtlMs: 300_000,
+    log: console
+  });
+
+  const seen = [];
+  const created = await backend.upsertEphemeral('presence', 'device-1', (current) => {
+    seen.push(current);
+    return { value: 1, expiresAt: Date.now() + 60_000 };
+  });
+  assert.equal(created.value, 1);
+  assert.deepEqual(seen, [null]);
+
+  const refreshed = await backend.upsertEphemeral('presence', 'device-1', (current) => {
+    seen.push(current);
+    return { value: current.value + 1, expiresAt: current.expiresAt + 60_000 };
+  });
+  assert.equal(refreshed.value, 2);
+  assert.equal(seen[1].value, 1);
+  assert.equal(refreshed.expiresAt, created.expiresAt + 60_000);
+
+  const stored = await backend.getEphemeral('presence', 'device-1');
+  assert.deepEqual(stored, refreshed);
+  // The stored record is a copy: mutating what the caller got back must not leak into the store.
+  refreshed.value = 99;
+  assert.equal((await backend.getEphemeral('presence', 'device-1')).value, 2);
+
+  await assert.rejects(
+    backend.upsertEphemeral('presence', 'device-1', () => ({ value: 3 })),
+    /valid expiresAt/
+  );
+  await assert.rejects(
+    backend.upsertEphemeral('presence', 'device-1', () => null),
+    /non-object record/
+  );
+  assert.equal((await backend.getEphemeral('presence', 'device-1')).value, 2);
+
+  await backend.upsertEphemeral('presence', 'device-1', () => ({ value: 4, expiresAt: Date.now() - 1 }));
+  assert.equal(await backend.getEphemeral('presence', 'device-1'), null);
+  const recreated = await backend.upsertEphemeral('presence', 'device-1', (current) => {
+    assert.equal(current, null, 'an expired record must be presented as absent');
+    return { value: 5, expiresAt: Date.now() + 60_000 };
+  });
+  assert.equal(recreated.value, 5);
+});
+
+test('redis upsertEphemeral retries once after a watch conflict and writes the mutator result', async () => {
+  const backend = makeBackend();
+  const isolated = makeRetryingIsolated({
+    initialValue: JSON.stringify({
+      expiresAt: Date.now() + 60_000,
+      value: 1
+    }),
+    failWatchTimes: 1
+  });
+  backend.executeIsolated = async (fn) => fn(isolated);
+
+  const mutatorInputs = [];
+  const upserted = await backend.upsertEphemeral('presence', 'id-1', (current) => {
+    mutatorInputs.push(current);
+    return { value: (current?.value || 0) + 1, expiresAt: Date.now() + 90_000 };
+  });
+
+  assert.equal(upserted.value, 2);
+  assert.equal(mutatorInputs.length, 1, 'a failed watch must not run the mutator');
+  assert.equal(mutatorInputs[0].value, 1);
+  assert.equal(isolated.watchCalls, 2);
+  assert.equal(isolated.unwatchCalls, 1);
+  assert.equal(JSON.parse(await isolated.get()).value, 2);
+});
+
+test('redis upsertEphemeral treats an expired stored record as absent', async () => {
+  const backend = makeBackend();
+  const isolated = makeRetryingIsolated({
+    initialValue: JSON.stringify({
+      expiresAt: Date.now() - 1,
+      value: 1
+    }),
+    failWatchTimes: 0
+  });
+  backend.executeIsolated = async (fn) => fn(isolated);
+
+  const upserted = await backend.upsertEphemeral('presence', 'id-1', (current) => {
+    assert.equal(current, null);
+    return { value: 7, expiresAt: Date.now() + 90_000 };
+  });
+  assert.equal(upserted.value, 7);
+  assert.equal(JSON.parse(await isolated.get()).value, 7);
+});

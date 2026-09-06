@@ -14,6 +14,24 @@ function normalizeSupabaseURL(raw) {
   return value;
 }
 
+const REGISTERED_DEVICE_LIST_COLUMNS = Object.freeze([
+  'device_id',
+  'protocol_signing_algorithm',
+  'protocol_public_key_fingerprint',
+  'device_name',
+  'status',
+  'registered_at',
+  'last_seen_at',
+  'platform',
+  'device_model',
+  'os_version',
+  'app_version',
+  'last_lan_addresses',
+  'last_public_address',
+  'last_presence_at',
+  'last_capabilities'
+]);
+
 class RegistryStore {
   constructor(options = {}) {
     this.supabaseUrl = normalizeSupabaseURL(options.supabaseUrl || process.env.SUPABASE_URL);
@@ -164,6 +182,46 @@ class RegistryStore {
     });
   }
 
+  /**
+   * Devices of one (tenant, user) pair for the account device list.
+   * Column list is explicit: key material (protocol_public_key_base64) must never
+   * leave the registry through this path, and the client response is bounded.
+   */
+  async listRegisteredDevices({ tenantId, userId, limit = 200 }) {
+    if (!this.canAccessRegistry) {
+      throw new Error('registry_not_configured');
+    }
+    const boundedLimit = Math.max(1, Math.min(500, Math.trunc(Number(limit) || 200)));
+    const params = [
+      `tenant_id=eq.${encodeURIComponent(tenantId)}`,
+      `user_id=eq.${encodeURIComponent(userId)}`,
+      'status=in.(active,pending,frozen)',
+      `select=${REGISTERED_DEVICE_LIST_COLUMNS.join(',')}`,
+      'order=last_seen_at.desc.nullslast,device_id.asc',
+      `limit=${boundedLimit}`
+    ];
+    const rows = await this.request({
+      path: `/rest/v1/registered_devices?${params.join('&')}`,
+      method: 'GET',
+      useServiceRole: true
+    });
+    if (!Array.isArray(rows)) {
+      // A non-array body means PostgREST answered something other than a row set; an
+      // empty device list must never stand in for that.
+      throw new Error('registry_malformed_response');
+    }
+    return rows;
+  }
+
+  async touchRegisteredDevicePresence(payload) {
+    return this.request({
+      path: '/rest/v1/rpc/touch_registered_device_presence_v7',
+      method: 'POST',
+      useServiceRole: true,
+      body: payload
+    });
+  }
+
   async bootstrapRegisterDevice(payload) {
     return this.request({
       path: '/rest/v1/rpc/bootstrap_register_device_v5',
@@ -297,5 +355,6 @@ class RegistryStore {
 }
 
 module.exports = {
-  RegistryStore
+  RegistryStore,
+  REGISTERED_DEVICE_LIST_COLUMNS
 };

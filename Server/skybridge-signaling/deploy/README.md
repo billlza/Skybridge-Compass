@@ -55,6 +55,35 @@ canonical schema source. `sql/security_v6.sql` is a byte-for-byte operational
 mirror for server-only recovery and review workflows. The Node migration
 contract test rejects any drift; never edit or deploy the mirror independently.
 
+## Presence metadata schema (v7)
+
+`/api/devices/list` and the presence persistence path require the v7 schema.
+Apply `supabase/migrations/20260905120000_device_presence_metadata_v7.sql`
+(mirror: `sql/security_v7.sql`, byte-identical, enforced by
+`test/security_v7_sql.test.js`) before rolling out a server build that exposes
+the account device list:
+
+1. Take and verify a restorable database backup.
+2. Apply the canonical v7 migration through the approved Supabase migration
+   pipeline. It is a single transaction (own `BEGIN`/`COMMIT`, lock and
+   statement timeouts, fail-closed self checks) and is idempotent.
+3. Verify before starting the new server:
+   - `public.registered_devices` has row level security enabled and `anon` /
+     `authenticated` hold no privileges on it (the migration's self check
+     raises `security_v7_registered_devices_exposed_to_client_roles` otherwise).
+   - `public.touch_registered_device_presence_v7` exists, `anon` cannot execute
+     it and `service_role` can.
+   - If PostgREST does not see the new RPC immediately, run
+     `notify pgrst, 'reload schema';`.
+4. Only then roll out Node instances. Until the columns exist the server keeps
+   heartbeats alive but answers `persisted:false, persistReason:registry_unavailable`
+   and `/api/devices/list` fails closed with `503 registry_schema_outdated`.
+
+The v7 change is additive. `last_seen_at` on `registered_devices` now also
+advances on every persisted heartbeat (at most once per
+`SIGNALING_PRESENCE_PERSIST_INTERVAL_MS` per device unless the reported metadata
+changed); nothing else reads that column.
+
 The v6 change is additive, so a server rollback may leave the schema installed.
 Do not down-migrate identity history after any rotation has committed. Restore a
 verified pre-migration backup only when no post-migration authority changes must
@@ -71,6 +100,33 @@ Operational maintenance:
 - Rotation/history/audit evidence is security-sensitive. Archive it under the
   organization's audit-retention policy through a separately reviewed migration;
   never update or delete the immutable audit table ad hoc.
+
+## Client-role lock-down for tenant policy and enrollment invites (v8)
+
+`public.tenant_security_policy` and `public.device_enrollment_invites` were
+created by security v5 without row level security and without revoking the
+default Supabase client-role grants, so the shipped anon key could read or
+rewrite tenant policy flags and forge enrollment invites. Apply
+`supabase/migrations/20260905130000_lock_down_tenant_policy_and_enrollment_invites_v8.sql`
+(mirror: `sql/security_v8.sql`, byte-identical, enforced by
+`test/security_v8_sql.test.js`) right after v7:
+
+1. It is privilege-only (RLS on, client roles revoked, `service_role`
+   granted), single-transaction, idempotent, and raises
+   `security_v8_<table>_exposed_to_client_roles` / `security_v8_<table>_rls_disabled`
+   if the boundary is not in place afterwards.
+2. The signaling server needs no change: it reads `tenant_security_policy`
+   with the service role and reaches invites only through SECURITY DEFINER
+   RPCs. Nothing in this repository uses the anon or authenticated role on
+   these tables.
+3. If an external admin tool wrote invites or policy rows through the anon or
+   authenticated role, it will start receiving empty results / permission
+   errors. Move it to the service role or a SECURITY DEFINER RPC; do not
+   re-grant client roles.
+4. Verify with `select relname, relrowsecurity from pg_class where relname in
+   ('tenant_security_policy','device_enrollment_invites');` (both `true`) and
+   `select has_table_privilege('anon','public.device_enrollment_invites','SELECT');`
+   (`false`).
 
 ## 2. Deploy from local workspace
 
