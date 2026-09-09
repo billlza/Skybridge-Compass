@@ -25,7 +25,7 @@ fragment float4 hazeFragment(HazeVertex stageInput [[stage_in]],
                              constant AtmosphereUniforms &uniforms [[buffer(0)]],
                              constant HazeAppearance &appearance [[buffer(1)]]) {
     return cinematicHaze(stageInput.uv, uniforms.resolution, uniforms.time, uniforms.intensity,
-                         uniforms.wind, uniforms.quality, appearance.tint, appearance.grain);
+                         uniforms.wind, uniforms.quality, appearance.tint, appearance.grain, float2(0.0));
 }
 """
 
@@ -42,10 +42,18 @@ def main():
     if '"' in source or not source.isascii():
         raise ValueError('The shared shader must be ASCII with no embedded string literals')
     hlsl = source.replace('fract(', 'frac(').replace('mix(', 'lerp(')
-    windows = 'namespace Skybridge.WinClient;\n\ninternal static class CinematicHazeShader\n{\n    internal const string Source = @"\n' + hlsl + '\n";\n}\n'
+    windows_path = args.windows_root / 'windows/Skybridge.WinClient/WeatherBackdropDX.xaml.cs'
+    windows = windows_path.read_text()
+    begin = '// BEGIN AEROSOL FIELD\n'
+    end = '// END AEROSOL FIELD'
+    if windows.count(begin) != 1 or windows.count(end) != 1:
+        raise ValueError('Expected exactly one aerosol field in the Windows weather shader')
+    field_start = windows.index(begin) + len(begin)
+    field_end = windows.index(end, field_start)
+    windows = windows[:field_start] + hlsl + '\n' + windows[field_end:]
     outputs = {
         root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources/HazeVolume.metal': METAL_PREFIX + source + METAL_SUFFIX,
-        args.windows_root / 'windows/Skybridge.WinClient/CinematicHazeShader.cs': windows,
+        windows_path: windows,
     }
     for output, text in outputs.items():
         if args.check:

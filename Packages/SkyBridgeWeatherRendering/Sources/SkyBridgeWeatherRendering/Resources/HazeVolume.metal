@@ -16,7 +16,8 @@ vertex HazeVertex hazeVertex(uint id [[vertex_id]]) {
 }
 float hazeHash(float3 p) {
     p = fract(p * 0.1031);
-    p += float3(dot(p, p.zyx + float3(31.32)));
+    float hashOffset = dot(p, p.zyx + float3(31.32, 31.32, 31.32));
+    p += float3(hashOffset, hashOffset, hashOffset);
     return fract((p.x + p.y) * p.z);
 }
 
@@ -34,12 +35,12 @@ float hazeNoise(float3 p) {
 }
 
 float3 hazeToLinear(float3 color) {
-    return mix(color / 12.92, pow((color + 0.055) / 1.055, float3(2.4)), step(float3(0.04045), color));
+    return mix(color / 12.92, pow((color + 0.055) / 1.055, float3(2.4, 2.4, 2.4)), step(float3(0.04045, 0.04045, 0.04045), color));
 }
 
 float3 hazeToDisplay(float3 color) {
-    color = max(color, float3(0.0));
-    return mix(color * 12.92, 1.055 * pow(color, float3(1.0 / 2.4)) - 0.055, step(float3(0.0031308), color));
+    color = max(color, float3(0.0, 0.0, 0.0));
+    return mix(color * 12.92, 1.055 * pow(color, float3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) - 0.055, step(float3(0.0031308, 0.0031308, 0.0031308), color));
 }
 
 float3 hazeViewRay(float2 uv, float2 viewport) {
@@ -54,7 +55,7 @@ float hazeTerrainHeight(float x, float seed) {
 }
 
 float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, float wind,
-                     float quality, float3 tint, float grainAmount) {
+                     float quality, float3 tint, float grainAmount, float2 flowOffset) {
     float amount = clamp(intensity, 0.0, 1.0);
     float3 ray = hazeViewRay(uv, viewport);
     float3 sunDirection = normalize(float3(0.10, 0.41, 1.5));
@@ -87,11 +88,12 @@ float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, fl
         rayLength = mix(rayLength, hitDistance, coverage);
     }
 
-    float3 transmittance = float3(1.0);
-    float3 scatteredLight = float3(0.0);
+    float3 transmittance = float3(1.0, 1.0, 1.0);
+    float3 scatteredLight = float3(0.0, 0.0, 0.0);
     float g = 0.68;
     float phase = (1.0 - g * g) / (12.5663706 * pow(1.0 + g * g - 2.0 * g * alignment, 1.5));
     float3 drift = float3(time * (0.018 + clamp(wind, 0.0, 1.0) * 0.038), 0.0, time * 0.009);
+    drift += float3(flowOffset.x * 4.0, -flowOffset.y * 4.0, 0.0);
     float stepLength = rayLength / (quality > 0.65 ? 24.0 : 12.0);
     for (int stepIndex = 0; stepIndex < 24; stepIndex += 1) {
         if (quality <= 0.65 && stepIndex >= 12) break;
@@ -107,7 +109,7 @@ float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, fl
         float sunVisibility = exp(-density * (2.5 + distance * 0.22) - smoothstep(0.32, 0.76, lightVeil) * 2.0);
         float3 ambient = hazeToLinear(float3(0.37, 0.40, 0.43));
         float3 lighting = ambient * 0.42 + warmLight * phase * sunVisibility * 2.0;
-        scatteredLight += transmittance * (float3(1.0) - segment) * lighting;
+        scatteredLight += transmittance * (float3(1.0, 1.0, 1.0) - segment) * lighting;
         transmittance *= segment;
     }
 
@@ -117,12 +119,13 @@ float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, fl
     float2 edge = float2((uv.x - 0.5) * viewport.x / viewport.y, uv.y - 0.46);
     color *= 1.0 - 0.10 * smoothstep(0.2, 0.95, length(edge));
     float grain = (hazeNoise(float3(uv * viewport * 0.52, time * 0.4)) - 0.5) * 0.003;
-    color = hazeToDisplay(color) + float3(grain * grainAmount * quality);
-    return float4(clamp(color, float3(0.0), float3(1.0)), 1.0);
+    float grainOffset = grain * grainAmount * quality;
+    color = hazeToDisplay(color) + float3(grainOffset, grainOffset, grainOffset);
+    return float4(clamp(color, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0)), 1.0);
 }
 fragment float4 hazeFragment(HazeVertex stageInput [[stage_in]],
                              constant AtmosphereUniforms &uniforms [[buffer(0)]],
                              constant HazeAppearance &appearance [[buffer(1)]]) {
     return cinematicHaze(stageInput.uv, uniforms.resolution, uniforms.time, uniforms.intensity,
-                         uniforms.wind, uniforms.quality, appearance.tint, appearance.grain);
+                         uniforms.wind, uniforms.quality, appearance.tint, appearance.grain, float2(0.0));
 }
