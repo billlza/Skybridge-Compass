@@ -1265,12 +1265,20 @@ contains_literal "$host_bundle_prepare_body" 'cp "$MAC_HOST_PRODUCT_PROFILE" "$e
   || fail "product-identity helper must embed the exact packaged product provisioning profile"
 contains_literal "$host_bundle_prepare_body" 'local source_core_resource_bundle="$SMOKE_BUILD_DIR/debug/SkyBridgeCompassApp_SkyBridgeCore.bundle"' \
   || fail "product-identity helper must source the exact SkyBridgeCore resource bundle from its dedicated SwiftPM scratch"
+contains_literal "$host_bundle_prepare_body" 'local source_bound_session_framework="$SMOKE_BUILD_DIR/debug/BoundSessionFFI.framework"' \
+  || fail "product-identity helper must source BoundSessionFFI from its dedicated SwiftPM scratch"
 contains_literal "$host_bundle_prepare_body" 'local embedded_core_resource_bundle="$resources_dir/SkyBridgeCompassApp_SkyBridgeCore.bundle"' \
   || fail "product-identity helper must embed the exact SkyBridgeCore resource bundle under Contents/Resources"
 contains_literal "$host_bundle_prepare_body" '[[ ! -d "$SMOKE_BUILD_DIR" || ! -d "$SMOKE_BUILD_DIR/debug" ]]' \
   || fail "product-identity helper must require a populated dedicated SwiftPM scratch"
 contains_literal "$host_bundle_prepare_body" '[[ ! -d "$source_core_resource_bundle" || -L "$source_core_resource_bundle" ]]' \
   || fail "product-identity helper must reject a missing or symlinked SkyBridgeCore resource bundle"
+contains_literal "$host_bundle_prepare_body" '[[ ! -d "$source_bound_session_framework" || -L "$source_bound_session_framework" ]]' \
+  || fail "product-identity helper must reject a missing or symlinked BoundSessionFFI framework"
+contains_literal "$host_bundle_prepare_body" '[[ ! -x "$source_bound_session_framework/BoundSessionFFI" || \' \
+  || fail "product-identity helper must require a non-symlinked BoundSessionFFI executable"
+contains_literal "$host_bundle_prepare_body" 'skybridge_assert_webrtc_m150_framework "$source_webrtc_framework"' \
+  || fail "product-identity helper must allow only the approved contained WebRTC framework binary"
 script_has_literal 'source "$ROOT_DIR/Scripts/skybridge_core_resource_bundle_helpers.sh"' \
   || fail "product-identity helper must source the shared Core resource bundle normalizer"
 [[ -r "$CORE_RESOURCE_BUNDLE_HELPERS" ]] \
@@ -1283,6 +1291,20 @@ contains_literal "$host_bundle_prepare_body" '[[ "$scratch_debug_dir" != "$scrat
   || fail "product-identity helper must reject a debug product directory outside its dedicated scratch"
 contains_literal "$host_bundle_prepare_body" '[[ "$source_resource_dir" != "$scratch_debug_dir/SkyBridgeCompassApp_SkyBridgeCore.bundle" ]]' \
   || fail "product-identity helper must require the exact Core bundle as a direct canonical debug product"
+contains_literal "$host_bundle_prepare_body" '[[ "$source_bound_session_framework_dir" != "$scratch_debug_dir/BoundSessionFFI.framework" ]]' \
+  || fail "product-identity helper must require BoundSessionFFI as a direct canonical debug product"
+script_has_literal "'@rpath/BoundSessionFFI.framework/BoundSessionFFI'" \
+  || fail "product-identity helper must close the BoundSessionFFI runtime dependency"
+script_has_literal 'verify_macos_smoke_host_rpath_framework_closure()' \
+  || fail "product-identity helper must expose one shared fail-closed framework dependency verifier"
+contains_literal "$host_bundle_prepare_body" 'verify_macos_smoke_host_rpath_framework_closure "$source_bin"' \
+  || fail "product-identity helper must verify the complete @rpath framework closure before staging"
+script_has_literal 'verify_macos_smoke_host_rpath_framework_closure "$MAC_APP_BIN"' \
+  || fail "host-only readiness must reverify the signed executable framework closure"
+script_has_literal '"runtimeFrameworkClosure": "verified"' \
+  || fail "host-only readiness must retain the signed runtime framework closure result"
+script_has_literal '"runtimeFrameworks": ["BoundSessionFFI", "WebRTC"]' \
+  || fail "host-only readiness must retain the exact signed runtime framework set"
 contains_literal "$host_bundle_prepare_body" 'local embedded_core_resource_root="$embedded_core_resource_contents/Resources"' \
   || fail "product-identity helper must normalize the flat SwiftPM bundle into a standard Contents/Resources layout"
 contains_literal "$host_bundle_prepare_body" 'if source_resource_layout="$(skybridge_copy_normalized_core_resource_bundle \
@@ -1314,9 +1336,15 @@ contains_literal "$host_bundle_prepare_body" '"$embedded_core_resource_root" \
   || fail "product-identity helper must normalize and prove the resource bundle before signing the app bundle"
 contains_literal "$host_bundle_prepare_body" 'resourceBundleLayout=normalized-contents-resources resourceBundleSource=dedicated-swiftpm-scratch resourceBundleSourceLayout=$source_resource_layout resourceBundleSealed=1' \
   || fail "product-identity helper status must record the signed dedicated resource-bundle provenance"
+contains_literal "$host_bundle_prepare_body" 'cp -R "$source_bound_session_framework" "$macos_dir/BoundSessionFFI.framework"' \
+  || fail "product-identity helper must embed BoundSessionFFI beside the @loader_path host executable"
+contains_literal "$host_bundle_prepare_body" '--sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH" "$macos_dir/BoundSessionFFI.framework"' \
+  || fail "product-identity helper must sign the embedded BoundSessionFFI framework with the verified product identity"
+contains_literal "$host_bundle_prepare_body" 'runtimeFrameworks=WebRTC,BoundSessionFFI runtimeFrameworkClosure=verified' \
+  || fail "product-identity helper status must record the closed signed runtime framework set"
 script_has_literal '--env "SKYBRIDGE_SMOKE_REQUIRE_EMBEDDED_CORE_RESOURCES=1"' \
   || fail "packaged-product helper launch must require the embedded signed localization bundle"
-script_has_literal 'remote-control-localization requiredKeys=20 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
+script_has_literal 'remote-control-localization requiredKeys=24 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
   || fail "packaged-product acceptance must wait for the runtime 20-key embedded localization probe"
 ! contains_literal "$host_bundle_prepare_body" 'debug/*.bundle' \
   || fail "product-identity helper must never copy an open-ended set of SwiftPM resource bundles"

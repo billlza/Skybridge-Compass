@@ -10197,6 +10197,11 @@ private extension CrossNetworkWebRTCManager {
             return true
         }
 
+        if msg.type == .controlAccess {
+            RemoteDesktopManager.instance.handleCrossNetworkControlAccessPayload(msg.payload)
+            return true
+        }
+
         if msg.type == .streamConfigurationAck,
            let payload = try? JSONDecoder().decode(
             RemoteDesktopStreamConfigurationAcknowledgement.self,

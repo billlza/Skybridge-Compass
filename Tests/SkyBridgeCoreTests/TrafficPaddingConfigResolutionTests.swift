@@ -28,8 +28,8 @@ final class TrafficPaddingConfigResolutionTests: XCTestCase {
         try body()
     }
 
-    func testUserDefaultsChangesTakeEffectImmediatelyDespiteCaching() throws {
-        try withRestoredDefaults {
+    func testUserDefaultsChangesTakeEffectImmediatelyDespiteCaching() {
+        withRestoredDefaults {
             let defaults = UserDefaults.standard
 
             defaults.set(false, forKey: enabledKey)
@@ -52,8 +52,8 @@ final class TrafficPaddingConfigResolutionTests: XCTestCase {
         }
     }
 
-    func testModeAndFixedSizeStillResolveFromLiveDefaults() throws {
-        try withRestoredDefaults {
+    func testModeAndFixedSizeStillResolveFromLiveDefaults() {
+        withRestoredDefaults {
             let defaults = UserDefaults.standard
             defaults.set(TrafficPaddingMode.fixed.rawValue, forKey: modeKey)
             defaults.set(4096, forKey: fixedKey)

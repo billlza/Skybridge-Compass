@@ -1,0 +1,239 @@
+{
+  "date": "2026-09-09T18:48:45.470907+08:00",
+  "status": "partial_external_runtime_diagnostic",
+  "applicationLifecycleRepair": "verified",
+  "releaseAcceptance": "open",
+  "formalProductInstalled": false,
+  "checks": [
+    {
+      "log": "macos-tests-final.log",
+      "passed": true,
+      "testsPassed": 6,
+      "compilerDiagnosticCount": 0,
+      "toolErrorCount": 0,
+      "runtimeApiDiagnosticCount": 0,
+      "metalApiValidationEnabled": false
+    },
+    {
+      "log": "iphone-tests-final.log",
+      "passed": true,
+      "testsPassed": 6,
+      "compilerDiagnosticCount": 0,
+      "toolErrorCount": 0,
+      "runtimeApiDiagnosticCount": 1,
+      "metalApiValidationEnabled": false
+    },
+    {
+      "log": "ipad-api-validation-final.log",
+      "passed": true,
+      "testsPassed": 6,
+      "compilerDiagnosticCount": 0,
+      "toolErrorCount": 0,
+      "runtimeApiDiagnosticCount": 0,
+      "metalApiValidationEnabled": true
+    },
+    {
+      "log": "macos-api-validation.log",
+      "passed": true,
+      "testsPassed": 6,
+      "compilerDiagnosticCount": 0,
+      "toolErrorCount": 0,
+      "runtimeApiDiagnosticCount": 0,
+      "metalApiValidationEnabled": true
+    },
+    {
+      "log": "macos-release-final.log",
+      "passed": true,
+      "testsPassed": null,
+      "compilerDiagnosticCount": 0,
+      "toolErrorCount": 0,
+      "runtimeApiDiagnosticCount": 0,
+      "metalApiValidationEnabled": false
+    },
+    {
+      "log": "ios-release-final.log",
+      "passed": true,
+      "testsPassed": null,
+      "compilerDiagnosticCount": 0,
+      "toolErrorCount": 0,
+      "runtimeApiDiagnosticCount": 0,
+      "metalApiValidationEnabled": false
+    }
+  ],
+  "regressionBaseline": {
+    "package": "/var/folders/c7/2dhh484x7m7bg6qkx91_92lm0000gn/T/skybridge-cloud-regression-jwlltkin",
+    "command": [
+      "swift",
+      "test",
+      "--package-path",
+      "/var/folders/c7/2dhh484x7m7bg6qkx91_92lm0000gn/T/skybridge-cloud-regression-jwlltkin",
+      "-Xswiftc",
+      "-warnings-as-errors",
+      "--filter",
+      "updatingPausedSurfaceDoesNotDrawInsideTheUpdateCallback"
+    ],
+    "exitCode": 1,
+    "expectedFailure": true,
+    "baselineAdjustment": "Private adapter exposed internally only to permit the same regression test."
+  },
+  "renderParity": {
+    "reference": "/Users/bill/Desktop/SkyBridge Compass - Android/design/weather/20260909-cloudy/final",
+    "comparisons": [
+      {
+        "platform": "macos",
+        "frame": "clouds-after-12-seconds.png",
+        "width": 360,
+        "height": 780,
+        "meanAbsoluteChannelDifference": 0.053703703703703705,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-quality-0.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843199324680806,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-quality-0.45.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843199324680806,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-quality-1.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05683496887200591,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-wide.png",
+        "width": 780,
+        "height": 585,
+        "meanAbsoluteChannelDifference": 0.0547505296223245,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-after-12-seconds.png",
+        "width": 360,
+        "height": 780,
+        "meanAbsoluteChannelDifference": 0.05370489078822412,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-quality-0.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-quality-0.45.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-quality-1.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05683655165136647,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-wide.png",
+        "width": 780,
+        "height": 585,
+        "meanAbsoluteChannelDifference": 0.05474906859522244,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-after-12-seconds.png",
+        "width": 360,
+        "height": 780,
+        "meanAbsoluteChannelDifference": 0.05370489078822412,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-quality-0.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-quality-0.45.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-quality-1.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05683655165136647,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-wide.png",
+        "width": 780,
+        "height": 585,
+        "meanAbsoluteChannelDifference": 0.05474906859522244,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      }
+    ]
+  },
+  "upstreamDiagnostic": {
+    "platform": "iPhone 16 Pro",
+    "osVersion": "26.5",
+    "osBuild": "23F77",
+    "status": "source_identified_not_eliminated",
+    "origin": "libMTLHud.dylib HUDMTLLayerTracking._snapshotDrawable:state:",
+    "trigger": "CAMetalDrawable.texture called from HUD presentation callback after backing became nil",
+    "evidence": "stale-drawable-stack.txt",
+    "reproducesOnFinalCode": true,
+    "localApplicationFramesOnOffendingStack": false,
+    "globalHUDSettingsChanged": false,
+    "productionHUDOverrideAdded": false,
+    "apiValidationDisabled": false
+  },
+  "testToolchain": {
+    "build": "Xcode 26.6",
+    "iphone": "Xcode 26.6",
+    "ipad": "Xcode 27.0 for iPadOS 27.0 (24A5430a), test-without-building"
+  },
+  "deviceState": "Debugger detached from the iPhone; only the independent validation host was installed. Formal apps and data preserved."
+}

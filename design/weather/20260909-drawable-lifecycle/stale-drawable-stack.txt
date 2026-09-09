@@ -1,0 +1,21 @@
+Drawable backing is nil: the exact warning branch in CAMetalDrawable.texture
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : -[HUDMTLLayerTracking _snapshotDrawable:state:]
+libMTLHud.dylib : __48-[HUDMTLLayerTracking _presentOrSignalDrawable:]_block_invoke_2
+QuartzCore : -[CAMetalDrawable didPresentAtTime:]
+QuartzCore : -[CAMetalDrawable release]
+CoreFoundation : __RELEASE_OBJECTS_IN_THE_ARRAY__
+CoreFoundation : -[__NSArrayM dealloc]
+QuartzCore : layer_composited(_CAImageQueue*, void*, unsigned int, unsigned int)
+QuartzCore : CAImageQueueDidComposite
+QuartzCore : _XImageQueueDidComposite
+QuartzCore : invocation function for block in CA::MachPortUtil::ClientIPC::create(char const*)
+libdispatch.dylib : _dispatch_client_callout
+libdispatch.dylib : _dispatch_continuation_pop
+libdispatch.dylib : _dispatch_source_latch_and_call
+libdispatch.dylib : _dispatch_source_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread

@@ -41,10 +41,9 @@ public struct DashboardBackgroundView: View {
                 .opacity(themeConfiguration.backgroundIntensity)
                 .ignoresSafeArea(.all)
 
-            // 全页面雾霾背景（仅在雾/霾天气启用）
-            // 说明：该层是 Metal 全屏雾霾，会整体“染灰”UI；对多云/晴天等不应常驻叠加，
-            // 否则会把主题底色与云层效果一起压暗成“灰败”。
-            if weatherManager.currentTheme.condition.needsFogEffect {
+            // Haze owns its complete atmosphere through WeatherEffectView. The existing
+            // additional fog layer is retained only for foggy weather.
+            if weatherManager.currentTheme.condition == .foggy {
                 GlobalHazeBackground(clearManager: hazeClearManager)
                     .ignoresSafeArea(.all)
             }

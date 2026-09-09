@@ -1,0 +1,16 @@
+{
+  "package": "/var/folders/c7/2dhh484x7m7bg6qkx91_92lm0000gn/T/skybridge-cloud-regression-jwlltkin",
+  "command": [
+    "swift",
+    "test",
+    "--package-path",
+    "/var/folders/c7/2dhh484x7m7bg6qkx91_92lm0000gn/T/skybridge-cloud-regression-jwlltkin",
+    "-Xswiftc",
+    "-warnings-as-errors",
+    "--filter",
+    "updatingPausedSurfaceDoesNotDrawInsideTheUpdateCallback"
+  ],
+  "exitCode": 1,
+  "expectedFailure": true,
+  "baselineAdjustment": "Private adapter exposed internally only to permit the same regression test."
+}

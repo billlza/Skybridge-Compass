@@ -1,0 +1,52 @@
+{
+  "schema_version": 2,
+  "component": "BoundSession FFI",
+  "version": "0.1.0",
+  "abi_major": 1,
+  "additive_abi_version": 2,
+  "abi_header_sha256": "45deb5e3e05798d6120c866b1fbddc66b26c37b55547f6630e6e94311f5bf4a0",
+  "v1_normalized_surface_sha256": "078403a789b95d3aa4b9803aacbbfb45945b696788acbff9e95c44119dc9ffd0",
+  "exported_bs_ffi_symbol_count": 38,
+  "v1_exported_bs_ffi_symbol_count": 33,
+  "v2_exported_bs_ffi_symbol_count": 5,
+  "capabilities_v2": "0x0f",
+  "source_revision": "999729934b0cf3c76bad814ea9d620261b46b407",
+  "source_worktree_clean": false,
+  "source_snapshot_sha256": "3ef9401ada4176cf9318162d5c43a8ae31cb3f643e46b535d0aae7536f9b194e",
+  "source_snapshot_method": "sorted path-length/path/file-sha256 over implementation, excluding target",
+  "cargo_lock_sha256": "268158bdfa41f2002f2af28e867379f48b26b05909aa6f2d39a0e391755106b4",
+  "rust_toolchain": {
+    "rustc": "1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "1.94.0 (85eff7c80 2026-01-15)",
+    "llvm": "21.1.8"
+  },
+  "build_contract": {
+    "profile": "release",
+    "locked": true,
+    "warnings_as_errors": true,
+    "target_directory_contract": "explicit source target directory",
+    "path_remapping": {
+      "build_home": "/__skybridge__/build-home",
+      "cargo_home": "/__skybridge__/cargo-home",
+      "rust_sysroot": "/__skybridge__/rust-sysroot",
+      "implementation_root": "/__skybridge__/boundsession-source"
+    },
+    "fake_provider_enabled": false,
+    "library_kind": "dynamic-framework",
+    "framework_layouts": {
+      "macos": "versioned-A",
+      "ios": "flat"
+    },
+    "install_name": "@rpath/BoundSessionFFI.framework/BoundSessionFFI"
+  },
+  "framework_binaries_after_adhoc_signing": {
+    "macos-arm64/BoundSessionFFI.framework/Versions/A/BoundSessionFFI": "c4022f5a7cdfcb2c34048d18a583c083aeb1300e270ca7529a124eec10111957",
+    "ios-arm64/BoundSessionFFI.framework/BoundSessionFFI": "13c18cd46bad94bc50a859d2bc05ea7087cc52d3fa41698232bf302bcf8b812f",
+    "ios-arm64-simulator/BoundSessionFFI.framework/BoundSessionFFI": "852d9ef2eb6ad894af268bff404a6e8d3519fada5154bb71b4ce18dfd83a6b73"
+  },
+  "signing_contract": {
+    "source_frameworks": "ad-hoc integration integrity only",
+    "shipping_bundle": "must be re-signed with the final Apple application identity and pass codesign --verify --deep --strict"
+  },
+  "classification": "source-bound integration snapshot; not a signed or published release artifact"
+}

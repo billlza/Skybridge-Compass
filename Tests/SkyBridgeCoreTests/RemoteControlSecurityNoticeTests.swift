@@ -15,8 +15,8 @@ final class RemoteControlSecurityNoticeTests: XCTestCase {
 
     func testSecurityNoticeLocalizationContractCoversCodeShellGateAndAllLocales() throws {
         let requiredKeys = RemoteControlSecurityNoticeLocalizationContract.requiredKeys
-        XCTAssertEqual(requiredKeys.count, 20)
-        XCTAssertEqual(Set(requiredKeys).count, 20)
+        XCTAssertEqual(requiredKeys.count, 24)
+        XCTAssertEqual(Set(requiredKeys).count, 24)
 
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

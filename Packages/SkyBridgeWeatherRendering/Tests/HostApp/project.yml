@@ -1,0 +1,65 @@
+name: CloudRenderingHost
+options:
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  SkyBridgeWeatherRendering:
+    path: ../..
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    SWIFT_SUPPRESS_WARNINGS: NO
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    DEVELOPMENT_TEAM: YKUPL7Z869
+    CODE_SIGN_STYLE: Automatic
+targets:
+  CloudRenderingHost:
+    type: application
+    platform: iOS
+    info:
+      path: Info.plist
+      properties:
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    sources:
+      - CloudRenderingHost.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.weather.rendering.validation
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - package: SkyBridgeWeatherRendering
+      - sdk: AppIntents.framework
+  CloudRenderingHostTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - ../SkyBridgeWeatherRenderingTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skybridge.weather.rendering.validation.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - target: CloudRenderingHost
+      - sdk: AppIntents.framework
+schemes:
+  CloudRenderingHost:
+    build:
+      targets:
+        CloudRenderingHost: all
+        CloudRenderingHostTests: [test]
+    test:
+      environmentVariables:
+        MTL_DEBUG_LAYER: "1"
+      targets:
+        - CloudRenderingHostTests
+      parallelizeBuild: false

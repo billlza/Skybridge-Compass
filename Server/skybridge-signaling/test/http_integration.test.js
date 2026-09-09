@@ -2927,7 +2927,11 @@ function bindingQuery(binding, extra = {}) {
 }
 
 function authHeaders(accessToken = bearerToken) {
-  return { Authorization: `Bearer ${accessToken}` };
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    'X-SkyBridge-Client-Version': '1.0.2',
+    'X-SkyBridge-Protocol-Version': '1'
+  };
 }
 
 function presenceRecordKey(binding, { requestedTenantId = tenantId, requestedUserId = userId } = {}) {
@@ -3393,6 +3397,40 @@ test('devices/list rejects callers that are not active registered devices', asyn
   const badBinding = await getJSON('/api/devices/list?deviceId=short', { headers: authHeaders() });
   assert.equal(badBinding.status, 400);
   assert.equal(badBinding.json.error, 'bad_device_binding');
+});
+
+test('devices/list enforces the production version floor and accepts explicit current-version headers', async () => {
+  const caller = makeIdentityBinding('list-version-floor');
+  registryStore.setDeviceStatus(caller, 'active');
+  const getTenantPolicy = registryStore.getTenantPolicy;
+  registryStore.getTenantPolicy = async function (requestedTenantId) {
+    return {
+      ...await getTenantPolicy.call(this, requestedTenantId),
+      min_supported_client_version: '1.0.0',
+      min_supported_protocol_version: '1'
+    };
+  };
+  const path = `/api/devices/list?${bindingQuery(caller)}`;
+  try {
+    const missing = await getJSON(path, { headers: { Authorization: `Bearer ${bearerToken}` } });
+    assert.equal(missing.status, 426);
+    assert.equal(missing.json.error, 'client_version_too_old');
+    const oldClient = await getJSON(path, {
+      headers: { ...authHeaders(), 'X-SkyBridge-Client-Version': '0.9.0' }
+    });
+    assert.equal(oldClient.status, 426);
+    assert.equal(oldClient.json.error, 'client_version_too_old');
+    const oldProtocol = await getJSON(path, {
+      headers: { ...authHeaders(), 'X-SkyBridge-Protocol-Version': '0' }
+    });
+    assert.equal(oldProtocol.status, 426);
+    assert.equal(oldProtocol.json.error, 'protocol_version_too_old');
+    const current = await listDevices(caller);
+    assert.equal(current.status, 200);
+    assert.ok(current.json.devices.some((device) => device.deviceId === caller.deviceId && device.isCaller));
+  } finally {
+    registryStore.getTenantPolicy = getTenantPolicy;
+  }
 });
 
 test('devices/list is isolated per tenant and user', async () => {

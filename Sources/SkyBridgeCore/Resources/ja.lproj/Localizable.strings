@@ -675,7 +675,7 @@
 "remote.connectionMode.near" = "近距離";
 "remote.connectionMode.far" = "遠距離";
 "remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
-"remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "同じネットワーク内のデバイスを表示・操作";
 "remote.connectionMode.far.description" = "手動 RDP（制限付きプレビュー）— FreeRDP 3.30 ソフトウェア GDI、厳密な証明書検証、チャネルリダイレクトなし";
 "common.unknown" = "不明";
 "profile.title" = "プロフィール";
@@ -1146,3 +1146,11 @@
 "dashboard.accountDevices.summary" = "%d 台 · %d 台オンライン";
 "dashboard.accountDevices.viewAll" = "すべて表示";
 "dashboard.accountDevices.empty" = "同じアカウントでサインインした他の端末がここに表示されます";
+
+"remoteControl.securityNotice.inputController" = "入力操作中";
+
+"remoteControl.securityNotice.observer" = "閲覧のみ";
+
+"remoteControl.securityNotice.transferInput" = "入力操作を引き継ぐ";
+
+"remoteControl.securityNotice.approveView" = "閲覧を許可";

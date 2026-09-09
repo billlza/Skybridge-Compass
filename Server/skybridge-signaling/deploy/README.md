@@ -133,19 +133,95 @@ rewrite tenant policy flags and forge enrollment invites. Apply
 ```bash
 bash Server/skybridge-signaling/deploy/scripts/deploy_remote.sh \
   --host <server-ip-or-dns> \
-  --user <ssh-user>
+  --user <ssh-user> \
+  --node-runtime-dir /opt/skybridge-signaling/runtime/<reviewed-node-distribution>
 ```
 
 Common flags:
 - `--service skybridge-signaling`
 - `--app-dir /opt/skybridge-signaling`
-- `--health-url http://127.0.0.1:8443/health`
+- `--health-url http://127.0.0.1:8443/readyz`
+- `--node-runtime-dir` is required. Install and review the matching official Node
+  distribution before deployment; the deploy script never upgrades system Node.
+- `--skip-systemd`: prepare and verify the isolated candidate only; leave the
+  `current` symlink and running service unchanged.
+
+Deployment verifies the same contract before promotion and after restarting the
+service: the packaged build fingerprint must match the root, health and readiness
+responses, both account-device endpoints must be advertised, and the actual
+unauthenticated requests must return `401 missing_bearer_token`. A healthy older
+process or an entry proxy returning a generic `401` does not satisfy this gate.
+The candidate boot log remains in its release directory on success or failure.
+If verification after restart fails, deployment uses the existing rollback path.
+
+This route and build check does not verify database schema, authenticated account
+access or device interoperability. Complete the schema prerequisites above and
+the authenticated product acceptance separately before promotion.
+
+### Selected Node runtime and service rollback
+
+The selected directory must contain `bin/node` and its bundled
+`lib/node_modules/npm/bin/npm-cli.js`. Preflight verifies Node 24.6.0 or newer and
+the host platform/architecture. Preflight, npm installation and candidate startup
+use that Node explicitly. The service receives a managed
+`/etc/systemd/system/<service>.service.d/20-node-runtime.conf` drop-in that resets
+`ExecStart` to the same absolute Node executable. System Node and the machine's
+global `PATH` are unchanged.
+
+`APP_DIR` and `APP_DIR/releases` must be deployment-managed and not writable by
+the service account, including through ACLs. Review and fix only those named
+parent directories when migrating an older installation. The archive is extracted
+without restoring workstation ownership. Only the candidate's `node_modules` and
+dedicated npm cache are writable by the service during `npm ci`; they are frozen
+under root ownership afterwards, including when installation fails. Deployment
+never recursively changes ownership of `APP_DIR`, shared configuration or the
+selected Node distribution.
+
+Before changing service configuration, the candidate receives a private
+`.service-runtime-journal` with the original unit and managed drop-in, preserving
+their contents, ownership, permissions and absence state. Both automatic rollback
+and `rollback_remote.sh` use `release_runtime_journal.sh` to restore this same
+configuration before reloading and restarting the service. A legacy direct
+predecessor needs no new runtime metadata: its captured original unit and missing
+drop-in state restore its original default-Node behavior.
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
+  --host <server-ip-or-dns> --user <ssh-user>
+```
+
+The default target is the recorded direct predecessor, never the newest directory
+by modification time. `--release <name>` may select another release only when its
+Node binding and successful `.deployment-verified` record exist. Prepared or failed
+candidates and unknown legacy history are rejected rather than assigned a guessed
+runtime. This restores service configuration and the current release; it does not
+roll back database migrations, shared environment configuration or runtime files.
+
+Rollback also requires the configured health endpoint to return the exact target
+build. It uses the target's `.skybridge-build-fingerprint`, or the private
+pre-promotion health receipt for a direct legacy predecessor without that file.
+HTTP 200 with a different or missing build is a rollback verification failure.
+Legacy rollback does not require the newer account-device routes.
+
+SSH and SCP use batch mode, strict existing host-key verification, a 10-second
+connection timeout and bounded server-alive checks. No user SSH configuration is
+modified, and a connection or authentication failure cannot open an interactive
+password prompt or claim successful deployment.
 
 ## 3. Post-deploy smoke checks
 
 ```bash
-bash Server/skybridge-signaling/deploy/scripts/smoke_local.sh http://127.0.0.1:8443
+bash Server/skybridge-signaling/deploy/scripts/smoke_local.sh \
+  http://127.0.0.1:8443 "" 'skybridge-signaling/<expected-release-name>'
 ```
+
+Use the fingerprint from the reviewed release's `.skybridge-build-fingerprint`
+file; do not derive the expected value from the server being checked. The third
+argument is required unless `SKYBRIDGE_EXPECTED_SERVER_BUILD_FINGERPRINT` is set.
+An explicitly empty second argument keeps every deployment probe credential-free.
+The base URL must use HTTP(S), without credentials, query or fragment. Redirects
+are rejected, TLS verification stays enabled, and response bodies are never
+printed, including TURN credentials.
 
 For a real PNVS hook probe in staging:
 
@@ -161,6 +237,10 @@ Expected behavior:
 - `GET /health` returns `200`.
 - `GET /health` includes an `sms` readiness block.
 - `GET /readyz` returns `200` only when the signaling backend and required SMS OTP dependencies are ready.
+- `GET /`, `GET /health` and `GET /readyz` report the exact expected `serverBuildFingerprint`.
+- `GET /` advertises `/api/presence/register` and `/api/devices/list`.
+- Unauthenticated `POST /api/presence/register` with `{}` and `GET /api/devices/list`
+  both return `401` with JSON `error=missing_bearer_token`.
 - `probe_supabase_send_sms_hook.sh` returns `200`, then PNVS control panel shows a matching sending record.
 - `GET /api/turn/credentials` is not `404`.
 - `GET /api/turn/credentials` returns short-lived mode (`mode=shared_secret_hmac`) in production.

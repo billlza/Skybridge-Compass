@@ -16,12 +16,22 @@ struct H264ParameterSetTransitionState: Sendable {
         sequenceParameterSet: Data?,
         pictureParameterSet: Data?
     ) {
+        if let sequenceParameterSet, let pictureParameterSet {
+            let pair = H264ParameterSetPair(sequenceParameterSet: sequenceParameterSet,
+                                           pictureParameterSet: pictureParameterSet)
+            // An explicitly repeated active pair supersedes an incomplete update.
+            // Never let an earlier pending SPS override the pair carried by this IDR.
+            pendingSequenceParameterSet = pair == activePair ? nil : sequenceParameterSet
+            pendingPictureParameterSet = pair == activePair ? nil : pictureParameterSet
+            return
+        }
+        let hasPendingPair = pendingSequenceParameterSet != nil || pendingPictureParameterSet != nil
         if let sequenceParameterSet,
-           sequenceParameterSet != activePair?.sequenceParameterSet {
+           sequenceParameterSet != activePair?.sequenceParameterSet || hasPendingPair {
             pendingSequenceParameterSet = sequenceParameterSet
         }
         if let pictureParameterSet,
-           pictureParameterSet != activePair?.pictureParameterSet {
+           pictureParameterSet != activePair?.pictureParameterSet || hasPendingPair {
             pendingPictureParameterSet = pictureParameterSet
         }
     }

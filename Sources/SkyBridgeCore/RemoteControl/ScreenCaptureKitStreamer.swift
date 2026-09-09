@@ -243,12 +243,17 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
             width: preferredSize?.width ?? CGFloat(display.width),
             height: preferredSize?.height ?? CGFloat(display.height)
         )
+        // The input contract maps the whole visible frame to the captured display.
+        // Keep the same aspect when reducing resolution so SCK adds no unmapped bars.
+        let fittedSize = preserveExactVisibleSize
+            ? requestedSize
+            : try RemoteControlCaptureCompatibility.fittedCaptureSize(requestedSize, displaySize: capturedDisplayPixelSize)
 
         // iOS 端为简化解码：允许用 BGRA 模式输出 JPEG（避免 H.264/HEVC NAL 兼容问题）
         jpegMode = (preferredCodec == .bgra)
         let captureSize = jpegMode
-            ? jpegFallbackProfile.constrainedSize(for: requestedSize)
-            : requestedSize
+            ? jpegFallbackProfile.constrainedSize(for: fittedSize)
+            : fittedSize
         let visibleSize = RemoteControlCaptureCompatibility.normalizedCaptureSize(
             captureSize,
             for: preferredCodec,
@@ -299,6 +304,11 @@ final class ScreenCaptureKitStreamer: NSObject, @unchecked Sendable {
         let configuration = SCStreamConfiguration()
         configuration.width = width
         configuration.height = height
+        if !preserveExactVisibleSize {
+            // Even-dimension rounding may change the aspect by a fraction of a pixel.
+            // Fill those final bounds instead of adding another implicit content inset.
+            configuration.preservesAspectRatio = false
+        }
         configuration.pixelFormat = kCVPixelFormatType_32BGRA // 原始帧，后续由VTCompressionSession进行压缩
         configuration.minimumFrameInterval = Self.screenCaptureMinimumFrameInterval(forConfiguredFPS: configuredFPS)
         configuration.queueDepth = selectedQueueDepth

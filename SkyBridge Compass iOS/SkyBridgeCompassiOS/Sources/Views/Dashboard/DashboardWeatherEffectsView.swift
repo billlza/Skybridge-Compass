@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import SkyBridgeWeatherRendering
 
 @available(iOS 17.0, *)
 struct DashboardWeatherEffectsBackgroundLayer: View {
@@ -58,7 +59,20 @@ private struct DashboardWeatherEffectsContent: View {
         let minimumInterval = WeatherEffectsFrameRatePolicy.minimumInterval(for: snapshot)
 
         Group {
-            if !shouldAnimate {
+            if snapshot.condition == .cloudy {
+                CinematicCloudView(
+                    intensity: Float(snapshot.intensity), wind: Float(snapshot.wind),
+                    quality: ProcessInfo.processInfo.thermalState == .nominal ? 1 : 0.45,
+                    framesPerSecond: Int((1 / minimumInterval).rounded()), isAnimating: shouldAnimate
+                )
+            } else if snapshot.condition == .haze {
+                SkyBridgeWeatherRendering.CinematicHazeView(
+                    intensity: Float(snapshot.intensity), wind: Float(snapshot.wind),
+                    quality: !ProcessInfo.processInfo.isLowPowerModeEnabled &&
+                        ProcessInfo.processInfo.thermalState == .nominal ? 1 : 0.45,
+                    framesPerSecond: Int((1 / minimumInterval).rounded()), isAnimating: shouldAnimate
+                )
+            } else if !shouldAnimate {
                 WeatherEffectsTintGradient(snapshot: snapshot)
                     .opacity(snapshot.tintOpacity * 0.68)
             } else {
@@ -300,13 +314,11 @@ private enum WeatherParticleRenderer {
         switch snapshot.condition {
         case .clear:
             drawClearSky(snapshot: snapshot, particles: field.shimmerParticles, time: time, in: &context, size: size)
-        case .cloudy:
-            drawClouds(snapshot: snapshot, clouds: field.cloudParticles, time: time, in: &context, size: size)
         case .rainy:
             drawRain(snapshot: snapshot, drops: field.rainParticles, time: time, in: &context, size: size)
         case .snowy:
             drawSnow(snapshot: snapshot, flakes: field.snowParticles, time: time, in: &context, size: size)
-        case .foggy, .haze:
+        case .foggy:
             drawFog(snapshot: snapshot, puffs: field.fogParticles, time: time, in: &context, size: size)
         case .stormy:
             drawRain(snapshot: snapshot, drops: field.rainParticles, time: time, in: &context, size: size)
@@ -314,7 +326,7 @@ private enum WeatherParticleRenderer {
                 drawStormFlash(snapshot: snapshot, time: time, in: &context, size: size)
                 drawStormLightning(snapshot: snapshot, time: time, in: &context, size: size)
             }
-        case .unknown:
+        case .cloudy, .haze, .unknown:
             break
         }
     }
@@ -374,37 +386,6 @@ private enum WeatherParticleRenderer {
                 )),
                 with: .color(Color.white.opacity((0.10 + 0.22 * twinkle) * snapshot.intensity * particle.alpha))
             )
-        }
-    }
-
-    private static func drawClouds(
-        snapshot: WeatherAnimationSnapshot,
-        clouds: [WeatherParticle],
-        time: TimeInterval,
-        in context: inout GraphicsContext,
-        size: CGSize
-    ) {
-        context.drawLayer { layer in
-            layer.addFilter(.blur(radius: 18))
-            for cloud in clouds {
-                let progress = (cloud.x + time * cloud.speed * 0.018 * cloud.depth).wrapped01()
-                let x = progress * Double(size.width * 1.35) - Double(size.width) * 0.18
-                let y = (cloud.y * 0.72 + 0.04 * sin(time * cloud.twinkle + cloud.phase)) * Double(size.height)
-                let width = cloud.size * Double(size.width) * (0.48 + cloud.depth * 0.35)
-                let height = width * (0.30 + cloud.depth * 0.10)
-                let rect = CGRect(
-                    x: CGFloat(x - width * 0.5),
-                    y: CGFloat(y - height * 0.5),
-                    width: CGFloat(width),
-                    height: CGFloat(height)
-                )
-                // 深度着色 + 提高不透明度：近处云团更厚实、远处更轻薄，云层更立体而非平淡一片。
-                let depthShade = 0.6 + 0.7 * cloud.depth
-                layer.fill(
-                    Path(ellipseIn: rect),
-                    with: .color(Color.white.opacity((0.09 + cloud.alpha * 0.16) * snapshot.intensity * depthShade))
-                )
-            }
         }
     }
 
@@ -533,10 +514,8 @@ private enum WeatherParticleRenderer {
         in context: inout GraphicsContext,
         size: CGSize
     ) {
-        let tint: Color = snapshot.condition == .haze
-            ? Color(red: 0.96, green: 0.78, blue: 0.46)
-            : .white
-        let opacity = snapshot.condition == .haze ? 0.085 : 0.10
+        let tint = Color.white
+        let opacity = 0.10
 
         context.drawLayer { layer in
             layer.addFilter(.blur(radius: 24))
@@ -628,7 +607,6 @@ private enum WeatherParticleRenderer {
 
 private struct WeatherParticleField: Equatable {
     let shimmerParticles: [WeatherParticle]
-    let cloudParticles: [WeatherParticle]
     let rainParticles: [WeatherParticle]
     let snowParticles: [WeatherParticle]
     let fogParticles: [WeatherParticle]
@@ -647,20 +625,6 @@ private struct WeatherParticleField: Equatable {
                 drift: rng.next(in: -1...1),
                 depth: rng.next(in: 0.45...1.0),
                 twinkle: rng.next(in: 0.55...1.45)
-            )
-        } : []
-        cloudParticles = condition == .cloudy ? (0..<34).map { _ in
-            WeatherParticle(
-                x: rng.next(in: 0...1),
-                y: rng.next(in: 0.04...0.78),
-                speed: rng.next(in: 0.30...1.05),
-                size: rng.next(in: 0.12...0.34),
-                length: rng.next(in: 80...180),
-                alpha: rng.next(in: 0.55...1.0),
-                phase: rng.next(in: 0...(Double.pi * 2)),
-                drift: rng.next(in: -1...1),
-                depth: rng.next(in: 0.35...1.0),
-                twinkle: rng.next(in: 0.04...0.15)
             )
         } : []
         rainParticles = (condition == .rainy || condition == .stormy) ? (0..<520).map { _ in
@@ -691,7 +655,7 @@ private struct WeatherParticleField: Equatable {
                 twinkle: rng.next(in: 0.35...0.95)
             )
         } : []
-        fogParticles = (condition == .foggy || condition == .haze) ? (0..<58).map { _ in
+        fogParticles = condition == .foggy ? (0..<58).map { _ in
             WeatherParticle(
                 x: rng.next(in: 0...1),
                 y: rng.next(in: 0...1),

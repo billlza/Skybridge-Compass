@@ -1387,6 +1387,26 @@ public actor DeviceIdentityKeyManager {
         )
     }
 
+    /// Reads the committed public KEM identity without provisioning a key or
+    /// exposing its private material to callers preparing a pairing bundle.
+    /// The base provider fixes the storage tier; the existing pairing selector
+    /// resolves the requested suite within that tier independently of preference.
+    public func existingKEMPublicKey(
+        for suite: CryptoSuite,
+        baseProvider: any CryptoProvider
+    ) async throws -> Data? {
+        let suiteProvider = try Self.pairingIdentityProvider(
+            for: suite,
+            baseProvider: baseProvider,
+            qPeriaptProvider: nil
+        )
+        guard let material = try await existingKEMIdentityKeyStrict(for: suite, provider: suiteProvider) else {
+            return nil
+        }
+        defer { material.privateKey.zeroize() }
+        return material.publicKey
+    }
+
     /// Loads one exact tiered KEM identity without provisioning or legacy
     /// reconciliation. Untiered records and copies outside the authoritative
     /// shared-group namespace require an explicit migration and are rejected.

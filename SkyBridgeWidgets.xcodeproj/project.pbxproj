@@ -126,6 +126,9 @@
 		C2D035561142D8216CF47A4D /* AccountDevicesPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */; };
 		E0D6C0B4D4876F5A83B04BAF /* AccountDevicePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */; };
 		F2B0BE87BA55EABB1B973425 /* AccountDevicesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */; };
+		A8BD3FD15341DBB7907F1AFE /* NearFieldControlCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */; };
+		AC7FECF6887AB68C91E310B1 /* NearFieldWorkspaceViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */; };
+		71D10F4CC0694067DBE52DDF /* RemoteControlPairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -267,6 +270,9 @@
 		417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesPanelView.swift; sourceTree = "<group>"; };
 		815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicePresentation.swift; sourceTree = "<group>"; };
 		D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesSectionView.swift; sourceTree = "<group>"; };
+		4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldControlCanvas.swift; sourceTree = "<group>"; };
+		5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldWorkspaceViewModel.swift; sourceTree = "<group>"; };
+		B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlPairingView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -399,6 +405,9 @@
 				2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */,
 				C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */,
 				80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */,
+				B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */,
+				5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */,
+				4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */,
 				72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */,
 				904A7A42479065B9367A8E4D /* SSHTerminalView.swift */,
 				4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */,
@@ -780,6 +789,9 @@
 				460A1A9C2CD7B05278490283 /* NavigationItem.swift in Sources */,
 				E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */,
 				7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */,
+				71D10F4CC0694067DBE52DDF /* RemoteControlPairingView.swift in Sources */,
+				AC7FECF6887AB68C91E310B1 /* NearFieldWorkspaceViewModel.swift in Sources */,
+				A8BD3FD15341DBB7907F1AFE /* NearFieldControlCanvas.swift in Sources */,
 				E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */,
 				47408F11F55E2E3497CF25CF /* OnlineDeviceConnectionCoordinator.swift in Sources */,
 				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,

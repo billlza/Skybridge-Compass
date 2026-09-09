@@ -1133,6 +1133,8 @@ struct WebRTCSignalingCurrentPathTests {
         #expect(listRequest.httpMethod == "GET")
         #expect(listRequest.url?.path == "/api/devices/list")
         #expect(listRequest.value(forHTTPHeaderField: "Authorization") == "Bearer token-presence")
+        #expect(listRequest.value(forHTTPHeaderField: "X-SkyBridge-Client-Version") == "1.0.2")
+        #expect(listRequest.value(forHTTPHeaderField: "X-SkyBridge-Protocol-Version") == "1")
         let listURL = try #require(listRequest.url)
         let listComponents = try #require(URLComponents(url: listURL, resolvingAgainstBaseURL: false))
         let queryItems = try #require(listComponents.queryItems)

@@ -6,15 +6,14 @@ import CryptoKit
 /// 验证本机强身份生成、持久化和判定逻辑
 @available(macOS 14.0, *)
 final class SelfIdentityProviderTests: XCTestCase {
-    private final class MirrorProbe: @unchecked Sendable {
+    private final class AuthorityLoadProbe: @unchecked Sendable {
         private let lock = NSLock()
         private var calls = 0
 
-        func record(_: String) -> Bool {
+        func record() {
             lock.lock()
             calls += 1
             lock.unlock()
-            return true
         }
 
         func invocationCount() -> Int {
@@ -132,7 +131,6 @@ final class SelfIdentityProviderTests: XCTestCase {
         let expectedMACs: Set<String> = ["02:aa:bb:cc:dd:ee"]
         let provider = SelfIdentityProvider(
             identityLoader: { _ in identity },
-            deviceIDMirror: { _ in false },
             macAddressLoader: { expectedMACs }
         )
 
@@ -166,28 +164,50 @@ final class SelfIdentityProviderTests: XCTestCase {
         XCTAssertTrue(snapshot.pubKeyFP.isEmpty)
     }
 
-    func testReadOnlyExistingIdentityDoesNotMirrorOrPublishState() async throws {
+    func testReadOnlyExistingIdentityDoesNotCreateMigrateOrPublishState() async throws {
         let identity = makeIdentityInfo(
             deviceID: "55555555-5555-4555-8555-555555555555"
         )
-        let mirrorProbe = MirrorProbe()
+        let authorityProbe = AuthorityLoadProbe()
         let provider = SelfIdentityProvider(
-            identityLoader: { allowCreate in
-                XCTAssertFalse(allowCreate)
-                return identity
+            identityLoader: { _ in
+                throw FixtureError.authorityUnavailable
             },
-            deviceIDMirror: { deviceID in
-                mirrorProbe.record(deviceID)
+            readOnlyIdentityLoader: {
+                authorityProbe.record()
+                return identity
             }
         )
 
         let deviceID = try await provider.existingProtocolIdentityDeviceIdReadOnly()
 
         XCTAssertEqual(deviceID, identity.deviceId)
-        XCTAssertEqual(mirrorProbe.invocationCount(), 0)
+        XCTAssertEqual(authorityProbe.invocationCount(), 1)
         let snapshot = await provider.presentationSnapshot()
         XCTAssertTrue(snapshot.deviceId.isEmpty)
         XCTAssertTrue(snapshot.pubKeyFP.isEmpty)
+    }
+
+    func testRepeatedPublishedIdentityQueriesStillValidateCurrentAuthority() async throws {
+        let identity = makeIdentityInfo(deviceID: "66666666-6666-4666-8666-666666666666")
+        let authorityProbe = AuthorityLoadProbe()
+        let provider = SelfIdentityProvider(identityLoader: { allowCreate in
+            XCTAssertFalse(allowCreate)
+            authorityProbe.record()
+            if authorityProbe.invocationCount() == 3 { throw FixtureError.authorityUnavailable }
+            return identity
+        })
+        let deviceID = try await provider.protocolIdentityDeviceId(allowCreate: false)
+        let snapshot = try await provider.snapshotEnsuringProtocolDeviceId(allowCreate: false)
+        XCTAssertEqual(deviceID, identity.deviceId)
+        XCTAssertEqual(snapshot.pubKeyFP, identity.pubKeyFP)
+        do {
+            _ = try await provider.protocolIdentityDeviceId(allowCreate: false)
+            XCTFail("A cached presentation value must not mask a subsequent authority failure")
+        } catch FixtureError.authorityUnavailable {
+            // Every authority request remains strict even after the first publication.
+        }
+        XCTAssertEqual(authorityProbe.invocationCount(), 3)
     }
 
     func testSnapshotEnsuringIdentityPropagatesAuthorityFailure() async {

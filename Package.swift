@@ -159,7 +159,8 @@ let package = Package(
         // Binary dependencies are exact-pinned so a future upstream release cannot silently
         // replace reviewed native bytes during a clean resolve.
         .package(url: "https://github.com/stasel/WebRTC", exact: "150.0.0"),
-        .package(path: "Packages/SkyBridgeCameraKit")
+        .package(path: "Packages/SkyBridgeCameraKit"),
+        .package(path: "Packages/SkyBridgeWeatherRendering")
     ],
     targets: [
         .binaryTarget(
@@ -172,6 +173,10 @@ let package = Package(
         .binaryTarget(
             name: "QPeriaptFFI",
             path: "Sources/Vendor/qperiapt.xcframework"
+        ),
+        .binaryTarget(
+            name: "BoundSessionFFI",
+            path: "Sources/Vendor/boundsession.xcframework"
         ),
         .binaryTarget(
             name: "libopus",
@@ -204,6 +209,17 @@ let package = Package(
             dependencies: ["QPeriaptFFI"],
             path: "Sources/CQPeriapt",
             publicHeadersPath: "include"
+        ),
+        .target(
+            name: "CBoundSession",
+            dependencies: ["BoundSessionFFI"],
+            path: "Sources/CBoundSession",
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(
+                    latestCStandardFlags + ["-Wall", "-Wextra", "-Werror", "-pedantic"]
+                )
+            ]
         ),
         .target(
             name: "SkyBridgeQPeriaptRuntime",
@@ -424,9 +440,11 @@ let package = Package(
                 .product(name: "SwiftASN1", package: "swift-asn1"),
                 .product(name: "WebRTC", package: "WebRTC"),
                 .product(name: "SkyBridgeCameraKit", package: "SkyBridgeCameraKit"),
+                .product(name: "SkyBridgeWeatherRendering", package: "SkyBridgeWeatherRendering"),
                 "liboqs",
                 "OQSRAII",
                 "SkyBridgeQPeriaptRuntime",
+                "CBoundSession",
                 "SkyBridgeWidgetShared"
             ] + smokeSupportProductionDependencies,
             path: "Sources/SkyBridgeCore",
@@ -519,6 +537,7 @@ let package = Package(
                 "SkyBridgeUI",
                 "SkyBridgeOpus",
                 "SkyBridgeRealtimeMedia",
+                "CBoundSession",
                 "CQPeriapt",
                 "OQSRAII",
                 "SkyBridgeBenchmarkSupport",
@@ -530,7 +549,8 @@ let package = Package(
             ],
             resources: [
                 .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json"),
-                .copy("Fixtures/AppleCompatibilityVectors/inputs.json")
+                .copy("Fixtures/AppleCompatibilityVectors/inputs.json"),
+                .copy("Fixtures/BoundSession/bound-session-run-evidence-v2.txt")
             ],
             swiftSettings: ([
             ] + (enableApplePQCSDK ? [
@@ -538,6 +558,13 @@ let package = Package(
                 .define("HAS_APPLE_PQC_SDK")
             ] : [])),
             linkerSettings: webRTCTestLinkerSettings()
+        ),
+        .testTarget(
+            name: "SkyBridgeCompassAppTests",
+            dependencies: ["SkyBridgeCompassApp", "SkyBridgeCore", "SkyBridgeProtocolCore"],
+            // SwiftPM links all test targets into one runner. CoreTests already
+            // supplies its WebRTC runtime search path; repeating it warns in ld.
+            path: "Tests/SkyBridgeCompassAppTests"
         ),
         .testTarget(
             name: "SkyBridgeMessagePersistenceTests",
@@ -554,6 +581,11 @@ let package = Package(
             name: "SkyBridgeQPeriaptRuntimeTests",
             dependencies: ["SkyBridgeQPeriaptRuntime"],
             path: "Tests/SkyBridgeQPeriaptRuntimeTests"
+        ),
+        .testTarget(
+            name: "HandshakeBenchRunnerTests",
+            dependencies: ["HandshakeBenchRunner", "SkyBridgeCore"],
+            path: "Tests/HandshakeBenchRunnerTests"
         ),
         .testTarget(
             name: "SkyBridgeBenchTests",
@@ -680,9 +712,11 @@ let package = Package(
             dependencies: [
                 "SkyBridgeCore",
                 "OQSRAII",
-                "SkyBridgeBenchmarkSupport"
+                "SkyBridgeBenchmarkSupport",
+                "SkyBridgeQPeriaptRuntime"
             ],
             path: "Sources/HandshakeBenchRunner",
+            swiftSettings: (enableApplePQCSDK ? [.define("HAS_APPLE_PQC_SDK")] : []),
             linkerSettings: [
                 .linkedFramework("CryptoKit")
             ]

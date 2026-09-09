@@ -23,7 +23,6 @@ final class LocalPeerServiceCoordinator: ObservableObject {
 
     private let fileTransferManager = FileTransferManager.shared
     private let fileTransferListener: FileTransferListenerService
-    private let remoteControlManager: RemoteControlManager
     private let remoteControlServer: RemoteControlServer
     private let p2pDiscoveryService = P2PDiscoveryService.shared
 
@@ -38,8 +37,7 @@ final class LocalPeerServiceCoordinator: ObservableObject {
 
     private init() {
         self.fileTransferListener = FileTransferListenerService(manager: fileTransferManager)
-        self.remoteControlManager = RemoteControlManager()
-        self.remoteControlServer = RemoteControlServer(manager: remoteControlManager)
+        self.remoteControlServer = RemoteControlServer()
     }
 
     func startIfNeeded() async throws {

@@ -1180,6 +1180,16 @@ fi
 
 log "本次打包使用构建目录: ${BUILD_DIR}"
 
+bound_session_verifier=(
+  python3
+  "${ROOT_DIR}/Scripts/verify_boundsession_xcframework.py"
+  --root "${ROOT_DIR}"
+)
+if is_release_distribution_context; then
+  bound_session_verifier+=(--require-publishable-source)
+fi
+"${bound_session_verifier[@]}"
+
 log "复验并清理既有 App Bundle，然后创建输出结构"
 skybridge_remove_package_app_bundle_for_replacement \
   "${ROOT_DIR}" \

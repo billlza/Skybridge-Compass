@@ -3164,8 +3164,8 @@ final class RegressionHardeningTests: XCTestCase {
       in: source
     )
     let driverCreatedBody = try sourceSlice(
-      from: "onDriverCreated: { driver in",
-      to: "try ensureLANBootstrapStillActive(for: connection)",
+      from: "onDriverCreated:",
+      to: "guard let establishedDriver = lanHandshakeDriver else",
       in: source
     )
 
@@ -3175,6 +3175,9 @@ final class RegressionHardeningTests: XCTestCase {
     )
     XCTAssertTrue(driverCreatedBody.contains("installLANHandshakeDriver("))
     XCTAssertTrue(driverCreatedBody.contains("startReceiving()"))
+    let install = try XCTUnwrap(driverCreatedBody.range(of: "installLANHandshakeDriver("))
+    let receive = try XCTUnwrap(driverCreatedBody.range(of: "startReceiving()"))
+    XCTAssertLessThan(install.lowerBound, receive.lowerBound)
     XCTAssertTrue(source.contains("private func installLANSecureSessionKeys("))
 
     let installKeysBody = try sourceSlice(
@@ -3196,7 +3199,7 @@ final class RegressionHardeningTests: XCTestCase {
 
     let resetParserBody = try sourceSlice(
       from: "private func resetLANReceiveParserState(",
-      to: "private func isCrossNetworkDevice(",
+      to: "private func resetMetalFeedDeliveryState(",
       in: source
     )
     XCTAssertTrue(resetParserBody.contains("private func resetLANSecureReceivePipelineState("))

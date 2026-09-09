@@ -39,7 +39,6 @@ struct RemoteControlInputOwner: Hashable, Sendable {
 enum RemoteControlInjectionMappingSnapshot: Sendable {
     case available(RemoteControlInjectionMapping)
     case missing
-    case ownerConflict
 }
 
 struct RemoteControlInjectionMappingLease: Hashable, Sendable {
@@ -47,9 +46,9 @@ struct RemoteControlInjectionMappingLease: Hashable, Sendable {
     fileprivate let generation: UUID
 }
 
-/// Process-wide mapping for the one active remote-control video capture. The
-/// mapping is leased to an exact transport/session/generation owner. Publishing
-/// a replacement is atomic and a stale stream can clear only its own lease.
+/// Capture geometry for each admitted transport/session/generation owner.
+/// Input authority is checked separately by the host session coordinator.
+/// A capture replacement and teardown can affect only that owner's exact lease.
 enum RemoteControlInjectionMappingStore {
     private struct OwnedMapping: Sendable {
         let lease: RemoteControlInjectionMappingLease
@@ -57,7 +56,7 @@ enum RemoteControlInjectionMappingStore {
     }
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var current: OwnedMapping?
+    nonisolated(unsafe) private static var mappings: [RemoteControlInputOwner: OwnedMapping] = [:]
 
     @discardableResult
     static func publish(
@@ -69,22 +68,21 @@ enum RemoteControlInjectionMappingStore {
             generation: UUID()
         )
         lock.lock(); defer { lock.unlock() }
-        current = OwnedMapping(lease: lease, mapping: mapping)
+        mappings[owner] = OwnedMapping(lease: lease, mapping: mapping)
         return lease
     }
 
     static func clear(_ lease: RemoteControlInjectionMappingLease) {
         lock.lock(); defer { lock.unlock() }
-        guard current?.lease == lease else { return }
-        current = nil
+        guard mappings[lease.owner]?.lease == lease else { return }
+        mappings.removeValue(forKey: lease.owner)
     }
 
     static func snapshot(
         for owner: RemoteControlInputOwner
     ) -> RemoteControlInjectionMappingSnapshot {
         lock.lock(); defer { lock.unlock() }
-        guard let current else { return .missing }
-        guard current.lease.owner == owner else { return .ownerConflict }
+        guard let current = mappings[owner] else { return .missing }
         return .available(current.mapping)
     }
 
@@ -96,8 +94,7 @@ enum RemoteControlInjectionMappingStore {
         for owner: RemoteControlInputOwner
     ) -> RemoteControlInjectionMappingLease? {
         lock.lock(); defer { lock.unlock() }
-        if let current,
-           current.lease.owner == owner,
+        if let current = mappings[owner],
            current.mapping.displayID == mapping.displayID,
            current.mapping.visibleSize == mapping.visibleSize {
             return nil
@@ -106,7 +103,7 @@ enum RemoteControlInjectionMappingStore {
             owner: owner,
             generation: UUID()
         )
-        current = OwnedMapping(lease: lease, mapping: mapping)
+        mappings[owner] = OwnedMapping(lease: lease, mapping: mapping)
         return lease
     }
 }
@@ -536,8 +533,6 @@ enum RemoteControlInputEventInjector {
             mapping = availableMapping
         case .missing:
             return .missing
-        case .ownerConflict:
-            return .ownerConflict
         }
 
         guard mapping.visibleSize.width.isFinite,

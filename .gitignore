@@ -37,13 +37,15 @@ DerivedData/
 # which requires a checked-in Package.resolved (otherwise SwiftPM reports
 # "a resolved file is required ... dependencies were added: swift-asn1").
 !Package.resolved
-# Keep generated/downloaded package contents ignored, but the in-repository camera protocol
-# package is first-party source and must remain version controlled.
+# Keep generated/downloaded package contents ignored; first-party camera and weather
+# packages remain version controlled.
 Packages/*
 !Packages/SkyBridgeCameraKit/
 !Packages/SkyBridgeCameraKit/**
 Packages/SkyBridgeCameraKit/.build/
 Packages/SkyBridgeCameraKit/.swiftpm/
+!Packages/SkyBridgeWeatherRendering/
+!Packages/SkyBridgeWeatherRendering/Tests/HostApp/CloudRenderingHost.xcodeproj/xcshareddata/xcschemes/CloudRenderingHost.xcscheme
 Package.pins
 .swift_test_output.txt
 

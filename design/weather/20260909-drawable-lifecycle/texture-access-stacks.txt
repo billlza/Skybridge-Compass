@@ -1,0 +1,154 @@
+TEXTURE ACCESS on thread index 13 id 764212
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : __48-[HUDMTLLayerTracking _presentOrSignalDrawable:]_block_invoke
+QuartzCore : -[CAMetalDrawable addPresentScheduledHandler:]
+libMTLHud.dylib : -[HUDMTLLayerTracking _presentOrSignalDrawable:]
+libMTLHud.dylib : HUDCAMetalDrawablePresentCommon
+libMTLHud.dylib : CAMetalDrawable_present(void (*)(), objc_object*, objc_selector*)
+Metal : __45-[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+Metal : MTLDispatchListApply
+Metal : -[_MTLCommandBuffer didScheduleWithStartTime:endTime:error:]
+IOGPU : IOGPUNotificationQueueDispatchAvailableCompletionNotifications
+IOGPU : __IOGPUNotificationQueueSetDispatchQueue_block_invoke
+libdispatch.dylib : _dispatch_client_callout4
+libdispatch.dylib : _dispatch_mach_msg_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_mach_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+
+TEXTURE ACCESS on thread index 13 id 764212
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : -[HUDMTLLayerOverlay layerTracking:presentDrawable:]
+libMTLHud.dylib : -[HUDMTLLayerTracking _presentOrSignalDrawable:]
+libMTLHud.dylib : HUDCAMetalDrawablePresentCommon
+libMTLHud.dylib : CAMetalDrawable_present(void (*)(), objc_object*, objc_selector*)
+Metal : __45-[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+Metal : MTLDispatchListApply
+Metal : -[_MTLCommandBuffer didScheduleWithStartTime:endTime:error:]
+IOGPU : IOGPUNotificationQueueDispatchAvailableCompletionNotifications
+IOGPU : __IOGPUNotificationQueueSetDispatchQueue_block_invoke
+libdispatch.dylib : _dispatch_client_callout4
+libdispatch.dylib : _dispatch_mach_msg_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_mach_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+
+TEXTURE ACCESS on thread index 13 id 764212
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : __48-[HUDMTLLayerTracking _presentOrSignalDrawable:]_block_invoke
+QuartzCore : -[CAMetalDrawable addPresentScheduledHandler:]
+libMTLHud.dylib : -[HUDMTLLayerTracking _presentOrSignalDrawable:]
+libMTLHud.dylib : HUDCAMetalDrawablePresentCommon
+libMTLHud.dylib : CAMetalDrawable_present(void (*)(), objc_object*, objc_selector*)
+Metal : __45-[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+Metal : MTLDispatchListApply
+Metal : -[_MTLCommandBuffer didScheduleWithStartTime:endTime:error:]
+IOGPU : IOGPUNotificationQueueDispatchAvailableCompletionNotifications
+IOGPU : __IOGPUNotificationQueueSetDispatchQueue_block_invoke
+libdispatch.dylib : _dispatch_client_callout4
+libdispatch.dylib : _dispatch_mach_msg_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_mach_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+
+TEXTURE ACCESS on thread index 8 id 764207
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : -[HUDMTLLayerTracking _snapshotDrawable:state:]
+libMTLHud.dylib : __48-[HUDMTLLayerTracking _presentOrSignalDrawable:]_block_invoke_2
+QuartzCore : -[CAMetalDrawable didPresentAtTime:]
+QuartzCore : -[CAMetalDrawable release]
+CoreFoundation : __RELEASE_OBJECTS_IN_THE_ARRAY__
+CoreFoundation : -[__NSArrayM dealloc]
+QuartzCore : layer_composited(_CAImageQueue*, void*, unsigned int, unsigned int)
+QuartzCore : CAImageQueueDidComposite
+QuartzCore : _XImageQueueDidComposite
+QuartzCore : invocation function for block in CA::MachPortUtil::ClientIPC::create(char const*)
+libdispatch.dylib : _dispatch_client_callout
+libdispatch.dylib : _dispatch_continuation_pop
+libdispatch.dylib : _dispatch_source_latch_and_call
+libdispatch.dylib : _dispatch_source_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+
+TEXTURE ACCESS on thread index 13 id 764212
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : -[HUDMTLLayerOverlay layerTracking:presentDrawable:]
+libMTLHud.dylib : -[HUDMTLLayerTracking _presentOrSignalDrawable:]
+libMTLHud.dylib : HUDCAMetalDrawablePresentCommon
+libMTLHud.dylib : CAMetalDrawable_present(void (*)(), objc_object*, objc_selector*)
+Metal : __45-[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+Metal : MTLDispatchListApply
+Metal : -[_MTLCommandBuffer didScheduleWithStartTime:endTime:error:]
+IOGPU : IOGPUNotificationQueueDispatchAvailableCompletionNotifications
+IOGPU : __IOGPUNotificationQueueSetDispatchQueue_block_invoke
+libdispatch.dylib : _dispatch_client_callout4
+libdispatch.dylib : _dispatch_mach_msg_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_mach_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+
+TEXTURE ACCESS on thread index 12 id 764211
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : __48-[HUDMTLLayerTracking _presentOrSignalDrawable:]_block_invoke
+QuartzCore : -[CAMetalDrawable addPresentScheduledHandler:]
+libMTLHud.dylib : -[HUDMTLLayerTracking _presentOrSignalDrawable:]
+libMTLHud.dylib : HUDCAMetalDrawablePresentCommon
+libMTLHud.dylib : CAMetalDrawable_present(void (*)(), objc_object*, objc_selector*)
+Metal : __45-[_MTLCommandBuffer presentDrawable:options:]_block_invoke
+Metal : MTLDispatchListApply
+Metal : -[_MTLCommandBuffer didScheduleWithStartTime:endTime:error:]
+IOGPU : IOGPUNotificationQueueDispatchAvailableCompletionNotifications
+IOGPU : __IOGPUNotificationQueueSetDispatchQueue_block_invoke
+libdispatch.dylib : _dispatch_client_callout4
+libdispatch.dylib : _dispatch_mach_msg_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_mach_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+
+TEXTURE ACCESS on thread index 8 id 764207
+QuartzCore : -[CAMetalDrawable texture]
+libMTLHud.dylib : -[HUDMTLLayerTracking _snapshotDrawable:state:]
+libMTLHud.dylib : __48-[HUDMTLLayerTracking _presentOrSignalDrawable:]_block_invoke_2
+QuartzCore : -[CAMetalDrawable didPresentAtTime:]
+QuartzCore : layer_presented(_CAImageQueue*, unsigned int, double, double, double, void*)
+QuartzCore : invoke_presented_callback(void*)
+libdispatch.dylib : _dispatch_client_callout
+libdispatch.dylib : _dispatch_lane_serial_drain
+libdispatch.dylib : _dispatch_lane_invoke
+libdispatch.dylib : _dispatch_root_queue_drain_deferred_wlh
+libdispatch.dylib : _dispatch_workloop_worker_thread
+libsystem_pthread.dylib : _pthread_wqthread
+

@@ -1130,7 +1130,11 @@ public actor SignalServerClient {
                 URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
                 URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
             ],
-            requiresUserAuthentication: true
+            requiresUserAuthentication: true,
+            extraHeaders: [
+                "X-SkyBridge-Client-Version": clientVersionProvider(),
+                "X-SkyBridge-Protocol-Version": protocolVersionProvider()
+            ]
         )
     }
 

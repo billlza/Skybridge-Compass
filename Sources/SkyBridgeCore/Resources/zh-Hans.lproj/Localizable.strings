@@ -731,7 +731,7 @@
 "remote.connectionMode.near" = "近距";
 "remote.connectionMode.far" = "远距";
 "remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
-"remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "查看并控制同一网络内的设备";
 "remote.connectionMode.far.description" = "手动 RDP（受限预览）- FreeRDP 3.30 软件 GDI、严格证书校验、无通道重定向";
 "common.unknown" = "未知";
 "profile.title" = "用户资料";
@@ -1297,3 +1297,11 @@
 "dashboard.accountDevices.summary" = "%d 台设备 · %d 台在线";
 "dashboard.accountDevices.viewAll" = "查看全部";
 "dashboard.accountDevices.empty" = "登录同一账号的其他设备会显示在这里";
+
+"remoteControl.securityNotice.inputController" = "拥有输入权";
+
+"remoteControl.securityNotice.observer" = "仅观看";
+
+"remoteControl.securityNotice.transferInput" = "交接输入权";
+
+"remoteControl.securityNotice.approveView" = "允许观看";

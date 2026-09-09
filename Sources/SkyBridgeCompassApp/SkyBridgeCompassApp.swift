@@ -317,7 +317,7 @@ struct SkyBridgeCompassApp: App {
 
 // 近距硬件镜像窗口 - macOS 15/26 最佳实践
 // 说明：macOS Tahoe 26 已于 2025-09-15 正式发布，CryptoKit 原生支持 HPKE X-Wing、ML-KEM、ML-DSA
-        WindowGroup(id: "near-field-mirror") {
+        Window("近距远程控制", id: "near-field-mirror") {
             NearFieldMirrorView()
                 .frame(minWidth: 800, minHeight: 600)
                 .preferredColorScheme(.dark)

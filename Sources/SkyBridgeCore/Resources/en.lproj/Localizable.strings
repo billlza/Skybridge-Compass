@@ -704,7 +704,7 @@
 "remote.connectionMode.near" = "Near";
 "remote.connectionMode.far" = "Far";
 "remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
-"remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
+"remote.connectionMode.near.description" = "View and control devices on the same network";
 "remote.connectionMode.far.description" = "Manual RDP (restricted preview) — FreeRDP 3.30 software GDI, strict certificate validation, no channel redirection";
 "common.unknown" = "Unknown";
 "profile.title" = "Profile";
@@ -1271,3 +1271,11 @@
 "dashboard.accountDevices.summary" = "%d devices · %d online";
 "dashboard.accountDevices.viewAll" = "View All";
 "dashboard.accountDevices.empty" = "Other devices signed in with the same account will appear here";
+
+"remoteControl.securityNotice.inputController" = "Input controller";
+
+"remoteControl.securityNotice.observer" = "View only";
+
+"remoteControl.securityNotice.transferInput" = "Transfer input control";
+
+"remoteControl.securityNotice.approveView" = "Allow viewing";

@@ -11,12 +11,11 @@ import SkyBridgeUI
 private final class LocalLanInteropHostCoordinator {
     private let p2pDiscoveryService = P2PDiscoveryService.shared
     private let fileTransferManager = FileTransferManager.shared
-    private let remoteControlManager = RemoteControlManager()
     private lazy var reporter = SmokeStatusReporter(statusURL: self.statusURL())
     private var monitorTask: Task<Void, Never>?
 
     private lazy var fileTransferListener = FileTransferListenerService(manager: fileTransferManager)
-    private lazy var remoteControlServer = RemoteControlServer(manager: remoteControlManager)
+    private lazy var remoteControlServer = RemoteControlServer()
 
     private var expectsFileTransferSmoke: Bool {
         ProcessInfo.processInfo.environment["SKYBRIDGE_SMOKE_EXPECT_FILE_TRANSFER"] == "1"

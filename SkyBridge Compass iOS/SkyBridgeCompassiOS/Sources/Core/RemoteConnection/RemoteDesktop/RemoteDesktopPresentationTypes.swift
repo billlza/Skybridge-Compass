@@ -55,18 +55,19 @@ public enum RemoteDesktopRenderOrientation: String, Sendable {
 @available(iOS 17.0, *)
 extension RemoteDesktopManager {
     /// 从触控转换为鼠标事件
-    public func handleTouch(at point: CGPoint, in bounds: CGRect, type: MouseEventType) {
-        guard bounds.width > 0, bounds.height > 0 else { return }
+    public func handleTouch(at point: CGPoint, in bounds: CGRect, type: MouseEventType,
+                            expectedConnectionID: String) {
+        guard bounds.width.isFinite, bounds.height.isFinite,
+              bounds.width > 0, bounds.height > 0,
+              resolution.width.isFinite, resolution.height.isFinite,
+              resolution.width > 1, resolution.height > 1 else { return }
         let normalizedX = (point.x - bounds.minX) / bounds.width
         let normalizedY = (point.y - bounds.minY) / bounds.height
-        guard normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else { return }
-
-        let remoteX = normalizedX * resolution.width
-        let remoteY = normalizedY * resolution.height
-        let event = MouseEvent(type: type, x: remoteX, y: remoteY)
-
-        Task {
-            await sendMouseEvent(event)
-        }
+        guard normalizedX.isFinite, normalizedY.isFinite,
+              normalizedX >= 0, normalizedX <= 1, normalizedY >= 0, normalizedY <= 1 else { return }
+        let event = MouseEvent(type: type,
+                              x: min(normalizedX * resolution.width, resolution.width - 1),
+                              y: min(normalizedY * resolution.height, resolution.height - 1))
+        enqueueMouseEvent(event, expectedConnectionID: expectedConnectionID)
     }
 }
