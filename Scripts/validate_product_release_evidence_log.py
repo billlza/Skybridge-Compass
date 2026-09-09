@@ -17,6 +17,7 @@ import re
 import stat
 import tempfile
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -24,7 +25,6 @@ from ios_physical_release_acceptance import (
     PhysicalAcceptanceError,
     validate_archive_binding,
 )
-
 
 SUBSYSTEM = "com.skybridge.compass.release-evidence"
 CATEGORY = "ProductSession"
@@ -62,8 +62,7 @@ CONNECTIVITY_OWNER_FIELDS = (
 )
 EVENT_FIELDS: dict[str, tuple[str, ...]] = {
     "remoteControlNoticeShown": COMMON_FIELDS + ("phase", "result"),
-    "remoteControlNoticePanelPresented": COMMON_FIELDS
-    + ("phase", "buttons", "result"),
+    "remoteControlNoticePanelPresented": COMMON_FIELDS + ("phase", "buttons", "result"),
     "remoteControlNoticeHumanApproved": COMMON_FIELDS
     + ("phase", "decisionSource", "result"),
     "remoteControlNoticeApproved": COMMON_FIELDS
@@ -125,8 +124,7 @@ EVENT_FIELDS: dict[str, tuple[str, ...]] = {
         "result",
         "uiEffect",
     ),
-    "releaseSessionDisconnected": COMMON_FIELDS
-    + ("noticeHidden", "reason", "result"),
+    "releaseSessionDisconnected": COMMON_FIELDS + ("noticeHidden", "reason", "result"),
 }
 
 MAC_PRODUCT = "SkyBridgeCompassApp"
@@ -145,6 +143,9 @@ CONNECTIVITY_SUCCESS_PROFILES = {
     ("xwing", "pqc"),
     ("pqc", "xwing"),
 }
+# Canonical P2P/WebRTC lifecycle evidence admits only these authenticated product suites.
+# The connectivity matrix has its own offer/profile contract below.
+AUTHENTICATED_SESSION_SUITES = {"X-Wing", "Q-Periapt-ABI2-PolicyBound"}
 PQC_SUITES = {
     "X-Wing",
     "Q-Periapt-ABI2-PolicyBound",
@@ -189,7 +190,14 @@ def _read_regular_file(path: Path, label: str, maximum_bytes: int) -> bytes:
         if os.read(descriptor, 1):
             _fail(f"{label} grew while reading")
         after = os.fstat(descriptor)
-        stable_fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+        stable_fields = (
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
+        )
         if any(getattr(before, name) != getattr(after, name) for name in stable_fields):
             _fail(f"{label} changed while reading")
         return bytes(content)
@@ -307,11 +315,15 @@ def _parse_event_line(
 
     if fields["transport"] not in {"p2p", "webrtc"}:
         _fail(f"line {line_number} has an unsupported transport")
-    if "session_ref" in fields and REFERENCE_PATTERN.fullmatch(fields["session_ref"]) is None:
+    if (
+        "session_ref" in fields
+        and REFERENCE_PATTERN.fullmatch(fields["session_ref"]) is None
+    ):
         _fail(f"line {line_number} has an invalid session_ref")
-    if "attempt_ref" in fields and ATTEMPT_REFERENCE_PATTERN.fullmatch(
-        fields["attempt_ref"]
-    ) is None:
+    if (
+        "attempt_ref" in fields
+        and ATTEMPT_REFERENCE_PATTERN.fullmatch(fields["attempt_ref"]) is None
+    ):
         _fail(f"line {line_number} has an invalid attempt_ref")
     if expected_owner not in PRODUCTS or fields["owner"] != expected_owner:
         _fail(f"line {line_number} is not owned by the expected shipping product")
@@ -319,7 +331,9 @@ def _parse_event_line(
     return Event(name=name, fields=fields, line_number=line_number)
 
 
-def parse_canonical_log(path: Path, *, expected_owner: str = MAC_PRODUCT) -> list[Event]:
+def parse_canonical_log(
+    path: Path, *, expected_owner: str = MAC_PRODUCT
+) -> list[Event]:
     content = _read_regular_file(path, "product release evidence log", MAX_INPUT_BYTES)
     try:
         text = content.decode("ascii")
@@ -343,7 +357,10 @@ def _validate_event_values(event: Event) -> None:
     if name == "releaseSessionOwner":
         if fields["state"] != "active":
             _fail(f"line {line} owner state must be active")
-        if fields["transport"] == "p2p" and fields["routeClass"] not in {"wifi", "awdl"}:
+        if fields["transport"] == "p2p" and fields["routeClass"] not in {
+            "wifi",
+            "awdl",
+        }:
             _fail(f"line {line} has an invalid P2P routeClass")
         if fields["transport"] == "webrtc" and fields["selectedTransport"] not in {
             "direct",
@@ -352,7 +369,10 @@ def _validate_event_values(event: Event) -> None:
             _fail(f"line {line} has an invalid WebRTC selectedTransport")
         return
     expected_fixed: dict[str, dict[str, str]] = {
-        "remoteControlNoticeShown": {"phase": "awaitingApproval", "result": "presented"},
+        "remoteControlNoticeShown": {
+            "phase": "awaitingApproval",
+            "result": "presented",
+        },
         "remoteControlNoticePanelPresented": {
             "phase": "awaitingApproval",
             "buttons": "approve,reject",
@@ -402,29 +422,40 @@ def _validate_event_values(event: Event) -> None:
             _fail(f"line {line} local frame proof must be local-renderer")
     elif name == "remoteInputApplied":
         _positive_integer(fields["event_seq"], f"line {line} event_seq")
-        if fields["effect"] not in {"pointer", "keyboard", "scroll"} or fields["applied"] != "1":
+        if (
+            fields["effect"] not in {"pointer", "keyboard", "scroll"}
+            or fields["applied"] != "1"
+        ):
             _fail(f"line {line} has an invalid applied input effect")
     elif name == "p2pSessionAuthenticated":
         if (
             fields["transport"] != "p2p"
             or fields["role"] not in {"initiator", "responder"}
-            or fields["suite"] != "X-Wing"
+            or fields["suite"] not in AUTHENTICATED_SESSION_SUITES
             or fields["result"] != "authenticated"
         ):
-            _fail(f"line {line} P2P peer session is not authenticated with X-Wing")
+            _fail(f"line {line} P2P peer session has no supported authenticated suite")
     elif name == "webrtcPQCRekeyAuthenticated":
-        if fields["transport"] != "webrtc" or fields["suite"] != "X-Wing" \
-                or fields["result"] != "authenticated":
-            _fail(f"line {line} WebRTC session has no authenticated X-Wing rekey")
+        if (
+            fields["transport"] != "webrtc"
+            or fields["suite"] not in AUTHENTICATED_SESSION_SUITES
+            or fields["result"] != "authenticated"
+        ):
+            _fail(f"line {line} WebRTC session has no supported authenticated rekey")
     elif name == "webrtcMediaSample":
-        if fields["transport"] != "webrtc" or fields["result"] != "flowing" \
-                or fields["mediaRole"] not in {"sender", "receiver"}:
+        if (
+            fields["transport"] != "webrtc"
+            or fields["result"] != "flowing"
+            or fields["mediaRole"] not in {"sender", "receiver"}
+        ):
             _fail(f"line {line} WebRTC media sample is not a flowing product sample")
         _positive_integer(fields["sample_seq"], f"line {line} sample_seq")
         for key in ("video_frames", "video_bytes", "audio_units", "audio_bytes"):
             _positive_integer(fields[key], f"line {line} {key}")
-        if re.fullmatch(r"(?:0|[1-9][0-9]*)", fields["elapsed_ms"], re.ASCII) is None \
-                or int(fields["elapsed_ms"]) > UINT64_MAX:
+        if (
+            re.fullmatch(r"(?:0|[1-9][0-9]*)", fields["elapsed_ms"], re.ASCII) is None
+            or int(fields["elapsed_ms"]) > UINT64_MAX
+        ):
             _fail(f"line {line} elapsed_ms must be a UInt64 decimal integer")
     elif name.startswith("connectivity"):
         _validate_connectivity_event_values(event)
@@ -436,9 +467,11 @@ def _validate_event_values(event: Event) -> None:
                 "send": "send-ui",
                 "receive": "accept-ui",
             }.get(fields["direction"])
-            if expected_interaction is None \
-                    or fields["interaction"] != expected_interaction \
-                    or fields["result"] != "started":
+            if (
+                expected_interaction is None
+                or fields["interaction"] != expected_interaction
+                or fields["result"] != "started"
+            ):
                 _fail(f"line {line} has an invalid file-transfer start")
             if fields["payload"] != "nonempty":
                 _fail(f"line {line} file-transfer payload must be nonempty")
@@ -463,7 +496,13 @@ def _validate_event_values(event: Event) -> None:
         if (
             fields["noticeHidden"] not in expected_notice_hidden
             or fields["reason"]
-            not in {"user", "peer", "trust-invalidated", "session-replaced", "protocol-failure"}
+            not in {
+                "user",
+                "peer",
+                "trust-invalidated",
+                "session-replaced",
+                "protocol-failure",
+            }
             or fields["result"] != "disconnected"
         ):
             _fail(f"line {line} has an invalid disconnect result")
@@ -495,7 +534,9 @@ def _validate_connectivity_event_values(event: Event) -> None:
         or fields["requirePQC"] != "1"
         or fields["allowClassicFallback"] != "0"
     ):
-        _fail(f"line {line} connectivity local offer/policy is not strict and consistent")
+        _fail(
+            f"line {line} connectivity local offer/policy is not strict and consistent"
+        )
 
     if event.name == "connectivityAttemptStarted":
         if fields["result"] != "started":
@@ -522,16 +563,21 @@ def _validate_connectivity_event_values(event: Event) -> None:
             or fields["reason"] != "strict-pqc-rejects-classic"
             or fields["result"] != "rejected"
         ):
-            _fail(f"line {line} connectivity policy rejection is not the signed classic case")
-    elif event.name == "connectivityAttemptFailed":
-        if fields["reason"] not in {
+            _fail(
+                f"line {line} connectivity policy rejection is not the signed classic case"
+            )
+    elif event.name == "connectivityAttemptFailed" and (
+        fields["reason"]
+        not in {
             "handshake-failed",
             "transport-closed",
             "cancelled",
             "superseded",
             "publication-failed",
-        } or fields["result"] != "failed":
-            _fail(f"line {line} connectivity failure terminal is invalid")
+        }
+        or fields["result"] != "failed"
+    ):
+        _fail(f"line {line} connectivity failure terminal is invalid")
 
 
 def _sessions(events: list[Event]) -> dict[tuple[str, str, str, int], Session]:
@@ -574,7 +620,7 @@ def _validate_remote_session(session: Session, transport: str) -> Session:
     names = _event_names(session)
     required_once = (
         "releaseSessionOwner",
-        *(('p2pSessionAuthenticated',) if transport == "p2p" else ()),
+        *(("p2pSessionAuthenticated",) if transport == "p2p" else ()),
         "remoteControlNoticeShown",
         "remoteControlNoticePanelPresented",
         "remoteControlNoticeHumanApproved",
@@ -598,7 +644,8 @@ def _validate_remote_session(session: Session, transport: str) -> Session:
     indexed_effect_events = [
         (index, event)
         for index, event in enumerate(session.events)
-        if event.name in {"secureFrameAccepted", "localFramePresented", "remoteInputApplied"}
+        if event.name
+        in {"secureFrameAccepted", "localFramePresented", "remoteInputApplied"}
     ]
     if any(
         not (active_index < index < terminal_index)
@@ -634,7 +681,10 @@ def _validate_remote_session(session: Session, transport: str) -> Session:
     if local_sequences != sorted(set(local_sequences)):
         _fail("local_frame_seq must be unique and strictly increasing")
     disconnected = session.events[-1]
-    if disconnected.name != "releaseSessionDisconnected" or disconnected.fields["noticeHidden"] != "1":
+    if (
+        disconnected.name != "releaseSessionDisconnected"
+        or disconnected.fields["noticeHidden"] != "1"
+    ):
         _fail("remote-control disconnect must be final and prove the notice is hidden")
     forbidden = {
         "remoteControlNoticeRejected",
@@ -679,8 +729,9 @@ def _validate_simple_p2p_session(session: Session) -> None:
         _fail("P2P peer-only disconnect cannot claim a hidden notice")
 
 
-def _sessions_by_reference(sessions: dict[tuple[str, str, str, int], Session]) \
-        -> dict[str, Session]:
+def _sessions_by_reference(
+    sessions: dict[tuple[str, str, str, int], Session],
+) -> dict[str, Session]:
     by_reference: dict[str, Session] = {}
     for session in sessions.values():
         reference = session.owner.fields["session_ref"]
@@ -710,13 +761,19 @@ def _validate_p2p_pair(
         _validate_peer_session(mac_session, transport="p2p")
         _validate_peer_session(ios_session, transport="p2p")
         mac_auth = [
-            event for event in mac_session.events if event.name == "p2pSessionAuthenticated"
+            event
+            for event in mac_session.events
+            if event.name == "p2pSessionAuthenticated"
         ]
         ios_auth = [
-            event for event in ios_session.events if event.name == "p2pSessionAuthenticated"
+            event
+            for event in ios_session.events
+            if event.name == "p2pSessionAuthenticated"
         ]
         if len(mac_auth) != 1 or len(ios_auth) != 1:
-            _fail("each P2P endpoint session requires one authenticated lifecycle event")
+            _fail(
+                "each P2P endpoint session requires one authenticated lifecycle event"
+            )
         roles = (mac_auth[0].fields["role"], ios_auth[0].fields["role"])
         if set(roles) != {"initiator", "responder"}:
             _fail("paired P2P endpoint roles must be complementary")
@@ -731,8 +788,10 @@ def _validate_p2p_pair(
         else:
             _validate_simple_p2p_session(mac_session)
             _validate_simple_p2p_session(ios_session)
-    if observed_roles != {("responder", "initiator"), ("initiator", "responder")} \
-            or full_remote_count != 1:
+    if (
+        observed_roles != {("responder", "initiator"), ("initiator", "responder")}
+        or full_remote_count != 1
+    ):
         _fail("P2P evidence does not prove both directional authenticated lifecycles")
 
 
@@ -755,7 +814,7 @@ def _webrtc_media_window(session: Session, expected_role: str) -> None:
         _fail("WebRTC media evidence does not span the required 30-second soak")
     for key in ("video_frames", "video_bytes", "audio_units", "audio_bytes"):
         counters = [int(event.fields[key]) for event in samples]
-        if any(later <= earlier for earlier, later in zip(counters, counters[1:])):
+        if any(later <= earlier for earlier, later in pairwise(counters)):
             _fail(f"WebRTC media evidence {key} did not increase through the soak")
 
 
@@ -769,13 +828,18 @@ def _validate_webrtc_pair(mac_session: Session, ios_events: list[Event]) -> None
     for session, role in ((mac_session, "sender"), (ios_session, "receiver")):
         names = _event_names(session)
         if names.count("webrtcPQCRekeyAuthenticated") != 1:
-            _fail("WebRTC product evidence requires one authenticated X-Wing rekey per endpoint")
+            _fail(
+                "WebRTC product evidence requires one authenticated product rekey per endpoint"
+            )
         rekey_index = names.index("webrtcPQCRekeyAuthenticated")
         sample_indices = [
             index for index, name in enumerate(names) if name == "webrtcMediaSample"
         ]
-        if not sample_indices or rekey_index >= sample_indices[0] \
-                or sample_indices[-1] >= names.index("releaseSessionDisconnected"):
+        if (
+            not sample_indices
+            or rekey_index >= sample_indices[0]
+            or sample_indices[-1] >= names.index("releaseSessionDisconnected")
+        ):
             _fail("WebRTC media soak must follow rekey and precede disconnect")
         _webrtc_media_window(session, role)
 
@@ -813,7 +877,9 @@ def _connectivity_attempts(
         _validate_event_values(event)
         attempt_reference = event.fields["attempt_ref"]
         generation = int(event.fields["generation"])
-        previous_attempt = generation_to_attempt.setdefault(generation, attempt_reference)
+        previous_attempt = generation_to_attempt.setdefault(
+            generation, attempt_reference
+        )
         if previous_attempt != attempt_reference:
             _fail(f"{expected_owner} reuses one local generation across attempts")
         grouped.setdefault(attempt_reference, []).append(event)
@@ -865,9 +931,7 @@ def _connectivity_attempts(
     return attempts
 
 
-def _validate_connectivity(
-    mac_events: list[Event], ios_events: list[Event]
-) -> None:
+def _validate_connectivity(mac_events: list[Event], ios_events: list[Event]) -> None:
     mac_attempts = _connectivity_attempts(mac_events, MAC_PRODUCT)
     ios_attempts = _connectivity_attempts(ios_events, IOS_PRODUCT)
     all_references = set(mac_attempts) | set(ios_attempts)
@@ -889,16 +953,27 @@ def _validate_connectivity(
                 or not mac_attempt.is_success
                 or not ios_attempt.is_success
             ):
-                _fail("successful connectivity attempts require exact Mac and iOS product endpoints")
+                _fail(
+                    "successful connectivity attempts require exact Mac and iOS product endpoints"
+                )
             mac_authenticated, mac_endpoint = mac_attempt.events[1:]
             ios_authenticated, ios_endpoint = ios_attempt.events[1:]
             if mac_endpoint.fields["role"] == ios_endpoint.fields["role"]:
                 _fail("successful connectivity endpoints must have complementary roles")
             joined_values = (
-                (mac_authenticated.fields["session_ref"], ios_authenticated.fields["session_ref"]),
-                (mac_endpoint.fields["session_ref"], ios_endpoint.fields["session_ref"]),
+                (
+                    mac_authenticated.fields["session_ref"],
+                    ios_authenticated.fields["session_ref"],
+                ),
+                (
+                    mac_endpoint.fields["session_ref"],
+                    ios_endpoint.fields["session_ref"],
+                ),
                 (mac_endpoint.fields["suite"], ios_endpoint.fields["suite"]),
-                (mac_endpoint.fields["attemptProfile"], ios_endpoint.fields["attemptProfile"]),
+                (
+                    mac_endpoint.fields["attemptProfile"],
+                    ios_endpoint.fields["attemptProfile"],
+                ),
             )
             if any(left != right for left, right in joined_values):
                 _fail(
@@ -906,36 +981,45 @@ def _validate_connectivity(
                 )
             session_reference = mac_endpoint.fields["session_ref"]
             if session_reference in success_sessions:
-                _fail("successful connectivity pairs must use distinct authenticated sessions")
+                _fail(
+                    "successful connectivity pairs must use distinct authenticated sessions"
+                )
             success_sessions.add(session_reference)
             profile_pair = (
                 mac_endpoint.fields["localProfile"],
                 ios_endpoint.fields["localProfile"],
             )
             if profile_pair in success_profiles:
-                _fail("connectivity evidence duplicates a successful Mac/iOS profile pair")
+                _fail(
+                    "connectivity evidence duplicates a successful Mac/iOS profile pair"
+                )
             success_profiles.add(profile_pair)
             continue
 
         rejection_attempts = [
-            attempt
-            for attempt in (mac_attempt, ios_attempt)
-            if attempt is not None
+            attempt for attempt in (mac_attempt, ios_attempt) if attempt is not None
         ]
-        if len(rejection_attempts) != 1 or not rejection_attempts[0].is_expected_rejection:
+        if (
+            len(rejection_attempts) != 1
+            or not rejection_attempts[0].is_expected_rejection
+        ):
             _fail(
                 "expected classic rejection must be one shipping responder started/rejected pair"
             )
         rejection_owners.append(rejection_attempts[0].owner)
 
     if success_profiles != CONNECTIVITY_SUCCESS_PROFILES:
-        _fail("connectivity evidence does not cover the exact three success profile pairs")
+        _fail(
+            "connectivity evidence does not cover the exact three success profile pairs"
+        )
     if sorted(rejection_owners) != sorted(PRODUCTS):
-        _fail("connectivity evidence requires one signed classic rejection per shipping responder")
+        _fail(
+            "connectivity evidence requires one signed classic rejection per shipping responder"
+        )
 
 
 def _validate_file_transfer(
-    sessions: dict[tuple[str, str, str, int], Session]
+    sessions: dict[tuple[str, str, str, int], Session],
 ) -> dict[str, tuple[Session, Event, Event]]:
     if len(sessions) != 2:
         _fail("file-transfer evidence must contain exactly two transfer owners")
@@ -951,8 +1035,10 @@ def _validate_file_transfer(
         session_references.add(session.owner.fields["session_ref"])
     if len(session_references) != 1:
         _fail("two file transfers must share one authenticated P2P session reference")
-    if {started.fields["direction"] for _, started, _ in observations.values()} \
-            != {"send", "receive"}:
+    if {started.fields["direction"] for _, started, _ in observations.values()} != {
+        "send",
+        "receive",
+    }:
         _fail("each product must complete one send and one receive UI transfer")
     return observations
 
@@ -971,6 +1057,13 @@ def validate_events(
         _fail("product release evidence contains no session owner")
     if ios_events is None:
         _fail(f"{kind} evidence requires paired Mac and iOS product logs")
+    suites = {
+        event.fields["suite"]
+        for event in (*events, *ios_events)
+        if event.name in {"p2pSessionAuthenticated", "webrtcPQCRekeyAuthenticated"}
+    }
+    if len(suites) != 1:
+        _fail("paired product lifecycles disagree on their authenticated suite")
     if kind == "p2p":
         _validate_p2p_pair(sessions, ios_events)
     elif kind == "webrtc":
@@ -986,12 +1079,12 @@ def validate_events(
         for reference in mac_observations:
             mac_session, mac_started, _ = mac_observations[reference]
             ios_session, ios_started, _ = ios_observations[reference]
-            if (
-                mac_session.owner.fields["session_ref"]
-                != ios_session.owner.fields["session_ref"]
-                or {mac_started.fields["direction"], ios_started.fields["direction"]}
-                != {"send", "receive"}
-            ):
+            if mac_session.owner.fields["session_ref"] != ios_session.owner.fields[
+                "session_ref"
+            ] or {mac_started.fields["direction"], ios_started.fields["direction"]} != {
+                "send",
+                "receive",
+            }:
                 _fail("paired file-transfer directions are not complementary")
     else:
         _fail(f"unsupported evidence kind: {kind}")
@@ -1031,7 +1124,9 @@ def validate_capture_manifest(
     expected_values = {
         "schemaVersion": 1,
         "profile": CAPTURE_PROFILE,
-        "captureMode": CAPTURE_MODE if expected_owner == MAC_PRODUCT else IOS_CAPTURE_MODE,
+        "captureMode": CAPTURE_MODE
+        if expected_owner == MAC_PRODUCT
+        else IOS_CAPTURE_MODE,
         "processExecutable": PRODUCT_EXECUTABLES[expected_owner],
         "ownershipVerified": True,
         "candidateIdentityVerified": True,
@@ -1055,7 +1150,11 @@ def validate_capture_manifest(
         except PhysicalAcceptanceError as exc:
             _fail(f"iOS product capture archive binding is invalid: {exc}")
     process_id = payload.get("processID")
-    if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 1:
+    if (
+        isinstance(process_id, bool)
+        or not isinstance(process_id, int)
+        or process_id <= 1
+    ):
         _fail("product evidence capture manifest processID must be greater than one")
     start_time_token = payload.get("startTimeToken")
     match = (
@@ -1084,13 +1183,17 @@ def validate_artifact_log(artifact_dir: Path, kind: str) -> None:
         mac_sessions = _sessions(mac_events)
         if kind == "p2p":
             if len(mac_sessions) != 2:
-                _fail("P2P evidence requires exactly two bidirectional product sessions")
+                _fail(
+                    "P2P evidence requires exactly two bidirectional product sessions"
+                )
             full = [
                 session
                 for session in mac_sessions.values()
                 if "remoteControlNoticeShown" in _event_names(session)
             ]
-            simple = [session for session in mac_sessions.values() if session not in full]
+            simple = [
+                session for session in mac_sessions.values() if session not in full
+            ]
             if len(full) != 1 or len(simple) != 1:
                 _fail("P2P Mac evidence requires one full and one reverse lifecycle")
             _validate_remote_session(full[0], "p2p")
@@ -1102,7 +1205,7 @@ def validate_artifact_log(artifact_dir: Path, kind: str) -> None:
                 next(iter(mac_sessions.values())), "webrtc"
             )
             if _event_names(mac_session).count("webrtcPQCRekeyAuthenticated") != 1:
-                _fail("WebRTC Mac evidence requires one authenticated X-Wing rekey")
+                _fail("WebRTC Mac evidence requires one authenticated product rekey")
             _webrtc_media_window(mac_session, "sender")
         elif kind == "file-transfer":
             _validate_file_transfer(mac_sessions)
@@ -1154,7 +1257,9 @@ def _write_new_file(path: Path, content: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory_descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        directory_descriptor = os.open(
+            parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
         try:
             os.fsync(directory_descriptor)
         finally:
@@ -1278,7 +1383,10 @@ def extract_oslog(
         ):
             _fail(f"raw OSLog line {line_number} is outside the exact capture boundary")
         image_path = row.get("processImagePath")
-        if not isinstance(image_path, str) or Path(image_path).resolve(strict=True) != expected_image:
+        if (
+            not isinstance(image_path, str)
+            or Path(image_path).resolve(strict=True) != expected_image
+        ):
             _fail(f"raw OSLog line {line_number} is from a different process image")
         format_string = row.get("formatString")
         if not isinstance(format_string, str) or "public" not in format_string:
@@ -1305,7 +1413,9 @@ def extract_oslog(
         "category": CATEGORY,
         "eventCount": len(messages),
     }
-    capture_bytes = (json.dumps(capture, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    capture_bytes = (json.dumps(capture, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
     _write_new_file(output_path, canonical_log)
     try:
         _write_new_file(capture_output_path, capture_bytes)
@@ -1326,7 +1436,9 @@ def parse_args() -> argparse.Namespace:
     extract.add_argument("--capture-output", type=Path, required=True)
     validate = subparsers.add_parser("validate")
     validate.add_argument(
-        "--kind", choices=("connectivity", "p2p", "webrtc", "file-transfer"), required=True
+        "--kind",
+        choices=("connectivity", "p2p", "webrtc", "file-transfer"),
+        required=True,
     )
     validate.add_argument("--artifact-dir", type=Path, required=True)
     validate_capture_parser = subparsers.add_parser("validate-capture")

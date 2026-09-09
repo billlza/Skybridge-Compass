@@ -12,6 +12,7 @@
 #
 # Environment overrides:
 #   SKYBRIDGE_RC_OUTPUT_DIR   output root (default .sandbox-home/release-candidate)
+#   SKYBRIDGE_BUILD_JOBS      optional shared Xcode/SwiftPM job limit (1..64)
 #   SKYBRIDGE_SOURCE_REPOSITORY / GITHUB_REPOSITORY   owner/repo provenance
 set -euo pipefail
 umask 077
@@ -24,6 +25,7 @@ EXPORT_OPTIONS="${ROOT_DIR}/Scripts/ios_release_candidate_export_options.plist"
 source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh"
 # shellcheck source=Scripts/xcodebuild_helpers.sh
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
+skybridge_configured_build_jobs >/dev/null
 
 IOS_RELEASE_VERSION_RECORD="$(
   bash "${ROOT_DIR}/Scripts/check_ios_release_version.sh"

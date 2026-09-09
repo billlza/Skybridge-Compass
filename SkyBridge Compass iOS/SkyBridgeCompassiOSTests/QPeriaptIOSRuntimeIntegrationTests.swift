@@ -4,6 +4,34 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
+    func testQPeerPlatformsAdmitCanonicalNativeMetadataAndRetainKeyValidation() {
+        let key = KEMPublicKeyInfo(
+            suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
+            publicKey: Data(repeating: 0x42, count: 1_216)
+        )
+        for (platform, version) in [("windows", "10.0.19041"), ("Ubuntu", "24.04")] {
+            XCTAssertEqual(
+                KEMPublicKeyInfo.normalizedValidKeys([key], platform: platform, osVersion: version),
+                [key]
+            )
+            XCTAssertTrue(
+                QPeriaptIOSPlatformPolicy.isPeerHandshakePlatformVersionEligible("\(platform) \(version)")
+            )
+        }
+        for (platform, version) in [
+            ("windows", "Windows 11"), ("windows", "10.0.19040"),
+            ("Ubuntu", "24.03"), ("Ubuntu", "Windows 10.0.26100")
+        ] {
+            XCTAssertTrue(
+                KEMPublicKeyInfo.normalizedValidKeys([key], platform: platform, osVersion: version).isEmpty
+            )
+        }
+        let truncated = KEMPublicKeyInfo(suiteWireId: key.suiteWireId, publicKey: key.publicKey.dropLast())
+        XCTAssertTrue(
+            KEMPublicKeyInfo.normalizedValidKeys([truncated], platform: "windows", osVersion: "10.0.26100").isEmpty
+        )
+    }
+
     func testInboundResponderFactoryRejectsEmptyAndNonNegotiablePeerSuites() {
         let invalidPeerOffers: [[CryptoSuite]] = [
             [],

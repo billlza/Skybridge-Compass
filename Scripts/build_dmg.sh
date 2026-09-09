@@ -30,6 +30,7 @@ source "$PROJECT_ROOT/Scripts/framework_artifact_helpers.sh"
 source "$PROJECT_ROOT/Scripts/notarytool_helpers.sh"
 source "$PROJECT_ROOT/Scripts/package_build_policy.sh"
 source "$PROJECT_ROOT/Scripts/xcodebuild_helpers.sh"
+CONFIGURED_BUILD_JOBS="$(skybridge_configured_build_jobs)"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 VERSION="$(bash "$PROJECT_ROOT/Scripts/check_macos_release_version.sh")"
 DIST_DIR="$PROJECT_ROOT/dist"
@@ -891,6 +892,9 @@ if [[ "$SKIP_BUILD" == false ]]; then
             -c release
             --arch "$BUILD_ARCH"
         )
+        if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+            SWIFTPM_BUILD_ARGS+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+        fi
         if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
             SWIFTPM_BUILD_ARGS+=(--scratch-path "$SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH")
         fi

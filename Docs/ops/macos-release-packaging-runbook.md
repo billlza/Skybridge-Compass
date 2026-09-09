@@ -20,8 +20,14 @@ to reintroduce:
 
 Use the release script as the entry point:
 
+Set `SKYBRIDGE_BUILD_JOBS=2` to bound both SwiftPM and Xcode build concurrency.
+The optional value must be a decimal integer from 1 through 64 without leading
+zeroes. An unset value preserves the build tools' existing defaults; an empty or
+invalid value fails before the producer starts work.
+
 ```bash
 : "${SKYBRIDGE_RELEASE_BUILD_ID:?set an approved positive numeric build id}"
+export SKYBRIDGE_BUILD_JOBS=2
 Scripts/build_dmg.sh \
   --build-id "$SKYBRIDGE_RELEASE_BUILD_ID" \
   --notarize-app \

@@ -991,6 +991,7 @@ source "${ROOT_DIR}/Scripts/framework_artifact_helpers.sh"
 source "${ROOT_DIR}/Scripts/package_build_policy.sh"
 source "${ROOT_DIR}/Scripts/signing_entitlements_helpers.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
+CONFIGURED_BUILD_JOBS="$(skybridge_configured_build_jobs)"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 XCODE_BUILD_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/Release"
 BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
@@ -1115,6 +1116,9 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
       -c release
       --arch "${BUILD_ARCH}"
     )
+    if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+      SWIFTPM_BUILD_ARGS+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+    fi
     if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
       SWIFTPM_BUILD_ARGS+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
     fi
@@ -1573,6 +1577,9 @@ build_power_metrics_helper() {
     -c release
     --arch "${BUILD_ARCH}"
   )
+  if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+    swiftpm_build_args+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+  fi
   if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
     swiftpm_build_args+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
   fi

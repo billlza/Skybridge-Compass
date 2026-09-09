@@ -112,7 +112,7 @@ final class ProductReleaseEvidenceRecorder {
         role: ProductConnectivityHandshakeRole,
         suite: CryptoSuite
     ) -> Bool {
-        guard owner.transport == .p2p, suite == .xwing else { return false }
+        guard owner.transport == .p2p, (suite == .xwing || suite == .qperiaptABI2PolicyBound) else { return false }
         return mutateCurrent(owner) { state in
             guard !state.p2pAuthenticated else { return nil }
             state.p2pAuthenticated = true
@@ -132,7 +132,7 @@ final class ProductReleaseEvidenceRecorder {
         owner: ProductEvidenceSessionOwner,
         suite: CryptoSuite
     ) -> Bool {
-        guard owner.transport == .webrtc, suite == .xwing else { return false }
+        guard owner.transport == .webrtc, (suite == .xwing || suite == .qperiaptABI2PolicyBound) else { return false }
         return mutateCurrent(owner) { state in
             guard !state.webrtcRekeyAuthenticated else { return nil }
             state.webrtcRekeyAuthenticated = true

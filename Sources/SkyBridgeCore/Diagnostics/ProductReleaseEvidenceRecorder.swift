@@ -340,14 +340,14 @@ public final class ProductReleaseEvidenceRecorder {
     ) -> Bool {
         mutateCurrent(owner) { state in
             guard owner.transport == .p2p,
-                  negotiatedSuite == .xwingMLDSA,
+                  (negotiatedSuite == .xwingMLDSA || negotiatedSuite == .qperiaptABI2PolicyBound),
                   !state.p2pAuthenticated else {
                 return nil
             }
             state.p2pAuthenticated = true
             return (
                 "p2pSessionAuthenticated",
-                ["role=\(role.rawValue)", "suite=X-Wing", "result=authenticated"]
+                ["role=\(role.rawValue)", "suite=\(negotiatedSuite.rawValue)", "result=authenticated"]
             )
         }
     }
@@ -359,14 +359,14 @@ public final class ProductReleaseEvidenceRecorder {
     ) -> Bool {
         mutateCurrent(owner) { state in
             guard owner.transport == .webrtc,
-                  negotiatedSuite == .xwingMLDSA,
+                  (negotiatedSuite == .xwingMLDSA || negotiatedSuite == .qperiaptABI2PolicyBound),
                   !state.webRTCPQCRekeyAuthenticated else {
                 return nil
             }
             state.webRTCPQCRekeyAuthenticated = true
             return (
                 "webrtcPQCRekeyAuthenticated",
-                ["suite=X-Wing", "result=authenticated"]
+                ["suite=\(negotiatedSuite.rawValue)", "result=authenticated"]
             )
         }
     }

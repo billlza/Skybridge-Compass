@@ -2522,7 +2522,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         attemptSnapshot: ProductConnectivityHandshakeAttemptSnapshot
     ) async {
         let sessionObjectIdentifier = ObjectIdentifier(session)
-        guard keys.negotiatedSuite == .xwing,
+        guard (keys.negotiatedSuite == .xwing || keys.negotiatedSuite == .qperiaptABI2PolicyBound),
               isCurrentSession(
                 sessionId: sessionId,
                 sessionObjectIdentifier: sessionObjectIdentifier
@@ -2596,7 +2596,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             sessionReference: sessionReference,
             selectedTransport: selectedTransport
         ), ProductReleaseEvidenceRecorder.shared
-            .recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .xwing) else {
+            .recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: keys.negotiatedSuite) else {
             return
         }
         productEvidenceOwnersBySessionId[sessionId] = owner
