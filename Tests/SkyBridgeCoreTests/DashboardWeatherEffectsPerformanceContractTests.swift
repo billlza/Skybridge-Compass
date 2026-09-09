@@ -1,6 +1,22 @@
 import XCTest
 
 final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
+    func testHazeUsesOneNativeAtmosphereWithoutLegacyParticleLayers() throws {
+        let mac = try repositorySource("Sources/SkyBridgeCore/Weather/CinematicHazeView.swift")
+        let dashboard = try repositorySource("Sources/SkyBridgeCompassApp/Dashboard/DashboardBackgroundView.swift")
+        let ios = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift")
+        XCTAssertEqual(Self.countOccurrences(of: "SkyBridgeWeatherRendering.CinematicHazeView(", in: mac), 1)
+        XCTAssertFalse(mac.contains("TimelineView("))
+        XCTAssertFalse(mac.contains("MetalHazeParticleView("))
+        XCTAssertTrue(mac.contains(".opacity(clearManager.globalOpacity)"))
+        XCTAssertTrue(mac.contains("!isRemoteDesktopActive"))
+        XCTAssertEqual(Self.countOccurrences(of: "GlobalHazeBackground(", in: dashboard), 1)
+        XCTAssertTrue(dashboard.contains("if weatherManager.currentTheme.condition == .foggy"))
+        XCTAssertTrue(ios.contains("snapshot.condition == .haze"))
+        XCTAssertEqual(Self.countOccurrences(of: "SkyBridgeWeatherRendering.CinematicHazeView(", in: ios), 1)
+        XCTAssertTrue(ios.contains("fogParticles = condition == .foggy ?"))
+    }
+
     func testIOSDashboardWeatherEffectsUseSinglePureTimelineRenderer() throws {
         let source = try repositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift"
