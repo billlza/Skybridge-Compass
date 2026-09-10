@@ -5,6 +5,74 @@ import XCTest
 @available(macOS 14.0, *)
 @MainActor
 final class QPeriaptRuntimeFailureTests: XCTestCase {
+    func testPeerAwareFactoriesPreserveRequestedAdmittedQSession() async throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Native Q admission requires macOS 26 or newer.")
+        }
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        defer {
+            if let previous {
+                XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", previous, 1), 0)
+            } else {
+                XCTAssertEqual(unsetenv("SB_ENABLE_QPERIAPT"), 0)
+            }
+            QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        }
+        _ = try await QPeriaptPlatformPolicy.prepareLocalRuntimeSupport()
+        let providers = [
+            CryptoProviderFactory.makeInboundPQCResponderProvider(
+                policy: .requirePQC, peerSupportedSuites: [.qperiaptABI2PolicyBound]
+            ),
+            CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+                policy: .requirePQC, peerAdvertisedSuites: [.qperiaptABI2PolicyBound]
+            )
+        ]
+        for provider in providers {
+            XCTAssertTrue(provider is QPeriaptCryptoProvider)
+            XCTAssertEqual(provider.tier, .qperiaptPQC)
+            XCTAssertEqual(CryptoProviderFactory.handshakeOfferedPQCSuites(using: provider), [.qperiaptABI2PolicyBound])
+            let context = try await HandshakeContext.create(
+                role: .responder,
+                cryptoProvider: provider,
+                protocolSignatureProvider: PQCSignatureProvider(backend: .oqs),
+                cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: [.qperiaptABI2PolicyBound]),
+                offeredSuites: CryptoProviderFactory.handshakeOfferedPQCSuites(using: provider),
+                activeProtocolSigningAlgorithm: .mlDSA65
+            )
+            await context.zeroize()
+        }
+    }
+
+    func testPeerAwareFactoriesDoNotFallBackWhenRequestedQIsUnadmitted() {
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        defer {
+            if let previous {
+                XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", previous, 1), 0)
+            } else {
+                XCTAssertEqual(unsetenv("SB_ENABLE_QPERIAPT"), 0)
+            }
+            QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        }
+        for policy in [CryptoProviderFactory.SelectionPolicy.preferPQC, .requirePQC] {
+            let providers = [
+                CryptoProviderFactory.makeInboundPQCResponderProvider(
+                    policy: policy, peerSupportedSuites: [.qperiaptABI2PolicyBound, .xwingMLDSA]
+                ),
+                CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+                    policy: policy, peerAdvertisedSuites: [.qperiaptABI2PolicyBound, .mlkem768MLDSA65]
+                )
+            ]
+            for provider in providers {
+                XCTAssertTrue(provider is UnavailablePQCProvider)
+                XCTAssertTrue(CryptoProviderFactory.handshakeOfferedPQCSuites(using: provider).isEmpty)
+            }
+        }
+    }
+
     func testPreparationFailurePreservesQChoiceAndExplicitRetryRecovers() async throws {
         let domain = "QPeriaptRuntimeFailureTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))

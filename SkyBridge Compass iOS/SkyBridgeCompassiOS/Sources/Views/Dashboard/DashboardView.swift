@@ -27,6 +27,7 @@ public struct DashboardView: View {
     @StateObject private var settingsManager = SettingsManager.instance
     @StateObject private var crossNetworkManager = CrossNetworkWebRTCManager.instance
     @EnvironmentObject private var authManager: AuthenticationManager
+    @Environment(\.colorScheme) private var colorScheme
 
     @State private var selectedTab: DashboardTab = Self.initialSelectedTab
     @State private var loadedTabs: Set<DashboardTab> = [Self.initialSelectedTab]
@@ -113,8 +114,7 @@ public struct DashboardView: View {
             .tag(DashboardTab.settings)
         }
         .accessibilityIdentifier("dashboard.root")
-        .tint(.cyan)
-        .preferredColorScheme(.dark)
+        .tint(colorScheme == .dark ? .cyan : .blue)
         .onChange(of: selectedTab) { _, newValue in
             loadedTabs.insert(newValue)
         }
@@ -188,6 +188,7 @@ public struct QuantumGlassBackground: View {
     @StateObject private var settingsManager = SettingsManager.instance
     @StateObject private var fileTransferManager = FileTransferManager.instance
     @StateObject private var remoteDesktopManager = RemoteDesktopManager.instance
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
@@ -237,10 +238,14 @@ public struct QuantumGlassBackground: View {
         ZStack {
             // 1. Rich deep-space gradient (navy → deep indigo, NOT pure black)
             LinearGradient(
-                gradient: Gradient(colors: [
+                gradient: Gradient(colors: colorScheme == .dark ? [
                     Color(red: 0.04, green: 0.06, blue: 0.18),
                     Color(red: 0.06, green: 0.04, blue: 0.16),
                     Color(red: 0.03, green: 0.03, blue: 0.10)
+                ] : [
+                    Color(red: 0.91, green: 0.95, blue: 1.00),
+                    Color(red: 0.85, green: 0.89, blue: 0.98),
+                    Color(red: 0.95, green: 0.97, blue: 1.00)
                 ]),
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -440,6 +445,7 @@ private struct QuantumStarLayer: View {
                             activeConnectionsSection
                         }
                     }
+                    .liquidGlassGroup()
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                 }
@@ -461,7 +467,6 @@ private struct QuantumStarLayer: View {
             .overlay { WeatherRainGlassOverlay(scene: rainScene).ignoresSafeArea() }
             .navigationTitle(dashboardTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     UserAvatarButton()
@@ -469,7 +474,7 @@ private struct QuantumStarLayer: View {
                 ToolbarItem(placement: .principal) {
                     Text(dashboardTitle)
                         .font(.headline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
@@ -478,7 +483,7 @@ private struct QuantumStarLayer: View {
                     } label: {
                         Image(systemName: viewModel.isRefreshing ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(viewModel.isRefreshing ? 360 : 0))
                             .animation(viewModel.isRefreshing ? .linear(duration: 1).repeatForever(autoreverses: false) : .default, value: viewModel.isRefreshing)
                     }
@@ -490,7 +495,7 @@ private struct QuantumStarLayer: View {
                     } label: {
                         Image(systemName: "qrcode.viewfinder")
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(.secondary)
                     }
                     .accessibilityIdentifier("dashboard.qr.button")
                 }
@@ -524,7 +529,7 @@ private struct QuantumStarLayer: View {
             // 设备图标 (Glassy)
             ZStack {
                 Circle()
-                    .fill(.ultraThinMaterial)
+                    .fill(Color.cyan.opacity(0.12))
                     .frame(width: 60, height: 60)
                 
                 Image(systemName: "iphone")
@@ -542,17 +547,17 @@ private struct QuantumStarLayer: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(AppleMobileDeviceIdentity.currentSnapshot().deviceName)
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
 
                 Text("\(Self.currentModelDisplayName) · \(Self.currentChipDisplayName)")
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 
                 Text("iOS \(UIDevice.current.systemVersion)")
                     .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.7))
+                    .foregroundStyle(.secondary)
                 
                 HStack(spacing: 4) {
                     Circle()
@@ -561,13 +566,13 @@ private struct QuantumStarLayer: View {
                         .shadow(color: primaryConnectionStatusColor.opacity(0.5), radius: 3, x: 0, y: 0)
                     Text(primaryConnectionStatusText)
                         .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
+                        .foregroundStyle(.secondary)
                 }
 
                 if let primaryConnectionDetailText {
                     Text(primaryConnectionDetailText)
                         .font(.caption2)
-                        .foregroundColor(.white.opacity(0.55))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
@@ -589,20 +594,10 @@ private struct QuantumStarLayer: View {
                     .foregroundColor(securityBadgeColor)
             }
             .padding(10)
-            .background(.ultraThinMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(LinearGradient(colors: [securityBadgeColor.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-            )
+            .background(securityBadgeColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .padding()
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear, .cyan.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-        )
+        .liquidGlassCard(cornerRadius: 24, padding: 0)
     }
 
     // MARK: - Device Model / Chip (best-effort)
@@ -746,7 +741,7 @@ private struct QuantumStarLayer: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(RuntimeLocalization.string("快捷操作"))
                 .font(.headline)
-                .foregroundColor(.white.opacity(0.9))
+                .foregroundStyle(.secondary)
             
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 16) {
@@ -816,7 +811,7 @@ private struct QuantumStarLayer: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(latest.fileName)
                             .font(.subheadline.weight(.semibold))
-                            .foregroundColor(.white)
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                         
                         Text(latest.status == .completed ? RuntimeLocalization.string("传输完成") : RuntimeLocalization.string("传输失败"))
@@ -844,7 +839,7 @@ private struct QuantumStarLayer: View {
             HStack {
                 Text("附近设备")
                     .font(.headline)
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundStyle(.secondary)
                 
                 Spacer()
                 
@@ -884,7 +879,7 @@ private struct QuantumStarLayer: View {
             HStack {
                 Text("活跃连接")
                     .font(.headline)
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundStyle(.secondary)
                 
                 Spacer()
                 
@@ -1079,7 +1074,7 @@ private struct LiveTransferBannerView: View {
                 HStack {
                     Text(fileName)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     
                     Spacer()
@@ -1112,7 +1107,7 @@ private struct LiveTransferBannerView: View {
                 
                 Text(speedDisplay(speed))
                     .font(.caption2.monospacedDigit())
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(16)
@@ -1170,13 +1165,13 @@ private struct UserAvatarButton: View {
                         default:
                             Text(initials)
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(.secondary)
                         }
                     }
                 } else {
                     Text(initials)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
+                        .foregroundStyle(.secondary)
                 }
             }
             .frame(width: 32, height: 32)
@@ -1290,10 +1285,10 @@ private struct QRCodeHubSheet: View {
                                         .controlSize(.large)
                                     Text("连接中...")
                                         .font(.headline)
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(.primary)
                                     Text("正在验证二维码并建立跨网连接")
                                         .font(.subheadline)
-                                        .foregroundStyle(.white.opacity(0.8))
+                                        .foregroundStyle(.secondary)
                                 }
                                 .padding(24)
                                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -1747,7 +1742,7 @@ private struct DashboardNotificationBellButton: View {
                     Group {
                         if events.isEmpty && inFlightTransfers.isEmpty {
                             ContentUnavailableView("暂无通知", systemImage: "bell.slash")
-                                .foregroundStyle(.white.opacity(0.82))
+                                .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
                             ScrollView {
@@ -1756,7 +1751,7 @@ private struct DashboardNotificationBellButton: View {
                                         VStack(alignment: .leading, spacing: 10) {
                                             Text("进行中的传输")
                                                 .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.white.opacity(0.74))
+                                                .foregroundStyle(.secondary)
 
                                             ForEach(sortedInFlightTransfers) { transfer in
                                                 VStack(alignment: .leading, spacing: 8) {
@@ -1765,12 +1760,12 @@ private struct DashboardNotificationBellButton: View {
                                                             .foregroundStyle(transfer.isIncoming ? .green : .cyan)
                                                         Text(transfer.fileName)
                                                             .font(.subheadline.weight(.semibold))
-                                                            .foregroundStyle(.white)
+                                                            .foregroundStyle(.primary)
                                                             .lineLimit(1)
                                                         Spacer(minLength: 0)
                                                         Text("\(Int((min(max(transfer.progress, 0), 1) * 100).rounded(.down)))%")
                                                             .font(.caption.monospacedDigit())
-                                                            .foregroundStyle(.white.opacity(0.72))
+                                                            .foregroundStyle(.secondary)
                                                     }
 
                                                     ProgressView(value: min(max(transfer.progress, 0), 1))
@@ -1787,12 +1782,12 @@ private struct DashboardNotificationBellButton: View {
                                                         Text("\(byteCount(transfer.transferredBytes))/\(byteCount(transfer.totalBytes))")
                                                     }
                                                     .font(.caption2)
-                                                    .foregroundStyle(.white.opacity(0.68))
+                                                    .foregroundStyle(.secondary)
 
                                                     if transfer.isIncoming, let location = localLocationHint(path: transfer.localPath) {
                                                         Text(String(format: RuntimeLocalization.string("保存到 %@"), location))
                                                             .font(.caption2)
-                                                            .foregroundStyle(.white.opacity(0.68))
+                                                            .foregroundStyle(.secondary)
                                                             .lineLimit(1)
                                                     }
                                                 }
@@ -1813,7 +1808,7 @@ private struct DashboardNotificationBellButton: View {
                                         VStack(alignment: .leading, spacing: 10) {
                                             Text("事件记录")
                                                 .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.white.opacity(0.74))
+                                                .foregroundStyle(.secondary)
 
                                             ForEach(events) { item in
                                                 HStack(alignment: .top, spacing: 10) {
@@ -1823,15 +1818,15 @@ private struct DashboardNotificationBellButton: View {
                                                     VStack(alignment: .leading, spacing: 4) {
                                                         Text(item.title)
                                                             .font(.subheadline.weight(.semibold))
-                                                            .foregroundStyle(.white)
+                                                            .foregroundStyle(.primary)
                                                         if let detail = item.detail, !detail.isEmpty {
                                                             Text(detail)
                                                                 .font(.caption)
-                                                                .foregroundStyle(.white.opacity(0.72))
+                                                                .foregroundStyle(.secondary)
                                                         }
                                                         Text(item.timestampFormatted)
                                                             .font(.caption2)
-                                                            .foregroundStyle(.white.opacity(0.56))
+                                                            .foregroundStyle(.secondary)
                                                     }
                                                     Spacer(minLength: 0)
                                                 }

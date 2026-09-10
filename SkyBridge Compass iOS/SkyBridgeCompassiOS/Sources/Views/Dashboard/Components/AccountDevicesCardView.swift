@@ -26,20 +26,20 @@ struct AccountDevicesCardView: View {
         HStack(spacing: 10) {
             Image(systemName: "person.crop.rectangle.stack.fill")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(.cyan)
+                .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(RuntimeLocalization.string("账号设备"))
                     .font(.headline)
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                 if let snapshot = presence.accountDevices {
                     let summary = AccountDevicePresentationPolicy.summary(for: snapshot.devices)
                     Text(RuntimeLocalization.format("%d 台设备 · %d 台在线", [summary.total, summary.online]))
                         .font(.caption)
-                        .foregroundColor(.white.opacity(0.6))
+                        .foregroundStyle(.secondary)
                 } else if let nebulaId = authManager.currentUser?.nebulaId, !nebulaId.isEmpty {
                     Text(nebulaId)
                         .font(.caption.monospaced())
-                        .foregroundColor(.white.opacity(0.6))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
@@ -48,7 +48,7 @@ struct AccountDevicesCardView: View {
                 onViewAll()
             }
             .font(.subheadline)
-            .foregroundColor(.cyan)
+            .foregroundStyle(.tint)
         }
     }
 
@@ -65,7 +65,7 @@ struct AccountDevicesCardView: View {
             if devices.isEmpty {
                 Text(RuntimeLocalization.string("登录同一账号的其他设备会显示在这里"))
                     .font(.caption)
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundStyle(.secondary)
             } else {
                 VStack(spacing: 8) {
                     ForEach(devices) { record in
@@ -87,18 +87,18 @@ struct AccountDevicesCardView: View {
                 systemImage: isSignedOut ? "person.crop.circle.badge.exclamationmark" : "exclamationmark.triangle.fill"
             )
             .font(.caption)
-            .foregroundColor(.white.opacity(0.7))
+            .foregroundStyle(.secondary)
         } else if presence.isAuthenticated {
             HStack(spacing: 8) {
                 ProgressView().tint(.cyan).scaleEffect(0.8)
                 Text(RuntimeLocalization.string("正在同步账号设备…"))
             }
             .font(.caption)
-            .foregroundColor(.white.opacity(0.6))
+            .foregroundStyle(.secondary)
         } else {
             Label(RuntimeLocalization.string("登录后才能看到本账号的设备"), systemImage: "person.crop.circle.badge.exclamationmark")
                 .font(.caption)
-                .foregroundColor(.white.opacity(0.7))
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -120,11 +120,11 @@ private struct AccountDeviceCompactRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(AccountDevicePresentationPolicy.displayName(for: record))
                     .font(.subheadline.weight(.medium))
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(AccountDevicePresentation.modelText(for: record))
                     .font(.caption2)
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     Circle()
@@ -136,13 +136,13 @@ private struct AccountDeviceCompactRow: View {
                     }
                 }
                 .font(.caption2)
-                .foregroundColor(.white.opacity(0.6))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
             Spacer()
             Text(AccountDevicePresentation.relativeTimeText(from: record.lastSeenAt))
                 .font(.caption2)
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)

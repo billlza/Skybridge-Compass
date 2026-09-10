@@ -14,6 +14,9 @@ public enum LiquidGlass {
 private struct LiquidGlassCardModifier: ViewModifier {
     let cornerRadius: CGFloat
     let contentPadding: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         Group {
@@ -21,10 +24,15 @@ private struct LiquidGlassCardModifier: ViewModifier {
                 let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 content
                     .padding(contentPadding)
-                    .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
-                    .clipShape(shape)
-                    .overlay(
-                        shape.strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                    // Clear system glass keeps the animated scene optically visible. A local
+                    // contrast layer supports text without blurring the entire panel or scene.
+                    .background {
+                        shape.fill((colorScheme == .dark ? Color.black : Color.white)
+                            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.48 : 0.64)))
+                    }
+                    .glassEffect(
+                        reduceTransparency || contrast == .increased ? .regular : .clear,
+                        in: shape
                     )
             } else {
                 content
@@ -57,10 +65,7 @@ private struct LiquidGlassCapsuleModifier: ViewModifier {
                 content
                     .padding(.horizontal, contentPaddingH)
                     .padding(.vertical, contentPaddingV)
-                    .glassEffect(.regular, in: .capsule)
-                    .overlay(
-                        Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                    )
+                    .glassEffect(.regular.interactive(), in: .capsule)
             } else {
                 content
                     .padding(.horizontal, contentPaddingH)
@@ -71,11 +76,29 @@ private struct LiquidGlassCapsuleModifier: ViewModifier {
                     )
             }
         }
+        .weatherGlassSurface(cornerRadius: 100)
+    }
+}
+
+@available(iOS 17.0, macOS 14.0, *)
+private struct LiquidGlassGroupModifier: ViewModifier {
+    let spacing: CGFloat
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) { content }
+        } else {
+            content
+        }
     }
 }
 
 @available(iOS 17.0, macOS 14.0, *)
 public extension View {
+    /// Share the system's glass rendering pass without layering glass on glass.
+    func liquidGlassGroup(spacing: CGFloat = 8) -> some View {
+        modifier(LiquidGlassGroupModifier(spacing: spacing))
+    }
     /// 液态玻璃卡片（适用于你的主界面卡片/面板）
     func liquidGlassCard(
         cornerRadius: CGFloat = LiquidGlass.defaultCornerRadius,

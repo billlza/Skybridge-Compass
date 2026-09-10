@@ -46,15 +46,15 @@ struct AccountDevicesSectionView: View {
         HStack(spacing: 10) {
             Image(systemName: "person.crop.rectangle.stack.fill")
                 .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(.cyan)
+                .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(RuntimeLocalization.string("账号设备"))
                     .font(.headline)
-                    .foregroundColor(.white.opacity(0.9))
+                    .foregroundStyle(.secondary)
                 if let nebulaId = authManager.currentUser?.nebulaId, !nebulaId.isEmpty {
                     Text("Nebula ID · \(nebulaId)")
                         .font(.caption.monospaced())
-                        .foregroundColor(.white.opacity(0.5))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
@@ -62,14 +62,14 @@ struct AccountDevicesSectionView: View {
             if let updatedAt = presence.lastSuccessfulListAt {
                 Text(RuntimeLocalization.format("更新于 %@", [AccountDevicePresentation.relativeTimeText(from: updatedAt)]))
                     .font(.caption2)
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundStyle(.secondary)
             }
             Button {
                 presence.triggerRefresh()
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.subheadline.weight(.medium))
-                    .foregroundColor(.cyan)
+                    .foregroundStyle(.tint)
             }
             .accessibilityLabel(Text(RuntimeLocalization.string("刷新")))
         }
@@ -96,6 +96,7 @@ struct AccountDevicesSectionView: View {
                         )
                     }
                 }
+                .liquidGlassGroup(spacing: 6)
             }
         } else if let failure = presence.lastListFailure {
             let isSignedOut = failure == .notAuthenticated && !presence.isAuthenticated
@@ -113,7 +114,7 @@ struct AccountDevicesSectionView: View {
                 ProgressView().tint(.cyan)
                 Text(RuntimeLocalization.string("正在同步账号设备…"))
                     .font(.caption)
-                    .foregroundColor(.white.opacity(0.6))
+                    .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
@@ -142,7 +143,7 @@ struct AccountDevicesSectionView: View {
     private func notice(_ text: String, tint: Color) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "info.circle.fill").foregroundColor(tint)
-            Text(text).font(.caption).foregroundColor(.white.opacity(0.75))
+            Text(text).font(.caption).foregroundStyle(.secondary)
             Spacer()
         }
         .padding(12)
@@ -156,10 +157,10 @@ struct AccountDevicesSectionView: View {
                 .foregroundStyle(.cyan.opacity(0.6))
             Text(title)
                 .font(.subheadline.weight(.medium))
-                .foregroundColor(.white.opacity(0.8))
+                .foregroundStyle(.secondary)
             Text(message)
                 .font(.caption)
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -204,7 +205,7 @@ private struct AccountDeviceRowView: View {
                 HStack(spacing: 6) {
                     Text(AccountDevicePresentationPolicy.displayName(for: record))
                         .font(.subheadline.weight(.medium))
-                        .foregroundColor(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     badge(AccountDevicePresentation.statusText(for: connectivity), color: AccountDevicePresentation.statusColor(for: connectivity))
                     badge(
@@ -218,18 +219,18 @@ private struct AccountDeviceRowView: View {
                 if let detail = AccountDevicePresentation.detailLine(for: record) {
                     Text(detail)
                         .font(.caption)
-                        .foregroundColor(.white.opacity(0.6))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 if let address = addressText {
                     Text(address)
                         .font(.caption.monospaced())
-                        .foregroundColor(.white.opacity(0.6))
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
                 Text("\(RuntimeLocalization.string("设备 ID")) \(AccountDevicePresentationPolicy.shortDeviceId(record.deviceId)) · \(RuntimeLocalization.string("最近活跃")) \(AccountDevicePresentation.relativeTimeText(from: record.lastSeenAt))")
                     .font(.caption2)
-                    .foregroundColor(.white.opacity(0.45))
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
@@ -238,19 +239,7 @@ private struct AccountDeviceRowView: View {
             actionButton
         }
         .padding(14)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [AccountDevicePresentation.statusColor(for: connectivity).opacity(0.35), .clear],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
+        .liquidGlassCard(cornerRadius: 20, padding: 0)
         .contextMenu {
             ForEach(record.lanAddresses + (record.publicAddress.map { [$0] } ?? []), id: \.self) { address in
                 Button {
@@ -292,7 +281,7 @@ private struct AccountDeviceRowView: View {
                     onOpenNearbyDevice(nearbyDevice)
                 }
                 .font(.caption.weight(.semibold))
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
                 .background(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
@@ -303,7 +292,7 @@ private struct AccountDeviceRowView: View {
                 onOpenCrossNetworkConnect()
             }
             .font(.caption.weight(.semibold))
-            .foregroundColor(.cyan)
+            .foregroundStyle(.tint)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(Color.cyan.opacity(0.15))
@@ -317,7 +306,7 @@ private struct AccountDeviceRowView: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(color.opacity(0.8))
-            .foregroundColor(.white)
+            .foregroundStyle(.primary)
             .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
