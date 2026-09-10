@@ -4,6 +4,59 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
+    func testRequestedQWithoutAdmissionCannotSelectAnOrdinaryProvider() {
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptIOSRuntime.resetForTesting()
+        defer {
+            if let previous {
+                XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", previous, 1), 0)
+            } else {
+                XCTAssertEqual(unsetenv("SB_ENABLE_QPERIAPT"), 0)
+            }
+            QPeriaptIOSRuntime.resetForTesting()
+        }
+        for policy in [CryptoProviderFactory.SelectionPolicy.preferPQC, .requirePQC] {
+            let providers = [
+                CryptoProviderFactory.make(policy: policy),
+                CryptoProviderFactory.makeInboundPQCResponderProvider(
+                    policy: policy,
+                    peerSupportedSuites: [.qperiaptABI2PolicyBound, .xwingMLDSA]
+                )
+            ]
+            for provider in providers {
+                XCTAssertEqual(provider.providerName, "Unavailable")
+                XCTAssertTrue(provider.supportedSuites.isEmpty)
+            }
+        }
+    }
+
+    @available(iOS 26.0, *)
+    func testAdmittedQResponderDoesNotChangeSuiteFamilyForAnOrdinaryPeer() async throws {
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptIOSRuntime.resetForTesting()
+        defer {
+            if let previous {
+                XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", previous, 1), 0)
+            } else {
+                XCTAssertEqual(unsetenv("SB_ENABLE_QPERIAPT"), 0)
+            }
+            QPeriaptIOSRuntime.resetForTesting()
+        }
+        let preparation = try await QPeriaptIOSRuntime.prepareProductionSession()
+        XCTAssertEqual(preparation, .activated)
+        let selected = CryptoProviderFactory.make(policy: .requirePQC)
+        XCTAssertEqual(selected.tier, .qperiaptPQC)
+        for offer in [[CryptoSuite.qperiaptABI2PolicyBound], [.xwingMLDSA]] {
+            let responder = CryptoProviderFactory.makeInboundPQCResponderProvider(
+                policy: .requirePQC, peerSupportedSuites: offer
+            )
+            XCTAssertEqual(responder.tier, .qperiaptPQC)
+            XCTAssertEqual(responder.supportedSuites, [.qperiaptABI2PolicyBound])
+        }
+    }
+
     func testQPeerPlatformsAdmitCanonicalNativeMetadataAndRetainKeyValidation() {
         let key = KEMPublicKeyInfo(
             suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,

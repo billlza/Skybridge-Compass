@@ -9,6 +9,43 @@ final class HandshakeCryptoPolicyParityTests: XCTestCase {
     private static let mlDSA87SignatureLength = 4_627
 
     @MainActor
+    func testCoreCannotReuseOrOverrideAnOrdinaryProviderAfterQIsRequested() async throws {
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "0", 1), 0)
+        QPeriaptIOSRuntime.resetForTesting()
+        defer {
+            if let previous {
+                XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", previous, 1), 0)
+            } else {
+                XCTAssertEqual(unsetenv("SB_ENABLE_QPERIAPT"), 0)
+            }
+            QPeriaptIOSRuntime.resetForTesting()
+        }
+        let probe = InitializationIdentityResolverProbe(failFirstPQC: false)
+        let core = SkyBridgeiOSCore { algorithm, _ in
+            try await probe.resolve(algorithm: algorithm)
+        }
+        try await core.initialize(policy: .requirePQC, providerOverride: MockNativeHybridProvider())
+        XCTAssertEqual(core.cryptoProvider?.tier, .nativePQC)
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        for override in [false, true] {
+            do {
+                if override {
+                    try await core.initialize(policy: .requirePQC, providerOverride: MockNativeHybridProvider())
+                } else {
+                    try await core.initialize(policy: .requirePQC)
+                }
+                XCTFail("Requested Q must fail admission before an ordinary provider can be reused")
+            } catch SkyBridgeError.handshakeFailed {
+                // Admission fails without replacing the prior complete configuration.
+            }
+            XCTAssertEqual(core.cryptoProvider?.tier, .nativePQC)
+        }
+        let attempts = await probe.pqcAttemptCount()
+        XCTAssertEqual(attempts, 1, "Rejected Q selection must not resolve or create another identity")
+    }
+
+    @MainActor
     func testCorePolicySwitchPublishesAtomicallyAndRetriesAfterIdentityFailure() async throws {
         let probe = InitializationIdentityResolverProbe()
         let core = SkyBridgeiOSCore { algorithm, _ in
@@ -1731,13 +1768,18 @@ private final class InMemoryProtocolIdentityPersistence: ProtocolIdentityPersist
 @available(iOS 17.0, *)
 private actor InitializationIdentityResolverProbe {
     private var pqcAttempts = 0
+    private let failFirstPQC: Bool
+
+    init(failFirstPQC: Bool = true) {
+        self.failFirstPQC = failFirstPQC
+    }
 
     func resolve(
         algorithm: ProtocolSigningAlgorithm
     ) throws -> ResolvedProtocolSigningIdentity {
         if algorithm == .mlDSA65 {
             pqcAttempts += 1
-            if pqcAttempts == 1 {
+            if failFirstPQC, pqcAttempts == 1 {
                 throw InjectedInitializationIdentityError()
             }
         }

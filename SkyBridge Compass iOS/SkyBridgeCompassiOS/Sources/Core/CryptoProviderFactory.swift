@@ -198,16 +198,9 @@ public enum CryptoProviderFactory {
         let baseProvider = make(policy: policy)
 
         if baseProvider.tier == .qperiaptPQC {
-            let peerSupportsQPeriapt = peerSupportedSuites.contains {
-                $0 == .qperiaptABI2PolicyBound
-            }
-            if peerSupportsQPeriapt {
-                return baseProvider
-            }
-            return selectStandardProvider(
-                capability: detectCapability(),
-                policy: policy
-            )
+            // Preserve the user's single-suite policy. The authenticated
+            // handshake rejects peers with no Q intersection.
+            return baseProvider
         }
 
         #if HAS_APPLE_PQC_SDK
@@ -247,9 +240,11 @@ public enum CryptoProviderFactory {
         capability: Capability,
         policy: SelectionPolicy
     ) -> any CryptoProvider {
-        if isQPeriaptSelectionAllowed(for: policy),
-           capability.hasQPeriapt,
-           let provider = QPeriaptIOSRuntime.makeCryptoProvider() {
+        if isQPeriaptSelectionAllowed(for: policy), QPeriaptIOSRuntime.isRequested() {
+            guard capability.hasQPeriapt,
+                  let provider = QPeriaptIOSRuntime.makeCryptoProvider() else {
+                return UnavailablePQCProvider()
+            }
             return provider
         }
         return selectStandardProvider(capability: capability, policy: policy)
