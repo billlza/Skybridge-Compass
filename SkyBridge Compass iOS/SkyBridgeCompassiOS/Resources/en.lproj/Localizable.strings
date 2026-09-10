@@ -361,3 +361,11 @@
 "%d 分钟前" = "%d min ago";
 "%d 小时前" = "%d h ago";
 "%d 天前" = "%d d ago";
+
+/* Account device registration and hardware metadata */
+"本机身份与历史登记不一致，需要重新验证设备。" = "This device’s identity differs from its historical registration. Verify the device again.";
+"本机尚未登记，需由已登记设备批准。" = "This device is not registered. Approval from a registered device is required.";
+"本机登记正在等待批准。" = "This device’s registration is awaiting approval.";
+"本机登记已冻结。" = "This device’s registration is frozen.";
+"暂时无法确认本机的登记状态。" = "This device’s registration status could not be confirmed.";
+"型号尚未上报" = "Model not reported";

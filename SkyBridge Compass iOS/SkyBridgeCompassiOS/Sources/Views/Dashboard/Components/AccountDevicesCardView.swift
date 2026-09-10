@@ -55,6 +55,12 @@ struct AccountDevicesCardView: View {
     @ViewBuilder
     private var content: some View {
         if let snapshot = presence.accountDevices {
+            if let issue = AccountDevicePresentation.registrationIssueText(for: snapshot) {
+                Label(issue, systemImage: "person.crop.circle.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             let devices = Array(AccountDevicePresentationPolicy.orderedDevices(snapshot.devices).prefix(Self.previewRowLimit))
             if devices.isEmpty {
                 Text(RuntimeLocalization.string("登录同一账号的其他设备会显示在这里"))
@@ -115,6 +121,10 @@ private struct AccountDeviceCompactRow: View {
                 Text(AccountDevicePresentationPolicy.displayName(for: record))
                     .font(.subheadline.weight(.medium))
                     .foregroundColor(.white)
+                    .lineLimit(1)
+                Text(AccountDevicePresentation.modelText(for: record))
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.6))
                     .lineLimit(1)
                 HStack(spacing: 6) {
                     Circle()

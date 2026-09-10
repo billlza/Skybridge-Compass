@@ -1,4 +1,5 @@
 import Foundation
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 public struct TrustRecordDisplayGroup: Identifiable, Sendable, Equatable {
@@ -68,7 +69,7 @@ public enum ApplePeerDeviceMetadataNormalizer {
                 return trimmedChip
             }
             if let resolved {
-                return resolved.chip
+                return resolved.chip ?? normalizedFallbackChip(from: trimmedChip)
             }
             return normalizedFallbackChip(from: trimmedChip)
         }()
@@ -256,24 +257,9 @@ public enum ApplePeerDeviceMetadataNormalizer {
 
     private static func resolvedPresentation(
         forModelIdentifier rawModelIdentifier: String
-    ) -> (modelName: String, chip: String)? {
-        let modelIdentifier = rawModelIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !modelIdentifier.isEmpty else { return nil }
-
-        switch modelIdentifier {
-        case "iPhone17,1":
-            return ("iPhone 16 Pro", "A18 Pro")
-        case "iPhone17,2":
-            return ("iPhone 16 Pro Max", "A18 Pro")
-        case "iPhone17,3":
-            return ("iPhone 16", "A18")
-        case "iPhone17,4":
-            return ("iPhone 16 Plus", "A18")
-        case "iPad16,3", "iPad16,4":
-            return ("iPad Pro 11-inch (M4)", "M4")
-        default:
-            return nil
-        }
+    ) -> (modelName: String, chip: String?)? {
+        guard let model = AppleHardwareModelCatalog.model(for: rawModelIdentifier) else { return nil }
+        return (model.name, model.chip)
     }
 }
 

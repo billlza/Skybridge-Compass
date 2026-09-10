@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SkyBridgeProtocolCore
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -18,7 +19,7 @@ public enum LocalDevicePresentation {
         #if os(macOS)
         return Snapshot(
             deviceName: LocalHostName.localizedName,
-            modelName: "Mac",
+            modelName: AppleHardwareModelCatalog.displayName(for: HardwareModelIdentifier.current()),
             platformName: "macOS",
             osVersion: osVersion
         )
@@ -171,20 +172,7 @@ public enum LocalDevicePresentation {
     #if os(iOS)
     private static func currentAppleMobileModelName() -> String {
         let identifier = currentModelIdentifier()
-        switch identifier {
-        case "iPhone17,1":
-            return "iPhone 16 Pro"
-        case "iPhone17,2":
-            return "iPhone 16 Pro Max"
-        case "iPhone17,3":
-            return "iPhone 16"
-        case "iPhone17,4":
-            return "iPhone 16 Plus"
-        case "iPad16,3", "iPad16,4":
-            return "iPad Pro 11-inch (M4)"
-        default:
-            return identifier.isEmpty ? currentUIKitModelName() : identifier
-        }
+        return AppleHardwareModelCatalog.displayName(for: identifier) ?? currentUIKitModelName()
     }
 
     private static func currentModelIdentifier() -> String {

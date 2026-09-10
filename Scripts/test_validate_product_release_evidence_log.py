@@ -402,6 +402,66 @@ class ProductReleaseEvidenceLogTests(unittest.TestCase):
             self.assertNotIn("bootUUID", output.read_text(encoding="ascii"))
             MODULE.validate_capture_manifest(capture, len(rows))
 
+    def test_extract_oslog_accepts_exact_native_stream_preamble_only(self) -> None:
+        banner = (
+            'Filtering the log data using "processIdentifier == 4321 AND '
+            '(subsystem == "com.skybridge.compass.release-evidence" AND '
+            'category == "ProductSession")"\n'
+        )
+        cases = {
+            "native": (banner, "", True),
+            "native-finished": (banner, '{"count":1,"finished":1}\n', True),
+            "wrong-count": (banner, '{"count":2,"finished":1}\n', False),
+            "unfinished": (banner, '{"count":1,"finished":0}\n', False),
+            "boolean-count": (banner, '{"count":true,"finished":1}\n', False),
+            "wrong-pid": (banner.replace("4321", "4322"), "", False),
+            "wrong-subsystem": (banner.replace("release-evidence", "other"), "", False),
+            "duplicate": (banner + banner, "", False),
+            "blank-before": ("\n" + banner, "", False),
+            "banner-after-event": ("", banner, False),
+            "arbitrary-text": ("unrecognized capture output\n", "", False),
+            "preamble-only": (banner, "", False),
+            "empty-native": (banner, '{"count":0,"finished":1}\n', False),
+        }
+        for label, (prefix, suffix, accepted) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                executable = root / "SkyBridgeCompassApp"
+                executable.write_bytes(b"candidate executable")
+                executable.chmod(0o700)
+                row = {
+                    "eventType": "logEvent",
+                    "messageType": "Default",
+                    "subsystem": MODULE.SUBSYSTEM,
+                    "category": MODULE.CATEGORY,
+                    "processID": 4321,
+                    "processImagePath": os.fspath(executable),
+                    "formatString": "%{public}s",
+                    "eventMessage": p2p_remote_lines()[0],
+                }
+                raw = root / "raw.ndjson"
+                payload = (
+                    ""
+                    if label in {"preamble-only", "empty-native"}
+                    else json.dumps(row) + "\n"
+                )
+                raw.write_text(prefix + payload + suffix, encoding="utf-8")
+                ownership = self.write_ownership_record(root, executable)
+                output, capture = root / MODULE.LOG_FILE, root / MODULE.CAPTURE_FILE
+                if accepted:
+                    MODULE.extract_oslog(
+                        raw, 4321, executable, ownership, output, capture
+                    )
+                    self.assertEqual(output.read_text(), p2p_remote_lines()[0] + "\n")
+                    MODULE.validate_capture_manifest(capture, 1)
+                else:
+                    with self.assertRaises(MODULE.ProductEvidenceError):
+                        MODULE.extract_oslog(
+                            raw, 4321, executable, ownership, output, capture
+                        )
+                    self.assertFalse(output.exists())
+                    self.assertFalse(capture.exists())
+
     def test_extract_oslog_rejects_wrong_pid_process_or_private_format(self) -> None:
         mutations = {
             "pid": {"processID": 9999},

@@ -22,8 +22,9 @@ Usage:
 
 The caller starts the normal candidate through its ordinary UI, starts this
 collector, performs the externally observed UI session, and waits for capture
-completion. Raw unified-log metadata stays in a private temporary directory;
-only the fixed public message schema and process-binding manifest are retained.
+completion. Raw unified-log metadata stays in a private capture directory.
+Successful captures retain only the fixed public message schema and process
+binding; failed captures retain the private raw input for diagnosis.
 USAGE
 }
 
@@ -138,15 +139,20 @@ OUTPUT_CAPTURE="$ARTIFACT_DIR/mac-product-session-capture.json"
   exit 1
 }
 
-PRIVATE_CAPTURE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/skybridge-product-evidence.XXXXXX")"
+PRIVATE_CAPTURE_DIR="$(mktemp -d "$ARTIFACT_DIR/private-capture.XXXXXX")"
 chmod 0700 "$PRIVATE_CAPTURE_DIR"
 LOG_STREAM_PID=""
 cleanup() {
+  local exit_status=$?
   if [[ -n "$LOG_STREAM_PID" ]] && kill -0 "$LOG_STREAM_PID" >/dev/null 2>&1; then
     kill -TERM "$LOG_STREAM_PID" >/dev/null 2>&1 || true
     wait "$LOG_STREAM_PID" >/dev/null 2>&1 || true
   fi
-  /bin/rm -rf "$PRIVATE_CAPTURE_DIR"
+  if (( exit_status == 0 )); then
+    /bin/rm -rf "$PRIVATE_CAPTURE_DIR"
+  else
+    echo "failed raw capture retained privately: $PRIVATE_CAPTURE_DIR" >&2
+  fi
 }
 trap cleanup EXIT
 RAW_OSLOG="$PRIVATE_CAPTURE_DIR/product-session.ndjson"

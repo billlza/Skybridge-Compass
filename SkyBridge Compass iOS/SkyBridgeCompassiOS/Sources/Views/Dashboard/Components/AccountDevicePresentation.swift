@@ -9,7 +9,7 @@ import UIKit
 @MainActor
 enum AccountDevicePresentation {
     static func systemImageName(for record: AccountDeviceRecord) -> String {
-        switch record.platform {
+        switch AccountDevicePresentationPolicy.displayPlatform(for: record) {
         case .macOS: return "laptopcomputer"
         case .iPadOS: return "ipad"
         case .iOS: return "iphone"
@@ -18,6 +18,22 @@ enum AccountDevicePresentation {
         case .linux: return "server.rack"
         case nil: return "questionmark.square.dashed"
         }
+    }
+
+    static func registrationIssueText(for snapshot: AccountDeviceListSnapshot) -> String? {
+        guard let issue = AccountDevicePresentationPolicy.registrationIssue(for: snapshot) else { return nil }
+        switch issue {
+        case .identityMismatch: return RuntimeLocalization.string("本机身份与历史登记不一致，需要重新验证设备。")
+        case .notRegistered: return RuntimeLocalization.string("本机尚未登记，需由已登记设备批准。")
+        case .pending: return RuntimeLocalization.string("本机登记正在等待批准。")
+        case .frozen: return RuntimeLocalization.string("本机登记已冻结。")
+        case .unrecognizedStatus: return RuntimeLocalization.string("暂时无法确认本机的登记状态。")
+        }
+    }
+
+    static func modelText(for record: AccountDeviceRecord) -> String {
+        AccountDevicePresentationPolicy.modelDisplayName(for: record)
+            ?? RuntimeLocalization.string("型号尚未上报")
     }
 
     static func statusText(for connectivity: AccountDevicePresentationPolicy.Connectivity) -> String {
@@ -54,8 +70,8 @@ enum AccountDevicePresentation {
 
     static func detailLine(for record: AccountDeviceRecord) -> String? {
         var parts: [String] = []
-        if let model = record.deviceModel, !model.isEmpty { parts.append(model) }
-        if let platform = record.platform {
+        parts.append(modelText(for: record))
+        if let platform = AccountDevicePresentationPolicy.displayPlatform(for: record) {
             let osVersion = record.osVersion.map { " \($0)" } ?? ""
             parts.append("\(platformDisplayName(platform))\(osVersion)")
         } else if let osVersion = record.osVersion, !osVersion.isEmpty {

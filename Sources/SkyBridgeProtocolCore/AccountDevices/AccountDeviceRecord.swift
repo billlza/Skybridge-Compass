@@ -38,7 +38,11 @@ public struct AccountDeviceRecord: Codable, Sendable, Equatable, Identifiable {
     /// 该行是否就是发起请求的设备（服务端按完整身份绑定判定）。
     public let isCaller: Bool
 
-    public var id: String { deviceId }
+    /// A hardware/device ID can survive a signing-key change. Separate registry
+    /// bindings must remain separate rows; neither their metadata nor trust merges.
+    public var id: String {
+        "\(deviceId)/\(protocolSigningAlgorithm)/\(protocolPublicKeyFingerprint.lowercased())"
+    }
 
     public var platform: AccountDevicePlatform? {
         platformRawValue.flatMap(AccountDevicePlatform.init(rawValue:))

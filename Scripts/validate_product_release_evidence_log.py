@@ -1438,7 +1438,16 @@ def extract_oslog(
     except UnicodeDecodeError as exc:
         _fail(f"raw OSLog NDJSON is not UTF-8: {exc}")
     messages: list[str] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
+    # Native log stream emits this banner even with --style ndjson. It is command
+    # metadata, accepted once at the start only for the collector's exact filter.
+    stream_preamble = (
+        f'Filtering the log data using "processIdentifier == {expected_pid} AND '
+        f'(subsystem == "{SUBSYSTEM}" AND category == "{CATEGORY}")"'
+    )
+    lines = text.splitlines()
+    for line_number, line in enumerate(lines, 1):
+        if line_number == 1 and line == stream_preamble:
+            continue
         if not line:
             _fail(f"raw OSLog line {line_number} is empty")
         try:
@@ -1447,6 +1456,18 @@ def extract_oslog(
             _fail(f"raw OSLog line {line_number} is invalid JSON: {exc}")
         if not isinstance(row, dict):
             _fail(f"raw OSLog line {line_number} is not an object")
+        # A normally timed-out native stream terminates with its exact event count.
+        # An interrupted stream may have no trailer. Neither form supplies evidence.
+        if row.keys() == {"count", "finished"}:
+            if (
+                line_number != len(lines)
+                or type(row["count"]) is not int
+                or type(row["finished"]) is not int
+                or row["finished"] != 1
+                or row["count"] != len(messages)
+            ):
+                _fail("raw OSLog native completion trailer is invalid")
+            continue
         if (
             row.get("eventType") != "logEvent"
             or row.get("messageType") != "Default"

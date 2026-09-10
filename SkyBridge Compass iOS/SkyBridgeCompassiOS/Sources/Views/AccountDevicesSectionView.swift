@@ -17,6 +17,10 @@ struct AccountDevicesSectionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            if let snapshot = presence.accountDevices,
+               let issue = AccountDevicePresentation.registrationIssueText(for: snapshot) {
+                notice(issue, tint: .orange)
+            }
             if let failure = presence.lastListFailure, presence.accountDevices != nil {
                 notice(
                     RuntimeLocalization.format("列表可能已过期（上次更新：%@）", [AccountDevicePresentation.relativeTimeText(from: presence.lastSuccessfulListAt)])

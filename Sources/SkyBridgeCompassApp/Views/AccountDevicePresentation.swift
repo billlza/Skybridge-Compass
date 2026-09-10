@@ -9,7 +9,7 @@ import SkyBridgeProtocolCore
 @MainActor
 enum AccountDevicePresentation {
     static func systemImageName(for record: AccountDeviceRecord) -> String {
-        switch record.platform {
+        switch AccountDevicePresentationPolicy.displayPlatform(for: record) {
         case .macOS: return "laptopcomputer"
         case .iPadOS: return "ipad"
         case .iOS: return "iphone"
@@ -18,6 +18,22 @@ enum AccountDevicePresentation {
         case .linux: return "server.rack"
         case nil: return "questionmark.square.dashed"
         }
+    }
+
+    static func registrationIssueText(for snapshot: AccountDeviceListSnapshot) -> String? {
+        guard let issue = AccountDevicePresentationPolicy.registrationIssue(for: snapshot) else { return nil }
+        switch issue {
+        case .identityMismatch: return LocalizationManager.shared.localizedString("discovery.accountDevices.caller.identityMismatch")
+        case .notRegistered: return LocalizationManager.shared.localizedString("discovery.accountDevices.caller.notRegistered")
+        case .pending: return LocalizationManager.shared.localizedString("discovery.accountDevices.caller.pending")
+        case .frozen: return LocalizationManager.shared.localizedString("discovery.accountDevices.caller.frozen")
+        case .unrecognizedStatus: return LocalizationManager.shared.localizedString("discovery.accountDevices.caller.unrecognizedStatus")
+        }
+    }
+
+    static func modelText(for record: AccountDeviceRecord) -> String {
+        AccountDevicePresentationPolicy.modelDisplayName(for: record)
+            ?? LocalizationManager.shared.localizedString("discovery.accountDevices.modelNotReported")
     }
 
     static func statusText(for connectivity: AccountDevicePresentationPolicy.Connectivity) -> String {
@@ -56,8 +72,8 @@ enum AccountDevicePresentation {
     /// 机型 · 系统 · 版本（缺失项自动省略）。
     static func detailLine(for record: AccountDeviceRecord) -> String? {
         var parts: [String] = []
-        if let model = record.deviceModel, !model.isEmpty { parts.append(model) }
-        if let platform = record.platform {
+        parts.append(modelText(for: record))
+        if let platform = AccountDevicePresentationPolicy.displayPlatform(for: record) {
             let osVersion = record.osVersion.map { " \($0)" } ?? ""
             parts.append("\(platformDisplayName(platform))\(osVersion)")
         } else if let osVersion = record.osVersion, !osVersion.isEmpty {
