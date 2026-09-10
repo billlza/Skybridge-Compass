@@ -19,6 +19,8 @@ packages:
     exactVersion: 150.0.0
   SkyBridgeCameraKitLocal:
     path: ../Packages/SkyBridgeCameraKit
+  SkyBridgeWeatherRenderingLocal:
+    path: ../Packages/SkyBridgeWeatherRendering
 
 targets:
   SkyBridgeCompass-iOS:
@@ -28,7 +30,7 @@ targets:
       path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
       properties:
         CFBundleShortVersionString: "1.0.2"
-        CFBundleVersion: "3"
+        CFBundleVersion: "4"
         CFBundleURLTypes:
           - CFBundleURLName: com.skybridge.compass.ios
             CFBundleURLSchemes:
@@ -101,6 +103,8 @@ targets:
         product: SkyBridgeMessagePersistence
       - package: SkyBridgeCameraKitLocal
         product: SkyBridgeCameraKit
+      - package: SkyBridgeWeatherRenderingLocal
+        product: SkyBridgeWeatherRendering
       - target: SkyBridgeCompass-Widgets
         embed: true
     settings:
@@ -159,7 +163,7 @@ targets:
       path: "Widgets/Info.plist"
       properties:
         CFBundleShortVersionString: "1.0.2"
-        CFBundleVersion: "3"
+        CFBundleVersion: "4"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     sources:

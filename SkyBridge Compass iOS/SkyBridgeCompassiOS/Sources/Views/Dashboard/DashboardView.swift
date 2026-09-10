@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import SkyBridgeWeatherRendering
 import Foundation
 import Darwin
 
@@ -31,6 +32,7 @@ public struct DashboardView: View {
     @State private var loadedTabs: Set<DashboardTab> = [Self.initialSelectedTab]
     @State private var enableAnimatedBackground = false
     @State private var enableWeatherEffects = false
+    @State private var rainScene = WeatherRainScene()
     @State private var showingQRScanner = false
     @State private var showingSettings = false
     @State private var showingDeviceDetail: DiscoveredDevice?
@@ -194,15 +196,20 @@ public struct QuantumGlassBackground: View {
     private let enableAnimations: Bool
     private let enableWeatherEffects: Bool
     private let isHomeVisible: Bool
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
 
     public init(
         enableAnimations: Bool = true,
         enableWeatherEffects: Bool = true,
-        isHomeVisible: Bool = true
+        isHomeVisible: Bool = true,
+        glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil
     ) {
         self.enableAnimations = enableAnimations
         self.enableWeatherEffects = enableWeatherEffects
         self.isHomeVisible = isHomeVisible
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
     }
 
     public var body: some View {
@@ -273,7 +280,7 @@ public struct QuantumGlassBackground: View {
 
             // 4. Weather effects (independent lifecycle, must NOT be re-created per frame)
             DashboardWeatherEffectsBackgroundLayer(
-                isActive: shouldRunWeatherEffects
+                isActive: shouldRunWeatherEffects, glassRegions: glassRegions, rainScene: rainScene
             )
         }
         .id(animationPolicyGeneration)
@@ -402,12 +409,6 @@ private struct QuantumStarLayer: View {
     private var homeTab: some View {
         NavigationStack {
             ZStack {
-                QuantumGlassBackground(
-                    enableAnimations: enableAnimatedBackground,
-                    enableWeatherEffects: enableWeatherEffects,
-                    isHomeVisible: selectedTab == .home
-                )
-
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 16) {
                         welcomeSection
@@ -443,8 +444,21 @@ private struct QuantumStarLayer: View {
                     .padding(.vertical, 8)
                 }
                 .scrollContentBackground(.hidden)
+                .weatherGlassClippingRegion()
                 .background(Color.clear)
             }
+            .backgroundPreferenceValue(WeatherGlassPreferenceKey.self) { anchors in
+                GeometryReader { geometry in
+                    QuantumGlassBackground(
+                        enableAnimations: enableAnimatedBackground,
+                        enableWeatherEffects: enableWeatherEffects,
+                        isHomeVisible: selectedTab == .home,
+                        glassRegions: anchors.map { $0.resolve(in: geometry) }, rainScene: rainScene
+                    )
+                }
+                .ignoresSafeArea()
+            }
+            .overlay { WeatherRainGlassOverlay(scene: rainScene).ignoresSafeArea() }
             .navigationTitle(dashboardTitle)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarColorScheme(.dark, for: .navigationBar)

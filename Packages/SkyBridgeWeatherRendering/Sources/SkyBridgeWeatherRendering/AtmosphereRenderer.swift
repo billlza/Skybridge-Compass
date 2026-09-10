@@ -19,10 +19,14 @@ struct AtmosphereUniforms {
 }
 
 enum AtmosphereKind: CaseIterable, Sendable {
-    case clouds, haze
+    case clouds, haze, rain
 
-    var resource: String { self == .clouds ? "CloudVolume" : "HazeVolume" }
-    var entryPrefix: String { self == .clouds ? "cloud" : "haze" }
+    var resource: String {
+        switch self { case .clouds: "CloudVolume"; case .haze: "HazeVolume"; case .rain: "RainVolume" }
+    }
+    var entryPrefix: String {
+        switch self { case .clouds: "cloud"; case .haze: "haze"; case .rain: "rain" }
+    }
 }
 
 struct HazeAppearance: Equatable {
@@ -36,6 +40,7 @@ final class AtmosphereRenderer {
     let device: any MTLDevice
     let queue: any MTLCommandQueue
     let pipeline: any MTLRenderPipelineState
+    let glassPipeline: (any MTLRenderPipelineState)?
     let density: (any MTLTexture)?
 
     @concurrent
@@ -65,6 +70,23 @@ final class AtmosphereRenderer {
         descriptor.fragmentFunction = fragment
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        if kind == .rain {
+            guard let glassVertex = library.makeFunction(name: "rainGlassVertex"),
+                  let glassFragment = library.makeFunction(name: "rainGlassFragment") else {
+                throw AtmosphereRenderError.unavailable("rain glass shader entry points are missing")
+            }
+            descriptor.vertexFunction = glassVertex
+            descriptor.fragmentFunction = glassFragment
+            let attachment = descriptor.colorAttachments[0]!
+            attachment.isBlendingEnabled = true
+            attachment.sourceRGBBlendFactor = .one
+            attachment.sourceAlphaBlendFactor = .one
+            attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            glassPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        } else {
+            glassPipeline = nil
+        }
         density = kind == .clouds ? try Self.loadDensity(device: device, bundle: bundle) : nil
     }
 
@@ -100,10 +122,12 @@ final class AtmosphereRenderer {
     }
 
     func encode(commandBuffer: any MTLCommandBuffer, pass: MTLRenderPassDescriptor, uniforms: AtmosphereUniforms,
-                appearance: HazeAppearance = HazeAppearance()) throws {
+                appearance: HazeAppearance = HazeAppearance(), rain: RainAppearance = RainAppearance(),
+                compositeGlass: Bool = true) throws {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
             throw AtmosphereRenderError.unavailable("render command encoder allocation failed")
         }
+        defer { encoder.endEncoding() }
         var uniforms = uniforms
         encoder.setRenderPipelineState(pipeline)
         if let density { encoder.setFragmentTexture(density, index: 0) }
@@ -112,8 +136,60 @@ final class AtmosphereRenderer {
             var appearance = appearance
             encoder.setFragmentBytes(&appearance, length: MemoryLayout<HazeAppearance>.stride, index: 1)
         }
+        if kind == .rain {
+            try bindRain(rain, to: encoder)
+        }
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        if kind == .rain, compositeGlass { try encodeGlass(encoder: encoder, uniforms: uniforms, rain: rain) }
+    }
+
+    /// Transparent foreground, encoded on the background's command buffer and clock.
+    func encodeGlass(commandBuffer: any MTLCommandBuffer, pass: MTLRenderPassDescriptor,
+                     uniforms: AtmosphereUniforms, rain: RainAppearance) throws {
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            throw AtmosphereRenderError.unavailable("glass command encoder allocation failed")
+        }
+        defer { encoder.endEncoding() }
+        try encodeGlass(encoder: encoder, uniforms: uniforms, rain: rain)
+    }
+
+    private func bindRain(_ rain: RainAppearance, to encoder: any MTLRenderCommandEncoder) throws {
+        var parameters = rain.parameters
+        encoder.setFragmentBytes(&parameters, length: MemoryLayout<RainParameters>.stride, index: 1)
+        try rain.glass.withUnsafeBytes { bytes in
+            guard let address = bytes.baseAddress else {
+                throw AtmosphereRenderError.unavailable("rain glass constants have no storage")
+            }
+            encoder.setFragmentBytes(address, length: bytes.count, index: 2)
+            encoder.setVertexBytes(address, length: bytes.count, index: 2)
+        }
+        try rain.clearZones.withUnsafeBytes { bytes in
+            guard let address = bytes.baseAddress else {
+                throw AtmosphereRenderError.unavailable("rain interaction constants have no storage")
+            }
+            encoder.setFragmentBytes(address, length: bytes.count, index: 3)
+        }
+    }
+
+    private func encodeGlass(encoder: any MTLRenderCommandEncoder, uniforms: AtmosphereUniforms,
+                             rain: RainAppearance) throws {
+        guard let glassPipeline else { throw AtmosphereRenderError.unavailable("rain glass pipeline is unavailable") }
+        var uniforms = uniforms
+        encoder.setRenderPipelineState(glassPipeline)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<AtmosphereUniforms>.stride, index: 0)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<AtmosphereUniforms>.stride, index: 0)
+        try bindRain(rain, to: encoder)
+        for (index, clip) in rain.clips.enumerated() {
+            let width = Int(uniforms.resolution.x), height = Int(uniforms.resolution.y)
+            let x = max(0, min(width, Int(floor(clip.minX * Double(width)))))
+            let y = max(0, min(height, Int(floor(clip.minY * Double(height)))))
+            let right = max(x, min(width, Int(ceil(clip.maxX * Double(width)))))
+            let bottom = max(y, min(height, Int(ceil(clip.maxY * Double(height)))))
+            guard right > x, bottom > y else { continue }
+            encoder.setScissorRect(MTLScissorRect(x: x, y: y, width: right - x, height: bottom - y))
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6,
+                                   instanceCount: 4, baseInstance: index * 4)
+        }
     }
 
     private static func resourceBundle() throws -> Bundle {

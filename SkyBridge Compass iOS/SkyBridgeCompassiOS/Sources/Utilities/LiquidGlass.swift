@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 
 /// iOS Liquid Glass（液态玻璃）统一封装：
 /// - iOS 26+：使用系统 `glassEffect`（与 macOS 26 Tahoe 端一致）
@@ -41,6 +42,7 @@ private struct LiquidGlassCardModifier: ViewModifier {
                     )
             }
         }
+        .weatherGlassSurface(cornerRadius: cornerRadius)
     }
 }
 

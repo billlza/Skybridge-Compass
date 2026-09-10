@@ -3,6 +3,8 @@
 import argparse
 from pathlib import Path
 
+from weather_shader_export import read_agsl, replace_field, write_outputs
+
 METAL_PREFIX = """#include <metal_stdlib>
 using namespace metal;
 struct AtmosphereUniforms {
@@ -38,30 +40,14 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     path = args.android_root / 'app/src/main/kotlin/com/skybridge/compass/android/ui/components/CinematicHazeAgsl.kt'
-    source = path.read_text().split('val SOURCE = """', 1)[1].split('""".trimIndent()', 1)[0].strip()
-    if '"' in source or not source.isascii():
-        raise ValueError('The shared shader must be ASCII with no embedded string literals')
-    hlsl = source.replace('fract(', 'frac(').replace('mix(', 'lerp(')
+    source = read_agsl(path)
     windows_path = args.windows_root / 'windows/Skybridge.WinClient/WeatherBackdropDX.xaml.cs'
-    windows = windows_path.read_text()
-    begin = '// BEGIN AEROSOL FIELD\n'
-    end = '// END AEROSOL FIELD'
-    if windows.count(begin) != 1 or windows.count(end) != 1:
-        raise ValueError('Expected exactly one aerosol field in the Windows weather shader')
-    field_start = windows.index(begin) + len(begin)
-    field_end = windows.index(end, field_start)
-    windows = windows[:field_start] + hlsl + '\n' + windows[field_end:]
+    windows = replace_field(windows_path.read_text(), 'AEROSOL FIELD', source)
     outputs = {
         root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources/HazeVolume.metal': METAL_PREFIX + source + METAL_SUFFIX,
         windows_path: windows,
     }
-    for output, text in outputs.items():
-        if args.check:
-            if output.read_text() != text:
-                raise ValueError(f'{output} differs from the shared aerosol field')
-        else:
-            output.write_text(text)
-        print(f'{output.name}: ' + ('exact match' if args.check else 'exported'))
+    write_outputs(outputs, args.check)
 
 
 if __name__ == '__main__':

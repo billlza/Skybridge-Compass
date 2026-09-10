@@ -8,9 +8,13 @@ struct DashboardWeatherEffectsBackgroundLayer: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private let isActive: Bool
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
 
-    init(isActive: Bool = true) {
+    init(isActive: Bool = true, glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil) {
         self.isActive = isActive
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
     }
 
     var body: some View {
@@ -19,7 +23,7 @@ struct DashboardWeatherEffectsBackgroundLayer: View {
         Group {
             if shouldRender,
                let snapshot = WeatherAnimationSnapshot(weather: weatherManager.currentWeather) {
-                DashboardWeatherEffectsContent(snapshot: snapshot)
+                DashboardWeatherEffectsContent(snapshot: snapshot, glassRegions: glassRegions, rainScene: rainScene)
             }
         }
         .task(id: shouldRender) {
@@ -34,14 +38,18 @@ struct DashboardWeatherEffectsBackgroundLayer: View {
 @available(iOS 17.0, *)
 private struct DashboardWeatherEffectsContent: View {
     let snapshot: WeatherAnimationSnapshot
+    let glassRegions: [WeatherGlassRegion]
+    let rainScene: WeatherRainScene?
     private let field: WeatherParticleField
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
     @State private var framePolicyGeneration = 0
 
-    init(snapshot: WeatherAnimationSnapshot) {
+    init(snapshot: WeatherAnimationSnapshot, glassRegions: [WeatherGlassRegion], rainScene: WeatherRainScene?) {
         self.snapshot = snapshot
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
         self.field = WeatherParticleField(seed: snapshot.seed, condition: snapshot.condition)
     }
 
@@ -72,6 +80,14 @@ private struct DashboardWeatherEffectsContent: View {
                         ProcessInfo.processInfo.thermalState == .nominal ? 1 : 0.45,
                     framesPerSecond: Int((1 / minimumInterval).rounded()), isAnimating: shouldAnimate
                 )
+            } else if snapshot.condition == .rainy || snapshot.condition == .stormy {
+                CinematicRainView(
+                    intensity: Float(snapshot.intensity), wind: Float(snapshot.wind),
+                    quality: ProcessInfo.processInfo.thermalState == .nominal ? 1 : 0.45,
+                    storm: snapshot.condition == .stormy, allowsLightning: allowsStormFlash,
+                    framesPerSecond: Int((1 / minimumInterval).rounded()), isAnimating: shouldAnimate,
+                    glassRegions: glassRegions, scene: rainScene
+                )
             } else if !shouldAnimate {
                 WeatherEffectsTintGradient(snapshot: snapshot)
                     .opacity(snapshot.tintOpacity * 0.68)
@@ -85,7 +101,6 @@ private struct DashboardWeatherEffectsContent: View {
                             WeatherParticleRenderer.draw(
                                 snapshot: snapshot,
                                 field: field,
-                                allowsStormFlash: allowsStormFlash,
                                 time: timeline.date.timeIntervalSinceReferenceDate,
                                 in: &context,
                                 size: size
@@ -304,7 +319,6 @@ private enum WeatherParticleRenderer {
     static func draw(
         snapshot: WeatherAnimationSnapshot,
         field: WeatherParticleField,
-        allowsStormFlash: Bool,
         time: TimeInterval,
         in context: inout GraphicsContext,
         size: CGSize
@@ -314,19 +328,11 @@ private enum WeatherParticleRenderer {
         switch snapshot.condition {
         case .clear:
             drawClearSky(snapshot: snapshot, particles: field.shimmerParticles, time: time, in: &context, size: size)
-        case .rainy:
-            drawRain(snapshot: snapshot, drops: field.rainParticles, time: time, in: &context, size: size)
         case .snowy:
             drawSnow(snapshot: snapshot, flakes: field.snowParticles, time: time, in: &context, size: size)
         case .foggy:
             drawFog(snapshot: snapshot, puffs: field.fogParticles, time: time, in: &context, size: size)
-        case .stormy:
-            drawRain(snapshot: snapshot, drops: field.rainParticles, time: time, in: &context, size: size)
-            if allowsStormFlash {
-                drawStormFlash(snapshot: snapshot, time: time, in: &context, size: size)
-                drawStormLightning(snapshot: snapshot, time: time, in: &context, size: size)
-            }
-        case .cloudy, .haze, .unknown:
+        case .cloudy, .haze, .rainy, .stormy, .unknown:
             break
         }
     }
@@ -385,84 +391,6 @@ private enum WeatherParticleRenderer {
                     height: CGFloat(radius * 2)
                 )),
                 with: .color(Color.white.opacity((0.10 + 0.22 * twinkle) * snapshot.intensity * particle.alpha))
-            )
-        }
-    }
-
-    private static func drawRain(
-        snapshot: WeatherAnimationSnapshot,
-        drops: [WeatherParticle],
-        time: TimeInterval,
-        in context: inout GraphicsContext,
-        size: CGSize
-    ) {
-        // 阵风：基础风 + 慢速摆动 + 偶发强阵风，让整片雨丝有节奏地倾斜（纯数学，零额外绘制开销）。
-        let gust = sin(time * 0.14) * 0.12
-            + sin(time * 0.37 + 1.3) * 0.07
-            + max(0, sin(time * 0.085) - 0.45) * 0.55
-        let wind = (snapshot.wind - 0.35) * (snapshot.isStorm ? 0.78 : 0.46) + gust
-        let activeCount = snapshot.isStorm ? drops.count : min(390, drops.count)
-        // 提高基础不透明度：原值过低（0.23）在明亮背景上几乎看不见，显得简陋。
-        let baseOpacity = snapshot.isStorm ? 0.50 : 0.38
-
-        for drop in drops.prefix(activeCount) {
-            let fall = (drop.y + time * drop.speed * (snapshot.isStorm ? 0.18 : 0.13)).wrapped01()
-            let x = (drop.x + wind * 0.05 * drop.depth + drop.drift * 0.02).wrapped01() * Double(size.width)
-            let y = fall * Double(size.height)
-            let length = drop.length * (0.72 + drop.depth * 0.50) * (snapshot.isStorm ? 1.18 : 1.0)
-            let dx = wind * length * 0.34
-            // 深度着色：近处雨丝更亮更粗、远处更淡更细 → 形成景深层次，而非平铺噪点。
-            let depthShade = 0.45 + 0.75 * drop.depth
-            let head = CGPoint(x: CGFloat(x), y: CGFloat(y))
-            let tail = CGPoint(x: CGFloat(x + dx), y: CGFloat(y + length))
-
-            var path = Path()
-            path.move(to: head)
-            path.addLine(to: tail)
-            context.stroke(
-                path,
-                with: .color(Color.white.opacity(baseOpacity * snapshot.intensity * drop.alpha * depthShade)),
-                lineWidth: CGFloat(drop.size * (0.8 + drop.depth * 0.6))
-            )
-            // 近处雨丝叠一段更亮的“头部”高光，呈现明显的流线/速度感（仅最近 ~40% 雨丝，限制开销）。
-            if drop.depth > 0.62 {
-                var headPath = Path()
-                headPath.move(to: head)
-                headPath.addLine(to: CGPoint(x: CGFloat(x + dx * 0.32), y: CGFloat(y + length * 0.32)))
-                context.stroke(
-                    headPath,
-                    with: .color(Color.white.opacity(min(0.85, baseOpacity * 1.5) * snapshot.intensity * drop.alpha)),
-                    lineWidth: CGFloat(drop.size * (1.1 + drop.depth * 0.6))
-                )
-            }
-        }
-
-        let splashCount = snapshot.isStorm ? 48 : 30
-        for drop in drops.prefix(splashCount) {
-            let phase = sin(time * (1.0 + drop.twinkle) + drop.phase)
-            guard phase > 0.62 else { continue }
-            let x = drop.x * Double(size.width)
-            let y = Double(size.height) * (0.78 + drop.y * 0.18)
-            let radius = (phase - 0.62) * 10.0 * snapshot.intensity
-            // 双环水花：外环淡、内核亮，落地处更有“溅起”的实感。
-            context.stroke(
-                Path(ellipseIn: CGRect(
-                    x: CGFloat(x - radius),
-                    y: CGFloat(y - radius * 0.28),
-                    width: CGFloat(radius * 2),
-                    height: CGFloat(radius * 0.55)
-                )),
-                with: .color(Color.cyan.opacity(0.12 * snapshot.intensity)),
-                lineWidth: 1.0
-            )
-            context.fill(
-                Path(ellipseIn: CGRect(
-                    x: CGFloat(x - radius * 0.28),
-                    y: CGFloat(y - radius * 0.10),
-                    width: CGFloat(radius * 0.56),
-                    height: CGFloat(radius * 0.22)
-                )),
-                with: .color(Color.white.opacity(0.10 * snapshot.intensity))
             )
         }
     }
@@ -536,78 +464,10 @@ private enum WeatherParticleRenderer {
         }
     }
 
-    private static func drawStormFlash(
-        snapshot: WeatherAnimationSnapshot,
-        time: TimeInterval,
-        in context: inout GraphicsContext,
-        size: CGSize
-    ) {
-        let flash = max(0, sin(time * 1.45) - 0.86) * 2.6
-        guard flash > 0 else { return }
-        context.fill(
-            Path(CGRect(origin: .zero, size: size)),
-            with: .color(Color.white.opacity(0.13 * flash * snapshot.intensity))
-        )
-    }
-
-    private static func drawStormLightning(
-        snapshot: WeatherAnimationSnapshot,
-        time: TimeInterval,
-        in context: inout GraphicsContext,
-        size: CGSize
-    ) {
-        let pulse = max(0, sin(time * 1.45) - 0.89) * 3.4
-        guard pulse > 0 else { return }
-
-        let strikeIndex = UInt64(max(0, floor(time * 0.45)))
-        var rng = WeatherSeededGenerator(seed: snapshot.seed ^ (strikeIndex &* 0x9E37_79B9_7F4A_7C15))
-        let startX = CGFloat(rng.next(in: 0.18...0.82)) * size.width
-        let topY = CGFloat(rng.next(in: 0.04...0.12)) * size.height
-        let segmentCount = 7
-        let verticalStep = size.height * CGFloat(rng.next(in: 0.050...0.075))
-        var x = startX
-        var y = topY
-
-        var bolt = Path()
-        bolt.move(to: CGPoint(x: x, y: y))
-        for _ in 0..<segmentCount {
-            x += CGFloat(rng.next(in: -0.065...0.065)) * size.width
-            y += verticalStep * CGFloat(rng.next(in: 0.70...1.18))
-            bolt.addLine(to: CGPoint(x: x, y: y))
-        }
-
-        context.stroke(
-            bolt,
-            with: .color(Color.white.opacity(0.30 * pulse * snapshot.intensity)),
-            lineWidth: 2.2
-        )
-        context.stroke(
-            bolt,
-            with: .color(Color.cyan.opacity(0.10 * pulse * snapshot.intensity)),
-            lineWidth: 7.0
-        )
-
-        for branch in 0..<2 {
-            var branchPath = Path()
-            let branchStartY = topY + verticalStep * CGFloat(branch + 2)
-            let branchStartX = startX + CGFloat(rng.next(in: -0.06...0.06)) * size.width
-            branchPath.move(to: CGPoint(x: branchStartX, y: branchStartY))
-            branchPath.addLine(to: CGPoint(
-                x: branchStartX + CGFloat(rng.next(in: -0.16...0.16)) * size.width,
-                y: branchStartY + CGFloat(rng.next(in: 0.05...0.10)) * size.height
-            ))
-            context.stroke(
-                branchPath,
-                with: .color(Color.white.opacity(0.16 * pulse * snapshot.intensity)),
-                lineWidth: 1.2
-            )
-        }
-    }
 }
 
 private struct WeatherParticleField: Equatable {
     let shimmerParticles: [WeatherParticle]
-    let rainParticles: [WeatherParticle]
     let snowParticles: [WeatherParticle]
     let fogParticles: [WeatherParticle]
 
@@ -625,20 +485,6 @@ private struct WeatherParticleField: Equatable {
                 drift: rng.next(in: -1...1),
                 depth: rng.next(in: 0.45...1.0),
                 twinkle: rng.next(in: 0.55...1.45)
-            )
-        } : []
-        rainParticles = (condition == .rainy || condition == .stormy) ? (0..<520).map { _ in
-            WeatherParticle(
-                x: rng.next(in: 0...1),
-                y: rng.next(in: 0...1),
-                speed: rng.next(in: 0.72...1.95),
-                size: rng.next(in: 0.65...1.35),
-                length: rng.next(in: 16...52),
-                alpha: rng.next(in: 0.55...1.0),
-                phase: rng.next(in: 0...(Double.pi * 2)),
-                drift: rng.next(in: -1...1),
-                depth: rng.next(in: 0.45...1.0),
-                twinkle: rng.next(in: 0.4...1.2)
             )
         } : []
         snowParticles = condition == .snowy ? (0..<310).map { _ in

@@ -23,22 +23,22 @@ assert_rejected() {
   fi
 }
 
-actual="$("$CHECKER" --root "$SCRATCH" --expected-version 1.0.2 --expected-build 3)"
-[[ "$actual" == $'1.0.2\t3' ]] || {
+actual="$("$CHECKER" --root "$SCRATCH" --expected-version 1.0.2 --expected-build 4)"
+[[ "$actual" == $'1.0.2\t4' ]] || {
   echo "[ios-release-version-test] ERROR: unexpected checker output: $actual" >&2
   exit 1
 }
 
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 4' \
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 5' \
   "$SCRATCH/SkyBridge Compass iOS/Widgets/Info.plist"
 assert_rejected "a mismatched Widget build"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 3' \
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 4' \
   "$SCRATCH/SkyBridge Compass iOS/Widgets/Info.plist"
 
 /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 0' \
   "$SCRATCH/SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
 assert_rejected "a non-positive app build"
-/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 3' \
+/usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 4' \
   "$SCRATCH/SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.plist"
 
 python3 - "$SCRATCH/SkyBridge Compass iOS/project.yml" <<'PY'

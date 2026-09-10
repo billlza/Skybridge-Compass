@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 
 /// 主控台全宽卡片的液态玻璃外观（磨砂底层 + 渐变光泽 + 描边 + 动态阴影 + 悬停缩放）。
 ///
@@ -45,6 +46,7 @@ struct DashboardLiquidGlassChrome: ViewModifier {
                 x: 0,
                 y: isFlashing ? 8 : 4
             )
+            .weatherGlassSurface(cornerRadius: 20)
             .scaleEffect(isHovering ? 1.005 : 1.0)
             .animation(.spring(response: 0.4, dampingFraction: 0.75), value: isHovering)
             .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isFlashing)

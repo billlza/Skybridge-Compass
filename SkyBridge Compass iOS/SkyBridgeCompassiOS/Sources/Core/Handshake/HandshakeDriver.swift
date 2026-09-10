@@ -765,6 +765,7 @@ public actor HandshakeDriver {
     /// A peer Finished may reenter this actor while our transport send is suspended.
     /// Only the exact send completion can make its session eligible for publication.
     private var localFinishedDelivery: LocalFinishedDelivery?
+    private var responderOperationToken: UUID?
 
     public func authenticatedFinishedConfirmation(
         matching keys: SessionKeys
@@ -1257,6 +1258,7 @@ public actor HandshakeDriver {
     /// 取消握手
     public func cancel() async {
         guard case .idle = state else {
+            responderOperationToken = nil
             activeOutboundOperationToken = nil
             finishedCommitToken = nil
             localFinishedDelivery = nil
@@ -1299,6 +1301,14 @@ public actor HandshakeDriver {
     
     /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
+        let operationToken = UUID()
+        responderOperationToken = operationToken
+        state = .processingMessageA
+        defer {
+            if responderOperationToken == operationToken {
+                responderOperationToken = nil
+            }
+        }
         currentPeer = peer
         clearAuthenticatedRemoteAuthority()
         
@@ -1318,8 +1328,6 @@ public actor HandshakeDriver {
             )
             context = ctx
             
-            state = .processingMessageA
-            
             // 处理 MessageA
             do {
                 try await ctx.processMessageA(messageA)
@@ -1328,10 +1336,12 @@ public actor HandshakeDriver {
                     identityPublicKey: messageA.identityPublicKey
                 )
             } catch {
-                await handleHandshakeError(error, context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
                 return
             }
 
+            guard responderOperationToken == operationToken else { return }
             if let soa = messageA.soaExtension,
                let localPeerId = localSOAPeerId {
                 // SOA binding must be driven by authenticated MessageA fields.
@@ -1413,10 +1423,12 @@ public actor HandshakeDriver {
                 messageB = result.message
                 sharedSecret = result.sharedSecret
             } catch {
-                await handleHandshakeError(error, context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
                 return
             }
             defer { sharedSecret.zeroize() }
+            guard responderOperationToken == operationToken else { return }
             
             // 发送 MessageB
             do {
@@ -1424,26 +1436,33 @@ public actor HandshakeDriver {
                 // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
                 try await transport.send(to: peer, data: padded)
             } catch {
-                await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx, expectedResponderOperation: operationToken)
                 return
             }
             
+            guard responderOperationToken == operationToken else { return }
             // 派生会话密钥
             let sessionKeys: SessionKeys
             do {
                 sessionKeys = try await ctx.finalizeResponderSessionKeys(sharedSecret: sharedSecret)
             } catch {
-                await handleHandshakeError(error, context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
                 return
             }
 
+            guard responderOperationToken == operationToken else { return }
+            let remoteAuthority = await ctx.getAuthenticatedRemoteAuthority()
+            guard responderOperationToken == operationToken else { return }
             captureCandidateRemoteAuthority(
-                await ctx.getAuthenticatedRemoteAuthority(),
+                remoteAuthority,
                 authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
             )
             
             // 清理敏感数据
             await ctx.zeroize()
+            guard responderOperationToken == operationToken else { return }
             context = nil
             
             // 等待 Finished
@@ -1498,7 +1517,8 @@ public actor HandshakeDriver {
             }
             
         } catch {
-            await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA)
+            guard responderOperationToken == operationToken else { return }
+            await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA, expectedResponderOperation: operationToken)
         }
     }
     
@@ -1905,6 +1925,7 @@ public actor HandshakeDriver {
     }
     
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        responderOperationToken = nil
         activeOutboundOperationToken = nil
         finishedCommitToken = nil
         localFinishedDelivery = nil
@@ -1992,11 +2013,18 @@ public actor HandshakeDriver {
         _ error: Error,
         context: HandshakeContext? = nil,
         rawHandshakeData: Data? = nil,
-        messageKind: HandshakeWireMessageKind? = nil
+        messageKind: HandshakeWireMessageKind? = nil,
+        expectedResponderOperation: UUID? = nil
     ) async {
+        if let expectedResponderOperation,
+           responderOperationToken != expectedResponderOperation { return }
         let negotiatedSuite = await context?.negotiatedSuite
+        if let expectedResponderOperation,
+           responderOperationToken != expectedResponderOperation { return }
         if let ctx = context {
             await ctx.zeroize()
+            if let expectedResponderOperation,
+               responderOperationToken != expectedResponderOperation { return }
             self.context = nil
         }
         
@@ -2134,6 +2162,7 @@ public actor HandshakeDriver {
         winnerAttemptId: Data
     ) async {
         guard case .idle = state else {
+            responderOperationToken = nil
             activeOutboundOperationToken = nil
             finishedCommitToken = nil
             localFinishedDelivery = nil

@@ -2,12 +2,14 @@ import Foundation
 
 enum AtmosphereRenderPolicy {
     /// Same pixel budget and quality tiers as the Android cloud volume.
-    static func drawableSize(for size: CGSize, quality: Float) -> CGSize {
+    static func drawableSize(for size: CGSize, quality: Float, kind: AtmosphereKind = .clouds) -> CGSize {
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else {
             return .zero
         }
         let qualityScale: CGFloat = quality > 0.65 ? 1 : 0.75
-        let scale = min(1, 600 / min(size.width, size.height), 1300 / max(size.width, size.height)) * qualityScale
+        let shortEdge: CGFloat = kind == .rain ? 900 : 600
+        let longEdge: CGFloat = kind == .rain ? 1950 : 1300
+        let scale = min(1, shortEdge / min(size.width, size.height), longEdge / max(size.width, size.height)) * qualityScale
         return CGSize(width: max(1, (size.width * scale).rounded()), height: max(1, (size.height * scale).rounded()))
     }
 }

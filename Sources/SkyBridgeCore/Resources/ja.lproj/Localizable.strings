@@ -1154,3 +1154,12 @@
 "remoteControl.securityNotice.transferInput" = "入力操作を引き継ぐ";
 
 "remoteControl.securityNotice.approveView" = "閲覧を許可";
+
+"info.appleSilicon" = "Appleシリコン";
+"info.optimizationEnabled" = "最適化有効";
+"info.pCore" = "高性能コア";
+"info.eCore" = "高効率コア";
+"info.multiCoreOpt" = "マルチコア最適化";
+"info.reqAppleSilicon" = "Appleシリコンが必要です";
+"info.deviceUnsupported" = "非対応のデバイス";
+"info.standardMode" = "標準モード";

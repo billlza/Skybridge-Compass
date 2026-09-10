@@ -21,13 +21,9 @@ struct CloudSurfaceTests {
 
     @Test(arguments: AtmosphereKind.allCases)
     func nativeSurfaceLoadsWhenPausedAndTracksWindowSize(kind: AtmosphereKind) async throws {
-        let root = Group {
-            if kind == .clouds {
-                CinematicCloudView(isAnimating: false)
-            } else {
-                CinematicHazeView(isAnimating: false)
-            }
-        }
+        let rainScene = WeatherRainScene()
+        let root = AtmosphereView(kind: kind, isAnimating: false, rainScene: kind == .rain ? rainScene : nil)
+            .overlay { if kind == .rain { WeatherRainGlassOverlay(scene: rainScene) } }
         #if os(macOS)
         let window = NSWindow(contentRect: CGRect(x: 40, y: 40, width: 480, height: 780),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -56,30 +52,27 @@ struct CloudSurfaceTests {
         #expect(surface.isPaused)
         #expect(surface.bounds.width > 0 && surface.bounds.height > 0)
         #expect(surface.drawableSize.width > 0 && surface.drawableSize.height > 0)
-        #expect(min(surface.drawableSize.width, surface.drawableSize.height) <= 600)
-        #expect(max(surface.drawableSize.width, surface.drawableSize.height) <= 1300)
+        #expect(min(surface.drawableSize.width, surface.drawableSize.height) <= (kind == .rain ? 900 : 600))
+        #expect(max(surface.drawableSize.width, surface.drawableSize.height) <= (kind == .rain ? 1950 : 1300))
         #expect(abs(surface.drawableSize.width / surface.drawableSize.height - surface.bounds.width / surface.bounds.height) < 0.01)
         #expect(surface.colorPixelFormat == .bgra8Unorm)
         let metalLayer = try #require(surface.layer as? CAMetalLayer)
         #expect(metalLayer.colorspace?.name == CGColorSpace.sRGB)
         #expect(surface.delegate != nil)
-        // MTKView's currentDrawable belongs to its draw callback and may already have
-        // been presented. Acquire our own drawable to verify the live surface's format.
-        do {
-            let drawable = try #require(metalLayer.nextDrawable())
-            #expect(drawable.texture.width == Int(surface.drawableSize.width))
-            #expect(drawable.texture.height == Int(surface.drawableSize.height))
-            #expect(drawable.texture.pixelFormat == .bgra8Unorm)
-        }
-
         let coordinator = try #require(surface.delegate as? AtmosphereNativeView.Coordinator)
+        let observer = SurfaceFrameObserver(coordinator: coordinator)
+        surface.delegate = observer
         let original = coordinator.settings
         let changed = AtmosphereNativeView(renderer: original.renderer, intensity: 0.5, wind: original.wind,
                                       quality: original.quality, framesPerSecond: original.framesPerSecond,
-                                      isAnimating: false, onFailure: { Issue.record("\($0)") })
+                                      isAnimating: false, onFailure: { Issue.record("\($0)") }, rainScene: original.rainScene)
         coordinator.update(changed, view: surface)
         #expect(!surface.isPaused, "A static settings change must request one new frame")
         try await requireSubmittedStaticFrame(surface)
+        let frame = try #require(observer.lastFrame)
+        #expect(frame.width == Int(surface.drawableSize.width))
+        #expect(frame.height == Int(surface.drawableSize.height))
+        #expect(frame.pixelFormat == .bgra8Unorm)
 
         let parent = try #require(surface.superview)
         surface.removeFromSuperview()
@@ -87,6 +80,32 @@ struct CloudSurfaceTests {
         parent.addSubview(surface)
         #expect(!surface.isPaused, "Reattaching a static surface must redraw even when its size is unchanged")
         try await requireSubmittedStaticFrame(surface)
+
+        let animated = AtmosphereNativeView(renderer: original.renderer, intensity: changed.intensity,
+                                           wind: original.wind, quality: original.quality,
+                                           framesPerSecond: 30, isAnimating: true,
+                                           onFailure: { Issue.record("\($0)") }, rainScene: original.rainScene)
+        let firstAnimatedFrame = observer.presentedAnimationFrames
+        coordinator.update(animated, view: surface)
+        let animationDeadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while observer.presentedAnimationFrames - firstAnimatedFrame < 60 && ContinuousClock.now < animationDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(observer.presentedAnimationFrames - firstAnimatedFrame >= 60, "A visible surface must present at least 60 animated frames")
+        #expect(!surface.isPaused)
+        coordinator.update(changed, view: surface)
+        #expect(surface.isPaused, "Stopping animation must pause the frame clock without another settings change")
+        if kind == .rain {
+            #expect(rainScene.hasPresentationTarget(owner: coordinator))
+            let replacement = NSObject()
+            rainScene.bind(owner: replacement, device: original.renderer.device, requestFrame: {})
+            coordinator.update(changed, view: surface)
+            #expect(rainScene.hasPresentationTarget(owner: replacement), "A retiring rain view's settings update cannot reclaim the foreground")
+            rainScene.unbind(owner: coordinator)
+            #expect(rainScene.hasPresentationTarget(owner: replacement), "An old rain view cannot detach the replacement weather owner")
+            rainScene.unbind(owner: replacement)
+            #expect(!rainScene.hasPresentationTarget(owner: replacement), "Leaving rain must hide foreground droplets")
+        }
     }
 
     private func requireSubmittedStaticFrame(_ surface: MTKView) async throws {
@@ -115,6 +134,44 @@ struct CloudSurfaceTests {
         return nil
     }
     #endif
+}
+
+@MainActor
+private final class SurfaceFrameObserver: NSObject, MTKViewDelegate {
+    struct FrameLayout {
+        let width: Int
+        let height: Int
+        let pixelFormat: MTLPixelFormat
+    }
+
+    private let coordinator: AtmosphereNativeView.Coordinator
+    private(set) var lastFrame: FrameLayout?
+    private(set) var presentedAnimationFrames = 0
+
+    init(coordinator: AtmosphereNativeView.Coordinator) {
+        self.coordinator = coordinator
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        coordinator.mtkView(view, drawableSizeWillChange: size)
+    }
+
+    func draw(in view: MTKView) {
+        // Inspect the real render target inside MetalKit's owning callback, before presentation.
+        if let texture = view.currentRenderPassDescriptor?.colorAttachments[0].texture {
+            lastFrame = FrameLayout(width: texture.width, height: texture.height, pixelFormat: texture.pixelFormat)
+        }
+        let isAnimating = coordinator.settings.isAnimating
+        if let drawable = view.currentDrawable {
+            drawable.addPresentedHandler { [weak self] presented in
+                guard isAnimating, presented.presentedTime > 0 else { return }
+                Task { @MainActor [weak self] in
+                    self?.presentedAnimationFrames += 1
+                }
+            }
+        }
+        coordinator.draw(in: view)
+    }
 }
 
 @MainActor

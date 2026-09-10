@@ -617,6 +617,7 @@ let package = Package(
                 "SkyBridgeCore",
                 "SkyBridgeUI",
                 "SkyBridgeVisualParity",
+                .product(name: "SkyBridgeWeatherRendering", package: "SkyBridgeWeatherRendering"),
                 .product(name: "OrderedCollections", package: "swift-collections")
             ] + smokeSupportProductionDependencies,
             path: "Sources/SkyBridgeCompassApp",

@@ -58,6 +58,8 @@ schemes:
         CloudRenderingHost: all
         CloudRenderingHostTests: [test]
     test:
+      commandLineArguments:
+        --weather-rendering-tests: true
       environmentVariables:
         MTL_DEBUG_LAYER: "1"
       targets:

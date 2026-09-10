@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 import Charts
 import SkyBridgeCore
 import SkyBridgeUI
@@ -46,6 +47,7 @@ public struct DashboardView: View {
 
  // 雾霾交互管理器
     @StateObject private var hazeClearManager = InteractiveClearManager()
+    @State private var rainScene = WeatherRainScene()
 
  // ✅ 性能监控器 - 通过PerformanceModeManager获取真实的系统性能数据
     @State private var performanceModeManager: PerformanceModeManager?
@@ -98,16 +100,6 @@ public struct DashboardView: View {
 
     public var body: some View {
         ZStack {
-            if presentationPhase.enablesAnimatedBackground {
-                DashboardBackgroundView(
-                    hazeClearManager: hazeClearManager,
-                    enableWeatherEffects: presentationPhase.enablesDeferredContent
-                )
-            } else {
-                LaunchTransitionBackground()
-                    .ignoresSafeArea(.all)
-            }
-
             NavigationSplitView {
  // 侧边栏
                 GlassSidebar(selectedTab: Binding(
@@ -196,6 +188,8 @@ public struct DashboardView: View {
                 }
             }
 
+            WeatherRainGlassOverlay(scene: rainScene).ignoresSafeArea()
+
  // 用户资料覆盖层
             if showingUserProfileOverlay {
                 UserProfileOverlay(isPresented: $showingUserProfileOverlay)
@@ -208,6 +202,20 @@ public struct DashboardView: View {
                     ))
                     .animation(.spring(response: 0.6, dampingFraction: 0.8), value: showingUserProfileOverlay)
             }
+        }
+        .backgroundPreferenceValue(WeatherGlassPreferenceKey.self) { anchors in
+            GeometryReader { geometry in
+                if presentationPhase.enablesAnimatedBackground {
+                    DashboardBackgroundView(
+                        hazeClearManager: hazeClearManager,
+                        enableWeatherEffects: presentationPhase.enablesDeferredContent,
+                        glassRegions: anchors.map { $0.resolve(in: geometry) }, rainScene: rainScene
+                    )
+                } else {
+                    LaunchTransitionBackground().ignoresSafeArea(.all)
+                }
+            }
+            .ignoresSafeArea()
         }
         .tint(themeConfiguration.accentColor)
  // ⌘⇧↑ / ⌘⇧↓：在侧边栏栏目之间上下切换焦点（窗口为 key 时即生效，不依赖鼠标）
@@ -307,6 +315,7 @@ public struct DashboardView: View {
                     .padding(.bottom, 32)
                 }
                 .scrollIndicators(.hidden)
+                .weatherGlassClippingRegion()
             case .deviceManagement:
                 EnhancedDeviceDiscoveryView(requestedMode: $requestedDiscoveryMode)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)

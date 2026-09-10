@@ -6,6 +6,8 @@ import os
 struct AtmosphereView: View {
     private let kind: AtmosphereKind
     private let appearance: HazeAppearance
+    private let rain: RainAppearance
+    private let rainScene: WeatherRainScene?
     private let intensity: Float
     private let wind: Float
     private let quality: Float
@@ -15,11 +17,14 @@ struct AtmosphereView: View {
     @State private var failure: String?
 
     init(kind: AtmosphereKind, intensity: Float = 0.68, wind: Float = 0.2, quality: Float = 1,
-         framesPerSecond: Int = 30, isAnimating: Bool = true, appearance: HazeAppearance = HazeAppearance()) {
+         framesPerSecond: Int = 30, isAnimating: Bool = true, appearance: HazeAppearance = HazeAppearance(),
+         rain: RainAppearance = RainAppearance(), rainScene: WeatherRainScene? = nil) {
         precondition(intensity.isFinite && wind.isFinite && quality.isFinite)
         precondition(appearance.tint.x.isFinite && appearance.tint.y.isFinite && appearance.tint.z.isFinite)
         self.kind = kind
         self.appearance = appearance
+        self.rain = rain
+        self.rainScene = rainScene
         self.intensity = min(max(intensity, 0), 1)
         self.wind = min(max(wind, 0), 1)
         self.quality = min(max(quality, 0), 1)
@@ -35,7 +40,7 @@ struct AtmosphereView: View {
             } else if let renderer {
                 AtmosphereNativeView(renderer: renderer, intensity: intensity, wind: wind, quality: quality,
                                      framesPerSecond: framesPerSecond, isAnimating: isAnimating,
-                                     onFailure: recordFailure, appearance: appearance)
+                                     onFailure: recordFailure, appearance: appearance, rain: rain, rainScene: rainScene)
             } else {
                 Color(red: 0.035, green: 0.065, blue: 0.115)
             }
@@ -71,6 +76,8 @@ struct AtmosphereNativeView {
     let isAnimating: Bool
     let onFailure: @MainActor (String) -> Void
     var appearance = HazeAppearance()
+    var rain = RainAppearance()
+    var rainScene: WeatherRainScene?
 
     @MainActor
     func makeCoordinator() -> Coordinator { Coordinator(settings: self) }
@@ -114,12 +121,23 @@ struct AtmosphereNativeView {
         private var clock = AtmosphereAnimationClock()
         private let availableFrames = DispatchSemaphore(value: 2)
         private var needsFrame = true
+        private weak var boundRainScene: WeatherRainScene?
 
         init(settings: AtmosphereNativeView) { self.settings = settings }
 
         func update(_ settings: AtmosphereNativeView, view: MTKView) {
+            if boundRainScene !== settings.rainScene {
+                boundRainScene?.unbind(owner: self)
+                boundRainScene = settings.rainScene
+                settings.rainScene?.bind(owner: self, device: settings.renderer.device) { [weak self, weak view] in
+                    guard let self, let view else { return }
+                    self.needsFrame = true
+                    self.updateFrameClock(view)
+                }
+            }
             if self.settings.intensity != settings.intensity || self.settings.wind != settings.wind ||
-                self.settings.quality != settings.quality || self.settings.appearance != settings.appearance {
+                self.settings.quality != settings.quality || self.settings.appearance != settings.appearance ||
+                self.settings.rain != settings.rain {
                 needsFrame = true
             }
             self.settings = settings
@@ -135,7 +153,8 @@ struct AtmosphereNativeView {
             let scale = view.contentScaleFactor
             #endif
             let pixels = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
-            let size = AtmosphereRenderPolicy.drawableSize(for: pixels, quality: settings.quality)
+            let size = AtmosphereRenderPolicy.drawableSize(for: pixels, quality: settings.quality,
+                                                          kind: settings.renderer.kind)
             if size != .zero, size != view.drawableSize {
                 view.drawableSize = size
                 needsFrame = true
@@ -178,7 +197,23 @@ struct AtmosphereNativeView {
                 let time = clock.sample(at: CACurrentMediaTime(), animating: settings.isAnimating)
                 let uniforms = AtmosphereUniforms(resolution: SIMD2(Float(view.drawableSize.width), Float(view.drawableSize.height)),
                                              time: time, quality: settings.quality, intensity: settings.intensity, wind: settings.wind)
-                try settings.renderer.encode(commandBuffer: buffer, pass: pass, uniforms: uniforms, appearance: settings.appearance)
+                try settings.renderer.encode(commandBuffer: buffer, pass: pass, uniforms: uniforms,
+                                             appearance: settings.appearance, rain: settings.rain,
+                                             compositeGlass: settings.rainScene == nil)
+                let glassDrawable = settings.rainScene?.nextDrawable(owner: self)
+                if let glassDrawable {
+                    // Read the texture before presentation, exactly once, while this drawable is owned.
+                    let texture = glassDrawable.texture
+                    let glassPass = MTLRenderPassDescriptor()
+                    glassPass.colorAttachments[0].texture = texture
+                    glassPass.colorAttachments[0].loadAction = .clear
+                    glassPass.colorAttachments[0].storeAction = .store
+                    glassPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+                    var glassUniforms = uniforms
+                    glassUniforms.resolution = SIMD2(Float(texture.width), Float(texture.height))
+                    try settings.renderer.encodeGlass(commandBuffer: buffer, pass: glassPass,
+                                                       uniforms: glassUniforms, rain: settings.rain)
+                }
                 let availableFrames = availableFrames
                 let onFailure = settings.onFailure
                 buffer.addCompletedHandler { completed in
@@ -189,12 +224,14 @@ struct AtmosphereNativeView {
                     }
                 }
                 buffer.present(drawable)
+                if let glassDrawable { buffer.present(glassDrawable) }
                 buffer.commit()
-                needsFrame = false
+                needsFrame = settings.rainScene?.hasPresentationTarget(owner: self) == true && glassDrawable == nil
                 updateFrameClock(view)
             } catch {
                 availableFrames.signal()
                 view.isPaused = true
+                settings.rainScene?.unbind(owner: self)
                 settings.onFailure(error.localizedDescription)
             }
         }
@@ -233,6 +270,7 @@ extension AtmosphereNativeView: NSViewRepresentable {
     func makeNSView(context: Context) -> MTKView { makeSurface(coordinator: context.coordinator) }
     func updateNSView(_ view: MTKView, context: Context) { context.coordinator.update(self, view: view) }
     static func dismantleNSView(_ view: MTKView, coordinator: Coordinator) {
+        coordinator.settings.rainScene?.unbind(owner: coordinator)
         view.isPaused = true
         view.delegate = nil
         view.releaseDrawables()
@@ -243,6 +281,7 @@ extension AtmosphereNativeView: UIViewRepresentable {
     func makeUIView(context: Context) -> MTKView { makeSurface(coordinator: context.coordinator) }
     func updateUIView(_ view: MTKView, context: Context) { context.coordinator.update(self, view: view) }
     static func dismantleUIView(_ view: MTKView, coordinator: Coordinator) {
+        coordinator.settings.rainScene?.unbind(owner: coordinator)
         view.isPaused = true
         view.delegate = nil
         view.releaseDrawables()

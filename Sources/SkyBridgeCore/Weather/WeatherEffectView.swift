@@ -13,17 +13,22 @@
 
 import SwiftUI
 import OSLog
+import SkyBridgeWeatherRendering
 
 /// 天气效果覆盖层（Metal 4高性能渲染）
 public struct WeatherEffectView: View {
     let theme: WeatherTheme
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
     @State private var clearZones: [ClearZone] = []
     @State private var performanceConfig: PerformanceConfiguration?
     @StateObject private var interactiveClear = InteractiveClearManager()
     @State private var didInitialReset: Bool = false
 
-    public init(theme: WeatherTheme) {
+    public init(theme: WeatherTheme, glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil) {
         self.theme = theme
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
     }
 
     public var body: some View {
@@ -89,7 +94,7 @@ public struct WeatherEffectView: View {
 
             case .rainy:
 // 🌧️ 雨天 - 高级实现（内部已包含暴风雨差异逻辑），由统一 clearManager 注入
-                CinematicRainEffectView(clearManager: interactiveClear)
+                CinematicRainEffectView(clearManager: interactiveClear, glassRegions: glassRegions, rainScene: rainScene)
 
             case .snowy:
 // ❄️ 雪天 - 高级实现（不简化），由统一 clearManager 注入
@@ -112,8 +117,7 @@ public struct WeatherEffectView: View {
 
             case .stormy:
  // ⛈️ 暴风雨 - 电影级：强化雨滴 + 闪电系统
-                CinematicRainView(config: config)
-                    .opacity(interactiveClear.globalOpacity)
+                CinematicRainEffectView(clearManager: interactiveClear, storm: true, glassRegions: glassRegions, rainScene: rainScene)
 
             default:
                 EmptyView()

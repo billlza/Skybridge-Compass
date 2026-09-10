@@ -1305,3 +1305,12 @@
 "remoteControl.securityNotice.transferInput" = "交接输入权";
 
 "remoteControl.securityNotice.approveView" = "允许观看";
+
+"info.appleSilicon" = "Apple 芯片";
+"info.optimizationEnabled" = "优化已启用";
+"info.pCore" = "性能核心";
+"info.eCore" = "能效核心";
+"info.multiCoreOpt" = "多核优化";
+"info.reqAppleSilicon" = "需要 Apple 芯片";
+"info.deviceUnsupported" = "不支持此设备";
+"info.standardMode" = "标准模式";

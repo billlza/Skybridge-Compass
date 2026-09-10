@@ -1279,3 +1279,12 @@
 "remoteControl.securityNotice.transferInput" = "Transfer input control";
 
 "remoteControl.securityNotice.approveView" = "Allow viewing";
+
+"info.appleSilicon" = "Apple silicon";
+"info.optimizationEnabled" = "Optimizations enabled";
+"info.pCore" = "Performance cores";
+"info.eCore" = "Efficiency cores";
+"info.multiCoreOpt" = "Multicore optimization";
+"info.reqAppleSilicon" = "Apple silicon required";
+"info.deviceUnsupported" = "Unsupported device";
+"info.standardMode" = "Standard mode";

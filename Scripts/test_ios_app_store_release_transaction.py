@@ -27,7 +27,7 @@ SOURCE_REPOSITORY = "billlza/Skybridge-Compass"
 SOURCE_COMMIT = "1" * 40
 SOURCE_INPUT_DIGEST = "2" * 64
 VERSION = "1.0.2"
-BUILD = "3"
+BUILD = "4"
 APP_UUIDS = [{"architecture": "arm64", "uuid": "11111111-1111-1111-1111-111111111111"}]
 WIDGET_UUIDS = [
     {"architecture": "arm64", "uuid": "22222222-2222-2222-2222-222222222222"}
@@ -345,7 +345,7 @@ class PhysicalAcceptanceTests(unittest.TestCase):
                 )
                 original = manifest_path.read_bytes()
                 manifest = json.loads(original)
-                manifest["iosReleaseArchive"]["releaseBuild"] = "4"
+                manifest["iosReleaseArchive"]["releaseBuild"] = "5"
                 manifest_path.write_text(
                     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
@@ -466,7 +466,7 @@ class AppStoreProductPolicyTests(unittest.TestCase):
             app_store_widget_info=dict(archive_widget),
         )
         changed = dict(archive_app)
-        changed["CFBundleVersion"] = "4"
+        changed["CFBundleVersion"] = str(int(BUILD) + 1)
         with self.assertRaises(app_store_verifier.AppStoreVerificationError):
             app_store_verifier._validate_archive_product_metadata(
                 identity=identity,

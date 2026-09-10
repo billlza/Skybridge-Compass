@@ -1,5 +1,6 @@
 import SwiftUI
 import SkyBridgeCore
+import SkyBridgeWeatherRendering
 
 /// Lightweight first-frame background shared by the launch screen and Dashboard shell.
 struct LaunchTransitionBackground: View {
@@ -25,13 +26,18 @@ public struct DashboardBackgroundView: View {
 
     @ObservedObject var hazeClearManager: InteractiveClearManager
     private let enableWeatherEffects: Bool
+    private let glassRegions: [WeatherGlassRegion]
+    private let rainScene: WeatherRainScene?
 
     public init(
         hazeClearManager: InteractiveClearManager,
-        enableWeatherEffects: Bool = true
+        enableWeatherEffects: Bool = true,
+        glassRegions: [WeatherGlassRegion] = [], rainScene: WeatherRainScene? = nil
     ) {
         self._hazeClearManager = ObservedObject(wrappedValue: hazeClearManager)
         self.enableWeatherEffects = enableWeatherEffects
+        self.glassRegions = glassRegions
+        self.rainScene = rainScene
     }
 
     public var body: some View {
@@ -86,6 +92,6 @@ public struct DashboardBackgroundView: View {
     @ViewBuilder
     private func dynamicWeatherEffectView(for condition: WeatherCondition) -> some View {
         // ✅ 统一入口：所有天气覆盖层都通过 SkyBridgeCore.WeatherEffectView 渲染
-        WeatherEffectView(theme: weatherManager.currentTheme)
+        WeatherEffectView(theme: weatherManager.currentTheme, glassRegions: glassRegions, rainScene: rainScene)
     }
 }

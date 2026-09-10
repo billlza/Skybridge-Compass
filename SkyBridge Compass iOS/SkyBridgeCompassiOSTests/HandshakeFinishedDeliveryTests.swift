@@ -273,3 +273,89 @@ final class HandshakeFinishedDeliveryTests: XCTestCase {
         throw FinishedDeliveryTestFailure.timedOutWaitingForTransport
     }
 }
+
+@available(iOS 17.0, *)
+private actor PendingMessageBTransport: DiscoveryTransport {
+    private let blockFirst: Bool
+    private var messages: [Data] = []
+    private var pending: CheckedContinuation<Void, any Error>?
+    init(blockFirst: Bool = false) { self.blockFirst = blockFirst }
+    func send(to peer: PeerIdentifier, data: Data) async throws {
+        guard messages.count < 2 else { throw FinishedDeliveryTestFailure.duplicateSend }
+        messages.append(data)
+        if blockFirst && messages.count == 1 {
+            try await withCheckedThrowingContinuation { pending = $0 }
+        }
+    }
+    func captured() -> [Data] { messages }
+    func complete(succeed: Bool) {
+        guard let continuation = pending else { return }
+        pending = nil
+        if succeed { continuation.resume() }
+        else { continuation.resume(throwing: FinishedDeliveryTestFailure.sendFailed) }
+    }
+}
+
+@available(iOS 17.0, *)
+final class HandshakeMessageBCancellationTests: XCTestCase {
+    func testLateMessageBSuccessCannotSendFinishedAfterCancel() async throws {
+        try await exercise(succeed: true)
+    }
+    func testLateMessageBFailureCannotReplaceCancellation() async throws {
+        try await exercise(succeed: false)
+    }
+    private func exercise(succeed: Bool) async throws {
+        let outgoing = PendingMessageBTransport()
+        let incoming = PendingMessageBTransport(blockFirst: true)
+        func driver(_ transport: PendingMessageBTransport) -> HandshakeDriver {
+            let key = Curve25519.Signing.PrivateKey()
+            return HandshakeDriver(
+                transport: transport, cryptoProvider: ClassicCryptoProvider(),
+                protocolSignatureProvider: ClassicSignatureProvider(),
+                identityKeyHandle: .softwareKey(key.rawRepresentation), sigAAlgorithm: .ed25519,
+                protocolSigningKeyProtection: .softwareKeychain,
+                identityPublicKey: key.publicKey.rawRepresentation,
+                offeredSuites: [.x25519Ed25519]
+            )
+        }
+        let initiator = driver(outgoing)
+        let responder = driver(incoming)
+        let peer = PeerIdentifier(deviceId: "message-b-cancellation-\(UUID().uuidString)")
+        let outbound = Task { try await initiator.initiateHandshake(with: peer) }
+        var inbound: Task<Void, Never>?
+        do {
+            let deadline = ContinuousClock.now + .seconds(3)
+            while await outgoing.captured().isEmpty && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let frames = await outgoing.captured()
+            let message = try XCTUnwrap(frames.first)
+            inbound = Task { await responder.handleMessage(message, from: peer) }
+            while await incoming.captured().isEmpty && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let before = await incoming.captured()
+            XCTAssertEqual(before.count, 1)
+            await responder.cancel()
+            await incoming.complete(succeed: succeed)
+            await inbound?.value
+            if case .failed(.cancelled) = await responder.getCurrentState() {} else {
+                XCTFail("A late MessageB send must preserve cancellation")
+            }
+            let after = await incoming.captured()
+            XCTAssertEqual(after.count, 1, "A cancelled MessageB send cannot start Finished delivery")
+        } catch {
+            await responder.cancel()
+            await incoming.complete(succeed: false)
+            await inbound?.value
+            await initiator.cancel()
+            _ = await outbound.result
+            throw error
+        }
+        await responder.cancel()
+        await incoming.complete(succeed: false)
+        await inbound?.value
+        await initiator.cancel()
+        _ = await outbound.result
+    }
+}
