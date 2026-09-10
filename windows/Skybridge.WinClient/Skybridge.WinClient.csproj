@@ -118,4 +118,8 @@
     <PRIResource Include="Strings\zh-Hans\Resources.resw" />
     <PRIResource Include="Strings\ja\Resources.resw" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="..\..\LICENSE" Link="Licenses\SkyBridge-Compass.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\LICENSING.md" Link="Licenses\README.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
