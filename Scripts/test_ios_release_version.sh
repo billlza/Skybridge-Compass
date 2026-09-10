@@ -15,6 +15,29 @@ cp "$ROOT_DIR/SkyBridge Compass iOS/SkyBridgeCompassiOS/Supporting Files/Info.pl
 cp "$ROOT_DIR/SkyBridge Compass iOS/Widgets/Info.plist" \
   "$SCRATCH/SkyBridge Compass iOS/Widgets/Info.plist"
 
+
+# The regression fixture has an explicit baseline independent of the next shipping build.
+python3 - "$SCRATCH" <<'PYFIXTURE'
+from pathlib import Path
+import plistlib
+import re
+import sys
+
+root = Path(sys.argv[1]) / "SkyBridge Compass iOS"
+project = root / "project.yml"
+source = project.read_text(encoding="utf-8")
+source, versions = re.subn(r'(CFBundleShortVersionString:\s*)"[^"]+"', r'\g<1>"1.0.2"', source)
+source, builds = re.subn(r'(CFBundleVersion:\s*)"[^"]+"', r'\g<1>"4"', source)
+assert versions == 2 and builds == 2
+project.write_text(source, encoding="utf-8")
+for relative in ["SkyBridgeCompassiOS/Supporting Files/Info.plist", "Widgets/Info.plist"]:
+    path = root / relative
+    value = plistlib.loads(path.read_bytes())
+    value["CFBundleShortVersionString"] = "1.0.2"
+    value["CFBundleVersion"] = "4"
+    path.write_bytes(plistlib.dumps(value))
+PYFIXTURE
+
 assert_rejected() {
   local description="$1"
   if "$CHECKER" --root "$SCRATCH" >/dev/null 2>&1; then
