@@ -10,8 +10,8 @@
   "v1_exported_bs_ffi_symbol_count": 33,
   "v2_exported_bs_ffi_symbol_count": 5,
   "capabilities_v2": "0x0f",
-  "source_revision": "999729934b0cf3c76bad814ea9d620261b46b407",
-  "source_worktree_clean": false,
+  "source_revision": "3b08cd8ac7429fb527dadfb460f7e70cf2cc5102",
+  "source_worktree_clean": true,
   "source_snapshot_sha256": "3ef9401ada4176cf9318162d5c43a8ae31cb3f643e46b535d0aae7536f9b194e",
   "source_snapshot_method": "sorted path-length/path/file-sha256 over implementation, excluding target",
   "cargo_lock_sha256": "268158bdfa41f2002f2af28e867379f48b26b05909aa6f2d39a0e391755106b4",
@@ -40,9 +40,9 @@
     "install_name": "@rpath/BoundSessionFFI.framework/BoundSessionFFI"
   },
   "framework_binaries_after_adhoc_signing": {
-    "macos-arm64/BoundSessionFFI.framework/Versions/A/BoundSessionFFI": "c4022f5a7cdfcb2c34048d18a583c083aeb1300e270ca7529a124eec10111957",
-    "ios-arm64/BoundSessionFFI.framework/BoundSessionFFI": "13c18cd46bad94bc50a859d2bc05ea7087cc52d3fa41698232bf302bcf8b812f",
-    "ios-arm64-simulator/BoundSessionFFI.framework/BoundSessionFFI": "852d9ef2eb6ad894af268bff404a6e8d3519fada5154bb71b4ce18dfd83a6b73"
+    "macos-arm64/BoundSessionFFI.framework/Versions/A/BoundSessionFFI": "53033ba3906ed8aa803b0fd391f21b49b284374df7b245871df8a762e859ef3c",
+    "ios-arm64/BoundSessionFFI.framework/BoundSessionFFI": "01667b2439e08ce90664c1953ddbe900a0ef4fc7c574ba60e3ed98cae2725859",
+    "ios-arm64-simulator/BoundSessionFFI.framework/BoundSessionFFI": "067b87dea1d71b81f890555f47e5d68f045db4260df9ff5f79fb73a7d33630ba"
   },
   "signing_contract": {
     "source_frameworks": "ad-hoc integration integrity only",

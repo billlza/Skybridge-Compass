@@ -14,12 +14,16 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, NoReturn
 
+from extract_ios_production_identity_evidence import (
+    ProductionIdentityEvidenceError,
+    validate_manifest_identity_policy,
+)
 from ios_physical_release_acceptance import expected_binding
 from ios_release_archive_identity import ArchiveIdentityError, load_identity
-
 
 FINALIZATION_ORDER = "private-then-public-v1"
 MANIFEST_FILE_NAME = "release-acceptance.json"
@@ -70,7 +74,9 @@ def _open_trusted_directory(path: Path) -> tuple[int, os.stat_result]:
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        _fail(f"unable to open manifest directory without following links: {path}: {exc}")
+        _fail(
+            f"unable to open manifest directory without following links: {path}: {exc}"
+        )
     try:
         opened_metadata = os.fstat(descriptor)
     except OSError as exc:
@@ -100,14 +106,12 @@ def _validate_manifest_metadata(metadata: os.stat_result, path: Path) -> None:
     if stat.S_IMODE(metadata.st_mode) != MANIFEST_MODE:
         _fail(f"manifest mode must be 0600: {path}")
     if metadata.st_size <= 0 or metadata.st_size > MAX_MANIFEST_BYTES:
-        _fail(
-            f"manifest size must be between 1 and {MAX_MANIFEST_BYTES} bytes: {path}"
-        )
+        _fail(f"manifest size must be between 1 and {MAX_MANIFEST_BYTES} bytes: {path}")
 
 
 def _read_manifest(path: Path) -> tuple[bytes, dict[str, Any]]:
     directory_descriptor, _ = _open_trusted_directory(path.parent)
-    descriptor: Optional[int] = None
+    descriptor: int | None = None
     try:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
@@ -127,7 +131,9 @@ def _read_manifest(path: Path) -> tuple[bytes, dict[str, Any]]:
             remaining -= len(chunk)
         raw = b"".join(chunks)
         final_metadata = os.fstat(descriptor)
-        path_metadata = os.stat(path.name, dir_fd=directory_descriptor, follow_symlinks=False)
+        path_metadata = os.stat(
+            path.name, dir_fd=directory_descriptor, follow_symlinks=False
+        )
         if (
             final_metadata.st_dev != initial_metadata.st_dev
             or final_metadata.st_ino != initial_metadata.st_ino
@@ -161,7 +167,7 @@ def _serialized(payload: dict[str, Any]) -> bytes:
 
 
 def _inject(
-    fault_injector: Optional[FaultInjector],
+    fault_injector: FaultInjector | None,
     phase: str,
     path: Path,
 ) -> None:
@@ -179,11 +185,11 @@ def _atomic_replace(
     content: bytes,
     *,
     phase_prefix: str,
-    fault_injector: Optional[FaultInjector],
+    fault_injector: FaultInjector | None,
 ) -> None:
     directory_descriptor, _ = _open_trusted_directory(path.parent)
-    temporary_path: Optional[Path] = None
-    descriptor: Optional[int] = None
+    temporary_path: Path | None = None
+    descriptor: int | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{path.name}.{phase_prefix}.",
@@ -234,7 +240,7 @@ def _atomic_replace(
 def _validate_pre_cleanup_payload(
     payload: dict[str, Any],
     *,
-    required_archive_binding: Optional[dict[str, Any]],
+    required_archive_binding: dict[str, Any] | None,
 ) -> bool:
     candidate = payload.get("preCleanupCandidate")
     if type(candidate) is not bool:
@@ -251,7 +257,9 @@ def _validate_pre_cleanup_payload(
         if payload.get("iosReleaseArchive") != required_archive_binding:
             _fail("pre-cleanup manifest does not bind the exact iOS archive and IPA")
     elif candidate:
-        _fail("an acceptance candidate requires an explicit sealed iOS archive identity")
+        _fail(
+            "an acceptance candidate requires an explicit sealed iOS archive identity"
+        )
     if candidate:
         if payload.get("macHostLaunchMode") != "packaged":
             _fail("acceptance candidate requires the packaged Mac host launch mode")
@@ -273,10 +281,10 @@ def _validate_pre_cleanup_payload(
             _fail("acceptance candidate must not contain a binary test surface")
         if payload.get("iosProductionProduct") is not True:
             _fail("acceptance candidate must prove a production iOS product")
-        if payload.get("iosProductionIdentityAlgorithm") != "mldsa87":
-            _fail("acceptance candidate must prove ML-DSA-87 identity")
-        if payload.get("iosProductionIdentityProtection") != "secureEnclaveRequired":
-            _fail("acceptance candidate must require Secure Enclave identity protection")
+        try:
+            validate_manifest_identity_policy(payload)
+        except ProductionIdentityEvidenceError as exc:
+            _fail(f"acceptance candidate identity policy is invalid: {exc}")
         if payload.get("iosProductionIdentityLifecycleVerified") is not True:
             _fail("acceptance candidate must prove the production identity lifecycle")
         if payload.get("iosProductionIdentityProof") is not True:
@@ -306,8 +314,8 @@ def finalize_release_acceptance_manifests(
     private_manifest: Path,
     public_manifest: Path,
     *,
-    archive_identity: Optional[Path] = None,
-    fault_injector: Optional[FaultInjector] = None,
+    archive_identity: Path | None = None,
+    fault_injector: FaultInjector | None = None,
 ) -> None:
     """Finalize two manifests in a monotonic, private-first sequence.
 
@@ -334,7 +342,7 @@ def finalize_release_acceptance_manifests(
     ):
         _fail("private and public manifests must be in different directories")
 
-    required_archive_binding: Optional[dict[str, Any]] = None
+    required_archive_binding: dict[str, Any] | None = None
     if archive_identity is not None:
         try:
             required_archive_binding = expected_binding(load_identity(archive_identity))
@@ -398,7 +406,9 @@ def main() -> None:
             archive_identity=args.archive_identity,
         )
     except (FinalizationError, OSError) as exc:
-        raise SystemExit(f"release acceptance manifest finalization failed: {exc}") from exc
+        raise SystemExit(
+            f"release acceptance manifest finalization failed: {exc}"
+        ) from exc
 
 
 if __name__ == "__main__":

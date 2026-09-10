@@ -17,32 +17,29 @@ from extract_ios_product_release_evidence import (
 )
 from extract_ios_production_identity_evidence import (
     ProductionIdentityEvidenceError,
+    identity_manifest_fields,
+    validate_manifest_identity_policy,
     validate_public_proof,
 )
 from ios_physical_release_acceptance import expected_binding
 from ios_release_archive_identity import (
     ArchiveIdentityError,
-    load_identity as load_ios_archive_identity,
     validate_release_testing_ipa,
+)
+from ios_release_archive_identity import (
+    load_identity as load_ios_archive_identity,
 )
 from macos_release_candidate_identity import CandidateIdentityError, load_manifest
 from validate_product_release_evidence_log import (
-    IOS_LOG_FILE,
-    IOS_PRODUCT,
-    MAC_LOG_FILE,
-    MAC_PRODUCT,
     ProductEvidenceError,
-    parse_canonical_log,
+    product_session_references,
     validate_artifact_log,
 )
-
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
 FINALIZATION_ORDER = "private-then-public-v1"
 RELEASE_MANIFEST_MODE = 0o600
-SOURCE_REPOSITORY_PATTERN = re.compile(
-    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z", re.ASCII
-)
+SOURCE_REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z", re.ASCII)
 SOURCE_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
 FORMAL_KINDS = ("connectivity", "file-transfer", "p2p", "webrtc")
 BASE_MANIFEST_KEYS = {
@@ -121,7 +118,13 @@ def _read_regular_json(
             content.extend(chunk)
         after = os.fstat(descriptor)
         stable = (
-            "st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns"
+            "st_dev",
+            "st_ino",
+            "st_mode",
+            "st_uid",
+            "st_nlink",
+            "st_size",
+            "st_mtime_ns",
         )
         if os.read(descriptor, 1) or any(
             getattr(before, field) != getattr(after, field) for field in stable
@@ -155,8 +158,18 @@ def _require_source_commit(value: object, label: str) -> str:
 
 
 def _validate_manifest(payload: dict[str, Any], kind: str) -> tuple[str, str]:
-    expected_keys = BASE_MANIFEST_KEYS | (
-        REMOTE_NOTICE_KEYS if kind in {"p2p", "webrtc"} else set()
+    try:
+        identity_policy = validate_manifest_identity_policy(payload)
+    except ProductionIdentityEvidenceError as exc:
+        fail(str(exc))
+    expected_keys = (
+        BASE_MANIFEST_KEYS
+        | (REMOTE_NOTICE_KEYS if kind in {"p2p", "webrtc"} else set())
+        | (
+            {"iosProductionIdentityPurpose", "expectedSuite"}
+            if identity_policy.version == 2
+            else set()
+        )
     )
     if set(payload) != expected_keys:
         fail("release manifest does not use the exact product-only schema")
@@ -169,7 +182,9 @@ def _validate_manifest(payload: dict[str, Any], kind: str) -> tuple[str, str]:
     if payload.get("identitySourceStaplerValid") is not True:
         fail("release manifest requires stapler proof for the host identity source")
     if payload.get("identitySourceGatekeeperAccepted") is not True:
-        fail("release manifest requires Gatekeeper acceptance for the host identity source")
+        fail(
+            "release manifest requires Gatekeeper acceptance for the host identity source"
+        )
     exact_values: dict[str, object] = {
         "acceptanceEligible": True,
         "cleanupComplete": True,
@@ -177,10 +192,10 @@ def _validate_manifest(payload: dict[str, Any], kind: str) -> tuple[str, str]:
         "finalizationOrder": FINALIZATION_ORDER,
         "iosBinaryTestSurfaceDetected": False,
         "iosProductSurface": "production",
-        "iosProductionIdentityAlgorithm": "mldsa87",
+        "iosProductionIdentityAlgorithm": identity_policy.algorithm,
         "iosProductionIdentityLifecycleVerified": True,
         "iosProductionIdentityProof": True,
-        "iosProductionIdentityProtection": "secureEnclaveRequired",
+        "iosProductionIdentityProtection": identity_policy.protection,
         "iosProductionProduct": True,
         "identitySourceGatekeeperAccepted": True,
         "identitySourceStaplerValid": True,
@@ -193,7 +208,7 @@ def _validate_manifest(payload: dict[str, Any], kind: str) -> tuple[str, str]:
         "macTestingCompilationCondition": False,
         "preCleanupCandidate": True,
         "realDevice": True,
-        "schemaVersion": 1,
+        "schemaVersion": identity_policy.version,
         "transport": kind,
     }
     if kind in {"p2p", "webrtc"}:
@@ -253,21 +268,19 @@ def validate_macos_candidate_binding(
         or manifest.get("sourceCommit") != expected_source_sha
     ):
         fail("release manifest source does not match the macOS candidate")
-    if require_remote_control_notice and manifest is not None:
-        if any(manifest.get(key) is not True for key in (
-            "remoteControlNoticeProductPath",
-            "remoteControlNoticeHumanApproval",
-            "remoteControlNoticePanelPresented",
-        )):
-            fail("remote-control evidence lacks the validated normal product notice")
-
-
-# The only identity algorithm and key-protection class a release-acceptance
-# proof may claim. Asserted here in the validator (in addition to the exact
-# schema check in the extractor) so the release lane's own audit can grep the
-# requirement at its enforcement site.
-REQUIRED_IDENTITY_ALGORITHM = "mldsa87"
-REQUIRED_IDENTITY_PROTECTION = "secureEnclaveRequired"
+    if (
+        require_remote_control_notice
+        and manifest is not None
+        and any(
+            manifest.get(key) is not True
+            for key in (
+                "remoteControlNoticeProductPath",
+                "remoteControlNoticeHumanApproval",
+                "remoteControlNoticePanelPresented",
+            )
+        )
+    ):
+        fail("remote-control evidence lacks the validated normal product notice")
 
 
 def validate_production_identity_proof(
@@ -283,10 +296,6 @@ def validate_production_identity_proof(
         )
     except ProductionIdentityEvidenceError as exc:
         fail(f"invalid iOS production identity proof: {exc}")
-    if proof.get("algorithm") != REQUIRED_IDENTITY_ALGORITHM:
-        fail("iOS production identity proof does not use the required identity algorithm")
-    if proof.get("protection") != REQUIRED_IDENTITY_PROTECTION:
-        fail("iOS production identity proof does not use the required key protection")
     if proof.get("handshakePersistenceVerified") is not True:
         fail("iOS production identity proof lacks verified handshake persistence")
     if proof.get("currentPathAuthorityVerified") is not True:
@@ -301,20 +310,20 @@ def validate_production_identity_proof(
         != manifest.get("iosSwiftActiveCompilationConditions")
     ):
         fail("identity proof compilation conditions do not match the release manifest")
+    if manifest is not None:
+        for key, expected in identity_manifest_fields(proof).items():
+            if (
+                type(manifest.get(key)) is not type(expected)
+                or manifest[key] != expected
+            ):
+                fail(
+                    "identity proof purpose/algorithm/protection differs from the release manifest"
+                )
+        if proof["schemaVersion"] == 2 and proof["iosReleaseArchive"] != manifest.get(
+            "iosReleaseArchive"
+        ):
+            fail("existing identity proof belongs to a different sealed iOS archive")
     return proof
-
-
-def _product_session_references(artifact_dir: Path, kind: str) -> set[str]:
-    references: list[set[str]] = []
-    event_name = "connectivityEndpoint" if kind == "connectivity" else "releaseSessionOwner"
-    for file_name, owner in ((MAC_LOG_FILE, MAC_PRODUCT), (IOS_LOG_FILE, IOS_PRODUCT)):
-        events = parse_canonical_log(artifact_dir / file_name, expected_owner=owner)
-        references.append(
-            {event.fields["session_ref"] for event in events if event.name == event_name}
-        )
-    if not references[0] or references[0] != references[1]:
-        fail("Mac and iOS product session references do not match")
-    return references[0]
 
 
 def validate_product_only_formal_evidence(
@@ -343,12 +352,18 @@ def validate_product_only_formal_evidence(
             artifact_dir / "ios-product-installation-capture.json",
             expected_archive_binding=manifest.get("iosReleaseArchive"),
         )
-        validate_artifact_log(artifact_dir, kind)
-        sessions = _product_session_references(artifact_dir, kind)
+        validate_artifact_log(
+            artifact_dir, kind, expected_suite=proof.get("expectedSuite")
+        )
+        sessions = product_session_references(
+            artifact_dir, kind, expected_suite=proof.get("expectedSuite")
+        )
     except (IOSProductEvidenceError, ProductEvidenceError, OSError) as exc:
         fail(f"invalid fixed shipping-product evidence: {exc}")
     if proof.get("evidenceSessionRef") not in sessions:
         fail("production identity proof is not bound to this exact product session")
+    if proof["schemaVersion"] == 2 and set(proof["evidenceSessionRefs"]) != sessions:
+        fail("existing identity proof does not cover every exact Q product session")
 
 
 def validate_ios_release_archive_binding(
@@ -384,7 +399,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--kind",
-        choices=("connectivity", "file-transfer", "p2p", "webrtc", "production-identity"),
+        choices=(
+            "connectivity",
+            "file-transfer",
+            "p2p",
+            "webrtc",
+            "production-identity",
+        ),
         required=True,
     )
     parser.add_argument("--artifact-dir", type=Path, required=True)
@@ -428,7 +449,9 @@ def main() -> None:
     if manifest_repository != repository or manifest_commit != commit:
         fail("release manifest does not match the expected release source")
     if (args.ios_archive_identity is None) != (args.release_testing_ipa is None):
-        fail("--ios-archive-identity and --release-testing-ipa must be supplied together")
+        fail(
+            "--ios-archive-identity and --release-testing-ipa must be supplied together"
+        )
     if args.ios_archive_identity is not None and args.release_testing_ipa is not None:
         _validate_archive_inputs(
             manifest, args.ios_archive_identity, args.release_testing_ipa

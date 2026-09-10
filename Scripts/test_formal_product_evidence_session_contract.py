@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent.parent
 ORCHESTRATOR = ROOT / "Scripts/run_formal_product_evidence_session.sh"
 LIFECYCLE_ORCHESTRATOR = ROOT / "Scripts/run_formal_ios_identity_lifecycle.sh"
@@ -114,7 +113,11 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
         ):
             self.assertIn(required, self.orchestrator)
         self.assertNotIn("extract-lifecycle", self.orchestrator)
-        for forbidden in ("security delete", "delete-generic-password", "SecItemDelete"):
+        for forbidden in (
+            "security delete",
+            "delete-generic-password",
+            "SecItemDelete",
+        ):
             self.assertNotIn(forbidden, self.lifecycle)
 
     def test_top_level_all_transaction_keeps_private_identity_ephemeral(self) -> None:
@@ -126,7 +129,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             '"p2p|real-device-p2p-remote-smoke-public-redacted"',
             '"webrtc|real-device-webrtc-smoke-public-redacted"',
             '"file-transfer|real-device-file-transfer-smoke-public-redacted"',
-            'id1:[0-9a-f]{32}',
+            "id1:[0-9a-f]{32}",
             '/bin/rm -rf "$LIFECYCLE_RUNTIME"',
             'mv "$PUBLIC_STAGING" "$PUBLIC_EVIDENCE_ROOT"',
         ):
@@ -148,9 +151,12 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             "validate-proof",
         ):
             self.assertIn(required, self.identity_extractor)
-        self.assertIn("raw stable production identity reference", (
-            ROOT / "Scripts/real_device_smoke_redaction.sh"
-        ).read_text(encoding="utf-8"))
+        self.assertIn(
+            "raw stable production identity reference",
+            (ROOT / "Scripts/real_device_smoke_redaction.sh").read_text(
+                encoding="utf-8"
+            ),
+        )
 
     def test_current_ios_capture_is_exact_pid_and_archive_bound(self) -> None:
         for required in (
@@ -188,7 +194,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
 
     def test_candidate_bit_is_derived_after_all_fixed_validators(self) -> None:
         validate_log = self.manifest_builder.index(
-            "validate_artifact_log(artifact_dir, kind)"
+            "validate_artifact_log("
         )
         validate_install = self.manifest_builder.index("validate_installation_capture(")
         validate_identity = self.manifest_builder.index(
@@ -202,10 +208,12 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
 
     def test_both_ios_identifiers_are_public_redaction_tokens(self) -> None:
         materialize = self.orchestrator[
-            self.orchestrator.index("skybridge_smoke_materialize_public_artifacts"):
+            self.orchestrator.index("skybridge_smoke_materialize_public_artifacts") :
         ]
         self.assertIn('"$IOS_DEVICE_ID" "$IOS_DEVICE_UDID"', materialize)
-        check = materialize[materialize.index("skybridge_smoke_check_public_artifacts"):]
+        check = materialize[
+            materialize.index("skybridge_smoke_check_public_artifacts") :
+        ]
         self.assertIn('"$IOS_DEVICE_ID" "$IOS_DEVICE_UDID"', check)
 
     def test_old_smoke_front_doors_remain_explicitly_diagnostic(self) -> None:

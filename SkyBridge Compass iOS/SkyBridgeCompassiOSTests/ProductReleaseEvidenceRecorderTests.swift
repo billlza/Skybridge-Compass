@@ -373,6 +373,44 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         XCTAssertTrue(lines.last?.contains("attempt_ref=not-applicable") == true)
     }
 
+    func testExistingQIdentityRestorationDoesNotClaimNewCreationOrUnconfirmedHandshake() throws {
+        for protection: ProductIdentityEvidenceProtection in [.softwareKeychain, .secureEnclaveRequired] {
+            var lines: [String] = []
+            let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+            let descriptor = try XCTUnwrap(ProductIdentityEvidenceDescriptor(
+                identityReference: "id1:66666666666666666666666666666666",
+                algorithm: .mlDSA65, protection: protection
+            ))
+            XCTAssertTrue(recorder.recordProductionIdentityRestored(descriptor))
+            XCTAssertFalse(recorder.recordProductionIdentityRestored(descriptor))
+            let owner = try XCTUnwrap(recorder.beginSession(
+                transport: .p2p, sessionReference: sessionReference, routeClass: .wifi
+            ))
+            XCTAssertTrue(recorder.recordP2PSessionAuthenticated(
+                owner: owner, role: .initiator, suite: .qperiaptABI2PolicyBound
+            ))
+            XCTAssertFalse(recorder.recordProductionIdentityHandshakeBound(
+                descriptor: descriptor, sessionOwner: owner,
+                attemptReference: "at1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))
+            XCTAssertEqual(lines.filter { $0.hasPrefix("productionIdentity") }.count, 1)
+            XCTAssertFalse(lines.contains { $0.contains("created=1") || $0.contains("localFinished=sent") })
+        }
+    }
+
+    func testSameLaunchIdentityCreationAndReconciliationCannotBecomeRestoration() throws {
+        let descriptor = try XCTUnwrap(ProductIdentityEvidenceDescriptor(
+            identityReference: "id1:77777777777777777777777777777777",
+            algorithm: .mlDSA65, protection: .softwareKeychain
+        ))
+        var lines: [String] = []
+        let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+        recorder.noteNonRestoredIdentityResolution(descriptor)
+        XCTAssertFalse(recorder.recordProductionIdentityRestored(descriptor))
+        XCTAssertFalse(recorder.recordProductionIdentityCommitted(descriptor))
+        XCTAssertTrue(lines.isEmpty)
+    }
+
     func testGenericP2PFileTransferOwnerIsSingleSlotAndStaleSafe() throws {
         var lines: [String] = []
         let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
@@ -491,7 +529,10 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         let owner = try XCTUnwrap(recorder.beginSession(
             transport: .webrtc, sessionReference: sessionReference, selectedTransport: .relay
         ))
-        for rejected in [CryptoSuite.qperiaptContextBound, .x25519Ed25519, .unknown(0xffff)] {
+        let rejectedSuites: [SkyBridgeCompass_iOS.CryptoSuite] = [
+            .qperiaptContextBound, .x25519Ed25519, .unknown(0xffff)
+        ]
+        for rejected in rejectedSuites {
             XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: rejected))
         }
         XCTAssertTrue(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .qperiaptABI2PolicyBound))

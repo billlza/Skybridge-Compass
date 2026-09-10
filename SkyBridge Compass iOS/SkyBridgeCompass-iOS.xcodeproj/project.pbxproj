@@ -211,6 +211,7 @@
 		C732B478E7962ACA4DAC78A3 /* FileTransferClassicPeerResolutionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 713C92B54D41F5B8C80C4F76 /* FileTransferClassicPeerResolutionPolicy.swift */; };
 		C85B40DB51C1B1F5FF143378 /* RemoteDesktopManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E5263289EA47395D52657D8 /* RemoteDesktopManager.swift */; };
 		CA33646C6E8E1E7769FAE1CB /* HandshakeCryptoPolicyParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65C90057705D92FEF526C65C /* HandshakeCryptoPolicyParityTests.swift */; };
+		F4CB5C6005EF77FDC0F87379 /* HandshakeFinishedDeliveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5646EF214EE5B81D2AB2C2F /* HandshakeFinishedDeliveryTests.swift */; };
 		CC6D1E5C23B4BDFFB19E6278 /* OrderedInboundChunkRelayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01FF4DE7CA965FD1991AA3B9 /* OrderedInboundChunkRelayTests.swift */; };
 		CD13F7721469221C8FF317B0 /* SettingsManagerContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65FD439EE7832BF8C9D16D /* SettingsManagerContractTests.swift */; };
 		CDD8DC74867897BB930E446C /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A36B559F342929CA0C046D28 /* LogStore.swift */; };
@@ -408,6 +409,7 @@
 		64B4B8B97D2AD19F1A9A3684 /* DeviceDiscoveryIdentityPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDiscoveryIdentityPolicyTests.swift; sourceTree = "<group>"; };
 		659727828D97800AA64D41C4 /* SettingsManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsManager.swift; sourceTree = "<group>"; };
 		65C90057705D92FEF526C65C /* HandshakeCryptoPolicyParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeCryptoPolicyParityTests.swift; sourceTree = "<group>"; };
+		F5646EF214EE5B81D2AB2C2F /* HandshakeFinishedDeliveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HandshakeFinishedDeliveryTests.swift; sourceTree = "<group>"; };
 		65EDD47FB40C675DA9636DDF /* AppMessage+KEMRefreshFailurePayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppMessage+KEMRefreshFailurePayload.swift"; sourceTree = "<group>"; };
 		68C7504EB6E47491EE9CE10D /* KeychainManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainManager.swift; sourceTree = "<group>"; };
 		69945BE5BF5C41535CD50512 /* CurrentPathDeviceIdentityRotationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentPathDeviceIdentityRotationCoordinator.swift; sourceTree = "<group>"; };
@@ -726,6 +728,7 @@
 				4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */,
 				E702E9A3AC9F6266ABD535AF /* FileTransferLANRoutePolicyTests.swift */,
 				65C90057705D92FEF526C65C /* HandshakeCryptoPolicyParityTests.swift */,
+				F5646EF214EE5B81D2AB2C2F /* HandshakeFinishedDeliveryTests.swift */,
 				7A68AC9933B0C76F43F3C4EC /* InboundFileTransferApprovalServiceTests.swift */,
 				D02F165A3577BDC88F31411B /* KEMTrustStoreTests.swift */,
 				9094F55BF7BC5003D8D38290 /* ObservabilityContractTests.swift */,
@@ -1423,6 +1426,7 @@
 				B9B1776A08627F2AC1499D85 /* FallbackSemanticsParityTests.swift in Sources */,
 				DE19D5E16D0FAAF7C039E43A /* FileTransferLANRoutePolicyTests.swift in Sources */,
 				CA33646C6E8E1E7769FAE1CB /* HandshakeCryptoPolicyParityTests.swift in Sources */,
+				F4CB5C6005EF77FDC0F87379 /* HandshakeFinishedDeliveryTests.swift in Sources */,
 				B871B653EC5D405B70932B07 /* InboundFileTransferApprovalServiceTests.swift in Sources */,
 				D7466B71CF052E1AB9FBD95A /* KEMTrustStoreTests.swift in Sources */,
 				C2B6620F00166A0067A1098D /* ObservabilityContractTests.swift in Sources */,

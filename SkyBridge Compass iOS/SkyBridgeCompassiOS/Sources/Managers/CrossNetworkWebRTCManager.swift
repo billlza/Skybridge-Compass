@@ -2558,7 +2558,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         let committedIdentity = try? await SkyBridgeiOSCore.shared
             .committedActiveProtocolIdentitySnapshot()
-        guard isCurrentSession(
+        let finishedConfirmation = await driver.authenticatedFinishedConfirmation(matching: keys)
+        guard let finishedConfirmation,
+              isCurrentSession(
                 sessionId: sessionId,
                 sessionObjectIdentifier: sessionObjectIdentifier
               ),
@@ -2603,7 +2605,8 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         _ = ProductReleaseEvidenceRecorder.shared
             .recordProductionIdentityHandshakeBound(
                 descriptor: identityDescriptor,
-                sessionOwner: owner
+                sessionOwner: owner,
+                finishedConfirmation: finishedConfirmation
             )
         beginWebRTCProductEvidenceMediaSampling(
             sessionId: sessionId,

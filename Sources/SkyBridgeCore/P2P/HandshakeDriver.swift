@@ -16,6 +16,7 @@
 
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 public struct AuthenticatedRemoteAuthority: Sendable, Equatable {
@@ -142,6 +143,52 @@ struct ProductConnectivityHandshakeAttemptSnapshot: Sendable, Equatable {
 
 @available(macOS 14.0, iOS 17.0, *)
 public actor HandshakeDriver {
+
+    public struct AuthenticatedFinishedConfirmation: Sendable {
+        public let sessionId: String
+        public let suite: CryptoSuite
+        public let sessionReference: String
+
+        fileprivate init(sessionId: String, suite: CryptoSuite, sessionReference: String) {
+            self.sessionId = sessionId
+            self.suite = suite
+            self.sessionReference = sessionReference
+        }
+    }
+
+    private enum LocalFinishedDelivery {
+        case sending(token: UUID, sessionId: String)
+        case sent(sessionId: String)
+    }
+
+    /// A peer Finished may reenter this actor while our transport send is suspended.
+    /// Only the exact send completion can make its session eligible for publication.
+    private var localFinishedDelivery: LocalFinishedDelivery?
+
+    public func authenticatedFinishedConfirmation(
+        matching keys: SessionKeys
+    ) -> AuthenticatedFinishedConfirmation? {
+        guard case .established(let current) = state,
+              case .some(.sent(let deliveredSessionId)) = localFinishedDelivery,
+              deliveredSessionId == current.sessionId,
+              keys.sessionId == current.sessionId,
+              keys.negotiatedSuite == current.negotiatedSuite,
+              keys.role == current.role,
+              constantTimeEqual(keys.transcriptHash, current.transcriptHash),
+              constantTimeEqual(keys.sendKey, current.sendKey),
+              constantTimeEqual(keys.receiveKey, current.receiveKey) else {
+            return nil
+        }
+        guard let reference = SkyBridgeProtocolCore.P2PEvidenceReference.sessionIncarnation(
+            sessionID: current.sessionId,
+            transcriptHash: current.transcriptHash
+        ) else { return nil }
+        return AuthenticatedFinishedConfirmation(
+            sessionId: current.sessionId,
+            suite: current.negotiatedSuite,
+            sessionReference: reference
+        )
+    }
 
  // MARK: - Properties
 
@@ -891,6 +938,7 @@ public actor HandshakeDriver {
  // 只有在非 idle 状态才需要取消
         guard case .idle = state else {
             finishedCommitToken = nil
+            localFinishedDelivery = nil
             let contextToInvalidate = context
             context = nil
             pendingFinished = nil
@@ -1230,6 +1278,11 @@ public actor HandshakeDriver {
             let clock = ContinuousClock()
             let deadline = clock.now + timeout
             state = .waitingFinished(deadline: deadline, sessionKeys: sessionKeys, expectingFrom: .initiator)
+            let finishedDeliveryToken = UUID()
+            localFinishedDelivery = .sending(
+                token: finishedDeliveryToken,
+                sessionId: sessionKeys.sessionId
+            )
 
             timeoutTask?.cancel()
             timeoutTask = Task {
@@ -1259,10 +1312,20 @@ public actor HandshakeDriver {
                 try await transport.send(to: peer, data: padded)
                 RemoteControlSmokeStatusWriter.append("mac-handshake finished-sent peer=\(peerDiagnosticLabel) bytes=\(padded.count)")
             } catch {
+                guard isCurrentLocalFinishedSend(
+                    finishedDeliveryToken,
+                    sessionId: sessionKeys.sessionId
+                ) else { return }
                 await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                 RemoteControlSmokeStatusWriter.append("mac-handshake finished-send-failed peer=\(peerDiagnosticLabel) \(SkyBridgeDiagnosticRedaction.errorSummary(error))")
                 return
             }
+
+            guard isCurrentLocalFinishedSend(
+                finishedDeliveryToken,
+                sessionId: sessionKeys.sessionId
+            ) else { return }
+            localFinishedDelivery = .sent(sessionId: sessionKeys.sessionId)
 
             if let pending = pendingFinished {
                 pendingFinished = nil
@@ -1503,6 +1566,10 @@ public actor HandshakeDriver {
     private func handleFinished(_ finished: HandshakeFinished, from peer: PeerIdentifier) async {
         switch state {
         case .waitingMessageB, .processingMessageB:
+            guard pendingFinished == nil else {
+                await transitionToFailed(.invalidMessageFormat("Duplicate pending Finished"))
+                return
+            }
             pendingFinished = finished
             return
         case .waitingFinished(_, let sessionKeys, let expectingFrom):
@@ -1518,11 +1585,38 @@ public actor HandshakeDriver {
                 return
             }
 
+            if expectingFrom == .initiator {
+                switch localFinishedDelivery {
+                case .some(.sending(_, let sessionId)) where sessionId == sessionKeys.sessionId:
+                    guard pendingFinished == nil else {
+                        await transitionToFailed(
+                            .invalidMessageFormat("Duplicate pending Finished"),
+                            negotiatedSuite: sessionKeys.negotiatedSuite
+                        )
+                        return
+                    }
+                    pendingFinished = finished
+                    return
+                case .some(.sent(let sessionId)) where sessionId == sessionKeys.sessionId:
+                    break
+                default:
+                    await transitionToFailed(
+                        .invalidMessageFormat("Finished delivery does not own the current session"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+            }
+
             guard finishedCommitToken == nil else { return }
             let commitToken = UUID()
             finishedCommitToken = commitToken
 
             if expectingFrom == .responder {
+                localFinishedDelivery = .sending(
+                    token: commitToken,
+                    sessionId: sessionKeys.sessionId
+                )
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
                     let padded = try HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
@@ -1540,9 +1634,22 @@ public actor HandshakeDriver {
                 guard isCurrentFinishedCommit(
                     commitToken,
                     sessionId: sessionKeys.sessionId
+                ), isCurrentLocalFinishedSend(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
                 ) else {
                     return
                 }
+                localFinishedDelivery = .sent(sessionId: sessionKeys.sessionId)
+            }
+
+            guard case .some(.sent(let deliveredSessionId)) = localFinishedDelivery,
+                  deliveredSessionId == sessionKeys.sessionId else {
+                await transitionToFailed(
+                    .invalidMessageFormat("Local Finished has not been delivered"),
+                    negotiatedSuite: sessionKeys.negotiatedSuite
+                )
+                return
             }
 
             let committedArbiterLease: PeerSessionArbiter.EstablishedLease?
@@ -1676,6 +1783,7 @@ public actor HandshakeDriver {
  /// - 记录到 DiscoveryDiagnosticsService 以便用户可见
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
         finishedCommitToken = nil
+        localFinishedDelivery = nil
         let contextToInvalidate = context
         context = nil
         pendingFinished = nil
@@ -1730,6 +1838,19 @@ public actor HandshakeDriver {
                 "policyRequireSecureEnclavePoP": policy.requireSecureEnclavePoP ? "1" : "0"
             ]
         ))
+    }
+
+    private func isCurrentLocalFinishedSend(
+        _ token: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard case .some(.sending(let currentToken, let currentSessionId)) = localFinishedDelivery,
+              currentToken == token,
+              currentSessionId == sessionId,
+              case .waitingFinished(_, let currentKeys, _) = state else {
+            return false
+        }
+        return currentKeys.sessionId == sessionId
     }
 
     private func isCurrentFinishedCommit(
@@ -2066,6 +2187,7 @@ public actor HandshakeDriver {
     ) async {
         guard case .idle = state else {
             finishedCommitToken = nil
+            localFinishedDelivery = nil
             let contextToInvalidate = context
             context = nil
             pendingFinished = nil

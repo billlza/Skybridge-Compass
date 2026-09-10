@@ -11720,7 +11720,9 @@ public class P2PConnectionManager: ObservableObject {
         } else {
             identityDescriptor = nil
         }
-        guard let currentBinding = productConnectivityAttemptsByDriver[identifier],
+        let finishedConfirmation = await driver.authenticatedFinishedConfirmation(matching: keys)
+        guard let finishedConfirmation,
+              let currentBinding = productConnectivityAttemptsByDriver[identifier],
               currentBinding.connectionGeneration == connectionGeneration,
               currentBinding.owner === binding.owner,
               currentBinding.identityAlgorithm == binding.identityAlgorithm,
@@ -11754,7 +11756,8 @@ public class P2PConnectionManager: ObservableObject {
                 .recordProductionIdentityHandshakeBound(
                     descriptor: identityDescriptor,
                     sessionReference: sessionReference,
-                    attemptOwner: binding.owner
+                    attemptOwner: binding.owner,
+                    finishedConfirmation: finishedConfirmation
                 )
         }
         return true

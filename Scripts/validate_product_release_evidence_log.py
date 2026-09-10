@@ -146,6 +146,7 @@ CONNECTIVITY_SUCCESS_PROFILES = {
 # Canonical P2P/WebRTC lifecycle evidence admits only these authenticated product suites.
 # The connectivity matrix has its own offer/profile contract below.
 AUTHENTICATED_SESSION_SUITES = {"X-Wing", "Q-Periapt-ABI2-PolicyBound"}
+Q_AUTHENTICATED_SUITE = "Q-Periapt-ABI2-PolicyBound"
 PQC_SUITES = {
     "X-Wing",
     "Q-Periapt-ABI2-PolicyBound",
@@ -931,7 +932,9 @@ def _connectivity_attempts(
     return attempts
 
 
-def _validate_connectivity(mac_events: list[Event], ios_events: list[Event]) -> None:
+def _validate_connectivity(
+    mac_events: list[Event], ios_events: list[Event], *, expected_suite: str | None
+) -> None:
     mac_attempts = _connectivity_attempts(mac_events, MAC_PRODUCT)
     ios_attempts = _connectivity_attempts(ios_events, IOS_PRODUCT)
     all_references = set(mac_attempts) | set(ios_attempts)
@@ -993,6 +996,14 @@ def _validate_connectivity(mac_events: list[Event], ios_events: list[Event]) -> 
                 _fail(
                     "connectivity evidence duplicates a successful Mac/iOS profile pair"
                 )
+            if (
+                expected_suite == "0x0012"
+                and profile_pair == ("pqc", "pqc")
+                and mac_endpoint.fields["suite"] != Q_AUTHENTICATED_SUITE
+            ):
+                _fail(
+                    "the Q connectivity pair must authenticate suite 0x0012 on both endpoints"
+                )
             success_profiles.add(profile_pair)
             continue
 
@@ -1008,9 +1019,16 @@ def _validate_connectivity(mac_events: list[Event], ios_events: list[Event]) -> 
             )
         rejection_owners.append(rejection_attempts[0].owner)
 
-    if success_profiles != CONNECTIVITY_SUCCESS_PROFILES:
+    required_profiles = CONNECTIVITY_SUCCESS_PROFILES | (
+        {("pqc", "pqc")} if expected_suite == "0x0012" else set()
+    )
+    if success_profiles != required_profiles:
+        if expected_suite is None:
+            _fail(
+                "connectivity evidence does not cover the exact three success profile pairs"
+            )
         _fail(
-            "connectivity evidence does not cover the exact three success profile pairs"
+            "Q connectivity evidence requires the three compatibility pairs and one Q pqc/pqc pair"
         )
     if sorted(rejection_owners) != sorted(PRODUCTS):
         _fail(
@@ -1044,12 +1062,18 @@ def _validate_file_transfer(
 
 
 def validate_events(
-    events: list[Event], kind: str, *, ios_events: list[Event] | None = None
+    events: list[Event],
+    kind: str,
+    *,
+    ios_events: list[Event] | None = None,
+    expected_suite: str | None = None,
 ) -> None:
+    if expected_suite not in (None, "0x0012"):
+        _fail("unsupported expected authenticated suite")
     if kind == "connectivity":
         if ios_events is None:
             _fail("connectivity evidence requires paired Mac and iOS product logs")
-        _validate_connectivity(events, ios_events)
+        _validate_connectivity(events, ios_events, expected_suite=expected_suite)
         return
 
     sessions = _sessions(events)
@@ -1064,6 +1088,8 @@ def validate_events(
     }
     if len(suites) != 1:
         _fail("paired product lifecycles disagree on their authenticated suite")
+    if expected_suite == "0x0012" and suites != {Q_AUTHENTICATED_SUITE}:
+        _fail("both product lifecycles must authenticate the required Q suite 0x0012")
     if kind == "p2p":
         _validate_p2p_pair(sessions, ios_events)
     elif kind == "webrtc":
@@ -1170,7 +1196,9 @@ def validate_capture_manifest(
     return payload
 
 
-def validate_artifact_log(artifact_dir: Path, kind: str) -> None:
+def validate_artifact_log(
+    artifact_dir: Path, kind: str, *, expected_suite: str | None = None
+) -> None:
     mac_events = parse_canonical_log(
         artifact_dir / MAC_LOG_FILE, expected_owner=MAC_PRODUCT
     )
@@ -1219,7 +1247,38 @@ def validate_artifact_log(artifact_dir: Path, kind: str) -> None:
         len(ios_events),
         expected_owner=IOS_PRODUCT,
     )
-    validate_events(mac_events, kind, ios_events=ios_events)
+    validate_events(
+        mac_events, kind, ios_events=ios_events, expected_suite=expected_suite
+    )
+
+
+def product_session_references(
+    artifact_dir: Path, kind: str, *, expected_suite: str | None = None
+) -> set[str]:
+    """Join exact product sessions after their paired lifecycle has been validated."""
+    if expected_suite not in (None, "0x0012"):
+        _fail("unsupported expected authenticated suite")
+    references: list[set[str]] = []
+    event_name = (
+        "connectivityEndpoint" if kind == "connectivity" else "releaseSessionOwner"
+    )
+    for file_name, owner in ((MAC_LOG_FILE, MAC_PRODUCT), (IOS_LOG_FILE, IOS_PRODUCT)):
+        events = parse_canonical_log(artifact_dir / file_name, expected_owner=owner)
+        references.append(
+            {
+                event.fields["session_ref"]
+                for event in events
+                if event.name == event_name
+                and (
+                    kind != "connectivity"
+                    or expected_suite is None
+                    or event.fields["suite"] == Q_AUTHENTICATED_SUITE
+                )
+            }
+        )
+    if not references[0] or references[0] != references[1]:
+        _fail("Mac and iOS product session references do not match")
+    return references[0]
 
 
 def validate_capture(artifact_dir: Path) -> None:
@@ -1241,7 +1300,21 @@ def validate_capture(artifact_dir: Path) -> None:
         kind = "webrtc"
     else:
         kind = "p2p"
-    validate_artifact_log(artifact_dir, kind)
+    # A versioned, validated identity proof explicitly selects the Q contract.
+    # Raw log contents alone cannot opt a capture into a different matrix.
+    from extract_ios_production_identity_evidence import (
+        ProductionIdentityEvidenceError,
+        validate_public_proof,
+    )
+
+    expected_suite = None
+    proof_path = artifact_dir / "ios-production-identity-proof.json"
+    if proof_path.exists() or proof_path.is_symlink():
+        try:
+            expected_suite = validate_public_proof(proof_path).get("expectedSuite")
+        except ProductionIdentityEvidenceError as exc:
+            _fail(f"capture identity purpose is invalid: {exc}")
+    validate_artifact_log(artifact_dir, kind, expected_suite=expected_suite)
 
 
 def _write_new_file(path: Path, content: bytes) -> None:
@@ -1441,6 +1514,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     validate.add_argument("--artifact-dir", type=Path, required=True)
+    validate.add_argument("--expected-suite", choices=["0x0012"])
     validate_capture_parser = subparsers.add_parser("validate-capture")
     validate_capture_parser.add_argument("--artifact-dir", type=Path, required=True)
     return parser.parse_args()
@@ -1460,7 +1534,9 @@ def main() -> int:
             )
             print(f"product release OSLog extracted: {args.output}")
         elif args.command == "validate":
-            validate_artifact_log(args.artifact_dir, args.kind)
+            validate_artifact_log(
+                args.artifact_dir, args.kind, expected_suite=args.expected_suite
+            )
             print(f"product release evidence log valid: kind={args.kind}")
         else:
             validate_capture(args.artifact_dir)

@@ -193,6 +193,12 @@ public struct ProductIdentityEvidenceDescriptor: Sendable, Hashable {
     public var isFormalProductionIdentity: Bool {
         algorithm == .mlDSA87 && protection == .secureEnclaveRequired
     }
+
+    /// Existing Q sessions use the committed ML-DSA-65 authority. This does not
+    /// replace the separate creation proof required for a new Secure Enclave identity.
+    public var isExistingQProductionIdentity: Bool {
+        algorithm == .mlDSA65
+    }
 }
 
 /// Exact one-shot owner for an observed normal-product handshake attempt.

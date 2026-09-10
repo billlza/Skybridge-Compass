@@ -384,8 +384,7 @@ public final class SkyBridgeiOSCore {
         SkyBridgeLogger.shared.info(
             "🧩 HandshakePolicy: requirePQC=\(candidateHandshakePolicy.requirePQC ? "1" : "0"), allowClassicFallback=\(candidateHandshakePolicy.allowClassicFallback ? "1" : "0"), minimumTier=\(candidateHandshakePolicy.minimumTier.rawValue)"
         )
-        if identity.resolutionDisposition == .restoredCommittedAuthority,
-           let descriptor = CommittedIOSProtocolIdentitySnapshot(
+        if let descriptor = CommittedIOSProtocolIdentitySnapshot(
                snapshot: identity.snapshot,
                algorithm: identity.material.algorithm,
                protection: identity.material.keyProtection,
@@ -393,8 +392,16 @@ public final class SkyBridgeiOSCore {
                keyHandle: candidateKeyHandle,
                resolutionDisposition: identity.resolutionDisposition
            ).productEvidenceDescriptor {
-            _ = ProductReleaseEvidenceRecorder.shared
-                .recordProductionIdentityRestored(descriptor)
+            switch identity.resolutionDisposition {
+            case .restoredCommittedAuthority:
+                _ = ProductReleaseEvidenceRecorder.shared
+                    .recordProductionIdentityRestored(descriptor)
+            case .createdAndCommitted, .reconciledCommittedAuthority:
+                _ = ProductReleaseEvidenceRecorder.shared
+                    .noteNonRestoredIdentityResolution(descriptor)
+            case .ephemeralSmoke:
+                break
+            }
         }
     }
 

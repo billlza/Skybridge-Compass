@@ -5876,10 +5876,10 @@ public class P2PDiscoveryService: BaseManager {
                 return
             }
             productConnectivityAttemptOwner = nil
-            guard let sessionReference = P2PEvidenceReference.sessionIncarnation(
-                sessionID: keys.sessionId,
-                transcriptHash: keys.transcriptHash
-            ) else {
+            guard let driverSnapshot = driver,
+                  let confirmation = await driverSnapshot
+                    .authenticatedFinishedConfirmation(matching: keys),
+                  driver === driverSnapshot else {
                 _ = await MainActor.run {
                     ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
                         owner: owner,
@@ -5888,6 +5888,7 @@ public class P2PDiscoveryService: BaseManager {
                 }
                 return
             }
+            let sessionReference = confirmation.sessionReference
             let recorded = await MainActor.run {
                 ProductReleaseEvidenceRecorder.shared.authenticateConnectivityAttempt(
                     owner: owner,
