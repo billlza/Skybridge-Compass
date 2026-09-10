@@ -369,3 +369,9 @@
 "本机登记已冻结。" = "This device’s registration is frozen.";
 "暂时无法确认本机的登记状态。" = "This device’s registration status could not be confirmed.";
 "型号尚未上报" = "Model not reported";
+
+// Background appearance
+"settings.background_style" = "Background style";
+"settings.background_style.classic" = "Classic Starfield";
+"settings.background_style.light" = "Luminous Sky";
+"settings.background_style.description" = "Switch the background, glass and text colors together. Weather effects stay enabled as configured.";

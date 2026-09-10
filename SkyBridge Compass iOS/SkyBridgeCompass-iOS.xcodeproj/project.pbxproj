@@ -1677,7 +1677,7 @@
 /* Begin PBXTargetDependency section */
 		75F66CC7A477CED41FC751B6 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			productRef = "TEMP_C02AEECE-1F43-4435-8C36-88B453AD38D5" /* SkyBridgeWebRTCRuntime */;
+			productRef = "TEMP_4A2B4C37-736D-44FF-802F-B206D1982832" /* SkyBridgeWebRTCRuntime */;
 		};
 		A5D882D0AC6E2C52158B3CF4 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -2090,7 +2090,7 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = SkyBridgeRealtimeMedia;
 		};
-		"TEMP_C02AEECE-1F43-4435-8C36-88B453AD38D5" /* SkyBridgeWebRTCRuntime */ = {
+		"TEMP_4A2B4C37-736D-44FF-802F-B206D1982832" /* SkyBridgeWebRTCRuntime */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SkyBridgeWebRTCRuntime;
 		};

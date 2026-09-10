@@ -369,3 +369,9 @@
 "本机登记已冻结。" = "本机登记已冻结。";
 "暂时无法确认本机的登记状态。" = "暂时无法确认本机的登记状态。";
 "型号尚未上报" = "型号尚未上报";
+
+// Background appearance
+"settings.background_style" = "背景风格";
+"settings.background_style.classic" = "经典星空";
+"settings.background_style.light" = "清透天光";
+"settings.background_style.description" = "背景、玻璃与文字配色一同切换，天气效果保持不变。";

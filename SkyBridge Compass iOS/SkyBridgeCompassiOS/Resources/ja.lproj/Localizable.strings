@@ -369,3 +369,9 @@
 "本机登记已冻结。" = "このデバイスの登録は凍結されています。";
 "暂时无法确认本机的登记状态。" = "このデバイスの登録状態を確認できません。";
 "型号尚未上报" = "モデル未報告";
+
+// Background appearance
+"settings.background_style" = "背景スタイル";
+"settings.background_style.classic" = "クラシック星空";
+"settings.background_style.light" = "明るい空";
+"settings.background_style.description" = "背景・ガラス・文字の配色をまとめて切り替えます。天気エフェクトの設定は変わりません。";
