@@ -549,6 +549,7 @@ let package = Package(
             ],
             resources: [
                 .copy("Fixtures/QPeriaptABI2/signed-policy-vectors.json"),
+                .copy("Fixtures/QPeriaptABI2/skr2-golden.json"),
                 .copy("Fixtures/AppleCompatibilityVectors/inputs.json"),
                 .copy("Fixtures/BoundSession/bound-session-run-evidence-v2.txt")
             ],

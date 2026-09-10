@@ -1921,6 +1921,9 @@ public class P2PConnectionManager: ObservableObject {
             throw signedLANRefreshFailure("missing stable protocol identity target; refusing endpoint alias target")
         }
         let request = AppMessage.KEMRefreshRequestPayload(
+            version: requestedSuites == [.qperiaptABI2PolicyBound]
+                ? AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+                : AppMessage.KEMRefreshRequestPayload.currentVersion,
             requesterDeviceId: try localStablePersistentDeviceIdentifier(),
             targetDeviceId: targetProtocolDeviceId,
             requesterProtocolIdentityFingerprint: requesterProtocolIdentityFingerprint,
@@ -5519,9 +5522,17 @@ public class P2PConnectionManager: ObservableObject {
             targetFingerprint: request.targetProtocolIdentityFingerprint
         )
         try Task.checkCancellation()
+        let isQProfile = request.version == AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+        if isQProfile && selectedIdentity.algorithm != .mlDSA65 {
+            throw signedLANRefreshFailure("Q bootstrap requires the committed ML-DSA-65 identity")
+        }
+        let signedPlatform: String? = isQProfile ? "iOS" : nil
+        let signedOSVersion: String? = isQProfile ? "iOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion)" : nil
         let requestedWireIds = Set(requestedSuites.map(\.wireId))
         let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
-            try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys(),
+            platform: signedPlatform,
+            osVersion: signedOSVersion
         )
         .filter { requestedWireIds.contains($0.suiteWireId) }
         try Task.checkCancellation()
@@ -5537,6 +5548,7 @@ public class P2PConnectionManager: ObservableObject {
             kemPublicKeys: kemKeys
         )
         let unsigned = AppMessage.SignedKEMRefreshPayload(
+            version: request.version,
             deviceId: localId,
             aliases: PeerIdentityAliasResolver.lookupCandidates(for: localId),
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
@@ -5553,12 +5565,15 @@ public class P2PConnectionManager: ObservableObject {
             policyAllowClassicFallback: false,
             routeScope: "lan",
             bonjourEndpointDigest: request.bonjourEndpointDigest,
+            platform: signedPlatform,
+            osVersion: signedOSVersion,
             signature: Data()
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
         let signature = try await signatureProvider.sign(unsigned.signaturePreimage, key: selectedIdentity.keyHandle)
         try Task.checkCancellation()
         let response = AppMessage.SignedKEMRefreshPayload(
+            version: unsigned.version,
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -5575,6 +5590,8 @@ public class P2PConnectionManager: ObservableObject {
             policyAllowClassicFallback: unsigned.policyAllowClassicFallback,
             routeScope: unsigned.routeScope,
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
+            platform: unsigned.platform,
+            osVersion: unsigned.osVersion,
             signature: signature
         )
         await admissionGate.recordCompletedResponse(

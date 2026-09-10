@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 /// Stores peer KEM identity public keys by deviceId.
 /// This is the missing prerequisite for negotiating PQC suites (initiator needs peer KEM public key).
@@ -68,6 +69,9 @@ public actor KEMTrustStore {
         var recoveryEvidenceReference: String? = nil
         var signedSuiteWireIds: [UInt16]? = nil
         var signedRefreshDeviceId: String? = nil
+        var signedRefreshVersion: Int? = nil
+        var platform: String? = nil
+        var osVersion: String? = nil
         var authorityBoundBootstraps: [String: AuthorityBoundBootstrap]? = nil
     }
 
@@ -593,6 +597,8 @@ public actor KEMTrustStore {
                 signature: validPayload.signature,
                 publicKey: validPayload.protocolIdentityPublicKey
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw SignedRefreshImportError.signatureVerificationError(error.localizedDescription)
         }
@@ -600,13 +606,23 @@ public actor KEMTrustStore {
             throw SignedRefreshImportError.signatureVerificationFailed
         }
 
-        let validKeys = KEMPublicKeyInfo.normalizedValidKeys(validPayload.kemPublicKeys)
-        guard !validKeys.isEmpty else { return }
+        try Task.checkCancellation()
+        let validKeys = KEMPublicKeyInfo.normalizedValidKeys(
+            validPayload.kemPublicKeys, platform: validPayload.platform, osVersion: validPayload.osVersion
+        )
+        guard !validKeys.isEmpty, validKeys.count == validPayload.kemPublicKeys.count else {
+            throw AppMessage.KEMRefreshValidationError.missingKEMPublicKey
+        }
 
         let identifiers = [validPayload.deviceId] + validPayload.aliases + deviceIds
         let candidates = Self.trustMaterialCandidates(forAny: identifiers)
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else { throw AppMessage.KEMRefreshValidationError.invalidDeviceId }
 
+        // Signature verification suspends this actor. Recheck durable generations afterwards.
+        if let current = candidates.compactMap({ cache[$0]?.generation }).max(),
+           validPayload.generation < current {
+            throw AppMessage.KEMRefreshValidationError.generationRollback(current: current, incoming: validPayload.generation)
+        }
         let keyDict = Dictionary(uniqueKeysWithValues: validKeys.map { ($0.suiteWireId, $0.publicKey) })
         let payloadHash = Self.sha256Hex(validPayload.signaturePreimage)
         let requestHash = request.canonicalRequestHashHex
@@ -629,7 +645,10 @@ public actor KEMTrustStore {
                 requestHashHex: requestHash,
                 recoveryEvidenceReference: canonicalRecoveryReference,
                 signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted(),
-                signedRefreshDeviceId: validPayload.deviceId
+                signedRefreshDeviceId: validPayload.deviceId,
+                signedRefreshVersion: validPayload.version,
+                platform: validPayload.platform,
+                osVersion: validPayload.osVersion
             )
         }
         Self.pruneCacheIfNeeded(&candidateCache)
@@ -994,6 +1013,20 @@ public actor KEMTrustStore {
     }
 
     private static func sanitizedPeer(_ peer: StoredPeer) -> StoredPeer? {
+        if peer.source == "signed_lan_kem_refresh" {
+            let version = peer.signedRefreshVersion ?? AppMessage.SignedKEMRefreshPayload.currentVersion
+            if peer.keys[CryptoSuite.qperiaptABI2PolicyBound.wireId] != nil {
+                guard version == AppMessage.SignedKEMRefreshPayload.qPeriaptVersion,
+                      peer.keys.count == 1,
+                      peer.signedSuiteWireIds == [CryptoSuite.qperiaptABI2PolicyBound.wireId],
+                      QPeriaptPeerPlatformPolicy.isPeerAppPlatformEligible(
+                        platform: peer.platform, osVersion: peer.osVersion
+                      ) else { return nil }
+            } else {
+                guard version == AppMessage.SignedKEMRefreshPayload.currentVersion,
+                      peer.platform == nil, peer.osVersion == nil else { return nil }
+            }
+        }
         var sanitized = peer
         sanitized.keys = sanitizedKEMMap(peer.keys)
         guard !sanitized.keys.isEmpty else { return nil }

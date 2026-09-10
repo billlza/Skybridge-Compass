@@ -348,8 +348,8 @@ extension P2PDiscoveryService {
             throw makeSKRFailure("local protocol identity unavailable")
         }
         let selectedIdentity = localIdentities.first { identity in
-            targetFingerprint == nil
-                || targetFingerprint == identity.authoritativeFingerprint
+            (request.version != AppMessage.KEMRefreshRequestPayload.qPeriaptVersion || identity.algorithm == .mlDSA65)
+                && (targetFingerprint == nil || targetFingerprint == identity.authoritativeFingerprint)
         }
         guard let selectedIdentity else {
             throw makeSKRFailure("target protocol identity fingerprint mismatch")
@@ -373,8 +373,14 @@ extension P2PDiscoveryService {
             )
             throw makeSKRFailure("local PQC KEM material unavailable")
         }
+        let isQProfile = request.version == AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+        if isQProfile && selectedIdentity.algorithm != .mlDSA65 {
+            throw makeSKRFailure("Q bootstrap requires the committed ML-DSA-65 identity")
+        }
+        let signedPlatform: String? = isQProfile ? QPeriaptPlatformPolicy.localPlatformName() : nil
+        let signedOSVersion: String? = isQProfile ? QPeriaptPlatformPolicy.localOSVersionString() : nil
         let requestedWireIds = Set(requestedSuites.map(\.wireId))
-        let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(rawKEMKeys).filter { key in
+        let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(rawKEMKeys, platform: signedPlatform, osVersion: signedOSVersion).filter { key in
             requestedWireIds.contains(key.suiteWireId)
         }
         guard !kemKeys.isEmpty else {
@@ -406,6 +412,7 @@ extension P2PDiscoveryService {
         )
         let aliases = PeerTrustLookup.lookupCandidates(for: localId)
         let unsigned = AppMessage.SignedKEMRefreshPayload(
+            version: request.version,
             deviceId: localId,
             aliases: aliases,
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
@@ -422,6 +429,8 @@ extension P2PDiscoveryService {
             policyAllowClassicFallback: false,
             routeScope: "lan",
             bonjourEndpointDigest: request.bonjourEndpointDigest,
+            platform: signedPlatform,
+            osVersion: signedOSVersion,
             signature: Data()
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
@@ -441,6 +450,7 @@ extension P2PDiscoveryService {
         }
         try Task.checkCancellation()
         let response = AppMessage.SignedKEMRefreshPayload(
+            version: unsigned.version,
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -457,6 +467,8 @@ extension P2PDiscoveryService {
             policyAllowClassicFallback: unsigned.policyAllowClassicFallback,
             routeScope: unsigned.routeScope,
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
+            platform: unsigned.platform,
+            osVersion: unsigned.osVersion,
             signature: signature
         )
         await admissionGate.recordCompletedResponse(

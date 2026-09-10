@@ -3252,6 +3252,9 @@ public class P2PDiscoveryService: BaseManager {
         let requesterProof = try await localProtocolIdentityProofForOutboundPIB()
         let requesterFingerprint = requesterProof.fingerprint
         let request = AppMessage.KEMRefreshRequestPayload(
+            version: requestedSuites == [.qperiaptABI2PolicyBound]
+                ? AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+                : AppMessage.KEMRefreshRequestPayload.currentVersion,
             requesterDeviceId: requesterDeviceId,
             targetDeviceId: targetDeviceId,
             requesterProtocolIdentityFingerprint: requesterFingerprint,
@@ -3633,8 +3636,11 @@ public class P2PDiscoveryService: BaseManager {
     }
 
     private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+        if preferredTargetSuite?.canonicalKEMSuite == .qperiaptABI2PolicyBound {
+            return [.qperiaptABI2PolicyBound]
+        }
         let providerSuites = await cryptoProviderSupportedSuites(policy: .requirePQC)
-            .filter { $0.isPQCGroup && $0.isNegotiable }
+            .filter { $0.isPQCGroup && $0.isNegotiable && $0.canonicalKEMSuite != .qperiaptABI2PolicyBound }
             .map(\.canonicalKEMSuite)
         var suites = providerSuites
         if let preferred = preferredTargetSuite?.canonicalKEMSuite, preferred.isNegotiable, preferred.isPQCGroup {

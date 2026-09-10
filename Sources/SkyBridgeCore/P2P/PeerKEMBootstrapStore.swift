@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 public actor PeerKEMBootstrapStore {
@@ -8,9 +9,12 @@ public actor PeerKEMBootstrapStore {
     public enum SignedRefreshImportError: Error, LocalizedError, Sendable, Equatable {
         case signatureVerificationFailed
         case signatureVerificationError(String)
+        case persistenceVerificationFailed
 
         public var errorDescription: String? {
             switch self {
+            case .persistenceVerificationFailed:
+                return "Signed KEM refresh persistence could not be verified"
             case .signatureVerificationFailed:
                 return "SKR-1 signature verification failed at peer KEM bootstrap import"
             case .signatureVerificationError(let detail):
@@ -31,6 +35,7 @@ public actor PeerKEMBootstrapStore {
         var payloadHashHex: String? = nil
         var signedSuiteWireIds: [UInt16]? = nil
         var signedRefreshDeviceId: String? = nil
+        var signedRefreshVersion: Int? = nil
         var platform: String? = nil
         var osVersion: String? = nil
     }
@@ -362,6 +367,8 @@ public actor PeerKEMBootstrapStore {
                 signature: validPayload.signature,
                 publicKey: validPayload.protocolIdentityPublicKey
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             throw SignedRefreshImportError.signatureVerificationError(error.localizedDescription)
         }
@@ -369,20 +376,29 @@ public actor PeerKEMBootstrapStore {
             throw SignedRefreshImportError.signatureVerificationFailed
         }
 
+        try Task.checkCancellation()
         let validKeys = KEMPublicKeyInfo.normalizedValidKeys(
             validPayload.kemPublicKeys,
-            platform: nil,
-            osVersion: nil
+            platform: validPayload.platform,
+            osVersion: validPayload.osVersion
         )
-        guard !validKeys.isEmpty else { return }
+        guard !validKeys.isEmpty, validKeys.count == validPayload.kemPublicKeys.count else {
+            throw AppMessage.KEMRefreshValidationError.missingKEMPublicKey
+        }
 
         let identifiers = [validPayload.deviceId] + validPayload.aliases + deviceIds
         let candidates = trustMaterialIds(identifiers)
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else { throw AppMessage.KEMRefreshValidationError.invalidDeviceId }
 
+        // Signature verification suspends this actor. Recheck durable generations afterwards.
+        if let current = candidates.compactMap({ entries[$0]?.generation }).max(),
+           validPayload.generation < current {
+            throw AppMessage.KEMRefreshValidationError.generationRollback(current: current, incoming: validPayload.generation)
+        }
         let keyDict = Dictionary(uniqueKeysWithValues: validKeys.map { ($0.suiteWireId, $0.publicKey) })
         let payloadHash = Self.sha256Hex(validPayload.signaturePreimage)
         let observedAt = Date()
+        let previousEntries = entries
         for candidate in candidates {
             entries[candidate] = Entry(
                 kemPublicKeys: keyDict,
@@ -395,11 +411,23 @@ public actor PeerKEMBootstrapStore {
                 signingFingerprint: validPayload.protocolIdentityFingerprint,
                 payloadHashHex: payloadHash,
                 signedSuiteWireIds: validKeys.map(\.suiteWireId).sorted(),
-                signedRefreshDeviceId: validPayload.deviceId
+                signedRefreshDeviceId: validPayload.deviceId,
+                signedRefreshVersion: validPayload.version,
+                platform: validPayload.platform,
+                osVersion: validPayload.osVersion
             )
         }
         trimIfNeeded(maxEntries: Self.maximumEntryCount)
-        persist()
+        do {
+            let data = try JSONEncoder().encode(Snapshot(entries: entries))
+            defaults.set(data, forKey: Self.defaultsKey)
+            guard defaults.data(forKey: Self.defaultsKey) == data else {
+                throw SignedRefreshImportError.persistenceVerificationFailed
+            }
+        } catch {
+            entries = previousEntries
+            throw error
+        }
     }
 
     public func mergedKEMPublicKeys(forCandidates candidates: [String]) -> [UInt16: Data] {
@@ -699,6 +727,20 @@ public actor PeerKEMBootstrapStore {
     }
 
     private static func sanitizedEntry(_ entry: Entry) -> Entry? {
+        if entry.source == "signed_lan_kem_refresh" {
+            let version = entry.signedRefreshVersion ?? AppMessage.SignedKEMRefreshPayload.currentVersion
+            if entry.kemPublicKeys[CryptoSuite.qperiaptABI2PolicyBound.wireId] != nil {
+                guard version == AppMessage.SignedKEMRefreshPayload.qPeriaptVersion,
+                      entry.kemPublicKeys.count == 1,
+                      entry.signedSuiteWireIds == [CryptoSuite.qperiaptABI2PolicyBound.wireId],
+                      QPeriaptPeerPlatformPolicy.isPeerAppPlatformEligible(
+                        platform: entry.platform, osVersion: entry.osVersion
+                      ) else { return nil }
+            } else {
+                guard version == AppMessage.SignedKEMRefreshPayload.currentVersion,
+                      entry.platform == nil, entry.osVersion == nil else { return nil }
+            }
+        }
         var sanitized = entry
         sanitized.kemPublicKeys = sanitizedKEMMap(
             entry.kemPublicKeys,
