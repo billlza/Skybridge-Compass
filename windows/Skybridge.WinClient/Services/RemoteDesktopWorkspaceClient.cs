@@ -391,7 +391,7 @@ public sealed class RemoteDesktopWorkspaceClient : IRemoteDesktopWorkspaceClient
         {
             new(
                 "Desk Mac Preview",
-                "Ready",
+                "Preview only",
                 plan.Transport.Kind.ToString(),
                 $"quality={bitrateProfile}; fps={framerateProfile}",
                 "Input, display capture, and disconnect remain disabled until live transport is wired."),

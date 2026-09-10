@@ -1,573 +1,276 @@
-using System;
-using System.Collections.Generic;
-using System.Globalization;
+using System.Net.Sockets;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Threading.Tasks;
-using QRCoder;
+using Skybridge.WinClient.Services.FileTransfer;
+using Skybridge.WinClient.Services.RemoteControl;
 
 namespace Skybridge.WinClient.Services;
 
-public interface IFileTransferWorkspaceClient
+internal interface IFileTransferSelectionClient
 {
-    string BuildInitialStatus();
-
-    string BuildPendingStatus();
-
-    string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot);
-
-    string BuildCompletedStatusMessage();
-
-    bool CanSelectFiles();
-
-    bool CanSelectFolder();
-
-    bool CanGenerateShareQr();
-
-    string BuildSelectFilesPendingStatus();
-
-    string BuildSelectFolderPendingStatus();
-
-    string BuildShareQrPendingStatus();
-
-    Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync();
-
-    Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync();
-
-    Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync();
-
-    Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync();
+    Task<IReadOnlyList<string>> SelectPathsAsync(bool folder, CancellationToken cancellationToken);
+    Task<DiscoveryBrowserPeerCandidate?> SelectPeerAsync(CancellationToken cancellationToken);
+    Task<bool> ApproveIncomingAsync(ClassicFileMetadata metadata, string destinationDirectory, CancellationToken cancellationToken);
+    string DestinationDirectory { get; }
 }
 
-public interface IFileTransferShareIntentClient
+/// <summary>Live transfer workspace. Identities and control sessions belong to WindowsDeviceWorkspace.</summary>
+[SupportedOSPlatform("windows10.0.19041")]
+internal sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient, IAsyncDisposable
 {
-    bool CanGenerateShareQr();
+    private readonly WindowsDeviceWorkspace _workspace;
+    private readonly IFileTransferSelectionClient _selection;
+    private readonly Func<RemoteControlViewerAccount?> _account;
+    private readonly Func<string, string> _text;
+    private readonly object _state = new();
+    private readonly SemaphoreSlim _outbound = new(1, 1);
+    private readonly CancellationTokenSource _lifetime = new();
+    private CancellationTokenSource _connectionsLifetime = new();
+    private readonly Dictionary<string, FileTransferQueueItem> _active = new(StringComparer.Ordinal);
+    private readonly List<FileTransferHistoryItem> _history = [];
+    private readonly HashSet<string> _connected = new(StringComparer.Ordinal);
+    private readonly List<Task> _observations = [];
+    private readonly TransferProgress _progress;
+    private ClassicFileTransferListener? _listener;
+    private Task _listenerObservation = Task.CompletedTask;
+    private long _lastProgress;
+    private bool _disposed;
+    private int _disconnecting;
+    private string? _destinationDirectory;
+    private string _status;
 
-    FileTransferWorkspaceActionResult BuildShareQrIntent();
-}
-
-public interface IFileTransferSelectionIntentClient
-{
-    bool CanSelectFiles();
-
-    bool CanSelectFolder();
-
-    FileTransferSelectionIntentSnapshot CaptureSnapshot();
-
-    FileTransferWorkspaceActionResult BuildSelectFilesIntent();
-
-    FileTransferWorkspaceActionResult BuildSelectFolderIntent();
-}
-
-public sealed class InMemoryFileTransferSelectionIntentClient : IFileTransferSelectionIntentClient
-{
-    private readonly object _sync = new();
-    private int _nextFilesIntentId;
-    private int _nextFolderIntentId;
-    private string? _latestFilesIntentId;
-    private string? _latestFolderIntentId;
-    private DateTimeOffset? _latestFilesIntentAt;
-    private DateTimeOffset? _latestFolderIntentAt;
-
-    public bool CanSelectFiles() => true;
-
-    public bool CanSelectFolder() => true;
-
-    public FileTransferSelectionIntentSnapshot CaptureSnapshot()
+    internal FileTransferWorkspaceClient(WindowsDeviceWorkspace workspace, IFileTransferSelectionClient selection,
+        Func<RemoteControlViewerAccount?> account, Func<string, string> text)
     {
-        lock (_sync)
-        {
-            return new FileTransferSelectionIntentSnapshot(
-                _latestFilesIntentId is not null,
-                _latestFilesIntentId,
-                _latestFilesIntentAt,
-                _latestFolderIntentId is not null,
-                _latestFolderIntentId,
-                _latestFolderIntentAt);
-        }
+        _workspace = workspace; _selection = selection; _account = account; _text = text;
+        _status = text("FileTransferLiveReady");
+        _progress = new(ReportProgress);
     }
 
-    public FileTransferWorkspaceActionResult BuildSelectFilesIntent()
-    {
-        string intentId;
-        lock (_sync)
-        {
-            _nextFilesIntentId++;
-            intentId = $"FT-FILES-{_nextFilesIntentId:0000}";
-            _latestFilesIntentId = intentId;
-            _latestFilesIntentAt = DateTimeOffset.UtcNow;
-        }
-
-        return FileTransferWorkspaceClient.BuildSelectFilesIntentActionResult(intentId);
-    }
-
-    public FileTransferWorkspaceActionResult BuildSelectFolderIntent()
-    {
-        string intentId;
-        lock (_sync)
-        {
-            _nextFolderIntentId++;
-            intentId = $"FT-FOLDER-{_nextFolderIntentId:0000}";
-            _latestFolderIntentId = intentId;
-            _latestFolderIntentAt = DateTimeOffset.UtcNow;
-        }
-
-        return FileTransferWorkspaceClient.BuildSelectFolderIntentActionResult(intentId);
-    }
-}
-
-public sealed class InMemoryFileTransferShareIntentClient : IFileTransferShareIntentClient
-{
-    private readonly object _sync = new();
-    private int _nextIntentId;
-
-    public bool CanGenerateShareQr() => true;
-
-    public FileTransferWorkspaceActionResult BuildShareQrIntent()
-    {
-        int intentId;
-        lock (_sync)
-        {
-            _nextIntentId++;
-            intentId = _nextIntentId;
-        }
-
-        return FileTransferWorkspaceClient.BuildShareQrIntentActionResult($"FT-{intentId:0000}");
-    }
-}
-
-public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient
-{
-    private const string DefaultFilesSelectionIntentId = "FT-FILES-0000";
-    private const string DefaultFolderSelectionIntentId = "FT-FOLDER-0000";
-    private const string ShareQrQueryPrefix = "skybridge://file-transfer?data=";
-    private const int ShareQrVersion = 1;
-    private const int ShareQrPixelsPerModule = 8;
-    private const double ShareQrLifetimeSeconds = 300;
-    private static readonly IReadOnlyList<string> ShareQrCapabilities = new[] { "file-transfer", "intent-only", "windows" };
-    private static readonly JsonSerializerOptions QrJsonOptions = new(JsonSerializerDefaults.Web);
-
-    private readonly CoreBridge _coreBridge;
-    private readonly IFileTransferSelectionIntentClient _selectionIntentClient;
-    private readonly IFileTransferShareIntentClient _shareIntentClient;
-
-    public FileTransferWorkspaceClient(CoreBridge coreBridge)
-        : this(
-            coreBridge,
-            new InMemoryFileTransferShareIntentClient(),
-            new InMemoryFileTransferSelectionIntentClient())
-    {
-    }
-
-    public FileTransferWorkspaceClient(
-        CoreBridge coreBridge,
-        IFileTransferShareIntentClient shareIntentClient)
-        : this(coreBridge, shareIntentClient, new InMemoryFileTransferSelectionIntentClient())
-    {
-    }
-
-    public FileTransferWorkspaceClient(
-        CoreBridge coreBridge,
-        IFileTransferShareIntentClient shareIntentClient,
-        IFileTransferSelectionIntentClient selectionIntentClient)
-    {
-        _coreBridge = coreBridge ?? throw new ArgumentNullException(nameof(coreBridge));
-        _shareIntentClient = shareIntentClient ?? throw new ArgumentNullException(nameof(shareIntentClient));
-        _selectionIntentClient = selectionIntentClient ?? throw new ArgumentNullException(nameof(selectionIntentClient));
-    }
-
+    internal event Action<FileTransferWorkspaceSnapshot, string>? Changed;
+    public static string DefaultInitialStatus => "Ready";
+    public static string DefaultPendingStatus => "Refreshing...";
+    public static string DefaultCompletedStatusMessage => "File transfer workspace updated";
+    public static string DefaultSelectFilesPendingStatus => "Preparing file picker...";
+    public static string DefaultSelectFolderPendingStatus => "Preparing folder picker...";
+    public static string DefaultShareQrPendingStatus => "Preparing QR...";
+    public static string BuildDefaultCompletedStatus(FileTransferWorkspaceSnapshot snapshot) => $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
+    public static FileTransferWorkspaceActionResult BuildDefaultSelectFilesActionResult() => new("Unavailable", "File picker is not configured.", "");
+    public static FileTransferWorkspaceActionResult BuildDefaultSelectFolderActionResult() => new("Unavailable", "Folder picker is not configured.", "");
+    public static FileTransferWorkspaceActionResult BuildDefaultShareQrActionResult() => new("Unavailable", "QR sharing is not available for the current LAN transfer session.", "");
+    public string BuildInitialStatus() => _text("FileTransferLiveReady");
     public string BuildPendingStatus() => DefaultPendingStatus;
-
-    public string BuildInitialStatus() => DefaultInitialStatus;
-
-    public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
-        BuildDefaultCompletedStatus(snapshot);
-
+    public string BuildCompletedStatus(FileTransferWorkspaceSnapshot snapshot) { lock (_state) return _status; }
     public string BuildCompletedStatusMessage() => DefaultCompletedStatusMessage;
-
-    public bool CanSelectFiles() => _selectionIntentClient.CanSelectFiles();
-
-    public bool CanSelectFolder() => _selectionIntentClient.CanSelectFolder();
-
-    public bool CanGenerateShareQr() => _shareIntentClient.CanGenerateShareQr();
-
+    public bool CanSelectFiles() => !_disposed;
+    public bool CanSelectFolder() => !_disposed;
+    public bool CanGenerateShareQr() => false;
     public string BuildSelectFilesPendingStatus() => DefaultSelectFilesPendingStatus;
-
     public string BuildSelectFolderPendingStatus() => DefaultSelectFolderPendingStatus;
-
     public string BuildShareQrPendingStatus() => DefaultShareQrPendingStatus;
+    public Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync() => Task.FromResult(Snapshot());
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() => SelectAndSendAsync(false);
+    public Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync() => SelectAndSendAsync(true);
+    public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() => Task.FromResult(BuildDefaultShareQrActionResult());
 
-    public static string DefaultInitialStatus { get; } = "Ready";
-
-    public static string DefaultPendingStatus { get; } = "Refreshing...";
-
-    public static string DefaultCompletedStatusMessage { get; } = "File transfer workspace updated";
-
-    public static string DefaultSelectFilesPendingStatus { get; } = "Preparing file picker...";
-
-    public static string DefaultSelectFolderPendingStatus { get; } = "Preparing folder picker...";
-
-    public static string DefaultShareQrPendingStatus { get; } = "Preparing QR...";
-
-    public static string DefaultSelectFilesBlockedStatus { get; } = "File picker pending adapter";
-
-    public static string DefaultSelectFilesBlockedMessage { get; } = "File selection remains fail-closed";
-
-    public static string DefaultSelectFilesIntentReadyStatus { get; } = "File selection intent ready";
-
-    public static string DefaultSelectFilesIntentReadyMessage { get; } =
-        "File selection intent prepared in memory only; no file picker was opened.";
-
-    public static string DefaultSelectFolderBlockedStatus { get; } = "Folder picker pending adapter";
-
-    public static string DefaultSelectFolderBlockedMessage { get; } = "Folder selection remains fail-closed";
-
-    public static string DefaultSelectFolderIntentReadyStatus { get; } = "Folder selection intent ready";
-
-    public static string DefaultSelectFolderIntentReadyMessage { get; } =
-        "Folder selection intent prepared in memory only; no folder picker was opened.";
-
-    public static string DefaultShareQrBlockedStatus { get; } = "QR generation pending adapter";
-
-    public static string DefaultShareQrBlockedMessage { get; } = "File transfer QR generation remains fail-closed";
-
-    public static string DefaultShareQrReadyStatus { get; } = "QR share plan ready";
-
-    public static string DefaultShareQrReadyMessage { get; } =
-        "File transfer QR share plan prepared in memory only; no local files were read.";
-
-    public static string BuildDefaultCompletedStatus(FileTransferWorkspaceSnapshot snapshot) =>
-        $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC";
-
-    public static FileTransferWorkspaceActionResult BuildDefaultSelectFilesActionResult() =>
-        new(
-            DefaultSelectFilesBlockedStatus,
-            DefaultSelectFilesBlockedMessage,
-            "No file picker was opened, no local files were read, and no transfer manifest was created.");
-
-    public static FileTransferWorkspaceActionResult BuildSelectFilesIntentActionResult(string intentId) =>
-        new(
-            DefaultSelectFilesIntentReadyStatus,
-            DefaultSelectFilesIntentReadyMessage,
-            $"intent={NormalizeSelectionIntentId(intentId, DefaultFilesSelectionIntentId)}; no file picker was opened, no local files were read, and no transfer manifest was created.");
-
-    public static FileTransferWorkspaceActionResult BuildDefaultSelectFolderActionResult() =>
-        new(
-            DefaultSelectFolderBlockedStatus,
-            DefaultSelectFolderBlockedMessage,
-            "No folder picker was opened, no directory was scanned, and no transfer manifest was created.");
-
-    public static FileTransferWorkspaceActionResult BuildSelectFolderIntentActionResult(string intentId) =>
-        new(
-            DefaultSelectFolderIntentReadyStatus,
-            DefaultSelectFolderIntentReadyMessage,
-            $"intent={NormalizeSelectionIntentId(intentId, DefaultFolderSelectionIntentId)}; no folder picker was opened, no directory was scanned, and no transfer manifest was created.");
-
-    public static FileTransferWorkspaceActionResult BuildDefaultShareQrActionResult() =>
-        new(
-            DefaultShareQrBlockedStatus,
-            DefaultShareQrBlockedMessage,
-            "No local files were read and no transport or signaling session was started.");
-
-    public static FileTransferWorkspaceActionResult BuildShareQrIntentActionResult(string intentId) =>
-        BuildShareQrIntentActionResultCore(NormalizeShareIntentId(intentId));
-
-    private static FileTransferWorkspaceActionResult BuildShareQrIntentActionResultCore(string normalizedIntentId)
+    internal async Task ConnectSelectedPeerAsync()
     {
-        var shareQr = BuildSignedShareQrCode(normalizedIntentId);
-        return new FileTransferWorkspaceActionResult(
-            DefaultShareQrReadyStatus,
-            DefaultShareQrReadyMessage,
-            $"intent={normalizedIntentId}; qr={shareQr.Uri}; png={shareQr.PngByteLength} bytes; no local files were read, and no transport or signaling session was started.",
-            shareQr.Uri,
-            shareQr.PngBase64);
-    }
-
-    private static FileTransferShareQrCode BuildSignedShareQrCode(string intentId)
-    {
-        using var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var publicKey = ExportRawP256PublicKey(signingKey);
-        var publicKeyBase64 = Convert.ToBase64String(publicKey);
-        var publicKeyFingerprint = Convert.ToHexString(SHA256.HashData(publicKey)).ToLowerInvariant();
-        var timestampSeconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-        var timestamp = timestampSeconds.ToString("0.###", CultureInfo.InvariantCulture);
-        var expiresAt = (timestampSeconds + ShareQrLifetimeSeconds).ToString("0.###", CultureInfo.InvariantCulture);
-        var payload = new FileTransferShareQrPayload(
-            ShareQrVersion,
-            intentId,
-            Environment.MachineName,
-            "Windows",
-            "intent-only",
-            0,
-            0,
-            expiresAt,
-            ShareQrCapabilities);
-        var canonical = BuildShareQrCanonicalPayload(payload, timestamp, publicKeyFingerprint);
-        var signature = signingKey.SignData(
-            Encoding.UTF8.GetBytes(canonical),
-            HashAlgorithmName.SHA256,
-            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
-        var envelope = new FileTransferShareQrEnvelope(
-            payload,
-            Convert.ToBase64String(signature),
-            publicKeyBase64,
-            timestamp,
-            publicKeyFingerprint);
-        var envelopeJson = JsonSerializer.Serialize(envelope, QrJsonOptions);
-        var uri = $"{ShareQrQueryPrefix}{Base64UrlEncode(Encoding.UTF8.GetBytes(envelopeJson))}";
-        var pngBytes = PngByteQRCodeHelper.GetQRCode(
-            uri,
-            QRCodeGenerator.ECCLevel.Q,
-            ShareQrPixelsPerModule);
-
-        return new FileTransferShareQrCode(
-            uri,
-            Convert.ToBase64String(pngBytes),
-            pngBytes.Length);
-    }
-
-    private static string BuildShareQrCanonicalPayload(
-        FileTransferShareQrPayload payload,
-        string timestamp,
-        string publicKeyFingerprint) =>
-        string.Join(
-            "|",
-            "file-transfer",
-            payload.Version.ToString(CultureInfo.InvariantCulture),
-            payload.IntentId,
-            payload.DeviceName,
-            payload.DeviceType,
-            payload.ShareMode,
-            payload.ManifestFileCount.ToString(CultureInfo.InvariantCulture),
-            payload.ManifestBytes.ToString(CultureInfo.InvariantCulture),
-            payload.ExpiresAt,
-            string.Join(",", payload.Capabilities),
-            timestamp,
-            publicKeyFingerprint);
-
-    private static byte[] ExportRawP256PublicKey(ECDsa signingKey)
-    {
-        var publicParameters = signingKey.ExportParameters(false);
-        if (publicParameters.Q.X is not { Length: 32 } x
-            || publicParameters.Q.Y is not { Length: 32 } y)
+        if (!await _outbound.WaitAsync(0)) throw new InvalidOperationException(_text("FileTransferLiveBusy"));
+        try
         {
-            throw new InvalidOperationException("File transfer QR signing key export must produce a raw P256 public key.");
+            var account = RequireAccount();
+            var peer = await _selection.SelectPeerAsync(_lifetime.Token);
+            if (peer is not null) await ConnectAsync(peer, account);
         }
-
-        var publicKey = new byte[64];
-        Buffer.BlockCopy(x, 0, publicKey, 0, x.Length);
-        Buffer.BlockCopy(y, 0, publicKey, x.Length, y.Length);
-        return publicKey;
+        catch (Exception failure) { SetStatus(failure.Message); throw; }
+        finally { _outbound.Release(); }
     }
 
-    private static string Base64UrlEncode(byte[] bytes) =>
-        Convert.ToBase64String(bytes)
-            .TrimEnd('=')
-            .Replace('+', '-')
-            .Replace('/', '_');
-
-    private static string NormalizeShareIntentId(string intentId)
+    internal async Task DisconnectAsync()
     {
-        var normalized = (intentId ?? "").Trim();
-        return normalized.Length == 0 ? "FT-0000" : normalized;
-    }
-
-    private static string NormalizeSelectionIntentId(string? intentId, string fallback)
-    {
-        var normalized = (intentId ?? "").Trim();
-        return normalized.Length == 0 ? fallback : normalized;
-    }
-
-    public async Task<FileTransferWorkspaceSnapshot> BuildReadOnlySnapshotAsync()
-    {
-        var selectionIntent = _selectionIntentClient.CaptureSnapshot();
-        var plan = await _coreBridge.PlanConnectionAsync(
-            PeerCapabilities.Windows(),
-            PeerCapabilities.Apple(),
-            NetworkPath.CrossNatPath(),
-            CryptoProviderCapabilities.ResearchAll(),
-            new ushort[] { 0x0001, 0x0101, 0x1001 },
-            CryptoSuitePolicy.Compatibility(),
-            TrafficPaddingPlan.Sbp2Fixed(512));
-        var channelMappings = CoreChannelMappingResolver.RequireAll(plan.ChannelMappings);
-        var fileChannel = CoreChannelMappingResolver.Require(channelMappings, CoreChannelKind.File);
-        var manifestPayload = Encoding.UTF8.GetBytes("file-manifest:name=sample.mov;bytes=73400320");
-        var manifestFrame = await _coreBridge.EncodeFrameAsync(
-            CoreChannelKind.File,
-            1,
-            manifestPayload);
-        var metadata = await _coreBridge.DecodeFrameMetadataAsync(manifestFrame);
-        var decodedPayload = await _coreBridge.DecodeFramePayloadAsync(manifestFrame);
-
-        var queue = new List<FileTransferQueueItem>
+        if (Interlocked.Exchange(ref _disconnecting, 1) != 0) throw new InvalidOperationException(_text("FileTransferLiveBusy"));
+        try
         {
-            new(
-                "sample.mov",
-                "Queued",
-                "70 MB",
-                fileChannel.BindingKind.ToString(),
-                $"frame={metadata.EncodedLen} bytes; payload={decodedPayload.Length} bytes")
-        };
-        AddSelectionIntentQueueItems(queue, selectionIntent);
-        var history = new List<FileTransferHistoryItem>
-        {
-            new(
-                "archive.zip",
-                "Verified",
-                "HMAC tag recorded",
-                "Signature OK")
-        };
-        var security = new List<FileTransferSecurityFact>
-        {
-            new("Transport plan", plan.Transport.Kind.ToString(), $"audit={plan.Transport.AuditCode}; channels={channelMappings.Count}"),
-            new("Channel", fileChannel.BindingKind.ToString(), $"reliability={fileChannel.Reliability}; HOL isolated={fileChannel.HeadOfLineIsolated}"),
-            new("Manifest frame", $"{metadata.FrameHeaderLen} byte header", $"flags=0x{metadata.Flags:x4}; decoded={metadata.DecodedPayloadLen}"),
-            new("Selection intent", BuildSelectionIntentState(selectionIntent), BuildSelectionIntentDetail(selectionIntent)),
-            new("HMAC", "pending live transfer", "mac parity placeholder; no local files are read"),
-            new("Signature", "pending live transfer", "pairing/trust layer must verify sender identity")
-        };
-
-        return new FileTransferWorkspaceSnapshot(DateTimeOffset.UtcNow, queue, history, security);
-    }
-
-    public Task<FileTransferWorkspaceActionResult> BuildSelectFilesActionAsync() =>
-        Task.FromResult(_selectionIntentClient.BuildSelectFilesIntent());
-
-    public Task<FileTransferWorkspaceActionResult> BuildSelectFolderActionAsync() =>
-        Task.FromResult(_selectionIntentClient.BuildSelectFolderIntent());
-
-    public Task<FileTransferWorkspaceActionResult> BuildShareQrActionAsync() =>
-        Task.FromResult(_shareIntentClient.BuildShareQrIntent());
-
-    private static void AddSelectionIntentQueueItems(
-        List<FileTransferQueueItem> queue,
-        FileTransferSelectionIntentSnapshot selectionIntent)
-    {
-        if (selectionIntent.HasFilesIntent)
-        {
-            queue.Insert(
-                0,
-                new FileTransferQueueItem(
-                    "Selected files intent",
-                    "Intent ready",
-                    "0 files",
-                    "Picker pending",
-                    BuildFilesSelectionIntentDetail(selectionIntent)));
+            _connectionsLifetime.Cancel();
+            await _outbound.WaitAsync();
+            try
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                await _workspace.DisconnectControlSessionsAsync();
+                if (_listener is { } listener) { await listener.DisposeAsync(); _listener = null; }
+                await _listenerObservation;
+                await Task.WhenAll(_observations);
+                _observations.Clear();
+                _connectionsLifetime.Dispose();
+                _connectionsLifetime = new();
+                SetStatus(_text("FileTransferLiveDisconnected"));
+            }
+            finally { _outbound.Release(); }
         }
+        finally { Volatile.Write(ref _disconnecting, 0); }
+    }
 
-        if (selectionIntent.HasFolderIntent)
+    internal Task<FileTransferWorkspaceActionResult> SendSelectedPathsAsync(IReadOnlyList<string> paths, bool folder) => SelectAndSendAsync(folder, paths);
+
+    private async Task<FileTransferWorkspaceActionResult> SelectAndSendAsync(bool folder, IReadOnlyList<string>? selectedPaths = null)
+    {
+        if (!await _outbound.WaitAsync(0)) throw new InvalidOperationException(_text("FileTransferLiveBusy"));
+        string? staging = null;
+        try
         {
-            queue.Insert(
-                0,
-                new FileTransferQueueItem(
-                    "Selected folder intent",
-                    "Intent ready",
-                    "0 folders",
-                    "Picker pending",
-                    BuildFolderSelectionIntentDetail(selectionIntent)));
+            var account = RequireAccount();
+            var paths = selectedPaths ?? await _selection.SelectPathsAsync(folder, _lifetime.Token);
+            if (paths.Count == 0) return Result("FileTransferLiveCancelled");
+            if (paths.Count > 64 || (folder && paths.Count != 1) || paths.Any(string.IsNullOrWhiteSpace))
+                throw new InvalidOperationException(_text("FileTransferLiveSelectionLimit"));
+            var peer = await _selection.SelectPeerAsync(_lifetime.Token);
+            if (peer is null) return Result("FileTransferLiveCancelled");
+            var session = await ConnectAsync(peer, account);
+            using var power = WindowsPowerKeepAwake.Arm();
+            if (folder)
+            {
+                SetStatus(_text("FileTransferLivePackaging"));
+                staging = Path.Combine(Path.GetTempPath(), "SkyBridgeTransfer-" + Guid.NewGuid().ToString("N"));
+                paths = [await FileTransferFolderArchive.CreateAsync(paths[0], staging, _lifetime.Token)];
+            }
+            foreach (var path in paths) await SendFileAsync(session, peer, path);
+            return Result("FileTransferLiveCompleted");
+        }
+        catch (Exception failure)
+        {
+            SetStatus(failure.Message);
+            try { if (staging is not null && Directory.Exists(staging)) Directory.Delete(staging, recursive: true); staging = null; }
+            catch (Exception cleanup) { throw new AggregateException("Transfer and selected-folder staging cleanup failed.", failure, cleanup); }
+            throw;
+        }
+        finally
+        {
+            try { if (staging is not null) Directory.Delete(staging, recursive: true); }
+            finally { _outbound.Release(); }
         }
     }
 
-    private static string BuildSelectionIntentState(FileTransferSelectionIntentSnapshot selectionIntent)
+    private async Task SendFileAsync(LanProductControlSession session, DiscoveryBrowserPeerCandidate peer, string path)
     {
-        if (selectionIntent.HasFilesIntent && selectionIntent.HasFolderIntent)
+        var transferId = Guid.NewGuid().ToString("D");
+        using var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, session.Lifetime);
+        var key = session.AuthorizeFileTransfer(peer, transferId);
+        try
         {
-            return "files/folder intents ready";
+            SetStatus(_text("FileTransferLiveSending"));
+            await using var prepared = await ClassicFileTransferSender.PrepareAsync(path, transferId, session.LocalIdentity, key, operation.Token);
+            using var client = new TcpClient();
+            using var connect = CancellationTokenSource.CreateLinkedTokenSource(operation.Token);
+            connect.CancelAfter(TimeSpan.FromSeconds(10));
+            await client.ConnectAsync(session.RemoteAddress, peer.Routes.FileTransfer!.Port, connect.Token);
+            var result = await ClassicFileTransferSender.SendAsync(client.GetStream(), prepared, key, _progress, operation.Token);
+            Complete(transferId, Path.GetFileName(path), result, null);
         }
-
-        if (selectionIntent.HasFilesIntent)
-        {
-            return "files intent ready";
-        }
-
-        if (selectionIntent.HasFolderIntent)
-        {
-            return "folder intent ready";
-        }
-
-        return "ready";
+        catch (Exception failure) { Complete(transferId, Path.GetFileName(path), null, failure); throw; }
+        finally { CryptographicOperations.ZeroMemory(key); }
     }
 
-    private static string BuildSelectionIntentDetail(FileTransferSelectionIntentSnapshot selectionIntent)
+    private RemoteControlViewerAccount RequireAccount()
     {
-        if (!selectionIntent.HasFilesIntent && !selectionIntent.HasFolderIntent)
-        {
-            return "Selection actions prepare in-memory intents only; no picker is opened and no files are read.";
-        }
-
-        return $"{BuildFilesSelectionIntentDetail(selectionIntent)}; {BuildFolderSelectionIntentDetail(selectionIntent)}";
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Volatile.Read(ref _disconnecting) != 0) throw new InvalidOperationException(_text("FileTransferLiveBusy"));
+        return _account() ?? throw new InvalidOperationException(_text("FileTransferLiveSignIn"));
     }
 
-    private static string BuildFilesSelectionIntentDetail(FileTransferSelectionIntentSnapshot selectionIntent) =>
-        selectionIntent.HasFilesIntent && selectionIntent.FilesIntentCreatedAt.HasValue
-            ? $"files={NormalizeSelectionIntentId(selectionIntent.FilesIntentId, DefaultFilesSelectionIntentId)} at {selectionIntent.FilesIntentCreatedAt.Value:HH:mm:ss} UTC"
-            : "files=not prepared";
+    private async Task<LanProductControlSession> ConnectAsync(DiscoveryBrowserPeerCandidate peer, RemoteControlViewerAccount account)
+    {
+        if (_listener is null)
+        {
+            _destinationDirectory = Path.GetFullPath(_selection.DestinationDirectory);
+            if (!Directory.Exists(_destinationDirectory)) throw new DirectoryNotFoundException(_text("FileTransferLiveMissingDestination"));
+            _listener = new(_workspace, _destinationDirectory, _selection.ApproveIncomingAsync, _progress,
+                (metadata, result, failure) => Complete(metadata?.TransferId, metadata?.FileName, result, failure), _lifetime.Token);
+            _listenerObservation = ObserveListenerAsync(_listener);
+        }
+        if (_listener.Completion.IsCompleted) throw new IOException(_text("FileTransferLiveListenerStopped"));
+        SetStatus(_text("FileTransferLiveConnecting"));
+        var session = await _workspace.ConnectControlAsync(peer, account, _listener.Port, _connectionsLifetime.Token);
+        bool added;
+        lock (_state) added = _connected.Add(session.SessionId);
+        if (added)
+        {
+            _observations.RemoveAll(task => task.IsCompletedSuccessfully);
+            _observations.Add(ObserveSessionAsync(session));
+        }
+        SetStatus(_text("FileTransferLiveConnected"));
+        return session;
+    }
 
-    private static string BuildFolderSelectionIntentDetail(FileTransferSelectionIntentSnapshot selectionIntent) =>
-        selectionIntent.HasFolderIntent && selectionIntent.FolderIntentCreatedAt.HasValue
-            ? $"folder={NormalizeSelectionIntentId(selectionIntent.FolderIntentId, DefaultFolderSelectionIntentId)} at {selectionIntent.FolderIntentCreatedAt.Value:HH:mm:ss} UTC"
-            : "folder=not prepared";
+    private async Task ObserveSessionAsync(LanProductControlSession session)
+    {
+        var failure = await session.Completion.ConfigureAwait(false);
+        lock (_state) _connected.Remove(session.SessionId);
+        if (!_lifetime.IsCancellationRequested) SetStatus(failure?.Message ?? _text("FileTransferLiveDisconnected"));
+    }
+
+    private async Task ObserveListenerAsync(ClassicFileTransferListener listener)
+    {
+        try { await listener.Completion.ConfigureAwait(false); }
+        catch (Exception failure) { _connectionsLifetime.Cancel(); SetStatus(failure.Message); }
+    }
+
+    private void ReportProgress(ClassicFileTransferProgress progress)
+    {
+        bool publish;
+        lock (_state)
+        {
+            _active[progress.TransferId] = new(progress.FileName, progress.IsIncoming ? "Receiving" : "Sending",
+                $"{progress.Bytes:N0} / {progress.TotalBytes:N0} B", "LAN · PQC", "");
+            var now = Environment.TickCount64;
+            publish = now - _lastProgress >= 100 || progress.Bytes == progress.TotalBytes;
+            if (publish) _lastProgress = now;
+        }
+        if (publish) Publish();
+    }
+
+    private void Complete(string? transferId, string? name, ClassicFileTransferResult? result, Exception? failure)
+    {
+        lock (_state)
+        {
+            if (transferId is not null) _active.Remove(transferId);
+            _status = failure?.Message ?? _text("FileTransferLiveCompleted");
+            _history.Insert(0, new(name ?? _text("FileTransferLiveIncoming"),
+                failure is null ? (result?.SavedPath is null ? "Sent" : "Received") : "Failed",
+                result?.FileHash ?? "", result?.SavedPath ?? failure?.Message ?? _text("FileTransferLiveReceiptVerified")));
+            if (_history.Count > 100) _history.RemoveRange(100, _history.Count - 100);
+        }
+        Publish();
+    }
+
+    private FileTransferWorkspaceSnapshot Snapshot()
+    {
+        lock (_state) return new(DateTimeOffset.UtcNow, _active.Values.ToArray(), _history.ToArray(),
+            [new(_text("FileTransferLiveConnectionLabel"), _connected.Count.ToString(), _text("FileTransferLiveProtocol")),
+             new(_text("FileTransferLiveDestinationLabel"), _destinationDirectory ?? _text("FileTransferLiveDestinationPending"), _text("FileTransferLiveReceiptVerified"))]);
+    }
+    private FileTransferWorkspaceActionResult Result(string key) { SetStatus(_text(key)); return new(_text(key), _text(key), ""); }
+    private void SetStatus(string status) { lock (_state) _status = status; Publish(); }
+    private void Publish() { var snapshot = Snapshot(); string status; lock (_state) status = _status; Changed?.Invoke(snapshot, status); }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed) return;
+        _lifetime.Cancel();
+        _connectionsLifetime.Cancel();
+        await _outbound.WaitAsync();
+        try
+        {
+            if (_listener is { } listener) { await listener.DisposeAsync(); _listener = null; }
+            await _listenerObservation;
+            await _workspace.DisconnectControlSessionsAsync();
+            await Task.WhenAll(_observations);
+            _disposed = true;
+            _lifetime.Dispose();
+            _connectionsLifetime.Dispose();
+        }
+        finally { _outbound.Release(); }
+    }
+
+    private sealed class TransferProgress(Action<ClassicFileTransferProgress> report) : IProgress<ClassicFileTransferProgress>
+    { public void Report(ClassicFileTransferProgress value) => report(value); }
 }
-
-public sealed record FileTransferWorkspaceSnapshot(
-    DateTimeOffset CapturedAt,
-    IReadOnlyList<FileTransferQueueItem> Queue,
-    IReadOnlyList<FileTransferHistoryItem> History,
-    IReadOnlyList<FileTransferSecurityFact> Security);
-
-public sealed record FileTransferQueueItem(
-    string Name,
-    string State,
-    string Size,
-    string Binding,
-    string Detail);
-
-public sealed record FileTransferHistoryItem(
-    string Name,
-    string Result,
-    string Hmac,
-    string Signature);
-
-public sealed record FileTransferSecurityFact(
-    string Label,
-    string Value,
-    string Detail);
-
-public sealed record FileTransferSelectionIntentSnapshot(
-    bool HasFilesIntent,
-    string? FilesIntentId,
-    DateTimeOffset? FilesIntentCreatedAt,
-    bool HasFolderIntent,
-    string? FolderIntentId,
-    DateTimeOffset? FolderIntentCreatedAt);
-
-public sealed record FileTransferWorkspaceActionResult(
-    string Status,
-    string Message,
-    string Detail,
-    string? ShareQrPayload = null,
-    string? ShareQrPngBase64 = null);
-
-internal sealed record FileTransferShareQrPayload(
-    int Version,
-    string IntentId,
-    string DeviceName,
-    string DeviceType,
-    string ShareMode,
-    int ManifestFileCount,
-    long ManifestBytes,
-    string ExpiresAt,
-    IReadOnlyList<string> Capabilities);
-
-internal sealed record FileTransferShareQrEnvelope(
-    FileTransferShareQrPayload Payload,
-    string SignatureBase64,
-    string PublicKeyBase64,
-    string Timestamp,
-    string PublicKeyFingerprint);
-
-internal sealed record FileTransferShareQrCode(
-    string Uri,
-    string PngBase64,
-    int PngByteLength);

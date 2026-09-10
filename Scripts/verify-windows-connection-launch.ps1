@@ -65,6 +65,8 @@ function Invoke-NativeTool {
 $winClientProject = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 Assert-True -Condition (Test-Path -LiteralPath $winClientProject) -Message "Missing Windows client project: $winClientProject"
 $winClientProjectText = Get-Content -Raw -LiteralPath $winClientProject
+Assert-True -Condition $winClientProjectText.Contains('<Import Project="..\NativeCore.targets" />') -Message "WinClient must import the shared native Core build."
+$winClientProjectText += Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "windows/NativeCore.targets")
 foreach ($nativeArtifactSignal in @(
     "BuildSkybridgeCoreNativeDll",
     "cargo build --manifest-path",
@@ -84,7 +86,11 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
+    "windows/Skybridge.WinClient/Services/DiscoveryPeerRoutes.cs",
+    "windows/Skybridge.WinClient/Services/ProductSessionActionTargetProjection.cs",
+    "windows/Skybridge.WinClient/Services/SkyBridgeProtocolConstants.cs",
     "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs",
+    "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdTxtRecordCodec.cs",
     "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs",
     "windows/Skybridge.WinClient/Services/CrossNetworkConnectionCodePolicy.cs",
     "windows/Skybridge.WinClient/Services/CrossNetworkConnectionClient.cs",
@@ -123,6 +129,7 @@ try {
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
@@ -167,7 +174,8 @@ ExpectThrows<InvalidOperationException>(
     () => stateClient.BuildConnectionLaunchRequest(stateClient.BuildInputInvalidatedState()),
     "Parse a Core-validated discovery TXT record before connection launch.");
 
-var discoveredState = stateClient.BuildDiscoveryPeerValidatedState(peer);
+var candidate = WindowsDiscoveryBrowserClient.BuildDefaultPeerCandidate(peer);
+var discoveredState = stateClient.BuildDiscoveryPeerValidatedState(candidate);
 ExpectThrows<InvalidOperationException>(
     () => stateClient.BuildConnectionLaunchRequest(discoveredState),
     "Validate pairing material before connection launch.");
@@ -344,17 +352,19 @@ var browserSnapshot = await discoveryBrowser.BuildReadOnlySnapshotAsync(
         CompatibilityMode: false,
         ExtendedSearchSeconds: 15));
 AssertEqual(1, recordingDnsSd.Requests.Count, "DNS-SD browse request count");
-AssertEqual("_skybridge._udp,_skybridge._tcp", string.Join(",", recordingDnsSd.Requests[0].QueryOrder), "DNS-SD query order");
+AssertEqual(1, recordingDnsSd.CancellationTokens.Count, "DNS-SD browse cancellation token count");
+AssertEqual(true, recordingDnsSd.CancellationTokens[0].CanBeCanceled, "DNS-SD browse receives an owner-scoped cancellation token");
+AssertEqual("_skybridge._udp,_skybridge._tcp,_skybridge-xfer._tcp,_skybridge-rd._tcp,_skybridge-transfer._tcp,_skybridge-remote._tcp", string.Join(",", recordingDnsSd.Requests[0].QueryOrder), "DNS-SD query order");
 AssertEqual(1, recordingDiscovery.ParseCalls.Count, "discovery parser call count");
 AssertEqual("_skybridge._udp", recordingDiscovery.ParseCalls[0].Service, "discovery parser service");
 AssertEqual(1, browserSnapshot.Peers.Count, "DNS-SD Core-validated peer count");
 AssertContains(browserSnapshot.Peers[0].TrustSummary, "fingerprint only", "browser trust summary");
 AssertContains(
-    browserSnapshot.Facts.Last().Detail,
+    DiscoveryFact(browserSnapshot, "Core TXT parse").Detail,
     "desk-mac.local:11550",
     "Core TXT parse fact source");
 
-var macDiscoveredState = stateClient.BuildDiscoveryPeerValidatedState(browserSnapshot.Peers[0].Peer);
+var macDiscoveredState = stateClient.BuildDiscoveryPeerValidatedState(browserSnapshot.Peers[0]);
 var macPairedState = stateClient.BuildPairingValidatedState(macDiscoveredState, pairingMaterial);
 var macPreflightSnapshot = await new ConnectionPreflightClient(new CoreBridge())
     .BuildReadOnlySnapshotAsync(browserSnapshot.Peers[0].Peer, pairingMaterial);
@@ -802,6 +812,9 @@ static string Base64UrlEncode(byte[] value) =>
 static CrossNetworkConnectionFact Fact(CrossNetworkConnectionSnapshot snapshot, string label) =>
     snapshot.Facts.Single(fact => string.Equals(fact.Label, label, StringComparison.Ordinal));
 
+static DiscoveryBrowserFact DiscoveryFact(DiscoveryBrowserSnapshot snapshot, string label) =>
+    snapshot.Facts.Single(fact => string.Equals(fact.Label, label, StringComparison.Ordinal));
+
 static ConnectionPreflightFact PreflightFact(ConnectionPreflightSnapshot snapshot, string label) =>
     snapshot.Facts.Single(fact => string.Equals(fact.Label, label, StringComparison.Ordinal));
 
@@ -872,9 +885,15 @@ sealed class RecordingDnsSdBrowseClient : IWindowsDnsSdBrowseClient
 
     public List<WindowsDnsSdBrowseRequest> Requests { get; } = new();
 
-    public Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(WindowsDnsSdBrowseRequest request)
+    public List<CancellationToken> CancellationTokens { get; } = new();
+
+    public Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(
+        WindowsDnsSdBrowseRequest request,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Requests.Add(request);
+        CancellationTokens.Add(cancellationToken);
         return Task.FromResult(_snapshot);
     }
 }
@@ -904,13 +923,14 @@ sealed class RecordingDiscoveryClient : IDiscoveryClient
 '@
 
     $nativeCoreManifest = Join-Path $RepoRoot "core/skybridge-core/Cargo.toml"
-    $nativeCoreDebugDir = Join-Path $RepoRoot "core/skybridge-core/target/debug"
+    $nativeCoreTargetDir = Join-Path $tempRoot "cargo-target"
+    $nativeCoreDebugDir = Join-Path $nativeCoreTargetDir "debug"
     $nativeCoreDll = Join-Path $nativeCoreDebugDir "skybridge_core.dll"
     Assert-True -Condition (Test-Path -LiteralPath $nativeCoreManifest) -Message "Missing Rust core manifest: $nativeCoreManifest"
     if (-not (Test-Path -LiteralPath $nativeCoreDll)) {
         Invoke-NativeTool `
             -FilePath "cargo" `
-            -Arguments @("build", "--manifest-path", $nativeCoreManifest) `
+            -Arguments @("build", "--locked", "--manifest-path", $nativeCoreManifest, "--target-dir", $nativeCoreTargetDir) `
             -FailureMessage "Rust core native DLL build failed."
         Assert-True -Condition (Test-Path -LiteralPath $nativeCoreDll) -Message "Rust core native DLL missing after build: $nativeCoreDll"
     }

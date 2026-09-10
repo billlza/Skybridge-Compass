@@ -22,7 +22,8 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
     private readonly WebRtcSessionTransportAdapterOptions _options;
     private readonly SemaphoreSlim _mutex = new(1, 1);
     private ActiveSession? _activeSession;
-    private bool _disposed;
+    private bool _disposeRequested;
+    private bool _disposeCompleted;
 
     public WebRtcSessionTransportAdapterClient(
         IWebRtcHelperLaunchClient helperLaunchClient,
@@ -41,11 +42,18 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
         await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             if (_activeSession is not null)
             {
                 if (_activeSession.Matches(request) && _activeSession.IsLive)
                 {
                     return _activeSession.Snapshot;
+                }
+
+                if (_activeSession.IsClaimedByEngine)
+                {
+                    throw new InvalidOperationException(
+                        "WebRTC session transport is owned by an active engine operation; disconnect it before preparing a replacement session.");
                 }
 
                 await DisposeActiveSessionAsync().ConfigureAwait(false);
@@ -78,15 +86,7 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
             }
             finally
             {
-                if (dataPlaneClient is not null)
-                {
-                    await dataPlaneClient.DisposeAsync().ConfigureAwait(false);
-                }
-
-                if (helperSession is not null)
-                {
-                    await helperSession.DisposeAsync().ConfigureAwait(false);
-                }
+                await DisposeSessionResourcesAsync(dataPlaneClient, helperSession).ConfigureAwait(false);
             }
         }
         finally
@@ -100,6 +100,53 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
         await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
+            if (_activeSession?.IsClaimedByEngine == true)
+            {
+                throw new InvalidOperationException(
+                    "WebRTC session transport is owned by an active engine operation; only its exact lease may release it.");
+            }
+
+            await DisposeActiveSessionAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    internal async Task<OwnedWebRtcSessionContext> ClaimLiveSessionAsync(
+        ConnectionLaunchRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        await _mutex.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var active = RequireActiveSessionFor(request);
+            var lease = active.ClaimForEngine();
+            return new OwnedWebRtcSessionContext(
+                lease,
+                BuildLiveSessionContext(active, request));
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    internal async Task DisposeSessionAsync(WebRtcSessionTransportLease lease)
+    {
+        lease.RequireValid();
+        await _mutex.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var active = _activeSession;
+            if (active is null || !active.IsOwnedBy(lease))
+            {
+                return;
+            }
+
             await DisposeActiveSessionAsync().ConfigureAwait(false);
         }
         finally
@@ -116,6 +163,13 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
     public LiveWebRtcSessionContext RequireLiveSession(ConnectionLaunchRequest request)
     {
         var active = RequireActiveSessionFor(request);
+        return BuildLiveSessionContext(active, request);
+    }
+
+    private static LiveWebRtcSessionContext BuildLiveSessionContext(
+        ActiveSession active,
+        ConnectionLaunchRequest request)
+    {
         return new LiveWebRtcSessionContext(
             active.DataPlaneClient,
             active.PeerDeviceId,
@@ -158,7 +212,11 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
         }
 
         if (!string.Equals(request.Plan.AdapterBinding, active.Snapshot.AdapterBinding, StringComparison.Ordinal) ||
-            !string.Equals(request.Plan.SelectedCandidatePair, active.Snapshot.SelectedCandidatePair, StringComparison.Ordinal))
+            !string.Equals(request.Plan.LocalEndpoint, active.Snapshot.LocalEndpoint, StringComparison.Ordinal) ||
+            !string.Equals(request.Plan.RemoteEndpoint, active.Snapshot.RemoteEndpoint, StringComparison.Ordinal) ||
+            !string.Equals(request.Plan.SelectedCandidatePair, active.Snapshot.SelectedCandidatePair, StringComparison.Ordinal) ||
+            !string.Equals(request.Plan.RelayId, active.Snapshot.RelayId, StringComparison.Ordinal) ||
+            request.Plan.TimestampWindowMs != active.Snapshot.TimestampWindowMs)
         {
             throw new InvalidOperationException("WebRTC session launch plan does not match the active helper session binding.");
         }
@@ -168,14 +226,22 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        await _mutex.WaitAsync().ConfigureAwait(false);
+        try
         {
-            return;
-        }
+            if (_disposeCompleted)
+            {
+                return;
+            }
 
-        await DisposeSessionAsync().ConfigureAwait(false);
-        _mutex.Dispose();
-        _disposed = true;
+            _disposeRequested = true;
+            await DisposeActiveSessionAsync().ConfigureAwait(false);
+            _disposeCompleted = true;
+        }
+        finally
+        {
+            _mutex.Release();
+        }
     }
 
     private static void ValidateRequest(WindowsTransportAdapterRequest request)
@@ -229,6 +295,11 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
         var remoteFingerprint = remoteSignal.Fingerprint();
         var selectedCandidatePair =
             $"webrtc/dtls/sctp/{localSignal.FirstCandidateLabel()}-{remoteSignal.FirstCandidateLabel()}";
+        var sessionIncarnation = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var adapterBinding =
+            $"webrtc-session/v1/incarnation={sessionIncarnation};"
+            + $"role={(_options.AsAnswerer ? "answer" : "offer")};"
+            + $"ipc=127.0.0.1:{helperSession.IpcPort}";
         var transportSecretFingerprint = Sha256(
             "skybridge-webrtc-session-transport:"
             + $"{localFingerprint}:{remoteFingerprint}:"
@@ -244,13 +315,13 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
             new ConnectionPreflightFact(
                 "WebRTC session binding",
                 "dtls-sctp",
-                $"{localEndpoint} -> {remoteEndpoint}; candidate={selectedCandidatePair}")
+                $"{localEndpoint} -> {remoteEndpoint}; candidate={selectedCandidatePair}; incarnation={sessionIncarnation}")
         };
 
         return new WindowsTransportAdapterSnapshot(
             ConnectionLaunchAdapterKind.WebRtcDataChannel,
             IsLiveAdapterReady: true,
-            "verified webrtc datachannel session helper",
+            adapterBinding,
             localEndpoint,
             remoteEndpoint,
             selectedCandidatePair,
@@ -264,19 +335,63 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
     private async Task DisposeActiveSessionAsync()
     {
         var active = _activeSession;
-        _activeSession = null;
         if (active is null)
         {
             return;
         }
 
-        await active.DataPlaneClient.DisposeAsync().ConfigureAwait(false);
-        await active.HelperSession.DisposeAsync().ConfigureAwait(false);
+        await active.Resources.DisposePendingAsync().ConfigureAwait(false);
+        _activeSession = null;
+    }
+
+    private static async Task DisposeSessionResourcesAsync(
+        SkyBridgeDataPlaneClient? dataPlaneClient,
+        WebRtcHelperSession? helperSession)
+    {
+        List<Exception>? errors = null;
+        if (dataPlaneClient is not null)
+        {
+            try
+            {
+                await dataPlaneClient.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                errors = new List<Exception> { ex };
+            }
+        }
+
+        if (helperSession is not null)
+        {
+            try
+            {
+                await helperSession.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                errors ??= new List<Exception>();
+                errors.Add(ex);
+            }
+        }
+
+        if (errors is null)
+        {
+            return;
+        }
+
+        if (errors.Count == 1)
+        {
+            ExceptionDispatchInfo.Capture(errors[0]).Throw();
+        }
+
+        throw new AggregateException(
+            "WebRTC session transport resource teardown reported multiple errors.",
+            errors);
     }
 
     private void ThrowIfDisposed()
     {
-        if (_disposed)
+        if (_disposeRequested)
         {
             throw new ObjectDisposedException(nameof(WebRtcSessionTransportAdapterClient));
         }
@@ -339,6 +454,7 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
             HelperSession = helperSession;
             DataPlaneClient = dataPlaneClient;
             Snapshot = snapshot;
+            Resources = new WebRtcSessionResourceOwner(dataPlaneClient, helperSession);
         }
 
         public string PeerDeviceId { get; }
@@ -351,7 +467,28 @@ public sealed class WebRtcSessionTransportAdapterClient : IWindowsTransportAdapt
 
         public WindowsTransportAdapterSnapshot Snapshot { get; }
 
+        public WebRtcSessionResourceOwner Resources { get; }
+
         public bool IsLive => HelperSession.IsRunning && DataPlaneClient.IsConnected;
+
+        public bool IsClaimedByEngine => EngineLease is not null;
+
+        private WebRtcSessionTransportLease? EngineLease { get; set; }
+
+        public WebRtcSessionTransportLease ClaimForEngine()
+        {
+            if (EngineLease is not null)
+            {
+                throw new InvalidOperationException(
+                    "WebRTC session transport is already claimed by an engine operation.");
+            }
+
+            var lease = WebRtcSessionTransportLease.Create();
+            EngineLease = lease;
+            return lease;
+        }
+
+        public bool IsOwnedBy(WebRtcSessionTransportLease lease) => EngineLease == lease;
 
         public bool Matches(WindowsTransportAdapterRequest request) =>
             Matches(request.PairingMaterial.DeviceId, request.PairingMaterial.PublicKeyFingerprint);
@@ -392,131 +529,31 @@ public sealed class WebRtcSessionTransportAdapterOptions
     public ulong TimestampWindowMs { get; }
 }
 
-public sealed class WebRtcSessionEngineClient : IEngineClient, IDisposable
+public sealed partial class WebRtcSessionEngineClient
 {
-    private readonly IEngineClient _inner;
-    private readonly WebRtcSessionTransportAdapterClient _sessionAdapter;
-    private readonly IReadOnlyList<IWebRtcSessionRuntimeConsumer> _runtimeConsumers;
-    private readonly List<IWebRtcSessionRuntimeConsumer> _startedConsumers = new();
-
     public WebRtcSessionEngineClient(
         IEngineClient inner,
         WebRtcSessionTransportAdapterClient sessionAdapter,
         IReadOnlyList<IWebRtcSessionRuntimeConsumer>? runtimeConsumers = null)
+        : this(inner, new SessionEngineTransportBoundary(sessionAdapter), runtimeConsumers)
     {
-        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
-        _sessionAdapter = sessionAdapter ?? throw new ArgumentNullException(nameof(sessionAdapter));
-        _runtimeConsumers = runtimeConsumers ?? Array.Empty<IWebRtcSessionRuntimeConsumer>();
-        _inner.ConnectionStateChanged += OnInnerConnectionStateChanged;
     }
 
-    public EngineConnectionState State => _inner.State;
-
-    public event EventHandler<EngineConnectionState>? ConnectionStateChanged;
-
-    public async Task ConnectAsync(ConnectionLaunchRequest request)
+    private sealed class SessionEngineTransportBoundary : IWebRtcSessionEngineTransport
     {
-        _sessionAdapter.RequireLiveSessionFor(request);
-        try
-        {
-            await _inner.ConnectAsync(request).ConfigureAwait(false);
-            var context = _sessionAdapter.RequireLiveSession(request);
-            foreach (var consumer in _runtimeConsumers)
-            {
-                await consumer.StartAsync(context, request).ConfigureAwait(false);
-                _startedConsumers.Add(consumer);
-            }
-        }
-        catch (Exception ex)
-        {
-            var cleanupErrors = new List<Exception>();
-            cleanupErrors.AddRange(await StopStartedConsumersAsync().ConfigureAwait(false));
-            try
-            {
-                await _inner.DisconnectAsync().ConfigureAwait(false);
-            }
-            catch (Exception cleanupEx)
-            {
-                cleanupErrors.Add(cleanupEx);
-            }
+        private readonly WebRtcSessionTransportAdapterClient _sessionAdapter;
 
-            try
-            {
-                await _sessionAdapter.DisposeSessionAsync().ConfigureAwait(false);
-            }
-            catch (Exception cleanupEx)
-            {
-                cleanupErrors.Add(cleanupEx);
-            }
-
-            if (cleanupErrors.Count > 0)
-            {
-                cleanupErrors.Insert(0, ex);
-                throw new AggregateException(
-                    "WebRTC session engine connect failed and cleanup also reported errors.",
-                    cleanupErrors);
-            }
-
-            ExceptionDispatchInfo.Capture(ex).Throw();
-            throw;
-        }
-    }
-
-    public async Task DisconnectAsync()
-    {
-        var stopErrors = await StopStartedConsumersAsync().ConfigureAwait(false);
-        try
+        public SessionEngineTransportBoundary(WebRtcSessionTransportAdapterClient sessionAdapter)
         {
-            await _inner.DisconnectAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            await _sessionAdapter.DisposeSessionAsync().ConfigureAwait(false);
+            _sessionAdapter = sessionAdapter ?? throw new ArgumentNullException(nameof(sessionAdapter));
         }
 
-        if (stopErrors.Count > 0)
-        {
-            throw new AggregateException("One or more WebRTC session runtime consumers failed to stop.", stopErrors);
-        }
-    }
+        public Task<OwnedWebRtcSessionContext> ClaimLiveSessionAsync(ConnectionLaunchRequest request) =>
+            _sessionAdapter.ClaimLiveSessionAsync(request);
 
-    public Task SendHeartbeatAsync() => _inner.SendHeartbeatAsync();
+        public Task DisposeSessionAsync(WebRtcSessionTransportLease lease) =>
+            _sessionAdapter.DisposeSessionAsync(lease);
 
-    public void Dispose()
-    {
-        _inner.ConnectionStateChanged -= OnInnerConnectionStateChanged;
-        var stopErrors = StopStartedConsumersAsync().GetAwaiter().GetResult();
-        if (_inner is IDisposable disposable)
-        {
-            disposable.Dispose();
-        }
-
-        _sessionAdapter.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        if (stopErrors.Count > 0)
-        {
-            throw new AggregateException("One or more WebRTC session runtime consumers failed to stop.", stopErrors);
-        }
-    }
-
-    private void OnInnerConnectionStateChanged(object? sender, EngineConnectionState state) =>
-        ConnectionStateChanged?.Invoke(this, state);
-
-    private async Task<IReadOnlyList<Exception>> StopStartedConsumersAsync()
-    {
-        var errors = new List<Exception>();
-        for (var index = _startedConsumers.Count - 1; index >= 0; index--)
-        {
-            try
-            {
-                await _startedConsumers[index].StopAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                errors.Add(ex);
-            }
-        }
-
-        _startedConsumers.Clear();
-        return errors;
+        public ValueTask DisposeAsync() => _sessionAdapter.DisposeAsync();
     }
 }

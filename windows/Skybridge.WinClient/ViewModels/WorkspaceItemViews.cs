@@ -387,11 +387,11 @@ public sealed record FileTransferQueueItemView(
 public sealed record FileTransferHistoryItemView(
     string Name,
     string Result,
-    string Hmac,
-    string Signature)
+    string FileHash,
+    string Detail)
 {
     public static FileTransferHistoryItemView FromItem(FileTransferHistoryItem item) =>
-        new(item.Name, item.Result, item.Hmac, item.Signature);
+        new(item.Name, item.Result, item.FileHash, item.Detail);
 }
 
 public sealed record FileTransferSecurityFactView(
@@ -495,8 +495,10 @@ public sealed record DiscoveredPeerView(
     string PublicKeyFingerprint,
     string CapabilitiesSummary,
     string ProtocolVersion,
-    string TrustSummary)
+    string TrustSummary,
+    string ProductActionSummary)
 {
+    public DiscoveryBrowserPeerCandidate? Candidate { get; init; }
     public static DiscoveredPeerView FromCandidate(DiscoveryBrowserPeerCandidate candidate) =>
         new(
             candidate.Peer.DeviceId,
@@ -506,5 +508,25 @@ public sealed record DiscoveredPeerView(
             candidate.Peer.PublicKeyFingerprint,
             candidate.CapabilitiesSummary,
             candidate.Peer.ProtocolVersion,
-            candidate.TrustSummary);
+            candidate.TrustSummary,
+            FormatProductActionSummary(candidate.ProductActionTargets)) { Candidate = candidate };
+
+    private static string FormatProductActionSummary(IReadOnlyList<ProductSessionActionTarget> targets)
+    {
+        if (targets.Count == 0)
+        {
+            return "";
+        }
+
+        var values = new List<string>();
+        foreach (var target in targets)
+        {
+            values.Add(
+                target.Enabled
+                    ? $"{target.Kind}: ready via authenticated route"
+                    : $"{target.Kind}: blocked ({target.DisabledReason})");
+        }
+
+        return string.Join("; ", values);
+    }
 }

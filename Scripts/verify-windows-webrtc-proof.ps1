@@ -48,6 +48,7 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/PairingMaterialClient.cs",
     "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs",
     "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs",
+    "windows/Skybridge.WinClient/Services/DiscoveryPeerRoutes.cs",
     "windows/Skybridge.WinClient/Services/WindowsTransportAdapterClient.cs"
 ) | ForEach-Object { Join-Path $RepoRoot $_ }
 

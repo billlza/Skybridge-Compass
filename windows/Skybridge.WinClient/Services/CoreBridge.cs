@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -8,10 +9,12 @@ namespace Skybridge.WinClient.Services;
 /// <summary>
 /// Bridges the WinUI client with the Rust core via FFI.
 /// </summary>
-public sealed class CoreBridge
+public sealed partial class CoreBridge
 {
     private const int FrameHeaderLen = 20;
     private const int Sbp2HeaderLen = 8;
+    private const string QPeriaptFixedSuite = "ML-KEM-768+X25519";
+    private static readonly Lazy<bool> QPeriaptRuntimeAdmission = new(VerifyQPeriaptMetadata);
 
     static CoreBridge()
     {
@@ -24,6 +27,7 @@ public sealed class CoreBridge
         {
             try
             {
+                VerifyQPeriaptRuntime();
                 var handle = NativeMethods.EngineNew();
                 if (handle == nint.Zero)
                 {
@@ -38,6 +42,52 @@ public sealed class CoreBridge
                 return false;
             }
         });
+    }
+
+    internal static void VerifyQPeriaptRuntime() => _ = QPeriaptRuntimeAdmission.Value;
+    internal static uint QPeriaptAbiVersion() => NativeMethods.QPeriaptAbiVersion();
+    internal static nint QPeriaptVersion() => NativeMethods.QPeriaptVersion();
+    internal static nint QPeriaptFixedSuiteId() => NativeMethods.QPeriaptFixedSuiteId();
+    internal static nuint QPeriaptFixedSuiteIdLength() => NativeMethods.QPeriaptFixedSuiteIdLength();
+    internal static nint QPeriaptStatusName(int code) => NativeMethods.QPeriaptStatusName(code);
+
+    internal static string QPeriaptStatusText(int code)
+    {
+        var expected = code switch
+        {
+            0 => "OK", -1 => "ERR_NULL", -2 => "ERR_LENGTH", -3 => "ERR_POLICY",
+            -4 => "ERR_PANIC", -5 => "ERR_INTERNAL", -6 => "ERR_INVALID_KEYSHARE",
+            -7 => "ERR_ALIASING", -8 => "ERR_ENTROPY", _ => "UNKNOWN_STATUS"
+        };
+        RequireQPeriaptText(QPeriaptStatusName(code), expected, "status name");
+        return expected;
+    }
+
+    private static bool VerifyQPeriaptMetadata()
+    {
+        if (QPeriaptAbiVersion() != 2 || QPeriaptFixedSuiteIdLength() != (nuint)QPeriaptFixedSuite.Length)
+        {
+            throw new CryptographicException("Native Q-Periapt ABI or fixed-suite length does not match ABI 2.");
+        }
+        RequireQPeriaptText(QPeriaptVersion(), "0.1.5", "version");
+        RequireQPeriaptText(QPeriaptFixedSuiteId(), QPeriaptFixedSuite, "fixed suite");
+        for (var code = 0; code >= -8; code--) { _ = QPeriaptStatusText(code); }
+        _ = QPeriaptStatusText(int.MaxValue);
+        return true;
+    }
+
+    private static void RequireQPeriaptText(nint pointer, string expected, string field)
+    {
+        if (pointer == nint.Zero) { throw new CryptographicException($"Native Q-Periapt {field} is null."); }
+        // Read no farther than the expected ASCII constant and its terminating NUL.
+        for (var index = 0; index <= expected.Length; index++)
+        {
+            var expectedByte = index == expected.Length ? 0 : expected[index];
+            if (Marshal.ReadByte(pointer, index) != expectedByte)
+            {
+                throw new CryptographicException($"Native Q-Periapt {field} does not match the required ABI 2 contract.");
+            }
+        }
     }
 
     public Task<TransportSelection> SelectTransportAsync(
@@ -410,8 +460,23 @@ public sealed class CoreBridge
         });
     }
 
-    private static class NativeMethods
+    private static partial class NativeMethods
     {
+        [DllImport("skybridge_core", EntryPoint = "skybridge_q_periapt_abi_version", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern uint QPeriaptAbiVersion();
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_q_periapt_version", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern nint QPeriaptVersion();
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_q_periapt_fixed_suite_id", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern nint QPeriaptFixedSuiteId();
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_q_periapt_fixed_suite_id_len", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern nuint QPeriaptFixedSuiteIdLength();
+
+        [DllImport("skybridge_core", EntryPoint = "skybridge_q_periapt_status_name", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern nint QPeriaptStatusName(int code);
+
         [DllImport("skybridge_core", EntryPoint = "skybridge_engine_new")]
         public static extern nint EngineNew();
 
@@ -535,7 +600,9 @@ public enum CoreDiscoveryServiceKind
 {
     Unknown = 0,
     QuicPrimary = 1,
-    TcpFallback = 2
+    TcpFallback = 2,
+    FileTransfer = 3,
+    RemoteControl = 4
 }
 
 public enum CoreTransportKind

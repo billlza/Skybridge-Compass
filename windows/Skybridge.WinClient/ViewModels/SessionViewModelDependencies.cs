@@ -29,7 +29,8 @@ public sealed class SessionViewModelDependencies
         ISessionStatusClient? sessionStatusClient = null,
         IFeatureCatalogClient? featureCatalogClient = null,
         ISessionCommandStateClient? sessionCommandStateClient = null,
-        IWorkspaceCommandStateClient? workspaceCommandStateClient = null)
+        IWorkspaceCommandStateClient? workspaceCommandStateClient = null,
+        IProductSessionActionGateClient? productSessionActionGateClient = null)
     {
         ArgumentNullException.ThrowIfNull(engineClient);
 
@@ -58,6 +59,7 @@ public sealed class SessionViewModelDependencies
         FeatureCatalogClient = featureCatalogClient ?? new FeatureCatalogClient();
         SessionCommandStateClient = sessionCommandStateClient ?? new SessionCommandStateClient();
         WorkspaceCommandStateClient = workspaceCommandStateClient ?? new WorkspaceCommandStateClient();
+        ProductSessionActionGateClient = productSessionActionGateClient ?? new ProductSessionActionGateClient();
     }
 
     public IEngineClient EngineClient { get; }
@@ -109,4 +111,6 @@ public sealed class SessionViewModelDependencies
     public ISessionCommandStateClient SessionCommandStateClient { get; }
 
     public IWorkspaceCommandStateClient WorkspaceCommandStateClient { get; }
+
+    public IProductSessionActionGateClient ProductSessionActionGateClient { get; }
 }

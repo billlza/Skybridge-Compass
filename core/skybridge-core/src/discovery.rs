@@ -3,11 +3,20 @@ use std::collections::BTreeMap;
 
 pub const SKYBRIDGE_QUIC_PRIMARY_SERVICE: &str = "_skybridge._udp";
 pub const SKYBRIDGE_TCP_FALLBACK_SERVICE: &str = "_skybridge._tcp";
+pub const SKYBRIDGE_FILE_TRANSFER_SERVICE: &str = "_skybridge-xfer._tcp";
+pub const SKYBRIDGE_REMOTE_CONTROL_SERVICE: &str = "_skybridge-rd._tcp";
+pub const SKYBRIDGE_LEGACY_FILE_TRANSFER_SERVICE: &str = "_skybridge-transfer._tcp";
+pub const SKYBRIDGE_LEGACY_REMOTE_CONTROL_SERVICE: &str = "_skybridge-remote._tcp";
+const MAX_TXT_RECORD_BYTES: usize = 4096;
+const MAX_TXT_KEY_BYTES: usize = 64;
+const MAX_TXT_VALUE_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoveryServiceKind {
     QuicPrimary,
     TcpFallback,
+    FileTransfer,
+    RemoteControl,
 }
 
 impl DiscoveryServiceKind {
@@ -15,6 +24,8 @@ impl DiscoveryServiceKind {
         match self {
             Self::QuicPrimary => SKYBRIDGE_QUIC_PRIMARY_SERVICE,
             Self::TcpFallback => SKYBRIDGE_TCP_FALLBACK_SERVICE,
+            Self::FileTransfer => SKYBRIDGE_FILE_TRANSFER_SERVICE,
+            Self::RemoteControl => SKYBRIDGE_REMOTE_CONTROL_SERVICE,
         }
     }
 }
@@ -78,8 +89,13 @@ impl PeerAdvertisement {
 pub enum DiscoveryError {
     MissingField(&'static str),
     EmptyField(&'static str),
+    ConflictingFieldAliases(&'static str),
     InvalidPublicKeyFingerprint,
     InvalidTxtPair(String),
+    DuplicateTxtKey(String),
+    TxtRecordTooLarge,
+    TxtKeyTooLong(String),
+    TxtValueTooLong(String),
 }
 
 pub fn parse_txt_advertisement(txt: &str) -> Result<PeerAdvertisement, DiscoveryError> {
@@ -89,8 +105,30 @@ pub fn parse_txt_advertisement(txt: &str) -> Result<PeerAdvertisement, Discovery
 pub fn parse_txt_map(
     txt_record: BTreeMap<String, String>,
 ) -> Result<PeerAdvertisement, DiscoveryError> {
-    let device_id = required_field(&txt_record, "deviceId")?;
-    let public_key_fingerprint = required_field(&txt_record, "pubKeyFP")?;
+    let device_id = required_aliased_field(
+        &txt_record,
+        "deviceId",
+        &[
+            "deviceId",
+            "id",
+            "deviceID",
+            "device_id",
+            "uuid",
+            "uniqueId",
+            "unique_id",
+        ],
+    )?;
+    let public_key_fingerprint = required_aliased_field(
+        &txt_record,
+        "pubKeyFP",
+        &[
+            "pubKeyFP",
+            "pubKeyFp",
+            "pub_key_fp",
+            "identityFingerprint",
+            "publicKeyFingerprint",
+        ],
+    )?;
     if !is_valid_public_key_fingerprint(&public_key_fingerprint) {
         return Err(DiscoveryError::InvalidPublicKeyFingerprint);
     }
@@ -136,9 +174,19 @@ pub fn parse_service_kind(value: &str) -> Option<DiscoveryServiceKind> {
     match raw.as_str() {
         "_skybridge._udp" => Some(DiscoveryServiceKind::QuicPrimary),
         "_skybridge._tcp" => Some(DiscoveryServiceKind::TcpFallback),
+        "_skybridge-xfer._tcp" | "_skybridge-transfer._tcp" => {
+            Some(DiscoveryServiceKind::FileTransfer)
+        }
+        "_skybridge-rd._tcp" | "_skybridge-remote._tcp" => {
+            Some(DiscoveryServiceKind::RemoteControl)
+        }
         _ => match normalize_token(value).as_str() {
             "udp" | "quic" | "primary" => Some(DiscoveryServiceKind::QuicPrimary),
             "tcp" | "fallback" => Some(DiscoveryServiceKind::TcpFallback),
+            "file-transfer" | "filetransfer" => Some(DiscoveryServiceKind::FileTransfer),
+            "remote-control" | "remotecontrol" | "remote-desktop" | "remotedesktop" => {
+                Some(DiscoveryServiceKind::RemoteControl)
+            }
             _ => None,
         },
     }
@@ -152,6 +200,9 @@ pub fn is_valid_public_key_fingerprint(value: &str) -> bool {
 }
 
 fn parse_txt_pairs(txt: &str) -> Result<BTreeMap<String, String>, DiscoveryError> {
+    if txt.len() > MAX_TXT_RECORD_BYTES {
+        return Err(DiscoveryError::TxtRecordTooLarge);
+    }
     let mut pairs = BTreeMap::new();
     for raw_pair in txt.split(';') {
         let pair = raw_pair.trim();
@@ -166,23 +217,50 @@ fn parse_txt_pairs(txt: &str) -> Result<BTreeMap<String, String>, DiscoveryError
         if key.is_empty() {
             return Err(DiscoveryError::InvalidTxtPair(pair.into()));
         }
-        pairs.insert(key.to_string(), value.trim().to_string());
+        if key.len() > MAX_TXT_KEY_BYTES {
+            return Err(DiscoveryError::TxtKeyTooLong(key.into()));
+        }
+        let value = value.trim();
+        if value.len() > MAX_TXT_VALUE_BYTES {
+            return Err(DiscoveryError::TxtValueTooLong(key.into()));
+        }
+        if value.contains('\0') {
+            return Err(DiscoveryError::InvalidTxtPair(pair.into()));
+        }
+        if pairs.insert(key.to_string(), value.to_string()).is_some() {
+            return Err(DiscoveryError::DuplicateTxtKey(key.into()));
+        }
     }
     Ok(pairs)
 }
 
-fn required_field(
+fn required_aliased_field(
     txt_record: &BTreeMap<String, String>,
-    name: &'static str,
+    canonical_name: &'static str,
+    aliases: &[&str],
 ) -> Result<String, DiscoveryError> {
-    let value = txt_record
-        .get(name)
-        .ok_or(DiscoveryError::MissingField(name))?
-        .trim();
-    if value.is_empty() {
-        return Err(DiscoveryError::EmptyField(name));
+    let mut discovered_value: Option<String> = None;
+    for alias in aliases {
+        let Some(raw) = txt_record.get(*alias) else {
+            continue;
+        };
+        let value = raw.trim();
+        if value.is_empty() {
+            if discovered_value.is_none() {
+                return Err(DiscoveryError::EmptyField(canonical_name));
+            }
+            continue;
+        }
+        if let Some(existing) = discovered_value.as_deref() {
+            if existing != value {
+                return Err(DiscoveryError::ConflictingFieldAliases(canonical_name));
+            }
+            continue;
+        }
+        discovered_value = Some(value.to_string());
     }
-    Ok(value.to_string())
+
+    discovered_value.ok_or(DiscoveryError::MissingField(canonical_name))
 }
 
 fn parse_peer_platform(value: &str) -> PeerPlatform {
@@ -240,6 +318,67 @@ mod tests {
     }
 
     #[test]
+    fn parses_apple_discovery_aliases_without_weakening_identity() {
+        let ad = parse_txt_advertisement(&format!(
+            "unique_id=ipad-1;identityFingerprint={FP};platform=iPadOS;capabilities=webrtc"
+        ))
+        .expect("advertisement");
+
+        assert_eq!(ad.device_id, "ipad-1");
+        assert_eq!(ad.public_key_fingerprint, FP);
+        assert_eq!(ad.platform, PeerPlatform::Apple);
+    }
+
+    #[test]
+    fn rejects_conflicting_discovery_aliases() {
+        assert_eq!(
+            parse_txt_advertisement(&format!(
+                "deviceId=mac-1;uniqueId=mac-2;pubKeyFP={FP};platform=macOS"
+            ))
+            .unwrap_err(),
+            DiscoveryError::ConflictingFieldAliases("deviceId")
+        );
+        assert_eq!(
+            parse_txt_advertisement(&format!(
+                "deviceId=mac-1;pubKeyFP={FP};identityFingerprint=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789;platform=macOS"
+            ))
+            .unwrap_err(),
+            DiscoveryError::ConflictingFieldAliases("pubKeyFP")
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_and_oversized_txt_pairs_without_last_wins() {
+        assert_eq!(
+            parse_txt_advertisement(&format!(
+                "deviceId=mac-1;pubKeyFP={FP};deviceId=mac-2;platform=macOS"
+            ))
+            .unwrap_err(),
+            DiscoveryError::DuplicateTxtKey("deviceId".into())
+        );
+        assert_eq!(
+            parse_txt_advertisement(&format!(
+                "deviceId=mac-1;pubKeyFP={FP};{}=x",
+                "k".repeat(MAX_TXT_KEY_BYTES + 1)
+            ))
+            .unwrap_err(),
+            DiscoveryError::TxtKeyTooLong("k".repeat(MAX_TXT_KEY_BYTES + 1))
+        );
+        assert_eq!(
+            parse_txt_advertisement(&format!(
+                "deviceId=mac-1;pubKeyFP={FP};name={}",
+                "x".repeat(MAX_TXT_VALUE_BYTES + 1)
+            ))
+            .unwrap_err(),
+            DiscoveryError::TxtValueTooLong("name".into())
+        );
+        assert_eq!(
+            parse_txt_advertisement(&"x".repeat(MAX_TXT_RECORD_BYTES + 1)).unwrap_err(),
+            DiscoveryError::TxtRecordTooLarge
+        );
+    }
+
+    #[test]
     fn validates_required_fields_and_lowercase_fingerprint() {
         assert_eq!(
             parse_txt_advertisement("pubKeyFP=abc").unwrap_err(),
@@ -260,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn service_kind_matches_apple_primary_and_fallback_names() {
+    fn service_kind_accepts_legacy_aliases_but_emits_canonical_names() {
         assert_eq!(
             parse_service_kind("_skybridge._udp"),
             Some(DiscoveryServiceKind::QuicPrimary)
@@ -270,8 +409,40 @@ mod tests {
             Some(DiscoveryServiceKind::TcpFallback)
         );
         assert_eq!(
+            parse_service_kind("_skybridge-xfer._tcp"),
+            Some(DiscoveryServiceKind::FileTransfer)
+        );
+        assert_eq!(
+            parse_service_kind("_skybridge-transfer._tcp"),
+            Some(DiscoveryServiceKind::FileTransfer)
+        );
+        assert_eq!(
+            parse_service_kind("_skybridge-rd._tcp"),
+            Some(DiscoveryServiceKind::RemoteControl)
+        );
+        assert_eq!(
+            parse_service_kind("_skybridge-remote._tcp"),
+            Some(DiscoveryServiceKind::RemoteControl)
+        );
+        assert_eq!(
             DiscoveryServiceKind::QuicPrimary.service_type(),
             SKYBRIDGE_QUIC_PRIMARY_SERVICE
+        );
+        assert_eq!(
+            DiscoveryServiceKind::FileTransfer.service_type(),
+            "_skybridge-xfer._tcp"
+        );
+        assert_eq!(
+            DiscoveryServiceKind::RemoteControl.service_type(),
+            "_skybridge-rd._tcp"
+        );
+        assert_eq!(
+            SKYBRIDGE_LEGACY_FILE_TRANSFER_SERVICE,
+            "_skybridge-transfer._tcp"
+        );
+        assert_eq!(
+            SKYBRIDGE_LEGACY_REMOTE_CONTROL_SERVICE,
+            "_skybridge-remote._tcp"
         );
     }
 }

@@ -2,6 +2,8 @@
 
 SkyBridge Compass Pro 是一个跨平台设备管理和远程控制解决方案，支持 macOS、iOS、Android、Windows 和 Linux 设备之间的无缝连接和协作。
 
+Windows 原生实现、局域网文件传输边界和验证方式见 [Windows 架构说明](docs/windows-architecture.md)。
+
 ## 项目结构
 
 ```

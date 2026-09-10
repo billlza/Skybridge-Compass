@@ -1,5 +1,6 @@
 param(
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [switch]$FileTransferOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,8 +16,21 @@ function Assert-True {
     }
 }
 
+function Assert-WindowsHostForWinUiBuild {
+    param([string]$ScriptName)
+
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $isWindowsHost) {
+        $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        throw "$ScriptName requires a Windows host because WindowsAppSDK/WinUI resource generation invokes MakePri.exe from Microsoft.Windows.SDK.BuildTools; current host is $osDescription."
+    }
+}
+
+Assert-WindowsHostForWinUiBuild -ScriptName "Windows native runtime profile"
+
 $sourceFiles = @()
-$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
+$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" -Recurse |
     Sort-Object Name |
     ForEach-Object { $_.FullName }
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Converters") -Filter "*.cs" |
@@ -35,6 +49,7 @@ $tempRoot = Join-Path $tempParent ("skybridge-win-native-runtime-profile-" + [gu
 $testProject = Join-Path $tempRoot "Skybridge.WinNativeRuntimeProfile.csproj"
 $testProgram = Join-Path $tempRoot "Program.cs"
 
+$profilePassed = $false
 try {
     New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
@@ -57,21 +72,27 @@ try {
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
   </ItemGroup>
 </Project>
 "@
 
     Set-Content -LiteralPath $testProgram -Encoding UTF8 -Value @'
+using System.Buffers;
 using System.Buffers.Binary;
+using System.Buffers.Text;
 using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
@@ -80,9 +101,42 @@ using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Skybridge.WinClient;
 using Skybridge.WinClient.Services;
 using Skybridge.WinClient.ViewModels;
+using Skybridge.WinClient.Services.FileTransfer;
+using Skybridge.WinClient.Services.RemoteControl;
+
+if (args.SequenceEqual(["--file-transfer-only"]))
+{
+    await VerifyFileTransferWorkspaceAsync();
+    Console.WriteLine("windows-file-transfer-qr: ok (unavailable without a real share manifest)");
+    return;
+}
+
+static async Task VerifyFileTransferWorkspaceAsync()
+{
+    var defaults = WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment();
+    AssertType<UnavailableFileTransferWorkspaceClient>(defaults.FileTransferClient, "a native picker must be supplied by its owning window");
+    AssertEqual(false, defaults.FileTransferClient.CanSelectFiles(), "unconfigured picker gate");
+    AssertEqual(false, defaults.FileTransferClient.CanGenerateShareQr(), "unconfigured share gate");
+    await using var workspace = new WindowsDeviceWorkspace();
+    await using var transfers = new FileTransferWorkspaceClient(workspace, new CancelledFileTransferSelection(),
+        () => new RemoteControlViewerAccount("Runtime profile", "Runtime profile"), key => key);
+    var configured = WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment(transfers);
+    AssertEqual(true, ReferenceEquals(configured.FileTransferClient, transfers), "the factory must retain the one window-owned transfer runtime");
+    AssertEqual(true, transfers.CanSelectFiles(), "configured file picker gate");
+    AssertEqual(true, transfers.CanSelectFolder(), "configured folder picker gate");
+    AssertEqual(false, transfers.CanGenerateShareQr(), "a live file session must not advertise an unsupported share QR");
+    var qr = await transfers.BuildShareQrActionAsync();
+    AssertEqual(true, qr.ShareQrPayload is null && qr.ShareQrPngBase64 is null, "unsupported QR must not mint an unrelated identity or an empty manifest");
+    AssertEqual("FileTransferLiveCancelled", (await transfers.BuildSelectFilesActionAsync()).Status, "file picker cancellation");
+    AssertEqual("FileTransferLiveCancelled", (await transfers.BuildSelectFolderActionAsync()).Status, "folder picker cancellation");
+    var snapshot = await transfers.BuildReadOnlySnapshotAsync();
+    AssertEqual(0, snapshot.Queue.Count, "cancelled selection must not create a sample queue row");
+    AssertEqual(0, snapshot.History.Count, "cancelled selection must not invent a successful transfer");
+}
 
 var runtimeVariables = new[]
 {
@@ -113,6 +167,11 @@ var runtimeVariables = new[]
     "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_SMOKE",
     "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_SMOKE_EVIDENCE_PATH",
     "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_SMOKE_TIMEOUT_SECONDS",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_HANDSHAKE_TIMEOUT_SECONDS",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_MLDSA65_PRIVATE_KEY_BASE64_PATH",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_PEER_MLKEM768_PUBLIC_KEY_BASE64_PATH",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_LOCAL_MLKEM768_DECAPSULATION_KEY_BASE64_PATH",
+    "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_LOCAL_MLKEM768_PUBLIC_KEY_BASE64_PATH",
     "SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT",
     "SKYBRIDGE_WINDOWS_MSQUIC_ROLE",
     "SKYBRIDGE_WINDOWS_MSQUIC_LISTEN_ENDPOINT",
@@ -123,10 +182,17 @@ var runtimeVariables = new[]
 try
 {
     ClearRuntimeEnvironment();
-    AssertEqual(false, WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "default native DNS-SD profile flag");
+    AssertEqual(OperatingSystem.IsWindows(), WindowsNativeRuntimeDependencyFactory.IsNativeRuntimeRequested(), "default native DNS-SD profile flag");
     var defaultDependencies = SessionViewModelDependencyFactory.CreateConfigured();
     AssertType<FfiEngineClient>(defaultDependencies.EngineClient, "default engine");
-    AssertNestedType<PendingWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+    if (OperatingSystem.IsWindows())
+    {
+        AssertNestedType<NativeWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+    }
+    else
+    {
+        AssertNestedType<PendingWindowsDnsSdBrowseClient>(defaultDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+    }
     AssertNestedType<PendingWindowsTransportAdapterClient>(defaultDependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
     AssertType<SystemMonitorWorkspaceClient>(defaultDependencies.SystemMonitorClient, "default system monitor client");
     AssertEqual(true, defaultDependencies.SystemMonitorClient.CanStartMonitoring(), "default system monitor start gate");
@@ -150,32 +216,7 @@ try
     AssertIndicator(advancedMonitoringSnapshot, "Advanced", "Read-only", "advanced monitoring indicator");
     var repeatedAdvancedMonitoring = await defaultDependencies.SystemMonitorClient.BuildAdvancedMonitoringActionAsync();
     AssertEqual(SystemMonitorWorkspaceClient.DefaultAdvancedMonitoringBlockedStatus, repeatedAdvancedMonitoring.Status, "repeat advanced monitoring status");
-    AssertType<FileTransferWorkspaceClient>(defaultDependencies.FileTransferClient, "default file transfer client");
-    AssertNestedType<InMemoryFileTransferSelectionIntentClient>(defaultDependencies.FileTransferClient, "_selectionIntentClient", "default file transfer selection intent client");
-    AssertEqual(true, defaultDependencies.FileTransferClient.CanSelectFiles(), "default file transfer select files gate");
-    AssertEqual(true, defaultDependencies.FileTransferClient.CanSelectFolder(), "default file transfer select folder gate");
-    AssertEqual(true, defaultDependencies.FileTransferClient.CanGenerateShareQr(), "default file transfer QR share gate");
-    var selectFilesIntent = await defaultDependencies.FileTransferClient.BuildSelectFilesActionAsync();
-    AssertEqual(FileTransferWorkspaceClient.DefaultSelectFilesIntentReadyStatus, selectFilesIntent.Status, "file transfer select files intent status");
-    AssertContains(selectFilesIntent.Detail, "intent=FT-FILES-0001", "file transfer select files intent detail should include deterministic in-memory intent id.");
-    AssertContains(selectFilesIntent.Detail, "no local files were read", "file transfer select files intent detail should keep file reads disabled.");
-    var selectFolderIntent = await defaultDependencies.FileTransferClient.BuildSelectFolderActionAsync();
-    AssertEqual(FileTransferWorkspaceClient.DefaultSelectFolderIntentReadyStatus, selectFolderIntent.Status, "file transfer select folder intent status");
-    AssertContains(selectFolderIntent.Detail, "intent=FT-FOLDER-0001", "file transfer select folder intent detail should include deterministic in-memory intent id.");
-    AssertContains(selectFolderIntent.Detail, "no directory was scanned", "file transfer select folder intent detail should keep directory scanning disabled.");
-    var selectionIntentClient = GetNested<InMemoryFileTransferSelectionIntentClient>(
-        defaultDependencies.FileTransferClient,
-        "_selectionIntentClient");
-    var selectionIntentSnapshot = selectionIntentClient.CaptureSnapshot();
-    AssertEqual(true, selectionIntentSnapshot.HasFilesIntent, "file transfer files selection snapshot readiness");
-    AssertEqual("FT-FILES-0001", selectionIntentSnapshot.FilesIntentId, "file transfer files selection snapshot id");
-    AssertEqual(true, selectionIntentSnapshot.HasFolderIntent, "file transfer folder selection snapshot readiness");
-    AssertEqual("FT-FOLDER-0001", selectionIntentSnapshot.FolderIntentId, "file transfer folder selection snapshot id");
-    var shareQrIntent = await defaultDependencies.FileTransferClient.BuildShareQrActionAsync();
-    AssertEqual(FileTransferWorkspaceClient.DefaultShareQrReadyStatus, shareQrIntent.Status, "file transfer QR share intent status");
-    AssertEqual(FileTransferWorkspaceClient.DefaultShareQrReadyMessage, shareQrIntent.Message, "file transfer QR share intent message");
-    AssertContains(shareQrIntent.Detail, "intent=FT-0001", "file transfer QR share intent detail should include deterministic in-memory intent id.");
-    AssertContains(shareQrIntent.Detail, "no transport or signaling session was started", "file transfer QR share intent detail should keep transport/signaling disabled.");
+    await VerifyFileTransferWorkspaceAsync();
     AssertType<SettingsWorkspaceClient>(defaultDependencies.SettingsClient, "default settings client");
     AssertNestedType<DisabledSystemPreferencesLauncher>(defaultDependencies.SettingsClient, "_systemPreferencesLauncher", "default system preferences launcher");
     AssertNestedType<InMemorySettingsExportPreviewClient>(defaultDependencies.SettingsClient, "_exportPreviewClient", "default settings export preview client");
@@ -277,7 +318,14 @@ try
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_SETTINGS_SYSTEM_PREFERENCES", "enabled");
     var systemPreferencesDependencies = SessionViewModelDependencyFactory.CreateConfigured();
     AssertType<FfiEngineClient>(systemPreferencesDependencies.EngineClient, "system preferences env engine");
-    AssertNestedType<PendingWindowsDnsSdBrowseClient>(systemPreferencesDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "system preferences DNS-SD provider");
+    if (OperatingSystem.IsWindows())
+    {
+        AssertNestedType<NativeWindowsDnsSdBrowseClient>(systemPreferencesDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "system preferences DNS-SD provider");
+    }
+    else
+    {
+        AssertNestedType<PendingWindowsDnsSdBrowseClient>(systemPreferencesDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "system preferences DNS-SD provider");
+    }
     AssertType<SettingsWorkspaceClient>(systemPreferencesDependencies.SettingsClient, "system preferences settings client");
     AssertNestedType<WindowsSystemPreferencesLauncher>(systemPreferencesDependencies.SettingsClient, "_systemPreferencesLauncher", "enabled system preferences launcher");
     AssertEqual(true, systemPreferencesDependencies.SettingsClient.CanOpenSystemPreferences(), "enabled system preferences gate");
@@ -507,6 +555,16 @@ try
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SIGNALING_DIR", Path.Combine(AppContext.BaseDirectory, "webrtc-product-control-signaling"));
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_WEBRTC_SESSION_ROLE", "offer");
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TIMESTAMP_WINDOW_MS", "15000");
+    ExpectThrows<InvalidOperationException>(
+        () => SessionViewModelDependencyFactory.CreateConfigured(),
+        "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_MLDSA65_PRIVATE_KEY_BASE64_PATH is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=webrtc-product-control.");
+    var productControlKeyPaths = WriteProductControlOfferKeyFiles();
+    Environment.SetEnvironmentVariable(
+        "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_MLDSA65_PRIVATE_KEY_BASE64_PATH",
+        productControlKeyPaths.LocalMlDsa65PrivateKeyPath);
+    Environment.SetEnvironmentVariable(
+        "SKYBRIDGE_WINDOWS_WEBRTC_PRODUCT_PEER_MLKEM768_PUBLIC_KEY_BASE64_PATH",
+        productControlKeyPaths.PeerMlKem768PublicKeyPath);
     var productControlDependencies = SessionViewModelDependencyFactory.CreateConfigured();
     AssertType<WebRtcProductControlEngineClient>(productControlDependencies.EngineClient, "WebRTC product-control engine");
     AssertNestedType<NativeWindowsDnsSdBrowseClient>(productControlDependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "WebRTC product-control DNS-SD provider");
@@ -567,9 +625,10 @@ try
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER", "msquic");
-    ExpectThrows<InvalidOperationException>(
-        () => SessionViewModelDependencyFactory.CreateConfigured(),
-        "SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT is required when SKYBRIDGE_WINDOWS_TRANSPORT_ADAPTER=msquic.");
+    var discoveredMsquicDependencies = SessionViewModelDependencyFactory.CreateConfigured();
+    var discoveredMsquicAdapter = GetNested<IWindowsTransportAdapterClient>(discoveredMsquicDependencies.ConnectionPreflightClient, "_transportAdapterClient");
+    AssertType<WindowsNativeMsQuicTransportAdapterClient>(discoveredMsquicAdapter, "MsQuic discovery route adapter without a pinned endpoint");
+    AssertEqual<string?>(null, GetNested<WindowsNativeMsQuicTransportAdapterOptions>(discoveredMsquicAdapter, "_options").PeerEndpoint, "discovery route must not invent a pinned peer endpoint");
 
     ClearRuntimeEnvironment();
     Environment.SetEnvironmentVariable("SKYBRIDGE_WINDOWS_RUNTIME", "native");
@@ -1062,7 +1121,8 @@ async Task VerifyCurrentPathSignalingContractsAsync()
         new CurrentPathWebRtcSignalingPayload(
             candidate: "candidate:1 1 udp 2122260223 192.168.0.105 54321 typ host",
             sdpMid: "0",
-            sdpMLineIndex: 0),
+            sdpMLineIndex: 0,
+            usernameFragment: "ICEU1"),
         sentAt: 1_700_000_003d);
     var leaveEnvelope = new CurrentPathWebRtcSignalingEnvelope(
         "session-1",
@@ -1083,7 +1143,9 @@ async Task VerifyCurrentPathSignalingContractsAsync()
     AssertEqual(false, leaveEnvelope.ToString().Contains("session-1", StringComparison.OrdinalIgnoreCase), "current-path envelope ToString must redact session id");
     AssertEqual(CurrentPathWebRtcSignalingMessageType.Offer, CurrentPathSignalingFrameCodec.DecodeEnvelope(CurrentPathSignalingFrameCodec.EncodeEnvelope(offerEnvelope)).Type, "current-path offer round trip");
     AssertEqual(CurrentPathWebRtcSignalingMessageType.Answer, CurrentPathSignalingFrameCodec.DecodeEnvelope(CurrentPathSignalingFrameCodec.EncodeEnvelope(answerEnvelope)).Type, "current-path answer round trip");
-    AssertEqual(CurrentPathWebRtcSignalingMessageType.IceCandidate, CurrentPathSignalingFrameCodec.DecodeEnvelope(CurrentPathSignalingFrameCodec.EncodeEnvelope(iceEnvelope)).Type, "current-path ICE round trip");
+    var iceRoundTrip = CurrentPathSignalingFrameCodec.DecodeEnvelope(CurrentPathSignalingFrameCodec.EncodeEnvelope(iceEnvelope));
+    AssertEqual(CurrentPathWebRtcSignalingMessageType.IceCandidate, iceRoundTrip.Type, "current-path ICE round trip");
+    AssertEqual("ICEU1", iceRoundTrip.Payload!.UsernameFragment, "current-path ICE usernameFragment round trip");
     AssertEqual(CurrentPathWebRtcSignalingMessageType.Leave, CurrentPathSignalingFrameCodec.DecodeEnvelope(CurrentPathSignalingFrameCodec.EncodeEnvelope(leaveEnvelope)).Type, "current-path leave round trip");
     ExpectThrows<InvalidDataException>(
         () => new CurrentPathWebRtcSignalingEnvelope(
@@ -1105,6 +1167,12 @@ async Task VerifyCurrentPathSignalingContractsAsync()
     ExpectThrows<InvalidDataException>(
         () => new CurrentPathWebRtcSignalingPayload(sdpMLineIndex: -1),
         "must not be negative");
+    ExpectThrows<InvalidDataException>(
+        () => new CurrentPathWebRtcSignalingPayload(usernameFragment: ""),
+        "username fragment must not be empty");
+    ExpectThrows<InvalidDataException>(
+        () => new CurrentPathWebRtcSignalingPayload(usernameFragment: new string('u', CurrentPathWebRtcSignalingPayload.MaxUsernameFragmentBytes + 1)),
+        "username fragment exceeds");
     ExpectThrows<InvalidDataException>(
         () => new CurrentPathWebRtcSignalingPayload(protocolSigningAlgorithm: "P-256"),
         "Unsupported current-path protocol signing algorithm");
@@ -1460,7 +1528,8 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
             new CurrentPathWebRtcSignalingPayload(
                 candidate: "2222 1 udp 2113937663 192.168.0.101 51490 typ host generation 0",
                 sdpMid: "0",
-                sdpMLineIndex: 0),
+                sdpMLineIndex: 0,
+                usernameFragment: "MAC1"),
             sentAt: 1_700_100_001d))));
     bridgeTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
         CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
@@ -1483,16 +1552,17 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
     {
         await wsClient.ConnectAndBindAsync();
         var bridge = new CurrentPathWebRtcHelperSignalingBridge();
+        var bridgeOptions = new CurrentPathWebRtcHelperSignalingBridgeOptions(
+            "bridge-session-1",
+            "windows-device-01",
+            "mac-device-00001",
+            localOfferPath,
+            remoteAnswerPath,
+            signalFileTimeout: TimeSpan.FromSeconds(1),
+            remoteSignalTimeout: TimeSpan.FromSeconds(5));
         var result = await bridge.ExchangeOffererAsync(
             wsClient,
-            new CurrentPathWebRtcHelperSignalingBridgeOptions(
-                "bridge-session-1",
-                "windows-device-01",
-                "mac-device-00001",
-                localOfferPath,
-                remoteAnswerPath,
-                signalFileTimeout: TimeSpan.FromSeconds(1),
-                remoteAnswerTimeout: TimeSpan.FromSeconds(5)));
+            bridgeOptions);
 
         AssertEqual(1, result.LocalCandidateCount, "current-path helper bridge local candidate count");
         AssertEqual(1, result.RemoteCandidateCount, "current-path helper bridge remote candidate count");
@@ -1507,6 +1577,52 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
         AssertEqual("44:55:66", writtenAnswer.Fingerprint(), "current-path helper bridge answer fingerprint");
         AssertEqual("192.168.0.101:51490", writtenAnswer.FirstEndpoint(), "current-path helper bridge answer endpoint");
         AssertEqual("host-192.168.0.101:51490", writtenAnswer.FirstCandidateLabel(), "current-path helper bridge answer candidate label");
+        AssertEqual("MAC1", writtenAnswer.Candidates[0].UsernameFragment, "current-path helper bridge answer candidate username fragment");
+
+        bridgeTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
+            CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
+                "bridge-session-1",
+                "mac-device-00001",
+                "windows-device-01",
+                CurrentPathWebRtcSignalingMessageType.IceCandidate,
+                new CurrentPathWebRtcSignalingPayload(
+                    candidate: "5555 1 udp 2113937663 192.168.0.101 51491 typ host generation 0",
+                    sdpMid: "0",
+                    sdpMLineIndex: 0,
+                    usernameFragment: "MAC2"),
+                sentAt: 1_700_100_003d))));
+        bridgeTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
+            CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
+                "bridge-session-1",
+                "mac-device-00001",
+                "windows-device-01",
+                CurrentPathWebRtcSignalingMessageType.IceCandidate,
+                new CurrentPathWebRtcSignalingPayload(
+                    candidate: "5555 1 udp 2113937663 192.168.0.101 51491 typ host generation 0",
+                    sdpMid: "0",
+                    sdpMLineIndex: 0,
+                    usernameFragment: "MAC2"),
+                sentAt: 1_700_100_004d))));
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lateReceiveCount = 0;
+        bridgeTransport.AfterReceive = () =>
+        {
+            lateReceiveCount++;
+            if (lateReceiveCount == 2)
+            {
+                ready.TrySetResult();
+            }
+        };
+        var relayedCandidates = await bridge.RelayRemoteIceCandidatesUntilAsync(
+            wsClient,
+            bridgeOptions,
+            "answer",
+            ready.Task);
+        AssertEqual(1, relayedCandidates, "current-path helper bridge relays late remote candidate count");
+        writtenAnswer = WebRtcSignalDocument.Read(remoteAnswerPath, "answer");
+        AssertEqual(2, writtenAnswer.Candidates.Length, "current-path helper bridge keeps late remote candidate");
+        AssertEqual("192.168.0.101:51491", CandidateEndpoint(writtenAnswer.Candidates[1]), "current-path helper bridge late candidate endpoint");
+        AssertEqual("MAC2", writtenAnswer.Candidates[1].UsernameFragment, "current-path helper bridge late candidate username fragment");
     }
 
     var wrongPeerAnswerPath = Path.Combine(signalingRoot, "bridge-wrong-peer-answer.json");
@@ -1544,7 +1660,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
                     localOfferPath,
                     wrongPeerAnswerPath,
                     signalFileTimeout: TimeSpan.FromSeconds(1),
-                    remoteAnswerTimeout: TimeSpan.FromSeconds(5))),
+                    remoteSignalTimeout: TimeSpan.FromSeconds(5))),
             "unexpected peer");
         AssertEqual(false, File.Exists(wrongPeerAnswerPath), "current-path helper bridge must not write wrong-peer answer");
     }
@@ -1561,6 +1677,20 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
             CurrentPathWebRtcSignalingMessageType.Answer,
             new CurrentPathWebRtcSignalingPayload(sdp: "v=0\r\na=fingerprint:sha-256 AA:BB:CC\r\n"),
             sentAt: 1_700_100_004d))));
+    var noCandidateIce = CurrentPathWebSocketReceiveResult.TextMessage(
+        CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
+            "bridge-session-3",
+            "mac-device-00001",
+            "windows-device-01",
+            CurrentPathWebRtcSignalingMessageType.IceCandidate,
+            new CurrentPathWebRtcSignalingPayload(
+                candidate: "7777 1 udp 2113937663 192.168.0.101 51492 typ host generation 0",
+                sdpMid: "0",
+                sdpMLineIndex: 0,
+                usernameFragment: "MAC3"),
+            sentAt: 1_700_100_005d)));
+    noCandidateTransport.EnqueueReceive(noCandidateIce);
+    noCandidateTransport.EnqueueReceive(noCandidateIce);
 
     await using (var noCandidateClient = new CurrentPathWebSocketSignalingClient(
         noCandidateTransport,
@@ -1574,8 +1704,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
     {
         await noCandidateClient.ConnectAndBindAsync();
         var bridge = new CurrentPathWebRtcHelperSignalingBridge();
-        await ExpectThrowsAsync<InvalidDataException>(
-            () => bridge.ExchangeOffererAsync(
+        var result = await bridge.ExchangeOffererAsync(
                 noCandidateClient,
                 new CurrentPathWebRtcHelperSignalingBridgeOptions(
                     "bridge-session-3",
@@ -1584,9 +1713,39 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
                     localOfferPath,
                     noCandidateAnswerPath,
                     signalFileTimeout: TimeSpan.FromSeconds(1),
-                    remoteAnswerTimeout: TimeSpan.FromSeconds(5))),
-            "without parseable ICE candidate material");
-        AssertEqual(false, File.Exists(noCandidateAnswerPath), "current-path helper bridge must not write no-candidate answer");
+                    remoteSignalTimeout: TimeSpan.FromSeconds(5)));
+        AssertEqual(0, result.RemoteCandidateCount, "current-path helper bridge accepts answer-before-candidate trickle");
+        var writtenAnswer = WebRtcSignalDocument.Read(noCandidateAnswerPath, "answer");
+        AssertEqual("AA:BB:CC", writtenAnswer.Fingerprint(), "current-path helper bridge no-candidate answer fingerprint");
+        AssertEqual(0, writtenAnswer.Candidates.Length, "current-path helper bridge writes zero initial answer candidates");
+
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var noCandidateReceiveCount = 0;
+        noCandidateTransport.AfterReceive = () =>
+        {
+            noCandidateReceiveCount++;
+            if (noCandidateReceiveCount == 2)
+            {
+                ready.TrySetResult();
+            }
+        };
+        var relayedCandidates = await bridge.RelayRemoteIceCandidatesUntilAsync(
+            noCandidateClient,
+            new CurrentPathWebRtcHelperSignalingBridgeOptions(
+                "bridge-session-3",
+                "windows-device-01",
+                "mac-device-00001",
+                localOfferPath,
+                noCandidateAnswerPath,
+                signalFileTimeout: TimeSpan.FromSeconds(1),
+                remoteSignalTimeout: TimeSpan.FromSeconds(5)),
+            "answer",
+            ready.Task);
+        AssertEqual(1, relayedCandidates, "current-path helper bridge relays answer-before-candidate trickle count");
+        writtenAnswer = WebRtcSignalDocument.Read(noCandidateAnswerPath, "answer");
+        AssertEqual(1, writtenAnswer.Candidates.Length, "current-path helper bridge stores answer-before-candidate trickle");
+        AssertEqual("192.168.0.101:51492", CandidateEndpoint(writtenAnswer.Candidates[0]), "current-path helper bridge answer-before-candidate endpoint");
+        AssertEqual("MAC3", writtenAnswer.Candidates[0].UsernameFragment, "current-path helper bridge answer-before-candidate username fragment");
     }
 
     var wrongToAnswerPath = Path.Combine(signalingRoot, "bridge-wrong-to-answer.json");
@@ -1625,7 +1784,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
                     localOfferPath,
                     wrongToAnswerPath,
                     signalFileTimeout: TimeSpan.FromSeconds(1),
-                    remoteAnswerTimeout: TimeSpan.FromSeconds(5))),
+                    remoteSignalTimeout: TimeSpan.FromSeconds(5))),
             "addressed to another device");
         AssertEqual(false, File.Exists(wrongToAnswerPath), "current-path helper bridge must not write wrong-to answer");
     }
@@ -1666,7 +1825,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
                     localOfferPath,
                     missingFingerprintAnswerPath,
                     signalFileTimeout: TimeSpan.FromSeconds(1),
-                    remoteAnswerTimeout: TimeSpan.FromSeconds(5))),
+                    remoteSignalTimeout: TimeSpan.FromSeconds(5))),
             "does not contain a DTLS fingerprint");
         AssertEqual(false, File.Exists(missingFingerprintAnswerPath), "current-path helper bridge must not write missing-fingerprint answer");
     }
@@ -1800,6 +1959,7 @@ async Task VerifyWebRtcProductControlContractsAsync()
         "192.168.0.105:5443",
         "192.168.0.101:5443",
         "webrtc/dtls/sctp/host-192.168.0.105:5443-host-192.168.0.101:5443/skybridge",
+        0,
         new string('b', 64),
         15_000,
         WebRtcProductControlSecureSessionState.TransportOnly);
@@ -2094,6 +2254,48 @@ async Task VerifyWebRtcProductPqcHandshakeCryptoProviderAsync()
             () => tamperedDriver.StartInitiatorAsync(
                 BuildProductHandshakeContext(tamperedResponderPlane, peerFingerprint: tamperedResponderPlane.ResponderIdentityFingerprint)),
             "ML-DSA signature verification failed");
+
+        using var responderSigner = MLDsa.GenerateKey(MLDsaAlgorithm.MLDsa65);
+        using var responderKem = MLKem.GenerateKey(MLKemAlgorithm.MLKem768);
+        var responderPrivateKey = responderSigner.ExportMLDsaPrivateKey();
+        var responderDecapsulationKey = responderKem.ExportDecapsulationKey();
+        try
+        {
+            using var initiatorPlane = new TestWebRtcProductPqcInitiatorPlane(responderKem.ExportEncapsulationKey());
+            var responderOptions = new WebRtcProductPqcHandshakeCryptoProviderOptions(
+                responderPrivateKey,
+                peerMlKem768PublicKey: Array.Empty<byte>(),
+                localMlKem768DecapsulationKey: responderDecapsulationKey);
+            using var responderProvider = new WebRtcProductPqcHandshakeCryptoProvider(responderOptions);
+            AssertBytesAllZero(responderOptions.LocalMlDsa65PrivateKey.ToArray(), "PQC responder provider options local ML-DSA private key cleared after import");
+            AssertBytesAllZero(responderOptions.LocalMlKem768DecapsulationKey.ToArray(), "PQC responder provider options local ML-KEM decapsulation key cleared after import");
+            var responderStore = new WebRtcProductSecureSessionStore();
+            var responderDriver = new WebRtcProductHandshakeDriver(
+                responderProvider,
+                responderStore,
+                new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
+            var responderResult = await responderDriver.StartResponderWithResultAsync(
+                BuildProductHandshakeContext(
+                    initiatorPlane,
+                    peerFingerprint: initiatorPlane.InitiatorIdentityFingerprint,
+                    role: "answer"));
+            AssertEqual(WebRtcProductHandshakeCodec.SuiteMlKem768Mldsa65, responderResult.SelectedSuiteWireId, "PQC provider responder selected suite");
+            AssertEqual(true, responderResult.InitiatorSignatureVerified, "PQC provider responder verifies initiator signature");
+            AssertEqual(true, responderResult.InitiatorFinishedVerified, "PQC provider responder verifies initiator Finished");
+            AssertEqual(true, initiatorPlane.ResponderFinishedVerified, "PQC initiator peer verifies responder Finished");
+            var responderKeys = responderStore.RequireEstablishedKeys(
+                responderResult.EstablishedContext,
+                WebRtcProductHandshakeCodec.SuiteMlKem768Mldsa65,
+                WebRtcAppSecureRole.Responder);
+            AssertEqual(responderKeys.SessionId, initiatorPlane.InitiatorKeys?.SessionId, "PQC responder provider session id symmetry");
+            AssertBytesEqual(responderKeys.SendKey.ToArray(), initiatorPlane.InitiatorKeys!.ReceiveKey.ToArray(), "PQC responder provider send key symmetry");
+            AssertBytesEqual(responderKeys.ReceiveKey.ToArray(), initiatorPlane.InitiatorKeys.SendKey.ToArray(), "PQC responder provider receive key symmetry");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(responderPrivateKey);
+            CryptographicOperations.ZeroMemory(responderDecapsulationKey);
+        }
     }
     finally
     {
@@ -2211,6 +2413,7 @@ async Task VerifyWebRtcProductSecureSessionStoreAsync()
         "192.168.0.105:5443",
         "192.168.0.101:5443",
         "webrtc/dtls/sctp/host-192.168.0.105:5443-host-192.168.0.101:5443/skybridge",
+        0,
         new string('b', 64),
         15_000,
         WebRtcProductControlSecureSessionState.TransportOnly);
@@ -2306,6 +2509,7 @@ async Task VerifyWebRtcProductHandshakeDriverAsync()
     var established = await driver.StartInitiatorAsync(context);
     AssertEqual(WebRtcProductControlSecureSessionState.Established, established.SecureSessionState, "product handshake driver establishes context");
     AssertEqual(1, cryptoProvider.OpenMessageBCount, "product handshake driver calls crypto provider for MessageB");
+    AssertEqual(0, cryptoProvider.AbortInitiatorSecretCount, "successful product handshake must consume rather than abort the initiator secret");
     AssertEqual(2, controlPlane.SentMessages.Count, "product handshake driver sends MessageA and initiator Finished");
     AssertEqual(true, controlPlane.InitiatorFinishedVerified, "product handshake responder verifies initiator Finished");
     var keys = store.RequireEstablishedKeys(established);
@@ -2313,6 +2517,35 @@ async Task VerifyWebRtcProductHandshakeDriverAsync()
     AssertEqual(keys.SessionId, controlPlane.ResponderKeys?.SessionId, "product handshake driver session id symmetry");
     AssertBytesEqual(keys.SendKey.ToArray(), controlPlane.ResponderKeys!.ReceiveKey.ToArray(), "product handshake driver send key symmetry");
     AssertBytesEqual(keys.ReceiveKey.ToArray(), controlPlane.ResponderKeys.SendKey.ToArray(), "product handshake driver receive key symmetry");
+
+    var answererPlane = new TestWebRtcProductHandshakeInitiatorPlane();
+    var answererContext = BuildProductHandshakeContext(
+        answererPlane,
+        peerFingerprint: answererPlane.InitiatorIdentityFingerprint,
+        role: "answer");
+    var answererProvider = new TestWebRtcProductHandshakeCryptoProvider(answererPlane.SharedSecret);
+    var answererStore = new WebRtcProductSecureSessionStore();
+    var answererDriver = new WebRtcProductHandshakeDriver(
+        answererProvider,
+        answererStore,
+        new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
+    var answererResult = await answererDriver.StartResponderWithResultAsync(answererContext);
+    AssertEqual(WebRtcProductControlSecureSessionState.Established, answererResult.EstablishedContext.SecureSessionState, "product handshake responder establishes context");
+    AssertEqual(WebRtcProductHandshakeCodec.SuiteX25519Ed25519, answererResult.SelectedSuiteWireId, "product handshake responder selected suite");
+    AssertEqual(true, answererResult.InitiatorIdentityFingerprintVerified, "product handshake responder verifies initiator fingerprint");
+    AssertEqual(true, answererResult.InitiatorSignatureVerified, "product handshake responder verifies initiator signature");
+    AssertEqual(true, answererResult.ResponderFinishedSent, "product handshake responder sends Finished");
+    AssertEqual(true, answererResult.InitiatorFinishedVerified, "product handshake responder verifies initiator Finished");
+    AssertEqual(1, answererProvider.CreateMessageBCount, "product handshake responder calls crypto provider for MessageB");
+    AssertEqual(0, answererProvider.OpenMessageBCount, "product handshake responder must not open MessageB as initiator");
+    AssertEqual(2, answererPlane.SentMessages.Count, "product handshake responder sends MessageB and responder Finished");
+    AssertEqual(true, answererPlane.ResponderFinishedVerified, "product handshake initiator peer verifies responder Finished");
+    AssertEqual(true, answererPlane.InitiatorFinishedSent, "product handshake initiator peer sends initiator Finished");
+    var responderKeys = answererStore.RequireEstablishedKeys(answererResult.EstablishedContext);
+    AssertEqual(WebRtcAppSecureRole.Responder, responderKeys.Role, "product handshake driver installs responder keys");
+    AssertEqual(responderKeys.SessionId, answererPlane.InitiatorKeys?.SessionId, "product handshake responder session id symmetry");
+    AssertBytesEqual(responderKeys.SendKey.ToArray(), answererPlane.InitiatorKeys!.ReceiveKey.ToArray(), "product handshake responder send key symmetry");
+    AssertBytesEqual(responderKeys.ReceiveKey.ToArray(), answererPlane.InitiatorKeys.SendKey.ToArray(), "product handshake responder receive key symmetry");
 
     var unavailablePlane = new TestWebRtcProductHandshakeResponderPlane();
     var unavailableDriver = new WebRtcProductHandshakeDriver(
@@ -2326,8 +2559,9 @@ async Task VerifyWebRtcProductHandshakeDriverAsync()
 
     var tamperedPlane = new TestWebRtcProductHandshakeResponderPlane(tamperResponderFinished: true);
     var tamperedStore = new WebRtcProductSecureSessionStore();
+    var tamperedProvider = new TestWebRtcProductHandshakeCryptoProvider(tamperedPlane.SharedSecret);
     var tamperedDriver = new WebRtcProductHandshakeDriver(
-        new TestWebRtcProductHandshakeCryptoProvider(tamperedPlane.SharedSecret),
+        tamperedProvider,
         tamperedStore,
         new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
     var tamperedContext = BuildProductHandshakeContext(tamperedPlane, peerFingerprint: tamperedPlane.ResponderIdentityFingerprint);
@@ -2337,15 +2571,20 @@ async Task VerifyWebRtcProductHandshakeDriverAsync()
     ExpectThrows<WebRtcAppSessionKeysUnavailableException>(
         () => tamperedStore.RequireEstablishedKeys(tamperedContext with { SecureSessionState = WebRtcProductControlSecureSessionState.Established }),
         "secure session keys are not installed");
+    AssertEqual(1, tamperedProvider.OpenMessageBCount, "tampered Finished must fail after consuming MessageB secret");
+    AssertEqual(0, tamperedProvider.AbortInitiatorSecretCount, "tampered Finished must not abort an already consumed initiator secret");
 
     var earlySbwcPlane = new TestWebRtcProductHandshakeResponderPlane(sendSecureEnvelopeBeforeMessageB: true);
+    var earlySbwcProvider = new TestWebRtcProductHandshakeCryptoProvider(earlySbwcPlane.SharedSecret);
     var earlySbwcDriver = new WebRtcProductHandshakeDriver(
-        new TestWebRtcProductHandshakeCryptoProvider(earlySbwcPlane.SharedSecret),
+        earlySbwcProvider,
         new WebRtcProductSecureSessionStore(),
         new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
     await ExpectThrowsAsync<WebRtcProductHandshakeDriverException>(
         () => earlySbwcDriver.StartInitiatorAsync(BuildProductHandshakeContext(earlySbwcPlane, peerFingerprint: earlySbwcPlane.ResponderIdentityFingerprint)),
         "SBWC envelope while waiting for MessageB");
+    AssertEqual(0, earlySbwcProvider.OpenMessageBCount, "early SBWC rejection must happen before MessageB open");
+    AssertEqual(1, earlySbwcProvider.AbortInitiatorSecretCount, "early SBWC rejection must abort the pending initiator secret exactly once");
 
     var identityMismatchPlane = new TestWebRtcProductHandshakeResponderPlane();
     var identityMismatchProvider = new TestWebRtcProductHandshakeCryptoProvider(identityMismatchPlane.SharedSecret);
@@ -2357,19 +2596,43 @@ async Task VerifyWebRtcProductHandshakeDriverAsync()
         () => identityMismatchDriver.StartInitiatorAsync(BuildProductHandshakeContext(identityMismatchPlane)),
         "identity public key fingerprint does not match");
     AssertEqual(0, identityMismatchProvider.OpenMessageBCount, "product handshake identity mismatch must fail before MessageB open");
+    AssertEqual(1, identityMismatchProvider.AbortInitiatorSecretCount, "product handshake identity mismatch must abort the pending initiator secret exactly once");
+    var identityMismatchMessageA = WebRtcProductHandshakeCodec.DecodeMessageA(identityMismatchPlane.SentMessages.Single());
+    AssertBytesEqual(
+        SHA256.HashData(identityMismatchMessageA.EncodeWithoutSignature()),
+        identityMismatchProvider.LastAbortedTranscriptHashA,
+        "product handshake abort must target the exact pending MessageA transcript hash");
+
+    var answererIdentityMismatchPlane = new TestWebRtcProductHandshakeInitiatorPlane();
+    var answererIdentityMismatchProvider = new TestWebRtcProductHandshakeCryptoProvider(answererIdentityMismatchPlane.SharedSecret);
+    var answererIdentityMismatchDriver = new WebRtcProductHandshakeDriver(
+        answererIdentityMismatchProvider,
+        new WebRtcProductSecureSessionStore(),
+        new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
+    await ExpectThrowsAsync<WebRtcProductHandshakeDriverException>(
+        () => answererIdentityMismatchDriver.StartResponderAsync(BuildProductHandshakeContext(answererIdentityMismatchPlane, role: "answer")),
+        "identity public key fingerprint does not match");
+    AssertEqual(0, answererIdentityMismatchProvider.CreateMessageBCount, "product handshake answerer identity mismatch must fail before MessageB creation");
+    AssertEqual(0, answererIdentityMismatchPlane.SentMessages.Count, "product handshake answerer identity mismatch must not send MessageB");
 
     var overflowPlane = new TestWebRtcProductHandshakeResponderPlane(extraMessagesBeforeMessageB: 2);
+    var overflowProvider = new TestWebRtcProductHandshakeCryptoProvider(overflowPlane.SharedSecret);
     var overflowDriver = new WebRtcProductHandshakeDriver(
-        new TestWebRtcProductHandshakeCryptoProvider(overflowPlane.SharedSecret),
+        overflowProvider,
         new WebRtcProductSecureSessionStore(),
         new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3), maxQueuedInboundMessages: 1));
     await ExpectThrowsAsync<WebRtcProductHandshakeDriverException>(
         () => overflowDriver.StartInitiatorAsync(BuildProductHandshakeContext(overflowPlane, peerFingerprint: overflowPlane.ResponderIdentityFingerprint)),
         "inbound queue exceeded");
+    AssertEqual(0, overflowProvider.OpenMessageBCount, "inbound overflow must fail before MessageB open");
+    AssertEqual(1, overflowProvider.AbortInitiatorSecretCount, "inbound overflow must abort the pending initiator secret exactly once");
 
     var nonTransportContext = context with { SecureSessionState = WebRtcProductControlSecureSessionState.Established };
     await ExpectThrowsAsync<WebRtcProductHandshakeDriverException>(
         () => driver.StartInitiatorAsync(nonTransportContext),
+        "must start from a TransportOnly");
+    await ExpectThrowsAsync<WebRtcProductHandshakeDriverException>(
+        () => answererDriver.StartResponderAsync(answererContext with { SecureSessionState = WebRtcProductControlSecureSessionState.Established }),
         "must start from a TransportOnly");
 }
 
@@ -2393,11 +2656,12 @@ async Task VerifyWebRtcAppControlBootstrapClientAsync()
         WebRtcProductHandshakeCodec.SuiteX25519Ed25519);
 
     AssertEqual("pong", result.ReceivedMessageKind, "AppControl bootstrap receives pong");
+    AssertEqual("SkybridgeSecureEnvelopeV1", result.PayloadFormat, "AppControl bootstrap payload format");
     AssertEqual(keys.SessionId, result.SessionId, "AppControl bootstrap session id");
-    AssertEqual((ulong)1, result.OutboundCounter, "AppControl bootstrap outbound counter");
-    AssertEqual((ulong)1, result.InboundCounter, "AppControl bootstrap inbound counter");
-    AssertEqual(WebRtcAppSecureEnvelope.SessionIdHash(keys.SessionId), result.SessionHash, "AppControl bootstrap session hash");
-    AssertEqual(WebRtcAppSecureEnvelope.TranscriptPrefix(keys.TranscriptHash.Span), result.TranscriptPrefix, "AppControl bootstrap transcript prefix");
+    AssertEqual((ulong?)1, result.OutboundCounter, "AppControl bootstrap outbound counter");
+    AssertEqual((ulong?)1, result.InboundCounter, "AppControl bootstrap inbound counter");
+    AssertEqual((ulong?)WebRtcAppSecureEnvelope.SessionIdHash(keys.SessionId), result.SessionHash, "AppControl bootstrap session hash");
+    AssertEqual((ulong?)WebRtcAppSecureEnvelope.TranscriptPrefix(keys.TranscriptHash.Span), result.TranscriptPrefix, "AppControl bootstrap transcript prefix");
     AssertEqual(true, controlPlane.AppControlPingOpened, "AppControl bootstrap responder opens ping");
     AssertEqual(true, controlPlane.AppControlPongSent, "AppControl bootstrap responder sends pong");
     AssertEqual(result.PingId, controlPlane.ReceivedAppControlPingId!.Value, "AppControl bootstrap ping id round trip");
@@ -2442,6 +2706,90 @@ async Task VerifyWebRtcAppControlBootstrapClientAsync()
                 new WebRtcAppControlBootstrapOptions(TimeSpan.FromSeconds(3), maxQueuedInboundMessages: 1))
             .ExchangePingAsync(overflowEstablished, WebRtcProductHandshakeCodec.SuiteX25519Ed25519),
         "inbound queue exceeded");
+
+    var responderPlane = new TestWebRtcProductHandshakeInitiatorPlane(wrapAppControlPingWithTrafficPadding: true);
+    var responderContext = BuildProductHandshakeContext(
+        responderPlane,
+        peerFingerprint: responderPlane.InitiatorIdentityFingerprint,
+        role: "answer");
+    var responderStore = new WebRtcProductSecureSessionStore();
+    var responderDriver = new WebRtcProductHandshakeDriver(
+        new TestWebRtcProductHandshakeCryptoProvider(responderPlane.SharedSecret),
+        responderStore,
+        new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
+    var responderEstablished = await responderDriver.StartResponderAsync(responderContext);
+    var responderSessionKeys = responderStore.RequireEstablishedKeys(responderEstablished);
+    responderPlane.QueueAppControlPing(0x1234UL);
+
+    var responderHost = new WebRtcAppControlResponderHost(
+        responderStore,
+        new WebRtcAppControlBootstrapOptions(TimeSpan.FromSeconds(3), maxQueuedInboundMessages: 2));
+    var responderResult = await responderHost.AnswerPingAsync(
+        responderEstablished,
+        WebRtcProductHandshakeCodec.SuiteX25519Ed25519);
+    AssertEqual("ping", responderResult.ReceivedMessageKind, "AppControl responder receives ping");
+    AssertEqual("pong", responderResult.SentMessageKind, "AppControl responder sends pong");
+    AssertEqual("SkybridgeSecureEnvelopeV1", responderResult.PayloadFormat, "AppControl responder payload format");
+    AssertEqual(responderSessionKeys.SessionId, responderResult.SessionId, "AppControl responder session id");
+    AssertEqual((ulong?)1, responderResult.OutboundCounter, "AppControl responder outbound counter");
+    AssertEqual((ulong?)1, responderResult.InboundCounter, "AppControl responder inbound counter");
+    AssertEqual((ulong?)WebRtcAppSecureEnvelope.SessionIdHash(responderSessionKeys.SessionId), responderResult.SessionHash, "AppControl responder session hash");
+    AssertEqual((ulong?)WebRtcAppSecureEnvelope.TranscriptPrefix(responderSessionKeys.TranscriptHash.Span), responderResult.TranscriptPrefix, "AppControl responder transcript prefix");
+    AssertEqual(true, responderPlane.AppControlPongOpened, "AppControl responder peer opens pong");
+    AssertEqual(responderResult.PingId, responderPlane.ReceivedAppControlPongId!.Value, "AppControl responder pong id round trip");
+    AssertEqual(0x1234UL, responderResult.PingId, "AppControl responder ping id");
+
+    var legacyResponderPlane = new TestWebRtcProductHandshakeInitiatorPlane(useAppleLegacyAppPayload: true);
+    var legacyResponderContext = BuildProductHandshakeContext(
+        legacyResponderPlane,
+        peerFingerprint: legacyResponderPlane.InitiatorIdentityFingerprint,
+        role: "answer");
+    var legacyResponderStore = new WebRtcProductSecureSessionStore();
+    var legacyResponderDriver = new WebRtcProductHandshakeDriver(
+        new TestWebRtcProductHandshakeCryptoProvider(legacyResponderPlane.SharedSecret),
+        legacyResponderStore,
+        new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
+    var legacyResponderEstablished = await legacyResponderDriver.StartResponderAsync(legacyResponderContext);
+    legacyResponderPlane.QueueAppControlPing(0x5678UL);
+    var legacyResponderHost = new WebRtcAppControlResponderHost(
+        legacyResponderStore,
+        new WebRtcAppControlBootstrapOptions(
+            TimeSpan.FromSeconds(3),
+            maxQueuedInboundMessages: 2,
+            payloadFormat: WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined));
+    var legacyResponderResult = await legacyResponderHost.AnswerPingAsync(
+        legacyResponderEstablished,
+        WebRtcProductHandshakeCodec.SuiteX25519Ed25519);
+    AssertEqual("AppleLegacyAesGcmCombined", legacyResponderResult.PayloadFormat, "Apple legacy responder payload format");
+    AssertEqual((ulong?)null, legacyResponderResult.OutboundCounter, "Apple legacy responder has no SBWC outbound counter");
+    AssertEqual((ulong?)null, legacyResponderResult.InboundCounter, "Apple legacy responder has no SBWC inbound counter");
+    AssertEqual((ulong?)null, legacyResponderResult.SessionHash, "Apple legacy responder has no SBWC session hash");
+    AssertEqual((ulong?)null, legacyResponderResult.TranscriptPrefix, "Apple legacy responder has no SBWC transcript prefix");
+    AssertEqual(true, legacyResponderPlane.AppControlPongOpened, "Apple legacy responder peer opens pong");
+    AssertEqual(0x5678UL, legacyResponderResult.PingId, "Apple legacy responder ping id");
+
+    var legacyOfferPlane = new TestWebRtcProductHandshakeResponderPlane(useAppleLegacyAppPayload: true);
+    var legacyOfferStore = new WebRtcProductSecureSessionStore();
+    var legacyOfferDriver = new WebRtcProductHandshakeDriver(
+        new TestWebRtcProductHandshakeCryptoProvider(legacyOfferPlane.SharedSecret),
+        legacyOfferStore,
+        new WebRtcProductHandshakeDriverOptions(TimeSpan.FromSeconds(3)));
+    var legacyOfferEstablished = await legacyOfferDriver.StartInitiatorAsync(
+        BuildProductHandshakeContext(legacyOfferPlane, peerFingerprint: legacyOfferPlane.ResponderIdentityFingerprint));
+    var legacyOfferClient = new WebRtcAppControlBootstrapClient(
+        legacyOfferStore,
+        new WebRtcAppControlBootstrapOptions(
+            TimeSpan.FromSeconds(3),
+            maxQueuedInboundMessages: 2,
+            payloadFormat: WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined));
+    var legacyOfferResult = await legacyOfferClient.ExchangePingAsync(
+        legacyOfferEstablished,
+        WebRtcProductHandshakeCodec.SuiteX25519Ed25519);
+    AssertEqual("AppleLegacyAesGcmCombined", legacyOfferResult.PayloadFormat, "Apple legacy bootstrap payload format");
+    AssertEqual((ulong?)null, legacyOfferResult.OutboundCounter, "Apple legacy bootstrap has no SBWC outbound counter");
+    AssertEqual((ulong?)null, legacyOfferResult.InboundCounter, "Apple legacy bootstrap has no SBWC inbound counter");
+    AssertEqual(true, legacyOfferPlane.AppControlPingOpened, "Apple legacy bootstrap peer opens ping");
+    AssertEqual(true, legacyOfferPlane.AppControlPongSent, "Apple legacy bootstrap peer sends pong");
 }
 
 void VerifyWebRtcAppSecureEnvelopeCodec()
@@ -2679,6 +3027,62 @@ void ClearRuntimeEnvironment()
     }
 }
 
+static (string LocalMlDsa65PrivateKeyPath, string PeerMlKem768PublicKeyPath) WriteProductControlOfferKeyFiles()
+{
+    if (!MLDsa.IsSupported || !MLKem.IsSupported)
+    {
+        throw new PlatformNotSupportedException(
+            "The Windows product-control runtime profile requires .NET ML-DSA and ML-KEM support.");
+    }
+
+    var keyDirectory = Path.Combine(AppContext.BaseDirectory, "product-control-key-fixture");
+    Directory.CreateDirectory(keyDirectory);
+    var localPrivateKeyPath = Path.Combine(keyDirectory, "local-mldsa65-private-key.base64");
+    var peerPublicKeyPath = Path.Combine(keyDirectory, "peer-mlkem768-public-key.base64");
+
+    using var localSigner = MLDsa.GenerateKey(MLDsaAlgorithm.MLDsa65);
+    using var peerKem = MLKem.GenerateKey(MLKemAlgorithm.MLKem768);
+    var localPrivateKey = localSigner.ExportMLDsaPrivateKey();
+    var peerPublicKey = peerKem.ExportEncapsulationKey();
+    try
+    {
+        WriteBase64KeyFile(localPrivateKeyPath, localPrivateKey);
+        WriteBase64KeyFile(peerPublicKeyPath, peerPublicKey);
+        return (localPrivateKeyPath, peerPublicKeyPath);
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(localPrivateKey);
+        CryptographicOperations.ZeroMemory(peerPublicKey);
+    }
+}
+
+static void WriteBase64KeyFile(string path, ReadOnlySpan<byte> keyBytes)
+{
+    var encoded = new byte[Base64.GetMaxEncodedToUtf8Length(keyBytes.Length)];
+    try
+    {
+        var status = Base64.EncodeToUtf8(
+            keyBytes,
+            encoded,
+            out var consumed,
+            out var written,
+            isFinalBlock: true);
+        if (status != OperationStatus.Done || consumed != keyBytes.Length)
+        {
+            throw new InvalidOperationException("Could not encode a product-control key fixture as base64.");
+        }
+
+        using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        output.Write(encoded.AsSpan(0, written));
+        output.Flush(flushToDisk: true);
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(encoded);
+    }
+}
+
 static WindowsTransportAdapterRequest BuildAdapterRequest(
     CoreTransportKind transportKind,
     CoreTransportAuditCode auditCode,
@@ -2855,6 +3259,17 @@ static void AssertBytesAllZero(byte[] actual, string label)
 static string Sha256Hex(byte[] bytes) =>
     Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
+static string CandidateEndpoint(WebRtcSignalDocument.SignalCandidate candidate)
+{
+    var match = Regex.Match(candidate.Candidate, @"^(?:candidate:)?\S+ \d+ \S+ \d+ (\S+) (\d+) typ \S+");
+    if (!match.Success)
+    {
+        throw new InvalidDataException("WebRTC signaling ICE candidate is not parseable.");
+    }
+
+    return $"{match.Groups[1].Value}:{match.Groups[2].Value}";
+}
+
 static string ManualAuthoritativeFingerprint(string algorithmRawValue, byte[] publicKey)
 {
     var algorithmBytes = Encoding.UTF8.GetBytes(algorithmRawValue);
@@ -2962,6 +3377,7 @@ static LiveWebRtcProductControlContext BuildProductHandshakeContext(
         "192.168.0.105:5443",
         "192.168.0.101:5443",
         "webrtc/dtls/sctp/host-192.168.0.105:5443-host-192.168.0.101:5443/skybridge",
+        0,
         new string('b', 64),
         15_000,
         state);
@@ -3029,6 +3445,8 @@ sealed class FakeCurrentPathWebSocketTransport : ICurrentPathWebSocketTransport
 
     public List<string> SentTexts { get; } = new();
 
+    public Action? AfterReceive { get; set; }
+
     public void EnqueueReceive(CurrentPathWebSocketReceiveResult result) =>
         _receiveQueue.Enqueue(result);
 
@@ -3071,6 +3489,7 @@ sealed class FakeCurrentPathWebSocketTransport : ICurrentPathWebSocketTransport
         }
 
         var result = _receiveQueue.Dequeue();
+        AfterReceive?.Invoke();
         if (result.ByteCount > maxMessageBytes)
         {
             throw new InvalidDataException("Current-path WebSocket text message exceeded the configured byte limit.");
@@ -3301,7 +3720,7 @@ sealed class TestWebRtcProductPqcResponderPlane : IWebRtcProductControlPlane, ID
     }
 }
 
-sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeCryptoProvider
+sealed class TestWebRtcProductHandshakeCryptoProvider : IProductHandshakeCryptoProvider
 {
     private readonly byte[] _sharedSecret;
 
@@ -3313,8 +3732,14 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
 
     public int OpenMessageBCount { get; private set; }
 
+    public int CreateMessageBCount { get; private set; }
+
+    public int AbortInitiatorSecretCount { get; private set; }
+
+    public byte[] LastAbortedTranscriptHashA { get; private set; } = Array.Empty<byte>();
+
     public ValueTask<WebRtcProductHandshakeMessageA> CreateInitiatorMessageAAsync(
-        LiveWebRtcProductControlContext context,
+        ProductHandshakePeerContext context,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -3344,8 +3769,8 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
         return ValueTask.FromResult(messageA);
     }
 
-    public ValueTask<ReadOnlyMemory<byte>> OpenResponderMessageBAsync(
-        LiveWebRtcProductControlContext context,
+    public ValueTask<ProductHandshakeSharedSecret> OpenResponderMessageBAsync(
+        ProductHandshakePeerContext context,
         WebRtcProductHandshakeMessageA messageA,
         ReadOnlyMemory<byte> transcriptHashA,
         WebRtcProductHandshakeMessageB messageB,
@@ -3359,7 +3784,558 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
         ProductHandshakeTestVectors.AssertEqual(WebRtcProductHandshakeCodec.SuiteX25519Ed25519, messageB.SelectedSuiteWireId, "product handshake provider selected suite");
         ProductHandshakeTestVectors.AssertEqual(true, messageA.SupportedSuiteWireIds.Contains(messageB.SelectedSuiteWireId), "product handshake provider selected suite offered");
         OpenMessageBCount++;
-        return ValueTask.FromResult<ReadOnlyMemory<byte>>(_sharedSecret.ToArray());
+        return ValueTask.FromResult(new ProductHandshakeSharedSecret(_sharedSecret));
+    }
+
+    public ValueTask<WebRtcProductHandshakeResponderMaterial> CreateResponderMessageBAsync(
+        ProductHandshakePeerContext context,
+        WebRtcProductHandshakeMessageA messageA,
+        ReadOnlyMemory<byte> transcriptHashA,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(messageA);
+        cancellationToken.ThrowIfCancellationRequested();
+        ProductHandshakeTestVectors.AssertEqual(WebRtcProductHandshakeCodec.TranscriptHashLength, transcriptHashA.Length, "product handshake responder provider transcriptHashA length");
+        ProductHandshakeTestVectors.AssertEqual(true, messageA.SupportedSuiteWireIds.Contains(WebRtcProductHandshakeCodec.SuiteX25519Ed25519), "product handshake responder provider MessageA offers classic suite");
+        var suite = WebRtcProductHandshakeCodec.SuiteX25519Ed25519;
+        var messageB = new WebRtcProductHandshakeMessageB(
+            selectedSuiteWireId: suite,
+            responderShare: ProductHandshakeTestVectors.SequenceBytes(32, 0x61),
+            serverNonce: ProductHandshakeTestVectors.SequenceBytes(32, 0x71),
+            encryptedPayload: new WebRtcProductHpkeSealedBox(
+                suite,
+                ProductHandshakeTestVectors.SequenceBytes(32, 0x81),
+                ProductHandshakeTestVectors.SequenceBytes(12, 0x91),
+                Encoding.UTF8.GetBytes("runtime profile responder payload"),
+                ProductHandshakeTestVectors.SequenceBytes(16, 0xA1)),
+            identityPublicKey: new WebRtcProductProtocolIdentityPublicKey(
+                WebRtcProductSignatureAlgorithm.Ed25519,
+                ProductHandshakeTestVectors.SequenceBytes(32, 0xB1)).Encode(),
+            signature: ProductHandshakeTestVectors.SequenceBytes(64, 0xC1));
+        CreateMessageBCount++;
+        return ValueTask.FromResult(new WebRtcProductHandshakeResponderMaterial(messageB, _sharedSecret.ToArray()));
+    }
+
+    public void AbortInitiatorSecret(ReadOnlyMemory<byte> transcriptHashA)
+    {
+        ProductHandshakeTestVectors.AssertEqual(
+            WebRtcProductHandshakeCodec.TranscriptHashLength,
+            transcriptHashA.Length,
+            "product handshake provider aborted transcriptHashA length");
+        AbortInitiatorSecretCount++;
+        LastAbortedTranscriptHashA = transcriptHashA.ToArray();
+    }
+}
+
+sealed class TestWebRtcProductPqcInitiatorPlane : IWebRtcProductControlPlane, IDisposable
+{
+    private static readonly byte[] EmptyMldsaContext = Array.Empty<byte>();
+    private static readonly byte[] PlaceholderSignature = { 0x01 };
+
+    private readonly MLDsa _initiatorSigner;
+    private readonly byte[] _responderKemPublicKey;
+    private byte[] _sharedSecret = Array.Empty<byte>();
+    private Action<byte[]>? _messageReceived;
+    private WebRtcProductHandshakeMessageA? _messageA;
+    private bool _messageASent;
+    private bool _disposed;
+
+    public TestWebRtcProductPqcInitiatorPlane(byte[] responderKemPublicKey)
+    {
+        if (responderKemPublicKey.Length != MLKemAlgorithm.MLKem768.EncapsulationKeySizeInBytes)
+        {
+            throw new InvalidOperationException("PQC initiator plane requires a ML-KEM-768 responder public key.");
+        }
+
+        _initiatorSigner = MLDsa.GenerateKey(MLDsaAlgorithm.MLDsa65);
+        _responderKemPublicKey = responderKemPublicKey.ToArray();
+        var identity = new WebRtcProductProtocolIdentityPublicKey(
+            WebRtcProductSignatureAlgorithm.MlDsa65,
+            _initiatorSigner.ExportMLDsaPublicKey());
+        InitiatorIdentityPublicKey = identity.Encode();
+        InitiatorIdentityFingerprint = identity.AuthoritativeFingerprint;
+    }
+
+    public bool IsConnected => true;
+
+    public byte[] InitiatorIdentityPublicKey { get; }
+
+    public string InitiatorIdentityFingerprint { get; }
+
+    public WebRtcAppSecureSessionKeys? InitiatorKeys { get; private set; }
+
+    public bool ResponderFinishedVerified { get; private set; }
+
+    public bool InitiatorFinishedSent { get; private set; }
+
+    public List<byte[]> SentMessages { get; } = new();
+
+    public event Action<byte[]> MessageReceived
+    {
+        add
+        {
+            _messageReceived += value;
+            TrySendMessageA();
+        }
+        remove
+        {
+            _messageReceived -= value;
+        }
+    }
+
+    public Task SendAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+        var outbound = message.ToArray();
+        SentMessages.Add(outbound);
+        if (SentMessages.Count == 1)
+        {
+            AcceptMessageB(outbound);
+        }
+        else if (SentMessages.Count == 2)
+        {
+            VerifyResponderFinishedAndSendInitiatorFinished(outbound);
+        }
+        else
+        {
+            throw new InvalidOperationException("PQC initiator plane only handles MessageB and responder Finished.");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _initiatorSigner.Dispose();
+        CryptographicOperations.ZeroMemory(_responderKemPublicKey);
+        CryptographicOperations.ZeroMemory(_sharedSecret);
+        CryptographicOperations.ZeroMemory(InitiatorIdentityPublicKey);
+    }
+
+    private void TrySendMessageA()
+    {
+        if (_messageASent || _messageReceived is null)
+        {
+            return;
+        }
+
+        _messageASent = true;
+        _messageA = BuildMessageA();
+        _messageReceived.Invoke(_messageA.Encode());
+    }
+
+    private WebRtcProductHandshakeMessageA BuildMessageA()
+    {
+        byte[]? keyShare = null;
+        byte[]? sharedSecret = null;
+        try
+        {
+            using (var responderKem = MLKem.ImportEncapsulationKey(
+                MLKemAlgorithm.MLKem768,
+                _responderKemPublicKey))
+            {
+                responderKem.Encapsulate(out keyShare, out sharedSecret);
+            }
+
+            if (keyShare is null || sharedSecret is null)
+            {
+                throw new InvalidOperationException("PQC initiator plane failed to encapsulate a shared secret.");
+            }
+
+            CryptographicOperations.ZeroMemory(_sharedSecret);
+            _sharedSecret = sharedSecret.ToArray();
+            var clientNonce = RandomNumberGenerator.GetBytes(WebRtcProductHandshakeCodec.NonceLength);
+            var unsignedMessageA = CreateMessageA(keyShare, clientNonce, PlaceholderSignature);
+            var signature = _initiatorSigner.SignData(unsignedMessageA.SignaturePreimage(), EmptyMldsaContext);
+            return CreateMessageA(keyShare, clientNonce, signature);
+        }
+        finally
+        {
+            if (keyShare is not null)
+            {
+                CryptographicOperations.ZeroMemory(keyShare);
+            }
+
+            if (sharedSecret is not null)
+            {
+                CryptographicOperations.ZeroMemory(sharedSecret);
+            }
+        }
+    }
+
+    private WebRtcProductHandshakeMessageA CreateMessageA(
+        ReadOnlySpan<byte> keyShare,
+        ReadOnlySpan<byte> clientNonce,
+        ReadOnlySpan<byte> signature)
+    {
+        return new WebRtcProductHandshakeMessageA(
+            supportedSuiteWireIds: new[] { WebRtcProductHandshakeCodec.SuiteMlKem768Mldsa65 },
+            keyShares: new[]
+            {
+                new WebRtcProductHandshakeKeyShare(
+                    WebRtcProductHandshakeCodec.SuiteMlKem768Mldsa65,
+                    keyShare.ToArray())
+            },
+            clientNonce: clientNonce.ToArray(),
+            capabilities: new WebRtcProductCryptoCapabilities(
+                supportedKem: new[] { "ML-KEM-768" },
+                supportedSignature: new[] { "ML-DSA-65" },
+                supportedAuthProfiles: new[] { "PQC" },
+                supportedAead: new[] { "AES-256-GCM" },
+                pqcAvailable: true,
+                platformVersion: "windows-pqc-initiator-smoke",
+                providerType: "liboqs"),
+            policy: new WebRtcProductHandshakePolicy(
+                requirePqc: true,
+                allowClassicFallback: false,
+                minimumTier: "nativePQC",
+                requireSecureEnclavePoP: false),
+            identityPublicKey: InitiatorIdentityPublicKey,
+            extensionsRaw: Array.Empty<byte>(),
+            signature: signature.ToArray());
+    }
+
+    private void AcceptMessageB(byte[] outbound)
+    {
+        if (_messageA is null)
+        {
+            throw new InvalidOperationException("PQC initiator plane has no MessageA transcript.");
+        }
+
+        if (_sharedSecret.Length != MLKemAlgorithm.MLKem768.SharedSecretSizeInBytes)
+        {
+            throw new InvalidOperationException("PQC initiator plane has no shared secret.");
+        }
+
+        var messageB = WebRtcProductHandshakeCodec.DecodeMessageB(outbound);
+        var transcriptA = SHA256.HashData(_messageA.EncodeWithoutSignature());
+        var transcriptB = SHA256.HashData(messageB.EncodeWithoutSignature());
+        InitiatorKeys = WebRtcProductHandshakeSessionKeys.Derive(
+            _sharedSecret,
+            messageB.SelectedSuiteWireId,
+            transcriptA,
+            transcriptB,
+            _messageA.ClientNonce.Span,
+            messageB.ServerNonce.Span,
+            WebRtcAppSecureRole.Initiator);
+    }
+
+    private void VerifyResponderFinishedAndSendInitiatorFinished(byte[] outbound)
+    {
+        if (InitiatorKeys is null)
+        {
+            throw new InvalidOperationException("PQC initiator plane has no session keys.");
+        }
+
+        var responderFinished = WebRtcProductHandshakeCodec.DecodeFinished(outbound);
+        ResponderFinishedVerified = WebRtcProductHandshakeSessionKeys.VerifyFinished(
+            responderFinished,
+            InitiatorKeys,
+            WebRtcAppSecureRole.Responder);
+        if (!ResponderFinishedVerified)
+        {
+            throw new InvalidOperationException("PQC initiator plane could not verify responder Finished.");
+        }
+
+        var initiatorFinished = WebRtcProductHandshakeSessionKeys.CreateFinished(InitiatorKeys);
+        InitiatorFinishedSent = true;
+        _messageReceived?.Invoke(initiatorFinished.Encode());
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(TestWebRtcProductPqcInitiatorPlane));
+        }
+    }
+}
+
+sealed class TestWebRtcProductHandshakeInitiatorPlane : IWebRtcProductControlPlane
+{
+    private readonly bool _wrapAppControlPingWithTrafficPadding;
+    private readonly bool _useAppleLegacyAppPayload;
+    private readonly WebRtcAppSecureReplayWindow _appControlReplayWindow = new();
+    private readonly WebRtcProductProtocolIdentityPublicKey _initiatorIdentity = new(
+        WebRtcProductSignatureAlgorithm.Ed25519,
+        ProductHandshakeTestVectors.SequenceBytes(32, 0x41));
+    private Action<byte[]>? _messageReceived;
+    private bool _messageASent;
+    private bool _appControlPingQueued;
+    private bool _appControlPingSent;
+    private ulong _queuedAppControlPingId;
+    private ulong _nextInitiatorAppControlCounter = 1;
+    private WebRtcProductHandshakeMessageA? _messageA;
+
+    public TestWebRtcProductHandshakeInitiatorPlane(
+        bool wrapAppControlPingWithTrafficPadding = false,
+        bool useAppleLegacyAppPayload = false)
+    {
+        _wrapAppControlPingWithTrafficPadding = wrapAppControlPingWithTrafficPadding;
+        _useAppleLegacyAppPayload = useAppleLegacyAppPayload;
+    }
+
+    public bool IsConnected => true;
+
+    public byte[] SharedSecret { get; } = SHA256.HashData(Encoding.UTF8.GetBytes("runtime profile product handshake shared secret"));
+
+    public byte[] InitiatorIdentityPublicKey => _initiatorIdentity.Encode();
+
+    public string InitiatorIdentityFingerprint => _initiatorIdentity.AuthoritativeFingerprint;
+
+    public List<byte[]> SentMessages { get; } = new();
+
+    public WebRtcAppSecureSessionKeys? InitiatorKeys { get; private set; }
+
+    public bool ResponderFinishedVerified { get; private set; }
+
+    public bool InitiatorFinishedSent { get; private set; }
+
+    public bool AppControlPongOpened { get; private set; }
+
+    public ulong? ReceivedAppControlPongId { get; private set; }
+
+    public event Action<byte[]> MessageReceived
+    {
+        add
+        {
+            _messageReceived += value;
+            TrySendMessageA();
+            TrySendQueuedAppControlPing();
+        }
+        remove
+        {
+            _messageReceived -= value;
+        }
+    }
+
+    public Task SendAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var outbound = message.ToArray();
+        SentMessages.Add(outbound);
+        if (SentMessages.Count == 1)
+        {
+            AcceptMessageB(outbound);
+        }
+        else if (SentMessages.Count == 2)
+        {
+            VerifyResponderFinishedAndSendInitiatorFinished(outbound);
+        }
+        else
+        {
+            OpenAppControlPong(outbound);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public void QueueAppControlPing(ulong pingId)
+    {
+        if (pingId == 0)
+        {
+            throw new InvalidOperationException("test product handshake initiator requires a non-zero AppControl ping id.");
+        }
+
+        _queuedAppControlPingId = pingId;
+        _appControlPingQueued = true;
+        TrySendQueuedAppControlPing();
+    }
+
+    private void TrySendMessageA()
+    {
+        if (_messageASent || _messageReceived is null)
+        {
+            return;
+        }
+
+        _messageASent = true;
+        _messageA = BuildMessageA();
+        _messageReceived.Invoke(_messageA.Encode());
+    }
+
+    private WebRtcProductHandshakeMessageA BuildMessageA()
+    {
+        var suite = WebRtcProductHandshakeCodec.SuiteX25519Ed25519;
+        return new WebRtcProductHandshakeMessageA(
+            supportedSuiteWireIds: new[] { suite },
+            keyShares: new[]
+            {
+                new WebRtcProductHandshakeKeyShare(suite, ProductHandshakeTestVectors.SequenceBytes(32, 0x21))
+            },
+            clientNonce: ProductHandshakeTestVectors.SequenceBytes(32, 0x31),
+            capabilities: new WebRtcProductCryptoCapabilities(
+                supportedKem: new[] { "X25519" },
+                supportedSignature: new[] { "Ed25519" },
+                supportedAuthProfiles: new[] { "skybridge-product-control-v1" },
+                supportedAead: new[] { "AES-256-GCM" },
+                pqcAvailable: false,
+                platformVersion: "windows-runtime-profile",
+                providerType: "CryptoKit-Classic"),
+            policy: WebRtcProductHandshakePolicy.Default,
+            identityPublicKey: InitiatorIdentityPublicKey,
+            extensionsRaw: Array.Empty<byte>(),
+            signature: ProductHandshakeTestVectors.SequenceBytes(64, 0x51));
+    }
+
+    private void AcceptMessageB(byte[] outbound)
+    {
+        if (_messageA is null)
+        {
+            throw new InvalidOperationException("test product handshake initiator has no MessageA transcript.");
+        }
+
+        var messageB = WebRtcProductHandshakeCodec.DecodeMessageB(outbound);
+        var transcriptA = SHA256.HashData(_messageA.EncodeWithoutSignature());
+        var transcriptB = SHA256.HashData(messageB.EncodeWithoutSignature());
+        InitiatorKeys = WebRtcProductHandshakeSessionKeys.Derive(
+            SharedSecret,
+            messageB.SelectedSuiteWireId,
+            transcriptA,
+            transcriptB,
+            _messageA.ClientNonce.Span,
+            messageB.ServerNonce.Span,
+            WebRtcAppSecureRole.Initiator);
+    }
+
+    private void VerifyResponderFinishedAndSendInitiatorFinished(byte[] outbound)
+    {
+        if (InitiatorKeys is null)
+        {
+            throw new InvalidOperationException("test product handshake initiator has no session keys.");
+        }
+
+        var responderFinished = WebRtcProductHandshakeCodec.DecodeFinished(outbound);
+        ResponderFinishedVerified = WebRtcProductHandshakeSessionKeys.VerifyFinished(
+            responderFinished,
+            InitiatorKeys,
+            WebRtcAppSecureRole.Responder);
+        if (!ResponderFinishedVerified)
+        {
+            throw new InvalidOperationException("test product handshake initiator could not verify responder Finished.");
+        }
+
+        var initiatorFinished = WebRtcProductHandshakeSessionKeys.CreateFinished(InitiatorKeys);
+        InitiatorFinishedSent = true;
+        _messageReceived?.Invoke(initiatorFinished.Encode());
+    }
+
+    private void TrySendQueuedAppControlPing()
+    {
+        if (!_appControlPingQueued ||
+            _appControlPingSent ||
+            _messageReceived is null ||
+            InitiatorKeys is null ||
+            !InitiatorFinishedSent)
+        {
+            return;
+        }
+
+        var sealedPing = SealPingPayload(_queuedAppControlPingId);
+        _messageReceived.Invoke(_wrapAppControlPingWithTrafficPadding
+            ? WrapTrafficPadding(sealedPing)
+            : sealedPing);
+        _appControlPingSent = true;
+    }
+
+    private byte[] SealPingPayload(ulong pingId)
+    {
+        if (InitiatorKeys is null)
+        {
+            throw new InvalidOperationException("test product handshake initiator has no AppControl session keys.");
+        }
+
+        var payload = BuildPingPayload(pingId);
+        if (_useAppleLegacyAppPayload)
+        {
+            return WebRtcControlChannelCodec.EncryptAppleLegacyAppPayload(payload, InitiatorKeys);
+        }
+
+        return WebRtcControlChannelCodec.EncryptAppPayload(
+            payload,
+            InitiatorKeys,
+            WebRtcAppSecurePacketType.AppControl,
+            _nextInitiatorAppControlCounter++);
+    }
+
+    private void OpenAppControlPong(byte[] outbound)
+    {
+        if (InitiatorKeys is null)
+        {
+            throw new InvalidOperationException("test product handshake initiator has no AppControl session keys.");
+        }
+
+        var payload = _useAppleLegacyAppPayload
+            ? WebRtcControlChannelCodec.DecryptAppleLegacyAppPayload(outbound, InitiatorKeys)
+            : OpenSbwcAppControlPayload(outbound, InitiatorKeys);
+        ReceivedAppControlPongId = RequirePongId(payload);
+        AppControlPongOpened = true;
+    }
+
+    private byte[] OpenSbwcAppControlPayload(byte[] outbound, WebRtcAppSecureSessionKeys keys)
+    {
+        var opened = WebRtcControlChannelCodec.DecryptAppPayload(
+            outbound,
+            keys,
+            new[] { WebRtcAppSecurePacketType.AppControl });
+        _appControlReplayWindow.ValidateAndRecord(opened);
+        return opened.Payload;
+    }
+
+    private static byte[] BuildPingPayload(ulong pingId)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteStartObject("ping");
+            writer.WriteNumber("id", pingId);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return stream.ToArray();
+    }
+
+    private static ulong RequirePongId(ReadOnlySpan<byte> payload)
+    {
+        using var document = JsonDocument.Parse(payload.ToArray());
+        if (document.RootElement.ValueKind != JsonValueKind.Object ||
+            !document.RootElement.TryGetProperty("pong", out var pong) ||
+            pong.ValueKind != JsonValueKind.Object ||
+            !pong.TryGetProperty("id", out var id) ||
+            id.ValueKind != JsonValueKind.Number ||
+            !id.TryGetUInt64(out var pongId))
+        {
+            throw new InvalidOperationException("test product handshake initiator expected a JSON AppMessage pong payload.");
+        }
+
+        return pongId;
+    }
+
+    private static byte[] WrapTrafficPadding(byte[] payload)
+    {
+        var padded = new byte[payload.Length + 24];
+        padded[0] = 0x53;
+        padded[1] = 0x42;
+        padded[2] = 0x50;
+        padded[3] = 0x32;
+        BinaryPrimitives.WriteUInt32BigEndian(padded.AsSpan(4, 4), checked((uint)payload.Length));
+        payload.CopyTo(padded.AsSpan(8));
+        for (var index = 8 + payload.Length; index < padded.Length; index++)
+        {
+            padded[index] = 0x5A;
+        }
+
+        return padded;
     }
 }
 
@@ -3371,6 +4347,7 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
     private readonly bool _wrapAppControlResponseWithTrafficPadding;
 	    private readonly bool _tamperAppControlPongId;
 	    private readonly int _extraAppControlResponses;
+	    private readonly bool _useAppleLegacyAppPayload;
 	    private readonly WebRtcAppSecureReplayWindow _appControlReplayWindow = new();
 	    private readonly WebRtcProductProtocolIdentityPublicKey _responderIdentity = new(
 	        WebRtcProductSignatureAlgorithm.Ed25519,
@@ -3383,7 +4360,8 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
         int extraMessagesBeforeMessageB = 0,
         bool wrapAppControlResponseWithTrafficPadding = false,
         bool tamperAppControlPongId = false,
-        int extraAppControlResponses = 0)
+        int extraAppControlResponses = 0,
+        bool useAppleLegacyAppPayload = false)
     {
         _tamperResponderFinished = tamperResponderFinished;
         _sendSecureEnvelopeBeforeMessageB = sendSecureEnvelopeBeforeMessageB;
@@ -3391,6 +4369,7 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
         _wrapAppControlResponseWithTrafficPadding = wrapAppControlResponseWithTrafficPadding;
         _tamperAppControlPongId = tamperAppControlPongId;
         _extraAppControlResponses = extraAppControlResponses;
+        _useAppleLegacyAppPayload = useAppleLegacyAppPayload;
     }
 
     public bool IsConnected => true;
@@ -3515,12 +4494,10 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
             throw new InvalidOperationException("test product handshake responder must verify initiator Finished before AppControl.");
         }
 
-        var opened = WebRtcControlChannelCodec.DecryptAppPayload(
-            outbound,
-            ResponderKeys,
-            new[] { WebRtcAppSecurePacketType.AppControl });
-        _appControlReplayWindow.ValidateAndRecord(opened);
-        var pingId = RequirePingId(opened.Payload);
+        var payload = _useAppleLegacyAppPayload
+            ? WebRtcControlChannelCodec.DecryptAppleLegacyAppPayload(outbound, ResponderKeys)
+            : OpenSbwcAppControlPayload(outbound, ResponderKeys);
+        var pingId = RequirePingId(payload);
         AppControlPingOpened = true;
         ReceivedAppControlPingId = pingId;
 
@@ -3546,11 +4523,26 @@ sealed class TestWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeC
         }
 
         var payload = BuildPongPayload(pingId);
+        if (_useAppleLegacyAppPayload)
+        {
+            return WebRtcControlChannelCodec.EncryptAppleLegacyAppPayload(payload, ResponderKeys);
+        }
+
         return WebRtcControlChannelCodec.EncryptAppPayload(
             payload,
             ResponderKeys,
             WebRtcAppSecurePacketType.AppControl,
             _nextResponderAppControlCounter++);
+    }
+
+    private byte[] OpenSbwcAppControlPayload(byte[] outbound, WebRtcAppSecureSessionKeys keys)
+    {
+        var opened = WebRtcControlChannelCodec.DecryptAppPayload(
+            outbound,
+            keys,
+            new[] { WebRtcAppSecurePacketType.AppControl });
+        _appControlReplayWindow.ValidateAndRecord(opened);
+        return opened.Payload;
     }
 
     private static ulong RequirePingId(ReadOnlySpan<byte> payload)
@@ -3624,13 +4616,26 @@ sealed class TestWebRtcProductControlPlane : IWebRtcProductControlPlane
         return Task.CompletedTask;
     }
 }
+sealed class CancelledFileTransferSelection : IFileTransferSelectionClient
+{
+    public string DestinationDirectory => throw new InvalidOperationException("Cancelled selection must not inspect a receive folder.");
+    public Task<IReadOnlyList<string>> SelectPathsAsync(bool folder, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<string>>([]);
+    public Task<DiscoveryBrowserPeerCandidate?> SelectPeerAsync(CancellationToken cancellationToken) => throw new InvalidOperationException("Cancelled selection must not choose a peer or establish a session.");
+    public Task<bool> ApproveIncomingAsync(ClassicFileMetadata metadata, string destinationDirectory, CancellationToken cancellationToken) => throw new InvalidOperationException("No receiver was enabled.");
+}
+
 '@
 
     & dotnet restore $testProject
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native runtime profile restore failed."
 
-    & dotnet run --project $testProject --no-restore
+    & dotnet build $testProject --no-restore
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native runtime profile build failed."
+
+    $testArguments = if ($FileTransferOnly) { @("--", "--file-transfer-only") } else { @() }
+    & dotnet run --project $testProject --no-build --no-restore @testArguments
     Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows native runtime profile run failed."
+    $profilePassed = $true
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {
@@ -3644,6 +4649,7 @@ finally {
             [StringComparison]::Ordinal)
 
         Assert-True -Condition $isOwnedSmokeDir -Message "Refusing to remove unexpected temp directory: $resolvedTempRoot"
-        Remove-Item -LiteralPath $resolvedTempRoot -Recurse -Force
+        if ($profilePassed) { Remove-Item -LiteralPath $resolvedTempRoot -Recurse -Force }
+        else { Write-Output "Failed runtime profile retained at $resolvedTempRoot" }
     }
 }

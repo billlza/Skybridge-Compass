@@ -1,327 +1,218 @@
-using System;
 using System.Diagnostics;
 using System.Globalization;
-using System.Net.Http;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Net.NetworkInformation;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Win32;
 
 namespace Skybridge.WinClient.Services;
 
-// =====================================================================================
-//  TopBarNetworkStatusClient — Windows port of the macOS
-//  Sources/SkyBridgeCore/Network/TopBarNetworkStatusService.swift sampler surface.
-//
-//  It provides the three REAL top-bar network probes the Mac top bar shows, using only
-//  in-framework Windows/.NET APIs (no third-party deps):
-//
-//    NET SPEED  : System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
-//                 → sum BytesReceived/BytesSent (GetIPv4Statistics/GetIPStatistics) across
-//                 UP, non-loopback, non-tunnel interfaces. The CLIENT only reads the raw
-//                 cumulative counters; the COORDINATOR keeps the baseline and computes the
-//                 delta ÷ elapsed seconds (exactly the Mac's previousCounters/elapsed math,
-//                 ported off the getifaddrs/if_data ifi_ibytes/ifi_obytes sum). Formatting
-//                 is base-1000 (GB/s ≥ 1e9, MB/s ≥ 1e6, KB/s ≥ 1e3, else B/s), mirroring the
-//                 Mac formatBytesPerSecond, e.g. "↓ 24.0 KB/s · ↑ 6.1 KB/s".
-//
-//    LATENCY    : a static cached HttpClient HEAD request (mirrors WeatherClient's single
-//                 cached HttpClient pattern) to the same fast endpoint the Mac uses
-//                 (https://skybridge-compass.vercel.app); elapsed measured with Stopwatch.
-//                 On any failure → null, which the coordinator renders as the honest "— ms"
-//                 placeholder (never a fabricated RTT).
-//
-//    IP + PROXY : HTTP GET https://ipapi.co/json/ (the exact Mac locationURL) → parse
-//                 {ip, city, country_code}; the Windows system proxy is detected by reading
-//                 HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ProxyEnable
-//                 via Microsoft.Win32.Registry (in-framework; 1 = proxy on). The coordinator
-//                 formats "City · 代理" / "City · 直连" matching the Mac. On failure →
-//                 honest "IP · 不可用".
-//
-//  Every method is try/catch → result-or-null; NOTHING throws into the UI. The client is a
-//  pure data seam (no timers, no observable surface) — the TopBarNetworkCoordinator owns the
-//  periodic loop, the baseline state, and the formatting, exactly the way the Mac service's
-//  start()/sampleSpeed()/refreshLatency()/refreshLocation() loop does.
-// =====================================================================================
-
 public interface ITopBarNetworkStatusClient
 {
-    /// <summary>
-    /// Snapshot of the cumulative inbound/outbound byte counters summed across all UP,
-    /// non-loopback, non-tunnel interfaces, captured at <see cref="NetworkCounterSample.SampledAt"/>.
-    /// Returns null if the counters cannot be read (the coordinator then keeps the last
-    /// baseline and shows the loading placeholder).
-    /// </summary>
-    NetworkCounterSample? SampleInterfaceCounters();
-
-    /// <summary>
-    /// Measures round-trip latency to the fast endpoint via a HEAD request. Returns the
-    /// elapsed milliseconds (≥ 1), or null on any network/timeout failure.
-    /// </summary>
-    Task<int?> MeasureLatencyMillisecondsAsync(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Fetches the public IP / city / country-code from ipapi.co and reads the Windows
-    /// system-proxy flag. Returns null on failure (coordinator shows "IP · 不可用").
-    /// </summary>
-    Task<NetworkLocationSample?> ResolveLocationAsync(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Reads the Windows system-proxy enabled flag in isolation (HKCU ProxyEnable == 1).
-    /// Always returns a bool (false on any failure) — used for the icon color even when the
-    /// IP lookup itself fails.
-    /// </summary>
+    NetworkCounterSample SampleInterfaceCounters();
+    Task<int> MeasureLatencyMillisecondsAsync(CancellationToken cancellationToken = default);
+    Task<NetworkLocationSample> ResolveLocationAsync(CancellationToken cancellationToken = default);
     bool IsSystemProxyEnabled();
 }
 
-// Cumulative byte counters at a point in time (the coordinator differences two of these).
 public readonly record struct NetworkCounterSample(ulong BytesReceived, ulong BytesSent, DateTimeOffset SampledAt);
+public readonly record struct NetworkLocationSample(string PublicIpAddress, string? City, string? CountryCode, bool IsSystemProxyEnabled);
 
-// Resolved public-network location + the system-proxy state at resolution time.
-public readonly record struct NetworkLocationSample(
-    string? PublicIpAddress,
-    string? City,
-    string? CountryCode,
-    bool IsSystemProxyEnabled);
+public enum NetworkProbeFailure { Timeout, Unreachable, HttpStatus, InvalidResponse, CountersUnavailable }
 
+public sealed class NetworkProbeException : Exception
+{
+    public NetworkProbeException(NetworkProbeFailure failure, string message, Exception? innerException = null,
+        HttpStatusCode? statusCode = null, TimeSpan? retryAfter = null) : base(message, innerException)
+    {
+        Failure = failure;
+        StatusCode = statusCode;
+        RetryAfter = retryAfter;
+    }
+
+    public NetworkProbeFailure Failure { get; }
+    public HttpStatusCode? StatusCode { get; }
+    public TimeSpan? RetryAfter { get; }
+}
+
+// Network I/O and counter reads stay here; the coordinator owns cadence and UI publication.
 public sealed class TopBarNetworkStatusClient : ITopBarNetworkStatusClient
 {
-    // One cached client for the whole app (idiomatic; mirrors WeatherClient.HttpClient).
-    // 6 s ceiling guards the per-request timeouts so a hung socket can't wedge the loop.
-    private static readonly HttpClient HttpClient = CreateHttpClient();
+    public const string LatencyEndpoint = "https://www.microsoft.com/";
+    public const string LocationEndpoint = "https://ipwho.is/?fields=success,ip,city,country_code";
+    private const int MaximumLocationBytes = 16 * 1024;
+    private static readonly HttpClient SharedHttpClient = CreateHttpClient();
+    private readonly HttpClient _httpClient;
+    private readonly Func<bool> _readProxy;
 
-    private static readonly TimeSpan LatencyTimeout = TimeSpan.FromSeconds(5);
+    public TopBarNetworkStatusClient() : this(SharedHttpClient, ReadEffectiveProxy) { }
 
-    private static readonly TimeSpan LocationTimeout = TimeSpan.FromSeconds(6);
-
-    // Same endpoints as the Mac TopBarNetworkStatusService (latencyURL / locationURL).
-    private const string LatencyEndpoint = "https://www.gstatic.com/generate_204";
-
-    private const string LocationEndpoint = "https://ipwho.is/";
-
-    private static HttpClient CreateHttpClient()
+    // The caller owns an injected client; the production client is shared for the process lifetime.
+    internal TopBarNetworkStatusClient(HttpClient httpClient, Func<bool> readProxy)
     {
-        var client = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(6)
-        };
-        // ipapi.co rejects empty/unknown user-agents with 403; a curl-style agent is served
-        // the JSON body (same trick WeatherClient uses for wttr.in).
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("curl/8.4.0");
-        return client;
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _readProxy = readProxy ?? throw new ArgumentNullException(nameof(readProxy));
     }
 
-    // ---- Net speed: cumulative interface byte counters --------------------------------
+    private static HttpClient CreateHttpClient() => new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        ConnectTimeout = TimeSpan.FromSeconds(5),
+        UseCookies = false
+    }) { Timeout = Timeout.InfiniteTimeSpan };
 
-    public NetworkCounterSample? SampleInterfaceCounters()
+    public NetworkCounterSample SampleInterfaceCounters()
     {
         try
         {
-            ulong bytesIn = 0;
-            ulong bytesOut = 0;
-
-            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            ulong received = 0, sent = 0;
+            var count = 0;
+            foreach (var adapter in NetworkInterface.GetAllNetworkInterfaces())
             {
-                // Mirror the Mac filter: UP, non-loopback, non-tunnel. (The Mac walks
-                // getifaddrs with IFF_UP set and IFF_LOOPBACK clear; we additionally skip
-                // Tunnel adapters so a VPN's virtual NIC doesn't double-count the physical
-                // traffic it encapsulates.)
-                if (nic.OperationalStatus != OperationalStatus.Up)
-                {
+                if (adapter.OperationalStatus != OperationalStatus.Up ||
+                    adapter.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
                     continue;
-                }
-
-                if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
-                {
-                    continue;
-                }
-
-                // Prefer the IPv4 statistics (BytesReceived/BytesSent are cumulative octet
-                // counts, matching ifi_ibytes/ifi_obytes); fall back to the combined IP
-                // statistics on adapters that don't expose the IPv4-specific view.
-                // GetIPv4Statistics() returns IPv4InterfaceStatistics and GetIPStatistics()
-                // returns IPInterfaceStatistics — two unrelated types (no common base), so read
-                // the cumulative octet counts in each branch rather than sharing a variable.
-                long received;
-                long sent;
-                try
-                {
-                    var s = nic.GetIPv4Statistics();
-                    received = s.BytesReceived;
-                    sent = s.BytesSent;
-                }
-                catch (NetworkInformationException)
-                {
-                    var s = nic.GetIPStatistics();
-                    received = s.BytesReceived;
-                    sent = s.BytesSent;
-                }
-
-                // The .NET counters are signed longs; clamp negatives (counter glitch) to 0.
-                bytesIn += received > 0 ? (ulong)received : 0;
-                bytesOut += sent > 0 ? (ulong)sent : 0;
+                var statistics = adapter.GetIPStatistics();
+                if (statistics.BytesReceived < 0 || statistics.BytesSent < 0)
+                    throw new NetworkProbeException(NetworkProbeFailure.CountersUnavailable, "Interface counters are invalid.");
+                received = checked(received + (ulong)statistics.BytesReceived);
+                sent = checked(sent + (ulong)statistics.BytesSent);
+                count++;
             }
-
-            return new NetworkCounterSample(bytesIn, bytesOut, DateTimeOffset.UtcNow);
+            if (count == 0)
+                throw new NetworkProbeException(NetworkProbeFailure.CountersUnavailable, "No active network interface.");
+            return new(received, sent, DateTimeOffset.UtcNow);
         }
-        catch (Exception)
+        catch (NetworkInformationException ex)
         {
-            // No adapters readable / WMI hiccup — the coordinator keeps its last baseline.
-            return null;
+            throw new NetworkProbeException(NetworkProbeFailure.CountersUnavailable, "Network counters cannot be read.", ex);
         }
     }
 
-    // ---- Latency: cached-HttpClient HEAD + Stopwatch ----------------------------------
-
-    public async Task<int?> MeasureLatencyMillisecondsAsync(CancellationToken cancellationToken = default)
+    public async Task<int> MeasureLatencyMillisecondsAsync(CancellationToken cancellationToken = default)
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(LatencyTimeout);
-
-            // GET (not HEAD): the msftconnecttest endpoint returns 405 to HEAD, so use a GET of
-            // the tiny (~14-byte) connecttest.txt. With ResponseHeadersRead we still time only the
-            // round trip to the first response, never the (trivial) body read.
-            using var request = new HttpRequestMessage(HttpMethod.Get, LatencyEndpoint);
+            using var request = CreateRequest(HttpMethod.Head, LatencyEndpoint);
             var stopwatch = Stopwatch.StartNew();
-            using var response = await HttpClient
-                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token)
-                .ConfigureAwait(false);
-
-            stopwatch.Stop();
-
-            // Accept any HTTP response (2xx–5xx) as a successful round trip — we are timing
-            // reachability, not asserting a 200 (the Mac accepts 200..<600 likewise).
-            return Math.Max(1, (int)stopwatch.Elapsed.TotalMilliseconds);
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
+            // Any HTTP response proves a round trip; this measures HTTPS response time, not ICMP RTT.
+            return Math.Max(1, checked((int)stopwatch.Elapsed.TotalMilliseconds));
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException)
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            // Network/timeout — honest null → "— ms".
-            return null;
+            throw new NetworkProbeException(NetworkProbeFailure.Timeout, "The latency probe timed out.", ex);
         }
-        catch (Exception)
+        catch (HttpRequestException ex)
         {
-            return null;
+            throw new NetworkProbeException(NetworkProbeFailure.Unreachable, "The latency endpoint is unreachable.", ex);
         }
     }
 
-    // ---- IP + proxy: ipapi.co GET + HKCU ProxyEnable ----------------------------------
-
-    public async Task<NetworkLocationSample?> ResolveLocationAsync(CancellationToken cancellationToken = default)
+    public async Task<NetworkLocationSample> ResolveLocationAsync(CancellationToken cancellationToken = default)
     {
-        // Always resolve the proxy state (it's local + cheap) so the icon color is correct
-        // even when the IP lookup itself fails below.
-        var proxyEnabled = IsSystemProxyEnabled();
-
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(8));
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(LocationTimeout);
-
-            using var response = await HttpClient
-                .GetAsync(LocationEndpoint, HttpCompletionOption.ResponseHeadersRead, cts.Token)
-                .ConfigureAwait(false);
-
+            using var request = CreateRequest(HttpMethod.Get, LocationEndpoint);
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                return null;
+                var retryAfter = response.Headers.RetryAfter?.Delta
+                    ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow);
+                if (response.StatusCode == HttpStatusCode.TooManyRequests && (retryAfter is null || retryAfter <= TimeSpan.Zero))
+                    retryAfter = TimeSpan.FromDays(1);
+                throw new NetworkProbeException(NetworkProbeFailure.HttpStatus, "IP lookup was rejected by the service.",
+                    statusCode: response.StatusCode, retryAfter: retryAfter);
             }
-
-            await using var stream = await response.Content
-                .ReadAsStreamAsync(cts.Token)
-                .ConfigureAwait(false);
-            using var document = await JsonDocument
-                .ParseAsync(stream, cancellationToken: cts.Token)
-                .ConfigureAwait(false);
-
+            if (response.Content.Headers.ContentLength > MaximumLocationBytes)
+                throw InvalidResponse();
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
+            var buffer = new byte[MaximumLocationBytes + 1];
+            var bytes = 0;
+            while (bytes < buffer.Length)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(bytes), timeout.Token).ConfigureAwait(false);
+                if (read == 0) break;
+                bytes += read;
+            }
+            if (bytes > MaximumLocationBytes) throw InvalidResponse();
+            using var document = JsonDocument.Parse(buffer.AsMemory(0, bytes));
             var root = document.RootElement;
-            var ip = ReadString(root, "ip");
-            if (string.IsNullOrWhiteSpace(ip))
-            {
-                // No usable IP → treat as failure (coordinator shows "IP · 不可用").
-                return null;
-            }
-
-            return new NetworkLocationSample(
-                ip,
-                ReadString(root, "city"),
-                ReadString(root, "country_code"),
-                proxyEnabled);
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True)
+                throw InvalidResponse();
+            var ipText = ReadString(root, "ip");
+            if (!IPAddress.TryParse(ipText, out var ip) || IPAddress.IsLoopback(ip) || ip.Equals(IPAddress.Any) || ip.Equals(IPAddress.IPv6Any))
+                throw InvalidResponse();
+            return new(ip.ToString(), ReadString(root, "city"), ReadString(root, "country_code"), IsSystemProxyEnabled());
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or OperationCanceledException)
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            throw new NetworkProbeException(NetworkProbeFailure.Timeout, "The IP lookup timed out.", ex);
         }
-        catch (Exception)
+        catch (HttpRequestException ex)
         {
-            return null;
+            throw new NetworkProbeException(NetworkProbeFailure.Unreachable, "The IP service is unreachable.", ex);
+        }
+        catch (IOException ex)
+        {
+            throw new NetworkProbeException(NetworkProbeFailure.Unreachable, "The IP response stream was interrupted.", ex);
+        }
+        catch (JsonException ex)
+        {
+            throw new NetworkProbeException(NetworkProbeFailure.InvalidResponse, "The IP service returned invalid JSON.", ex);
         }
     }
 
-    public bool IsSystemProxyEnabled()
+    public bool IsSystemProxyEnabled() => _readProxy();
+    private static bool ReadEffectiveProxy() => UsesProxy(HttpClient.DefaultProxy, new Uri(LocationEndpoint));
+
+    internal static bool UsesProxy(IWebProxy proxy, Uri destination)
     {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows\CurrentVersion\Internet Settings");
-            if (key is null)
-            {
-                return false;
-            }
-
-            // ProxyEnable is a DWORD: 1 = a manual proxy is configured + on. (This mirrors
-            // the Mac's SCDynamicStoreCopyProxies HTTP/HTTPS/SOCKS enable check — both report
-            // "is the OS routing through a configured proxy".)
-            var value = key.GetValue("ProxyEnable");
-            return value is int enabled && enabled != 0;
-        }
-        catch (Exception)
-        {
-            // Registry hive unavailable / access denied — assume direct (false), never throw.
-            return false;
-        }
+        ArgumentNullException.ThrowIfNull(proxy);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (proxy.IsBypassed(destination)) return false;
+        // Windows' HttpWindowsProxy always returns false from IsBypassed. Its
+        // GetProxy result is authoritative: null or the destination means DIRECT.
+        var endpoint = proxy.GetProxy(destination);
+        return endpoint is not null && endpoint != destination;
     }
+
+    private static HttpRequestMessage CreateRequest(HttpMethod method, string endpoint)
+    {
+        var request = new HttpRequestMessage(method, endpoint);
+        request.Headers.UserAgent.ParseAdd("SkyBridgeCompass/1.0");
+        request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
+        return request;
+    }
+
+    private static NetworkProbeException InvalidResponse() =>
+        new(NetworkProbeFailure.InvalidResponse, "The IP service returned an invalid location response.");
 
     private static string? ReadString(JsonElement root, string property)
     {
-        if (root.TryGetProperty(property, out var element) && element.ValueKind == JsonValueKind.String)
-        {
-            var raw = element.GetString();
-            return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
-        }
-
-        return null;
+        if (!root.TryGetProperty(property, out var value) || value.ValueKind == JsonValueKind.Null) return null;
+        if (value.ValueKind != JsonValueKind.String) throw InvalidResponse();
+        var text = value.GetString()?.Trim();
+        if (text is { Length: > 128 } || (text is not null && text.Any(char.IsControl))) throw InvalidResponse();
+        return string.IsNullOrEmpty(text) ? null : text;
     }
 
-    // ---- Base-1000 byte/sec formatting (mirrors the Mac formatBytesPerSecond) ---------
-
-    // Exposed as a static helper so the coordinator formats with the exact same thresholds
-    // (and the unit tests, if any, can assert it directly). Base 1000: GB/s ≥ 1e9, MB/s ≥ 1e6,
-    // KB/s ≥ 1e3, else B/s. One decimal place for the scaled units, integer for B/s.
     public static string FormatBytesPerSecond(double bytesPerSecond)
     {
-        if (double.IsNaN(bytesPerSecond) || bytesPerSecond < 0)
+        if (!double.IsFinite(bytesPerSecond) || bytesPerSecond < 0)
+            throw new ArgumentOutOfRangeException(nameof(bytesPerSecond));
+        var (divisor, unit) = bytesPerSecond switch
         {
-            bytesPerSecond = 0;
-        }
-
-        if (bytesPerSecond >= 1_000_000_000d)
-        {
-            return string.Format(CultureInfo.InvariantCulture, "{0:0.0} GB/s", bytesPerSecond / 1_000_000_000d);
-        }
-
-        if (bytesPerSecond >= 1_000_000d)
-        {
-            return string.Format(CultureInfo.InvariantCulture, "{0:0.0} MB/s", bytesPerSecond / 1_000_000d);
-        }
-
-        if (bytesPerSecond >= 1_000d)
-        {
-            return string.Format(CultureInfo.InvariantCulture, "{0:0.0} KB/s", bytesPerSecond / 1_000d);
-        }
-
-        return string.Format(CultureInfo.InvariantCulture, "{0:0} B/s", bytesPerSecond);
+            >= 1_000_000_000 => (1_000_000_000d, "GB/s"),
+            >= 1_000_000 => (1_000_000d, "MB/s"),
+            >= 1_000 => (1_000d, "KB/s"),
+            _ => (1d, "B/s")
+        };
+        return (bytesPerSecond / divisor).ToString(divisor == 1 ? "0" : "0.0", CultureInfo.InvariantCulture) + " " + unit;
     }
 }

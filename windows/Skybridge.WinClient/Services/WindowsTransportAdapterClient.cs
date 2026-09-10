@@ -463,6 +463,21 @@ public sealed class WindowsExternalTransportAdapterOptions
     }
 }
 
+/// <param name="DiscoveredRoutes">
+/// The DNS-SD endpoints resolved for this peer, when discovery produced them.
+///
+/// This is the link that was missing between discovery and transport. `DiscoveredPeer` is a
+/// Core-derived identity — device id, fingerprint, capabilities — and deliberately carries no
+/// address, so until now the only way an adapter could learn where to dial was an environment
+/// variable holding a hand-typed host:port. That made the Windows-native MsQuic path a lab
+/// harness rather than a product path, and left File Transfer and Remote Desktop fail-closed on
+/// "pending adapter" even though the adapter itself was complete.
+///
+/// Optional, and null is a normal value: a peer discovered without a resolved SRV/TXT endpoint,
+/// or reached through a path where the address is not ours to choose (relay), has no route here.
+/// Adapters must treat null as "no address was resolved" and fail closed, never as licence to
+/// invent one.
+/// </param>
 public sealed record WindowsTransportAdapterRequest(
     DiscoveredPeer DiscoveredPeer,
     PairingMaterial PairingMaterial,
@@ -472,7 +487,8 @@ public sealed record WindowsTransportAdapterRequest(
     bool RelayAllowed,
     PeerCapabilities LocalCapabilities,
     PeerCapabilities RemoteCapabilities,
-    NetworkPath NetworkPath);
+    NetworkPath NetworkPath,
+    DiscoveryPeerRoutes? DiscoveredRoutes = null);
 
 public sealed record WindowsTransportAdapterSnapshot(
     ConnectionLaunchAdapterKind AdapterKind,

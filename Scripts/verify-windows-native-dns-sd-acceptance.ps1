@@ -5,7 +5,8 @@ param(
     [switch]$RequirePeer,
     [string]$ExpectedDeviceId = "",
     [string]$ExpectedFingerprint = "",
-    [string]$SearchText = ""
+    [string]$SearchText = "",
+    [switch]$StressGarbageCollection
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,17 @@ function Assert-True {
         throw $Message
     }
 }
+
+function Assert-WindowsHostForNativeDnsSdAcceptance {
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $isWindowsHost) {
+        $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        throw "Windows native DNS-SD acceptance requires a Windows host because it builds skybridge_core.dll and exercises Win32 DnsServiceBrowse/DnsServiceResolve; current host is $osDescription."
+    }
+}
+
+Assert-WindowsHostForNativeDnsSdAcceptance
 
 function Join-ProcessArguments {
     param([string[]]$Arguments)
@@ -72,7 +84,11 @@ $sourceFiles = @(
     "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryClient.cs",
     "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs",
-    "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
+    "windows/Skybridge.WinClient/Services/DiscoveryPeerRoutes.cs",
+    "windows/Skybridge.WinClient/Services/ProductSessionActionTargetProjection.cs",
+    "windows/Skybridge.WinClient/Services/SkyBridgeProtocolConstants.cs",
+    "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs",
+    "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdTxtRecordCodec.cs"
 ) | ForEach-Object { Join-Path $RepoRoot $_ }
 
 foreach ($sourceFile in $sourceFiles) {
@@ -80,13 +96,31 @@ foreach ($sourceFile in $sourceFiles) {
 }
 
 $nativeProviderSource = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs")
+$nativeTxtCodecSource = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdTxtRecordCodec.cs")
 foreach ($nativeLifecycleSignal in @(
     "DnsServiceBrowseCancel",
     "DnsServiceResolveCancel",
     "DnsRecordListFree",
-    "DnsServiceFreeInstance"
+    "DnsServiceFreeInstance",
+    "CancellationToken cancellationToken",
+    "CallbackCompleted",
+    "CompleteCallbackBarrier",
+    "status == ErrorCancelled",
+    "NativeWindowsDnsSdTxtRecordCodec.TrySerialize"
 )) {
     Assert-True -Condition ($nativeProviderSource.Contains($nativeLifecycleSignal)) -Message "Native DNS-SD provider missing lifecycle signal: $nativeLifecycleSignal"
+}
+Assert-True -Condition (-not $nativeProviderSource.Contains("CallbackDrainDelay")) -Message "Native DNS-SD provider must await its callback completion barrier instead of using a fixed drain delay."
+Assert-True -Condition (-not $nativeProviderSource.Contains("FromMilliseconds(250)")) -Message "Native DNS-SD provider must not use a fixed 250ms callback drain."
+foreach ($nativeTxtValidationSignal in @(
+    "MaxTxtRecordBytes",
+    "MaxTxtKeyBytes",
+    "MaxTxtValueBytes",
+    "MaxTxtProperties",
+    "ContainsTxtKeySeparatorOrControl",
+    "ContainsTxtValueSeparatorOrControl"
+)) {
+    Assert-True -Condition ($nativeTxtCodecSource.Contains($nativeTxtValidationSignal)) -Message "Native DNS-SD TXT codec missing validation signal: $nativeTxtValidationSignal"
 }
 
 $coreManifest = Join-Path $RepoRoot "core/Skybridge-core/Cargo.toml"
@@ -95,14 +129,6 @@ if (-not (Test-Path -LiteralPath $coreManifest)) {
 }
 
 Assert-True -Condition (Test-Path -LiteralPath $coreManifest) -Message "Missing Rust Core manifest for native DNS-SD acceptance: $coreManifest"
-Invoke-NativeTool `
-    -FilePath "cargo" `
-    -Arguments @("build", "--manifest-path", $coreManifest, "--lib") `
-    -FailureMessage "Rust Core native library build failed for native DNS-SD acceptance."
-
-$coreRoot = Split-Path -Parent $coreManifest
-$nativeDll = Join-Path $coreRoot "target/debug/skybridge_core.dll"
-Assert-True -Condition (Test-Path -LiteralPath $nativeDll) -Message "Missing skybridge_core.dll for Core TXT parsing: $nativeDll"
 
 $tempParent = [System.IO.Path]::GetTempPath()
 $tempRoot = Join-Path $tempParent ("skybridge-win-native-dns-sd-" + [guid]::NewGuid().ToString("N"))
@@ -111,7 +137,21 @@ $testProgram = Join-Path $tempRoot "Program.cs"
 
 try {
     New-Item -ItemType Directory -Path $tempRoot | Out-Null
+    $nativeTargetDir = Join-Path $tempRoot "cargo-target"
+    $nativeTarget = switch ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()) {
+        "X64" { "x86_64-pc-windows-msvc" }
+        "Arm64" { "aarch64-pc-windows-msvc" }
+        default { throw "Native DNS-SD acceptance requires an x64 or ARM64 process." }
+    }
+    Invoke-NativeTool `
+        -FilePath "cargo" `
+        -Arguments @("build", "--locked", "--manifest-path", $coreManifest, "--lib", "--target", $nativeTarget, "--target-dir", $nativeTargetDir) `
+        -FailureMessage "Rust Core native library build failed for native DNS-SD acceptance."
 
+    $nativeDll = Join-Path $nativeTargetDir "$nativeTarget/debug/skybridge_core.dll"
+    Assert-True -Condition (Test-Path -LiteralPath $nativeDll) -Message "Missing skybridge_core.dll for Core TXT parsing: $nativeDll"
+
+    $nativeDllXml = [System.Security.SecurityElement]::Escape($nativeDll)
     $programXml = [System.Security.SecurityElement]::Escape($testProgram)
     $compileItems = @("    <Compile Include=""$programXml"" />")
     foreach ($sourceFile in $sourceFiles) {
@@ -128,9 +168,11 @@ try {
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
+    <Content Include="$nativeDllXml" Link="skybridge_core.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
 "@
@@ -144,7 +186,22 @@ AssertEqual(true, typeof(IWindowsDnsSdBrowseClient).IsAssignableFrom(typeof(Nati
 var browser = new WindowsDiscoveryBrowserClient(
     new CoreDiscoveryClient(new CoreBridge()),
     new NativeWindowsDnsSdBrowseClient());
-var snapshot = await browser.BuildReadOnlySnapshotAsync(
+using var gcLifetime = new CancellationTokenSource();
+var collections = 0;
+var gcPressure = options.StressGarbageCollection ? Task.Run(async () =>
+{
+    while (!gcLifetime.IsCancellationRequested)
+    {
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        Interlocked.Increment(ref collections);
+        try { await Task.Delay(10, gcLifetime.Token); }
+        catch (OperationCanceledException) when (gcLifetime.IsCancellationRequested) { return; }
+    }
+}) : Task.CompletedTask;
+DiscoveryBrowserSnapshot snapshot;
+try
+{
+snapshot = await browser.BuildReadOnlySnapshotAsync(
     new DiscoveryBrowserRequest(
         DiscoveryBrowserAction.Start,
         "",
@@ -152,10 +209,29 @@ var snapshot = await browser.BuildReadOnlySnapshotAsync(
         options.SearchText,
         CompatibilityMode: false,
         options.ExtendedSearchSeconds));
+}
+finally
+{
+    await gcLifetime.CancelAsync();
+    await gcPressure;
+}
+if (options.StressGarbageCollection)
+{
+    AssertEqual(true, collections > 0, "compacting collections during native DNS-SD");
+    Console.WriteLine($"native-gc-pressure: collections={collections}");
+}
 
 var factText = string.Join(
     Environment.NewLine,
     snapshot.Facts.Select(fact => $"{fact.Label}|{fact.Value}|{fact.Detail}"));
+foreach (var peer in snapshot.Peers)
+{
+    Console.WriteLine($"peer: {peer.Peer.DeviceId}|{peer.Peer.DisplayName}|{peer.Peer.PlatformLabel}|{peer.CapabilitiesSummary}");
+}
+foreach (var fact in snapshot.Facts)
+{
+    Console.WriteLine($"fact: {fact.Label}|{fact.Value}|{fact.Detail}");
+}
 AssertContains(factText, "DnsServiceBrowse", "native browse API fact");
 AssertContains(factText, "DnsServiceResolve", "native resolve API fact");
 
@@ -189,15 +265,17 @@ if (!string.IsNullOrWhiteSpace(options.ExpectedFingerprint))
         $"expected fingerprint {options.ExpectedFingerprint}");
 }
 
+if (!string.IsNullOrWhiteSpace(options.ExpectedDeviceId) && !string.IsNullOrWhiteSpace(options.ExpectedFingerprint))
+{
+    AssertEqual(true, snapshot.Peers.Any(peer =>
+        peer.Peer.DeviceId.Equals(options.ExpectedDeviceId, StringComparison.OrdinalIgnoreCase) &&
+        peer.Peer.PublicKeyFingerprint.Equals(options.ExpectedFingerprint, StringComparison.OrdinalIgnoreCase)),
+        "expected device ID and fingerprint must belong to the same discovered peer");
+}
+
 foreach (var peer in snapshot.Peers)
 {
     AssertContains(peer.TrustSummary, "fingerprint only", "fingerprint-only trust summary");
-    Console.WriteLine($"peer: {peer.Peer.DeviceId}|{peer.Peer.DisplayName}|{peer.Peer.PlatformLabel}|{peer.CapabilitiesSummary}");
-}
-
-foreach (var fact in snapshot.Facts)
-{
-    Console.WriteLine($"fact: {fact.Label}|{fact.Value}|{fact.Detail}");
 }
 
 Console.WriteLine($"windows-native-dns-sd-acceptance: ok peers={snapshot.Peers.Count} facts={snapshot.Facts.Count}");
@@ -223,7 +301,8 @@ sealed record AcceptanceOptions(
     bool RequirePeer,
     string ExpectedDeviceId,
     string ExpectedFingerprint,
-    string SearchText)
+    string SearchText,
+    bool StressGarbageCollection)
 {
     public static AcceptanceOptions Parse(string[] args)
     {
@@ -232,6 +311,7 @@ sealed record AcceptanceOptions(
         var expectedDeviceId = "";
         var expectedFingerprint = "";
         var searchText = "";
+        var stressGarbageCollection = false;
 
         for (var index = 0; index < args.Length; index++)
         {
@@ -242,6 +322,9 @@ sealed record AcceptanceOptions(
                     break;
                 case "--require-peer":
                     requirePeer = true;
+                    break;
+                case "--compact-gc":
+                    stressGarbageCollection = true;
                     break;
                 case "--expected-device-id":
                     expectedDeviceId = RequireValue(args, ++index, "--expected-device-id");
@@ -262,7 +345,7 @@ sealed record AcceptanceOptions(
             throw new InvalidOperationException("--seconds must be between 1 and 30.");
         }
 
-        return new AcceptanceOptions(seconds, requirePeer, expectedDeviceId, expectedFingerprint, searchText);
+        return new AcceptanceOptions(seconds, requirePeer, expectedDeviceId, expectedFingerprint, searchText, stressGarbageCollection);
     }
 
     private static string RequireValue(string[] args, int index, string option)
@@ -297,6 +380,10 @@ sealed record AcceptanceOptions(
 
         if ($RequirePeer) {
             $runArgs += "--require-peer"
+        }
+
+        if ($StressGarbageCollection) {
+            $runArgs += "--compact-gc"
         }
 
         if (-not [string]::IsNullOrWhiteSpace($ExpectedDeviceId)) {

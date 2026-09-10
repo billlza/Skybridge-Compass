@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.WebSockets;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -54,7 +55,8 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                     new CurrentPathWebRtcSignalingPayload(
                         candidate: candidate.Candidate,
                         sdpMid: candidate.SdpMid,
-                        sdpMLineIndex: candidate.SdpMLineIndex),
+                        sdpMLineIndex: candidate.SdpMLineIndex,
+                        usernameFragment: candidate.UsernameFragment),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -66,11 +68,6 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                 remoteCandidates,
                 cancellationToken)
             .ConfigureAwait(false);
-        if (remoteCandidates.Count == 0 && !WebRtcSignalDocument.ContainsParseableCandidate(remoteAnswer.Payload!.Sdp!))
-        {
-            throw new InvalidDataException(
-                "Current-path helper signaling bridge received an answer without parseable ICE candidate material.");
-        }
 
         WebRtcSignalDocument.RequireFingerprint(remoteAnswer.Payload!.Sdp!, options.RemoteSignalPath);
         WebRtcSignalDocument.Write(
@@ -142,7 +139,8 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                     new CurrentPathWebRtcSignalingPayload(
                         candidate: candidate.Candidate,
                         sdpMid: candidate.SdpMid,
-                        sdpMLineIndex: candidate.SdpMLineIndex),
+                        sdpMLineIndex: candidate.SdpMLineIndex,
+                        usernameFragment: candidate.UsernameFragment),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -152,6 +150,82 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
             remoteCandidates.Count,
             remoteOffer.From,
             options.RemoteSignalPath);
+    }
+
+    public async Task<int> RelayRemoteIceCandidatesUntilAsync(
+        CurrentPathWebSocketSignalingClient signalingClient,
+        CurrentPathWebRtcHelperSignalingBridgeOptions options,
+        string expectedRemoteSignalType,
+        Task readyTask,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(signalingClient);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(readyTask);
+        RequireBound(signalingClient);
+        if (!string.Equals(expectedRemoteSignalType, "offer", StringComparison.Ordinal) &&
+            !string.Equals(expectedRemoteSignalType, "answer", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Current-path helper signaling bridge can relay ICE only for offer or answer signal files.");
+        }
+
+        var remoteSignal = WebRtcSignalDocument.Read(options.RemoteSignalPath, expectedRemoteSignalType);
+        var remoteCandidates = new List<WebRtcSignalDocument.SignalCandidate>(remoteSignal.Candidates);
+        var remoteCandidateKeys = new HashSet<string>(
+            remoteCandidates.Select(RemoteIceCandidateKey),
+            StringComparer.Ordinal);
+        var relayedCandidates = 0;
+        while (!readyTask.IsCompleted)
+        {
+            using var receiveCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var receiveTask = signalingClient.ReceiveNextAsync(receiveCancellation.Token);
+            var completedTask = await Task.WhenAny(readyTask, receiveTask).ConfigureAwait(false);
+            if (completedTask == readyTask)
+            {
+                receiveCancellation.Cancel();
+                await ObserveReceiveAfterReadyAsync(receiveTask, receiveCancellation.Token).ConfigureAwait(false);
+                break;
+            }
+
+            var inbound = await receiveTask.ConfigureAwait(false);
+            if (inbound.Kind == CurrentPathSignalingInboundMessageKind.ServerFrame)
+            {
+                continue;
+            }
+
+            if (!TryReadExpectedRemoteEnvelope(inbound, options, out var envelope))
+            {
+                continue;
+            }
+
+            switch (envelope.Type)
+            {
+                case CurrentPathWebRtcSignalingMessageType.Join:
+                    continue;
+                case CurrentPathWebRtcSignalingMessageType.IceCandidate:
+                    if (!AddRemoteCandidate(remoteCandidates, remoteCandidateKeys, envelope, options))
+                    {
+                        continue;
+                    }
+
+                    WebRtcSignalDocument.Write(
+                        options.RemoteSignalPath,
+                        expectedRemoteSignalType,
+                        remoteSignal.Sdp,
+                        remoteCandidates);
+                    relayedCandidates++;
+                    continue;
+                case CurrentPathWebRtcSignalingMessageType.Offer:
+                case CurrentPathWebRtcSignalingMessageType.Answer:
+                case CurrentPathWebRtcSignalingMessageType.Leave:
+                default:
+                    throw new InvalidDataException(
+                        $"Current-path helper signaling bridge received unexpected {envelope.Type} while relaying ICE candidates.");
+            }
+        }
+
+        await readyTask.ConfigureAwait(false);
+        return relayedCandidates;
     }
 
     private static void RequireBound(CurrentPathWebSocketSignalingClient signalingClient)
@@ -187,7 +261,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(options.RemoteAnswerTimeout);
+        timeout.CancelAfter(options.RemoteSignalTimeout);
 
         while (true)
         {
@@ -199,7 +273,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
             catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"Current-path helper signaling bridge did not receive an answer within {options.RemoteAnswerTimeout.TotalSeconds:F0}s.");
+                    $"Current-path helper signaling bridge did not receive an answer within {options.RemoteSignalTimeout.TotalSeconds:F0}s.");
             }
 
             if (inbound.Kind == CurrentPathSignalingInboundMessageKind.ServerFrame)
@@ -217,7 +291,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                 case CurrentPathWebRtcSignalingMessageType.Join:
                     continue;
                 case CurrentPathWebRtcSignalingMessageType.IceCandidate:
-                    AddRemoteCandidate(remoteCandidates, envelope, options);
+                    AddRemoteCandidate(remoteCandidates, null, envelope, options);
                     continue;
                 case CurrentPathWebRtcSignalingMessageType.Answer:
                     return envelope;
@@ -237,7 +311,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(options.RemoteAnswerTimeout);
+        timeout.CancelAfter(options.RemoteSignalTimeout);
 
         CurrentPathWebRtcSignalingEnvelope? remoteOffer = null;
         while (true)
@@ -250,7 +324,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
             catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"Current-path helper signaling bridge did not receive an offer with ICE candidate material within {options.RemoteAnswerTimeout.TotalSeconds:F0}s.");
+                    $"Current-path helper signaling bridge did not receive an offer within {options.RemoteSignalTimeout.TotalSeconds:F0}s.");
             }
 
             if (inbound.Kind == CurrentPathSignalingInboundMessageKind.ServerFrame)
@@ -268,12 +342,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                 case CurrentPathWebRtcSignalingMessageType.Join:
                     continue;
                 case CurrentPathWebRtcSignalingMessageType.IceCandidate:
-                    AddRemoteCandidate(remoteCandidates, envelope, options);
-                    if (remoteOffer is not null)
-                    {
-                        return remoteOffer;
-                    }
-
+                    AddRemoteCandidate(remoteCandidates, null, envelope, options);
                     continue;
                 case CurrentPathWebRtcSignalingMessageType.Offer:
                     if (remoteOffer is not null)
@@ -283,13 +352,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                     }
 
                     remoteOffer = envelope;
-                    if (remoteCandidates.Count > 0 ||
-                        WebRtcSignalDocument.ContainsParseableCandidate(remoteOffer.Payload!.Sdp!))
-                    {
-                        return remoteOffer;
-                    }
-
-                    continue;
+                    return remoteOffer;
                 case CurrentPathWebRtcSignalingMessageType.Answer:
                 case CurrentPathWebRtcSignalingMessageType.Leave:
                 default:
@@ -330,17 +393,12 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
         return true;
     }
 
-    private static void AddRemoteCandidate(
+    private static bool AddRemoteCandidate(
         List<WebRtcSignalDocument.SignalCandidate> remoteCandidates,
+        HashSet<string>? remoteCandidateKeys,
         CurrentPathWebRtcSignalingEnvelope envelope,
         CurrentPathWebRtcHelperSignalingBridgeOptions options)
     {
-        if (remoteCandidates.Count >= options.MaxRemoteIceCandidates)
-        {
-            throw new InvalidDataException(
-                $"Current-path helper signaling bridge received more than {options.MaxRemoteIceCandidates} remote ICE candidates.");
-        }
-
         var payload = envelope.Payload
             ?? throw new InvalidDataException("Current-path remote ICE envelope is missing payload.");
         if (string.IsNullOrWhiteSpace(payload.Candidate))
@@ -353,13 +411,36 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
             throw new InvalidDataException("Current-path remote ICE m-line index is outside the helper range.");
         }
 
-        remoteCandidates.Add(new WebRtcSignalDocument.SignalCandidate
+        var candidate = new WebRtcSignalDocument.SignalCandidate
         {
             Candidate = payload.Candidate,
             SdpMid = payload.SdpMid,
-            SdpMLineIndex = (ushort)(payload.SdpMLineIndex ?? 0)
-        });
+            SdpMLineIndex = (ushort)(payload.SdpMLineIndex ?? 0),
+            UsernameFragment = payload.UsernameFragment
+        };
+        var candidateKey = RemoteIceCandidateKey(candidate);
+        if (remoteCandidateKeys is not null && !remoteCandidateKeys.Add(candidateKey))
+        {
+            return false;
+        }
+
+        if (remoteCandidates.Count >= options.MaxRemoteIceCandidates)
+        {
+            throw new InvalidDataException(
+                $"Current-path helper signaling bridge received more than {options.MaxRemoteIceCandidates} remote ICE candidates.");
+        }
+
+        remoteCandidates.Add(candidate);
+        return true;
     }
+
+    private static string RemoteIceCandidateKey(WebRtcSignalDocument.SignalCandidate candidate) =>
+        string.Join(
+            '\u001f',
+            candidate.Candidate,
+            candidate.SdpMid ?? "",
+            candidate.SdpMLineIndex.ToString(),
+            candidate.UsernameFragment ?? "");
 
     private static async Task<WebRtcSignalDocument> WaitForSignalDocumentAsync(
         string path,
@@ -368,6 +449,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
         CancellationToken cancellationToken)
     {
         var deadline = DateTimeOffset.UtcNow + timeout;
+        Exception? lastTransientReadError = null;
         while (DateTimeOffset.UtcNow < deadline)
         {
             if (File.Exists(path))
@@ -376,13 +458,9 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
                 {
                     return WebRtcSignalDocument.Read(path, expectedType);
                 }
-                catch (JsonException)
+                catch (Exception ex) when (ex is JsonException or IOException)
                 {
-                    // File transfer or atomic rename may expose the file before all bytes are visible.
-                }
-                catch (IOException)
-                {
-                    // Another process may still hold the file handle briefly; retry until timeout.
+                    lastTransientReadError = ex;
                 }
             }
 
@@ -390,14 +468,44 @@ public sealed class CurrentPathWebRtcHelperSignalingBridge
         }
 
         throw new TimeoutException(
-            $"Current-path helper signaling bridge did not find a valid {expectedType} signal at '{path}' within {timeout.TotalSeconds:F0}s.");
+            lastTransientReadError is null
+                ? $"Current-path helper signaling bridge did not find a valid {expectedType} signal at '{path}' within {timeout.TotalSeconds:F0}s."
+                : $"Current-path helper signaling bridge did not find a valid {expectedType} signal at '{path}' within {timeout.TotalSeconds:F0}s; last transient read error was {lastTransientReadError.GetType().Name}: {lastTransientReadError.Message}",
+            lastTransientReadError);
     }
+
+    private static async Task ObserveReceiveAfterReadyAsync(
+        Task receiveTask,
+        CancellationToken receiveCancellationToken)
+    {
+        try
+        {
+            await receiveTask.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (receiveCancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex) when (IsExpectedReceiveCleanupException(ex))
+        {
+            return;
+        }
+    }
+
+    private static bool IsExpectedReceiveCleanupException(Exception ex) =>
+        ex is CurrentPathWebSocketSignalingException
+        {
+            FailureClass: CurrentPathSignalingFailureClass.TransientNetwork
+        } or
+            IOException or
+            ObjectDisposedException or
+            WebSocketException;
 }
 
 public sealed class CurrentPathWebRtcHelperSignalingBridgeOptions
 {
     private static readonly TimeSpan DefaultSignalFileTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan DefaultRemoteAnswerTimeout = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan DefaultRemoteSignalTimeout = TimeSpan.FromSeconds(120);
 
     public CurrentPathWebRtcHelperSignalingBridgeOptions(
         string sessionId,
@@ -406,10 +514,10 @@ public sealed class CurrentPathWebRtcHelperSignalingBridgeOptions
         string localSignalPath,
         string remoteSignalPath,
         TimeSpan? signalFileTimeout = null,
-        TimeSpan? remoteAnswerTimeout = null,
+        TimeSpan? remoteSignalTimeout = null,
         int maxRemoteIceCandidates = 128)
     {
-        SessionId = CurrentPathWebRtcSignalingEnvelope.NormalizeSessionId(sessionId);
+        SessionId = CurrentPathWebRtcSignalingEnvelope.ValidateSessionId(sessionId);
         LocalDeviceId = CurrentPathProtocolIdentityBinding.NormalizeDeviceId(localDeviceId);
         RemoteDeviceId = CurrentPathProtocolIdentityBinding.NormalizeDeviceId(remoteDeviceId);
         ArgumentException.ThrowIfNullOrWhiteSpace(localSignalPath);
@@ -417,15 +525,15 @@ public sealed class CurrentPathWebRtcHelperSignalingBridgeOptions
         LocalSignalPath = localSignalPath;
         RemoteSignalPath = remoteSignalPath;
         SignalFileTimeout = signalFileTimeout ?? DefaultSignalFileTimeout;
-        RemoteAnswerTimeout = remoteAnswerTimeout ?? DefaultRemoteAnswerTimeout;
+        RemoteSignalTimeout = remoteSignalTimeout ?? DefaultRemoteSignalTimeout;
         if (SignalFileTimeout <= TimeSpan.Zero)
         {
             throw new InvalidDataException("Current-path helper signaling bridge signal file timeout must be positive.");
         }
 
-        if (RemoteAnswerTimeout <= TimeSpan.Zero)
+        if (RemoteSignalTimeout <= TimeSpan.Zero)
         {
-            throw new InvalidDataException("Current-path helper signaling bridge remote answer timeout must be positive.");
+            throw new InvalidDataException("Current-path helper signaling bridge remote signal timeout must be positive.");
         }
 
         if (maxRemoteIceCandidates is < 0 or > 256)
@@ -448,7 +556,7 @@ public sealed class CurrentPathWebRtcHelperSignalingBridgeOptions
 
     public TimeSpan SignalFileTimeout { get; }
 
-    public TimeSpan RemoteAnswerTimeout { get; }
+    public TimeSpan RemoteSignalTimeout { get; }
 
     public int MaxRemoteIceCandidates { get; }
 }

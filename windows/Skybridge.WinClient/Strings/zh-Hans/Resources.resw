@@ -37,16 +37,16 @@
 
   <!-- ============================ Sidebar / brand ============================ -->
   <data name="AppSidebarBrandName.Text" xml:space="preserve">
-    <value>Skybridge Compass</value>
-    <comment>Sidebar header app name (brand; conventionally not translated).</comment>
+    <value>云桥司南</value>
+    <comment>Sidebar header app name. Must equal the Mac "app.name" string exactly.</comment>
   </data>
   <data name="AppSidebarBrandTagline.Text" xml:space="preserve">
     <value>下一代跨平台连接体验</value>
-    <comment>Sidebar tagline (secondary).</comment>
+    <comment>Sidebar tagline. Must equal the Mac "app.slogan" string exactly.</comment>
   </data>
-  <data name="AppSidebarBrandTaglineMuted.Text" xml:space="preserve">
-    <value>下一代跨平台连接体验</value>
-    <comment>Sidebar tagline (muted variant, same string as AppSidebarBrandTagline).</comment>
+  <data name="AppWindowTitle" xml:space="preserve">
+    <value>云桥司南</value>
+    <comment>Main window title, shown in the taskbar and Alt-Tab. Mac uses WindowGroup(app.name), so this must equal AppSidebarBrandName.Text.</comment>
   </data>
 
   <!-- ============================ Top bar ============================ -->
@@ -129,7 +129,7 @@
     <comment>Left-sidebar card header. Mac fileTransfer.quickActions.</comment>
   </data>
   <data name="FileTransferQuickActionsHint.Text" xml:space="preserve">
-    <value>选择文件 / 文件夹或生成分享二维码。选择仅在内存中准备一个传输意图——不会打开选择器，也不会读取任何文件。</value>
+    <value>选择文件或文件夹发送。连接设备后，可以批准接收文件；文件夹按 ZIP 传输。</value>
     <comment>Quick Actions explanatory subtitle (Windows-specific honesty note).</comment>
   </data>
   <data name="FileTransferRecentTransfersHeader.Text" xml:space="preserve">
@@ -145,7 +145,7 @@
     <comment>Drop-zone title. Mac fileTransfer.drop.title.</comment>
   </data>
   <data name="FileTransferDropZoneSubtitle.Text" xml:space="preserve">
-    <value>Windows 客户端尚未接入拖放功能。请使用上方的“选择文件 / 选择文件夹”来准备传输意图。</value>
+    <value>拖入最多 64 个文件或 1 个文件夹，然后选择设备。文件夹按 ZIP 传输。</value>
     <comment>Drop-zone honest subtitle (Windows-specific).</comment>
   </data>
   <data name="FileTransferQrPreviewTitle.Text" xml:space="preserve">
@@ -374,11 +374,11 @@
     <comment>Top-bar net-speed pill hover tooltip.</comment>
   </data>
   <data name="TopBarNetworkLatencyPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
-    <value>到 SkyBridge 端点的往返延迟，每约 15 秒刷新一次</value>
+    <value>Microsoft（www.microsoft.com）HTTPS 响应时间，每 15 秒刷新；不是远程会话延迟。</value>
     <comment>Top-bar latency pill hover tooltip.</comment>
   </data>
   <data name="TopBarIpLocationPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
-    <value>公网 IP 位置与系统代理状态，每约 5 分钟刷新一次</value>
+    <value>公网 IP 位置来自 IPWhois（ipwho.is），每 5 分钟刷新。代理状态表示本次查询的网络路径。</value>
     <comment>Top-bar IP/proxy pill hover tooltip.</comment>
   </data>
   <data name="TopBarDiagnosticsPill.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
@@ -1328,7 +1328,7 @@
     <value>启用实时天气</value>
   </data>
   <data name="SettingsAdvancedRealTimeWeatherCaption.Text" xml:space="preserve">
-    <value>启用后顶部栏与仪表盘显示实时天气数据</value>
+    <value>开启时刷新天气并播放背景动画；关闭后背景静止，保留天气数据与手动刷新。</value>
   </data>
   <data name="SettingsAdvancedShowRealtimeFpsLabel.Text" xml:space="preserve">
     <value>显示实时FPS</value>
@@ -1679,5 +1679,168 @@
   <data name="RemoteDesktopCardQualityLabel.Text" xml:space="preserve">
     <value>画质</value>
     <comment>B3 per-session summary card Quality pill label. Mac remoteMetricPill quality.</comment>
+  </data>
+  <data name="RemoteControlHostTitle.Text" xml:space="preserve"><value>允许控制此电脑</value></data>
+  <data name="RemoteControlHostToggle.OnContent" xml:space="preserve"><value>已开启</value></data>
+  <data name="RemoteControlHostToggle.OffContent" xml:space="preserve"><value>已关闭</value></data>
+  <data name="RemoteControlHostExplanation.Text" xml:space="preserve"><value>每个受信任的连接都需在这台电脑上批准。最多两台设备同时观看，仅一台拥有键盘和鼠标控制权。</value></data>
+  <data name="RemoteControlHostNetwork.Header" xml:space="preserve"><value>使用的局域网</value></data>
+  <data name="RemoteControlHostNetwork.PlaceholderText" xml:space="preserve"><value>选择网络</value></data>
+  <data name="RemoteControlHostRefresh.Label" xml:space="preserve"><value>刷新</value></data>
+  <data name="RemoteControlHostCopyPairing.Label" xml:space="preserve"><value>复制本机配对信息</value></data>
+  <data name="RemoteControlHostImportPairing.Label" xml:space="preserve"><value>粘贴配对信息</value></data>
+  <data name="RemoteControlHostPendingController.Title" xml:space="preserve"><value>确认控制器身份</value></data>
+  <data name="RemoteControlHostPendingFingerprint.Header" xml:space="preserve"><value>身份指纹</value></data>
+  <data name="RemoteControlHostReviewHint.Text" xml:space="preserve"><value>核对名称和身份指纹是否属于预期控制设备。信任身份后，每次连接仍需单独批准。</value></data>
+  <data name="RemoteControlHostConfirmController.Content" xml:space="preserve"><value>信任此控制器</value></data>
+  <data name="RemoteControlHostCancelController.Content" xml:space="preserve"><value>取消</value></data>
+  <data name="RemoteControlHostIdentity.Header" xml:space="preserve"><value>本机身份</value></data>
+  <data name="RemoteControlHostPairingHint.Text" xml:space="preserve"><value>先与控制器交换配对信息，再开启远程访问。此处仅分享公开身份，不包含私钥。</value></data>
+  <data name="RemoteControlHostActiveBanner.Title" xml:space="preserve"><value>此电脑已开启远程访问</value></data>
+  <data name="RemoteControlHostStop.Content" xml:space="preserve"><value>停止共享</value></data>
+  <data name="RemoteControlHostNoticeWindowTitle" xml:space="preserve"><value>远程连接请求与会话</value></data>
+  <data name="RemoteControlHostNoTrustedDevices" xml:space="preserve"><value>尚未信任任何控制器，请先导入对方的配对信息。</value></data>
+  <data name="RemoteControlHostTrustedDevices" xml:space="preserve"><value>已信任 {0} 台控制器：{1}</value></data>
+  <data name="RemoteControlHostNoNetwork" xml:space="preserve"><value>未找到可用的局域网，请连接 Wi-Fi 或网线后刷新。</value></data>
+  <data name="RemoteControlHostChooseNetwork" xml:space="preserve"><value>检测到多个网络，请选择与控制器相同的局域网。</value></data>
+  <data name="RemoteControlHostNetworkHint" xml:space="preserve"><value>控制器需要连接到所选的同一网络。</value></data>
+  <data name="RemoteControlHostStatusStopped" xml:space="preserve"><value>远程访问已关闭</value></data>
+  <data name="RemoteControlHostStatusListening" xml:space="preserve"><value>等待已信任的控制器连接</value></data>
+  <data name="RemoteControlHostStatusAuthenticating" xml:space="preserve"><value>正在验证控制器身份</value></data>
+  <data name="RemoteControlHostStatusConnected" xml:space="preserve"><value>已批准的远程观看设备已连接</value></data>
+  <data name="RemoteControlHostStatusFailed" xml:space="preserve"><value>远程访问需要处理</value></data>
+  <data name="RemoteControlHostTransferSummary" xml:space="preserve"><value>已传送 {0} 帧画面、{1} 个音频包</value></data>
+  <data name="RemoteControlHostPairingCopied" xml:space="preserve"><value>已复制本机的公开配对信息。</value></data>
+  <data name="RemoteControlHostPairingImported" xml:space="preserve"><value>已信任该控制器，可以开启远程访问。</value></data>
+  <data name="RemoteControlHostClipboardEmpty" xml:space="preserve"><value>剪贴板中没有配对信息。</value></data>
+  <data name="RemoteControlHostSessionAwaitingApproval" xml:space="preserve"><value>等待在这台电脑上批准</value></data>
+  <data name="RemoteControlHostSessionPreparing" xml:space="preserve"><value>正在准备已批准的画面连接</value></data>
+  <data name="RemoteControlHostSessionViewing" xml:space="preserve"><value>仅观看 · 输入权限由这台电脑分配</value></data>
+  <data name="RemoteControlHostSessionControlling" xml:space="preserve"><value>正在观看并控制这台电脑</value></data>
+  <data name="RemoteControlHostSessionDisconnecting" xml:space="preserve"><value>正在断开并释放输入</value></data>
+  <data name="RemoteControlHostSessionApproveViewing.Label" xml:space="preserve"><value>允许观看</value></data>
+  <data name="RemoteControlHostSessionApproveControl.Label" xml:space="preserve"><value>允许控制</value></data>
+  <data name="RemoteControlHostSessionTransferInput.Label" xml:space="preserve"><value>移交输入权限</value></data>
+  <data name="RemoteControlHostSessionDisconnect.Label" xml:space="preserve"><value>拒绝 / 断开</value></data>
+  <data name="NetworkProbeTimeout" xml:space="preserve"><value>请求超时</value></data>
+  <data name="NetworkProbeUnreachable" xml:space="preserve"><value>网络不可达</value></data>
+  <data name="NetworkProbeInvalidResponse" xml:space="preserve"><value>响应无效</value></data>
+  <data name="NetworkProbeCountersUnavailable" xml:space="preserve"><value>网卡计数不可用</value></data>
+  <data name="NetworkProbeStopped" xml:space="preserve"><value>采样已停止</value></data>
+  <data name="NetworkProxy" xml:space="preserve"><value>代理</value></data>
+  <data name="NetworkDirect" xml:space="preserve"><value>直连</value></data>
+  <data name="DiscoveryDiagnostics.Header" xml:space="preserve"><value>发现诊断</value></data>
+  <data name="RemoteViewerTitle" xml:space="preserve"><value>近距远程控制</value></data>
+  <data name="RemoteViewerPeers.Header" xml:space="preserve"><value>附近的远程桌面</value></data>
+  <data name="RemoteViewerRefresh.Content" xml:space="preserve"><value>刷新</value></data>
+  <data name="RemoteViewerConnect.Content" xml:space="preserve"><value>连接</value></data>
+  <data name="RemoteViewerDisconnect.Content" xml:space="preserve"><value>断开</value></data>
+  <data name="RemoteViewerChoose" xml:space="preserve"><value>选择附近已配对的设备。此次连接需要对方批准。</value></data>
+  <data name="RemoteViewerScanning" xml:space="preserve"><value>正在搜索附近设备…</value></data>
+  <data name="RemoteViewerNoPeers" xml:space="preserve"><value>未在当前网络发现远程桌面。</value></data>
+  <data name="RemoteViewerAuthenticating" xml:space="preserve"><value>正在验证已配对设备…</value></data>
+  <data name="RemoteViewerWaitingApproval" xml:space="preserve"><value>等待对方批准远程查看…</value></data>
+  <data name="RemoteViewerControlling" xml:space="preserve"><value>已连接 · 已获键盘和鼠标控制权</value></data>
+  <data name="RemoteViewerObserving" xml:space="preserve"><value>已连接 · 仅查看</value></data>
+  <data name="RemoteViewerDisconnected" xml:space="preserve"><value>远程查看已结束。</value></data>
+  <data name="RemoteViewerSignInRequired" xml:space="preserve"><value>请先登录，以便另一台设备显示控制请求来自哪个账号。</value></data>
+  <data name="AccountRestoreNetworkFailure" xml:space="preserve"><value>账号服务暂时不可用，已保留本机登录凭据；网络恢复后请重试。</value></data>
+  <data name="AccountRestoreStorageFailure" xml:space="preserve"><value>无法读取或更新本机登录凭据，请检查存储权限后重试。</value></data>
+  <data name="AccountRestoreVerificationFailure" xml:space="preserve"><value>本机登录凭据未通过验证，请重新登录。</value></data>
+  <data name="FileTransferLiveReady" xml:space="preserve">
+    <value>请选择文件或连接设备</value>
+  </data>
+  <data name="FileTransferLiveBusy" xml:space="preserve">
+    <value>文件传输操作正在进行</value>
+  </data>
+  <data name="FileTransferLiveCancelled" xml:space="preserve">
+    <value>已取消选择</value>
+  </data>
+  <data name="FileTransferLiveSelectionLimit" xml:space="preserve">
+    <value>一次最多选择 64 个文件或 1 个文件夹</value>
+  </data>
+  <data name="FileTransferLivePackaging" xml:space="preserve">
+    <value>正在打包文件夹…</value>
+  </data>
+  <data name="FileTransferLiveCompleted" xml:space="preserve">
+    <value>传输完成</value>
+  </data>
+  <data name="FileTransferLiveSending" xml:space="preserve">
+    <value>正在发送，等待接收回执…</value>
+  </data>
+  <data name="FileTransferLiveSignIn" xml:space="preserve">
+    <value>请先登录再传输文件</value>
+  </data>
+  <data name="FileTransferLiveConnecting" xml:space="preserve">
+    <value>正在建立安全连接…</value>
+  </data>
+  <data name="FileTransferLiveConnected" xml:space="preserve">
+    <value>已连接，可发送或批准接收文件</value>
+  </data>
+  <data name="FileTransferLiveDisconnected" xml:space="preserve">
+    <value>设备连接已断开</value>
+  </data>
+  <data name="FileTransferLiveIncoming" xml:space="preserve">
+    <value>接收文件</value>
+  </data>
+  <data name="FileTransferLiveFailed" xml:space="preserve">
+    <value>传输失败</value>
+  </data>
+  <data name="FileTransferLiveReceiptVerified" xml:space="preserve">
+    <value>已核对完整文件和认证回执</value>
+  </data>
+  <data name="FileTransferLiveConnectionLabel" xml:space="preserve">
+    <value>已连接设备</value>
+  </data>
+  <data name="FileTransferLiveProtocol" xml:space="preserve">
+    <value>使用现有 PQC 设备会话；断开后停止传输</value>
+  </data>
+  <data name="FileTransferLiveDestinationLabel" xml:space="preserve">
+    <value>接收位置</value>
+  </data>
+  <data name="FileTransferLiveNoPeers" xml:space="preserve">
+    <value>未发现文件传输设备，请确认双方应用已启动且位于同一网络</value>
+  </data>
+  <data name="FileTransferLiveChoosePeer" xml:space="preserve">
+    <value>选择传输设备</value>
+  </data>
+  <data name="FileTransferLiveConnect" xml:space="preserve">
+    <value>连接</value>
+  </data>
+  <data name="FileTransferLiveCancel" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="FileTransferLiveAccept" xml:space="preserve">
+    <value>接收</value>
+  </data>
+  <data name="FileTransferLiveDecline" xml:space="preserve">
+    <value>拒绝</value>
+  </data>
+  <data name="FileTransferLiveConnectButton.Content" xml:space="preserve">
+    <value>连接设备</value>
+  </data>
+  <data name="FileTransferLiveDisconnectButton.Content" xml:space="preserve">
+    <value>断开传输连接</value>
+  </data>
+  <data name="FileTransferLiveMissingDestination" xml:space="preserve">
+    <value>设置中的接收目录不存在，请选择有效目录</value>
+  </data>
+  <data name="FileTransferLiveListenerStopped" xml:space="preserve">
+    <value>文件接收已停止，请断开后重新连接设备</value>
+  </data>
+  <data name="FileTransferLiveDestinationPending" xml:space="preserve">
+    <value>连接后使用设置中的接收目录</value>
+  </data>
+  <data name="FileTransferLiveSendingState" xml:space="preserve">
+    <value>发送中</value>
+  </data>
+  <data name="FileTransferLiveReceivingState" xml:space="preserve">
+    <value>接收中</value>
+  </data>
+  <data name="FileTransferLiveSent" xml:space="preserve">
+    <value>已发送</value>
+  </data>
+  <data name="FileTransferLiveReceived" xml:space="preserve">
+    <value>已接收</value>
   </data>
 </root>

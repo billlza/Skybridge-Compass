@@ -13,6 +13,9 @@ The durable connection must be owned by Windows Task Scheduler, not by an intera
 - Pinned known_hosts: `C:\ProgramData\ssh\skybridge-relay-known_hosts`
 - Logs: `C:\ProgramData\SkyBridge\reverse-ssh-relay\logs\skybridge-relay-tunnel.log`
 - Remote forward: `127.0.0.1:2222 -> 127.0.0.1:22`
+- Triggers: at startup **and** a repeating self-heal trigger (`-SelfHealIntervalMinutes`, default 5)
+
+The self-heal trigger is part of the contract, not a convenience. `RestartCount` only replaces an instance that Task Scheduler itself started and then observed failing, so a boot-only task leaves the tunnel down until the next reboot whenever the `ssh` process dies on its own — or is orphaned by a `-Force` re-registration, which leaves the old process running while the new task definition has never been started. With `MultipleInstances = IgnoreNew` each repeat is a no-op while a tunnel is alive and a recovery when it is not. `verify-windows-reverse-ssh-relay-lifecycle.ps1` refuses to accept a task that is missing either trigger.
 
 Do not use an Administrator foreground `ssh.exe` process as acceptance evidence. The relay private key ACL is intentionally scoped for `LOCAL SERVICE`; interactive foreground runs can fail with OpenSSH key-permission errors even when the scheduled task setup is correct.
 

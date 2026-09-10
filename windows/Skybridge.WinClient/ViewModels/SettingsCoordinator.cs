@@ -59,7 +59,7 @@ public sealed class SettingsEffectSinks
     /// <summary>signalStrengthAlpha → apply the EMA coefficient to the DD signal smoother.</summary>
     public Action<double>? SetSignalSmoothingAlpha { get; init; }
 
-    /// <summary>keepSystemAwakeDuringTransfer → arm/disarm the SetThreadExecutionState awake gate.</summary>
+    /// <summary>keepSystemAwakeDuringTransfer → arm/disarm the Windows power request awake gate.</summary>
     public Action<bool>? SetKeepAwakeDuringTransfer { get; init; }
 
     /// <summary>系统监控 显示项 (CPU/Memory/Disk/Network/Temperature/FanSpeed) → push the six
@@ -329,7 +329,7 @@ public sealed class SettingsCoordinator : INotifyPropertyChanged, IDisposable
     public bool ImportSettings(string path) => _service.ImportFrom(path);
 
     /// <summary>Revert all settings to defaults (deletes the on-disk file).</summary>
-    public void ResetSettings() => _service.Reset();
+    public bool ResetSettings() => _service.Reset();
 
     /// <summary>
     /// Re-apply the deferred-effect settings to their subsystems. Invoked by the EXISTING
@@ -346,7 +346,15 @@ public sealed class SettingsCoordinator : INotifyPropertyChanged, IDisposable
     /// (if auto-scan is on) the discovery start + re-scan timer — without waiting for the first
     /// user edit. Idempotent.
     /// </summary>
-    public void ApplyInitialEffects() => ApplyAllEffects();
+    public void ApplyInitialEffects()
+    {
+        if (!_service.RuntimeTruth.Trusted)
+        {
+            return;
+        }
+
+        ApplyAllEffects();
+    }
 
     // =================================================================================
     //  Live-effect hooks — each drives a REAL subsystem through the SettingsEffectSinks the
@@ -446,7 +454,7 @@ public sealed class SettingsCoordinator : INotifyPropertyChanged, IDisposable
     // device signal indicators smooth more (low alpha) or track faster (high alpha).
     private void OnSignalSmoothingChanged(double alpha) => _sinks.SetSignalSmoothingAlpha?.Invoke(alpha);
 
-    // 传输时保持唤醒 → arm/disarm the SetThreadExecutionState keep-awake gate used during transfers.
+    // 传输时保持唤醒 → arm/disarm the Windows power request keep-awake gate used during transfers.
     private void OnKeepAwakeChanged(bool keepAwake) => _sinks.SetKeepAwakeDuringTransfer?.Invoke(keepAwake);
 
     // 系统监控 显示项 → push the six metric show-flags into the monitor tile-visibility source

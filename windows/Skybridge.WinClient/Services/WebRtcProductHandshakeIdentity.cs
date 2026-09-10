@@ -28,8 +28,8 @@ public sealed class WebRtcProductProtocolIdentityPublicKey
         Algorithm = algorithm;
         PublicKey = publicKey.ToArray();
         SecureEnclavePublicKey = secureEnclavePublicKey.HasValue && !secureEnclavePublicKey.Value.IsEmpty
-            ? secureEnclavePublicKey.Value.ToArray()
-            : null;
+            ? new ReadOnlyMemory<byte>(secureEnclavePublicKey.Value.ToArray())
+            : (ReadOnlyMemory<byte>?)null;
     }
 
     public WebRtcProductSignatureAlgorithm Algorithm { get; }

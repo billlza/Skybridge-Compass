@@ -157,7 +157,7 @@
                                     </Grid>
                                 </StackPanel>
 
-                                <Border Height="1" Background="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+                                <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" />
 
                                 <!-- Row 2 — 昵称 (display name; 编辑 hint for now) -->
                                 <StackPanel Spacing="8">
@@ -178,7 +178,7 @@
                                     </Border>
                                 </StackPanel>
 
-                                <Border Height="1" Background="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+                                <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" />
 
                                 <!-- Row 3 — 邮箱 (value + copy, or 未绑定 + 绑定) -->
                                 <StackPanel Spacing="8">
@@ -216,7 +216,7 @@
                                     </Grid>
                                 </StackPanel>
 
-                                <Border Height="1" Background="{StaticResource SkyBridgeShellSurfaceStrokeBrush}" />
+                                <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" />
 
                                 <!-- Row 4 — 手机号 (value, or 未绑定 + 绑定) -->
                                 <StackPanel Spacing="8">

@@ -15,6 +15,19 @@ function Assert-True {
     }
 }
 
+function Assert-WindowsHostForWinUiBuild {
+    param([string]$ScriptName)
+
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $isWindowsHost) {
+        $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        throw "$ScriptName requires a Windows host because WindowsAppSDK/WinUI resource generation invokes MakePri.exe from Microsoft.Windows.SDK.BuildTools; current host is $osDescription."
+    }
+}
+
+Assert-WindowsHostForWinUiBuild -ScriptName "windows UI action-order smoke"
+
 $sourceFiles = @()
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
     Sort-Object Name |
@@ -48,6 +61,7 @@ try {
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWinUI>true</UseWinUI>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -57,10 +71,10 @@ try {
 $compileItemText
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
   </ItemGroup>
 </Project>
 "@
@@ -85,7 +99,6 @@ AssertSequence(
         "UsbManagement",
         "FileTransfer",
         "RemoteDesktop",
-        "Quantum",
         "SystemMonitor",
         "Settings"
     });
@@ -97,9 +110,8 @@ AssertSequence(
         "Dashboard",
         "Device Discovery",
         "USB Management",
-        "File Transfer",
-        "Remote Desktop",
-        "Quantum",
+        "File Transfer\uFF08Quantum Communication\uFF09",
+        "Remote Desktop\uFF08Quantum Communication\uFF09",
         "System Monitor",
         "Settings"
     });

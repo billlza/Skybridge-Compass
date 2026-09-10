@@ -15,6 +15,19 @@ function Assert-True {
     }
 }
 
+function Assert-WindowsHostForWinUiBuild {
+    param([string]$ScriptName)
+
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $isWindowsHost) {
+        $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        throw "$ScriptName requires a Windows host because WindowsAppSDK/WinUI resource generation invokes MakePri.exe from Microsoft.Windows.SDK.BuildTools; current host is $osDescription."
+    }
+}
+
+Assert-WindowsHostForWinUiBuild -ScriptName "windows command-gates smoke"
+
 $sourceFiles = @()
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
     Sort-Object Name |
@@ -49,19 +62,21 @@ try {
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWinUI>true</UseWinUI>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
   </ItemGroup>
 </Project>
 "@
@@ -100,6 +115,7 @@ var settingsClient = new TestSettingsWorkspaceClient(
 var topBarStatusClient = new TestTopBarStatusClient(
     canOpenNotifications: true,
     canToggleTheme: true);
+var productControlSessionSnapshotClient = new TestProductControlSessionSnapshotClient();
 var coordinator = new WorkspaceCommandGateCoordinator(
     new SessionCommandStateClient(),
     new FeatureCatalogClient(),
@@ -113,7 +129,8 @@ var coordinator = new WorkspaceCommandGateCoordinator(
     settingsClient,
     new TestDiscoveryClient(),
     new PairingMaterialClient(),
-    new ConnectionWorkspaceStateClient());
+    new ConnectionWorkspaceStateClient(),
+    new ProductSessionActionGateClient(productControlSessionSnapshotClient));
 var catalog = new WorkspaceActionCatalogClient();
 var details = new WorkspaceActionDetailSnapshot("Off", "System");
 
@@ -510,6 +527,22 @@ AssertResolvedAction(
     WorkspaceActionGateId.CanDisconnectRemoteDesktopSession,
     true,
     "remote desktop Disconnect Session");
+
+productControlSessionSnapshotClient.IncludeAuthenticatedRemoteDesktopBinding = false;
+var remoteDesktopSessionBlockedAvailability = new WorkspaceCommandAvailability(coordinator, () => remoteDesktopReadyState);
+AssertEqual(false, remoteDesktopSessionBlockedAvailability.CanRecommendedRemoteDesktopConnect(), "session-blocked remote desktop WorkspaceCommandAvailability.RecommendedConnect");
+AssertEqual(false, remoteDesktopSessionBlockedAvailability.CanAdvancedRemoteDesktopConnect(), "session-blocked remote desktop WorkspaceCommandAvailability.AdvancedConnect");
+AssertEqual(true, remoteDesktopSessionBlockedAvailability.CanShowRemoteDesktopPerformanceOverlay(), "session-blocked remote desktop WorkspaceCommandAvailability.PerformanceOverlay");
+AssertEqual(true, remoteDesktopSessionBlockedAvailability.CanApplyRemoteDesktopQuality(), "session-blocked remote desktop WorkspaceCommandAvailability.Quality");
+AssertEqual(true, remoteDesktopSessionBlockedAvailability.CanOpenRemoteDesktopSettings(), "session-blocked remote desktop WorkspaceCommandAvailability.Settings");
+AssertEqual(false, remoteDesktopSessionBlockedAvailability.CanEnterRemoteDesktopFullScreen(), "session-blocked remote desktop WorkspaceCommandAvailability.FullScreen");
+AssertEqual(false, remoteDesktopSessionBlockedAvailability.CanDisconnectRemoteDesktopSession(), "session-blocked remote desktop WorkspaceCommandAvailability.DisconnectSession");
+var remoteDesktopSessionBlockedGates = coordinator.BuildActionGateSnapshot(remoteDesktopReadyState);
+AssertEqual(false, remoteDesktopSessionBlockedGates.CanRecommendedRemoteDesktopConnect, "session-blocked remote desktop action gate RecommendedConnect");
+AssertEqual(false, remoteDesktopSessionBlockedGates.CanAdvancedRemoteDesktopConnect, "session-blocked remote desktop action gate AdvancedConnect");
+AssertEqual(false, remoteDesktopSessionBlockedGates.CanEnterRemoteDesktopFullScreen, "session-blocked remote desktop action gate FullScreen");
+AssertEqual(false, remoteDesktopSessionBlockedGates.CanDisconnectRemoteDesktopSession, "session-blocked remote desktop action gate DisconnectSession");
+productControlSessionSnapshotClient.IncludeAuthenticatedRemoteDesktopBinding = true;
 
 var remoteDesktopBlockedState = BuildCommandState(
     liveReady: true,
@@ -932,6 +965,16 @@ ConnectionWorkspaceValidatedState BuildValidatedState(bool liveReady)
         "apple,webrtc,tcp,relay",
         "1",
         PeerCapabilities.Apple());
+    var remoteDesktopEndpoint = new DiscoveryPeerEndpoint(
+        SkyBridgeProtocolConstants.RemoteDesktopDnsSdService,
+        "mac-1.local",
+        5901,
+        "Desk Mac._skybridge-rd._tcp.local",
+        "resolved-dns-sd-endpoint");
+    var candidate = WindowsDiscoveryBrowserClient.BuildDefaultPeerCandidate(peer) with
+    {
+        Routes = DiscoveryPeerRoutes.Empty with { RemoteDesktop = remoteDesktopEndpoint }
+    };
     var pairingMaterial = new PairingMaterial(
         "mac-1",
         "Desk Mac",
@@ -940,7 +983,7 @@ ConnectionWorkspaceValidatedState BuildValidatedState(bool liveReady)
         new byte[] { 1, 2, 3, 4, 5 },
         VerifiedAgainstDiscoveryFingerprint: true,
         "command gate smoke");
-    var discoveredState = stateClient.BuildDiscoveryPeerValidatedState(peer);
+    var discoveredState = stateClient.BuildDiscoveryPeerValidatedState(candidate);
     var pairedState = stateClient.BuildPairingValidatedState(discoveredState, pairingMaterial);
     return stateClient.BuildPreflightValidatedState(
         pairedState,
@@ -1106,6 +1149,43 @@ sealed class TestDiscoveryClient : IDiscoveryClient
 
     public Task<DiscoveredPeer> ParseAdvertisementAsync(string service, string txtRecord) =>
         throw new NotSupportedException("Command-gate smoke only needs parser readiness.");
+}
+
+sealed class TestProductControlSessionSnapshotClient : IProductControlSessionSnapshotClient
+{
+    public bool IncludeAuthenticatedRemoteDesktopBinding { get; set; } = true;
+
+    public ProductControlSessionSnapshotResult Capture(
+        DiscoveryBrowserPeerCandidate candidate,
+        DateTimeOffset nowUtc)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        var endpoint = candidate.Routes.RemoteDesktop
+            ?? throw new InvalidOperationException("Command-gate remote desktop candidate must carry a resolved route.");
+        var bindings = IncludeAuthenticatedRemoteDesktopBinding
+            ? new[]
+            {
+                new AuthenticatedProductRouteBinding(
+                    ProductSessionActionKind.RemoteDesktop,
+                    endpoint.Service,
+                    endpoint.HostName,
+                    endpoint.Port,
+                    endpoint.InstanceName,
+                    endpoint.Provenance,
+                    nowUtc.AddMinutes(5))
+            }
+            : Array.Empty<AuthenticatedProductRouteBinding>();
+        var session = new EstablishedProductControlSessionSnapshot(
+            "command-gate-session",
+            candidate.Peer.DeviceId,
+            candidate.Peer.PublicKeyFingerprint,
+            "Established",
+            nowUtc.AddMinutes(5))
+        {
+            AuthenticatedRouteBindings = bindings
+        };
+        return new(session, null, "command-gate authenticated product session");
+    }
 }
 
 sealed class TestFileTransferWorkspaceClient : IFileTransferWorkspaceClient
@@ -1420,9 +1500,19 @@ sealed class TestSettingsWorkspaceClient : ISettingsWorkspaceClient
 }
 '@
 
-    dotnet run --project $testProject --no-launch-profile
+    dotnet restore $testProject
     if ($LASTEXITCODE -ne 0) {
-        throw "windows-command-gates smoke failed with exit code $LASTEXITCODE"
+        throw "windows-command-gates restore failed with exit code $LASTEXITCODE"
+    }
+
+    dotnet build $testProject --no-restore --configuration Release --nologo
+    if ($LASTEXITCODE -ne 0) {
+        throw "windows-command-gates build failed with exit code $LASTEXITCODE"
+    }
+
+    dotnet run --project $testProject --no-build --no-restore --configuration Release --no-launch-profile
+    if ($LASTEXITCODE -ne 0) {
+        throw "windows-command-gates run failed with exit code $LASTEXITCODE"
     }
 }
 finally {

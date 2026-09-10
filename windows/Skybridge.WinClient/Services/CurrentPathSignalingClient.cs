@@ -222,6 +222,7 @@ public static class CurrentPathSignalingWebSocketPolicy
     public const int MaxSessionIdLength = 512;
     public const int MaxSessionTokenLength = 4096;
     public const int MaxVersionLength = 64;
+    public const int MaxWebRtcEnvelopeBytes = 1_048_576;
 
     public static Uri BuildHeaderCredentialWebSocketUri(
         string signalingServerOrigin,
@@ -232,27 +233,27 @@ public static class CurrentPathSignalingWebSocketPolicy
         string protocolVersion)
     {
         var origin = CurrentPathOriginPolicy.CanonicalOrigin(signalingServerOrigin);
-        var normalizedSessionId = NormalizeSessionId(sessionId);
+        var normalizedSessionId = NormalizeRouteSessionId(sessionId);
         RequireCredentialValue(normalizedSessionId, MaxSessionIdLength, "current-path session id");
         RequireCredentialValue(sessionToken, MaxSessionTokenLength, "current-path session token");
         RequireCredentialValue(clientVersion, MaxVersionLength, "current-path client version");
         RequireCredentialValue(protocolVersion, MaxVersionLength, "current-path protocol version");
         var path = ValidateWebSocketPath(wsPath);
         var originUri = new Uri(origin);
-        var builder = new UriBuilder(originUri)
-        {
-            Scheme = originUri.Scheme == Uri.UriSchemeHttps ? "wss" : "ws",
-            Path = path,
-            Query = string.Join(
-                "&",
-                new[]
-                {
-                    $"shard={Uri.EscapeDataString(normalizedSessionId)}",
-                    $"cv={Uri.EscapeDataString(clientVersion.Trim())}",
-                    $"pv={Uri.EscapeDataString(protocolVersion.Trim())}",
-                }),
-        };
-        return builder.Uri;
+        var scheme = originUri.Scheme == Uri.UriSchemeHttps ? "wss" : "ws";
+        var query = string.Join(
+            "&",
+            new[]
+            {
+                $"shard={Uri.EscapeDataString(normalizedSessionId)}",
+                $"cv={Uri.EscapeDataString(clientVersion.Trim())}",
+                $"pv={Uri.EscapeDataString(protocolVersion.Trim())}",
+            });
+        // The server compares the raw request path. Validate origin/path and encode query values
+        // before disabling only Uri's path/query canonicalization at this single construction boundary.
+        return new Uri(
+            $"{scheme}://{originUri.Authority}{path}?{query}",
+            new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true });
     }
 
     public static IReadOnlyDictionary<string, string> BuildHeaderCredentials(
@@ -261,7 +262,7 @@ public static class CurrentPathSignalingWebSocketPolicy
         string clientVersion,
         string protocolVersion)
     {
-        var normalizedSessionId = NormalizeSessionId(sessionId);
+        var normalizedSessionId = NormalizeRouteSessionId(sessionId);
         RequireCredentialValue(normalizedSessionId, MaxSessionIdLength, "current-path session id");
         RequireCredentialValue(sessionToken, MaxSessionTokenLength, "current-path session token");
         RequireCredentialValue(clientVersion, MaxVersionLength, "current-path client version");
@@ -293,15 +294,20 @@ public static class CurrentPathSignalingWebSocketPolicy
             {
                 throw new InvalidDataException("Current-path signaling websocket path contains an invalid percent escape.");
             }
+
+            var escaped = byte.Parse(path.AsSpan(index + 1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            if (escaped < 0x20 || escaped == 0x7f || escaped is (byte)'.' or (byte)'/' or (byte)'\\' or (byte)'?' or (byte)'#')
+            {
+                throw new InvalidDataException("Current-path signaling websocket path contains an encoded delimiter or control character.");
+            }
+
+            index += 2;
         }
 
-        var decodedPath = Uri.UnescapeDataString(path);
-        ValidateWebSocketPathCharacters(decodedPath);
-        ValidateWebSocketPathSegments(decodedPath);
         return path;
     }
 
-    private static string NormalizeSessionId(string sessionId)
+    private static string NormalizeRouteSessionId(string sessionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
         return sessionId.Trim().ToUpperInvariant();
@@ -344,7 +350,8 @@ public static class CurrentPathSignalingWebSocketPolicy
 
         foreach (var current in path)
         {
-            if (current < 0x21 || current > 0x7E || char.IsWhiteSpace(current))
+            if (!(char.IsAsciiLetterOrDigit(current) ||
+                current is '-' or '.' or '_' or '~' or '!' or '$' or '&' or '\'' or '(' or ')' or '*' or '+' or ',' or ';' or '=' or ':' or '@' or '/' or '%'))
             {
                 throw new InvalidDataException("Current-path signaling websocket path contains an invalid character.");
             }
@@ -1183,9 +1190,11 @@ public sealed record CurrentPathBootstrapKemPublicKey
 
 public sealed record CurrentPathWebRtcSignalingPayload
 {
-    public const int MaxSdpBytes = 12 * 1024;
+    // Keep envelope headroom for session/device IDs, protocol identity fields, KEM metadata, and JSON framing.
+    public const int MaxSdpBytes = CurrentPathSignalingWebSocketPolicy.MaxWebRtcEnvelopeBytes - (16 * 1024);
     public const int MaxIceCandidateBytes = 2048;
     public const int MaxSdpMidBytes = 128;
+    public const int MaxUsernameFragmentBytes = 256;
 
     [JsonConstructor]
     public CurrentPathWebRtcSignalingPayload(
@@ -1193,6 +1202,7 @@ public sealed record CurrentPathWebRtcSignalingPayload
         string? candidate = null,
         string? sdpMid = null,
         int? sdpMLineIndex = null,
+        string? usernameFragment = null,
         string? protocolSigningAlgorithm = null,
         string? protocolPublicKeyFingerprint = null,
         byte[]? protocolPublicKeyBytes = null,
@@ -1204,6 +1214,7 @@ public sealed record CurrentPathWebRtcSignalingPayload
         Candidate = ValidateBoundedUtf8Text(candidate, MaxIceCandidateBytes, "current-path ICE candidate");
         SdpMid = ValidateBoundedUtf8Text(sdpMid, MaxSdpMidBytes, "current-path SDP mid");
         SdpMLineIndex = sdpMLineIndex;
+        UsernameFragment = ValidateIceUsernameFragment(usernameFragment);
         ProtocolSigningAlgorithm = string.IsNullOrWhiteSpace(protocolSigningAlgorithm)
             ? null
             : CurrentPathProtocolSigningAlgorithms.ToWireName(
@@ -1244,6 +1255,10 @@ public sealed record CurrentPathWebRtcSignalingPayload
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? SdpMLineIndex { get; }
 
+    [JsonPropertyName("usernameFragment")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? UsernameFragment { get; }
+
     [JsonPropertyName("protocolSigningAlgorithm")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ProtocolSigningAlgorithm { get; }
@@ -1283,6 +1298,27 @@ public sealed record CurrentPathWebRtcSignalingPayload
         return raw;
     }
 
+    private static string? ValidateIceUsernameFragment(string? raw)
+    {
+        if (raw is null)
+        {
+            return null;
+        }
+
+        if (raw.Length == 0)
+        {
+            throw new InvalidDataException("Current-path ICE username fragment must not be empty when present.");
+        }
+
+        if (Encoding.UTF8.GetByteCount(raw) > MaxUsernameFragmentBytes ||
+            raw.Any(current => char.IsControl(current)))
+        {
+            throw new InvalidDataException("Current-path ICE username fragment exceeds the byte limit or contains control characters.");
+        }
+
+        return raw;
+    }
+
     private static string? ValidateShortMetadata(string? raw, string label)
     {
         var normalized = raw?.Trim();
@@ -1312,7 +1348,7 @@ public sealed record CurrentPathWebRtcSignalingEnvelope
         string? authToken = null,
         double sentAt = 0)
     {
-        SessionId = NormalizeSessionId(sessionId);
+        SessionId = ValidateSessionId(sessionId);
         From = CurrentPathProtocolIdentityBinding.NormalizeDeviceId(from);
         To = string.IsNullOrWhiteSpace(to) ? null : CurrentPathProtocolIdentityBinding.NormalizeDeviceId(to);
         Type = type;
@@ -1359,14 +1395,15 @@ public sealed record CurrentPathWebRtcSignalingEnvelope
     public override string ToString() =>
         $"{nameof(CurrentPathWebRtcSignalingEnvelope)} {{ SessionId = <redacted>, From = {RedactedStableIdentifier(From)}, To = {RedactedStableIdentifier(To)}, Type = {Type}, PayloadPresent = {Payload is not null}, AuthToken = {RedactedOptional(AuthToken)}, SentAt = {SentAt.ToString(CultureInfo.InvariantCulture)} }}";
 
-    public static string NormalizeSessionId(string raw)
+    // Server session IDs are opaque and case-sensitive. REST decoding also trims only whitespace.
+    public static string ValidateSessionId(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
             throw new InvalidDataException("Current-path signaling envelope sessionId is missing.");
         }
 
-        var normalized = raw.Trim().ToUpperInvariant();
+        var normalized = raw.Trim();
         if (normalized.Length > CurrentPathSignalingWebSocketPolicy.MaxSessionIdLength ||
             normalized.Any(ch => ch < 0x20 || ch == 0x7F))
         {
@@ -1725,7 +1762,7 @@ public sealed class ClientWebSocketCurrentPathTransport : ICurrentPathWebSocketT
 
 public sealed class CurrentPathWebSocketSignalingClientOptions
 {
-    public const int DefaultMaxMessageBytes = 16 * 1024;
+    public const int DefaultMaxMessageBytes = CurrentPathSignalingWebSocketPolicy.MaxWebRtcEnvelopeBytes;
 
     public CurrentPathWebSocketSignalingClientOptions(
         string signalingServerOrigin,
@@ -1751,7 +1788,7 @@ public sealed class CurrentPathWebSocketSignalingClientOptions
             clientVersion,
             protocolVersion);
         Headers = headers;
-        SessionId = headers[CurrentPathSignalingWebSocketPolicy.SessionIdHeader];
+        SessionId = CurrentPathWebRtcSignalingEnvelope.ValidateSessionId(sessionId);
         LocalDeviceId = CurrentPathProtocolIdentityBinding.NormalizeDeviceId(localDeviceId);
         ClientVersion = clientVersion.Trim();
         ProtocolVersion = protocolVersion.Trim();
@@ -1761,9 +1798,10 @@ public sealed class CurrentPathWebSocketSignalingClientOptions
             throw new InvalidDataException("Current-path WebSocket connect timeout must be positive.");
         }
 
-        if (maxMessageBytes <= 0 || maxMessageBytes > DefaultMaxMessageBytes)
+        if (maxMessageBytes <= 0 || maxMessageBytes > CurrentPathSignalingWebSocketPolicy.MaxWebRtcEnvelopeBytes)
         {
-            throw new InvalidDataException($"Current-path WebSocket max message bytes must be between 1 and {DefaultMaxMessageBytes}.");
+            throw new InvalidDataException(
+                $"Current-path WebSocket max message bytes must be between 1 and {CurrentPathSignalingWebSocketPolicy.MaxWebRtcEnvelopeBytes}.");
         }
 
         MaxMessageBytes = maxMessageBytes;
@@ -1928,8 +1966,17 @@ public sealed class CurrentPathWebSocketSignalingClient : IAsyncDisposable
                 "Current-path WebSocket envelope scope does not match the bound session.");
         }
 
+        var encodedEnvelope = CurrentPathSignalingFrameCodec.EncodeEnvelope(envelope);
+        if (Encoding.UTF8.GetByteCount(encodedEnvelope) > _options.MaxMessageBytes)
+        {
+            throw new CurrentPathWebSocketSignalingException(
+                "outbound_message_too_large",
+                CurrentPathSignalingFailureClass.ProtocolViolation,
+                "Current-path outbound signaling envelope exceeds the configured byte limit.");
+        }
+
         await _transport.SendTextAsync(
-                CurrentPathSignalingFrameCodec.EncodeEnvelope(envelope),
+                encodedEnvelope,
                 cancellationToken)
             .ConfigureAwait(false);
     }
@@ -2073,7 +2120,7 @@ public sealed class CurrentPathWebSocketSignalingClient : IAsyncDisposable
         {
             if (string.Equals(parsed.ServerFrame.Type, "bound", StringComparison.Ordinal))
             {
-                var boundSessionId = CurrentPathWebRtcSignalingEnvelope.NormalizeSessionId(
+                var boundSessionId = CurrentPathWebRtcSignalingEnvelope.ValidateSessionId(
                     parsed.ServerFrame.SessionId ?? string.Empty);
                 if (!string.Equals(boundSessionId, _options.SessionId, StringComparison.Ordinal))
                 {
@@ -2149,7 +2196,7 @@ public sealed class CurrentPathWebSocketSignalingClient : IAsyncDisposable
 
         if (!string.IsNullOrWhiteSpace(frame.SessionId))
         {
-            var frameSessionId = CurrentPathWebRtcSignalingEnvelope.NormalizeSessionId(frame.SessionId);
+            var frameSessionId = CurrentPathWebRtcSignalingEnvelope.ValidateSessionId(frame.SessionId);
             if (!string.Equals(frameSessionId, _options.SessionId, StringComparison.Ordinal))
             {
                 Emit(

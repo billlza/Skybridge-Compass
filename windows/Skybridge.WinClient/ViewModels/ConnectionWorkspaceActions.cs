@@ -129,6 +129,9 @@ internal sealed class ConnectionWorkspaceActions
         {
             var discoveredPeer = _connectionInputCoordinator.ValidatedState.DiscoveredPeer;
             var pairingMaterial = _connectionInputCoordinator.ValidatedState.PairingMaterial;
+            // The discovery candidate travels with the peer through every validated-state
+            // transition, so its resolved DNS-SD endpoints are the ones for this exact peer.
+            var discoveredRoutes = _connectionInputCoordinator.ValidatedState.DiscoveryCandidate?.Routes;
             var readiness = _connectionWorkspaceStateClient.BuildPreflightReadiness(
                 discoveredPeer,
                 pairingMaterial);
@@ -140,7 +143,8 @@ internal sealed class ConnectionWorkspaceActions
             _setConnectionPreflightStatus(_connectionPreflightClient.BuildPendingStatus());
             var snapshot = await _connectionPreflightClient.BuildReadOnlySnapshotAsync(
                 discoveredPeer!,
-                pairingMaterial!);
+                pairingMaterial!,
+                discoveredRoutes);
             _connectionResultProjector.ApplyPreflightPrepared(snapshot);
         });
 

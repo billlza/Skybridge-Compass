@@ -349,11 +349,11 @@
                                 PlaceholderText="密码"
                                 Style="{StaticResource GlassPasswordBoxStyle}" />
 
-                            <!-- 记住账号密码 (Mac stores email pref only, never the raw password) -->
-                            <CheckBox
-                                x:Name="RememberCredentials"
-                                Content="记住账号密码"
-                                Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                            <TextBlock
+                                Text="登录会话由 Windows 安全存储维护；不会保存原始密码。"
+                                FontSize="12"
+                                TextWrapping="Wrap"
+                                Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
 
                             <!-- Inline error (collapsed until a sign-in attempt fails) -->
                             <Border
@@ -404,12 +404,10 @@
                                 FontSize="13"
                                 TextWrapping="Wrap"
                                 Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
-                            <!-- BLUE "使用 Microsoft 登录" button. Microsoft OAuth requires the
-                                 Supabase azure provider, which is NOT enabled on this project yet,
-                                 so the button is HONEST: clicking it surfaces an inline message
-                                 rather than faking success or opening a broken flow. -->
+                            <!-- Microsoft remains disabled until Windows owns state, PKCE, callback
+                                 validation, and Supabase session installation as one closed flow. -->
                             <Button
-                                Click="OnMicrosoftContinue"
+                                IsEnabled="False"
                                 HorizontalAlignment="Stretch"
                                 Style="{StaticResource MicrosoftButtonStyle}"
                                 Height="50"
@@ -429,12 +427,12 @@
                                         <Rectangle Grid.Row="1" Grid.Column="0" Fill="#FF00A4EF" />
                                         <Rectangle Grid.Row="1" Grid.Column="1" Fill="#FFFFB900" />
                                     </Grid>
-                                    <TextBlock Text="使用 Microsoft 登录" FontWeight="SemiBold" Foreground="White" />
+                                    <TextBlock Text="Microsoft 登录尚未开放" FontWeight="SemiBold" Foreground="White" />
                                 </StackPanel>
                             </Button>
                             <TextBlock
                                 x:Name="MicrosoftHint"
-                                Text="Microsoft 账号登录需要在 Supabase 启用 Azure 登录后才能使用。"
+                                Text="Windows 端尚未完成 state、PKCE、安全回调校验和会话安装闭环，请暂用邮箱登录。"
                                 FontSize="12"
                                 TextWrapping="Wrap"
                                 Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
@@ -450,29 +448,29 @@
                                 <StackPanel Spacing="10">
                                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                                         <FontIcon Glyph="&#xE72E;" FontSize="16" Foreground="#FFB07CF5" />
-                                        <TextBlock Text="推荐使用安全浏览器登录" FontWeight="SemiBold" Foreground="#FFB07CF5" />
+                                        <TextBlock Text="Nebula 登录尚未接通" FontWeight="SemiBold" Foreground="#FFB07CF5" />
                                     </StackPanel>
                                     <TextBlock
-                                        Text="Nebula 登录会在系统浏览器中完成，授权与二次验证都会留在浏览器授权会话里。"
+                                        Text="Nebula 登录尚未在 Windows 端完成安全回调闭环，请暂用邮箱登录。"
                                         FontSize="12"
                                         TextWrapping="Wrap"
                                         Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                                         <FontIcon Glyph="&#xE73E;" FontSize="13" Foreground="{StaticResource SkyBridgeSuccessBrush}" />
-                                        <TextBlock Text="支持 PKCE 与浏览器内 MFA" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
+                                        <TextBlock Text="待实现 state、PKCE、回调校验与会话安装" FontSize="12" Foreground="{StaticResource SkyBridgeTextSecondaryBrush}" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
-                            <!-- 在安全浏览器中登录 (PURPLE) -->
+                            <!-- Disabled until Windows owns a complete state + PKCE callback flow. -->
                             <Button
-                                Click="OnNebulaBrowserLogin"
+                                IsEnabled="False"
                                 HorizontalAlignment="Stretch"
                                 Style="{StaticResource NebulaButtonStyle}"
                                 Height="50"
                                 MinHeight="50">
                                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <FontIcon Glyph="&#xE774;" FontSize="16" Foreground="White" />
-                                    <TextBlock Text="在安全浏览器中登录" FontWeight="SemiBold" Foreground="White" />
+                                    <TextBlock Text="Nebula 登录尚未开放" FontWeight="SemiBold" Foreground="White" />
                                 </StackPanel>
                             </Button>
                         </StackPanel>

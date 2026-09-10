@@ -4,45 +4,19 @@
 # with /p:EnableMsixTooling=true /p:GenerateAppxPackageOnBuild=true (see §4 of the plan).
 
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Drawing
 
 $ProjectDir = Split-Path -Parent $PSScriptRoot   # .../Skybridge.WinClient
 $AssetsDir  = Join-Path $ProjectDir 'Assets'
 $PublisherSubject = 'CN=SkyBridge'               # MUST match Package.appxmanifest Publisher
 $PfxPassword = 'DevPassw0rd!'                     # change for your environment
 
-New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
-
-# --- (a) Placeholder PNGs: solid SkyBridge-blue fill, exact pixel sizes ----------
-$fill = [System.Drawing.Color]::FromArgb(255, 12, 92, 168)   # opaque blue
-
-function New-Png([string]$name, [int]$w, [int]$h, [bool]$transparent = $false) {
-  $bmp = New-Object System.Drawing.Bitmap($w, $h)
-  $g   = [System.Drawing.Graphics]::FromImage($bmp)
-  if ($transparent) { $g.Clear([System.Drawing.Color]::Transparent) }
-  else              { $g.Clear($fill) }
-  $g.Dispose()
-  $bmp.Save((Join-Path $AssetsDir $name), [System.Drawing.Imaging.ImageFormat]::Png)
-  $bmp.Dispose()
-  Write-Host "  wrote Assets\$name  ($w x $h)"
+# The reviewed product artwork is checked in and shared with unpackaged builds.
+# Validate inputs before certificate setup; never replace the brand with placeholder pixels.
+foreach ($asset in 'SkyBridgeCompass.ico', 'AppList.scale-100.png', 'MedTile.scale-100.png', 'StoreLogo.scale-100.png') {
+  if (!(Test-Path -LiteralPath (Join-Path $AssetsDir $asset) -PathType Leaf)) {
+    throw "Missing product icon asset: $asset"
+  }
 }
-
-New-Png 'Square44x44Logo.png'    44   44
-New-Png 'Square150x150Logo.png'  150  150
-New-Png 'Wide310x150Logo.png'    310  150
-New-Png 'LargeTile.png'          310  310    # Square310x310Logo
-New-Png 'SmallTile.png'          71   71     # Square71x71Logo
-New-Png 'StoreLogo.png'          50   50
-New-Png 'SplashScreen.png'       620  300
-
-foreach ($s in 16,24,32,48,256) {
-  New-Png ("Square44x44Logo.targetsize-{0}.png" -f $s) $s $s
-}
-foreach ($s in 24,48,256) {
-  New-Png ("Square44x44Logo.targetsize-{0}_altform-unplated.png" -f $s) $s $s $true
-}
-
-Write-Host "Assets generated in $AssetsDir`n" -ForegroundColor Green
 
 # --- (b) Self-signed dev code-signing cert -------------------------------------
 $existing = Get-ChildItem Cert:\CurrentUser\My |

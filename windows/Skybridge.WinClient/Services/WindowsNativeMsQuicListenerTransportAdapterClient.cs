@@ -18,7 +18,8 @@ namespace Skybridge.WinClient.Services;
 /// transport for Windows-to-Windows same-LAN sessions. This is the T7b counterpart to the T7a dialer
 /// (<see cref="WindowsNativeMsQuicTransportAdapterClient"/>): instead of opening a QUIC connection to a peer,
 /// it binds a local UDP port with <see cref="QuicListener"/>, ACCEPTS an inbound <see cref="QuicConnection"/>
-/// (ALPN "skybridge/1", TLS 1.3), and accepts the inbound bidirectional control stream the dialer opens.
+/// (ALPN <see cref="SkyBridgeProtocolConstants.MsQuicAlpn"/>, TLS 1.3), and accepts the inbound
+/// bidirectional control stream the dialer opens.
 ///
 /// Together the two halves close the bidirectional Win-to-Win MsQuic path: one Windows box runs the listener
 /// (role=listen), the other runs the dialer (role=dial), and both derive the SAME transport-binding secret
@@ -43,8 +44,6 @@ namespace Skybridge.WinClient.Services;
 /// </summary>
 public sealed class WindowsNativeMsQuicListenerTransportAdapterClient : IWindowsTransportAdapterClient
 {
-    private const string SkyBridgeAlpn = "skybridge/1";
-
     private readonly WindowsNativeMsQuicListenerTransportAdapterOptions _options;
 
     public WindowsNativeMsQuicListenerTransportAdapterClient(WindowsNativeMsQuicListenerTransportAdapterOptions options)
@@ -94,7 +93,7 @@ public sealed class WindowsNativeMsQuicListenerTransportAdapterClient : IWindows
                 "Windows MsQuic listener",
                 "live inbound quic session",
                 $"MsQuic (System.Net.Quic) accepted an inbound QUIC connection {live.RemoteEndpoint} -> {live.LocalEndpoint} "
-                + $"with ALPN '{SkyBridgeAlpn}' and accepted the inbound control stream (MsQuicStream) per channel.rs."),
+                + $"with ALPN '{SkyBridgeProtocolConstants.MsQuicAlpn}' and accepted the inbound control stream (MsQuicStream) per channel.rs."),
             new ConnectionPreflightFact(
                 "MsQuic capability",
                 "negotiated",
@@ -144,14 +143,20 @@ public sealed class WindowsNativeMsQuicListenerTransportAdapterClient : IWindows
         var listenerOptions = new QuicListenerOptions
         {
             ListenEndPoint = listenEndpoint,
-            ApplicationProtocols = new List<SslApplicationProtocol> { new(SkyBridgeAlpn) },
+            ApplicationProtocols = new List<SslApplicationProtocol>
+            {
+                new(SkyBridgeProtocolConstants.MsQuicAlpn)
+            },
             ConnectionOptionsCallback = (_, _, _) => ValueTask.FromResult(new QuicServerConnectionOptions
             {
                 DefaultStreamErrorCode = 0,
                 DefaultCloseErrorCode = 0,
                 ServerAuthenticationOptions = new SslServerAuthenticationOptions
                 {
-                    ApplicationProtocols = new List<SslApplicationProtocol> { new(SkyBridgeAlpn) },
+                    ApplicationProtocols = new List<SslApplicationProtocol>
+                    {
+                        new(SkyBridgeProtocolConstants.MsQuicAlpn)
+                    },
                     ServerCertificate = serverCertificate,
                     // Request the dialer's client cert so connection.RemoteCertificate is populated for the
                     // two-sided secret, but do NOT require a trusted chain: real auth is the PQC handshake

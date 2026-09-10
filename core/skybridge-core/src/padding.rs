@@ -1,5 +1,3 @@
-use rand_core::{OsRng, RngCore};
-
 const SBP2_MAGIC: &[u8; 4] = b"SBP2";
 const SBP2_HEADER_LEN: usize = 8;
 
@@ -18,6 +16,7 @@ pub struct Sbp2DecodedFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sbp2Error {
+    RandomnessUnavailable,
     PayloadTooLarge,
     TargetTooSmall {
         actual_len: usize,
@@ -54,7 +53,7 @@ pub fn encode_sbp2_fixed(payload: &[u8], padded_payload_len: usize) -> Result<Ve
     let padding_len = padded_payload_len - payload.len();
     if padding_len > 0 {
         let mut padding = vec![0u8; padding_len];
-        OsRng.fill_bytes(&mut padding);
+        getrandom::fill(&mut padding).map_err(|_| Sbp2Error::RandomnessUnavailable)?;
         frame.extend_from_slice(&padding);
     }
 

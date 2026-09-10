@@ -37,7 +37,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
         }
 
         ThrowIfDisposed();
-        await _mutex.WaitAsync();
+        await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
@@ -49,7 +49,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
             EnsureHandle();
             SetState(EngineConnectionState.Connecting);
             IPeerPublicKeyProvider peerPublicKeyProvider = request.PairingMaterial.ToPeerPublicKeyProvider();
-            var peerPublicKey = await peerPublicKeyProvider.GetPeerPublicKeyAsync();
+            var peerPublicKey = await peerPublicKeyProvider.GetPeerPublicKeyAsync().ConfigureAwait(false);
             if (peerPublicKey is null || peerPublicKey.Length == 0)
             {
                 throw new InvalidOperationException("Cannot connect without a peer public key from pairing.");
@@ -134,7 +134,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
     public async Task<byte[]> GetLocalPublicKeyAsync()
     {
         ThrowIfDisposed();
-        await _mutex.WaitAsync();
+        await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
@@ -150,7 +150,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
     public async Task DisconnectAsync()
     {
         ThrowIfDisposed();
-        await _mutex.WaitAsync();
+        await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
@@ -172,7 +172,7 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
     public async Task SendHeartbeatAsync()
     {
         ThrowIfDisposed();
-        await _mutex.WaitAsync();
+        await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
@@ -221,9 +221,16 @@ public sealed class FfiEngineClient : IEngineClient, IDisposable
         finally
         {
             _mutex.Release();
-            _mutex.Dispose();
         }
 
+        // The semaphore is deliberately NOT disposed here. `_disposed` is set under
+        // `_disposeLock` before this point, so no NEW caller gets past ThrowIfDisposed —
+        // but a caller that passed that check microseconds earlier can still be parked in
+        // `await _mutex.WaitAsync()`. Disposing the semaphore out from under that waiter
+        // fails it with ObjectDisposedException on a pool thread, outside any workspace
+        // error scope. SemaphoreSlim holds no unmanaged resource unless AvailableWaitHandle
+        // is touched (it is not), so letting the GC reclaim it is both correct and cheaper
+        // than the crash it replaces.
         GC.SuppressFinalize(this);
         ThrowOnError(disconnectError, "dispose_disconnect");
     }

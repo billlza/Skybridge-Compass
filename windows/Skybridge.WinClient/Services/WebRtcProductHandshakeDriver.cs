@@ -47,24 +47,10 @@ public sealed class WebRtcProductHandshakeDriverOptions
     public int MaxQueuedInboundMessages { get; }
 }
 
-public interface IWebRtcProductHandshakeCryptoProvider
-{
-    ValueTask<WebRtcProductHandshakeMessageA> CreateInitiatorMessageAAsync(
-        LiveWebRtcProductControlContext context,
-        CancellationToken cancellationToken = default);
-
-    ValueTask<ReadOnlyMemory<byte>> OpenResponderMessageBAsync(
-        LiveWebRtcProductControlContext context,
-        WebRtcProductHandshakeMessageA messageA,
-        ReadOnlyMemory<byte> transcriptHashA,
-        WebRtcProductHandshakeMessageB messageB,
-        CancellationToken cancellationToken = default);
-}
-
-public sealed class UnavailableWebRtcProductHandshakeCryptoProvider : IWebRtcProductHandshakeCryptoProvider
+public sealed class UnavailableWebRtcProductHandshakeCryptoProvider : IProductHandshakeCryptoProvider
 {
     public ValueTask<WebRtcProductHandshakeMessageA> CreateInitiatorMessageAAsync(
-        LiveWebRtcProductControlContext context,
+        ProductHandshakePeerContext context,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -74,8 +60,8 @@ public sealed class UnavailableWebRtcProductHandshakeCryptoProvider : IWebRtcPro
             + "Refusing to send MessageA without real identity signing and key agreement.");
     }
 
-    public ValueTask<ReadOnlyMemory<byte>> OpenResponderMessageBAsync(
-        LiveWebRtcProductControlContext context,
+    public ValueTask<ProductHandshakeSharedSecret> OpenResponderMessageBAsync(
+        ProductHandshakePeerContext context,
         WebRtcProductHandshakeMessageA messageA,
         ReadOnlyMemory<byte> transcriptHashA,
         WebRtcProductHandshakeMessageB messageB,
@@ -89,6 +75,30 @@ public sealed class UnavailableWebRtcProductHandshakeCryptoProvider : IWebRtcPro
         throw new WebRtcProductHandshakeDriverException(
             "WebRTC product handshake crypto provider is unavailable. "
             + "Refusing to open MessageB or install SBWC session keys.");
+    }
+
+    public ValueTask<WebRtcProductHandshakeResponderMaterial> CreateResponderMessageBAsync(
+        ProductHandshakePeerContext context,
+        WebRtcProductHandshakeMessageA messageA,
+        ReadOnlyMemory<byte> transcriptHashA,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(messageA);
+        _ = transcriptHashA;
+        _ = cancellationToken;
+        throw new WebRtcProductHandshakeDriverException(
+            "WebRTC product handshake crypto provider is unavailable. "
+            + "Refusing to create responder MessageB or install SBWC session keys.");
+    }
+
+    public void AbortInitiatorSecret(ReadOnlyMemory<byte> transcriptHashA)
+    {
+        if (transcriptHashA.Length != WebRtcProductHandshakeCodec.TranscriptHashLength)
+        {
+            throw new WebRtcProductHandshakeDriverException(
+                "WebRTC product handshake crypto provider abort requires a 32-byte transcriptHashA.");
+        }
     }
 }
 
@@ -107,275 +117,99 @@ public sealed record WebRtcProductHandshakeInitiatorResult(
     bool ResponderFinishedVerified,
     bool InitiatorFinishedSent);
 
+public sealed record WebRtcProductHandshakeResponderResult(
+    LiveWebRtcProductControlContext EstablishedContext,
+    ushort SelectedSuiteWireId,
+    string SessionId,
+    int MessageABytes,
+    string MessageASha256,
+    int MessageBBytes,
+    string MessageBSha256,
+    ulong SessionHash,
+    ulong TranscriptPrefix,
+    bool InitiatorIdentityFingerprintVerified,
+    bool InitiatorSignatureVerified,
+    bool ResponderFinishedSent,
+    bool InitiatorFinishedVerified);
+
 public sealed class WebRtcProductHandshakeDriver
 {
-    private readonly IWebRtcProductHandshakeCryptoProvider _cryptoProvider;
+    private readonly ProductHandshakeCore _handshake;
     private readonly WebRtcProductSecureSessionStore _sessionStore;
     private readonly WebRtcProductHandshakeDriverOptions _options;
 
-    public WebRtcProductHandshakeDriver(
-        IWebRtcProductHandshakeCryptoProvider cryptoProvider,
-        WebRtcProductSecureSessionStore sessionStore,
-        WebRtcProductHandshakeDriverOptions? options = null)
+    public WebRtcProductHandshakeDriver(IProductHandshakeCryptoProvider cryptoProvider,
+        WebRtcProductSecureSessionStore sessionStore, WebRtcProductHandshakeDriverOptions? options = null)
     {
-        _cryptoProvider = cryptoProvider ?? throw new ArgumentNullException(nameof(cryptoProvider));
         _sessionStore = sessionStore ?? throw new ArgumentNullException(nameof(sessionStore));
         _options = options ?? WebRtcProductHandshakeDriverOptions.Default;
+        _handshake = new ProductHandshakeCore(cryptoProvider, _options.MessageTimeout);
     }
 
     public async Task<LiveWebRtcProductControlContext> StartInitiatorAsync(
-        LiveWebRtcProductControlContext transportContext,
-        CancellationToken cancellationToken = default)
-    {
-        var result = await StartInitiatorWithResultAsync(transportContext, cancellationToken)
-            .ConfigureAwait(false);
-        return result.EstablishedContext;
-    }
+        LiveWebRtcProductControlContext transportContext, CancellationToken cancellationToken = default) =>
+        (await StartInitiatorWithResultAsync(transportContext, cancellationToken).ConfigureAwait(false)).EstablishedContext;
+
+    public async Task<LiveWebRtcProductControlContext> StartResponderAsync(
+        LiveWebRtcProductControlContext transportContext, CancellationToken cancellationToken = default) =>
+        (await StartResponderWithResultAsync(transportContext, cancellationToken).ConfigureAwait(false)).EstablishedContext;
 
     public async Task<WebRtcProductHandshakeInitiatorResult> StartInitiatorWithResultAsync(
-        LiveWebRtcProductControlContext transportContext,
-        CancellationToken cancellationToken = default)
+        LiveWebRtcProductControlContext transportContext, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(transportContext);
         ValidateTransportContext(transportContext);
-
-        var messageA = await _cryptoProvider
-            .CreateInitiatorMessageAAsync(transportContext, cancellationToken)
-            .ConfigureAwait(false);
-        ArgumentNullException.ThrowIfNull(messageA);
-        ValidateMessageA(messageA);
-
-        var messageAFrame = messageA.Encode();
-        var messageASha256 = Sha256Hex(messageAFrame);
-        var transcriptHashA = SHA256.HashData(messageA.EncodeWithoutSignature());
-        await using var inbox = new ProductControlMessageInbox(
-            transportContext.ControlPlane,
-            _options.MaxQueuedInboundMessages);
-
-        await transportContext.ControlPlane
-            .SendAsync(messageAFrame, cancellationToken)
-            .ConfigureAwait(false);
-
-        var messageBFrame = await inbox
-            .ReadAsync("MessageB", _options.MessageTimeout, cancellationToken)
-            .ConfigureAwait(false);
-        var messageBSha256 = Sha256Hex(messageBFrame);
-        RejectSecureEnvelopeBeforeEstablished(messageBFrame.AsSpan(), "MessageB");
-        var messageB = DecodeMessageB(messageBFrame);
-        ValidateResponderIdentity(transportContext, messageB);
-        ValidateResponderSelection(messageA, messageB);
-
-        byte[] sharedSecret = Array.Empty<byte>();
+        await using var transport = new ProductControlMessageInbox(transportContext.ControlPlane, _options.MaxQueuedInboundMessages);
         try
         {
-            sharedSecret = (await _cryptoProvider
-                    .OpenResponderMessageBAsync(
-                        transportContext,
-                        messageA,
-                        transcriptHashA,
-                        messageB,
-                        cancellationToken)
-                    .ConfigureAwait(false))
-                .ToArray();
-            RequireSharedSecret(sharedSecret);
-
-            var transcriptHashB = SHA256.HashData(messageB.EncodeWithoutSignature());
-            var keys = WebRtcProductHandshakeSessionKeys.Derive(
-                sharedSecret,
-                messageB.SelectedSuiteWireId,
-                transcriptHashA,
-                transcriptHashB,
-                messageA.ClientNonce.Span,
-                messageB.ServerNonce.Span,
-                WebRtcAppSecureRole.Initiator);
-            try
-            {
-                var responderFinishedFrame = await inbox
-                    .ReadAsync("responder Finished", _options.MessageTimeout, cancellationToken)
-                    .ConfigureAwait(false);
-                RejectSecureEnvelopeBeforeEstablished(responderFinishedFrame.AsSpan(), "responder Finished");
-                var responderFinished = DecodeFinished(responderFinishedFrame);
-                if (!WebRtcProductHandshakeSessionKeys.VerifyFinished(
-                        responderFinished,
-                        keys,
-                        WebRtcAppSecureRole.Responder))
-                {
-                    throw new WebRtcProductHandshakeDriverException(
-                        "WebRTC product handshake responder Finished MAC verification failed.");
-                }
-
-                var initiatorFinished = WebRtcProductHandshakeSessionKeys.CreateFinished(keys);
-                await transportContext.ControlPlane
-                    .SendAsync(initiatorFinished.Encode(), cancellationToken)
-                    .ConfigureAwait(false);
-
-                var establishedContext = _sessionStore.InstallEstablishedSession(
-                    transportContext,
-                    keys,
-                    messageB.SelectedSuiteWireId);
-                return new WebRtcProductHandshakeInitiatorResult(
-                    establishedContext,
-                    messageB.SelectedSuiteWireId,
-                    keys.SessionId,
-                    messageAFrame.Length,
-                    messageASha256,
-                    messageBFrame.Length,
-                    messageBSha256,
-                    WebRtcAppSecureEnvelope.SessionIdHash(keys.SessionId),
-                    WebRtcAppSecureEnvelope.TranscriptPrefix(keys.TranscriptHash.Span),
-                    ResponderIdentityFingerprintVerified: true,
-                    ResponderSignatureVerified: true,
-                    ResponderFinishedVerified: true,
-                    InitiatorFinishedSent: true);
-            }
-            finally
-            {
-                keys.Dispose();
-            }
+            using var result = await _handshake.StartInitiatorAsync(transport, PeerContext(transportContext), cancellationToken).ConfigureAwait(false);
+            using var keys = WebRtcProductHandshakeSessionKeys.ToWebRtcKeys(result.Keys);
+            var established = _sessionStore.InstallEstablishedSession(transportContext, keys, result.SuiteWireId);
+            return new WebRtcProductHandshakeInitiatorResult(established, result.SuiteWireId, keys.SessionId,
+                result.MessageABytes, result.MessageASha256, result.MessageBBytes, result.MessageBSha256,
+                WebRtcAppSecureEnvelope.SessionIdHash(keys.SessionId), WebRtcAppSecureEnvelope.TranscriptPrefix(keys.TranscriptHash.Span),
+                ResponderIdentityFingerprintVerified: true, ResponderSignatureVerified: true,
+                ResponderFinishedVerified: true, InitiatorFinishedSent: true);
         }
-        finally
-        {
-            if (sharedSecret.Length > 0)
-            {
-                CryptographicOperations.ZeroMemory(sharedSecret);
-            }
-        }
+        catch (ProductHandshakeException ex) { throw new WebRtcProductHandshakeDriverException(ex.Message, ex); }
     }
 
-    private static void ValidateTransportContext(LiveWebRtcProductControlContext transportContext)
+    public async Task<WebRtcProductHandshakeResponderResult> StartResponderWithResultAsync(
+        LiveWebRtcProductControlContext transportContext, CancellationToken cancellationToken = default)
     {
-        if (transportContext.SecureSessionState != WebRtcProductControlSecureSessionState.TransportOnly)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake must start from a TransportOnly product-control context.");
-        }
-
-        if (!transportContext.ControlPlane.IsConnected)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake requires a connected product-control plane.");
-        }
-    }
-
-    private static void ValidateMessageA(WebRtcProductHandshakeMessageA messageA)
-    {
-        if (messageA.SupportedSuiteWireIds.Count == 0)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake provider created MessageA without supported suites.");
-        }
-
-        if (messageA.KeyShares.Count == 0)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake provider created MessageA without key shares.");
-        }
-    }
-
-    private static void ValidateResponderSelection(
-        WebRtcProductHandshakeMessageA messageA,
-        WebRtcProductHandshakeMessageB messageB)
-    {
-        if (!messageA.SupportedSuiteWireIds.Contains(messageB.SelectedSuiteWireId))
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake responder selected a suite that was not offered in MessageA.");
-        }
-
-        if (messageA.Policy.RequirePqc && IsClassicSuite(messageB.SelectedSuiteWireId))
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake responder selected a classic suite while MessageA requires PQC.");
-        }
-
-        if (!messageA.Policy.AllowClassicFallback &&
-            !string.Equals(messageA.Policy.MinimumTier, "classic", StringComparison.Ordinal) &&
-            IsClassicSuite(messageB.SelectedSuiteWireId))
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake responder selected a classic suite while classic fallback is disabled.");
-        }
-    }
-
-    private static void ValidateResponderIdentity(
-        LiveWebRtcProductControlContext transportContext,
-        WebRtcProductHandshakeMessageB messageB)
-    {
-        string actualFingerprint;
+        ValidateTransportContext(transportContext);
+        await using var transport = new ProductControlMessageInbox(transportContext.ControlPlane, _options.MaxQueuedInboundMessages);
         try
         {
-            var identity = WebRtcProductProtocolIdentityPublicKey.DecodeWithLegacyFallback(
-                messageB.IdentityPublicKey.Span);
-            actualFingerprint = identity.AuthoritativeFingerprint;
+            using var result = await _handshake.AcceptResponderAsync(transport, PeerContext(transportContext),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            using var keys = WebRtcProductHandshakeSessionKeys.ToWebRtcKeys(result.Keys);
+            var established = _sessionStore.InstallEstablishedSession(transportContext, keys, result.SuiteWireId);
+            return new WebRtcProductHandshakeResponderResult(established, result.SuiteWireId, keys.SessionId,
+                result.MessageABytes, result.MessageASha256, result.MessageBBytes, result.MessageBSha256,
+                WebRtcAppSecureEnvelope.SessionIdHash(keys.SessionId), WebRtcAppSecureEnvelope.TranscriptPrefix(keys.TranscriptHash.Span),
+                InitiatorIdentityFingerprintVerified: true, InitiatorSignatureVerified: true,
+                ResponderFinishedSent: true, InitiatorFinishedVerified: true);
         }
-        catch (WebRtcProductHandshakeCodecException ex)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake MessageB identity public key could not be decoded as a protocol identity.",
-                ex);
-        }
-
-        if (!string.Equals(actualFingerprint, transportContext.PeerPublicKeyFingerprint, StringComparison.Ordinal))
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake MessageB identity public key fingerprint does not match the paired peer authoritative fingerprint.");
-        }
+        catch (ProductHandshakeException ex) { throw new WebRtcProductHandshakeDriverException(ex.Message, ex); }
     }
 
-    private static bool IsClassicSuite(ushort suiteWireId) =>
-        suiteWireId is WebRtcProductHandshakeCodec.SuiteX25519Ed25519
-            or WebRtcProductHandshakeCodec.SuiteP256Ecdsa;
+    private static ProductHandshakePeerContext PeerContext(LiveWebRtcProductControlContext context) =>
+        new(context.PeerDeviceId, context.PeerPublicKeyFingerprint);
 
-    private static string Sha256Hex(ReadOnlySpan<byte> value) =>
-        Convert.ToHexString(SHA256.HashData(value)).ToLowerInvariant();
-
-    private static void RequireSharedSecret(ReadOnlySpan<byte> sharedSecret)
+    private static void ValidateTransportContext(LiveWebRtcProductControlContext context)
     {
-        if (sharedSecret.Length != WebRtcProductHandshakeSessionKeys.SharedSecretLength)
+        ArgumentNullException.ThrowIfNull(context);
+        if (context.SecureSessionState != WebRtcProductControlSecureSessionState.TransportOnly)
         {
-            throw new WebRtcProductHandshakeDriverException(
-                $"WebRTC product handshake provider returned a shared secret with length {sharedSecret.Length}; expected {WebRtcProductHandshakeSessionKeys.SharedSecretLength}.");
+            throw new WebRtcProductHandshakeDriverException("WebRTC product handshake must start from a TransportOnly product-control context.");
+        }
+        if (!context.ControlPlane.IsConnected)
+        {
+            throw new WebRtcProductHandshakeDriverException("WebRTC product handshake requires a connected product-control plane.");
         }
     }
 
-    private static WebRtcProductHandshakeMessageB DecodeMessageB(byte[] frame)
-    {
-        try
-        {
-            return WebRtcProductHandshakeCodec.DecodeMessageB(frame);
-        }
-        catch (Exception ex) when (ex is WebRtcProductHandshakeCodecException or InvalidDataException)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake failed to decode responder MessageB.",
-                ex);
-        }
-    }
-
-    private static WebRtcProductHandshakeFinished DecodeFinished(byte[] frame)
-    {
-        try
-        {
-            return WebRtcProductHandshakeCodec.DecodeFinished(frame);
-        }
-        catch (Exception ex) when (ex is WebRtcProductHandshakeCodecException or InvalidDataException)
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                "WebRTC product handshake failed to decode responder Finished.",
-                ex);
-        }
-    }
-
-    private static void RejectSecureEnvelopeBeforeEstablished(ReadOnlySpan<byte> frame, string expectedFrame)
-    {
-        if (WebRtcControlChannelCodec.IsLikelySecureEnvelope(frame))
-        {
-            throw new WebRtcProductHandshakeDriverException(
-                $"WebRTC product handshake received an SBWC envelope while waiting for {expectedFrame}; refusing AppControl before session establishment.");
-        }
-    }
-
-    private sealed class ProductControlMessageInbox : IAsyncDisposable
+    private sealed class ProductControlMessageInbox : IProductHandshakeTransport, IAsyncDisposable
     {
         private readonly IWebRtcProductControlPlane _controlPlane;
         private readonly Queue<byte[]> _messages = new();
@@ -392,36 +226,19 @@ public sealed class WebRtcProductHandshakeDriver
             _controlPlane.MessageReceived += OnMessageReceived;
         }
 
-        public async Task<byte[]> ReadAsync(
-            string expectedMessage,
-            TimeSpan timeout,
-            CancellationToken cancellationToken)
-        {
-            using var timeoutCts = new CancellationTokenSource(timeout);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
-            try
-            {
-                await _signal.WaitAsync(linkedCts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                throw new TimeoutException(
-                    $"WebRTC product handshake timed out waiting for {expectedMessage} after {timeout.TotalSeconds:F0}s.");
-            }
+        public Task SendAsync(ReadOnlyMemory<byte> frame, CancellationToken cancellationToken = default) =>
+            _controlPlane.SendAsync(frame, cancellationToken);
 
+        public async Task<ReadOnlyMemory<byte>> ReadAsync(CancellationToken cancellationToken = default)
+        {
+            await _signal.WaitAsync(cancellationToken).ConfigureAwait(false);
             lock (_gate)
             {
-                if (_failure is not null)
-                {
-                    throw _failure;
-                }
-
+                if (_failure is not null) { throw _failure; }
                 if (_messages.Count == 0)
                 {
-                    throw new WebRtcProductHandshakeDriverException(
-                        $"WebRTC product handshake inbox signaled without {expectedMessage} bytes.");
+                    throw new WebRtcProductHandshakeDriverException("WebRTC product handshake inbox signaled without frame bytes.");
                 }
-
                 return _messages.Dequeue();
             }
         }
@@ -469,9 +286,8 @@ public sealed class WebRtcProductHandshakeDriver
                 {
                     _messages.Enqueue(message.ToArray());
                 }
+                _signal.Release();
             }
-
-            _signal.Release();
         }
     }
 }

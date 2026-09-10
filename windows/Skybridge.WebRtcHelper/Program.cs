@@ -47,6 +47,7 @@
 
 using System.Buffers.Binary;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -463,7 +464,7 @@ internal static class Program
         Signal.Write(offerOut, "offer", offer.sdp, cands);
         Console.WriteLine($"[offer] wrote offer -> {Path.GetFullPath(offerOut)}; waiting for answer at {answerIn} ...");
 
-        var ans = await Signal.WaitReadAsync(answerIn, TimeSpan.FromSeconds(180));
+        var ans = await Signal.WaitReadAsync(answerIn, "answer", TimeSpan.FromSeconds(180));
         if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = ans.Sdp }) != SetDescriptionResultEnum.OK)
             return Fail("offerer rejected the peer answer");
         foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
@@ -487,7 +488,7 @@ internal static class Program
         var answerOut = opts.GetValueOrDefault("answer-out", "answer.json");
         var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "60"), out var h) ? h : 60;
         Console.WriteLine($"[answer] waiting for offer at {offerIn} ...");
-        var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
+        var off = await Signal.WaitReadAsync(offerIn, "offer", TimeSpan.FromSeconds(180));
 
         using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
         var cands = new List<Cand>();
@@ -547,7 +548,7 @@ internal static class Program
         Signal.Write(offerOut, "offer", offer.sdp, cands);
         Console.WriteLine($"[session-offer] wrote offer -> {Path.GetFullPath(offerOut)}; waiting for answer at {answerIn} ...");
 
-        var ans = await Signal.WaitReadAsync(answerIn, TimeSpan.FromSeconds(180));
+        var ans = await Signal.WaitReadAsync(answerIn, "answer", TimeSpan.FromSeconds(180));
         if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = ans.Sdp }) != SetDescriptionResultEnum.OK)
             return Fail("session-offer rejected the peer answer");
         foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
@@ -575,7 +576,7 @@ internal static class Program
         var holdSeconds = int.TryParse(opts.GetValueOrDefault("hold-seconds", "0"), out var h) ? h : 0;
 
         Console.WriteLine($"[session-answer] waiting for offer at {offerIn} ...");
-        var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
+        var off = await Signal.WaitReadAsync(offerIn, "offer", TimeSpan.FromSeconds(180));
 
         using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
         var cands = new List<Cand>();
@@ -637,13 +638,23 @@ internal static class Program
             Signal.Write(offerOut, "offer", offer.sdp, cands);
             Console.WriteLine($"[product-control-offer] wrote offer -> {Path.GetFullPath(offerOut)}; waiting for answer at {answerIn} ...");
 
-            var ans = await Signal.WaitReadAsync(answerIn, TimeSpan.FromSeconds(180));
+            var ans = await Signal.WaitReadAsync(answerIn, "answer", TimeSpan.FromSeconds(180));
             if (pc.setRemoteDescription(new RTCSessionDescriptionInit { type = RTCSdpType.answer, sdp = ans.Sdp }) != SetDescriptionResultEnum.OK)
                 return Fail("product-control-offer rejected the peer answer");
             foreach (var c in ans.Candidates) pc.addIceCandidate(c.ToInit());
 
             Console.WriteLine("[product-control-offer] awaiting DataChannel open...");
-            await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            var openTask = opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            var lateRemoteCandidatesTask = AddRemoteIceCandidatesUntilOpenAsync(
+                pc,
+                answerIn,
+                "answer",
+                ans.Candidates,
+                openTask,
+                "product-control-offer");
+            var lateRemoteCandidates = await WaitForOpenAndRemoteIceAsync(openTask, lateRemoteCandidatesTask);
+            if (lateRemoteCandidates > 0)
+                Console.WriteLine($"[product-control-offer] applied {lateRemoteCandidates} late remote ICE candidates");
             Console.WriteLine($"[product-control-offer] DataChannel state={dc.readyState}");
             if (dc.readyState != RTCDataChannelState.open)
                 return Fail("product-control-offer: DataChannel did not open");
@@ -669,7 +680,7 @@ internal static class Program
         try
         {
             Console.WriteLine($"[product-control-answer] waiting for offer at {offerIn} ...");
-            var off = await Signal.WaitReadAsync(offerIn, TimeSpan.FromSeconds(180));
+            var off = await Signal.WaitReadAsync(offerIn, "offer", TimeSpan.FromSeconds(180));
 
             using var pc = new RTCPeerConnection(ConfigWithIce(opts.GetValueOrDefault("ice-servers", ""), opts));
             var cands = new List<Cand>();
@@ -700,7 +711,18 @@ internal static class Program
             Signal.Write(answerOut, "answer", answer.sdp, cands);
             Console.WriteLine($"[product-control-answer] wrote answer -> {Path.GetFullPath(answerOut)}; awaiting DataChannel open...");
 
-            var channel = await opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            var openTask = opened.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            var lateRemoteCandidatesTask = AddRemoteIceCandidatesUntilOpenAsync(
+                pc,
+                offerIn,
+                "offer",
+                off.Candidates,
+                openTask,
+                "product-control-answer");
+            var lateRemoteCandidates = await WaitForOpenAndRemoteIceAsync(openTask, lateRemoteCandidatesTask);
+            if (lateRemoteCandidates > 0)
+                Console.WriteLine($"[product-control-answer] applied {lateRemoteCandidates} late remote ICE candidates");
+            var channel = await openTask;
             Console.WriteLine($"[product-control-answer] DataChannel state={channel.readyState}");
             if (channel.readyState != RTCDataChannelState.open)
                 return Fail("product-control-answer: DataChannel did not open");
@@ -727,16 +749,7 @@ internal static class Program
         {
             if (!string.IsNullOrWhiteSpace(portOutPath))
             {
-                try
-                {
-                    var tmp = portOutPath + ".tmp";
-                    File.WriteAllText(tmp, port.ToString(), new UTF8Encoding(false));
-                    File.Move(tmp, portOutPath, overwrite: true);
-                }
-                catch (IOException ex)
-                {
-                    Console.Error.WriteLine($"[{tag}] could not write ipc-port-out: {ex.Message}");
-                }
+                WriteUtf8TextAtomic(portOutPath, port.ToString());
             }
         }
 
@@ -763,16 +776,7 @@ internal static class Program
         {
             if (!string.IsNullOrWhiteSpace(portOutPath))
             {
-                try
-                {
-                    var tmp = portOutPath + ".tmp";
-                    File.WriteAllText(tmp, port.ToString(), new UTF8Encoding(false));
-                    File.Move(tmp, portOutPath, overwrite: true);
-                }
-                catch (IOException ex)
-                {
-                    Console.Error.WriteLine($"[{tag}] could not write ipc-port-out: {ex.Message}");
-                }
+                WriteUtf8TextAtomic(portOutPath, port.ToString());
             }
         }
 
@@ -907,6 +911,94 @@ internal static class Program
         await Task.WhenAny(tcs.Task, Task.Delay(timeout));
     }
 
+    private static async Task<int> AddRemoteIceCandidatesUntilOpenAsync(
+        RTCPeerConnection pc,
+        string remoteSignalPath,
+        string expectedSignalType,
+        IEnumerable<Cand> initialCandidates,
+        Task openTask,
+        string tag)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in initialCandidates)
+        {
+            seen.Add(RemoteIceCandidateKey(candidate));
+        }
+
+        var applied = 0;
+        Exception? lastTransientReadError = null;
+        var transientReadErrorCount = 0;
+        while (!openTask.IsCompleted)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false);
+            if (openTask.IsCompleted)
+            {
+                break;
+            }
+
+            Signal signal;
+            try
+            {
+                signal = Signal.Read(remoteSignalPath, expectedSignalType);
+            }
+            catch (Exception ex) when (ex is IOException or JsonException)
+            {
+                lastTransientReadError = ex;
+                transientReadErrorCount++;
+                continue;
+            }
+
+            foreach (var candidate in signal.Candidates)
+            {
+                if (!seen.Add(RemoteIceCandidateKey(candidate)))
+                {
+                    continue;
+                }
+
+                pc.addIceCandidate(candidate.ToInit());
+                applied++;
+                Console.WriteLine($"[{tag}] applied late remote ICE candidate #{applied}");
+            }
+        }
+
+        if (transientReadErrorCount > 0 && applied == 0 && lastTransientReadError is not null)
+        {
+            Console.Error.WriteLine(
+                $"[{tag}] observed {transientReadErrorCount} transient remote ICE signal read error(s); last={lastTransientReadError.GetType().Name}: {lastTransientReadError.Message}");
+        }
+
+        return applied;
+    }
+
+    private static async Task<int> WaitForOpenAndRemoteIceAsync(Task openTask, Task<int> remoteIceTask)
+    {
+        var completed = await Task.WhenAny(openTask, remoteIceTask).ConfigureAwait(false);
+        if (completed == remoteIceTask && !openTask.IsCompleted)
+        {
+            return await remoteIceTask.ConfigureAwait(false);
+        }
+
+        try
+        {
+            await openTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            await remoteIceTask.ConfigureAwait(false);
+            throw;
+        }
+
+        return await remoteIceTask.ConfigureAwait(false);
+    }
+
+    private static string RemoteIceCandidateKey(Cand candidate) =>
+        string.Join(
+            '\u001f',
+            candidate.Candidate,
+            candidate.SdpMid ?? "",
+            candidate.SdpMLineIndex.ToString(),
+            candidate.UsernameFragment ?? "");
+
     private static TaskCompletionSource NewTcs() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static TaskCompletionSource<T> NewTcs<T>() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -951,9 +1043,120 @@ internal static class Program
     private static void WriteProofAtomic(string path, ProofDocument proof)
     {
         var json = JsonSerializer.Serialize(proof, ProofDocument.JsonOptions);
-        var tmp = path + ".tmp";
-        File.WriteAllText(tmp, json, new UTF8Encoding(false));
-        File.Move(tmp, path, overwrite: true);
+        WriteUtf8TextAtomic(path, json);
+    }
+
+    private static void WriteUtf8TextAtomic(string path, string contents)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("Output path must not be empty.", nameof(path));
+
+        var fullPath = Path.GetFullPath(path);
+        var parent = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrWhiteSpace(parent))
+        {
+            AssertNoWindowsReparsePointAncestors(parent, "output directory");
+            Directory.CreateDirectory(parent);
+            AssertNoWindowsReparsePointAncestors(parent, "output directory");
+        }
+
+        AssertNoWindowsReparsePoint(fullPath, "output file");
+
+        var tempPath = fullPath + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false), bufferSize: 4096, leaveOpen: true))
+                {
+                    writer.Write(contents);
+                }
+
+                stream.Flush(flushToDisk: true);
+            }
+
+            MoveReplacingWithRetry(tempPath, fullPath);
+        }
+        catch (Exception writeError)
+        {
+            DeleteTempAfterFailure(tempPath, writeError);
+            ExceptionDispatchInfo.Capture(writeError).Throw();
+            throw;
+        }
+    }
+
+    private static void MoveReplacingWithRetry(string sourcePath, string destinationPath)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2);
+        while (true)
+        {
+            AssertNoWindowsReparsePoint(destinationPath, "output file");
+            try
+            {
+                File.Move(sourcePath, destinationPath, overwrite: true);
+                return;
+            }
+            catch (IOException) when (DateTimeOffset.UtcNow < deadline)
+            {
+                Thread.Sleep(TimeSpan.FromMilliseconds(50));
+            }
+        }
+    }
+
+    private static void AssertNoWindowsReparsePointAncestors(string path, string label)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var current = Path.GetFullPath(path);
+        while (!string.IsNullOrWhiteSpace(current))
+        {
+            if (Directory.Exists(current) || File.Exists(current))
+            {
+                AssertNoWindowsReparsePoint(current, label);
+            }
+
+            var parent = Path.GetDirectoryName(current);
+            if (string.IsNullOrWhiteSpace(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            current = parent;
+        }
+    }
+
+    private static void AssertNoWindowsReparsePoint(string path, string label)
+    {
+        if (!OperatingSystem.IsWindows() || (!Directory.Exists(path) && !File.Exists(path)))
+        {
+            return;
+        }
+
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException($"{label} must not be a reparse point: {path}");
+        }
+    }
+
+    private static void DeleteTempAfterFailure(string tempPath, Exception writeError)
+    {
+        try
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+        catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException(
+                $"Output write failed and temporary output cleanup also failed: {tempPath}",
+                new AggregateException(writeError, cleanupError));
+        }
     }
 
     private static Dictionary<string, string> ParseArgs(string[] args)

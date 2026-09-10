@@ -160,11 +160,12 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
 {
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(300);
 
-    private readonly SettingsStore _store;
+    private readonly ISettingsStore _store;
     private readonly object _sync = new();
     private SkyBridgeSettings _model;
     private Timer? _saveTimer;
     private bool _disposed;
+    private SettingsRuntimeTruth _runtimeTruth;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -172,14 +173,18 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     /// subscribers (theme/discovery/top-bar) bind to this instead of N individual handlers.</summary>
     public event EventHandler<SettingsChangedEventArgs>? SettingsChanged;
 
-    public SettingsService(SettingsStore? store = null)
+    public SettingsService(ISettingsStore? store = null)
     {
         _store = store ?? new SettingsStore();
-        _model = _store.Load();
+        var loadResult = _store.Load();
+        _model = loadResult.Settings;
+        _runtimeTruth = SettingsRuntimeTruth.FromLoad(loadResult);
     }
 
     /// <summary>Read-only snapshot of the current model (for Export and bulk reads).</summary>
     public SkyBridgeSettings Snapshot => _model.Clone();
+
+    public SettingsRuntimeTruth RuntimeTruth => _runtimeTruth;
 
     // ---- Write-through plumbing ------------------------------------------------------
 
@@ -239,7 +244,12 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
             toSave = _model.Clone();
         }
 
-        _store.Save(toSave);
+        var saveResult = _store.Save(toSave);
+        _runtimeTruth = _runtimeTruth with
+        {
+            LastWriteStatus = saveResult.Status,
+            LastErrorCode = saveResult.Succeeded ? _runtimeTruth.LastErrorCode : saveResult.ErrorCode
+        };
     }
 
     // ---- General ---------------------------------------------------------------------
@@ -378,16 +388,14 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
             return false;
         }
 
-        try
+        FlushSave();
+        var result = _store.ExportTo(path, _model.Clone());
+        _runtimeTruth = _runtimeTruth with
         {
-            FlushSave();
-            _store.ExportTo(path, _model.Clone());
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+            LastWriteStatus = result.Status,
+            LastErrorCode = result.Succeeded ? _runtimeTruth.LastErrorCode : result.ErrorCode
+        };
+        return result.Succeeded;
     }
 
     /// <summary>
@@ -398,12 +406,18 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     public bool ImportFrom(string path)
     {
         var imported = _store.ImportFrom(path);
-        if (imported is null)
+        if (!imported.Succeeded || !imported.Trusted)
         {
+            _runtimeTruth = _runtimeTruth with
+            {
+                LoadStatus = imported.Status,
+                LastErrorCode = imported.ErrorCode
+            };
             return false;
         }
 
-        ReplaceModel(imported);
+        _runtimeTruth = SettingsRuntimeTruth.FromLoad(imported);
+        ReplaceModel(imported.Settings);
         return true;
     }
 
@@ -411,10 +425,22 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     /// Reset all settings to their defaults: delete the on-disk file and swap in a fresh-default
     /// model, then notify (a single bulk PropertyChanged with a null name = "everything changed").
     /// </summary>
-    public void Reset()
+    public bool Reset()
     {
-        _store.Reset();
+        var result = _store.Reset();
+        _runtimeTruth = _runtimeTruth with
+        {
+            LastWriteStatus = result.Status,
+            Trusted = result.Succeeded || _runtimeTruth.Trusted,
+            LastErrorCode = result.Succeeded ? string.Empty : result.ErrorCode
+        };
+        if (!result.Succeeded)
+        {
+            return false;
+        }
+
         ReplaceModel(new SkyBridgeSettings());
+        return true;
     }
 
     private void ReplaceModel(SkyBridgeSettings next)
@@ -471,8 +497,23 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
         // Flush any pending debounced write so a change made in the last 300 ms before close is
         // not lost, then release the timer.
         timer?.Dispose();
-        _store.Save(_model.Clone());
+        var saveResult = _store.Save(_model.Clone());
+        _runtimeTruth = _runtimeTruth with
+        {
+            LastWriteStatus = saveResult.Status,
+            LastErrorCode = saveResult.Succeeded ? _runtimeTruth.LastErrorCode : saveResult.ErrorCode
+        };
     }
+}
+
+public sealed record SettingsRuntimeTruth(
+    SettingsStoreLoadStatus LoadStatus,
+    SettingsStoreWriteStatus? LastWriteStatus,
+    bool Trusted,
+    string LastErrorCode)
+{
+    public static SettingsRuntimeTruth FromLoad(SettingsStoreLoadResult result) =>
+        new(result.Status, null, result.Trusted, result.ErrorCode);
 }
 
 /// <summary>Carries the name of the settings property that changed (empty == bulk/all).</summary>

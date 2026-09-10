@@ -15,6 +15,19 @@ function Assert-True {
     }
 }
 
+function Assert-WindowsHostForWinUiBuild {
+    param([string]$ScriptName)
+
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $isWindowsHost) {
+        $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        throw "$ScriptName requires a Windows host because WindowsAppSDK/WinUI resource generation invokes MakePri.exe from Microsoft.Windows.SDK.BuildTools; current host is $osDescription."
+    }
+}
+
+Assert-WindowsHostForWinUiBuild -ScriptName "windows startup-state smoke"
+
 $sourceFiles = @()
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
     Sort-Object Name |
@@ -53,6 +66,7 @@ try {
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWinUI>true</UseWinUI>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -62,10 +76,10 @@ try {
 $compileItemText
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
   </ItemGroup>
 </Project>
 "@
@@ -95,7 +109,14 @@ ClearRuntimeEnvironment();
 var dependencies = SessionViewModelDependencyFactory.CreateConfigured();
 AssertType<FfiEngineClient>(dependencies.EngineClient, "default engine");
 AssertType<WindowsDiscoveryBrowserClient>(dependencies.DiscoveryBrowserClient, "default discovery browser");
-AssertNestedType<PendingWindowsDnsSdBrowseClient>(dependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+if (OperatingSystem.IsWindows())
+{
+    AssertNestedType<NativeWindowsDnsSdBrowseClient>(dependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+}
+else
+{
+    AssertNestedType<PendingWindowsDnsSdBrowseClient>(dependencies.DiscoveryBrowserClient, "_dnsSdBrowseClient", "default DNS-SD provider");
+}
 AssertNestedType<PendingWindowsTransportAdapterClient>(dependencies.ConnectionPreflightClient, "_transportAdapterClient", "default transport adapter");
 AssertType<DeviceDiscoveryInputDefaultsClient>(dependencies.DeviceDiscoveryInputDefaultsClient, "default input provider");
 
@@ -136,7 +157,15 @@ AssertEqual("shortLived", state.ConnectionCodeLeaseMode, "default connection-cod
 AssertSequence(
     "default DNS-SD service query order",
     state.DiscoveryBrowserInputPolicy.ServiceQueryOrder,
-    new[] { "_skybridge._udp", "_skybridge._tcp" });
+    new[]
+    {
+        "_skybridge._udp",
+        "_skybridge._tcp",
+        "_skybridge-xfer._tcp",
+        "_skybridge-rd._tcp",
+        "_skybridge-transfer._tcp",
+        "_skybridge-remote._tcp"
+    });
 AssertEqual(15, state.DiscoveryBrowserInputPolicy.ExtendedSearchSeconds, "default extended search seconds");
 AssertEqual(15, state.ExtendedSearchCountdown, "startup extended search countdown");
 
@@ -157,7 +186,6 @@ AssertSequence(
         "UsbManagement",
         "FileTransfer",
         "RemoteDesktop",
-        "Quantum",
         "SystemMonitor",
         "Settings"
     });

@@ -399,9 +399,8 @@ $featureRows = @(
     [pscustomobject]@{ Order = "3"; Id = "UsbManagement"; Title = "USB Management"; Gate = "IsUsbManagementSelected"; Heading = 'Text="USB Management"'; Surfaces = @("UsbManagementHeader"); Anchors = @("WorkspaceAction.UsbManagementHeader.RefreshDevices") },
     [pscustomobject]@{ Order = "4"; Id = "FileTransfer"; Title = "File Transfer"; Gate = "IsFileTransferSelected"; Heading = 'Text="File Transfer"'; Surfaces = @("FileTransferHeader", "FileTransfer"); Anchors = @("WorkspaceAction.FileTransfer.SelectFiles", "WorkspaceAction.FileTransfer.SelectFolder", "WorkspaceAction.FileTransfer.GenerateQr", "FileTransferShareQrPreview") },
     [pscustomobject]@{ Order = "5"; Id = "RemoteDesktop"; Title = "Remote Desktop"; Gate = "IsRemoteDesktopSelected"; Heading = 'Text="Remote Desktop"'; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop"); Anchors = @("WorkspaceAction.RemoteDesktop.RecommendedConnect", "WorkspaceAction.RemoteDesktop.AdvancedConnect", "WorkspaceAction.RemoteDesktop.DisconnectSession") },
-    [pscustomobject]@{ Order = "6"; Id = "Quantum"; Title = "Quantum / Core Diagnostics"; Gate = "IsQuantumSelected"; Heading = 'Text="Quantum / Core Diagnostics"'; Surfaces = @("QuantumDiagnosticsHeader"); Anchors = @("WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics") },
-    [pscustomobject]@{ Order = "7"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
-    [pscustomobject]@{ Order = "8"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
+    [pscustomobject]@{ Order = "6"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
+    [pscustomobject]@{ Order = "7"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
 )
 
 $navigationMatrixRows = Get-MarkdownTableRows `
@@ -446,7 +445,6 @@ Assert-Ordered -Text $featureCatalog -Context "FeatureCatalog mac navigation ord
     "FeatureEntryId.UsbManagement",
     "FeatureEntryId.FileTransfer",
     "FeatureEntryId.RemoteDesktop",
-    "FeatureEntryId.Quantum",
     "FeatureEntryId.SystemMonitor",
     "FeatureEntryId.Settings"
 )
@@ -457,7 +455,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow selected workspace visibil
     "Visibility=`"{Binding IsUsbManagementSelected",
     "Visibility=`"{Binding IsFileTransferSelected",
     "Visibility=`"{Binding IsRemoteDesktopSelected",
-    "Visibility=`"{Binding IsQuantumSelected",
     "Visibility=`"{Binding IsSystemMonitorSelected",
     "Visibility=`"{Binding IsSettingsSelected"
 )

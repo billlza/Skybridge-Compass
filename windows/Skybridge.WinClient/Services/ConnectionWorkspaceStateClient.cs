@@ -12,7 +12,7 @@ public interface IConnectionWorkspaceStateClient
         DiscoveryBrowserSnapshot snapshot);
 
     ConnectionWorkspaceValidatedState BuildDiscoveryPeerValidatedState(
-        DiscoveredPeer peer);
+        DiscoveryBrowserPeerCandidate candidate);
 
     ConnectionWorkspaceValidatedState BuildPairingValidatedState(
         ConnectionWorkspaceValidatedState currentState,
@@ -100,36 +100,40 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
         };
 
     public ConnectionWorkspaceValidatedState BuildInputInvalidatedState() =>
-        new(null, null, null);
+        new(null, null, null, null);
 
     public ConnectionWorkspaceValidatedState BuildDiscoveryBrowserValidatedState(
         DiscoveryBrowserSnapshot snapshot) =>
         new(
             snapshot.Peers.Count == 1 ? snapshot.Peers[0].Peer : null,
+            snapshot.Peers.Count == 1 ? snapshot.Peers[0] : null,
             null,
             null);
 
     public ConnectionWorkspaceValidatedState BuildDiscoveryPeerValidatedState(
-        DiscoveredPeer peer) =>
-        new(peer, null, null);
+        DiscoveryBrowserPeerCandidate candidate)
+    {
+        ArgumentNullException.ThrowIfNull(candidate);
+        return new(candidate.Peer, candidate, null, null);
+    }
 
     public ConnectionWorkspaceValidatedState BuildPairingValidatedState(
         ConnectionWorkspaceValidatedState currentState,
         PairingMaterial material) =>
-        new(currentState.DiscoveredPeer, material, null);
+        new(currentState.DiscoveredPeer, currentState.DiscoveryCandidate, material, null);
 
     public ConnectionWorkspaceValidatedState BuildPairingInputResetState(
         ConnectionWorkspaceValidatedState currentState) =>
-        new(currentState.DiscoveredPeer, null, null);
+        new(currentState.DiscoveredPeer, currentState.DiscoveryCandidate, null, null);
 
     public ConnectionWorkspaceValidatedState BuildPreflightValidatedState(
         ConnectionWorkspaceValidatedState currentState,
         ConnectionPreflightSnapshot snapshot) =>
-        new(currentState.DiscoveredPeer, currentState.PairingMaterial, snapshot);
+        new(currentState.DiscoveredPeer, currentState.DiscoveryCandidate, currentState.PairingMaterial, snapshot);
 
     public ConnectionWorkspaceValidatedState BuildPreflightInputResetState(
         ConnectionWorkspaceValidatedState currentState) =>
-        new(currentState.DiscoveredPeer, currentState.PairingMaterial, null);
+        new(currentState.DiscoveredPeer, currentState.DiscoveryCandidate, currentState.PairingMaterial, null);
 
     public ConnectionWorkspaceStatusPatch BuildDiscoveryBrowserResultPatch(
         DiscoveryBrowserAction action,
@@ -143,7 +147,9 @@ public sealed class ConnectionWorkspaceStateClient : IConnectionWorkspaceStateCl
                     : $"Validated {snapshot.Peers.Count} peer(s)",
             DiscoveryBrowserStatus: snapshot.IsScanning
                 ? $"Scanning {snapshot.CapturedAt:HH:mm:ss} UTC"
-                : $"Stopped {snapshot.CapturedAt:HH:mm:ss} UTC",
+                : action == DiscoveryBrowserAction.Stop
+                    ? $"Stopped {snapshot.CapturedAt:HH:mm:ss} UTC"
+                    : $"Snapshot {snapshot.CapturedAt:HH:mm:ss} UTC",
             PairingStatus: action == DiscoveryBrowserAction.Stop ? currentPairingStatus : DefaultReadyStatus,
             IsDiscoveryScanning: snapshot.IsScanning,
             StatusMessage: "Discovery browser snapshot updated");
@@ -287,5 +293,6 @@ public sealed record ConnectionWorkspacePreflightReadiness(
 
 public sealed record ConnectionWorkspaceValidatedState(
     DiscoveredPeer? DiscoveredPeer,
+    DiscoveryBrowserPeerCandidate? DiscoveryCandidate,
     PairingMaterial? PairingMaterial,
     ConnectionPreflightSnapshot? PreflightSnapshot);

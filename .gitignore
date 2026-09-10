@@ -134,9 +134,18 @@ core/skybridge-core/target
 **/obj/
 !core/skybridge-core/src/bin/
 !core/skybridge-core/src/bin/*.rs
+artifacts/**/current-path-product-control-answerer-code*.txt
+artifacts/**/skybridge-current-path-product-control-answerer-code*.txt
+artifacts/**/skybridge-current-path-product-control-answerer-code-*/
+artifacts/**/skybridge-current-path-product-control-session-id-*/
+artifacts/**/skybridge-current-path-product-control-session-state-*/
+artifacts/**/skybridge-current-path-product-control-signaling-*/
 
 # WebRTC signaling/proof artifacts contain ICE ufrag/pwd, candidates, and DTLS fingerprints.
 **/webrtc-signaling/
+**/skybridge-current-path-product-control-session-id-*/
+**/skybridge-current-path-product-control-session-state-*/
+**/skybridge-current-path-product-control-signaling-*/
 windows/Skybridge.WebRtcHelper/*offer*.json
 windows/Skybridge.WebRtcHelper/*answer*.json
 windows/Skybridge.WebRtcHelper/*proof*.json
@@ -145,4 +154,3 @@ windows/Skybridge.WebRtcHelper/*proof*.json
 # MSIX dev signing artifacts (generated on the box by tools/Setup-Msix.ps1 — never commit)
 *.pfx
 *.cer
-windows/Skybridge.WinClient/Assets/

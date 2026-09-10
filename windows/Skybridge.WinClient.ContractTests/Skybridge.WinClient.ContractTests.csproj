@@ -1,0 +1,165 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier Condition="'$(OS)'=='Windows_NT'">win-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="QPeriaptNativeContractTests.cs" />
+    <Compile Include="QPeriaptProductContractTests.cs" />
+    <Compile Include="QPeriaptWindowsProductTests.cs" />
+    <Compile Include="QPeriaptSchema1ReupgradeTests.cs" />
+    <None Update="Fixtures\qperiapt-peer-platform-contract.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Fixtures\q-abi2-session-kdf-v1.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\core\skybridge-core\tests\fixtures\qperiapt-production-trust-root.json" Link="Fixtures\qperiapt-production-trust-root.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="NetworkTelemetryTests.cs" />
+    <Compile Include="ClassicFileTransferWireTests.cs" />
+    <Compile Include="LanProductControlSessionTests.cs" />
+    <Compile Include="ClassicFileTransferOperationTests.cs" />
+    <Compile Include="NativeLanFileTransferValidation.cs" />
+    <None Update="Fixtures\classic-file-transfer-v2.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransfer\ClassicFileTransferWire.cs" Link="Services\FileTransfer\ClassicFileTransferWire.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransfer\ClassicFileTransferFrames.cs" Link="Services\FileTransfer\ClassicFileTransferFrames.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransfer\ClassicFileTransferOperation.cs" Link="Services\FileTransfer\ClassicFileTransferOperation.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransfer\ClassicFileTransferSender.cs" Link="Services\FileTransfer\ClassicFileTransferSender.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransfer\ClassicFileTransferReceiver.cs" Link="Services\FileTransfer\ClassicFileTransferReceiver.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransfer\FileTransferFolderArchive.cs" Link="Services\FileTransfer\FileTransferFolderArchive.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductForwardSecretContribution.cs" Link="Services\ProductForwardSecretContribution.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\TopBarNetworkStatusClient.cs" Link="Services\TopBarNetworkStatusClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\TopBarNetworkCoordinator.cs" Link="ViewModels\TopBarNetworkCoordinator.cs" />
+    <Compile Include="WeatherGlassGeometryTests.cs" />
+    <Compile Include="..\Skybridge.WinClient\WeatherGlassGeometry.cs" Link="WeatherGlassGeometry.cs" />
+    <Compile Include="TestStubs.cs" />
+    <Compile Include="ViewModelTestStubs.cs" />
+    <Compile Include="RemoteControlNetworkSelectionTests.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\RemoteControlHostViewModel.cs" Link="ViewModels\RemoteControlHostViewModel.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\RemoteControlHostSessionViewModel.cs" Link="ViewModels\RemoteControlHostSessionViewModel.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\WorkspaceCollectionProjector.cs" Link="ViewModels\WorkspaceCollectionProjector.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WindowsDeviceWorkspace.cs" Link="Services\WindowsDeviceWorkspace.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlHostWorkspaceModels.cs" Link="Services\RemoteControl\RemoteControlHostWorkspaceModels.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WindowsRuntimeLog.cs" Link="Services\WindowsRuntimeLog.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\AccountDeviceRosterClient.cs" Link="Services\AccountDeviceRosterClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ConnectionWorkspaceStateClient.cs" Link="Services\ConnectionWorkspaceStateClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CoreBridge.cs" Link="Services\CoreBridge.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CoreBridge.QPeriapt.cs" Link="Services\CoreBridge.QPeriapt.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\QPeriaptNativeClient.cs" Link="Services\QPeriaptNativeClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\QPeriaptProductionPolicy.cs" Link="Services\QPeriaptProductionPolicy.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\QPeriaptTrustedStateStore.cs" Link="Services\QPeriaptTrustedStateStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SessionPersistenceContracts.cs" Link="Services\SessionPersistenceContracts.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\QPeriaptKeyEncoding.cs" Link="Services\QPeriaptKeyEncoding.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\QPeriaptHandshakeContext.cs" Link="Services\QPeriaptHandshakeContext.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductPqcHandshakeCryptoProvider.PolicyBound.cs" Link="Services\WebRtcProductPqcHandshakeCryptoProvider.PolicyBound.cs" />
+    <EmbeddedResource Include="..\Skybridge.WinClient\Resources\qperiapt-production-trust-root.json" LogicalName="Skybridge.QPeriapt.ProductionTrustRoot.json" />
+    <Compile Include="..\Skybridge.WinClient\Services\DiscoveryBrowserClient.cs" Link="Services\DiscoveryBrowserClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\DiscoveryPeerRoutes.cs" Link="Services\DiscoveryPeerRoutes.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\DiscoveryClient.cs" Link="Services\DiscoveryClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ISupabaseAuthClient.cs" Link="Services\ISupabaseAuthClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductSessionActionGateClient.cs" Link="Services\ProductSessionActionGateClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductSessionActionTargetProjection.cs" Link="Services\ProductSessionActionTargetProjection.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteDesktopWorkspaceClient.cs" Link="Services\RemoteDesktopWorkspaceClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SessionStore.cs" Link="Services\SessionStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SkyBridgeProtocolConstants.cs" Link="Services\SkyBridgeProtocolConstants.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SettingsStore.cs" Link="Services\SettingsStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SkybridgeNativeLibraryResolver.cs" Link="Services\SkybridgeNativeLibraryResolver.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SettingsService.cs" Link="Services\SettingsService.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SupabaseAuthClient.cs" Link="Services\SupabaseAuthClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\NativeWindowsDnsSdTxtRecordCodec.cs" Link="Services\NativeWindowsDnsSdTxtRecordCodec.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\NativeWindowsDnsSdBrowseClient.cs" Link="Services\NativeWindowsDnsSdBrowseClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcArtifactFileWriter.cs" Link="Services\WebRtcArtifactFileWriter.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcAuthenticatedRouteBindingPayload.cs" Link="Services\WebRtcAuthenticatedRouteBindingPayload.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcAuthenticatedRouteBindingStore.cs" Link="Services\WebRtcAuthenticatedRouteBindingStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcControlChannelCodec.cs" Link="Services\WebRtcControlChannelCodec.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductControlContracts.cs" Link="Services\WebRtcProductControlContracts.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductControlEngineClient.cs" Link="Services\WebRtcProductControlEngineClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeCodec.cs" Link="Services\WebRtcProductHandshakeCodec.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcFileTransferRuntimeProof.cs" Link="Services\WebRtcFileTransferRuntimeProof.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductControlMessageInbox.cs" Link="Services\WebRtcProductControlMessageInbox.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductControlPlaneClient.cs" Link="Services\WebRtcProductControlPlaneClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductSecureSessionRuntimeConsumer.cs" Link="Services\WebRtcProductSecureSessionRuntimeConsumer.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductSecureSessionStore.cs" Link="Services\WebRtcProductSecureSessionStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcSessionEngineClient.cs" Link="Services\WebRtcSessionEngineClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcSessionRuntimeContracts.cs" Link="Services\WebRtcSessionRuntimeContracts.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcSessionResourceOwner.cs" Link="Services\WebRtcSessionResourceOwner.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WindowsNativeMsQuicTransportSecret.cs" Link="Services\WindowsNativeMsQuicTransportSecret.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WorkspaceErrorStatusClient.cs" Link="Services\WorkspaceErrorStatusClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\IEngineClient.cs" Link="Services\IEngineClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\AccountSessionCoordinator.cs" Link="ViewModels\AccountSessionCoordinator.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\AsyncRelayCommand.cs" Link="ViewModels\AsyncRelayCommand.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\DiscoveryBrowserActions.cs" Link="ViewModels\DiscoveryBrowserActions.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\RemoteDesktopWorkspaceActions.cs" Link="ViewModels\RemoteDesktopWorkspaceActions.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\WorkspaceBusyCoordinator.cs" Link="ViewModels\WorkspaceBusyCoordinator.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\WorkspaceStatusPatchApplier.cs" Link="ViewModels\WorkspaceStatusPatchApplier.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Skybridge.WinClient\Services\ProductHandshakeContracts.cs" Link="Services\ProductHandshakeContracts.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductControlTrafficPadding.cs" Link="Services\ProductControlTrafficPadding.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\LanProductControlMessages.cs" Link="Services\LanProductControlMessages.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\LanProductControlSession.cs" Link="Services\LanProductControlSession.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductHandshakeCore.cs" Link="Services\ProductHandshakeCore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductHandshakeKeyDerivation.cs" Link="Services\ProductHandshakeKeyDerivation.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeSessionKeys.cs" Link="Services\WebRtcProductHandshakeSessionKeys.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductSecureEnvelope.cs" Link="Services\ProductSecureEnvelope.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControlHandshakeBinding.cs" Link="Services\RemoteControlHandshakeBinding.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControlSecureEnvelope.cs" Link="Services\RemoteControlSecureEnvelope.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RealtimeMediaPacketCodec.cs" Link="Services\RealtimeMediaPacketCodec.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductPqcHandshakeCryptoProvider.cs" Link="Services\WebRtcProductPqcHandshakeCryptoProvider.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlWireContracts.cs" Link="Services\RemoteControl\RemoteControlWireContracts.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\TcpProductControlTransport.cs" Link="Services\TcpProductControlTransport.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlHostSession.cs" Link="Services\RemoteControl\RemoteControlHostSession.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlViewerSession.cs" Link="Services\RemoteControl\RemoteControlViewerSession.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlVideoFrameBuffer.cs" Link="Services\RemoteControl\RemoteControlVideoFrameBuffer.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlVideoTimeline.cs" Link="Services\RemoteControl\RemoteControlVideoTimeline.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductPeerAuthentication.cs" Link="Services\ProductPeerAuthentication.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlHostAccessCoordinator.cs" Link="Services\RemoteControl\RemoteControlHostAccessCoordinator.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsDesktopContracts.cs" Link="Services\RemoteControl\WindowsDesktopContracts.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsDesktopPixels.cs" Link="Services\RemoteControl\WindowsDesktopPixels.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsInteractiveDesktop.cs" Link="Services\RemoteControl\WindowsInteractiveDesktop.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsRemoteInput.cs" Link="Services\RemoteControl\WindowsRemoteInput.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsRemoteInputPolicy.cs" Link="Services\RemoteControl\WindowsRemoteInputPolicy.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsDesktopCapture.cs" Link="Services\RemoteControl\WindowsDesktopCapture.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsDesktopScaler.cs" Link="Services\RemoteControl\WindowsDesktopScaler.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsDesktopEncoder.cs" Link="Services\RemoteControl\WindowsDesktopEncoder.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsLoopbackAudioSource.cs" Link="Services\RemoteControl\WindowsLoopbackAudioSource.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsLoopbackAudioInterop.cs" Link="Services\RemoteControl\WindowsLoopbackAudioInterop.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsOpusAudioEncoder.cs" Link="Services\RemoteControl\WindowsOpusAudioEncoder.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsRemoteControlAdvertisement.cs" Link="Services\RemoteControl\WindowsRemoteControlAdvertisement.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsRemoteControlAdvertisementNative.cs" Link="Services\RemoteControl\WindowsRemoteControlAdvertisementNative.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsRemoteControlStream.cs" Link="Services\RemoteControl\WindowsRemoteControlStream.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WindowsPowerKeepAwake.cs" Link="Services\WindowsPowerKeepAwake.cs" />
+    <Compile Include="RemoteControlProtocolContractTests.cs" />
+    <Compile Include="RemoteControlIdentityContractTests.cs" />
+    <Compile Include="RemoteControlHostSessionTests.cs" />
+    <Compile Include="RemoteControlViewerSessionTests.cs" />
+    <Compile Include="WindowsPowerKeepAwakeTests.cs" />
+    <Compile Include="RemoteControlHostAccessTests.cs" />
+    <Compile Include="WindowsRemoteControlAudioAdvertisementTests.cs" />
+    <Compile Include="WindowsDesktopBackendContractTests.cs" />
+    <None Include="Fixtures\remote-control-mac-wire-v1.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="..\Skybridge.WinClient\Services\WebRtcProductHandshakeIdentity.cs" Link="Services\WebRtcProductHandshakeIdentity.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsH264AccessUnit.cs" Link="Services\RemoteControl\WindowsH264AccessUnit.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsMediaFoundationInterop.cs" Link="Services\RemoteControl\WindowsMediaFoundationInterop.cs" /></ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlIdentityStore.cs" Link="Services\RemoteControl\RemoteControlIdentityStore.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlIdentityStore.PolicyBound.cs" Link="Services\RemoteControl\RemoteControlIdentityStore.PolicyBound.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\RemoteControlPairingMaterial.cs" Link="Services\RemoteControl\RemoteControlPairingMaterial.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Skybridge.WinClient\Services\RemoteControl\WindowsRemoteControlHost.cs" Link="Services\RemoteControl\WindowsRemoteControlHost.cs" />
+  </ItemGroup>
+  <Import Project="..\NativeCore.targets" />
+</Project>

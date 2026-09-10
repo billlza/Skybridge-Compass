@@ -1,0 +1,27 @@
+<Project>
+  <PropertyGroup Condition="'$(OS)'=='Windows_NT'">
+    <SkybridgeCoreManifest>$(MSBuildThisFileDirectory)..\core\skybridge-core\Cargo.toml</SkybridgeCoreManifest>
+    <SkybridgeCoreCargoConfig>$(MSBuildThisFileDirectory)..\.cargo\config.toml</SkybridgeCoreCargoConfig>
+    <SkybridgeCoreCargoProfile Condition="'$(Configuration)'=='Release'">release</SkybridgeCoreCargoProfile>
+    <SkybridgeCoreCargoProfile Condition="'$(SkybridgeCoreCargoProfile)'==''">debug</SkybridgeCoreCargoProfile>
+    <SkybridgeCoreCargoProfileArgs Condition="'$(SkybridgeCoreCargoProfile)'=='release'">--release</SkybridgeCoreCargoProfileArgs>
+    <SkybridgeCoreRustTarget Condition="'$(RuntimeIdentifier)'=='win-arm64'">aarch64-pc-windows-msvc</SkybridgeCoreRustTarget>
+    <SkybridgeCoreRustTarget Condition="'$(RuntimeIdentifier)'=='win-x64'">x86_64-pc-windows-msvc</SkybridgeCoreRustTarget>
+    <SkybridgeCoreRustTarget Condition="'$(RuntimeIdentifier)'=='win-x86'">i686-pc-windows-msvc</SkybridgeCoreRustTarget>
+    <SkybridgeCoreCargoTargetArgs Condition="'$(SkybridgeCoreRustTarget)'!=''">--target $(SkybridgeCoreRustTarget)</SkybridgeCoreCargoTargetArgs>
+    <SkybridgeCoreCargoTargetSegment Condition="'$(SkybridgeCoreRustTarget)'!=''">$(SkybridgeCoreRustTarget)\</SkybridgeCoreCargoTargetSegment>
+    <SkybridgeCoreTargetDir Condition="'$(SkybridgeCoreTargetDir)'==''">$(MSBuildThisFileDirectory)..\core\skybridge-core\target</SkybridgeCoreTargetDir>
+    <SkybridgeCoreNativeDll>$(SkybridgeCoreTargetDir)\$(SkybridgeCoreCargoTargetSegment)$(SkybridgeCoreCargoProfile)\skybridge_core.dll</SkybridgeCoreNativeDll>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(OS)'=='Windows_NT'">
+    <Content Include="$(SkybridgeCoreNativeDll)" Link="skybridge_core.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
+  <Target Name="BuildSkybridgeCoreNativeDll" BeforeTargets="PrepareForBuild" Condition="'$(OS)'=='Windows_NT'">
+    <Message Importance="High" Text="Building skybridge_core native library ($(SkybridgeCoreCargoProfile))" />
+    <Exec Command="cargo build --manifest-path &quot;$(SkybridgeCoreManifest)&quot; --config &quot;$(SkybridgeCoreCargoConfig)&quot; --locked $(SkybridgeCoreCargoProfileArgs) $(SkybridgeCoreCargoTargetArgs)" EnvironmentVariables="CARGO_TARGET_DIR=$(SkybridgeCoreTargetDir)" />
+    <Error Condition="!Exists('$(SkybridgeCoreNativeDll)')" Text="Missing skybridge_core native library after cargo build: $(SkybridgeCoreNativeDll)" />
+  </Target>
+
+</Project>

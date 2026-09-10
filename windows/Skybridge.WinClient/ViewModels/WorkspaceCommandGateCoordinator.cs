@@ -17,6 +17,7 @@ internal sealed class WorkspaceCommandGateCoordinator
     private readonly IDiscoveryClient _discoveryClient;
     private readonly IPairingMaterialClient _pairingMaterialClient;
     private readonly IConnectionWorkspaceStateClient _connectionWorkspaceStateClient;
+    private readonly IProductSessionActionGateClient _productSessionActionGateClient;
 
     public WorkspaceCommandGateCoordinator(
         ISessionCommandStateClient sessionCommandStateClient,
@@ -31,7 +32,8 @@ internal sealed class WorkspaceCommandGateCoordinator
         ISettingsWorkspaceClient settingsClient,
         IDiscoveryClient discoveryClient,
         IPairingMaterialClient pairingMaterialClient,
-        IConnectionWorkspaceStateClient connectionWorkspaceStateClient)
+        IConnectionWorkspaceStateClient connectionWorkspaceStateClient,
+        IProductSessionActionGateClient productSessionActionGateClient)
     {
         _sessionCommandStateClient = sessionCommandStateClient;
         _featureCatalogClient = featureCatalogClient;
@@ -46,6 +48,7 @@ internal sealed class WorkspaceCommandGateCoordinator
         _discoveryClient = discoveryClient;
         _pairingMaterialClient = pairingMaterialClient;
         _connectionWorkspaceStateClient = connectionWorkspaceStateClient;
+        _productSessionActionGateClient = productSessionActionGateClient ?? throw new ArgumentNullException(nameof(productSessionActionGateClient));
     }
 
     public bool IsFeatureSelected(FeatureEntry selectedFeature, FeatureEntryId featureId) =>
@@ -156,12 +159,14 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanRecommendedRemoteDesktopConnect(WorkspaceCommandGateState state) =>
         CanUseRemoteDesktopAction(
             state,
-            _remoteDesktopClient.CanStartRecommendedSession());
+            _remoteDesktopClient.CanStartRecommendedSession()
+                && BuildRemoteDesktopProductActionGate(state).IsReady);
 
     public bool CanAdvancedRemoteDesktopConnect(WorkspaceCommandGateState state) =>
         CanUseRemoteDesktopAction(
             state,
-            _remoteDesktopClient.CanStartAdvancedSession());
+            _remoteDesktopClient.CanStartAdvancedSession()
+                && BuildRemoteDesktopProductActionGate(state).IsReady);
 
     public bool CanShowRemoteDesktopPerformanceOverlay(WorkspaceCommandGateState state) =>
         CanUseRemoteDesktopAction(
@@ -181,12 +186,14 @@ internal sealed class WorkspaceCommandGateCoordinator
     public bool CanEnterRemoteDesktopFullScreen(WorkspaceCommandGateState state) =>
         CanUseRemoteDesktopAction(
             state,
-            _remoteDesktopClient.CanEnterFullScreen());
+            _remoteDesktopClient.CanEnterFullScreen()
+                && BuildRemoteDesktopProductActionGate(state).IsReady);
 
     public bool CanDisconnectRemoteDesktopSession(WorkspaceCommandGateState state) =>
         CanUseRemoteDesktopAction(
             state,
-            _remoteDesktopClient.CanDisconnectSession());
+            _remoteDesktopClient.CanDisconnectSession()
+                && BuildRemoteDesktopProductActionGate(state).IsReady);
 
     public bool CanRefreshSystemMonitor(WorkspaceCommandGateState state) =>
         CanUseSelectedWorkspaceFeature(state, FeatureEntryId.SystemMonitor);
@@ -358,6 +365,12 @@ internal sealed class WorkspaceCommandGateCoordinator
         _workspaceCommandStateClient.CanUseWorkspaceFeature(
             state.IsBusy,
             IsFeatureSelected(state.SelectedFeature, featureId));
+
+    private ProductSessionActionGateResult BuildRemoteDesktopProductActionGate(
+        WorkspaceCommandGateState state) =>
+        _productSessionActionGateClient.EvaluateRemoteDesktop(
+            state.ValidatedState.DiscoveryCandidate,
+            DateTimeOffset.UtcNow);
 }
 
 internal sealed record WorkspaceCommandGateState(

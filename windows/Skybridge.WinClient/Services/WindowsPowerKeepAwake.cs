@@ -1,105 +1,125 @@
-using System;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace Skybridge.WinClient.Services;
 
-// =====================================================================================
-//  WindowsPowerKeepAwake — a real SetThreadExecutionState wrapper used to keep the machine
-//  awake (no sleep, no display-off) for the duration of a file transfer (文件传输 > 选项 >
-//  传输时保持唤醒). Arm() sets ES_CONTINUOUS | ES_SYSTEM_REQUIRED (the system stays awake until
-//  Release() clears it back to ES_CONTINUOUS); it is reference-counted so nested transfers do not
-//  release each other early.
-//
-//  HONESTY NOTE (read the report): the transfer path in this Windows client is currently a
-//  read-only / intent surface (FileTransferWorkspaceClient builds snapshots + select/share
-//  intents; there is no live byte-pump that begins and ends a transfer here). So while this is a
-//  fully real keep-awake primitive and the 传输时保持唤醒 setting persists + flips the VM gate that
-//  guards Arm(), there is no live transfer in this client to wrap today — the gate is honored when
-//  a real transfer pump calls IsEnabledGate ? Arm() : noop around its run. It never keeps the
-//  machine awake on its own (Arm is only called inside a transfer scope), so the setting cannot
-//  silently drain the battery.
-// =====================================================================================
-
+/// <summary>Owns a power request for one active operation, independent of its continuation thread.</summary>
 public static class WindowsPowerKeepAwake
 {
-    [Flags]
-    private enum ExecutionState : uint
+    /// <summary>Keep the system awake until disposal. Desktop capture also requires an active display.</summary>
+    public static IDisposable Arm(bool keepDisplayAwake = false) => Arm(
+        keepDisplayAwake ? "SkyBridge remote desktop session" : "SkyBridge file transfer", keepDisplayAwake);
+
+    internal static IDisposable Arm(string reason, bool keepDisplayAwake)
     {
-        Continuous = 0x80000000,
-        SystemRequired = 0x00000001,
-        DisplayRequired = 0x00000002,
-    }
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        if (!OperatingSystem.IsWindows())
+            throw new PlatformNotSupportedException("Power requests require Windows.");
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint SetThreadExecutionState(ExecutionState esFlags);
-
-    private static readonly object Sync = new();
-    private static int _armCount;
-
-    /// <summary>
-    /// Begin keeping the system awake (ref-counted). Returns an IDisposable scope that Releases on
-    /// dispose — wrap a transfer in `using var _ = WindowsPowerKeepAwake.Arm();`. Never throws.
-    /// </summary>
-    public static IDisposable Arm()
-    {
-        lock (Sync)
+        var scope = new Scope(CreateRequest(reason));
+        try
         {
-            if (_armCount == 0)
-            {
-                try
-                {
-                    SetThreadExecutionState(ExecutionState.Continuous | ExecutionState.SystemRequired);
-                }
-                catch (Exception)
-                {
-                    // P/Invoke unavailable (non-Windows test host) — degrade to a no-op scope.
-                }
-            }
-
-            _armCount++;
+            scope.Start(keepDisplayAwake);
+            return scope;
         }
-
-        return new Scope();
-    }
-
-    private static void Release()
-    {
-        lock (Sync)
+        catch (Exception startFailure)
         {
-            if (_armCount == 0)
-            {
-                return;
-            }
-
-            _armCount--;
-            if (_armCount == 0)
-            {
-                try
-                {
-                    // Clear the system-required hint; ES_CONTINUOUS alone restores normal sleep.
-                    SetThreadExecutionState(ExecutionState.Continuous);
-                }
-                catch (Exception)
-                {
-                    // Ignore — best-effort restore.
-                }
-            }
+            try { scope.Dispose(); }
+            catch (Exception cleanupFailure) { throw new AggregateException("Power request creation and rollback failed.", startFailure, cleanupFailure); }
+            throw;
         }
     }
 
-    private sealed class Scope : IDisposable
+    private static SafeFileHandle CreateRequest(string reason)
     {
-        private bool _disposed;
+        var text = Marshal.StringToHGlobalUni(reason);
+        try
+        {
+            var context = new ReasonContext { Flags = 1, Reason = new ReasonUnion { SimpleReasonString = text } };
+            var handle = PowerCreateRequest(ref context);
+            if (!handle.IsInvalid) return handle;
+            var error = new Win32Exception(Marshal.GetLastPInvokeError(), "Windows could not create the power request.");
+            handle.Dispose();
+            throw error;
+        }
+        finally { Marshal.FreeHGlobal(text); }
+    }
+
+    private sealed class Scope(SafeFileHandle handle) : IDisposable
+    {
+        private SafeFileHandle? _handle = handle;
+        private bool _systemActive;
+        private bool _displayActive;
+
+        internal void Start(bool displayRequired)
+        {
+            var request = _handle ?? throw new ObjectDisposedException(nameof(Scope));
+            Require(PowerSetRequest(request, PowerRequestType.SystemRequired), "keep the system awake");
+            _systemActive = true;
+            if (displayRequired)
+            {
+                Require(PowerSetRequest(request, PowerRequestType.DisplayRequired), "keep the shared display awake");
+                _displayActive = true;
+            }
+        }
 
         public void Dispose()
         {
-            if (_disposed)
+            var request = Interlocked.Exchange(ref _handle, null);
+            if (request is null) return;
+            var failures = new List<Exception>();
+            try
             {
-                return;
+                if (_displayActive && !PowerClearRequest(request, PowerRequestType.DisplayRequired))
+                    failures.Add(new Win32Exception(Marshal.GetLastPInvokeError(), "Windows could not release the display power request."));
+                if (_systemActive && !PowerClearRequest(request, PowerRequestType.SystemRequired))
+                    failures.Add(new Win32Exception(Marshal.GetLastPInvokeError(), "Windows could not release the system power request."));
             }
-
-            _disposed = true;
-            Release();
+            finally { request.Dispose(); }
+            if (failures.Count > 0) throw new AggregateException("Power request cleanup failed.", failures);
         }
     }
+
+    private static void Require(bool success, string operation)
+    {
+        if (!success) throw new Win32Exception(Marshal.GetLastPInvokeError(), $"Windows could not {operation}.");
+    }
+
+    private enum PowerRequestType { DisplayRequired, SystemRequired }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ReasonContext
+    {
+        public uint Version;
+        public uint Flags;
+        public ReasonUnion Reason;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct ReasonUnion
+    {
+        [FieldOffset(0)] public nint SimpleReasonString;
+        [FieldOffset(0)] public DetailedReason Detailed;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DetailedReason
+    {
+        public nint Module;
+        public uint ResourceId;
+        public uint StringCount;
+        public nint Strings;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeFileHandle PowerCreateRequest(ref ReasonContext context);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PowerSetRequest(SafeFileHandle request, PowerRequestType type);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PowerClearRequest(SafeFileHandle request, PowerRequestType type);
 }

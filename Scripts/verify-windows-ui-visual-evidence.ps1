@@ -158,17 +158,11 @@ $expectedFeatures = [ordered]@{
         Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"
         Surfaces = @("RemoteDesktopHeader", "RemoteDesktop")
     }
-    "Quantum" = @{
-        Id = "Quantum"
-        Heading = "Quantum"
-        Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"
-        Surfaces = @("QuantumDiagnosticsHeader")
-    }
     "System Monitor" = @{
         Id = "SystemMonitor"
         Heading = "System Monitor"
         Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"
-        Surfaces = @("SystemMonitorHeader", "SystemMonitorControls")
+        Surfaces = @("QuantumDiagnosticsHeader", "SystemMonitorHeader", "SystemMonitorControls")
     }
     "Settings" = @{
         Id = "Settings"

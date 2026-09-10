@@ -1,4 +1,7 @@
 using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using Skybridge.WinClient.Services;
 
@@ -108,9 +111,10 @@ internal sealed class SettingsWorkspaceActions
         }
 
         var ok = _coordinator.ExportSettings(path);
+        var displayPath = RedactPath(path);
         return ok
-            ? new SettingsWorkspaceActionResult("Settings exported", $"Settings written to {path}.")
-            : new SettingsWorkspaceActionResult("Settings export failed", $"Could not write settings to {path}.");
+            ? new SettingsWorkspaceActionResult("Settings exported", $"Settings written to {displayPath}.")
+            : new SettingsWorkspaceActionResult("Settings export failed", $"Could not write settings to {displayPath}.");
     }
 
     private async Task<SettingsWorkspaceActionResult?> DoImportAsync()
@@ -127,9 +131,10 @@ internal sealed class SettingsWorkspaceActions
         }
 
         var ok = _coordinator.ImportSettings(path);
+        var displayPath = RedactPath(path);
         return ok
-            ? new SettingsWorkspaceActionResult("Settings imported", $"Settings replaced from {path}. Live effects re-applied.")
-            : new SettingsWorkspaceActionResult("Settings import failed", $"Could not import a valid settings file from {path}; current settings kept.");
+            ? new SettingsWorkspaceActionResult("Settings imported", $"Settings replaced from {displayPath}. Live effects re-applied.")
+            : new SettingsWorkspaceActionResult("Settings import failed", $"Could not import a valid settings file from {displayPath}; current settings kept.");
     }
 
     private Task<SettingsWorkspaceActionResult?> DoResetAsync()
@@ -139,9 +144,11 @@ internal sealed class SettingsWorkspaceActions
             return Task.FromResult<SettingsWorkspaceActionResult?>(null);
         }
 
-        _coordinator.ResetSettings();
+        var ok = _coordinator.ResetSettings();
         return Task.FromResult<SettingsWorkspaceActionResult?>(
-            new SettingsWorkspaceActionResult("Settings reset", "All settings reverted to defaults; live effects re-applied."));
+            ok
+                ? new SettingsWorkspaceActionResult("Settings reset", "All settings reverted to defaults; live effects re-applied.")
+                : new SettingsWorkspaceActionResult("Settings reset failed", "Could not clear the persisted settings file; current settings kept."));
     }
 
     private Task<SettingsWorkspaceActionResult?> DoApplyAsync()
@@ -187,4 +194,17 @@ internal sealed class SettingsWorkspaceActions
                 _setStatusMessage(result.Message);
                 await _applySettingsSnapshotAsync().ConfigureAwait(true);
             });
+
+    private static string RedactPath(string path)
+    {
+        var name = Path.GetFileName(path);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            name = "<settings-file>";
+        }
+
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path)))
+            .ToLowerInvariant()[..12];
+        return $"{name}#{digest}";
+    }
 }

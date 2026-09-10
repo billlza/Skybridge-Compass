@@ -182,19 +182,23 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Spacing="2">
                         <TextBlock
+                            x:Name="RealTimeWeatherLabel"
                             x:Uid="SettingsAdvancedRealTimeWeatherLabel"
                             Text="启用实时天气"
                             VerticalAlignment="Center"
                             Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
                         <TextBlock
                             x:Uid="SettingsAdvancedRealTimeWeatherCaption"
-                            Text="启用后顶部栏与仪表盘显示实时天气数据"
+                            Text="开启时刷新天气并播放背景动画；关闭后背景静止，保留天气数据与手动刷新。"
+                            TextWrapping="Wrap"
                             FontSize="11"
                             Foreground="{StaticResource SkyBridgeTextMutedBrush}" />
                     </StackPanel>
                     <ToggleSwitch
                         Grid.Column="1"
                         MinWidth="0"
+                        AutomationProperties.AutomationId="Skybridge.Settings.EnableRealTimeWeather"
+                        AutomationProperties.LabeledBy="{Binding ElementName=RealTimeWeatherLabel}"
                         IsOn="{Binding Settings.EnableRealTimeWeather, Mode=TwoWay}"
                         HorizontalAlignment="Right" />
                 </Grid>

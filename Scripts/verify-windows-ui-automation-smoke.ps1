@@ -399,7 +399,7 @@ function Assert-BasicLayout {
     )
 
     Restore-TestWindow -Window $Window
-    [void][NativeMethods]::MoveWindow([IntPtr]$Window.Current.NativeWindowHandle, 40, 40, $Width, $Height, $true)
+    Set-TestWindowLogicalSize -Window $Window -Width $Width -Height $Height
     Activate-TestWindow -Window $Window
     Start-Sleep -Milliseconds 300
     [void](Assert-SelectedFeature -Window $Window -FeatureId "Dashboard")
@@ -414,6 +414,38 @@ function Assert-BasicLayout {
     Assert-True -Condition ($topBar.Current.BoundingRectangle.Top -lt $dashboardAction.Current.BoundingRectangle.Top) -Message "Top-bar actions must remain above dashboard quick actions at ${Width}x${Height}."
     Assert-True -Condition ($topBar.Current.BoundingRectangle.Left -lt $themeAction.Current.BoundingRectangle.Left) -Message "Top-bar notification action must remain left of theme action at ${Width}x${Height}."
     Assert-True -Condition ($themeAction.Current.BoundingRectangle.Right -le ($windowRect.Right - 8)) -Message "Top-bar theme action must remain inside the window at ${Width}x${Height}."
+}
+
+function Set-TestWindowLogicalSize {
+    param(
+        [System.Windows.Automation.AutomationElement]$Window,
+        [int]$Width,
+        [int]$Height
+    )
+
+    $handle = [IntPtr]$Window.Current.NativeWindowHandle
+    $dpi = [NativeMethods]::GetDpiForWindow($handle)
+    Assert-True -Condition ($dpi -gt 0) -Message "Unable to resolve window DPI before resizing the WinUI test window."
+
+    $physicalWidth = [int][Math]::Round($Width * ($dpi / 96.0), [MidpointRounding]::AwayFromZero)
+    $physicalHeight = [int][Math]::Round($Height * ($dpi / 96.0), [MidpointRounding]::AwayFromZero)
+    $workArea = [NativeMethods]::GetMonitorWorkArea($handle)
+    $workWidth = $workArea.Right - $workArea.Left
+    $workHeight = $workArea.Bottom - $workArea.Top
+    Assert-True -Condition ($physicalWidth -le $workWidth -and $physicalHeight -le $workHeight) -Message "The current monitor cannot host the requested logical WinUI evidence size without clipping: logical=${Width}x${Height} dpi=$dpi requestedPhysical=${physicalWidth}x${physicalHeight} workAreaPhysical=${workWidth}x${workHeight}."
+
+    $positionX = $workArea.Left + [int][Math]::Floor(($workWidth - $physicalWidth) / 2.0)
+    $positionY = $workArea.Top + [int][Math]::Floor(($workHeight - $physicalHeight) / 2.0)
+    $moved = [NativeMethods]::MoveWindow($handle, $positionX, $positionY, $physicalWidth, $physicalHeight, $true)
+    Assert-True -Condition $moved -Message "MoveWindow failed for requested logical size ${Width}x${Height} at dpi=$dpi."
+
+    Activate-TestWindow -Window $Window
+    Start-Sleep -Milliseconds 300
+    $actual = $Window.Current.BoundingRectangle
+    $widthError = [Math]::Abs($actual.Width - $physicalWidth)
+    $heightError = [Math]::Abs($actual.Height - $physicalHeight)
+    Assert-True -Condition ($widthError -le 2 -and $heightError -le 2) -Message "WinUI window did not reach the requested logical size ${Width}x${Height}: dpi=$dpi requestedPhysical=${physicalWidth}x${physicalHeight} actualPhysical=$($actual.Width)x$($actual.Height)."
+    Assert-True -Condition ($actual.Left -ge $workArea.Left -and $actual.Top -ge $workArea.Top -and $actual.Right -le $workArea.Right -and $actual.Bottom -le $workArea.Bottom) -Message "WinUI evidence window is outside the current monitor work area: logical=${Width}x${Height} actual=$($actual.Left),$($actual.Top),$($actual.Right),$($actual.Bottom) workArea=$($workArea.Left),$($workArea.Top),$($workArea.Right),$($workArea.Bottom)."
 }
 
 function Restore-TestWindow {
@@ -668,6 +700,16 @@ function Get-RuntimeActionSurfaceSnapshot {
     })
 }
 
+function Get-FeatureAdditionalAnchors {
+    param($Feature)
+
+    if ($Feature.ContainsKey("AdditionalAnchors")) {
+        return @($Feature.AdditionalAnchors)
+    }
+
+    return @()
+}
+
 function Get-FeatureSurfaceGroups {
     param($Feature)
 
@@ -862,8 +904,57 @@ using System.Runtime.InteropServices;
 
 public static class NativeMethods
 {
+    private const uint MonitorDefaultToNearest = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public uint Size;
+        public NativeRect Monitor;
+        public NativeRect Work;
+        public uint Flags;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool MoveWindow(IntPtr hWnd, int x, int y, int nWidth, int nHeight, bool bRepaint);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint dwFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfo lpmi);
+
+    public static NativeRect GetMonitorWorkArea(IntPtr hWnd)
+    {
+        IntPtr monitor = MonitorFromWindow(hWnd, MonitorDefaultToNearest);
+        if (monitor == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Unable to resolve the monitor for the WinUI test window.");
+        }
+
+        MonitorInfo info = new MonitorInfo
+        {
+            Size = (uint)Marshal.SizeOf<MonitorInfo>()
+        };
+        if (!GetMonitorInfo(monitor, ref info))
+        {
+            throw new InvalidOperationException("Unable to resolve the monitor work area for the WinUI test window.");
+        }
+
+        return info.Work;
+    }
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
@@ -884,7 +975,16 @@ $stdoutTask = $null
 $stderrTask = $null
 try {
     $features = @(
-        @{ Id = "Dashboard"; Title = "Dashboard"; Anchor = "WorkspaceAction.DashboardQuickActions.ScanDevices"; Surfaces = @("DashboardQuickActions") },
+        @{
+            Id = "Dashboard"
+            Title = "Dashboard"
+            Anchor = "WorkspaceAction.DashboardQuickActions.ScanDevices"
+            Surfaces = @("DashboardQuickActions")
+            EvidenceScrollPercent = 100
+            SurfaceGroups = @(
+                @{ ScrollPercent = 100; Surfaces = @("DashboardQuickActions") }
+            )
+        },
         @{
             Id = "DeviceDiscovery"
             Title = "Device Discovery"
@@ -899,8 +999,21 @@ try {
         @{ Id = "UsbManagement"; Title = "USB Management"; Anchor = "WorkspaceAction.UsbManagementHeader.RefreshDevices"; Surfaces = @("UsbManagementHeader") },
         @{ Id = "FileTransfer"; Title = "File Transfer"; Anchor = "WorkspaceAction.FileTransfer.GenerateQr"; Surfaces = @("FileTransferHeader", "FileTransfer") },
         @{ Id = "RemoteDesktop"; Title = "Remote Desktop"; Anchor = "WorkspaceAction.RemoteDesktop.RecommendedConnect"; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop") },
-        @{ Id = "Quantum"; Title = "Quantum"; Anchor = "WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics"; Surfaces = @("QuantumDiagnosticsHeader") },
-        @{ Id = "SystemMonitor"; Title = "System Monitor"; Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls") },
+        # Quantum has no row of its own. FeatureCatalogClient makes it a suffix on the File
+        # Transfer and Remote Desktop entries rather than a page, matching the Mac sidebar's
+        # seven tabs, and the Core diagnostics panel it used to open now renders as the FIRST
+        # panel of the System Monitor workspace. This table was the one place that change was
+        # never propagated to, so the gate kept selecting a navigation item the shell no longer
+        # has. Its surface is not dropped, only moved: listing it here keeps the runtime action
+        # snapshot covering it, in the same order the workspace renders it, and AdditionalAnchors
+        # keeps asserting that the Run Diagnostics action is still reachable.
+        @{
+            Id = "SystemMonitor"
+            Title = "System Monitor"
+            Anchor = "WorkspaceAction.SystemMonitorControls.Monitoring"
+            Surfaces = @("QuantumDiagnosticsHeader", "SystemMonitorHeader", "SystemMonitorControls")
+            AdditionalAnchors = @("WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics")
+        },
         @{
             Id = "Settings"
             Title = "Settings"
@@ -953,9 +1066,8 @@ try {
         Write-Verbose "Window visual-state normalization was unavailable: $($_.Exception.Message)"
     }
     Restore-TestWindow -Window $window
-    [void][NativeMethods]::MoveWindow([IntPtr]$window.Current.NativeWindowHandle, 40, 40, 1280, 900, $true)
-    Activate-TestWindow -Window $window
-    Start-Sleep -Milliseconds 500
+    Assert-BasicLayout -Window $window -Width 1200 -Height 800
+    Set-TestWindowLogicalSize -Window $window -Width 1280 -Height 900
 
     foreach ($requiredAnchor in @(
         "Skybridge.Navigation.List",
@@ -989,17 +1101,27 @@ try {
             @{ Width = 1366; Height = 768 }
         )) {
             Restore-TestWindow -Window $window
-            [void][NativeMethods]::MoveWindow([IntPtr]$window.Current.NativeWindowHandle, 40, 40, $size.Width, $size.Height, $true)
-            Activate-TestWindow -Window $window
-            Start-Sleep -Milliseconds 500
+            Set-TestWindowLogicalSize -Window $window -Width $size.Width -Height $size.Height
             $globalActionBounds = Get-RuntimeActionSurfaceGroupSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -SurfaceGroups $globalActionSurfaceGroups -Context "global $($size.Width)x$($size.Height)"
             Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
 
             foreach ($feature in $features) {
                 Select-Feature -Window $window -FeatureId $feature.Id -AnchorAutomationId $feature.Anchor
                 $featureActionBounds = Get-FeatureRuntimeActionSurfaceSnapshot -Window $window -ActionOrderBySurface $actionOrderBySurface -Feature $feature -ContextSuffix "$($size.Width)x$($size.Height)"
-                Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
+                if ($feature.ContainsKey("EvidenceScrollPercent")) {
+                    Set-WorkspaceScrollPercent `
+                        -Window $window `
+                        -VerticalPercent ([double]$feature.EvidenceScrollPercent) `
+                        -Required
+                }
+                else {
+                    Set-WorkspaceScrollPercent -Window $window -VerticalPercent 0
+                }
                 [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId $feature.Anchor)
+                # Surfaces that moved into another workspace still have to be reachable there.
+                foreach ($additionalAnchor in @(Get-FeatureAdditionalAnchors -Feature $feature)) {
+                    [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId $additionalAnchor)
+                }
                 $fileName = "{0}x{1}-{2}.png" -f $size.Width, $size.Height, (ConvertTo-SafeFileName -Value $feature.Title)
                 $screenshotPath = Join-Path $resolvedEvidenceDir $fileName
                 $screenshot = Save-WindowScreenshot -Window $window -Path $screenshotPath

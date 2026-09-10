@@ -29,11 +29,14 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
                 "WebRTC product secure session installation requires a TransportOnly product-control context.");
         }
 
+        var sessionIncarnation = WebRtcProductSessionIncarnation.Create();
         var establishedContext = transportContext with
         {
-            SecureSessionState = WebRtcProductControlSecureSessionState.Established
+            SecureSessionState = WebRtcProductControlSecureSessionState.Established,
+            SessionIncarnation = sessionIncarnation
         };
         var session = new EstablishedSession(
+            sessionIncarnation,
             establishedContext.PeerDeviceId,
             establishedContext.PeerPublicKeyFingerprint,
             establishedContext.AdapterBinding,
@@ -52,7 +55,11 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
 
     public WebRtcAppSecureSessionKeys RequireEstablishedKeys(LiveWebRtcProductControlContext context)
     {
-        return RequireEstablishedSession(context).Keys.Clone();
+        ValidateEstablishedContext(context);
+        lock (_gate)
+        {
+            return RequireEstablishedSessionLocked(context).Keys.Clone();
+        }
     }
 
     public WebRtcAppSecureSessionKeys RequireEstablishedKeys(
@@ -61,23 +68,27 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
         WebRtcAppSecureRole role)
     {
         WebRtcProductHandshakeCodec.RequireKnownSuite(suiteWireId);
-        var session = RequireEstablishedSession(context);
-        if (session.SuiteWireId != suiteWireId)
+        ValidateEstablishedContext(context);
+        lock (_gate)
         {
-            throw new WebRtcAppSessionKeysUnavailableException(
-                "WebRTC product-control secure session suite does not match the requested suite.");
-        }
+            var session = RequireEstablishedSessionLocked(context);
+            if (session.SuiteWireId != suiteWireId)
+            {
+                throw new WebRtcAppSessionKeysUnavailableException(
+                    "WebRTC product-control secure session suite does not match the requested suite.");
+            }
 
-        if (session.Keys.Role != role)
-        {
-            throw new WebRtcAppSessionKeysUnavailableException(
-                "WebRTC product-control secure session role does not match the requested role.");
-        }
+            if (session.Keys.Role != role)
+            {
+                throw new WebRtcAppSessionKeysUnavailableException(
+                    "WebRTC product-control secure session role does not match the requested role.");
+            }
 
-        return session.Keys.Clone();
+            return session.Keys.Clone();
+        }
     }
 
-    private EstablishedSession RequireEstablishedSession(LiveWebRtcProductControlContext context)
+    private static void ValidateEstablishedContext(LiveWebRtcProductControlContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
         if (context.SecureSessionState != WebRtcProductControlSecureSessionState.Established)
@@ -85,13 +96,11 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
             throw new WebRtcAppSessionKeysUnavailableException(
                 "WebRTC product-control context is not Established; refusing to expose SBWC session keys.");
         }
+    }
 
-        EstablishedSession? session;
-        lock (_gate)
-        {
-            session = _established;
-        }
-
+    private EstablishedSession RequireEstablishedSessionLocked(LiveWebRtcProductControlContext context)
+    {
+        var session = _established;
         if (session is null)
         {
             throw new WebRtcAppSessionKeysUnavailableException(
@@ -107,7 +116,7 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
         return session;
     }
 
-    public void Clear(LiveWebRtcProductControlContext context)
+    public bool Clear(LiveWebRtcProductControlContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
         lock (_gate)
@@ -116,11 +125,14 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
             {
                 _established.Dispose();
                 _established = null;
+                return true;
             }
+
+            return false;
         }
     }
 
-    public void ClearAll()
+    internal void ClearAllForGlobalShutdown()
     {
         lock (_gate)
         {
@@ -130,6 +142,7 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
     }
 
     private sealed record EstablishedSession(
+        WebRtcProductSessionIncarnation Incarnation,
         string PeerDeviceId,
         string PeerPublicKeyFingerprint,
         string AdapterBinding,
@@ -141,12 +154,15 @@ public sealed class WebRtcProductSecureSessionStore : IWebRtcAppSessionKeyProvid
 
         public bool Matches(LiveWebRtcProductControlContext context)
         {
+            Incarnation.RequireValid();
             if (string.IsNullOrWhiteSpace(Keys.SessionId))
             {
                 throw new InvalidDataException("Installed WebRTC product secure session has an empty session id.");
             }
 
-            return string.Equals(PeerDeviceId, context.PeerDeviceId, StringComparison.Ordinal) &&
+            return context.SessionIncarnation is { } contextIncarnation &&
+                contextIncarnation == Incarnation &&
+                string.Equals(PeerDeviceId, context.PeerDeviceId, StringComparison.Ordinal) &&
                 string.Equals(PeerPublicKeyFingerprint, context.PeerPublicKeyFingerprint, StringComparison.Ordinal) &&
                 string.Equals(AdapterBinding, context.AdapterBinding, StringComparison.Ordinal) &&
                 string.Equals(TransportBindingDigestHex, context.TransportBindingDigestHex, StringComparison.Ordinal);
