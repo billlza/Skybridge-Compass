@@ -25,6 +25,12 @@ The optional value must be a decimal integer from 1 through 64 without leading
 zeroes. An unset value preserves the build tools' existing defaults; an empty or
 invalid value fails before the producer starts work.
 
+If the network cannot reliably reach Apple's accelerated upload endpoint, set
+`SKYBRIDGE_NOTARYTOOL_UPLOAD_ENDPOINT=standard` before starting the producer. This
+selects `notarytool --no-s3-acceleration` for the initial upload; it does not retry
+an upload with an unknown outcome. The default is `accelerated`. An existing
+submission must still be reconciled by its ID before another upload.
+
 ```bash
 : "${SKYBRIDGE_RELEASE_BUILD_ID:?set an approved positive numeric build id}"
 export SKYBRIDGE_BUILD_JOBS=2

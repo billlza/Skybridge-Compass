@@ -67,7 +67,8 @@ def response(status="Accepted", *, identity=SUBMISSION_ID, exit_code=0, stderr="
 
 
 class NotaryHelperTests(unittest.TestCase):
-    def run_case(self, submit, info, expected_exit, *, extra=(), app_directory=False):
+    def run_case(self, submit, info, expected_exit, *, extra=(), app_directory=False,
+                 upload_endpoint=None, admission_rejected=False):
         for shell in ("/bin/bash", "/bin/zsh"):
             with self.subTest(shell=shell), tempfile.TemporaryDirectory(
                 prefix="skybridge-notary-test-"
@@ -90,6 +91,7 @@ class NotaryHelperTests(unittest.TestCase):
                 else:
                     artifact.write_bytes(b"offline fixture")
                 environment = dict(os.environ)
+                environment.pop("SKYBRIDGE_NOTARYTOOL_UPLOAD_ENDPOINT", None)
                 environment.update({
                     "PATH": str(bin_dir) + os.pathsep + environment["PATH"],
                     "NOTARY_FIXTURE_ROOT": str(root),
@@ -97,6 +99,8 @@ class NotaryHelperTests(unittest.TestCase):
                     "SKYBRIDGE_NOTARYTOOL_POLL_SECONDS": "0",
                     "SKYBRIDGE_NOTARYTOOL_MAX_POLL_ATTEMPTS": "2",
                 })
+                if upload_endpoint is not None:
+                    environment["SKYBRIDGE_NOTARYTOOL_UPLOAD_ENDPOINT"] = upload_endpoint
                 result = subprocess.run(
                     [shell, "-euo", "pipefail", "-c", SHELL_DRIVER,
                      "notary-contract", str(HELPER), str(artifact), *extra],
@@ -111,7 +115,7 @@ class NotaryHelperTests(unittest.TestCase):
                 calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
                 submits = [call for call in calls if call[1] == "submit"]
                 infos = [call for call in calls if call[1] == "info"]
-                if extra and extra[0] in ("--no-wait", "--output-format", "--progress"):
+                if admission_rejected or (extra and extra[0] in ("--no-wait", "--output-format", "--progress")):
                     self.assertEqual(calls, [])
                     continue
                 self.assertEqual(len(submits), 1, "an outcome must never trigger another upload")
@@ -123,11 +127,23 @@ class NotaryHelperTests(unittest.TestCase):
                     self.assertIn("--no-progress", call)
                 for call in infos:
                     self.assertEqual(call[2], SUBMISSION_ID)
-                self.assertEqual("--no-s3-acceleration" in submits[0], "--no-s3-acceleration" in extra)
+                self.assertEqual("--no-s3-acceleration" in submits[0],
+                                 upload_endpoint == "standard" or "--no-s3-acceleration" in extra)
+                for call in infos:
+                    self.assertNotIn("--no-s3-acceleration", call)
                 self.assertEqual("--force" in submits[0], app_directory)
 
     def test_success_requires_matching_accepted_info(self):
         self.run_case(response(), [response()], 0)
+
+    def test_standard_endpoint_is_selected_before_the_only_upload(self):
+        self.run_case(response(), [response()], 0, upload_endpoint="standard")
+
+    def test_invalid_endpoint_and_conflicting_override_fail_before_upload(self):
+        for endpoint in ("", "unknown"):
+            self.run_case(response(), [], 1, upload_endpoint=endpoint, admission_rejected=True)
+        self.run_case(response(), [], 1, upload_endpoint="standard",
+                      extra=("--s3-acceleration",), admission_rejected=True)
 
     def test_submit_error_with_identity_reconciles_without_reupload(self):
         self.run_case(
