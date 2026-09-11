@@ -63,6 +63,7 @@
     <Compile Include="..\Skybridge.WinClient\Services\WebRtcProductPqcHandshakeCryptoProvider.PolicyBound.cs" Link="Services\WebRtcProductPqcHandshakeCryptoProvider.PolicyBound.cs" />
     <EmbeddedResource Include="..\Skybridge.WinClient\Resources\qperiapt-production-trust-root.json" LogicalName="Skybridge.QPeriapt.ProductionTrustRoot.json" />
     <Compile Include="..\Skybridge.WinClient\Services\DiscoveryBrowserClient.cs" Link="Services\DiscoveryBrowserClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\ProductDeviceIdentity.cs" Link="Services\ProductDeviceIdentity.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\DiscoveryPeerRoutes.cs" Link="Services\DiscoveryPeerRoutes.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\DiscoveryClient.cs" Link="Services\DiscoveryClient.cs" />
     <Compile Include="..\Skybridge.WinClient\Services\ISupabaseAuthClient.cs" Link="Services\ISupabaseAuthClient.cs" />

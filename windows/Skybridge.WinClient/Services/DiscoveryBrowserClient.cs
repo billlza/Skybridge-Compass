@@ -540,9 +540,9 @@ public sealed partial record DiscoveryPeerRoutes
     {
         var fileRoute = filePeer.Routes.FileTransfer
             ?? throw new InvalidOperationException("The selected device has no resolved file-transfer service.");
-        var identity = RemoteControlHandshakeBinding.CanonicalDeviceId(filePeer.Peer.DeviceId);
+        var identity = ProductDeviceIdentity.CanonicalDeviceId(filePeer.Peer.DeviceId);
         var controls = peers.Where(peer => peer.Peer.PublicKeyFingerprint == filePeer.Peer.PublicKeyFingerprint &&
-                RemoteControlHandshakeBinding.CanonicalDeviceId(peer.Peer.DeviceId) == identity)
+                ProductDeviceIdentity.CanonicalDeviceId(peer.Peer.DeviceId) == identity)
             .Select(peer => peer.Routes.Control)
             .OfType<DiscoveryPeerEndpoint>()
             .Where(route => route.Service == SkyBridgeProtocolConstants.TcpControlDnsSdService &&
