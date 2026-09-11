@@ -6568,6 +6568,14 @@ public class P2PDiscoveryService: BaseManager {
                                 return
                             }
                             case .ping(let payload):
+                                // An authenticated keepalive proves liveness of this exact owner;
+                                // it must not let an active file authority expire after 120 seconds.
+                                if let activeLease = classicTransferSessionLease,
+                                   !(await ClassicTransferSessionRegistry.shared.refreshIfOwned(activeLease)) {
+                                    logger.warning("⛔️ inbound control keepalive rejected: file-session owner expired or replaced")
+                                    connection.cancel()
+                                    return
+                                }
                                 let reply = AppMessage.pong(.init(id: payload.id))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)

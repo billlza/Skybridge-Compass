@@ -6,6 +6,66 @@ import XCTest
 final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
     @MainActor
     @available(iOS 26.0, *)
+    func testNativeQWireRoundTripBindsEncodedIdentityEnvelope() async throws {
+        #if HAS_APPLE_PQC_SDK
+        try await withAdmittedProductionProvider { provider, configuration in
+            let snapshot = QPeriaptHandshakeAdmissionSnapshot.capture(
+                provider: provider, protocolIdentityConfiguration: configuration
+            )
+            let bound = snapshot.bind(provider: provider)
+            XCTAssertTrue(snapshot.admits(provider: bound))
+            let recipient = try await P2PKEMIdentityKeyStore.shared.getOrCreateIdentityKey(
+                for: .qperiaptABI2PolicyBound, provider: bound
+            )
+            defer { recipient.privateKey.zeroize() }
+            let initiatorKey = try MLDSA65.PrivateKey()
+            let responderKey = try MLDSA65.PrivateKey()
+            let signatures = PQCSignatureProvider(algorithm: .mlDSA65, backend: .applePQC)
+            let policy = HandshakeCryptoPolicyResolver.policy(for: [.qperiaptABI2PolicyBound])
+            let initiator = HandshakeContext(
+                role: .initiator, cryptoProvider: bound, protocolSignatureProvider: signatures,
+                identityKeyHandle: .softwareKey(initiatorKey.integrityCheckedRepresentation),
+                identityPublicKey: initiatorKey.publicKey.rawRepresentation,
+                policy: .strictPQC, cryptoPolicy: policy,
+                offeredSuites: [.qperiaptABI2PolicyBound],
+                peerKEMPublicKeys: [.qperiaptABI2PolicyBound: recipient.publicKey]
+            )
+            let responder = HandshakeContext(
+                role: .responder, cryptoProvider: bound, protocolSignatureProvider: signatures,
+                identityKeyHandle: .softwareKey(responderKey.integrityCheckedRepresentation),
+                identityPublicKey: responderKey.publicKey.rawRepresentation,
+                policy: .strictPQC, cryptoPolicy: policy,
+                offeredSuites: [.qperiaptABI2PolicyBound]
+            )
+            do {
+                let messageA = try await initiator.buildMessageA()
+                let decodedA = try HandshakeMessageA.decode(from: messageA.encoded)
+                XCTAssertNotEqual(decodedA.identityPublicKey, initiatorKey.publicKey.rawRepresentation)
+                try await responder.processMessageA(decodedA)
+                let response = try await responder.buildMessageB()
+                defer { response.sharedSecret.zeroize() }
+                let decodedB = try HandshakeMessageB.decode(from: response.message.encoded)
+                let initiatorKeys = try await initiator.processMessageB(decodedB)
+                let responderKeys = try await responder.finalizeResponderSessionKeys(sharedSecret: response.sharedSecret)
+                XCTAssertEqual(initiatorKeys.negotiatedSuite, .qperiaptABI2PolicyBound)
+                XCTAssertEqual(initiatorKeys.sendKey, responderKeys.receiveKey)
+                XCTAssertEqual(initiatorKeys.receiveKey, responderKeys.sendKey)
+                XCTAssertEqual(initiatorKeys.transcriptHash, responderKeys.transcriptHash)
+            } catch {
+                await initiator.zeroize()
+                await responder.zeroize()
+                throw error
+            }
+            await initiator.zeroize()
+            await responder.zeroize()
+        }
+        #else
+        XCTFail("Native Q wire acceptance requires the Apple PQC SDK lane")
+        #endif
+    }
+
+    @MainActor
+    @available(iOS 26.0, *)
     func testAdmittedFactoryProviderReachesCoreIdentityResolution() async throws {
         try await withAdmittedProductionProvider { provider, _ in
             // Factory output has runtime authority; each driver binds identity separately.

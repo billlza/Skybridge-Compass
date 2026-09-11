@@ -2724,6 +2724,14 @@ public actor HandshakeContext {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
 
+        // Commit the same identity envelope that MessageA places on the wire. The responder
+        // reconstructs its KEM application context from that encoded field, not the raw key.
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: protocolSignatureProvider.signatureAlgorithm.wire,
+            secureEnclavePublicKey: nil
+        )
+
         // Capabilities are committed by the canonical Q-Periapt MessageA
         // application context, so they must be finalized before KEM execution.
         let capabilities = CryptoCapabilities.fromProvider(
@@ -2752,7 +2760,7 @@ public actor HandshakeContext {
                     policy: policy,
                     offeredSuites: supportedSuites,
                     capabilities: capabilities,
-                    identityPublicKey: identityPublicKey,
+                    identityPublicKey: identityKeys.encoded,
                     extensionsRaw: extensionsRaw
                 )
                 encaps = try await contextBoundProvider.kemEncapsulate(
@@ -2789,13 +2797,6 @@ public actor HandshakeContext {
 
         self.sentSupportedSuites = supportedSuites
         self.sentKeyShares = Dictionary(uniqueKeysWithValues: keyShares.map { ($0.suite, $0.shareBytes) })
-        
-        // 创建身份公钥结构
-        let identityKeys = IdentityPublicKeys(
-            protocolPublicKey: identityPublicKey,
-            protocolAlgorithm: protocolSignatureProvider.signatureAlgorithm.wire,
-            secureEnclavePublicKey: nil
-        )
         
         // 构建未签名消息（以 HandshakeMessageA 的 deterministic wire bytes 为准）
         let unsigned = HandshakeMessageA(
