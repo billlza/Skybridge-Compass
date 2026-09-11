@@ -307,6 +307,11 @@ foreach ($signal in @(
     Assert-True -Condition ($transport.Contains($signal)) -Message "Transport Apple interop invariant missing signal: $signal"
 }
 
+# Bind a relative output path to the caller before entering the nested Rust directory.
+if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
+    $EvidencePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EvidencePath)
+}
+
 Push-Location $coreRoot
 try {
     $fmtResult = Invoke-NativeCommand -FilePath "cargo" -Arguments @("fmt", "--all", "--", "--check")
