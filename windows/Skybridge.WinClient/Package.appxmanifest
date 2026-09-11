@@ -11,7 +11,7 @@
   <Identity
     Name="SkyBridge.Compass"
     Publisher="CN=SkyBridge"
-    Version="1.0.0.0" />
+    Version="1.0.2.0" />
 
   <Properties>
     <DisplayName>SkyBridge Compass</DisplayName>
