@@ -153,12 +153,13 @@ foreach ($requirement in @(
 }
 
 foreach ($signal in @(
-    "current TDSC mac branch",
+    "current cross-platform contracts are Apple project",
+    "Docs/ADR-0002-Remote-Control-Authority-and-Sessions.md",
     "Docs/CoreLayering.md",
     "Docs/ProtocolAlignmentPlan.md",
     "Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",
     "Sources checked on 2026-06-09",
-    "paper materials as stale"
+    "current implementation evidence take precedence over historical paper claims"
 )) {
     Assert-Contains -Text $architecture -Needle $signal -Message "Research evidence missing signal: $signal"
 }

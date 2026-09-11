@@ -507,7 +507,31 @@ foreach ($templateSignal in @(
     Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
 }
 
-Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 6 -Message "MainWindow must render catalog action buttons through the four shared action templates without reintroducing sidebar session buttons."
+# The file workspace owns two explicit connection lifecycle controls. Check their
+# location and handlers before excluding them from the shared-template inventory.
+[xml]$actionTemplateDocument = $mainWindow
+foreach ($lifecycle in @(
+    @{ Name = "FileTransferConnectButton"; Handler = "OnFileTransferConnectClicked"; AutomationId = "Skybridge.FileTransfer.Connect" },
+    @{ Name = "FileTransferDisconnectButton"; Handler = "OnFileTransferDisconnectClicked"; AutomationId = "Skybridge.FileTransfer.Disconnect" }
+)) {
+    $controls = @($actionTemplateDocument.SelectNodes("//*[local-name()='Button']") | Where-Object {
+        $_.GetAttribute("Name", "http://schemas.microsoft.com/winfx/2006/xaml") -eq $lifecycle.Name
+    })
+    Assert-True -Condition ($controls.Count -eq 1) -Message "File-transfer lifecycle control must occur exactly once: $($lifecycle.Name)"
+    $control = $controls[0]
+    Assert-True -Condition ($control.GetAttribute("Click") -eq $lifecycle.Handler) -Message "File-transfer lifecycle handler differs: $($lifecycle.Name)"
+    Assert-True -Condition ($control.GetAttribute("AutomationProperties.AutomationId") -eq $lifecycle.AutomationId) -Message "File-transfer lifecycle automation anchor differs: $($lifecycle.Name)"
+    $inFileWorkspace = $false
+    for ($ancestor = $control.ParentNode; $null -ne $ancestor; $ancestor = $ancestor.ParentNode) {
+        if ($ancestor -is [System.Xml.XmlElement] -and $ancestor.GetAttribute("Visibility").Contains("IsFileTransferSelected")) {
+            $inFileWorkspace = $true
+            break
+        }
+    }
+    Assert-True -Condition $inFileWorkspace -Message "File-transfer lifecycle control must remain inside the file workspace: $($lifecycle.Name)"
+    [void]$control.ParentNode.RemoveChild($control)
+}
+Assert-Count -Text $actionTemplateDocument.OuterXml -Pattern '<Button\b' -ExpectedCount 6 -Message "MainWindow must retain the four shared action templates and two weather refresh buttons without introducing extra sidebar/session controls."
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
     'ItemsSource="{Binding TopBarActions}"',

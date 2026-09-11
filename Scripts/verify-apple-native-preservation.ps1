@@ -38,7 +38,6 @@ function Assert-NotContains {
 function Invoke-SkybridgeCli {
     param([string[]]$Arguments)
 
-    $LASTEXITCODE = 0
     $output = & cargo run --quiet --manifest-path $coreManifest --bin skybridge -- @Arguments 2>&1
     $exitCode = $LASTEXITCODE
     $text = ($output | Out-String).Trim()

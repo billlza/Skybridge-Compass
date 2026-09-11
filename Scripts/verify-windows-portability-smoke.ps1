@@ -507,9 +507,9 @@ function Invoke-SmokeGate {
 
     try {
         Write-Output "windows-portability-smoke: running $Name"
-        $LASTEXITCODE = 0
         & $scriptPath @Parameters
-        Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Smoke gate failed: $Name exitCode=$LASTEXITCODE"
+        $gateSucceeded = $?
+        Assert-True -Condition $gateSucceeded -Message "Smoke gate failed: $Name exitCode=$LASTEXITCODE"
         Write-Output "windows-portability-smoke: passed $Name"
         Add-SmokeGateResult -Name $Name -Status "passed" -EvidencePath $EvidencePath
     }
