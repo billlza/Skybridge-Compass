@@ -43,7 +43,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
         return true;
     }
 
-    public static SessionViewModelDependencies CreateFromEnvironment(IFileTransferWorkspaceClient? fileTransferClient = null)
+    public static SessionViewModelDependencies CreateFromEnvironment(IFileTransferWorkspaceClient? fileTransferClient = null, ITopBarStatusClient? topBarStatusClient = null, SettingsService? settingsService = null)
     {
         var coreBridge = new CoreBridge();
         var discoveryClient = new CoreDiscoveryClient(coreBridge);
@@ -88,7 +88,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
             CreateSettingsWorkspaceClientFromEnvironment(),
             new DashboardMetricsClient(),
             new WeatherClient(),
-            new TopBarStatusClient(),
+            topBarStatusClient ?? new TopBarStatusClient(),
             new ConnectionWorkspaceStateClient(),
             new WorkspaceActionCatalogClient(),
             new WorkspaceErrorStatusClient(),
@@ -96,7 +96,7 @@ internal static class WindowsNativeRuntimeDependencyFactory
             new FeatureCatalogClient(),
             new SessionCommandStateClient(),
             new WorkspaceCommandStateClient(),
-            productSessionActionGateClient);
+            productSessionActionGateClient, settingsService);
     }
 
     public static ISettingsWorkspaceClient CreateSettingsWorkspaceClientFromEnvironment() =>

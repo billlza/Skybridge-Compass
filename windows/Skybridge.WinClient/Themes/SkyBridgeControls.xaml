@@ -16,7 +16,8 @@
 -->
 <ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Skybridge.WinClient">
 
     <!-- ===================================================================
          GlassPanel — the reusable replacement for inline glass Borders.
@@ -26,6 +27,7 @@
          breathing room is part of the "airy / frosted, not cramped" Mac feel.
          =================================================================== -->
     <Style x:Key="GlassPanel" TargetType="Border">
+        <Setter Property="local:WeatherGlassSurface.IsEnabled" Value="True" />
         <Setter Property="Background" Value="{StaticResource SkyBridgePanelFillBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgePanelStrokeBrush}" />
         <Setter Property="BorderThickness" Value="1" />
@@ -35,6 +37,7 @@
 
     <!-- A slightly tighter glass surface for nested cards / chips. -->
     <Style x:Key="GlassCard" TargetType="Border">
+        <Setter Property="local:WeatherGlassSurface.IsEnabled" Value="True" />
         <Setter Property="Background" Value="{StaticResource SkyBridgeCardFillBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeCardStrokeBrush}" />
         <Setter Property="BorderThickness" Value="1" />
@@ -51,7 +54,8 @@
          Mac StatCard now that the caption/description TextBlock is gone.
          =================================================================== -->
     <Style x:Key="MetricCard" TargetType="Border">
-        <Setter Property="Background" Value="{StaticResource SkyBridgeCardFillBrush}" />
+        <Setter Property="local:WeatherGlassSurface.IsEnabled" Value="True" />
+        <Setter Property="Background" Value="{StaticResource SkyBridgePanelFillBrush}" />
         <Setter Property="BorderBrush" Value="{StaticResource SkyBridgeCardStrokeBrush}" />
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="CornerRadius" Value="{StaticResource SkyBridgeCardCornerRadius}" />

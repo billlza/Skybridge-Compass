@@ -352,7 +352,7 @@ foreach ($compositionSignal in @(
     "SessionViewModelDependencyFactory",
     "SessionViewModelDependencyFactory.CreateConfigured()",
     "SessionViewModelDependencyFactory.CreateDefault()",
-    "new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace))",
+    "new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace, _notifications, settings, ShowAppearanceMenu))",
     "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment()"
 )) {
     Assert-Contains -Text ($sessionViewModelDependencyFactory + $sessionViewModel + $mainWindowCode + $parityDoc) -Needle $compositionSignal -Message "Windows composition signal missing: $compositionSignal"
@@ -525,7 +525,7 @@ foreach ($uiAutomationSmokeSignal in @(
     "WorkspaceAction.SystemMonitorControls.Monitoring",
     "WorkspaceAction.SettingsToolbar.ExportSettings",
     "FileTransferShareQrImage",
-    "no local files were read"
+    "LAN sessions must not advertise QR sharing without a real share manifest."
 )) {
     Assert-Contains -Text $uiAutomationSmoke -Needle $uiAutomationSmokeSignal -Message "Windows UI automation smoke missing signal: $uiAutomationSmokeSignal"
 }
@@ -1093,7 +1093,7 @@ foreach ($command in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand"
     Assert-Contains -Text $sessionViewModel -Needle $command -Message "SessionViewModel.cs missing catalog-mapped command: $command"
 }
 
-foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenTopBarNotificationsCommand", "ToggleTopBarThemeCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "CancelManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
+foreach ($migratedCommand in @("ConnectCommand", "HeartbeatCommand", "DisconnectCommand", "OpenDeviceDiscoveryCommand", "OpenFileTransferCommand", "OpenSystemMonitorCommand", "OpenSettingsCommand", "StartDiscoveryCommand", "StopDiscoveryCommand", "RefreshDiscoveryCommand", "RunExtendedDiscoveryCommand", "PrepareManualConnectionCommand", "CancelManualConnectionCommand", "GenerateQRCodeCommand", "ScanQRCodeCommand", "GenerateConnectionCodeCommand", "RegenerateConnectionCodeCommand", "CopyConnectionCodeCommand", "ConnectConnectionCodeCommand", "ParseAdvertisementCommand", "ValidatePairingCodeCommand", "PrepareConnectionCommand", "RefreshUsbManagementCommand", "RefreshFileTransferCommand", "SelectFileTransferFilesCommand", "SelectFileTransferFolderCommand", "GenerateFileTransferQrCommand", "RefreshRemoteDesktopCommand", "RecommendedRemoteDesktopConnectCommand", "AdvancedRemoteDesktopConnectCommand", "ShowRemoteDesktopPerformanceOverlayCommand", "ApplyRemoteDesktopQualityCommand", "OpenRemoteDesktopSettingsCommand", "EnterRemoteDesktopFullScreenCommand", "DisconnectRemoteDesktopSessionCommand", "RunCoreDiagnosticsCommand", "RefreshSystemMonitorCommand", "StartSystemMonitoringCommand", "StopSystemMonitoringCommand", "EnableAdvancedSystemMonitoringCommand", "RefreshSettingsCommand", "ExportSettingsCommand", "ImportSettingsCommand", "ResetSettingsCommand", "RequestSettingsPermissionCommand", "OpenSystemPreferencesCommand", "ApplySettingsCommand", "RestoreDefaultsCommand", "ResetMonitorDataCommand")) {
     Assert-True -Condition (-not $mainWindow.Contains("Command=`"{Binding $migratedCommand}`"")) -Message "MainWindow.xaml still hardcodes migrated action command: $migratedCommand"
 }
 
@@ -1165,7 +1165,9 @@ foreach ($workspaceVisibilitySignal in @(
 }
 
 Assert-True -Condition (-not $mainWindow.Contains('ItemsSource="{Binding SidebarSessionActions}"')) -Message "MainWindow.xaml must keep the mac-like sidebar free of session action buttons; visible session controls belong to SessionControlActions."
-Assert-ActionItemsControlResources -Text $mainWindow -Binding "TopBarActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "TopBarStatusActionButtonTemplate"
+# The native bell/appearance popup buttons keep the existing command contracts.
+Assert-Contains -Text $mainWindow -Needle 'Command="{Binding OpenTopBarNotificationsCommand}"' -Message "Notification center command must remain reachable."
+Assert-Contains -Text $mainWindow -Needle 'Command="{Binding ToggleTopBarThemeCommand}"' -Message "Appearance menu command must remain reachable."
 Assert-ActionItemsControlResources -Text $mainWindow -Binding "DeviceDiscoveryManualConnectFinalActions" -ItemsPanel "HorizontalWorkspaceActionItemsPanel" -ItemTemplate "WorkspaceActionButtonWithDetailTemplate"
 
 Assert-NavigationViewMenuTemplate -Text $mainWindow -Binding "NavigationItems" -ItemTemplate "NavigationItemTemplate" -SelectedBinding "SelectedFeature, Mode=TwoWay"
@@ -1217,7 +1219,7 @@ foreach ($automationSignal in @(
     'AutomationProperties.AutomationId="Skybridge.Navigation.List"',
     'AutomationProperties.AutomationId="{Binding Id}"',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
-    'AutomationProperties.AutomationId="Skybridge.Status.Message"',
+    'AutomationProperties.HelpText="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     'AutomationProperties.AutomationId="Skybridge.Workspace.ScrollViewer"',
@@ -1257,7 +1259,7 @@ Assert-ItemsControlTemplate -Text $mainWindow -Binding "SettingsActions" -ItemTe
 
 foreach ($layoutSignal in @(
     "<ColumnDefinition Width=`"280`" />",
-    "<RowDefinition Height=`"56`" />",
+    "<RowDefinition Height=`"Auto`" MinHeight=`"56`" />",
     # "SkyBridge" with a capital B — this must equal the Mac "app.name" string, which is
     # "SkyBridge Compass" (en) / "云桥司南" (zh-Hans) / "SkyBridge コンパス Pro" (ja). The
     # literal below is the design-time fallback in MainWindow.xaml; the runtime value comes
@@ -1289,15 +1291,15 @@ Assert-Ordered -Text $mainWindow -Context "Main workspace feature section order"
 )
 
 Assert-Ordered -Text $mainWindow -Context "Top bar parity action order" -Needles @(
+    'AutomationProperties.HelpText="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'Text="{Binding SelectedFeature.Title}"',
-    'Text="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     '<TextBlock Text="{Binding TopBarConnectionStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     'ToolTipService.ToolTip="FPS / Diagnostics"',
     'x:Uid="TopBarDiagnosticsFpsLabel" Text="FPS"',
     '<TextBlock Text="{Binding TopBarDiagnosticsStatus, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
-    'ItemsSource="{Binding TopBarActions}"'
+    'AutomationProperties.AutomationId="WorkspaceAction.TopBarActions.Notifications"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "Mac-like sidebar without session action buttons" -Needles @(

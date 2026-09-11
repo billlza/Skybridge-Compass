@@ -17,6 +17,21 @@
 
   <ItemGroup>
     <Compile Include="Program.cs" />
+    <Compile Include="AccountDeviceTests.cs" />
+    <Compile Include="ShellInteractionTests.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WorkspaceNotificationCenter.cs" Link="Services\WorkspaceNotificationCenter.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\SettingsThemePreferenceClient.cs" Link="Services\SettingsThemePreferenceClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\TopBarStatusClient.cs" Link="Services\TopBarStatusClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WorkspaceActionDetailSnapshot.cs" Link="Services\WorkspaceActionDetailSnapshot.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\FileTransferWorkspaceContracts.cs" Link="Services\FileTransferWorkspaceContracts.cs" />
+    <Compile Include="AccountDeviceLiveValidation.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\WindowsAccountDeviceMetadata.cs" Link="Services\WindowsAccountDeviceMetadata.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CrossNetworkConnectionCodePolicy.cs" Link="Services\CrossNetworkConnectionCodePolicy.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\CurrentPathSignalingClient.cs" Link="Services\CurrentPathSignalingClient.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\AccountDeviceAuthentication.cs" Link="Services\AccountDeviceAuthentication.cs" />
+    <Compile Include="..\Skybridge.WinClient\Services\AccountDevicePresentation.cs" Link="Services\AccountDevicePresentation.cs" />
+    <Compile Include="..\Skybridge.WinClient\ViewModels\AccountDevicesCoordinator.cs" Link="ViewModels\AccountDevicesCoordinator.cs" />
+    <EmbeddedResource Include="..\Skybridge.WinClient\Resources\account-device-apple-models.json" LogicalName="Skybridge.AccountDevices.AppleModels.json" />
     <Compile Include="QPeriaptNativeContractTests.cs" />
     <Compile Include="QPeriaptProductContractTests.cs" />
     <Compile Include="QPeriaptWindowsProductTests.cs" />

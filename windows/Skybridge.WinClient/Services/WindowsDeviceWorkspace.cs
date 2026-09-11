@@ -153,6 +153,20 @@ internal sealed class WindowsDeviceWorkspace : IAsyncDisposable
             candidate.Peer.PublicKeyFingerprint), crypto, localIdentity, localPairing);
     }
 
+    internal async Task<CurrentPathProtocolIdentityBinding> AccountIdentityAsync(CancellationToken cancellationToken)
+    {
+        await _operations.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _identity ??= await RemoteControlIdentityStore.LoadOrCreateAsync(_stateDirectory, _displayName, cancellationToken).ConfigureAwait(false);
+            var material = _identity.PublicMaterial;
+            return new CurrentPathProtocolIdentityBinding(material.DeviceId,
+                CurrentPathProtocolSigningAlgorithm.MLDsa65, material.ProtocolPublicKey, material.ProtocolPublicKeyFingerprint);
+        }
+        finally { _operations.Release(); }
+    }
+
     public async Task<RemoteControlHostPreparation> PrepareAsync(CancellationToken cancellationToken = default)
     {
         await _operations.WaitAsync(cancellationToken).ConfigureAwait(false);

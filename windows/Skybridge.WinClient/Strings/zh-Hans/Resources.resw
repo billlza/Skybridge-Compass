@@ -1843,4 +1843,67 @@
   <data name="FileTransferLiveReceived" xml:space="preserve">
     <value>已接收</value>
   </data>
+  <data name="AccountDevicesTitle.Text" xml:space="preserve"><value>账号设备</value></data>
+  <data name="AccountDevicesOpen.AutomationProperties.Name" xml:space="preserve"><value>查看账号设备</value></data>
+  <data name="AccountDevicesRefresh.Content" xml:space="preserve"><value>刷新</value></data>
+  <data name="AccountDevicesClose.Content" xml:space="preserve"><value>关闭</value></data>
+  <data name="AccountDevicesHint.Text" xml:space="preserve"><value>此账号下的设备。连续 90 秒未收到心跳将显示离线；账号设备列表不代表已授予远程控制权限。</value></data>
+  <data name="AccountDevicesSignedOut" xml:space="preserve"><value>登录后查看账号设备</value></data>
+  <data name="AccountDevicesLoading" xml:space="preserve"><value>正在连接账号设备服务…</value></data>
+  <data name="AccountDevicesSummary" xml:space="preserve"><value>{0} 台设备 · {1} 台在线</value></data>
+  <data name="AccountDevicesCurrent" xml:space="preserve"><value>账号设备已更新</value></data>
+  <data name="AccountDevicesTruncated" xml:space="preserve"><value>仅显示前 200 台设备，列表尚未完整。</value></data>
+  <data name="AccountDevicesExpired" xml:space="preserve"><value>在线状态已过期，等待刷新。</value></data>
+  <data name="AccountDevicesAuthError" xml:space="preserve"><value>账号会话未验证或已过期，请刷新或重新登录。</value></data>
+  <data name="AccountDevicesNotActive" xml:space="preserve"><value>此设备尚未获准使用账号设备服务，请在已授权设备上确认其状态。</value></data>
+  <data name="AccountDevicesRateLimited" xml:space="preserve"><value>刷新过于频繁，稍后自动重试。</value></data>
+  <data name="AccountDevicesServiceError" xml:space="preserve"><value>账号设备服务拒绝请求或暂不可用，稍后重试。</value></data>
+  <data name="AccountDevicesNetworkError" xml:space="preserve"><value>未能连接账号设备服务，稍后自动重试。</value></data>
+  <data name="AccountDevicesInvalidResponse" xml:space="preserve"><value>账号设备数据校验失败，未显示为在线。</value></data>
+  <data name="AccountDevicesLocalError" xml:space="preserve"><value>本机设备身份或元数据暂不可用，请稍后刷新。</value></data>
+  <data name="AccountDeviceModelUnknown" xml:space="preserve"><value>型号未上报</value></data>
+  <data name="AccountDevicePending" xml:space="preserve"><value>待批准</value></data>
+  <data name="AccountDeviceFrozen" xml:space="preserve"><value>已冻结</value></data>
+  <data name="AccountDeviceOnline" xml:space="preserve"><value>在线</value></data>
+  <data name="AccountDeviceOffline" xml:space="preserve"><value>离线</value></data>
+  <data name="AccountDeviceThisDevice" xml:space="preserve"><value>本机</value></data>
+  <data name="AccountDeviceLastSeen" xml:space="preserve"><value>最近在线：{0}</value></data>
+  <data name="AccountDeviceLastSeenUnknown" xml:space="preserve"><value>尚无在线记录</value></data>
+  <data name="FileTransferQrUnavailableHint.Text" xml:space="preserve"><value>当前局域网会话不支持二维码分享。请选择文件或文件夹，再选择接收设备。</value></data>
+  <data name="NotificationsButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>通知中心</value></data>
+  <data name="NotificationsButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>通知中心</value></data>
+  <data name="AppearanceButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>外观与壁纸</value></data>
+  <data name="AppearanceButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>外观与壁纸</value></data>
+  <data name="NotificationsCenterTitle" xml:space="preserve"><value>通知中心</value></data>
+  <data name="NotificationsClear" xml:space="preserve"><value>清空</value></data>
+  <data name="NotificationsEmpty" xml:space="preserve"><value>暂无通知</value></data>
+  <data name="NotificationsSystemDisabled" xml:space="preserve"><value>系统通知已关闭</value></data>
+  <data name="NotificationsSystemUnavailable" xml:space="preserve"><value>Windows 通知暂不可用，事件仍保留在此处</value></data>
+  <data name="NotificationsTransferSent" xml:space="preserve"><value>文件发送完成</value></data>
+  <data name="NotificationsTransferReceived" xml:space="preserve"><value>文件接收完成</value></data>
+  <data name="NotificationsTransferFailed" xml:space="preserve"><value>文件传输失败</value></data>
+  <data name="NotificationsAccountConnected" xml:space="preserve"><value>账号已连接</value></data>
+  <data name="NotificationsAccountConnectedDetail" xml:space="preserve"><value>已验证登录会话，账号设备服务可使用此身份。</value></data>
+  <data name="NotificationsAccountSignedOut" xml:space="preserve"><value>账号已退出</value></data>
+  <data name="NotificationsAccountSignedOutDetail" xml:space="preserve"><value>当前账号会话已结束。</value></data>
+  <data name="NotificationsRemoteConnected" xml:space="preserve"><value>远程控制已连接</value></data>
+  <data name="NotificationsRemoteConnectedDetail" xml:space="preserve"><value>已批准的远程设备已连接到此电脑。</value></data>
+  <data name="NotificationsRemoteEnded" xml:space="preserve"><value>远程控制已结束</value></data>
+  <data name="NotificationsRemoteEndedDetail" xml:space="preserve"><value>远程控制会话已关闭。</value></data>
+  <data name="AppearanceMode_system" xml:space="preserve"><value>跟随系统外观</value></data>
+  <data name="AppearanceMode_light" xml:space="preserve"><value>浅色外观</value></data>
+  <data name="AppearanceMode_dark" xml:space="preserve"><value>深色外观</value></data>
+  <data name="BackgroundTheme_weather" xml:space="preserve"><value>天气原景</value></data>
+  <data name="BackgroundTheme_starryNight" xml:space="preserve"><value>星空夜晚</value></data>
+  <data name="BackgroundTheme_deepSpace" xml:space="preserve"><value>深空探索</value></data>
+  <data name="BackgroundTheme_aurora" xml:space="preserve"><value>极光幻境</value></data>
+  <data name="BackgroundTheme_classic" xml:space="preserve"><value>经典模式</value></data>
+  <data name="BackgroundChooseImage" xml:space="preserve"><value>选择自定义背景…</value></data>
+  <data name="BackgroundLoadFailed" xml:space="preserve"><value>背景图片未能加载</value></data>
+  <data name="AppearanceSettingsLabel.Text" xml:space="preserve"><value>界面外观</value></data>
+  <data name="AppearanceSystemChoice.Content" xml:space="preserve"><value>跟随系统</value></data>
+  <data name="AppearanceLightChoice.Content" xml:space="preserve"><value>浅色</value></data>
+  <data name="AppearanceDarkChoice.Content" xml:space="preserve"><value>深色</value></data>
+  <data name="DiscoveryModeAccountDevicesTitle.Text" xml:space="preserve"><value>账号设备</value></data>
+  <data name="DiscoveryModeAccountDevicesSubtitle.Text" xml:space="preserve"><value>同一账号</value></data>
 </root>

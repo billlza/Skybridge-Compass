@@ -376,7 +376,7 @@ public static class CurrentPathSignalingWebSocketPolicy
     }
 }
 
-public sealed class CurrentPathSignalServerClient
+public sealed partial class CurrentPathSignalServerClient
 {
     private const int MaxJsonResponseBytes = 128 * 1024;
 
@@ -2389,6 +2389,9 @@ public sealed class CurrentPathSignalServerException : Exception
 
     private static bool IsKnownServerErrorCode(string value) =>
         value is
+            "device_not_registered" or "device_not_active" or "device_pending" or "device_frozen" or "device_revoked" or
+            "registry_not_configured" or "registry_unavailable" or "registry_schema_outdated" or
+            "client_upgrade_required" or "protocol_upgrade_required" or
             "admission_expired" or
             "admission_required" or
             "auth_rejected" or

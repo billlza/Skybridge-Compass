@@ -144,6 +144,7 @@ public sealed class SettingsCoordinator : INotifyPropertyChanged, IDisposable
     {
         switch (propertyName)
         {
+            case nameof(AppearanceMode):
             case nameof(UseDarkMode):
                 OnDarkModeChanged(UseDarkMode);
                 break;
@@ -212,6 +213,9 @@ public sealed class SettingsCoordinator : INotifyPropertyChanged, IDisposable
     public bool AutoScanOnStartup { get => _service.AutoScanOnStartup; set => _service.AutoScanOnStartup = value; }
     public bool ShowSystemNotifications { get => _service.ShowSystemNotifications; set => _service.ShowSystemNotifications = value; }
     public bool UseDarkMode { get => _service.UseDarkMode; set => _service.UseDarkMode = value; }
+    public string AppearanceMode { get => _service.AppearanceMode; set => _service.AppearanceMode = value; }
+    public string BackgroundTheme { get => _service.BackgroundTheme; set => _service.BackgroundTheme = value; }
+    public string? CustomBackgroundPath { get => _service.CustomBackgroundPath; set => _service.CustomBackgroundPath = value; }
     public int ScanInterval { get => _service.ScanInterval; set => _service.ScanInterval = value; }
     public bool ShowDeviceDetails { get => _service.ShowDeviceDetails; set => _service.ShowDeviceDetails = value; }
     public bool ShowConnectionStats { get => _service.ShowConnectionStats; set => _service.ShowConnectionStats = value; }

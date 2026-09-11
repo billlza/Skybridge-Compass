@@ -567,8 +567,8 @@ public sealed class SettingsWorkspaceClient : ISettingsWorkspaceClient
         d.Add(new("General", "Language · Language / 语言", "System (default)", "Mirrors mac default. Language picker is display-only; no app-language override is persisted on Windows."));
         // Card: Preferences / 偏好
         d.Add(new("General", "Preferences · Auto scan on startup", "On (default)", DisplayOnly + ". Auto-scan toggle reflects the mac default; Windows discovery start remains user/command driven."));
-        d.Add(new("General", "Preferences · System notifications", "On (default)", DisplayOnly + ". No notification permission is requested by this workspace."));
-        d.Add(new("General", "Preferences · Dark mode", "Off (default)", DisplayOnly + ". Theme follows the host shell; this toggle is not persisted."));
+        d.Add(new("General", "Preferences · System notifications", "On (default)", "Persisted locally. Account, transfer and session events feed the notification center; Windows delivery follows this preference and the operating system settings."));
+        d.Add(new("General", "Preferences · Appearance", "System / Light / Dark", "Persisted locally and shared by the settings page and top-bar appearance menu. System follows Windows; wallpaper selection is independent."));
         d.Add(new("General", "Preferences · Scan interval", "30s (default · 15/30/60/120)", DisplayOnly + ". Interval choice is not persisted to a Windows store."));
         // Card: Interface / 界面
         d.Add(new("General", "Interface · Show device details", "On (default)", DisplayOnly + ". Layout preference is not persisted."));

@@ -140,9 +140,29 @@
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Resources\qperiapt-production-trust-root.json" LogicalName="Skybridge.QPeriapt.ProductionTrustRoot.json" />
+    <EmbeddedResource Include="Resources\account-device-apple-models.json" LogicalName="Skybridge.AccountDevices.AppleModels.json" />
+    <EmbeddedResource Include="Resources\cloud_noise_volume.rgba" LogicalName="Skybridge.Weather.CloudDensity.rgba" />
+    <EmbeddedResource Include="obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\VSMain.cso" LogicalName="Skybridge.Weather.VSMain.cso" />
+    <EmbeddedResource Include="obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\PSMain.cso" LogicalName="Skybridge.Weather.PSMain.cso" />
+    <EmbeddedResource Include="obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\weather-shader-source.sha256" LogicalName="Skybridge.Weather.Source.sha256" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="..\..\LICENSE" Link="Licenses\SkyBridge-Compass.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="..\..\LICENSING.md" Link="Licenses\README.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-x64\Microsoft.WindowsAppRuntime.2.msix;$(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-x64\Microsoft.WindowsAppRuntime.Main.2.msix;$(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-x64\Microsoft.WindowsAppRuntime.Singleton.2.msix"
+             Link="RuntimeDependencies\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\Scripts\install-windows-notification-runtime.ps1" Link="Install-NotificationRuntime.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\NotificationRuntime\Microsoft.WindowsAppRuntime.Insights.Resource.dll"
+             Link="Microsoft.WindowsAppRuntime.Insights.Resource.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="PrepareNotificationAssets" BeforeTargets="PrepareForBuild" Condition="'$(OS)'=='Windows_NT' and '$(DesignTimeBuild)'!='true'">
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -File &quot;$(MSBuildProjectDirectory)\..\..\Scripts\prepare-windows-notification-assets.ps1&quot; -RuntimePackage &quot;$(MicrosoftWindowsAppSDKPackageDir)tools\MSIX\win10-x64\Microsoft.WindowsAppRuntime.2.msix&quot; -OutputDirectory &quot;$(MSBuildProjectDirectory)\obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\NotificationRuntime&quot;" />
+  </Target>
+
+  <Target Name="ValidateWeatherShaders" BeforeTargets="PrepareForBuild" Condition="'$(OS)'=='Windows_NT' and '$(DesignTimeBuild)'!='true'">
+    <Exec Command="powershell.exe -NoProfile -NonInteractive -File &quot;$(MSBuildProjectDirectory)\..\..\Scripts\verify-windows-weather-shaders.ps1&quot; -SourcePath &quot;$(MSBuildProjectDirectory)\WeatherBackdropDX.xaml.cs&quot; -EvidencePath &quot;$(MSBuildProjectDirectory)\obj\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\weather-shader-validation.json&quot;" />
+  </Target>
 </Project>

@@ -5,7 +5,9 @@ param(
     [int]$TimeoutSeconds = 20,
     [string]$EvidenceDir = "",
     [string]$EvidenceBranch = "",
-    [string]$EvidenceHead = ""
+    [string]$EvidenceHead = "",
+    [switch]$RequireAccountDeviceService,
+    [ValidatePattern("^[A-Fa-f0-9]{64}$")][string]$ExistingAssemblySha256
 )
 
 $ErrorActionPreference = "Stop"
@@ -159,12 +161,20 @@ function Wait-ForMainWindow {
         $window = [System.Windows.Automation.AutomationElement]::RootElement.FindFirst(
             [System.Windows.Automation.TreeScope]::Children,
             $condition)
-        if ($null -ne $window) {
+        if ($null -ne $window -and $window.Current.NativeWindowHandle -ne 0 -and -not $window.Current.IsOffscreen) {
             return $window
         }
     } while ((Get-Date) -lt $deadline)
 
     throw "Timed out waiting for Skybridge.WinClient main window."
+}
+
+function Close-TestWindow {
+    param([System.Windows.Automation.AutomationElement]$Window,[System.Diagnostics.Process]$Process)
+    if ($Process.HasExited) { return }
+    Assert-True ($Window.Current.ProcessId -eq $Process.Id) 'Window shutdown target does not match the candidate process.'
+    $Window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
+    Assert-True ($Process.WaitForExit(15000)) 'The candidate did not finish its normal window shutdown.'
 }
 
 function Assert-VisibleByAutomationId {
@@ -237,8 +247,8 @@ function Assert-SelectedFeature {
 function Assert-StatusMessageNotEmpty {
     param([System.Windows.Automation.AutomationElement]$Window)
 
-    $status = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.Status.Message"
-    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($status.Current.Name)) -Message "Status message is empty."
+    $status = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.SelectedFeature.Title"
+    Assert-True -Condition (-not [string]::IsNullOrWhiteSpace($status.Current.HelpText)) -Message "Status message is empty."
     return $status
 }
 
@@ -248,8 +258,8 @@ function Assert-StatusMessageContains {
         [string]$ExpectedText
     )
 
-    $status = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.Status.Message"
-    Assert-True -Condition $status.Current.Name.Contains($ExpectedText) -Message "Status message mismatch. expectedContains=$ExpectedText actual=$($status.Current.Name)"
+    $status = Assert-PresentByAutomationId -Root $Window -AutomationId "Skybridge.SelectedFeature.Title"
+    Assert-True -Condition $status.Current.HelpText.Contains($ExpectedText) -Message "Status message mismatch. expectedContains=$ExpectedText actual=$($status.Current.HelpText)"
     return $status
 }
 
@@ -368,6 +378,25 @@ function Assert-PresentAndVisibleByAutomationId {
     if ($element.Current.IsOffscreen) {
         Try-ScrollIntoView -Element $element
         $element = Assert-PresentByAutomationId -Root $Root -AutomationId $AutomationId -TimeoutSeconds $TimeoutSeconds
+        if ($element.Current.IsOffscreen) {
+            # Templated WinUI buttons do not always expose ScrollItemPattern.
+            # Use their actual workspace scroll owner, with bounded real scrolls.
+            $owner = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($element)
+            while ($owner -and $owner.Current.AutomationId -ne 'Skybridge.Workspace.ScrollViewer') {
+                $owner = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($owner)
+            }
+            if ($owner) {
+                $scroll = $owner.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
+                if ($scroll.Current.VerticallyScrollable) {
+                    foreach ($percent in 0,10,20,30,40,50,60,70,80,90,100) {
+                        $scroll.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll, $percent)
+                        Start-Sleep -Milliseconds 120
+                        $element = Assert-PresentByAutomationId -Root $Root -AutomationId $AutomationId -TimeoutSeconds $TimeoutSeconds
+                        if (-not $element.Current.IsOffscreen) { break }
+                    }
+                }
+            }
+        }
     }
 
     Assert-True -Condition (-not $element.Current.IsOffscreen) -Message "Automation id is present but offscreen after scroll attempt: $AutomationId"
@@ -440,11 +469,21 @@ function Set-TestWindowLogicalSize {
     Assert-True -Condition $moved -Message "MoveWindow failed for requested logical size ${Width}x${Height} at dpi=$dpi."
 
     Activate-TestWindow -Window $Window
-    Start-Sleep -Milliseconds 300
-    $actual = $Window.Current.BoundingRectangle
-    $widthError = [Math]::Abs($actual.Width - $physicalWidth)
-    $heightError = [Math]::Abs($actual.Height - $physicalHeight)
+    $resizeDeadline = (Get-Date).AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 100
+        # MoveWindow sizes the HWND rectangle; UIA may report only the visible
+        # DWM frame (excluding the 13px invisible resize border at 200% DPI).
+        $nativeRect = New-Object NativeMethods+NativeRect
+        Assert-True ([NativeMethods]::GetWindowRect($handle, [ref]$nativeRect)) "Native window bounds are unavailable after resize."
+        $actual = [pscustomobject]@{Left=$nativeRect.Left;Top=$nativeRect.Top;Right=$nativeRect.Right;Bottom=$nativeRect.Bottom;Width=($nativeRect.Right-$nativeRect.Left);Height=($nativeRect.Bottom-$nativeRect.Top)}
+        $widthError = [Math]::Abs($actual.Width - $physicalWidth)
+        $heightError = [Math]::Abs($actual.Height - $physicalHeight)
+        if ($widthError -le 2 -and $heightError -le 2) { break }
+    } while ((Get-Date) -lt $resizeDeadline)
     Assert-True -Condition ($widthError -le 2 -and $heightError -le 2) -Message "WinUI window did not reach the requested logical size ${Width}x${Height}: dpi=$dpi requestedPhysical=${physicalWidth}x${physicalHeight} actualPhysical=$($actual.Width)x$($actual.Height)."
+    $visible = $Window.Current.BoundingRectangle
+    Assert-True ($visible.Width -gt 0 -and $visible.Height -gt 0 -and $visible.Left -ge $actual.Left - 2 -and $visible.Top -ge $actual.Top - 2 -and $visible.Right -le $actual.Right + 2 -and $visible.Bottom -le $actual.Bottom + 2) "UI Automation reports content outside the resized native window."
     Assert-True -Condition ($actual.Left -ge $workArea.Left -and $actual.Top -ge $workArea.Top -and $actual.Right -le $workArea.Right -and $actual.Bottom -le $workArea.Bottom) -Message "WinUI evidence window is outside the current monitor work area: logical=${Width}x${Height} actual=$($actual.Left),$($actual.Top),$($actual.Right),$($actual.Bottom) workArea=$($workArea.Left),$($workArea.Top),$($workArea.Right),$($workArea.Bottom)."
 }
 
@@ -878,11 +917,16 @@ Assert-UnpackagedDefaultWindowsPackageType -Project $project
 $matrixPath = Join-Path $RepoRoot "docs/windows-ui-parity-matrix.md"
 $actionOrderBySurface = Get-ActionOrderMatrix -MatrixPath $matrixPath
 
-& dotnet restore $projectPath | Write-Output
-Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke restore failed."
+# CI/default runs still build with warnings as errors. Native acceptance can
+# instead pin an already-built assembly, preserving the bytes validated by the
+# notification, wallpaper and installation lanes.
+if (-not $ExistingAssemblySha256) {
+    & dotnet restore $projectPath | Write-Output
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke restore failed."
 
-& dotnet build $projectPath --configuration $Configuration --no-restore /p:TreatWarningsAsErrors=true | Write-Output
-Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke build failed."
+    & dotnet build $projectPath --configuration $Configuration --no-restore /p:TreatWarningsAsErrors=true | Write-Output
+    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "WinUI automation smoke build failed."
+}
 
 $targetFramework = "net10.0-windows10.0.22621.0"
 $runtimeIdentifiers = @($project.Project.PropertyGroup |
@@ -893,6 +937,11 @@ $runtimeIdentifiers = @($project.Project.PropertyGroup |
 Assert-True -Condition ($runtimeIdentifiers.Count -eq 1) -Message "WinUI automation smoke requires exactly one default RuntimeIdentifier; actual=[$($runtimeIdentifiers -join ', ')]"
 $exePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/bin/$Configuration/$targetFramework/$($runtimeIdentifiers[0])/Skybridge.WinClient.exe"
 Assert-True -Condition (Test-Path -LiteralPath $exePath) -Message "Missing WinUI executable: $exePath"
+if ($ExistingAssemblySha256) {
+    $assemblyPath = Join-Path (Split-Path $exePath) 'Skybridge.WinClient.dll'
+    Assert-True ((Get-FileHash $assemblyPath -Algorithm SHA256).Hash -eq $ExistingAssemblySha256) "The prebuilt UI candidate does not match its expected assembly hash."
+}
+
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 if (-not [string]::IsNullOrWhiteSpace($EvidenceDir)) {
@@ -957,6 +1006,12 @@ public static class NativeMethods
     }
 
     [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -969,6 +1024,11 @@ public static class NativeMethods
     public static extern void MouseEvent(int dwFlags, int dx, int dy, int dwData, UIntPtr dwExtraInfo);
 }
 "@
+
+# UI Automation bounds and saved pixels are physical; Win32 input/geometry must
+# use that same coordinate space at 150/200% display scaling.
+$inputDpiContext = [NativeMethods]::SetThreadDpiAwarenessContext([IntPtr](-4))
+Assert-True ($inputDpiContext -ne [IntPtr]::Zero) "Physical UI verification DPI context is unavailable."
 
 $process = $null
 $stdoutTask = $null
@@ -1174,10 +1234,36 @@ try {
 
     Select-Feature -Window $window -FeatureId "FileTransfer" -AnchorAutomationId "WorkspaceAction.FileTransfer.GenerateQr"
     $generateQr = Assert-VisibleByAutomationId -Root $window -AutomationId "WorkspaceAction.FileTransfer.GenerateQr"
-    $invokePattern = $generateQr.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-    $invokePattern.Invoke()
-    [void](Assert-VisibleByAutomationId -Root $window -AutomationId "FileTransferShareQrImage" -TimeoutSeconds 10)
-    [void](Assert-StatusMessageContains -Window $window -ExpectedText "no local files were read")
+    Assert-True -Condition (-not $generateQr.Current.IsEnabled) -Message "LAN sessions must not advertise QR sharing without a real share manifest."
+    [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId "FileTransfer.QrUnavailableReason")
+    $qrImage = Find-ByAutomationId -Root $window -AutomationId "FileTransferShareQrImage"
+    Assert-True -Condition ($null -eq $qrImage -or $qrImage.Current.IsOffscreen) -Message "Unsupported QR sharing must never display an empty or unrelated identity."
+
+    $accountEntry = Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId "AccountDevices.OpenFooter"
+    $accountEntry.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId "AccountDevices.Close")
+    [void](Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId "AccountDevices.Status")
+    $serviceDeadline = (Get-Date).AddSeconds(35)
+    do {
+        $accountStatus = Find-ByAutomationId -Root $window -AutomationId "AccountDevices.Status"
+        $accountPhase = $accountStatus.Current.ItemStatus
+        if ($accountPhase -notin @("loading", "")) { break }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $serviceDeadline)
+    $accountList = Find-ByAutomationId -Root $window -AutomationId "AccountDevices.List"
+    $rowCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
+    $accountRows = $accountList.FindAll([System.Windows.Automation.TreeScope]::Children, $rowCondition)
+    if ($resolvedEvidenceDir) {
+        [void](Save-WindowScreenshot -Window $window -Path (Join-Path $resolvedEvidenceDir "account-devices.png"))
+        [pscustomobject]@{phase=$accountPhase;status=$accountStatus.Current.Name;visibleRows=$accountRows.Count;authenticatedServiceRequired=[bool]$RequireAccountDeviceService} | ConvertTo-Json | Set-Content (Join-Path $resolvedEvidenceDir "account-device-service.json") -Encoding UTF8
+    }
+    if ($RequireAccountDeviceService) {
+        Assert-True -Condition ($accountPhase -eq "ready" -and $accountRows.Count -gt 0) -Message "Authenticated account device service did not provide real rows: phase=$accountPhase status=$($accountStatus.Current.Name)"
+    }
+    $closeAccount = Assert-PresentAndVisibleByAutomationId -Root $window -AutomationId "AccountDevices.Close"
+    $closeAccount.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    $accountOverlay = Find-ByAutomationId -Root $window -AutomationId "AccountDevices.Close"
+    Assert-True -Condition ($null -eq $accountOverlay -or $accountOverlay.Current.IsOffscreen) -Message "Account device modal did not close."
 
     Write-Output "windows-ui-automation-smoke: ok"
 }

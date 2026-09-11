@@ -65,6 +65,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
     // the sign-out command (the AsyncRelayCommand construction lives in the coordinator, not
     // here). Self-provisioned in the ctor; never routed through the DI composition root.
     private readonly AccountSessionCoordinator _accountSessionCoordinator;
+    internal AccountSessionCoordinator AccountSession => _accountSessionCoordinator;
     // Owns the live top-bar network telemetry loop (net speed / latency / IP+proxy) and its
     // own ITopBarNetworkStatusClient. Self-provisioned in the ctor; never routed through the
     // DI composition root. Disposed via Dispose on teardown.
@@ -546,7 +547,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         // subsystems this VM already owns — thin Action delegates, the same shape the TopBar /
         // Weather / DashboardMetrics coordinators use. Disposed in Dispose.
         _settingsCoordinator = new SettingsCoordinator(
-            service: null,
+            service: dependencies.SettingsService,
             sinks: new SettingsEffectSinks
             {
                 // 启用深色模式 / 主题颜色 — routed up to MainWindow (it owns the RootShell
@@ -1702,6 +1703,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         {
             if (SetField(ref _selectedDiscoveryMode, value))
             {
+                OnPropertyChanged(nameof(IsDiscoveryAccountDevicesModeSelected));
+                OnPropertyChanged(nameof(IsDiscoveryNetworkModeSelected));
                 OnPropertyChanged(nameof(IsDiscoveryLocalScanModeSelected));
                 OnPropertyChanged(nameof(IsDiscoveryQrModeSelected));
                 OnPropertyChanged(nameof(IsDiscoveryCloudModeSelected));
@@ -1712,6 +1715,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
     }
 
     public bool IsDiscoveryLocalScanModeSelected => _selectedDiscoveryMode == DiscoveryMode.LocalScan;
+
+    public bool IsDiscoveryAccountDevicesModeSelected => _selectedDiscoveryMode == DiscoveryMode.AccountDevices;
+
+    public bool IsDiscoveryNetworkModeSelected => !IsDiscoveryAccountDevicesModeSelected;
 
     public bool IsDiscoveryQrModeSelected => _selectedDiscoveryMode == DiscoveryMode.Qr;
 
@@ -2592,7 +2599,8 @@ public enum DiscoveryMode
     LocalScan,
     Qr,
     Cloud,
-    Code
+    Code,
+    AccountDevices
 }
 
 /// <summary>

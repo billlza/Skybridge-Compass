@@ -1843,4 +1843,67 @@
   <data name="FileTransferLiveReceived" xml:space="preserve">
     <value>受信済み</value>
   </data>
+  <data name="AccountDevicesTitle.Text" xml:space="preserve"><value>アカウントのデバイス</value></data>
+  <data name="AccountDevicesOpen.AutomationProperties.Name" xml:space="preserve"><value>アカウントのデバイスを表示</value></data>
+  <data name="AccountDevicesRefresh.Content" xml:space="preserve"><value>更新</value></data>
+  <data name="AccountDevicesClose.Content" xml:space="preserve"><value>閉じる</value></data>
+  <data name="AccountDevicesHint.Text" xml:space="preserve"><value>このアカウントのデバイスです。90秒間応答がない場合はオフラインになります。この一覧は遠隔操作の権限を付与しません。</value></data>
+  <data name="AccountDevicesSignedOut" xml:space="preserve"><value>ログインしてデバイスを表示</value></data>
+  <data name="AccountDevicesLoading" xml:space="preserve"><value>デバイスサービスに接続中…</value></data>
+  <data name="AccountDevicesSummary" xml:space="preserve"><value>{0}台のデバイス · {1}台オンライン</value></data>
+  <data name="AccountDevicesCurrent" xml:space="preserve"><value>デバイスを更新しました</value></data>
+  <data name="AccountDevicesTruncated" xml:space="preserve"><value>最初の200台を表示しています。一覧は完全ではありません。</value></data>
+  <data name="AccountDevicesExpired" xml:space="preserve"><value>オンライン情報の有効期限が切れました。更新を待っています。</value></data>
+  <data name="AccountDevicesAuthError" xml:space="preserve"><value>セッションが未確認または期限切れです。更新するか再ログインしてください。</value></data>
+  <data name="AccountDevicesNotActive" xml:space="preserve"><value>このデバイスは未承認です。承認済みデバイスで状態を確認してください。</value></data>
+  <data name="AccountDevicesRateLimited" xml:space="preserve"><value>更新頻度が高すぎます。後で再試行します。</value></data>
+  <data name="AccountDevicesServiceError" xml:space="preserve"><value>デバイスサービスが要求を拒否したか、利用できません。後で再試行してください。</value></data>
+  <data name="AccountDevicesNetworkError" xml:space="preserve"><value>デバイスサービスに接続できません。後で再試行します。</value></data>
+  <data name="AccountDevicesInvalidResponse" xml:space="preserve"><value>データの検証に失敗したためオンライン状態は表示しません。</value></data>
+  <data name="AccountDevicesLocalError" xml:space="preserve"><value>ローカルのデバイス識別情報を取得できません。後で更新してください。</value></data>
+  <data name="AccountDeviceModelUnknown" xml:space="preserve"><value>モデル未報告</value></data>
+  <data name="AccountDevicePending" xml:space="preserve"><value>承認待ち</value></data>
+  <data name="AccountDeviceFrozen" xml:space="preserve"><value>凍結済み</value></data>
+  <data name="AccountDeviceOnline" xml:space="preserve"><value>オンライン</value></data>
+  <data name="AccountDeviceOffline" xml:space="preserve"><value>オフライン</value></data>
+  <data name="AccountDeviceThisDevice" xml:space="preserve"><value>このデバイス</value></data>
+  <data name="AccountDeviceLastSeen" xml:space="preserve"><value>最終接続：{0}</value></data>
+  <data name="AccountDeviceLastSeenUnknown" xml:space="preserve"><value>接続記録がありません</value></data>
+  <data name="FileTransferQrUnavailableHint.Text" xml:space="preserve"><value>このLANセッションはQR共有に対応していません。ファイルまたはフォルダを選び、受信デバイスを選択してください。</value></data>
+  <data name="NotificationsButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>通知センター</value></data>
+  <data name="NotificationsButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>通知センター</value></data>
+  <data name="AppearanceButton.[using:Microsoft.UI.Xaml.Automation]AutomationProperties.Name" xml:space="preserve"><value>外観と壁紙</value></data>
+  <data name="AppearanceButton.[using:Microsoft.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve"><value>外観と壁紙</value></data>
+  <data name="NotificationsCenterTitle" xml:space="preserve"><value>通知センター</value></data>
+  <data name="NotificationsClear" xml:space="preserve"><value>消去</value></data>
+  <data name="NotificationsEmpty" xml:space="preserve"><value>通知はありません</value></data>
+  <data name="NotificationsSystemDisabled" xml:space="preserve"><value>システム通知はオフです</value></data>
+  <data name="NotificationsSystemUnavailable" xml:space="preserve"><value>Windows 通知を利用できません。履歴はここに保存されます</value></data>
+  <data name="NotificationsTransferSent" xml:space="preserve"><value>ファイルを送信しました</value></data>
+  <data name="NotificationsTransferReceived" xml:space="preserve"><value>ファイルを受信しました</value></data>
+  <data name="NotificationsTransferFailed" xml:space="preserve"><value>ファイル転送に失敗しました</value></data>
+  <data name="NotificationsAccountConnected" xml:space="preserve"><value>アカウントに接続しました</value></data>
+  <data name="NotificationsAccountConnectedDetail" xml:space="preserve"><value>ログインセッションを検証しました。アカウントのデバイスサービスに利用できます。</value></data>
+  <data name="NotificationsAccountSignedOut" xml:space="preserve"><value>ログアウトしました</value></data>
+  <data name="NotificationsAccountSignedOutDetail" xml:space="preserve"><value>現在のアカウントセッションを終了しました。</value></data>
+  <data name="NotificationsRemoteConnected" xml:space="preserve"><value>リモート操作に接続しました</value></data>
+  <data name="NotificationsRemoteConnectedDetail" xml:space="preserve"><value>承認されたリモートデバイスがこのコンピューターに接続しました。</value></data>
+  <data name="NotificationsRemoteEnded" xml:space="preserve"><value>リモート操作を終了しました</value></data>
+  <data name="NotificationsRemoteEndedDetail" xml:space="preserve"><value>リモート操作のセッションを終了しました。</value></data>
+  <data name="AppearanceMode_system" xml:space="preserve"><value>システムの外観に合わせる</value></data>
+  <data name="AppearanceMode_light" xml:space="preserve"><value>ライト</value></data>
+  <data name="AppearanceMode_dark" xml:space="preserve"><value>ダーク</value></data>
+  <data name="BackgroundTheme_weather" xml:space="preserve"><value>天気の背景</value></data>
+  <data name="BackgroundTheme_starryNight" xml:space="preserve"><value>星空の夜</value></data>
+  <data name="BackgroundTheme_deepSpace" xml:space="preserve"><value>深宇宙</value></data>
+  <data name="BackgroundTheme_aurora" xml:space="preserve"><value>オーロラ</value></data>
+  <data name="BackgroundTheme_classic" xml:space="preserve"><value>クラシック</value></data>
+  <data name="BackgroundChooseImage" xml:space="preserve"><value>背景画像を選択…</value></data>
+  <data name="BackgroundLoadFailed" xml:space="preserve"><value>背景画像を読み込めませんでした</value></data>
+  <data name="AppearanceSettingsLabel.Text" xml:space="preserve"><value>外観</value></data>
+  <data name="AppearanceSystemChoice.Content" xml:space="preserve"><value>システム</value></data>
+  <data name="AppearanceLightChoice.Content" xml:space="preserve"><value>ライト</value></data>
+  <data name="AppearanceDarkChoice.Content" xml:space="preserve"><value>ダーク</value></data>
+  <data name="DiscoveryModeAccountDevicesTitle.Text" xml:space="preserve"><value>アカウント</value></data>
+  <data name="DiscoveryModeAccountDevicesSubtitle.Text" xml:space="preserve"><value>同じアカウント</value></data>
 </root>

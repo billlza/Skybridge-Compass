@@ -236,6 +236,13 @@ public sealed class SettingsStore : ISettingsStore
             return "settings_language_invalid";
         }
 
+        if (settings.AppearanceMode is not (null or "system" or "dark" or "light")
+            || settings.BackgroundTheme is not ("weather" or "starryNight" or "deepSpace" or "aurora" or "classic" or "custom")
+            || (settings.BackgroundTheme == "custom" && string.IsNullOrWhiteSpace(settings.CustomBackgroundPath)))
+        {
+            return "settings_appearance_invalid";
+        }
+
         if (!IsHexColor(settings.ThemeColorHex))
         {
             return "settings_theme_color_invalid";

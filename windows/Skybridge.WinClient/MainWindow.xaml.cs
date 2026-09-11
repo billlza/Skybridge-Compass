@@ -39,6 +39,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        WeatherGlassSurface.SetRenderer(RootShell, WeatherBackdrop);
 
         // The taskbar button, Alt-Tab entry and window chrome all read Window.Title. WinUI
         // leaves it at the project-template default ("WinUI Desktop") unless it is set, and
@@ -53,7 +54,9 @@ public sealed partial class MainWindow : Window
 
         _fileTransferWorkspace = new(_remoteControlWorkspace, new NativeFileTransferSelection(this),
             ReadCurrentDeviceAccount, RemoteControlText);
-        ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace));
+        var settings = new SettingsService();
+        _notifications = new WorkspaceNotificationCenter(ShowNotifications);
+        ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace, _notifications, settings, ShowAppearanceMenu));
         _fileTransferWorkspace.Changed += OnFileTransferChanged;
         ViewModel.PropertyChanged += OnFileTransferAccountChanged;
         RootShell.DataContext = ViewModel;
@@ -96,6 +99,8 @@ public sealed partial class MainWindow : Window
         OnDarkModeEffectRequested(ViewModel.Settings.UseDarkMode);
         OnAccentColorEffectRequested(ViewModel.Settings.ThemeColorHex);
 
+        ConfigureShellActions();
+        ConfigureAccountDevices();
         SizeAndCenter();
 
         // Restore a remembered Supabase session (DPAPI) on launch so the account block shows
@@ -137,6 +142,7 @@ public sealed partial class MainWindow : Window
         ViewModel.AccentColorEffectRequested -= OnAccentColorEffectRequested;
         _fileTransferWorkspace.Changed -= OnFileTransferChanged;
         ViewModel.PropertyChanged -= OnFileTransferAccountChanged;
+        DisposeShellActions();
         ViewModel.Dispose();
     }
 
@@ -149,8 +155,10 @@ public sealed partial class MainWindow : Window
         try
         {
             if (_remoteControlViewer is { } viewer) await viewer.CloseForShutdownAsync();
+            await StopAccountDevicesAsync();
             await _fileTransferWorkspace.DisposeAsync();
             await RemoteControlHost.DisposeAsync();
+            await StopShellActionsAsync();
             _hostShutdownComplete = true;
             OnRemoteControlNoticeChanged(false);
             Close();
@@ -182,6 +190,12 @@ public sealed partial class MainWindow : Window
 
     private void OnRemoteControlNoticeChanged(bool connected)
     {
+        if (_remoteNotificationConnected != connected)
+        {
+            _remoteNotificationConnected = connected;
+            _notifications.Add(RemoteControlText(connected ? "NotificationsRemoteConnected" : "NotificationsRemoteEnded"),
+                RemoteControlText(connected ? "NotificationsRemoteConnectedDetail" : "NotificationsRemoteEndedDetail"), "\uE7F4");
+        }
         if (!connected)
         {
             if (!_hostShutdownComplete && RemoteControlHost.IsEnabled && RemoteControlHost.HasError) return;
@@ -280,15 +294,18 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // 启用深色模式 live effect: set the root FrameworkElement.RequestedTheme. The app ships
-    // dark-locked at App.xaml (RequestedTheme="Dark"); overriding it on the root content element
-    // re-themes the whole visual tree live. Non-throwing — a theme set never faults, but guard the
-    // root just in case it is not yet realized.
+    // The settings page and top-bar menu share one persisted appearance preference.
+    // Default keeps native controls subscribed to Windows appearance changes.
     private void OnDarkModeEffectRequested(bool useDark)
     {
         if (RootShell is { } root)
         {
-            root.RequestedTheme = useDark ? ElementTheme.Dark : ElementTheme.Light;
+            root.RequestedTheme = ViewModel.Settings.AppearanceMode switch
+            {
+                "system" => ElementTheme.Default,
+                "light" => ElementTheme.Light,
+                _ => ElementTheme.Dark
+            };
         }
     }
 
@@ -367,8 +384,8 @@ public sealed partial class MainWindow : Window
     // FrameworkElement.Tag; the handler parses it and routes to the VM's pure view-state
     // setter. Mirrors the Mac segmented controls / modernTabBar selection.
 
-    // Device Discovery connection-mode tab tapped (Tag = LocalScan / Qr / Cloud / Code).
-    private void OnDiscoveryModeTabTapped(object sender, TappedRoutedEventArgs e)
+    // Native buttons support both pointer and keyboard selection for all five modes.
+    private void OnDiscoveryModeTabClicked(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement element &&
             element.Tag is string tag &&
@@ -608,6 +625,7 @@ public sealed partial class MainWindow : Window
     // shell height at the open (or compact) pane width. The top bar is its own element.
     private void ApplyGlassRegions()
     {
+        WeatherBackdrop.RefreshGlassSurfaces();
         if (WeatherBackdrop.ActualWidth <= 0 || RootShell.ActualHeight <= 0 || TopBarChrome.ActualWidth <= 0)
         {
             return;

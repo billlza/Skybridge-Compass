@@ -27,7 +27,10 @@ public sealed class SkyBridgeSettings
     public string Language { get; set; } = "system";
     public bool AutoScanOnStartup { get; set; } = true;
     public bool ShowSystemNotifications { get; set; } = true;
-    public bool UseDarkMode { get; set; } = true; // Windows ships dark-locked; deliberate divergence from Mac (false)
+    public string? AppearanceMode { get; set; }
+    public string BackgroundTheme { get; set; } = "weather";
+    public string? CustomBackgroundPath { get; set; }
+    public bool UseDarkMode { get; set; } = true; // Legacy default; AppearanceMode preserves existing installs and allows system/light/dark.
     public int ScanInterval { get; set; } = 30;
     public bool ShowDeviceDetails { get; set; } = true;
     public bool ShowConnectionStats { get; set; } = true;
@@ -256,7 +259,35 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     public string Language { get => _model.Language; set => Set(_model.Language, value, v => _model.Language = v); }
     public bool AutoScanOnStartup { get => _model.AutoScanOnStartup; set => Set(_model.AutoScanOnStartup, value, v => _model.AutoScanOnStartup = v); }
     public bool ShowSystemNotifications { get => _model.ShowSystemNotifications; set => Set(_model.ShowSystemNotifications, value, v => _model.ShowSystemNotifications = v); }
-    public bool UseDarkMode { get => _model.UseDarkMode; set => Set(_model.UseDarkMode, value, v => _model.UseDarkMode = v); }
+    public string AppearanceMode
+    {
+        get => _model.AppearanceMode ?? (_model.UseDarkMode ? "dark" : "light");
+        set
+        {
+            if (value is not ("system" or "dark" or "light")) throw new ArgumentOutOfRangeException(nameof(value));
+            Set(_model.AppearanceMode, value, v => _model.AppearanceMode = v);
+            if (value != "system") Set(_model.UseDarkMode, value == "dark", v => _model.UseDarkMode = v, nameof(UseDarkMode));
+        }
+    }
+    public string BackgroundTheme
+    {
+        get => _model.BackgroundTheme;
+        set
+        {
+            if (value is not ("weather" or "starryNight" or "deepSpace" or "aurora" or "classic" or "custom")) throw new ArgumentOutOfRangeException(nameof(value));
+            Set(_model.BackgroundTheme, value, v => _model.BackgroundTheme = v);
+        }
+    }
+    public string? CustomBackgroundPath { get => _model.CustomBackgroundPath; set => Set(_model.CustomBackgroundPath, value, v => _model.CustomBackgroundPath = v); }
+    public bool UseDarkMode
+    {
+        get => _model.UseDarkMode;
+        set
+        {
+            Set(_model.UseDarkMode, value, v => _model.UseDarkMode = v);
+            AppearanceMode = value ? "dark" : "light";
+        }
+    }
     public int ScanInterval { get => _model.ScanInterval; set => Set(_model.ScanInterval, value, v => _model.ScanInterval = v); }
     public bool ShowDeviceDetails { get => _model.ShowDeviceDetails; set => Set(_model.ShowDeviceDetails, value, v => _model.ShowDeviceDetails = v); }
     public bool ShowConnectionStats { get => _model.ShowConnectionStats; set => Set(_model.ShowConnectionStats, value, v => _model.ShowConnectionStats = v); }

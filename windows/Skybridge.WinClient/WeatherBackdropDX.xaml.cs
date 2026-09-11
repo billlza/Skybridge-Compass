@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -97,7 +98,7 @@ public sealed partial class WeatherBackdropDX : UserControl
     //    renders the scene into a small "glass source" texture and pass 1 blurs it under the
     //    sidebar / top-bar rects the window hands over through SetGlassRegions. ──
     //    Sizes and offsets come from WeatherGlassGeometry (one texel per eight dips, 16 dip radius).
-    private ID3D12DescriptorHeap? _srvHeap;           // one shader-visible SRV (t0): the glass source
+    private ID3D12DescriptorHeap? _srvHeap;           // shader-visible SRVs: glass (t0), cloud density (t1)
     private ID3D12Resource? _glassSource;             // RT + SRV, recreated with the back buffers
     private uint _glassWidth;
     private uint _glassHeight;
@@ -136,9 +137,9 @@ public sealed partial class WeatherBackdropDX : UserControl
         public float Glass1Y;          // offset 68
         public float Glass1W;          // offset 72
         public float Glass1H;          // offset 76
-        public float Pad0;             // offset 80  (pad to fill the row; unused)
-        public float Pad1;             // offset 84
-        public float Pad2;             // offset 88
+        public int GlassSurfaceCount;  // offset 80
+        public int BackgroundMode;     // offset 84
+        public float WallpaperAspect;  // offset 88
         public float Pad3;             // offset 92
     }
 
@@ -457,7 +458,10 @@ public sealed partial class WeatherBackdropDX : UserControl
         {
             CreateGraphicsPipeline();
             CreateGlassSource();
+            CreateCloudDensityAtlas();
+            CreateWallpaperTexture(_backgroundImage);
             _shaderReady = true;
+            RefreshGlassSurfaces();
         }
         catch (Exception ex)
         {
@@ -582,63 +586,23 @@ public sealed partial class WeatherBackdropDX : UserControl
     // unexplained HRESULT and the backdrop silently falls back to a flat clear colour. The
     // previous call shape also leaked both blobs, because CheckError() throws before the
     // Dispose() statement that followed it.
-    private static Blob CompileShaderStage(string entryPoint, string profile)
+    private static byte[] LoadCompiledWeatherShader(string entryPoint)
     {
-        Result result = Compiler.Compile(
-            WeatherHlsl, entryPoint, "WeatherBackdrop.hlsl", profile,
-            out Blob bytecode, out Blob errors);
-
-        try
-        {
-            string diagnostic = ReadCompilerDiagnostic(errors);
-
-            if (result.Failure)
-            {
-                bytecode?.Dispose();
-                string detail = string.IsNullOrEmpty(diagnostic) ? "compiler produced no diagnostic" : diagnostic;
-                throw new InvalidOperationException(
-                    $"HLSL {profile} compilation of {entryPoint} failed ({result}): {detail}");
-            }
-
-            // A shader can compile AND warn. Reading the blob only on failure made those warnings
-            // structurally invisible, which is not compatible with holding the build to zero
-            // warnings - surface them instead of letting them accumulate unseen.
-            if (!string.IsNullOrEmpty(diagnostic))
-            {
-                WindowsRuntimeLog.Write(
-                    WindowsLogLevel.Warning,
-                    "backdrop",
-                    $"HLSL {profile} compilation of {entryPoint} succeeded with diagnostics: {diagnostic}");
-            }
-
-            return bytecode;
-        }
-        finally
-        {
-            errors?.Dispose();
-        }
-    }
-
-    // Returns the compiler's own text, or an empty string when it said nothing. Callers decide
-    // how to present "nothing", so this never invents a sentinel string that a caller would then
-    // have to recognise by shape.
-    private static string ReadCompilerDiagnostic(Blob errors)
-    {
-        if (errors is null)
-        {
-            return string.Empty;
-        }
-
-        IntPtr buffer = errors.BufferPointer;
-        if (buffer == IntPtr.Zero)
-        {
-            return string.Empty;
-        }
-
-        // The blob is NUL-terminated ANSI. Reading to the terminator avoids converting
-        // BufferSize (a PointerUSize) and avoids carrying the terminator into the message.
-        string? text = Marshal.PtrToStringAnsi(buffer);
-        return string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+        using var sourceHash = typeof(WeatherBackdropDX).Assembly.GetManifestResourceStream("Skybridge.Weather.Source.sha256")
+            ?? throw new InvalidDataException("The compiled weather shader source binding is missing.");
+        using var reader = new StreamReader(sourceHash, System.Text.Encoding.ASCII);
+        var expected = reader.ReadToEnd().Trim();
+        var actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.ASCII.GetBytes(WeatherHlsl)));
+        if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The compiled weather shader does not match the packaged source.");
+        using var resource = typeof(WeatherBackdropDX).Assembly.GetManifestResourceStream("Skybridge.Weather." + entryPoint + ".cso")
+            ?? throw new InvalidDataException("A compiled weather shader is missing.");
+        if (resource.Length is < 4 or > 2 * 1024 * 1024) throw new InvalidDataException("Invalid weather shader size.");
+        var bytes = new byte[checked((int)resource.Length)];
+        resource.ReadExactly(bytes);
+        if (bytes[0] != 'D' || bytes[1] != 'X' || bytes[2] != 'B' || bytes[3] != 'C')
+            throw new InvalidDataException("Invalid compiled weather shader format.");
+        return bytes;
     }
 
     private void CreateGraphicsPipeline()
@@ -648,34 +612,29 @@ public sealed partial class WeatherBackdropDX : UserControl
             return;
         }
 
-        // 1. Compile VS + PS from the embedded HLSL (FXC, Shader Model 5.0).
-        Blob vsBlob = CompileShaderStage("VSMain", "vs_5_0");
-        Blob psBlob;
-        try
+        if (Marshal.SizeOf<WeatherConstants>() != 96 || Marshal.SizeOf<GlassSurfaceConstants>() != 48 ||
+            WeatherGlassGeometry.ConstantSlotBytes < 96 + WeatherGlassGeometry.MaximumSurfaceCount * 48)
         {
-            psBlob = CompileShaderStage("PSMain", "ps_5_0");
-        }
-        catch
-        {
-            vsBlob.Dispose();
-            throw;
+            throw new InvalidOperationException("Weather constant layout does not match the shader ABI.");
         }
 
-        using (vsBlob)
-        using (psBlob)
+        // Native FXC validation and O3 compilation run during the build. Loading the
+        // exact source-bound bytecode avoids blocking this low-end PC's UI at launch.
+        byte[] vsBytecode = LoadCompiledWeatherShader("VSMain");
+        byte[] psBytecode = LoadCompiledWeatherShader("PSMain");
         {
-            // 2. Root signature: root CBV at b0 for all stages, a one-entry descriptor table with
-            //    the glass source SRV (t0) and a static linear-clamp sampler (s0) for the pixel stage.
+            // 2. Shared constant buffer and two texture SRVs with linear-clamp samplers.
+            //    Cloud density remains linear data in both scene and glass-source passes.
             var cbvDescriptor = new RootDescriptor1(0, 0);
             var cbvParam = new RootParameter1(
                 RootParameterType.ConstantBufferView, cbvDescriptor, ShaderVisibility.All);
             // Data-volatile: the table stays bound while pass 0 writes the glass source (pass 0 never
             // samples it; the barriers order the write before pass 1's reads).
-            var glassRange = new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 1, 0, 0, 0, DescriptorRangeFlags.DataVolatile);
+            var glassRange = new DescriptorRange1(DescriptorRangeType.ShaderResourceView, 3, 0, 0, 0, DescriptorRangeFlags.DataVolatile);
             var glassParam = new RootParameter1(new RootDescriptorTable1(glassRange), ShaderVisibility.Pixel);
             var glassSampler = new StaticSamplerDescription(SamplerDescription.LinearClamp, ShaderVisibility.Pixel, 0, 0);
             var rsDesc = new RootSignatureDescription1(
-                RootSignatureFlags.None, new[] { cbvParam, glassParam }, new[] { glassSampler });
+                RootSignatureFlags.None, new[] { cbvParam, glassParam }, new[] { glassSampler, new StaticSamplerDescription(SamplerDescription.LinearClamp, ShaderVisibility.Pixel, 1, 0) });
             _rootSignature = _device.CreateRootSignature(rsDesc);
 
             // 3. Graphics PSO: empty input layout (fullscreen triangle via SV_VertexID), triangle
@@ -683,8 +642,8 @@ public sealed partial class WeatherBackdropDX : UserControl
             var psoDesc = new GraphicsPipelineStateDescription
             {
                 RootSignature = _rootSignature,
-                VertexShader = vsBlob.AsMemory(),
-                PixelShader = psBlob.AsMemory(),
+                VertexShader = vsBytecode,
+                PixelShader = psBytecode,
                 InputLayout = null,
                 PrimitiveTopologyType = PrimitiveTopologyType.Triangle,
                 RasterizerState = RasterizerDescription.CullNone,
@@ -706,9 +665,9 @@ public sealed partial class WeatherBackdropDX : UserControl
             ResourceDescription.Buffer(ConstantBufferBytes),
             ResourceStates.GenericRead);
 
-        // 5. Shader-visible heap with the single glass-source SRV (filled by CreateGlassSource).
+        // 5. Shader-visible heap for the glass-source and immutable cloud density SRVs.
         _srvHeap = _device.CreateDescriptorHeap(new DescriptorHeapDescription(
-            DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 1, DescriptorHeapFlags.ShaderVisible));
+            DescriptorHeapType.ConstantBufferViewShaderResourceViewUnorderedAccessView, 3, DescriptorHeapFlags.ShaderVisible));
     }
 
     // Byte offset of a pass's constant slot for the frame that renders into the current back buffer.
@@ -732,6 +691,8 @@ public sealed partial class WeatherBackdropDX : UserControl
             ResolutionX = _width,
             ResolutionY = _height,
             Condition = MapCondition(Condition),
+            BackgroundMode = _backgroundMode,
+            WallpaperAspect = _backgroundImage is { } image ? (float)image.Width / image.Height : 1f,
             PointerU = _pointerUV.X,
             PointerV = _pointerUV.Y,
             PointerStrength = _pointerStrength,
@@ -745,6 +706,8 @@ public sealed partial class WeatherBackdropDX : UserControl
         (data.Glass1X, data.Glass1Y, data.Glass1W, data.Glass1H) = WeatherGlassGeometry.RectToUv(
             _glassTopBarDip.X, _glassTopBarDip.Y, _glassTopBarDip.Width, _glassTopBarDip.Height, Panel.ActualWidth, Panel.ActualHeight);
 
+        data.GlassSurfaceCount = _glassSurfaceCount;
+
         WeatherConstants glassPass = data;
         glassPass.RenderPass = 0;
         glassPass.ResolutionX = _glassWidth;   // pixel-scaled effects follow the glass source's own grid
@@ -753,9 +716,24 @@ public sealed partial class WeatherBackdropDX : UserControl
         finalPass.RenderPass = 1;
 
         Span<byte> cb = _constantBuffer.Map<byte>(0, (int)ConstantBufferBytes);
-        MemoryMarshal.Write(cb.Slice((int)ConstantSlotOffset(0)), in glassPass);
-        MemoryMarshal.Write(cb.Slice((int)ConstantSlotOffset(1)), in finalPass);
-        _constantBuffer.Unmap(0);
+        try
+        {
+            WriteWeatherConstants(cb.Slice((int)ConstantSlotOffset(0), (int)WeatherGlassGeometry.ConstantSlotBytes), in glassPass);
+            WriteWeatherConstants(cb.Slice((int)ConstantSlotOffset(1), (int)WeatherGlassGeometry.ConstantSlotBytes), in finalPass);
+        }
+        finally
+        {
+            _constantBuffer.Unmap(0);
+        }
+    }
+
+    private void WriteWeatherConstants(Span<byte> slot, in WeatherConstants header)
+    {
+        MemoryMarshal.Write(slot, in header);
+        for (int index = 0; index < _glassSurfaceCount; index++)
+        {
+            MemoryMarshal.Write(slot.Slice(96 + index * 48, 48), in _glassSurfaces[index]);
+        }
     }
 
     // -------------------------------------------------------------------------------------
@@ -910,6 +888,7 @@ public sealed partial class WeatherBackdropDX : UserControl
 
     private void DisposeGraphicsPipeline()
     {
+        RestoreGlassSurfaceBackings();
         _pipelineState?.Dispose();
         _pipelineState = null;
 
@@ -918,6 +897,11 @@ public sealed partial class WeatherBackdropDX : UserControl
 
         _constantBuffer?.Dispose();
         _constantBuffer = null;
+
+        _wallpaperTexture?.Dispose();
+        _wallpaperTexture = null;
+        _cloudDensityAtlas?.Dispose();
+        _cloudDensityAtlas = null;
 
         _srvHeap?.Dispose();
         _srvHeap = null;
@@ -940,7 +924,15 @@ public sealed partial class WeatherBackdropDX : UserControl
         _frameRequested = false;
         try
         {
-            RenderFrame();
+            if (!RenderFrame())
+            {
+                // Keep a one-shot redraw pending while its back buffer is still on the GPU.
+                _frameRequested = true;
+            }
+            else
+            {
+                CommitGlassSurfaceBackings();
+            }
         }
         catch (Exception ex)
         {
@@ -956,19 +948,26 @@ public sealed partial class WeatherBackdropDX : UserControl
         }
     }
 
-    private void RenderFrame()
+    private bool RenderFrame()
     {
         if (_device is null || _queue is null || _swapChain is null ||
-            _commandList is null || _rtvHeap is null)
+            _commandList is null || _rtvHeap is null || _fence is null)
         {
-            return;
+            throw new InvalidOperationException("The active weather renderer has incomplete GPU resources.");
+        }
+
+        // CompositionTarget.Rendering runs on the UI thread. Never wait there for GPU work:
+        // retain the last completed image and retry on a later composition callback.
+        if (_fence.CompletedValue < _frameFenceValues[_backBufferIndex])
+        {
+            return false;
         }
 
         ID3D12CommandAllocator? allocator = _allocators[_backBufferIndex];
         ID3D12Resource? backBuffer = _renderTargets[_backBufferIndex];
         if (allocator is null || backBuffer is null)
         {
-            return;
+            throw new InvalidOperationException("The weather back buffer is not initialized.");
         }
 
         allocator.Reset();
@@ -979,7 +978,7 @@ public sealed partial class WeatherBackdropDX : UserControl
 
         if (_shaderReady)
         {
-            if (_rootSignature is null || _pipelineState is null || _constantBuffer is null || _glassSource is null || _srvHeap is null)
+            if (_rootSignature is null || _pipelineState is null || _constantBuffer is null || _glassSource is null || _cloudDensityAtlas is null || _srvHeap is null)
             {
                 throw new InvalidOperationException("The weather shader is marked ready but part of its pipeline is missing.");
             }
@@ -1047,13 +1046,14 @@ public sealed partial class WeatherBackdropDX : UserControl
                 "backdrop",
                 $"device lost on Present (0x{present.Code:X8}); tearing down.");
                 Teardown();
-                return;
+                return false;
             }
 
             present.CheckError();
         }
 
         MoveToNextFrame();
+        return true;
     }
 
     // Smooth time-based hue cycle so it is visibly ANIMATED (proves the loop is live), with a
@@ -1097,11 +1097,7 @@ public sealed partial class WeatherBackdropDX : UserControl
 
         _backBufferIndex = _swapChain.CurrentBackBufferIndex;
 
-        if (_fence.CompletedValue < _frameFenceValues[_backBufferIndex])
-        {
-            _fence.SetEventOnCompletion(_frameFenceValues[_backBufferIndex], _fenceEvent).CheckError();
-            _fenceEvent.WaitOne();
-        }
+        // RenderFrame checks this buffer's fence before resetting its allocator.
     }
 
     private void WaitForGpuIdle()
@@ -1332,6 +1328,8 @@ public sealed partial class WeatherBackdropDX : UserControl
     //  pointer state, renderPass, frost rects); t0/s0 carry the pass-0 glass source.
     // =====================================================================================
     private const string WeatherHlsl = @"
+struct PanelGlassSurface { float4 bounds; float4 clip; float4 optics; };
+
 cbuffer WeatherCB : register(b0)
 {
     float  time;             // row0: 0
@@ -1345,8 +1343,14 @@ cbuffer WeatherCB : register(b0)
     float  glassBlur;        // row2: 44     frost kernel radius as a fraction of the panel width
     float4 glassRect0;       // row3: 48     sidebar frost rect in screen uv (x, y, w, h); w <= 0 = off
     float4 glassRect1;       // row4: 64     top-bar frost rect
-    float4 _glassPad;        // row5: 80     padding to match the C# struct (unused)
+    int glassSurfaceCount;   // row5: 80
+    int backgroundMode;
+    float wallpaperAspect;
+    float _glassPad;
+    PanelGlassSurface glassSurfaces[16]; // byte96; matches the packed C# surface records
 };
+
+float3 wallpaperLinear(float2 uv);
 
 // ----- fullscreen triangle (SV_VertexID) -----
 struct VSOut { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
@@ -1481,9 +1485,12 @@ float3 pointerDisperse(float2 uv, float aspect)
     // radial push AWAY from the pointer (normalize in plain UV so warp stays in UV units),
     // plus a trailing wake offset along the pointer velocity. Magnitude scaled by fs and radius
     // so a wider/stronger wave shoves the cloud further aside.
-    float2 dir = (dist > 1e-4) ? (toP / max(length(toP), 1e-4)) : float2(0.0, 0.0);
-    float2 warp = dir * fs * radius * 1.4;
-    warp += pointerVelocity * fs * 0.05;             // wake trail in the direction of motion
+    // Displacement must vanish at the pointer centre. A normalized radial vector
+    // with a finite centre displacement folds the image into a pinwheel.
+    float2 warp = toP * fs * 0.28;
+    float speed = length(float2(pointerVelocity.x * aspect, pointerVelocity.y));
+    float2 boundedVelocity = pointerVelocity / max(speed, 1.0);
+    warp += boundedVelocity * fs * (1.0 - falloff) * radius * 0.16;
 
     return float3(densMul, warp.x, warp.y);
 }
@@ -1571,111 +1578,105 @@ float3 starfield(float2 uv)
     return c;
 }
 
-// ============================ raymarched volumetric clouds ============================
-// Genuine raymarch: 40 view steps through a cloud slab, 6-step light march toward the
-// upper-left sun, Beer-Lambert extinction + energy-conserving in-scatter. Lit fluffy edges.
-static const float SLAB_LO = 1.2;   // cloud altitude band, low
-static const float SLAB_HI = 3.0;   // cloud altitude band, high
-
-float cloudDensity(float3 p, float coverage)
-{
-    p.x += time * 0.20;             // scroll
-    float base = fbm3(p * 0.55, 5);
-    // height falloff to keep clouds inside the slab band
-    float h = (p.y - SLAB_LO) / (SLAB_HI - SLAB_LO);
-    float shape = smoothstep(0.0, 0.25, h) * smoothstep(1.0, 0.55, h);
-    float d = base * shape;
-    // Discrete clumps: only the densest fbm peaks survive. The threshold is raised
-    // (1.0 - coverage*0.85) and the remap sharpened (x2.6) so the dark starry sky shows
-    // clearly between clumps instead of a continuous overcast sheet.
-    // The remap used to be x2.6, which drove almost every sample that cleared the threshold
-    // straight to 1.0 - a binary field, so clumps had hard edges and no interior gradient.
-    // x1.1 keeps a real density ramp, which is what gives clouds a soft edge and lets the
-    // march build up structure instead of hitting a wall.
-    d = saturate((d - (1.0 - coverage * 0.85)) * 1.1);
-    return d;
+// BEGIN CLOUD OPTICS
+Texture2D<float4> cloudNoiseAtlas : register(t1);
+SamplerState cloudSampler : register(s1);
+float cl01(float x) { return saturate(x); }
+float3 toLinearSrgb(float3 color) {
+    return lerp(color / 12.92, pow((color + 0.055) / 1.055, float3(2.4, 2.4, 2.4)), step(float3(0.04045, 0.04045, 0.04045), color));
+}
+float3 fromLinearSrgb(float3 color) {
+    color = max(color, float3(0.0, 0.0, 0.0));
+    return lerp(color * 12.92, 1.055 * pow(color, float3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) - 0.055, step(float3(0.0031308, 0.0031308, 0.0031308), color));
+}
+float2 cloudSliceOrigin(float z) {
+    return float2(fmod(z, 8.0), floor(z / 8.0)) * 66.0 + float2(1.5, 1.5);
 }
 
-// march toward the sun to estimate shadowing -> lit silver edges
-float cloudLight(float3 p, float3 sunDir, float coverage)
-{
-    float t = 0.0;
-    float dens = 0.0;
-    [unroll]
-    for (int i = 0; i < 6; i++)
-    {
-        float3 sp = p + sunDir * t;
-        dens += cloudDensity(sp, coverage) * 0.16;
-        t += 0.18;
+float3 cloudVolume(float3 p) {
+    // Two bilinear samples reconstruct a periodic trilinear volume. The input is a data
+    // buffer, so the renderer must not apply color conversion to these density channels.
+    float3 voxel = frac(p) * 64.0;
+    float slice = floor(voxel.z);
+    float3 nearSlice = float3(cloudNoiseAtlas.SampleLevel(cloudSampler, (cloudSliceOrigin(slice) + voxel.xy) / 528.0, 0).rgb);
+    float3 farSlice = float3(cloudNoiseAtlas.SampleLevel(cloudSampler, (cloudSliceOrigin(fmod(slice + 1.0, 64.0)) + voxel.xy) / 528.0, 0).rgb);
+    return lerp(nearSlice, farSlice, frac(voxel.z));
+}
+
+float cloudDensity(float3 p, float detail) {
+    float3 field = cloudVolume(p * 0.22);
+    float shape = field.r * 0.60 + field.b * 0.40;
+    float body = shape - 0.445;
+    float erosion = 0.5;
+    if (detail > 0.65) {
+        erosion = cloudVolume(p * 0.63 + float3(0.17, 0.31, 0.73)).g;
     }
-    return exp(-dens * 3.0);        // Beer-Lambert transmittance toward the light
+    body -= (1.0 - erosion) * 0.15 * (1.0 - smoothstep(0.0, 0.20, body));
+    float base = smoothstep(0.0, 0.10, p.y);
+    float top = 1.0 - smoothstep(0.48, 0.90, p.y);
+    return max(body, 0.0) * 20.0 * base * top;
 }
 
-// returns rgb premultiplied scene contribution + alpha in .a
-float4 raymarchClouds(float3 ro, float3 rd, float coverage, float3 skyTint, float3 sunCol)
-{
-    // upper-left key light (matches Mac (0.28w,0.12h) light source)
-    float3 sunDir = normalize(float3(-0.55, 0.65, 0.25));
-    // Horizon falloff: near-horizontal rays (small rd.y) graze a very long path through the
-    // slab and pile up density into an opaque white wall across the lower/horizon band. Weight
-    // density by the ray's upward angle so the horizon region reads as mostly-clear dark sky and
-    // clouds concentrate in the UPPER (steeper-ray) portion of the view. Below the cutoff the
-    // contribution is zero -> no white horizon wall.
-    float horizonWeight = smoothstep(0.10, 0.42, rd.y);   // 0 at/below horizon, 1 looking up
-    if (rd.y <= 0.001 || horizonWeight <= 0.0) return float4(0,0,0,0);
-    // intersect the view ray with the slab to bound the march
-    float tEnter = (SLAB_LO - ro.y) / max(rd.y, 0.001);
-    float tExit  = (SLAB_HI - ro.y) / max(rd.y, 0.001);
-    tEnter = max(tEnter, 0.0);
-    if (tExit <= tEnter) return float4(0,0,0,0);
-    // Cap the march length so grazing rays can't accumulate an unbounded slab traversal.
-    float maxMarch = 9.0;
-    tExit = min(tExit, tEnter + maxMarch);
+float3 cloudViewRay(float2 uv) {
+    // A fixed vertical field of view preserves the volume's proportions on wide screens.
+    float aspect = resolution.x / max(resolution.y, 1.0);
+    float3 forward = normalize(float3(0.0, 0.65, 1.0));
+    float3 cameraUp = float3(0.0, forward.z, -forward.y);
+    float2 film = float2((uv.x - 0.5) * aspect, 0.5 - uv.y);
+    return normalize(forward + float3(film.x, 0.0, 0.0) + cameraUp * film.y);
+}
 
-    float steps = 40.0;
-    float dt = (tExit - tEnter) / steps;
-    float jitter = hash21(rd.xy * resolution + time) * dt;   // blue-noise-ish dejitter
-    float t = tEnter + jitter;
+float4 cloudySky(float2 uv, float t, float amp, float windAmt, float quality) {
+    float3 ray = cloudViewRay(uv);
+    float3 sun = normalize(float3(0.65, 0.62, 0.44));
+    float sunlight = pow(cl01(dot(ray, sun)), 18.0);
+    float3 sky = lerp(float3(0.12, 0.23, 0.36), float3(0.38, 0.49, 0.58), cl01(uv.y * 1.1));
+    sky += float3(0.20, 0.17, 0.11) * sunlight;
+    sky = float3(toLinearSrgb(float3(sky)));
+    [branch] if (backgroundMode != 0) sky = wallpaperLinear(uv);
 
+    float start = 2.4 / ray.y;
+    float end = min(3.3 / ray.y, 24.0);
+    float steps = quality > 0.65 ? 48.0 : 24.0;
+    float stepSize = (end - start) / steps;
+    // Stratified, screen-stable offsets break up visible march planes without temporal flicker.
+    float jitter = frac(52.9829189 * frac(dot(floor(uv * resolution), float2(0.06711056, 0.00583715))));
+    // Translate one continuous volume. Never wrap individual clouds across a screen edge.
+    float3 drift = float3(-t * lerp(0.012, 0.035, windAmt), 0.0, -t * 0.004);
     float transmittance = 1.0;
-    float3 scattered = 0.0;
-    [loop]
-    for (int i = 0; i < 40; i++)
-    {
-        if (transmittance < 0.02) break;   // early-out
-        float3 p = ro + rd * t;
-        float d = cloudDensity(p, coverage);
-        // distance extinction: far samples thin out so distant clouds don't stack into a wall
-        d *= exp(-(t - tEnter) * 0.12) * horizonWeight;
-        if (d > 0.001)
-        {
-            float lit = cloudLight(p, sunDir, coverage);
-            // Cloud body shading, NIGHT-lit. These used to be daylight-cumulus values
-            // (0.55..0.92 grey rising to a warm sunlit white); multiplied by the warm sunCol
-            // they produced the flat cream sheet that had no business appearing over a
-            // nightSky whose brightest stop is 0.30. Clouds on a starry sky are dark forms
-            // that catch a thin cool rim, so the body sits below the sky's own luminance and
-            // only the lit edge lifts above it.
-            float3 baseCol = float3(0.05, 0.05, 0.10);          // shadowed body, darker than the sky
-            float3 litCol  = float3(0.34, 0.36, 0.46);          // cool rim where the key light grazes
-            float3 col = lerp(baseCol, litCol, lit);
-            col = lerp(col, col * sunCol, 0.12);                // was 0.35 - a hint of warmth, not a wash
-            float3 amb = skyTint * 0.5;
-            col += amb * (1.0 - lit) * 0.4;
-            // Energy-conserving in-scatter. The extinction constant was 6.0, which with
-            // dt <= 0.225 gave alpha ~0.74 PER SAMPLE: two or three dense samples saturated
-            // the ray, so nothing behind the first cloud face was ever visible and the whole
-            // band collapsed into one opaque wall. 1.6 lets the 40 steps actually integrate.
-            float dens = d * dt * 1.6;
-            float a = 1.0 - exp(-dens);
-            scattered += transmittance * a * col;
-            transmittance *= 1.0 - a;
+    float3 radiance = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < 48; i += 1) {
+        if (float(i) >= steps || start >= end) break;
+        float distance = start + (float(i) + jitter) * stepSize;
+        float3 p = ray * distance + float3(2.8, -2.4, 1.4) + drift;
+        float density = cloudDensity(p, quality);
+        if (density > 0.001) {
+            // Beer-Lambert extinction gives an opaque belly and translucent thin edges.
+            float nearDensity = cloudDensity(p + sun * 0.14, quality);
+            float shadow = nearDensity * 0.65;
+            shadow += cloudDensity(p + sun * 0.55, 0.0) * 0.35;
+            float direct = exp(-shadow * 1.4);
+            float ambient = lerp(0.48, 0.78, smoothstep(0.0, 0.9, p.y));
+            float3 light = float3(0.32, 0.40, 0.50) * ambient;
+            light += float3(toLinearSrgb(float3(0.98, 0.94, 0.85))) * direct * 0.58;
+            light += float3(0.065, 0.075, 0.085) * (1.0 - exp(-density * 1.4));
+            light += float3(0.15, 0.14, 0.12) * cl01((density - nearDensity) * 0.45);
+            float aerial = 1.0 - exp(-distance * 0.055);
+            light = lerp(light, sky, aerial);
+            float opacity = 1.0 - exp(-density * stepSize * lerp(1.8, 2.8, amp));
+            radiance += transmittance * opacity * light;
+            transmittance *= 1.0 - opacity;
+            if (transmittance < 0.015) break;
         }
-        t += dt;
     }
-    float alpha = 1.0 - transmittance;
-    return float4(scattered, alpha);
+    float3 color = float3(fromLinearSrgb(float3(radiance + transmittance * sky)));
+    // Keep the navigation and body text on a quiet, deep-blue atmospheric foreground.
+    float foreground = smoothstep(0.38, 1.0, uv.y);
+    color = lerp(color, float3(0.035, 0.065, 0.115), foreground * 0.94);
+    float vignette = 1.0 - 0.14 * pow(abs(uv.x - 0.5) * 2.0, 2.0);
+    return float4(color * vignette, 1.0);
 }
+// END CLOUD OPTICS
 
 // BEGIN RAIN OPTICS
 float rainHash(float2 p) {
@@ -1716,6 +1717,7 @@ float3 rainSky(float2 p, float t, float storm) {
     float light = exp(-pow((p.x - 0.24) * 2.6, 2.0) - pow((p.y + 0.10) * 3.2, 2.0));
     float3 color = lerp(rainToLinear(float3(0.12, 0.17, 0.20)),
                        rainToLinear(float3(0.29, 0.34, 0.35)), horizon);
+    [branch] if (backgroundMode != 0) color = wallpaperLinear(p / float2(resolution.x / resolution.y, 1.0) + 0.5);
     color *= lerp(0.48, 1.12, smoothstep(0.18, 0.80, cloud));
     color += rainToLinear(float3(0.28, 0.29, 0.27)) * light * veil * 0.55;
     return color * lerp(1.0, 0.68, storm);
@@ -2121,6 +2123,7 @@ float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, fl
     float3 upperSky = hazeToLinear(float3(0.25, 0.32, 0.38));
     float3 horizon = hazeToLinear(lerp(float3(0.60, 0.57, 0.50), tint, 0.25));
     float3 sky = lerp(upperSky, horizon, smoothstep(0.03, 0.64, uv.y));
+    [branch] if (backgroundMode != 0) sky = wallpaperLinear(uv);
     sky += warmLight * (halo * 0.23 + sunDisc * 1.4);
 
     // Quiet distant terrain gives the aerosol a measurable depth reference. Each ridge
@@ -2144,7 +2147,7 @@ float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, fl
     float3 transmittance = float3(1.0, 1.0, 1.0);
     float3 scatteredLight = float3(0.0, 0.0, 0.0);
     float g = 0.68;
-    float phase = (1.0 - g * g) / (12.5663706 * pow(1.0 + g * g - 2.0 * g * alignment, 1.5));
+    float phase = (1.0 - g * g) / (12.5663706 * pow(abs(1.0 + g * g - 2.0 * g * alignment), 1.5));
     float3 drift = float3(time * (0.018 + clamp(wind, 0.0, 1.0) * 0.038), 0.0, time * 0.009);
     drift += float3(flowOffset.x * 4.0, -flowOffset.y * 4.0, 0.0);
     float stepLength = rayLength / (quality > 0.65 ? 24.0 : 12.0);
@@ -2186,17 +2189,46 @@ float4 cinematicHaze(float2 uv, float2 viewport, float time, float intensity, fl
 Texture2D<float4> glassSource : register(t0);
 SamplerState glassSampler : register(s0);
 
-static const float GLASS_DIM = 0.90;          // dims the blurred sky (smoked; keeps white text readable)
-static const float GLASS_FILM = 0.035;        // linear white film: the milky lift of frosted glass
+static const float GLASS_DIM = 0.82;          // retain scene colour through smoked glass
+static const float GLASS_FILM = 0.012;        // restrained surface reflection
 static const float GLASS_DESATURATE = 0.15;   // glass scatters some of the sky's colour away
 static const float GLASS_GRAIN = 0.012;       // fine grain (added after the encode) so flat areas do not band
 
-float glassCoverage(float2 uv)
+float glassCoverage(float2 uv, out int panelIndex)
 {
-    float inside = 0.0;
-    if (glassRect0.z > 0.0 && all(uv >= glassRect0.xy) && all(uv < glassRect0.xy + glassRect0.zw)) inside = 1.0;
-    if (glassRect1.z > 0.0 && all(uv >= glassRect1.xy) && all(uv < glassRect1.xy + glassRect1.zw)) inside = 1.0;
-    return inside;
+    panelIndex = -1;
+    if (glassRect0.z > 0.0 && all(uv >= glassRect0.xy) && all(uv < glassRect0.xy + glassRect0.zw)) return 1.0;
+    if (glassRect1.z > 0.0 && all(uv >= glassRect1.xy) && all(uv < glassRect1.xy + glassRect1.zw)) return 1.0;
+    float aspect = resolution.x / resolution.y;
+    float pixel = 0.5 / resolution.y;
+    float nearestWetEdge = 14.0 * max(resolution.y / 900.0, 0.40) / resolution.y;
+    float margin = (condition == 2 || condition == 3) ? nearestWetEdge : pixel;
+    float2 extentPadding = margin / float2(aspect, 1.0);
+    int wetPanelIndex = -1;
+    [loop]
+    for (int index = 0; index < min(glassSurfaceCount, 16); index++)
+    {
+        PanelGlassSurface surface = glassSurfaces[index];
+        if (any(uv < surface.clip.xy) || any(uv >= surface.clip.xy + surface.clip.zw)) continue;
+        // Most pixels miss a panel's bounds. Reject those before the rounded-distance
+        // calculation, retaining the complete wet margin and subpixel silhouette.
+        if (any(uv < surface.bounds.xy - extentPadding) ||
+            any(uv >= surface.bounds.xy + surface.bounds.zw + extentPadding)) continue;
+        float2 halfSize = surface.bounds.zw * float2(aspect, 1.0) * 0.5;
+        float radius = min(surface.optics.x, min(halfSize.x, halfSize.y));
+        float2 p = (uv - surface.bounds.xy - surface.bounds.zw * 0.5) * float2(aspect, 1.0);
+        float2 q = abs(p) - halfSize + radius;
+        float distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+        float coverage = 1.0 - smoothstep(-pixel, pixel, distance);
+        if (coverage > 0.0) { panelIndex = index; return coverage; }
+        if ((condition == 2 || condition == 3) && distance < nearestWetEdge)
+        {
+            nearestWetEdge = distance;
+            wetPanelIndex = index;
+        }
+    }
+    panelIndex = wetPanelIndex;
+    return 0.0;
 }
 
 float3 glassSample(float2 uv)
@@ -2223,7 +2255,63 @@ float3 frostedGlass(float2 uv)
     float3 g = acc / 14.0;
     float lum = dot(g, float3(0.2126, 0.7152, 0.0722));
     g = lerp(g, lum.xxx, GLASS_DESATURATE);
-    return g * GLASS_DIM + GLASS_FILM;
+    // Local absorption protects text when bright cloud/sun pixels pass underneath.
+    // The animated sky outside the glass keeps its full luminance range.
+    float absorption = min(GLASS_DIM, 0.12 / max(lum, 0.0001));
+    return g * absorption + GLASS_FILM;
+}
+
+// Content panels are lenses over the full-resolution scene. The low-resolution
+// frost source remains exclusively responsible for the existing shell material.
+// Distances are in height-normalized screen units, so curvature is isotropic.
+float3 panelGlassEdge(float2 uv, PanelGlassSurface surface)
+{
+    float2 scale = float2(resolution.x / max(resolution.y, 1.0), 1.0);
+    float2 halfSize = surface.bounds.zw * scale * 0.5;
+    float radius = min(surface.optics.x, min(halfSize.x, halfSize.y));
+    float2 p = (uv - surface.bounds.xy - surface.bounds.zw * 0.5) * scale;
+    float2 q = abs(p) - halfSize + radius;
+    float2 corner = max(q, 0.0);
+    float cornerLength = length(corner);
+    float2 normal = cornerLength > 0.000001 ? corner / max(cornerLength, 0.000001)
+        : (q.x > q.y ? float2(1.0, 0.0) : float2(0.0, 1.0));
+    normal *= float2(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0);
+    float distance = cornerLength + min(max(q.x, q.y), 0.0) - radius;
+    return float3(normal, max(-distance, 0.0));
+}
+
+float2 panelGlassRefraction(float2 uv, PanelGlassSurface surface)
+{
+    float3 edge = panelGlassEdge(uv, surface);
+    // glassBlur represents 16 DIPs at every display scale. Reuse that metric
+    // without inheriting the frost kernel or its thumbnail-resolution texture.
+    float dip = glassBlur * resolution.x / max(resolution.y, 1.0) / 16.0;
+    float bevel = max(4.0 * dip, min(surface.optics.x, 14.0 * dip));
+    float lip = 1.0 - smoothstep(0.0, bevel, edge.z);
+    float2 scale = float2(resolution.x / max(resolution.y, 1.0), 1.0);
+    float2 p = (uv - surface.bounds.xy - surface.bounds.zw * 0.5) * scale;
+    float2 bend = edge.xy * (7.0 * dip * lip * lip) + p * (0.022 * (1.0 - lip));
+    return saturate(uv - bend / scale);
+}
+
+float3 panelGlassLighting(float3 scene, float2 uv, PanelGlassSurface surface)
+{
+    float3 edge = panelGlassEdge(uv, surface);
+    float dip = glassBlur * resolution.x / max(resolution.y, 1.0) / 16.0;
+    float rim = 1.0 - smoothstep(0.35 * dip, 1.7 * dip, edge.z);
+    float shoulder = 1.0 - smoothstep(1.7 * dip, 7.0 * dip, edge.z);
+    float2 scale = float2(resolution.x / max(resolution.y, 1.0), 1.0);
+    float2 pointerDelta = (pointerUV - uv) * scale;
+    float pointerDistance = length(pointerDelta);
+    float2 light = lerp(float2(-0.7, -0.7), pointerDelta / max(pointerDistance, 0.001),
+        saturate(pointerStrength) * (1.0 - smoothstep(0.04, 0.30, pointerDistance)) * 0.65);
+    light /= max(length(light), 0.001);
+    float facing = dot(edge.xy, light);
+    float highlight = pow(saturate(facing), 4.0) + pow(saturate(-facing), 6.0) * 0.38;
+    // A clear surface transmits the scene's luminance range as well as its colour.
+    // Compressing bright pixels here turns an entire sunny panel into grey film.
+    float3 transmitted = scene * 0.78;
+    return transmitted * (1.0 - shoulder * 0.06) + highlight * (rim * 0.28 + shoulder * 0.018);
 }
 
 // The finish shared by the scene and the frost paths of pass 1: sRGB encode for the UNORM target,
@@ -2240,27 +2328,71 @@ float4 finishFrame(float3 col, float2 uv, float frost)
 
 // Wet edges are composed after the frost kernel, preserving sharp droplets without
 // another render target. Geometry comes from the actual sidebar and top bar bounds.
-float3 wetGlassColor(float3 color, float2 uv)
+float3 wetGlassColor(float3 color, float2 uv, int panelIndex)
 {
     if (condition != 2 && condition != 3) return color;
     float density = pointerDisperse(uv, resolution.x / resolution.y).x;
+    if (panelIndex >= 0)
+    {
+        PanelGlassSurface surface = glassSurfaces[panelIndex];
+        // Use component-local coordinates so droplets stay attached when the panel scrolls.
+        float4 wet = rainWetGlass(uv - surface.bounds.xy, resolution, time + surface.optics.y,
+            float4(0.0, 0.0, surface.bounds.z, surface.bounds.w), surface.optics.x, density * 0.68);
+        return lerp(color, pow(saturate(wet.rgb), 2.2), wet.w);
+    }
     float4 wet0 = rainWetGlass(uv, resolution, time, glassRect0, 0.0, density * 0.68);
     float4 wet1 = rainWetGlass(uv, resolution, time, glassRect1, 0.0, density * 0.68);
     color = lerp(color, pow(saturate(wet0.rgb), 2.2), wet0.w);
     return lerp(color, pow(saturate(wet1.rgb), 2.2), wet1.w);
 }
 
+Texture2D wallpaperTexture : register(t2);
+
+// Sample the selected wallpaper inside the existing atmospheric and glass passes.
+float3 wallpaperLinear(float2 uv)
+{
+    float3 backgroundLight = float3(0.0, 0.0, 0.0);
+    if (backgroundMode == 5)
+    {
+        float aspect = resolution.x / max(resolution.y, 1.0);
+        float2 fit = wallpaperAspect > aspect ? float2(aspect / wallpaperAspect, 1.0) : float2(1.0, wallpaperAspect / aspect);
+        float4 image = wallpaperTexture.SampleLevel(glassSampler, saturate((uv - 0.5) * fit + 0.5), 0);
+        backgroundLight = pow(saturate(image.rgb), 2.2) * image.a * 0.8;
+    }
+    else
+    {
+    float3 color = lerp(float3(0.05, 0.05, 0.15), float3(0.15, 0.10, 0.25), saturate(uv.y));
+    if (backgroundMode == 2) color = lerp(float3(0.02, 0.02, 0.10), float3(0.08, 0.05, 0.20), saturate(uv.y));
+    if (backgroundMode == 3)
+    {
+        color = lerp(float3(0.05, 0.10, 0.18), float3(0.12, 0.20, 0.28), saturate(uv.y));
+        float curtain = 0.27 + 0.09 * sin(uv.x * 6.0 + time * 0.04) + 0.035 * sin(uv.x * 15.0 - time * 0.025);
+        color += float3(0.03, 0.42, 0.24) * exp(-abs(uv.y - curtain) * 28.0) * smoothstep(0.0, 0.25, uv.x);
+    }
+    if (backgroundMode == 4) color = lerp(float3(0.11, 0.15, 0.32), float3(0.22, 0.30, 0.50), saturate(uv.y));
+    backgroundLight = pow(saturate(color), 2.2);
+    if (backgroundMode == 1 || backgroundMode == 2) backgroundLight += starfield(uv) * (backgroundMode == 2 ? 0.8 : 0.55);
+    }
+    return backgroundLight;
+}
+
 float4 PSMain(VSOut input) : SV_TARGET
 {
     float2 uv = saturate(input.uv);     // 0..1 screen uv (top-left origin)
+    float2 screenUV = uv;
 
-    // Pass 1 pixels under the shell chrome show the frost and never the scene, so the raymarch
-    // below is skipped for them (about a quarter of the frame at the default layout).
+    // Preserve the shell frost. Content panels instead evaluate the actual scene
+    // at a refracted position, including wallpaper, weather and pointer motion.
+    int panelIndex = -1;
+    float coverage = 0.0;
+    if (renderPass != 0) coverage = glassCoverage(uv, panelIndex);
     [branch]
-    if (renderPass != 0 && glassCoverage(uv) > 0.5)
+    if (coverage >= 1.0 && panelIndex < 0)
     {
-        return finishFrame(wetGlassColor(frostedGlass(uv), uv), uv, 1.0);
+        return finishFrame(wetGlassColor(frostedGlass(uv), uv, panelIndex), uv, 1.0);
     }
+    if (panelIndex >= 0 && coverage > 0.0)
+        uv = lerp(uv, panelGlassRefraction(uv, glassSurfaces[panelIndex]), coverage);
     float ty = uv.y;                    // vertical gradient param
     float aspect = resolution.x / max(resolution.y, 1.0);
 
@@ -2280,7 +2412,7 @@ float4 PSMain(VSOut input) : SV_TARGET
 
     if (condition == 0)                 // ---- Clear ----
     {
-        col = lerp(nightSky(ty), clearSky(ty), 0.55);   // translucent blue veil over the dark starry theme (Mac parity)
+        col = backgroundMode == 0 ? lerp(nightSky(ty), clearSky(ty), 0.55) : wallpaperLinear(uv);
         // sun glow upper-left + caustic light spots
         float2 sun = float2(0.28, 0.18);
         float sd = length((uv - sun) * float2(aspect, 1.0));
@@ -2292,26 +2424,21 @@ float4 PSMain(VSOut input) : SV_TARGET
     }
     else if (condition == 1)            // ---- Cloudy ----
     {
-        float3 baseSky = nightSky(ty);                  // dark starry theme shows through (Mac cloudy lays no grey sky)
-        baseSky += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.5;
-        float coverage = 0.55;                          // lower so the dark starry sky shows between cloud clumps (Mac)
-        float4 clouds = raymarchClouds(ro, rd, coverage, baseSky, float3(1.0, 0.97, 0.9));
-        col = lerp(baseSky, clouds.rgb, clouds.a * densMul);  // wave thins the cloud -> starry sky shows
-        // scatterable wisp motes ON TOP of the cloud field: faint at rest, scatter apart on a wave
-        // (revealing the starry sky) then drift back -- the discrete-particle liveliness from Mac.
-        col += wispComposite(uv, aspect, clouds.a, 0.45);
+        // The accepted cross-platform cloud volume; pointer motion still warps and clears it.
+        float3 clouds = cloudySky(dispUV, time, 0.8, 0.25, 1.0).rgb;
+        col = lerp(backgroundMode == 0 ? nightSky(ty) : wallpaperLinear(uv), pow(saturate(clouds), 2.2), densMul);
     }
     else if (condition == 2 || condition == 3) // ---- Rain / storm ----
     {
         float storm = condition == 3 ? 1.0 : 0.0;
         float3 rain = cinematicRain(uv, resolution, time, lerp(0.68, 0.95, storm),
                                      0.25, 1.0, storm, 1.0, densMul, disp.yz).rgb;
-        float3 baseSky = nightSky(ty) + starfield(uv) * 0.25;
+        float3 baseSky = backgroundMode == 0 ? nightSky(ty) + starfield(uv) * 0.25 : wallpaperLinear(uv);
         col = lerp(baseSky, pow(saturate(rain), 2.2), densMul);
     }
     else if (condition == 4)            // ---- Snowy ----
     {
-        col = lerp(nightSky(ty), float3(0.20, 0.24, 0.34), 0.4);  // dim cold base so white flakes pop (Mac parity)
+        col = lerp(backgroundMode == 0 ? nightSky(ty) : wallpaperLinear(uv), float3(0.20, 0.24, 0.34), 0.4);
         col += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.4;
         // soft moon/halo glow at (0.3w, 0.15h)
         float2 halo = float2(0.3, 0.15);
@@ -2325,14 +2452,14 @@ float4 PSMain(VSOut input) : SV_TARGET
     }
     else if (condition == 5)            // ---- Foggy ----
     {
-        float3 baseSky = lerp(float3(0.55, 0.57, 0.6), float3(0.78, 0.80, 0.82), ty);
+        float3 baseSky = backgroundMode == 0 ? lerp(float3(0.55, 0.57, 0.6), float3(0.78, 0.80, 0.82), ty) : wallpaperLinear(uv);
         float fogAlpha;
         float3 fog = fogComposite(uv, 0.6, fogAlpha);
         col = lerp(baseSky, fog, saturate(fogAlpha * 1.4) * densMul);  // wave clears the fog (Mac haze parity)
     }
     else                                // ---- Haze (6) ----
     {
-        float3 baseSky = nightSky(ty);
+        float3 baseSky = backgroundMode == 0 ? nightSky(ty) : wallpaperLinear(uv);
         baseSky += starfield(uv) * smoothstep(0.55, 0.0, ty) * 0.35;
         float3 haze = cinematicHaze(uv, resolution, time, 0.68, 0.25, 1.0,
                                     float3(0.78, 0.72, 0.58), 1.0, dispUV - uv).rgb;
@@ -2354,7 +2481,14 @@ float4 PSMain(VSOut input) : SV_TARGET
 
     // ---- finish: gamma + gentle vignette (NO Reinhard - the scene is already LDR 0..1, so
     //      Reinhard would just crush every sky color to ~half brightness). ----
-    return finishFrame(wetGlassColor(col, uv), uv, 0.0);
+    if (coverage > 0.0)
+    {
+        float3 material = panelIndex >= 0
+            ? panelGlassLighting(col, screenUV, glassSurfaces[panelIndex])
+            : frostedGlass(screenUV);
+        col = lerp(col, material, coverage);
+    }
+    return finishFrame(wetGlassColor(col, screenUV, panelIndex), screenUV, panelIndex < 0 ? coverage : 0.0);
 }
 ";
 }

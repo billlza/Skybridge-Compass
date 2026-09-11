@@ -43,6 +43,7 @@ internal static class WeatherGlassGeometryTests
     {
         const uint backBuffers = 2;
         var bytes = WeatherGlassGeometry.ConstantBufferBytes(backBuffers);
+        Require(WeatherGlassGeometry.ConstantSlotBytes >= 96 + WeatherGlassGeometry.MaximumSurfaceCount * 48, "A slot must contain the fixed header and every clipped glass surface record.");
         var offsets = new List<ulong>();
         for (uint index = 0; index < backBuffers; index++)
         for (uint pass = 0; pass < WeatherGlassGeometry.PassesPerFrame; pass++)
@@ -51,7 +52,7 @@ internal static class WeatherGlassGeometryTests
         }
 
         Require(offsets.Distinct().Count() == offsets.Count, "Every (back buffer, pass) slot must be distinct.");
-        Require(offsets.All(o => o % WeatherGlassGeometry.ConstantSlotBytes == 0), "Every slot must be 256-byte aligned.");
+        Require(offsets.All(o => o % 256 == 0), "Every slot must be 256-byte aligned.");
         Require(offsets.Max() + WeatherGlassGeometry.ConstantSlotBytes <= bytes, "Every slot must lie inside the ring buffer.");
         var rejected = false;
         try { WeatherGlassGeometry.ConstantSlotOffset(0, WeatherGlassGeometry.PassesPerFrame); }

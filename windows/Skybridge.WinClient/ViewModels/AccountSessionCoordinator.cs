@@ -157,143 +157,176 @@ public sealed class AccountSessionCoordinator
         await _mutationGate.WaitAsync().ConfigureAwait(true);
         try
         {
-            var loadResult = _sessionStore.Load();
-            if (loadResult.IsQuietSignedOut)
-            {
-                return AccountSessionResult.SignedOutResult();
-            }
-
-            if (!loadResult.Succeeded || loadResult.Session is null)
-            {
-                return ClearStoredSessionAfterFailure(
-                    AccountSessionFailureKind.SessionPersistenceFailed,
-                    loadResult.Status.ToString());
-            }
-
-            var persisted = loadResult.Session;
-            if (persisted.Authority is null
-                || persisted.Authority != _authClient.SessionAuthority)
-            {
-                return ClearStoredSessionAfterFailure(
-                    AccountSessionFailureKind.AuthorityMismatch,
-                    "auth_persisted_authority_mismatch");
-            }
-
-            if (!SessionJwtValidator.TryValidate(
-                    persisted.AccessToken,
-                    _authClient.SessionAuthority,
-                    persisted.Subject,
-                    requireUnexpired: false,
-                    out var persistedClaims,
-                    out var persistedTokenError)
-                || persistedClaims is null)
-            {
-                return ClearStoredSessionAfterFailure(
-                    FailureKindForTokenError(persistedTokenError),
-                    persistedTokenError);
-            }
-
-            var accessToken = persisted.AccessToken!;
-            var refreshToken = persisted.RefreshToken!;
-            var subject = persistedClaims.Subject;
-
-            // Refresh the access token if it is expired or within the skew window.
-            if (NeedsRefresh(persistedClaims.ExpiresAtUnix))
-            {
-                var refreshed = await _authClient.RefreshAsync(refreshToken).ConfigureAwait(true);
-                if (!refreshed.Succeeded
-                    || refreshed.Value is null
-                    || string.IsNullOrWhiteSpace(refreshed.Value.AccessToken)
-                    || string.IsNullOrWhiteSpace(refreshed.Value.RefreshToken))
-                {
-                    if (IsTransientAuthFailure(refreshed.Failure))
-                        return DeferHydration(refreshed.Failure.Code);
-                    return ClearStoredSessionAfterFailure(
-                        AccountSessionFailureKind.RefreshRejected,
-                        refreshed.Failure?.Code ?? "auth_refresh_missing_rotated_token");
-                }
-
-                if (!SessionJwtValidator.TryValidate(
-                        refreshed.Value.AccessToken,
-                        _authClient.SessionAuthority,
-                        subject,
-                        requireUnexpired: true,
-                        out var refreshedClaims,
-                        out var refreshTokenError)
-                    || refreshedClaims is null
-                    || !EmbeddedUserMatchesSubject(refreshed.Value, subject))
-                {
-                    return ClearStoredSessionAfterFailure(
-                        string.IsNullOrEmpty(refreshTokenError)
-                            ? AccountSessionFailureKind.SubjectMismatch
-                            : FailureKindForTokenError(refreshTokenError),
-                        string.IsNullOrEmpty(refreshTokenError)
-                            ? "auth_refresh_embedded_subject_mismatch"
-                            : refreshTokenError);
-                }
-
-                accessToken = refreshed.Value.AccessToken;
-                refreshToken = refreshed.Value.RefreshToken;
-                // Rotation has already happened on the server. Commit the replacement
-                // before another network request can fail; do not publish identity yet.
-                var rotated = _sessionStore.Save(persisted with
-                {
-                    AccessToken = accessToken, RefreshToken = refreshToken,
-                    IssuedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                });
-                if (!rotated.Succeeded)
-                {
-                    ClearInMemoryAndNotify();
-                    return AccountSessionResult.Failed(AccountSessionFailureKind.SessionPersistenceFailed, rotated.Status.ToString());
-                }
-            }
-
-            // Re-confirm the live identity on every launch, even when the access token did not
-            // require refresh. Parsed JWT claims alone are never authentication proof.
-            var user = await _authClient
-                .GetUserAsync(accessToken, subject)
-                .ConfigureAwait(true);
-            var returnedSubjectMismatch = user.Value is not null
-                && !string.Equals(user.Value.Id, subject, StringComparison.Ordinal);
-            if (!user.Succeeded
-                || user.Value is null
-                || returnedSubjectMismatch)
-            {
-                if (!returnedSubjectMismatch && IsTransientAuthFailure(user.Failure))
-                    return DeferHydration(user.Failure.Code);
-                return ClearStoredSessionAfterFailure(
-                    FailureKindForUserFailure(user.Failure, returnedSubjectMismatch),
-                    user.Failure?.Code ?? "auth_user_subject_mismatch");
-            }
-
-            var previous = CaptureState();
-            ApplyVerifiedIdentity(accessToken, refreshToken, subject, user.Value);
-            var saveResult = Persist();
-            if (!saveResult.Succeeded)
-            {
-                RestoreState(previous);
-                var clearResult = _sessionStore.Clear();
-                _ = await _authClient.SignOutAsync(accessToken).ConfigureAwait(true);
-                if (!clearResult.Succeeded)
-                {
-                    return AccountSessionResult.Failed(
-                        AccountSessionFailureKind.SessionPersistenceFailed,
-                        $"{saveResult.Status}:{clearResult.Status}");
-                }
-
-                ClearInMemoryAndNotify();
-                return AccountSessionResult.FailedSignedOut(
-                    AccountSessionFailureKind.SessionPersistenceFailed,
-                    saveResult.Status.ToString());
-            }
-
-            RaiseIdentityChanged();
-            return AccountSessionResult.Succeeded();
+            return await HydrateFromStoreCoreAsync().ConfigureAwait(true);
         }
         finally
         {
             _mutationGate.Release();
         }
+    }
+
+    private async Task<AccountSessionResult> HydrateFromStoreCoreAsync(bool requestRefresh = false)
+    {
+        var loadResult = _sessionStore.Load();
+        if (loadResult.IsQuietSignedOut)
+        {
+            return AccountSessionResult.SignedOutResult();
+        }
+
+        if (!loadResult.Succeeded || loadResult.Session is null)
+        {
+            return ClearStoredSessionAfterFailure(
+                AccountSessionFailureKind.SessionPersistenceFailed,
+                loadResult.Status.ToString());
+        }
+
+        var persisted = loadResult.Session;
+        if (persisted.Authority is null
+            || persisted.Authority != _authClient.SessionAuthority)
+        {
+            return ClearStoredSessionAfterFailure(
+                AccountSessionFailureKind.AuthorityMismatch,
+                "auth_persisted_authority_mismatch");
+        }
+
+        if (!SessionJwtValidator.TryValidate(
+                persisted.AccessToken,
+                _authClient.SessionAuthority,
+                persisted.Subject,
+                requireUnexpired: false,
+                out var persistedClaims,
+                out var persistedTokenError)
+            || persistedClaims is null)
+        {
+            return ClearStoredSessionAfterFailure(
+                FailureKindForTokenError(persistedTokenError),
+                persistedTokenError);
+        }
+
+        var accessToken = persisted.AccessToken!;
+        var refreshToken = persisted.RefreshToken!;
+        var subject = persistedClaims.Subject;
+
+        // Refresh the access token if it is expired or within the skew window.
+        if (NeedsRefresh(persistedClaims.ExpiresAtUnix))
+        {
+            var refreshed = await _authClient.RefreshAsync(refreshToken).ConfigureAwait(true);
+            if (!refreshed.Succeeded
+                || refreshed.Value is null
+                || string.IsNullOrWhiteSpace(refreshed.Value.AccessToken)
+                || string.IsNullOrWhiteSpace(refreshed.Value.RefreshToken))
+            {
+                if (IsTransientAuthFailure(refreshed.Failure))
+                    return requestRefresh ? AccountSessionResult.Failed(AccountSessionFailureKind.Network, refreshed.Failure.Code) : DeferHydration(refreshed.Failure.Code);
+                return ClearStoredSessionAfterFailure(
+                    AccountSessionFailureKind.RefreshRejected,
+                    refreshed.Failure?.Code ?? "auth_refresh_missing_rotated_token");
+            }
+
+            if (!SessionJwtValidator.TryValidate(
+                    refreshed.Value.AccessToken,
+                    _authClient.SessionAuthority,
+                    subject,
+                    requireUnexpired: true,
+                    out var refreshedClaims,
+                    out var refreshTokenError)
+                || refreshedClaims is null
+                || !EmbeddedUserMatchesSubject(refreshed.Value, subject))
+            {
+                return ClearStoredSessionAfterFailure(
+                    string.IsNullOrEmpty(refreshTokenError)
+                        ? AccountSessionFailureKind.SubjectMismatch
+                        : FailureKindForTokenError(refreshTokenError),
+                    string.IsNullOrEmpty(refreshTokenError)
+                        ? "auth_refresh_embedded_subject_mismatch"
+                        : refreshTokenError);
+            }
+
+            accessToken = refreshed.Value.AccessToken;
+            refreshToken = refreshed.Value.RefreshToken;
+            // Rotation has already happened on the server. Commit the replacement
+            // before another network request can fail; do not publish identity yet.
+            var rotated = _sessionStore.Save(persisted with
+            {
+                AccessToken = accessToken, RefreshToken = refreshToken,
+                IssuedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            });
+            if (!rotated.Succeeded)
+            {
+                ClearInMemoryAndNotify();
+                return AccountSessionResult.Failed(AccountSessionFailureKind.SessionPersistenceFailed, rotated.Status.ToString());
+            }
+        }
+
+        // Re-confirm the live identity on every launch, even when the access token did not
+        // require refresh. Parsed JWT claims alone are never authentication proof.
+        var user = await _authClient
+            .GetUserAsync(accessToken, subject)
+            .ConfigureAwait(true);
+        var returnedSubjectMismatch = user.Value is not null
+            && !string.Equals(user.Value.Id, subject, StringComparison.Ordinal);
+        if (!user.Succeeded
+            || user.Value is null
+            || returnedSubjectMismatch)
+        {
+            if (!returnedSubjectMismatch && IsTransientAuthFailure(user.Failure))
+                return requestRefresh ? AccountSessionResult.Failed(AccountSessionFailureKind.Network, user.Failure.Code) : DeferHydration(user.Failure.Code);
+            return ClearStoredSessionAfterFailure(
+                FailureKindForUserFailure(user.Failure, returnedSubjectMismatch),
+                user.Failure?.Code ?? "auth_user_subject_mismatch");
+        }
+
+        var previous = CaptureState();
+        ApplyVerifiedIdentity(accessToken, refreshToken, subject, user.Value);
+        var saveResult = Persist();
+        if (!saveResult.Succeeded)
+        {
+            RestoreState(previous);
+            var clearResult = _sessionStore.Clear();
+            _ = await _authClient.SignOutAsync(accessToken).ConfigureAwait(true);
+            if (!clearResult.Succeeded)
+            {
+                return AccountSessionResult.Failed(
+                    AccountSessionFailureKind.SessionPersistenceFailed,
+                    $"{saveResult.Status}:{clearResult.Status}");
+            }
+
+            ClearInMemoryAndNotify();
+            return AccountSessionResult.FailedSignedOut(
+                AccountSessionFailureKind.SessionPersistenceFailed,
+                saveResult.Status.ToString());
+        }
+
+        RaiseIdentityChanged();
+        return AccountSessionResult.Succeeded();
+    }
+
+
+    internal string? AccountDeviceScope => IsSignedIn && _userId is not null
+        ? _authClient.SessionAuthority.Issuer + "/" + _userId : null;
+
+    // Captured under the same mutation gate as sign-in, sign-out and refresh. The
+    // device request receives one immutable authority/token pair, never two providers
+    // observing opposite sides of an account switch.
+    internal async Task<AccountDeviceAuthentication?> GetDeviceAuthenticationAsync(CancellationToken cancellationToken)
+    {
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+        try
+        {
+            if (!IsSignedIn) return null;
+            if (!SessionJwtValidator.TryValidate(_accessToken, _authClient.SessionAuthority, _userId,
+                requireUnexpired: false, out var claims, out _) || claims is null)
+                throw new InvalidDataException("Authenticated account token no longer matches its authority.");
+            if (NeedsRefresh(claims.ExpiresAtUnix))
+            {
+                var refreshed = await HydrateFromStoreCoreAsync(requestRefresh: true).ConfigureAwait(true);
+                if (!refreshed.Success) throw new AccountDeviceAuthenticationException(refreshed.FailureKind);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsSignedIn || _accessToken is null || _userId is null) return null;
+            return AccountDeviceAuthentication.FromVerifiedSession(_accessToken, _authClient.SessionAuthority, _userId);
+        }
+        finally { _mutationGate.Release(); }
     }
 
     // ---- Sign-out -------------------------------------------------------------------

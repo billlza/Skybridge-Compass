@@ -6,6 +6,25 @@ using System.Text.Json;
 using Skybridge.WinClient.Services;
 using Skybridge.WinClient.ViewModels;
 
+if (args.Length == 2 && args[0] == "--live-account-devices")
+{
+    if (!OperatingSystem.IsWindowsVersionAtLeast(10,0,19041)) throw new PlatformNotSupportedException("Windows native account validation required.");
+    await AccountDeviceLiveValidation.RunAsync(args[1]);
+    return;
+}
+
+if (args.SequenceEqual(["--shell-interactions"]))
+{
+    foreach (var test in ShellInteractionTests.Cases) { await test.Run(); Console.WriteLine("PASS " + test.Name); }
+    return;
+}
+
+if (args.SequenceEqual(["--account-devices"]))
+{
+    foreach (var test in AccountDeviceTests.Cases) { await test.Run(); Console.WriteLine("PASS " + test.Name); }
+    return;
+}
+
 if (args.Length == 2 && args[0] == "--policybound-migration-stop-before-identity")
 {
     await QPeriaptWindowsProductTests.StopBeforeIdentityCommitAsync(args[1]);
@@ -154,11 +173,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("async relay command ignores reentrant execute while running", TestAsyncRelayCommandIgnoresReentrantExecute),
     ("async relay command runs again after completing", TestAsyncRelayCommandRunsAgainAfterCompletion),
     ("async relay command rejects a null execute delegate", TestAsyncRelayCommandRejectsNullExecute),
-    ("account device roster requires a full signed-in identity", TestAccountDeviceRosterRequiresIdentity),
-    ("account device roster classifies rejected and failed reads", TestAccountDeviceRosterTypedFailures),
-    ("account device roster parses registered devices as stored", TestAccountDeviceRosterParsesDevices),
-    ("account device roster fails closed on an incomplete row", TestAccountDeviceRosterFailsClosedOnPartialRow),
-    ("account device roster scopes the query to the user and bearer token", TestAccountDeviceRosterRequestShape)
+
 };
 
 var remoteHostTests = Skybridge.WinClient.ContractTests.WindowsRemoteControlAudioAdvertisementTests.Cases
@@ -190,158 +205,10 @@ var remoteHostTests = Skybridge.WinClient.ContractTests.WindowsRemoteControlAudi
             Console.WriteLine("PASS Windows policy-bound identity recovery and native two-direction product handshake");
         }
     })));
-foreach (var test in tests.Concat(remoteHostTests))
+foreach (var test in tests.Concat(AccountDeviceTests.Cases).Concat(ShellInteractionTests.Cases).Concat(remoteHostTests))
 {
     await test.Run();
     Console.WriteLine($"PASS {test.Name}");
-}
-
-// ===== AccountDeviceRosterClient =====
-// "Which devices are on this account" is the only discovery path that survives the two
-// machines being on different subnets, so the rules that matter are about not lying: a
-// half-identity must not issue a query, a rejected session must not look like an empty
-// account, and a row the server sent incompletely must not silently shrink the list.
-
-static AccountDeviceRosterClient Roster(HttpMessageHandler handler) =>
-    new(new HttpClient(handler), "https://example.supabase.co", "publishable-key");
-
-static async Task TestAccountDeviceRosterRequiresIdentity()
-{
-    // A handler that would fail the test if it were ever reached: not signing in must not
-    // produce a request at all, because the anon-view result is not this user's roster.
-    var client = Roster(new RecordingHandler(_ =>
-        throw new InvalidOperationException("no request may be issued without a full identity")));
-
-    foreach (var request in new[]
-    {
-        new AccountDeviceRosterRequest(null, "token"),
-        new AccountDeviceRosterRequest("user", null),
-        new AccountDeviceRosterRequest("   ", "token"),
-        new AccountDeviceRosterRequest("user", "   ")
-    })
-    {
-        var snapshot = await client.LoadAsync(request);
-        Require(
-            snapshot.Failure == AccountDeviceRosterFailure.NotSignedIn,
-            "a missing user id or access token must classify as NotSignedIn");
-        Require(snapshot.Devices.Count == 0, "a not-signed-in roster must be empty");
-        Require(!snapshot.Trusted, "a not-signed-in roster must not be trusted");
-    }
-}
-
-static async Task TestAccountDeviceRosterTypedFailures()
-{
-    var identity = new AccountDeviceRosterRequest("user-1", "token-1");
-
-    var unauthorized = await Roster(new StaticHandler(HttpStatusCode.Unauthorized, "{}")).LoadAsync(identity);
-    Require(
-        unauthorized.Failure == AccountDeviceRosterFailure.Unauthorized,
-        "401 must classify as Unauthorized, never as an empty account");
-
-    var forbidden = await Roster(new StaticHandler(HttpStatusCode.Forbidden, "{}")).LoadAsync(identity);
-    Require(forbidden.Failure == AccountDeviceRosterFailure.Unauthorized, "403 must classify as Unauthorized");
-
-    var serverError = await Roster(new StaticHandler(HttpStatusCode.InternalServerError, "{}")).LoadAsync(identity);
-    Require(serverError.Failure == AccountDeviceRosterFailure.ServerError, "5xx must classify as ServerError");
-
-    var notArray = await Roster(new StaticHandler(HttpStatusCode.OK, "{\"message\":\"nope\"}")).LoadAsync(identity);
-    Require(
-        notArray.Failure == AccountDeviceRosterFailure.MalformedResponse,
-        "a non-array body must be malformed, not an empty roster");
-
-    var badJson = await Roster(new StaticHandler(HttpStatusCode.OK, "[{bad")).LoadAsync(identity);
-    Require(badJson.Failure == AccountDeviceRosterFailure.MalformedResponse, "unparseable JSON must be malformed");
-
-    var network = await Roster(new RecordingHandler(_ => throw new HttpRequestException("down"))).LoadAsync(identity);
-    Require(network.Failure == AccountDeviceRosterFailure.Network, "a transport failure must classify as Network");
-
-    // The one case that legitimately yields zero devices.
-    var empty = await Roster(new StaticHandler(HttpStatusCode.OK, "[]")).LoadAsync(identity);
-    Require(empty.Failure == AccountDeviceRosterFailure.None, "an empty array is a successful read");
-    Require(empty.Trusted && empty.Devices.Count == 0, "an account with no devices is trusted and empty");
-}
-
-static async Task TestAccountDeviceRosterParsesDevices()
-{
-    const string Body = """
-    [
-      {"device_id":"dev-a","device_name":"YY014","status":"active",
-       "last_seen_at":"2026-08-31T11:20:00Z","protocol_public_key_fingerprint":"SHA256:aaa"},
-      {"device_id":"dev-b","device_name":"","status":"pending",
-       "last_seen_at":null,"protocol_public_key_fingerprint":null}
-    ]
-    """;
-
-    var snapshot = await Roster(new StaticHandler(HttpStatusCode.OK, Body))
-        .LoadAsync(new AccountDeviceRosterRequest("user-1", "token-1"));
-
-    Require(snapshot.Trusted, "a well-formed array must be trusted");
-    Require(snapshot.Devices.Count == 2, $"expected 2 devices, got {snapshot.Devices.Count}");
-
-    var first = snapshot.Devices[0];
-    Require(first.DeviceId == "dev-a" && first.DeviceName == "YY014", "the first row must round-trip id and name");
-    Require(first.Status == "active", "status must be reported exactly as stored, not mapped to a boolean");
-    Require(first.LastSeenAt == DateTimeOffset.Parse("2026-08-31T11:20:00Z"), "last_seen_at must parse as UTC");
-    Require(first.KeyFingerprint == "SHA256:aaa", "the key fingerprint must round-trip");
-
-    var second = snapshot.Devices[1];
-    Require(second.DeviceName == "Unknown Device", "a blank name must fall back, matching the server default");
-    Require(second.LastSeenAt is null, "a null last_seen_at must stay unknown rather than becoming now");
-    Require(second.Status == "pending", "a pending device must not be silently promoted or hidden");
-}
-
-static async Task TestAccountDeviceRosterFailsClosedOnPartialRow()
-{
-    foreach (var body in new[]
-    {
-        "[{\"device_name\":\"no id\",\"status\":\"active\"}]",
-        "[{\"device_id\":\"dev-a\",\"device_name\":\"no status\"}]",
-        "[{\"device_id\":\"dev-a\",\"device_name\":\"ok\",\"status\":\"active\"},\"not-an-object\"]"
-    })
-    {
-        var snapshot = await Roster(new StaticHandler(HttpStatusCode.OK, body))
-            .LoadAsync(new AccountDeviceRosterRequest("user-1", "token-1"));
-
-        Require(
-            snapshot.Failure == AccountDeviceRosterFailure.MalformedResponse,
-            $"an unusable row must fail the whole read rather than shrink the list: {body}");
-        Require(snapshot.Devices.Count == 0, "a malformed roster must not surface partial devices");
-    }
-}
-
-static async Task TestAccountDeviceRosterRequestShape()
-{
-    Uri? seen = null;
-    string? apiKey = null;
-    string? authorization = null;
-
-    var handler = new RecordingHandler(request =>
-    {
-        seen = request.RequestUri;
-        apiKey = request.Headers.TryGetValues("apikey", out var k) ? string.Join(",", k) : null;
-        authorization = request.Headers.TryGetValues("Authorization", out var a) ? string.Join(",", a) : null;
-        return new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("[]", Encoding.UTF8, "application/json")
-        };
-    });
-
-    await Roster(handler).LoadAsync(new AccountDeviceRosterRequest("user 1/2", "token-1"));
-
-    Require(seen is not null, "a signed-in read must issue a request");
-
-    // AbsoluteUri, not ToString(): ToString() gives the display form, which un-escapes %20
-    // back to a literal space and would hide whether the id was escaped before being
-    // concatenated into the query.
-    var url = seen!.AbsoluteUri;
-    Require(url.Contains("/rest/v1/registered_devices", StringComparison.Ordinal),
-        $"the roster must read registered_devices; got {url}");
-    Require(url.Contains("user_id=eq.user%201%2F2", StringComparison.Ordinal),
-        $"the query must be scoped to the escaped user id; got {url}");
-    Require(url.Contains("select=device_id,device_name,status,last_seen_at,protocol_public_key_fingerprint", StringComparison.Ordinal),
-        $"columns must be selected explicitly rather than with *; got {url}");
-    Require(apiKey == "publishable-key", "the publishable key must be sent as apikey");
-    Require(authorization == "Bearer token-1", "the user access token must authorize the read");
 }
 
 // ===== AsyncRelayCommand =====

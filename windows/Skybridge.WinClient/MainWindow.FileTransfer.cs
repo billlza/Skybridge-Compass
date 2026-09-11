@@ -56,7 +56,11 @@ public sealed partial class MainWindow
     {
         if (!DispatcherQueue.TryEnqueue(() =>
         {
-            if (!_hostShutdownComplete) ViewModel.ApplyLiveFileTransfer(snapshot, status);
+            if (!_hostShutdownComplete)
+            {
+                ViewModel.ApplyLiveFileTransfer(snapshot, status);
+                _notifications.ObserveTransfers(snapshot.History, RemoteControlText, ViewModel.Settings.ShowFileTransferNotifications);
+            }
         }) && !_hostShutdownComplete)
             throw new InvalidOperationException("The transfer state could not be presented in the application window.");
     }

@@ -30,10 +30,12 @@ public sealed class SessionViewModelDependencies
         IFeatureCatalogClient? featureCatalogClient = null,
         ISessionCommandStateClient? sessionCommandStateClient = null,
         IWorkspaceCommandStateClient? workspaceCommandStateClient = null,
-        IProductSessionActionGateClient? productSessionActionGateClient = null)
+        IProductSessionActionGateClient? productSessionActionGateClient = null,
+        SettingsService? settingsService = null)
     {
         ArgumentNullException.ThrowIfNull(engineClient);
 
+        SettingsService = settingsService;
         EngineClient = engineClient;
         DiscoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         DiscoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
@@ -61,6 +63,8 @@ public sealed class SessionViewModelDependencies
         WorkspaceCommandStateClient = workspaceCommandStateClient ?? new WorkspaceCommandStateClient();
         ProductSessionActionGateClient = productSessionActionGateClient ?? new ProductSessionActionGateClient();
     }
+
+    public SettingsService? SettingsService { get; }
 
     public IEngineClient EngineClient { get; }
 

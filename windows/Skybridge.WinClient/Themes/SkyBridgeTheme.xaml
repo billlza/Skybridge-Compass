@@ -72,12 +72,11 @@
          empty-state RoundedRectangle fill black.opacity(0.22), so an idle "screen"
          reads as an off display area rather than a light translucent panel. -->
     <SolidColorBrush x:Key="SkyBridgeIdleScreenBackdropBrush" Color="#38000000" />
-    <!-- Panel = large section surface (GlassPanel style, dashboard cards, overlays): a white wash
-         lit at the top edge, the Mac card treatment. It is a wash, not a material: the frost lives
-         under the shell chrome only. -->
+    <!-- A local smoked-glass backing keeps white labels legible over bright weather.
+         Nested cards retain their existing light wash on this shared backing. -->
     <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#24FFFFFF" Offset="0.0" />
-        <GradientStop Color="#14FFFFFF" Offset="1.0" />
+        <GradientStop Color="#A308101D" Offset="0.0" />
+        <GradientStop Color="#B30B1422" Offset="1.0" />
     </LinearGradientBrush>
 
     <!-- Sidebar and top bar: transparent, because the weather renderer paints the frosted glass

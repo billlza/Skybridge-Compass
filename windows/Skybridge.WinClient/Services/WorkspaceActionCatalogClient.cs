@@ -916,10 +916,6 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanRestoreDefaults,
     bool CanResetMonitorData);
 
-public sealed record WorkspaceActionDetailSnapshot(
-    string TopBarNotificationsStatus,
-    string TopBarThemeStatus);
-
 public sealed record WorkspaceActionItem(
     string Key,
     string Title,

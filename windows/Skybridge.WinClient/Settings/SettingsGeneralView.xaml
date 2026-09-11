@@ -159,23 +159,14 @@
                             IsOn="{Binding Settings.ShowSystemNotifications, Mode=TwoWay}" />
                     </Grid>
 
-                    <!-- 启用深色模式 : Settings.UseDarkMode (bool, default true on Windows) -->
                     <Grid ColumnSpacing="12" MinHeight="44">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock
-                            x:Uid="SettingsGeneralDarkModeRow"
-                            Grid.Column="0"
-                            Text="启用深色模式"
-                            VerticalAlignment="Center"
-                            Foreground="{StaticResource SkyBridgeTextPrimaryBrush}" />
-                        <ToggleSwitch
-                            Grid.Column="1"
-                            HorizontalAlignment="Right"
-                            VerticalAlignment="Center"
-                            IsOn="{Binding Settings.UseDarkMode, Mode=TwoWay}" />
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <TextBlock x:Uid="AppearanceSettingsLabel" Text="Appearance" VerticalAlignment="Center" Foreground="{StaticResource SkyBridgeTextPrimaryBrush}"/>
+                        <ComboBox Grid.Column="1" MinWidth="130" SelectedValuePath="Tag" SelectedValue="{Binding Settings.AppearanceMode, Mode=TwoWay}">
+                            <ComboBoxItem x:Uid="AppearanceSystemChoice" Tag="system" Content="System"/>
+                            <ComboBoxItem x:Uid="AppearanceLightChoice" Tag="light" Content="Light"/>
+                            <ComboBoxItem x:Uid="AppearanceDarkChoice" Tag="dark" Content="Dark"/>
+                        </ComboBox>
                     </Grid>
 
                     <!-- 扫描间隔 : Settings.ScanInterval (int seconds, default 30) — 15/30/60/120 -->

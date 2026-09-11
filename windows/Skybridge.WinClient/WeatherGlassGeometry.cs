@@ -6,7 +6,8 @@ namespace Skybridge.WinClient;
 internal static class WeatherGlassGeometry
 {
     // One constant slot; D3D12 requires 256-byte alignment for a constant buffer view.
-    public const uint ConstantSlotBytes = 256;
+    public const int MaximumSurfaceCount = 16;
+    public const uint ConstantSlotBytes = 1024;
 
     // Per frame: slot 0 drives the glass-source pass, slot 1 the final pass.
     public const uint PassesPerFrame = 2;
