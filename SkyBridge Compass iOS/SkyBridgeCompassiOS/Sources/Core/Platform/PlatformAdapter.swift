@@ -348,14 +348,19 @@ public final class SkyBridgeiOSCore {
         configuration: ProtocolIdentityConfigurationRecord
     ) throws -> Bool {
         guard QPeriaptIOSRuntime.isRequested() else { return false }
-        guard let provider,
-              QPeriaptHandshakeAdmissionSnapshot.capture(
-                provider: provider, protocolIdentityConfiguration: configuration
-              ).admits(provider: provider) else {
-            throw SkyBridgeError.handshakeFailed(
-                reason: "Requested Q-Periapt ABI2 has no admitted provider for the current protocol identity"
-            )
-        }
+        let failure = SkyBridgeError.handshakeFailed(
+            reason: "Requested Q-Periapt ABI2 has no admitted provider for the current protocol identity"
+        )
+        guard let provider else { throw failure }
+        let snapshot = QPeriaptHandshakeAdmissionSnapshot.capture(
+            provider: provider, protocolIdentityConfiguration: configuration
+        )
+        // Factory output carries runtime authority. Validate its identity-bound view, as a
+        // handshake driver does. An already frozen override must retain its original binding.
+        let candidate = provider is any QPeriaptHandshakeBoundCryptoProvider
+            ? provider
+            : snapshot.bind(provider: provider)
+        guard snapshot.admits(provider: candidate) else { throw failure }
         return true
     }
 

@@ -4,6 +4,91 @@ import XCTest
 
 @available(iOS 17.0, *)
 final class QPeriaptIOSRuntimeIntegrationTests: XCTestCase {
+    @MainActor
+    @available(iOS 26.0, *)
+    func testAdmittedFactoryProviderReachesCoreIdentityResolution() async throws {
+        try await withAdmittedProductionProvider { provider, _ in
+            // Factory output has runtime authority; each driver binds identity separately.
+            XCTAssertTrue(provider is any QPeriaptRuntimeBoundCryptoProvider)
+            XCTAssertFalse(provider is any QPeriaptHandshakeBoundCryptoProvider)
+            let core = SkyBridgeiOSCore(protocolIdentityResolver: { algorithm, selected in
+                XCTAssertEqual(algorithm, .mlDSA65)
+                XCTAssertEqual(selected?.activeSuite, .qperiaptABI2PolicyBound)
+                throw CoreIdentityResolutionProbe.reached
+            })
+            do {
+                try await core.initialize(policy: .requirePQC)
+                XCTFail("The identity resolution probe must stop initialization")
+            } catch CoreIdentityResolutionProbe.reached {
+                // Positive admission must reach the existing identity I/O boundary.
+            } catch {
+                XCTFail("Verified factory provider was rejected before identity resolution: \(error)")
+            }
+            XCTAssertFalse(core.isInitialized)
+        }
+    }
+
+    @MainActor
+    @available(iOS 26.0, *)
+    func testCoreRejectsProviderFrozenToAnotherIdentityConfiguration() async throws {
+        try await withAdmittedProductionProvider { provider, configuration in
+            let session = try XCTUnwrap(QPeriaptIOSRuntime.currentSession)
+            let otherConfiguration = ProtocolIdentityConfigurationRecord(
+                algorithm: .mlDSA65, keyProtection: .secureEnclaveRequired
+            )
+            XCTAssertNotEqual(configuration, otherConfiguration)
+            let snapshot = QPeriaptHandshakeAdmissionSnapshot.admitted(
+                authProfile: session.authProfile,
+                trustRootFingerprint: session.trustRootFingerprint,
+                protocolIdentityConfiguration: otherConfiguration
+            )
+            let frozen = snapshot.bind(provider: provider)
+            XCTAssertTrue(snapshot.admits(provider: frozen))
+            let core = SkyBridgeiOSCore(protocolIdentityResolver: { _, _ in
+                throw CoreIdentityResolutionProbe.reached
+            })
+            do {
+                try await core.initialize(policy: .requirePQC, providerOverride: frozen)
+                XCTFail("An identity-bound override must not be rebound to current settings")
+            } catch CoreIdentityResolutionProbe.reached {
+                XCTFail("Mismatched frozen authority reached identity resolution")
+            } catch SkyBridgeError.handshakeFailed {
+                // Rejected before identity I/O, with no fallback or initialization commit.
+            }
+            XCTAssertFalse(core.isInitialized)
+        }
+    }
+
+    @MainActor
+    @available(iOS 26.0, *)
+    private func withAdmittedProductionProvider(
+        _ body: @MainActor (any CryptoProvider, ProtocolIdentityConfigurationRecord) async throws -> Void
+    ) async throws {
+        let defaults = UserDefaults.standard
+        let key = ProtocolSigningIdentityPolicy.configurationDefaultsKey
+        let oldConfiguration = defaults.object(forKey: key)
+        let oldEnable = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptIOSRuntime.resetForTesting()
+        defer {
+            if let oldConfiguration { defaults.set(oldConfiguration, forKey: key) }
+            else { defaults.removeObject(forKey: key) }
+            if let oldEnable { XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", oldEnable, 1), 0) }
+            else { XCTAssertEqual(unsetenv("SB_ENABLE_QPERIAPT"), 0) }
+            QPeriaptIOSRuntime.resetForTesting()
+        }
+        let configuration = ProtocolIdentityConfigurationRecord(
+            algorithm: .mlDSA65, keyProtection: .softwareKeychain
+        )
+        try ProtocolSigningIdentityPolicy.persist(configuration)
+        _ = try await QPeriaptIOSRuntime.prepareProductionSession()
+        let provider = CryptoProviderFactory.make(policy: .requirePQC)
+        XCTAssertEqual(provider.tier, .qperiaptPQC)
+        try await body(provider, configuration)
+    }
+
+    private enum CoreIdentityResolutionProbe: Error { case reached }
+
     func testRequestedQWithoutAdmissionCannotSelectAnOrdinaryProvider() {
         let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
         XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
