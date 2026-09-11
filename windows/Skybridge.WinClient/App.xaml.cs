@@ -129,7 +129,7 @@ public partial class App : Application
     // The API is Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride (the
     // Windows App SDK class — NOT Windows.Globalization, which throws/misbehaves unpackaged). It is
     // supported for unpackaged apps since Windows App SDK 1.6.240701003; this project references
-    // WindowsAppSDK 2.3.1, so it is available. The value is persisted by the platform between
+    // WindowsAppSDK 2.4.0, so it is available. The value is persisted by the platform between
     // sessions; setting it here every launch from our own source of truth keeps the two in sync.
     //
     // NOTE: x:Uid strings fully re-resolve to the new language on the NEXT launch. Setting the

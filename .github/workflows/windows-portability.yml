@@ -54,9 +54,9 @@ jobs:
       - name: Install Rust coverage tooling
         shell: pwsh
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy --component llvm-tools-preview --component rustfmt
-          rustup default 1.97.1
-          cargo install cargo-llvm-cov --version 0.8.7 --locked
+          rustup toolchain install 1.98.1 --profile minimal --component clippy --component llvm-tools-preview --component rustfmt
+          rustup default 1.98.1
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
 
       - name: Run Windows portability gate
         shell: pwsh

@@ -149,26 +149,26 @@ $agents = Get-Content -Raw -LiteralPath $agentsPath
 Assert-True -Condition ($targetFramework -eq "net10.0-windows10.0.22621.0") -Message "Windows client must target net10.0-windows10.0.22621.0, got $targetFramework"
 Assert-True -Condition ($targetPlatformMinVersion -eq "10.0.19041.0") -Message "Windows client must keep TargetPlatformMinVersion=10.0.19041.0, got $targetPlatformMinVersion"
 Assert-True -Condition ($windowsPackageTypes -contains "None") -Message "Windows client must keep a default WindowsPackageType=None path so unpackaged WinUI auto-initializes the Windows App SDK runtime. Actual=[$($windowsPackageTypes -join ', ')]"
-Assert-True -Condition ($windowsAppSdkVersion -eq "2.3.1") -Message "Windows App SDK must stay on latest stable 2.3.1, got $windowsAppSdkVersion"
-Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.2526") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.2526, got $buildToolsVersion"
+Assert-True -Condition ($windowsAppSdkVersion -eq "2.4.0") -Message "Windows App SDK must stay on latest stable 2.4.0, got $windowsAppSdkVersion"
+Assert-True -Condition ($buildToolsVersion -eq "10.0.28000.2705") -Message "Windows SDK BuildTools must stay on latest stable 10.0.28000.2705, got $buildToolsVersion"
 Assert-True -Condition ($qrCoderVersion -eq "1.8.0") -Message "QRCoder must stay on latest stable 1.8.0, got $qrCoderVersion"
 foreach ($vorticeVersion in @($vorticeDirect3D12Version, $vorticeDxgiVersion, $vorticeWinUiVersion, $vorticeD3DCompilerVersion)) {
     Assert-True -Condition ($vorticeVersion -eq "3.8.3") -Message "All Vortice packages must stay aligned on latest stable 3.8.3, got $vorticeVersion"
 }
 Assert-True -Condition ($vorticeMathematicsVersion -eq "2.1.1") -Message "Vortice.Mathematics must stay on latest stable 2.1.1, got $vorticeMathematicsVersion"
-Assert-True -Condition ($protectedDataVersion -eq "10.0.10") -Message "ProtectedData must stay on latest stable 10.0.10, got $protectedDataVersion"
+Assert-True -Condition ($protectedDataVersion -eq "10.0.12") -Message "ProtectedData must stay on latest stable 10.0.12, got $protectedDataVersion"
 Assert-True -Condition ($contractProtectedDataVersion -eq $protectedDataVersion) -Message "ContractTests ProtectedData version must match the product project. product=$protectedDataVersion tests=$contractProtectedDataVersion"
-Assert-True -Condition ($sipsorceryVersion -eq "10.0.13") -Message "SIPSorcery must stay on latest stable 10.0.13, got $sipsorceryVersion"
+Assert-True -Condition ($sipsorceryVersion -eq "10.0.16") -Message "SIPSorcery must stay on latest stable 10.0.16, got $sipsorceryVersion"
 Assert-Contains -Text $cargoManifest -Needle 'edition = "2021"' -Message "Rust core must stay on Rust 2021 edition until a dedicated migration is scheduled."
 Assert-Contains -Text $cargoManifest -Needle 'crate-type = ["rlib", "cdylib"]' -Message "Rust core must build both reusable rlib and native cdylib artifacts."
-Assert-True -Condition ([string]$globalJson.sdk.version -eq "10.0.302") -Message "global.json must pin the latest .NET 10 SDK 10.0.302."
+Assert-True -Condition ([string]$globalJson.sdk.version -eq "10.0.401") -Message "global.json must pin the latest .NET 10 SDK 10.0.401."
 Assert-True -Condition ([string]$globalJson.sdk.rollForward -eq "latestPatch") -Message "global.json must roll forward only within the pinned feature band."
 Assert-True -Condition (-not [bool]$globalJson.sdk.allowPrerelease) -Message "global.json must reject prerelease SDKs."
-Assert-Contains -Text $rustToolchain -Needle 'channel = "1.97.1"' -Message "rust-toolchain.toml must pin stable Rust 1.97.1."
+Assert-Contains -Text $rustToolchain -Needle 'channel = "1.98.1"' -Message "rust-toolchain.toml must pin stable Rust 1.98.1."
 Assert-Contains -Text $workflow -Needle 'actions/checkout@v7.0.1' -Message "Windows CI must pin actions/checkout v7.0.1."
 Assert-Contains -Text $workflow -Needle 'actions/setup-dotnet@v6.0.0' -Message "Windows CI must pin actions/setup-dotnet v6.0.0."
 Assert-Contains -Text $workflow -Needle 'global-json-file: global.json' -Message "Windows CI must consume the repository .NET SDK pin."
-Assert-Contains -Text $workflow -Needle 'cargo install cargo-llvm-cov --version 0.8.7 --locked' -Message "Windows CI must pin cargo-llvm-cov 0.8.7."
+Assert-Contains -Text $workflow -Needle 'cargo install cargo-llvm-cov --version 0.9.1 --locked' -Message "Windows CI must pin cargo-llvm-cov 0.9.1."
 
 $approvedCargoVersions = [ordered]@{
     "thiserror" = "2.0.20"
@@ -179,7 +179,7 @@ $approvedCargoVersions = [ordered]@{
     "time" = "0.3.55"
     "p256" = "0.14.0"
     "getrandom" = "0.4.3"
-    "aes-gcm" = "0.11.0"
+    "aes-gcm" = "0.11.1"
     "hkdf" = "0.13.0"
     "sha2" = "0.11.0"
     "zeroize" = "1.9.0"
@@ -198,24 +198,24 @@ foreach ($architectureSignal in @(
     'Technology stack check',
     'net10.0-windows10.0.22621.0',
     'TargetPlatformMinVersion `10.0.19041.0`',
-    'Windows App SDK `2.3.1`',
-    'Windows SDK BuildTools `10.0.28000.2526`',
+    'Windows App SDK `2.4.0`',
+    'Windows SDK BuildTools `10.0.28000.2705`',
     '`WindowsPackageType=None`',
     'QRCoder `1.8.0`',
     '.NET 10',
-    '10.0.10',
-    '10.0.302',
+    '10.0.12',
+    '10.0.401',
     'November 14, 2028',
-    'MsQuic v2.5.9',
+    'MsQuic v2.6.1',
     'libdatachannel',
     'v0.24.5',
-    'SIPSorcery `10.0.13`',
+    'SIPSorcery `10.0.16`',
     'Rust 2021 edition',
     'verify-windows-stack-freshness.ps1',
     '-EvidencePath <json>',
     'source URIs',
     'online latest-version results',
-    'Stack sources refreshed on 2026-08-10'
+    'Stack sources refreshed on 2026-09-11'
 )) {
     Assert-Contains -Text $architecture -Needle $architectureSignal -Message "Architecture stack freshness doc missing signal: $architectureSignal"
 }
@@ -224,8 +224,8 @@ foreach ($agentSignal in @(
     'WinUI 3 + .NET 10',
     'net10.0-windows10.0.22621.0',
     'TargetPlatformMinVersion `10.0.19041.0`',
-    'Windows App SDK `2.3.1`',
-    'Windows SDK BuildTools `10.0.28000.2526`',
+    'Windows App SDK `2.4.0`',
+    'Windows SDK BuildTools `10.0.28000.2705`',
     'QRCoder `1.8.0`',
     '-EvidencePath <json>',
     'verify-windows-stack-freshness.ps1'
@@ -239,7 +239,7 @@ if ($CheckOnline) {
     Assert-True -Condition ($dotnet10."channel-version" -eq "10.0") -Message ".NET release metadata channel mismatch."
     Assert-True -Condition ($dotnet10."support-phase" -eq "active") -Message ".NET 10 must remain active."
     Assert-True -Condition ($dotnet10."eol-date" -eq "2028-11-14") -Message ".NET 10 EOL date changed: $($dotnet10.'eol-date')"
-    Assert-True -Condition ($dotnet10."latest-runtime" -eq "10.0.10") -Message ".NET 10 latest runtime changed: $($dotnet10.'latest-runtime')"
+    Assert-True -Condition ($dotnet10."latest-runtime" -eq "10.0.12") -Message ".NET 10 latest runtime changed: $($dotnet10.'latest-runtime')"
     Assert-True -Condition ($dotnet10."latest-sdk" -eq [string]$globalJson.sdk.version) -Message ".NET 10 SDK pin is stale: project=$($globalJson.sdk.version) latest=$($dotnet10.'latest-sdk')"
 
     $latestWindowsAppSdk = Get-LatestStableNuGetVersion -PackageId "Microsoft.WindowsAppSDK"
@@ -272,7 +272,7 @@ if ($CheckOnline) {
     $rustVersionMatch = [regex]::Match([string]$rustStableManifest, '(?ms)^\[pkg\.rust\]\s+version\s*=\s*"(?<version>\d+\.\d+\.\d+)\s')
     Assert-True -Condition $rustVersionMatch.Success -Message "Official Rust stable manifest does not contain pkg.rust.version."
     $latestRustStable = $rustVersionMatch.Groups["version"].Value
-    Assert-True -Condition ($latestRustStable -eq "1.97.1") -Message "Rust stable toolchain changed: $latestRustStable"
+    Assert-True -Condition ($latestRustStable -eq "1.98.1") -Message "Rust stable toolchain changed: $latestRustStable"
 
     $latestCrates = [ordered]@{}
     foreach ($dependency in $approvedCargoVersions.Keys) {
@@ -280,7 +280,7 @@ if ($CheckOnline) {
         Assert-True -Condition ($latestCrates[$dependency] -eq $cargoVersions[$dependency]) -Message "Cargo dependency $dependency is not current stable: project=$($cargoVersions[$dependency]) latest=$($latestCrates[$dependency])"
     }
     $latestCargoLlvmCov = Get-LatestStableCrateVersion -CrateName "cargo-llvm-cov"
-    Assert-True -Condition ($latestCargoLlvmCov -eq "0.8.7") -Message "cargo-llvm-cov latest stable changed: $latestCargoLlvmCov"
+    Assert-True -Condition ($latestCargoLlvmCov -eq "0.9.1") -Message "cargo-llvm-cov latest stable changed: $latestCargoLlvmCov"
 
     $checkoutLatest = Invoke-RestMethod -Uri $sourceUris.checkoutLatestRelease
     Assert-True -Condition ($checkoutLatest.tag_name -eq "v7.0.1") -Message "actions/checkout latest stable changed: $($checkoutLatest.tag_name)"
@@ -290,7 +290,7 @@ if ($CheckOnline) {
     Assert-True -Condition (-not [bool]$setupDotnetLatest.prerelease) -Message "actions/setup-dotnet latest release must not be a prerelease."
 
     $msquicLatest = Invoke-RestMethod -Uri $sourceUris.msQuicLatestRelease
-    Assert-True -Condition ($msquicLatest.tag_name -eq "v2.5.9") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
+    Assert-True -Condition ($msquicLatest.tag_name -eq "v2.6.1") -Message "MsQuic latest stable changed: $($msquicLatest.tag_name)"
     Assert-True -Condition (-not [bool]$msquicLatest.prerelease) -Message "MsQuic latest release must not be a prerelease."
 
     $libdatachannelLatest = Invoke-RestMethod -Uri $sourceUris.libdatachannelLatestRelease
@@ -372,19 +372,19 @@ if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
         rustCore = [ordered]@{
             edition = "2021"
             crateTypes = @("rlib", "cdylib")
-            toolchain = "1.97.1"
+            toolchain = "1.98.1"
             dependencies = $cargoVersions
         }
         approvedVersions = [ordered]@{
-            dotnetLatestRuntime = "10.0.10"
-            dotnetLatestSdk = "10.0.302"
+            dotnetLatestRuntime = "10.0.12"
+            dotnetLatestSdk = "10.0.401"
             dotnetEolDate = "2028-11-14"
-            rustStable = "1.97.1"
-            cargoLlvmCov = "0.8.7"
+            rustStable = "1.98.1"
+            cargoLlvmCov = "0.9.1"
             checkout = "v7.0.1"
             setupDotnet = "v6.0.0"
-            sipsorcery = "10.0.13"
-            msquic = "v2.5.9"
+            sipsorcery = "10.0.16"
+            msquic = "v2.6.1"
             libdatachannel = "v0.24.5"
         }
         sourceUris = $sourceUris

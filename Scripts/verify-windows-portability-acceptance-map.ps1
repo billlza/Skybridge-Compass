@@ -186,12 +186,12 @@ foreach ($signal in @(
     "TargetPlatformMinVersion",
     "10.0.19041.0",
     "Microsoft.WindowsAppSDK",
-    "2.3.1",
+    "2.4.0",
     "Microsoft.Windows.SDK.BuildTools",
-    "10.0.28000.2526",
+    "10.0.28000.2705",
     "QRCoder",
     "1.8.0",
-    "MsQuic v2.5.9",
+    "MsQuic v2.6.1",
     "libdatachannel v0.24.5",
     "verify-windows-stack-freshness.ps1"
 )) {

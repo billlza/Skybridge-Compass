@@ -328,8 +328,8 @@ Assert-True -Condition (-not [regex]::IsMatch($mainWindowCode, "(?m)^\s*DataCont
 foreach ($winClientProjectSignal in @(
     "<TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>",
     "<TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>",
-    '<PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />',
-    '<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" PrivateAssets="all" />',
+    '<PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />',
+    '<PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" PrivateAssets="all" />',
     '<PackageReference Include="Vortice.Mathematics" Version="2.1.1" />'
 )) {
     Assert-Contains -Text $winClientProject -Needle $winClientProjectSignal -Message "Windows client project stack signal missing: $winClientProjectSignal"
