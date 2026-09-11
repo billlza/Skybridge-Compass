@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import OSLog
+import enum SkyBridgeProtocolCore.AppleProtocolPlatformMetadata
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferOperationReservationLedger
 import class SkyBridgeProtocolCore.InboundFileTransferIOActor
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
@@ -3589,7 +3590,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 deviceID: localBinding.deviceId,
                 deviceName: localDeviceName,
                 deviceType: P2PDeviceType.iOS.rawValue,
-                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(),
                 capabilities: ["cross-network", "p2p"],
                 protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
                 protocolPublicKeyBytes: localBinding.protocolPublicKeyBytes,
@@ -5861,10 +5862,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 )
             },
             platform: "iOS",
-            osVersion: {
-                let version = ProcessInfo.processInfo.operatingSystemVersion
-                return "iOS \(version.majorVersion).\(version.minorVersion)"
-            }()
+            osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion()
         )
     }
 
@@ -6353,7 +6351,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     deviceName: localName,
                     modelName: localModel,
                     platform: "iOS",
-                    osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                    osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(),
                     chip: nil,
                     accountDisplayName: identity.accountDisplayName,
                     nebulaId: identity.nebulaId,
@@ -9051,7 +9049,7 @@ extension CrossNetworkWebRTCManager {
             deviceName: localIdentity.deviceName,
             modelName: localIdentity.modelName,
             platform: "iOS",
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(),
             chip: nil,
             remoteVideoFormats: RemoteDesktopManager.supportedRemoteVideoFormats()
         ))

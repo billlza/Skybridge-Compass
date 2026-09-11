@@ -6093,7 +6093,7 @@ public class P2PDiscoveryService: BaseManager {
 
             let endpoints = ServiceEndpointRegistry.shared.snapshot()
             let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
-            let localPresentation = LocalDevicePresentation.current()
+            let localPresentation = LocalDevicePresentation.currentProtocolMetadata()
             let protocolIdentityPublicKeys: [AppMessage.ProtocolIdentityPublicKeyInfo]
             do {
                 protocolIdentityPublicKeys = try await Self.localProtocolIdentityPublicKeysForPairing()

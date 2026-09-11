@@ -30,9 +30,11 @@ struct CrossNetworkWebRTCLocalDeviceDescriptor: Sendable, Equatable {
     let osVersion: String
 
     static func current(
-        osVersion: String = ProcessInfo.processInfo.operatingSystemVersionString
+        operatingSystemVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
     ) -> CrossNetworkWebRTCLocalDeviceDescriptor {
-        let snapshot = LocalDevicePresentation.current(osVersion: osVersion)
+        let snapshot = LocalDevicePresentation.currentProtocolMetadata(
+            operatingSystemVersion: operatingSystemVersion
+        )
         return CrossNetworkWebRTCLocalDeviceDescriptor(
             deviceName: snapshot.deviceName,
             modelName: snapshot.modelName,

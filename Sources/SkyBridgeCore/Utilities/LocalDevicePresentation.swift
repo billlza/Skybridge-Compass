@@ -11,6 +11,23 @@ public enum LocalDevicePresentation {
         public let modelName: String?
         public let platformName: String
         public let osVersion: String
+
+        public func protocolMetadata(
+            operatingSystemVersion: OperatingSystemVersion
+        ) -> Snapshot {
+            Snapshot(
+                deviceName: deviceName,
+                modelName: modelName,
+                platformName: platformName == "iPadOS" ? "iOS" : platformName,
+                osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(operatingSystemVersion)
+            )
+        }
+    }
+
+    public static func currentProtocolMetadata(
+        operatingSystemVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+    ) -> Snapshot {
+        current().protocolMetadata(operatingSystemVersion: operatingSystemVersion)
     }
 
     public static func current(

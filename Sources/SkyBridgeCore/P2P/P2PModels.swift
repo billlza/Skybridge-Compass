@@ -2691,7 +2691,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return
         }
         let protocolIdentityPublicKeys = try await localProtocolIdentityPublicKeysForPairing()
-        let localPresentation = LocalDevicePresentation.current()
+        let localPresentation = LocalDevicePresentation.currentProtocolMetadata()
         let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
 
         let message = AppMessage.pairingIdentityExchange(.init(
