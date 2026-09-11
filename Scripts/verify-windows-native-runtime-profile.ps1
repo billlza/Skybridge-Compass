@@ -1181,13 +1181,13 @@ async Task VerifyCurrentPathSignalingContractsAsync()
         "64 lowercase hex");
     ExpectThrows<JsonException>(
         () => CurrentPathSignalingFrameCodec.ParseInboundText(
-            "{\"sessionId\":\"SESSION-1\",\"from\":\"windows-device-01\",\"type\":\"join\",\"sentAt\":1700000000,\"extra\":true}"),
+            "{\"sessionId\":\"session-1\",\"from\":\"windows-device-01\",\"type\":\"join\",\"sentAt\":1700000000,\"extra\":true}"),
         "could not be mapped");
     ExpectThrows<JsonException>(
         () => CurrentPathSignalingFrameCodec.ParseInboundText(
-            "{\"sessionId\":\"SESSION-1\",\"from\":\"windows-device-01\",\"type\":\"join\",\"payload\":{\"protocolPublicKeyBytes\":\"not-base64\"},\"sentAt\":1700000000}"),
+            "{\"sessionId\":\"session-1\",\"from\":\"windows-device-01\",\"type\":\"join\",\"payload\":{\"protocolPublicKeyBytes\":\"not-base64\"},\"sentAt\":1700000000}"),
         "could not be converted");
-    var unknownFrame = CurrentPathSignalingFrameCodec.ParseInboundText("{\"type\":\"unexpected\",\"sessionId\":\"SESSION-1\"}");
+    var unknownFrame = CurrentPathSignalingFrameCodec.ParseInboundText("{\"type\":\"unexpected\",\"sessionId\":\"session-1\"}");
     AssertEqual(CurrentPathSignalingInboundMessageKind.Unknown, unknownFrame.Kind, "current-path unknown server frame must not be accepted as known frame");
     AssertEqual(
         CurrentPathSignalingFailureClass.TokenExpired,
@@ -1204,7 +1204,7 @@ async Task VerifyCurrentPathSignalingContractsAsync()
 
     var fakeTransport = new FakeCurrentPathWebSocketTransport();
     fakeTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"SESSION-1\",\"role\":\"initiator\",\"clientId\":\"client-1\"}"));
+        "{\"type\":\"bound\",\"sessionId\":\"session-1\",\"role\":\"initiator\",\"clientId\":\"client-1\"}"));
     await using (var wsClient = new CurrentPathWebSocketSignalingClient(
         fakeTransport,
         new CurrentPathWebSocketSignalingClientOptions(
@@ -1235,7 +1235,7 @@ async Task VerifyCurrentPathSignalingContractsAsync()
 
     var rejectedTransport = new FakeCurrentPathWebSocketTransport();
     rejectedTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"error\",\"error\":\"session_token_expired\",\"sessionId\":\"SESSION-1\",\"reason\":\"secret-session-token\"}"));
+        "{\"type\":\"error\",\"error\":\"session_token_expired\",\"sessionId\":\"session-1\",\"reason\":\"secret-session-token\"}"));
     await using (var rejectedWsClient = new CurrentPathWebSocketSignalingClient(
         rejectedTransport,
         new CurrentPathWebSocketSignalingClientOptions(
@@ -1258,21 +1258,24 @@ async Task VerifyCurrentPathSignalingContractsAsync()
         }
     }
 
-    var mismatchTransport = new FakeCurrentPathWebSocketTransport();
-    mismatchTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"OTHER-SESSION\",\"role\":\"initiator\"}"));
-    await using (var mismatchWsClient = new CurrentPathWebSocketSignalingClient(
-        mismatchTransport,
-        new CurrentPathWebSocketSignalingClientOptions(
-            "https://api.nebula-technologies.net",
-            "/ws/current",
-            "session-1",
-            "session-token",
-            "windows-device-01")))
+    foreach (var mismatchedSessionId in new[] { "OTHER-SESSION", "SESSION-1" })
     {
-        await ExpectThrowsAsync<CurrentPathWebSocketSignalingException>(
-            () => mismatchWsClient.ConnectAndBindAsync(),
-            "does not match");
+        var mismatchTransport = new FakeCurrentPathWebSocketTransport();
+        mismatchTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
+            $"{{\"type\":\"bound\",\"sessionId\":\"{mismatchedSessionId}\",\"role\":\"initiator\"}}"));
+        await using (var mismatchWsClient = new CurrentPathWebSocketSignalingClient(
+            mismatchTransport,
+            new CurrentPathWebSocketSignalingClientOptions(
+                "https://api.nebula-technologies.net",
+                "/ws/current",
+                "session-1",
+                "session-token",
+                "windows-device-01")))
+        {
+            await ExpectThrowsAsync<CurrentPathWebSocketSignalingException>(
+                () => mismatchWsClient.ConnectAndBindAsync(),
+                "does not match");
+        }
     }
 
     var challenge = new CurrentPathAdmissionChallenge(
@@ -1518,7 +1521,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
 
     var bridgeTransport = new FakeCurrentPathWebSocketTransport();
     bridgeTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"BRIDGE-SESSION-1\",\"role\":\"initiator\",\"clientId\":\"client-bridge\"}"));
+        "{\"type\":\"bound\",\"sessionId\":\"bridge-session-1\",\"role\":\"initiator\",\"clientId\":\"client-bridge\"}"));
     bridgeTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
         CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
             "bridge-session-1",
@@ -1628,7 +1631,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
     var wrongPeerAnswerPath = Path.Combine(signalingRoot, "bridge-wrong-peer-answer.json");
     var wrongPeerTransport = new FakeCurrentPathWebSocketTransport();
     wrongPeerTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"BRIDGE-SESSION-2\",\"role\":\"initiator\"}"));
+        "{\"type\":\"bound\",\"sessionId\":\"bridge-session-2\",\"role\":\"initiator\"}"));
     wrongPeerTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
         CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
             "bridge-session-2",
@@ -1668,7 +1671,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
     var noCandidateAnswerPath = Path.Combine(signalingRoot, "bridge-no-candidate-answer.json");
     var noCandidateTransport = new FakeCurrentPathWebSocketTransport();
     noCandidateTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"BRIDGE-SESSION-3\",\"role\":\"initiator\"}"));
+        "{\"type\":\"bound\",\"sessionId\":\"bridge-session-3\",\"role\":\"initiator\"}"));
     noCandidateTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
         CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
             "bridge-session-3",
@@ -1751,7 +1754,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
     var wrongToAnswerPath = Path.Combine(signalingRoot, "bridge-wrong-to-answer.json");
     var wrongToTransport = new FakeCurrentPathWebSocketTransport();
     wrongToTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"BRIDGE-SESSION-4\",\"role\":\"initiator\"}"));
+        "{\"type\":\"bound\",\"sessionId\":\"bridge-session-4\",\"role\":\"initiator\"}"));
     wrongToTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
         CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
             "bridge-session-4",
@@ -1792,7 +1795,7 @@ async Task VerifyCurrentPathWebRtcHelperSignalingBridgeAsync(string signalingRoo
     var missingFingerprintAnswerPath = Path.Combine(signalingRoot, "bridge-missing-fingerprint-answer.json");
     var missingFingerprintTransport = new FakeCurrentPathWebSocketTransport();
     missingFingerprintTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
-        "{\"type\":\"bound\",\"sessionId\":\"BRIDGE-SESSION-5\",\"role\":\"initiator\"}"));
+        "{\"type\":\"bound\",\"sessionId\":\"bridge-session-5\",\"role\":\"initiator\"}"));
     missingFingerprintTransport.EnqueueReceive(CurrentPathWebSocketReceiveResult.TextMessage(
         CurrentPathSignalingFrameCodec.EncodeEnvelope(new CurrentPathWebRtcSignalingEnvelope(
             "bridge-session-5",
