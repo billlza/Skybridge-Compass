@@ -29,7 +29,7 @@ internal sealed class WorkspaceCommandBindings
         OpenTopBarNotificationsCommand = new AsyncRelayCommand(topBarWorkspaceActions.OpenNotificationsAsync, commandAvailability.CanOpenTopBarNotifications);
         ToggleTopBarThemeCommand = new AsyncRelayCommand(topBarWorkspaceActions.ToggleThemeAsync, commandAvailability.CanToggleTopBarTheme);
         StartDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser);
-        StopDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser);
+        StopDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanStopDiscoveryBrowser);
         RefreshDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser);
         RunExtendedDiscoveryCommand = new AsyncRelayCommand(discoveryBrowserActions.RunExtendedSearchAsync, commandAvailability.CanUseDiscoveryBrowser);
         PrepareManualConnectionCommand = new AsyncRelayCommand(connectionWorkspaceActions.PrepareManualConnectionAsync, commandAvailability.CanPrepareManualConnection);

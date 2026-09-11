@@ -138,6 +138,28 @@ var coordinator = new WorkspaceCommandGateCoordinator(
 var catalog = new WorkspaceActionCatalogClient();
 var details = new WorkspaceActionDetailSnapshot("Off", "System");
 
+// An in-flight DNS-SD browse owns IsBusy. Cancellation must remain reachable,
+// while new scans and connection attempts retain their existing busy guards.
+var scanningState = BuildCommandState(liveReady: true) with { IsBusy = true };
+var scanningAvailability = new WorkspaceCommandAvailability(coordinator, () => scanningState);
+AssertEqual(true, scanningAvailability.CanStopDiscoveryBrowser(), "in-flight discovery Stop command");
+AssertEqual(false, scanningAvailability.CanUseDiscoveryBrowser(), "in-flight discovery Start/Refresh commands");
+AssertEqual(false, scanningAvailability.CanConnect(), "in-flight discovery keeps Connect blocked");
+var scanningGates = coordinator.BuildActionGateSnapshot(scanningState);
+AssertResolvedAction(catalog, details, scanningGates,
+    WorkspaceActionSurface.DeviceDiscoveryScan, "StopScan",
+    WorkspaceActionCommandId.StopDiscovery, WorkspaceActionGateId.CanStopDiscoveryBrowser,
+    true, "in-flight discovery Stop action");
+AssertResolvedAction(catalog, details, scanningGates,
+    WorkspaceActionSurface.DeviceDiscoveryScan, "StartScan",
+    WorkspaceActionCommandId.StartDiscovery, WorkspaceActionGateId.CanUseDiscoveryBrowser,
+    false, "in-flight discovery Start action");
+var otherWorkspaceState = BuildCommandState(liveReady: true,
+    selectedFeatureId: FeatureEntryId.Settings) with { IsBusy = true };
+AssertEqual(false, coordinator.CanStopDiscoveryBrowser(otherWorkspaceState), "Stop stays scoped to device discovery");
+AssertEqual(false, coordinator.BuildActionGateSnapshot(otherWorkspaceState).CanStopDiscoveryBrowser,
+    "Stop action stays scoped to device discovery");
+
 var preflightOnlyState = BuildCommandState(liveReady: false);
 var preflightOnlyAvailability = new WorkspaceCommandAvailability(coordinator, () => preflightOnlyState);
 AssertEqual(false, preflightOnlyAvailability.CanConnect(), "preflight-only WorkspaceCommandAvailability.Connect");

@@ -144,6 +144,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             WorkspaceActionGateId.CanOpenTopBarNotifications => gates.CanOpenTopBarNotifications,
             WorkspaceActionGateId.CanToggleTopBarTheme => gates.CanToggleTopBarTheme,
             WorkspaceActionGateId.CanUseDiscoveryBrowser => gates.CanUseDiscoveryBrowser,
+            WorkspaceActionGateId.CanStopDiscoveryBrowser => gates.CanStopDiscoveryBrowser,
             WorkspaceActionGateId.CanPrepareManualConnection => gates.CanPrepareManualConnection,
             WorkspaceActionGateId.CanParseAdvertisement => gates.CanParseAdvertisement,
             WorkspaceActionGateId.CanValidatePairing => gates.CanValidatePairing,
@@ -364,7 +365,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 true,
                 "Mac-parity discovery scan action; command only stops browser state.",
                 CommandId: WorkspaceActionCommandId.StopDiscovery,
-                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
+                GateId: WorkspaceActionGateId.CanStopDiscoveryBrowser),
             new(
                 "Refresh",
                 "Refresh",
@@ -821,6 +822,7 @@ public enum WorkspaceActionGateId
     CanOpenTopBarNotifications,
     CanToggleTopBarTheme,
     CanUseDiscoveryBrowser,
+    CanStopDiscoveryBrowser,
     CanPrepareManualConnection,
     CanParseAdvertisement,
     CanValidatePairing,
@@ -914,7 +916,8 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanOpenSystemPreferences,
     bool CanApplySettings,
     bool CanRestoreDefaults,
-    bool CanResetMonitorData);
+    bool CanResetMonitorData,
+    bool CanStopDiscoveryBrowser = false);
 
 public sealed record WorkspaceActionItem(
     string Key,

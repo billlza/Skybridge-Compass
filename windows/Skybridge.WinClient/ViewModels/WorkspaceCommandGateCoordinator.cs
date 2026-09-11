@@ -80,6 +80,11 @@ internal sealed class WorkspaceCommandGateCoordinator
             state.IsBusy,
             IsFeatureSelected(state.SelectedFeature, FeatureEntryId.DeviceDiscovery));
 
+    // Cancellation stays reachable while the browse itself owns the busy state.
+    // Stopping does not initiate a connection or relax peer authentication.
+    public bool CanStopDiscoveryBrowser(WorkspaceCommandGateState state) =>
+        IsFeatureSelected(state.SelectedFeature, FeatureEntryId.DeviceDiscovery);
+
     public bool CanPrepareManualConnection(WorkspaceCommandGateState state) =>
         CanUseDeviceDiscoveryAction(
             state,
@@ -308,7 +313,8 @@ internal sealed class WorkspaceCommandGateCoordinator
                 CanApplySettings(state),
                 CanRestoreDefaults(state),
                 CanResetMonitorData(state),
-                CanRunCoreDiagnostics(state)));
+                CanRunCoreDiagnostics(state),
+                CanStopDiscoveryBrowser(state)));
     }
 
     private bool CanUseDeviceDiscoveryAction(

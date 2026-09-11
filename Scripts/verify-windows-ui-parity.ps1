@@ -862,7 +862,7 @@ foreach ($commandBindingsSignal in @(
     "new AsyncRelayCommand(topBarWorkspaceActions.OpenNotificationsAsync, commandAvailability.CanOpenTopBarNotifications)",
     "new AsyncRelayCommand(topBarWorkspaceActions.ToggleThemeAsync, commandAvailability.CanToggleTopBarTheme)",
     "new AsyncRelayCommand(discoveryBrowserActions.StartAsync, commandAvailability.CanUseDiscoveryBrowser)",
-    "new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanUseDiscoveryBrowser)",
+    "new AsyncRelayCommand(discoveryBrowserActions.StopAsync, commandAvailability.CanStopDiscoveryBrowser)",
     "new AsyncRelayCommand(discoveryBrowserActions.RefreshAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(discoveryBrowserActions.RunExtendedSearchAsync, commandAvailability.CanUseDiscoveryBrowser)",
     "new AsyncRelayCommand(connectionWorkspaceActions.PrepareManualConnectionAsync, commandAvailability.CanPrepareManualConnection)",

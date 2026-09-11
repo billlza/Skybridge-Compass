@@ -135,7 +135,8 @@ public sealed class WorkspaceCommandStateClient : IWorkspaceCommandStateClient
             request.CanOpenSystemPreferences,
             request.CanApplySettings,
             request.CanRestoreDefaults,
-            request.CanResetMonitorData);
+            request.CanResetMonitorData,
+            request.CanStopDiscoveryBrowser);
 }
 
 public sealed record WorkspaceCommandGateRequest(
@@ -178,4 +179,5 @@ public sealed record WorkspaceCommandGateRequest(
     bool CanApplySettings,
     bool CanRestoreDefaults,
     bool CanResetMonitorData,
-    bool CanRunCoreDiagnostics);
+    bool CanRunCoreDiagnostics,
+    bool CanStopDiscoveryBrowser = false);
