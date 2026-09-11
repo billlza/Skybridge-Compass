@@ -3638,44 +3638,47 @@ public class FileTransferManager: BaseManager {
             ?? peerContext.endpointHostOrIP
             ?? effectiveDeviceId
 
-        // File transfer may surface an ephemeral approval prompt, but must not synthesize
-        // empty trust records from unauthenticated self-reported metadata.
+        try ensureCurrentLifecycle(lifecycleGeneration)
+        let destinationDirectory = try await preparedInboundDestinationDirectory()
+        try ensureCurrentLifecycle(lifecycleGeneration)
+
         #if os(macOS)
-        if #available(macOS 14.0, *) {
-            if let declaredId = metadata.senderDeviceId, !declaredId.isEmpty {
-                let alreadyTrusted = TrustSyncService.shared.activeTrustRecords.contains { $0.deviceId == declaredId && !$0.isTombstone }
-                if !alreadyTrusted {
-                    let request = PairingTrustApprovalService.Request(
-                        peerEndpoint: effectiveDeviceId,
-                        declaredDeviceId: declaredId,
-                        displayName: metadata.senderDeviceName ?? effectiveDeviceName,
-                        model: metadata.senderModelName,
-                        platform: metadata.senderPlatform,
-                        osVersion: metadata.senderOSVersion,
-                        kemKeyCount: 0
-                    )
-                    let decision = await PairingTrustApprovalService.shared.decide(for: request)
-                    if decision == .reject {
-                        let error = FileTransferError.transferCancelled
-                        await sendFailureReceiptIfPossible(
-                            transferId: metadata.transferId,
-                            securityVersion: metadata.securityVersion,
-                            error: error,
-                            securityContext: resolvedSecurityContext,
-                            to: connection
-                        )
-                        throw error
-                    }
-                }
-            }
+        // The control session and metadata MAC have already authenticated this peer.
+        // Authorize this file write through the file-transfer prompt; a pairing prompt
+        // would retain a completed request while waiting for an unrelated rekey/SAS.
+        let approvalRequest = InboundFileTransferApprovalService.Request(
+            transferId: metadata.transferId,
+            fileName: sanitizeIncomingFileName(metadata.fileName),
+            fileSize: metadata.fileSize,
+            chunkSize: metadata.chunkSize,
+            totalChunks: metadata.fileSize == 0
+                ? 0
+                : Int((metadata.fileSize - 1) / Int64(metadata.chunkSize) + 1),
+            senderDeviceId: effectiveDeviceId,
+            senderDeviceName: effectiveDeviceName,
+            endpointDescription: peerContext.endpointHostOrIP ?? effectiveDeviceId,
+            destinationDirectoryPath: destinationDirectory.path,
+            proposedSavePath: destinationDirectory.appendingPathComponent(
+                sanitizeIncomingFileName(metadata.fileName)
+            ).path
+        )
+        let decision = await InboundFileTransferApprovalService.shared.decide(for: approvalRequest)
+        guard decision == .allowOnce else {
+            let error = FileTransferError.transferCancelled
+            await sendFailureReceiptIfPossible(
+                transferId: metadata.transferId,
+                securityVersion: metadata.securityVersion,
+                error: error,
+                securityContext: resolvedSecurityContext,
+                to: connection
+            )
+            throw error
         }
         #endif
 
         try ensureCurrentLifecycle(lifecycleGeneration)
         _ = try await acquireTransferSlot(expectedGeneration: lifecycleGeneration)
         defer { releaseTransferSlot() }
-        let destinationDirectory = try await preparedInboundDestinationDirectory()
-        try ensureCurrentLifecycle(lifecycleGeneration)
         let stagingURL = try Self.classicInboundPartialURL()
         do {
             try await InboundFileTransferIOActor.shared.validateSameVolumeCommit(

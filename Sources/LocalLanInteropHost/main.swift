@@ -1501,9 +1501,12 @@ private final class BonjourFileTransferRouteResolver: NSObject, @preconcurrency 
 private enum LocalLanInteropHostLifetime {
     static var coordinator: LocalLanInteropHostCoordinator?
     static var pairingTrustApprovalWindowController: PairingTrustApprovalWindowController?
+    static var inboundFileTransferApprovalWindowController: InboundFileTransferApprovalWindowController?
     static var remoteControlSecurityNoticePanelController: RemoteControlSecurityNoticePanelController?
 
     static func stopApprovalPresentation() {
+        inboundFileTransferApprovalWindowController?.stop()
+        inboundFileTransferApprovalWindowController = nil
         remoteControlSecurityNoticePanelController?.stop()
         remoteControlSecurityNoticePanelController = nil
         pairingTrustApprovalWindowController?.stop()
@@ -1597,6 +1600,10 @@ struct LocalLanInteropHostMain {
             let approvalWindowController = PairingTrustApprovalWindowController()
             approvalWindowController.start()
             LocalLanInteropHostLifetime.pairingTrustApprovalWindowController = approvalWindowController
+
+            let fileApprovalWindowController = InboundFileTransferApprovalWindowController()
+            fileApprovalWindowController.start()
+            LocalLanInteropHostLifetime.inboundFileTransferApprovalWindowController = fileApprovalWindowController
 
             let remoteControlSecurityNoticePanelController = RemoteControlSecurityNoticePanelController.shared
             remoteControlSecurityNoticePanelController.start()
