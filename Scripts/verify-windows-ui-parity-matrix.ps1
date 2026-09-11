@@ -464,11 +464,14 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow global shell anchor order"
     'ItemsSource="{Binding NavigationItems}"',
     'carries NO sidebar Connect / Disconnect actions',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
-    'AutomationProperties.AutomationId="Skybridge.Status.Message"',
+    'AutomationProperties.HelpText="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     'AutomationProperties.AutomationId="Skybridge.Actions.TopBar"',
-    'ItemsSource="{Binding TopBarActions}"'
+    'AutomationProperties.AutomationId="WorkspaceAction.TopBarActions.Notifications"',
+    'Command="{Binding OpenTopBarNotificationsCommand}"',
+    'AutomationProperties.AutomationId="WorkspaceAction.TopBarActions.Theme"',
+    'Command="{Binding ToggleTopBarThemeCommand}"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Needles @(
@@ -496,11 +499,9 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Nee
 foreach ($templateSignal in @(
     '<DataTemplate x:Key="WorkspaceActionButtonTemplate">',
     '<DataTemplate x:Key="WorkspaceActionButtonWithDetailTemplate">',
-    '<DataTemplate x:Key="TopBarStatusActionButtonTemplate">',
     '<DataTemplate x:Key="DashboardQuickActionTemplate">',
     'AutomationProperties.AutomationId="{Binding AutomationId}"',
     'Command="{Binding Command}"',
-    'Width="44"',
     'Height="36"',
     'ToolTipService.ToolTip="{Binding Title}"'
 )) {
@@ -531,12 +532,43 @@ foreach ($lifecycle in @(
     Assert-True -Condition $inFileWorkspace -Message "File-transfer lifecycle control must remain inside the file workspace: $($lifecycle.Name)"
     [void]$control.ParentNode.RemoveChild($control)
 }
-Assert-Count -Text $actionTemplateDocument.OuterXml -Pattern '<Button\b' -ExpectedCount 6 -Message "MainWindow must retain the four shared action templates and two weather refresh buttons without introducing extra sidebar/session controls."
+# Explicit shell and discovery buttons replaced the old top-bar item template.
+# Verify each owner, identity, and command before removing it from the template inventory.
+foreach ($entry in @(
+    @{ Id = "WorkspaceAction.TopBarActions.Notifications"; Attribute = "Command"; Value = "{Binding OpenTopBarNotificationsCommand}"; Owner = "Skybridge.Actions.TopBar" },
+    @{ Id = "WorkspaceAction.TopBarActions.Theme"; Attribute = "Command"; Value = "{Binding ToggleTopBarThemeCommand}"; Owner = "Skybridge.Actions.TopBar" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.AccountDevices"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.LocalScan"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.Qr"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.Cloud"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.Code"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" }
+)) {
+    $controls = @($actionTemplateDocument.SelectNodes("//*[local-name()='Button']") | Where-Object {
+        $_.GetAttribute("AutomationProperties.AutomationId") -eq $entry.Id
+    })
+    Assert-True -Condition ($controls.Count -eq 1) -Message "Shell action must occur exactly once: $($entry.Id)"
+    $control = $controls[0]
+    Assert-True -Condition ($control.GetAttribute($entry.Attribute) -eq $entry.Value) -Message "Shell action binding differs: $($entry.Id)"
+    $correctOwner = $false
+    for ($ancestor = $control.ParentNode; $null -ne $ancestor; $ancestor = $ancestor.ParentNode) {
+        if ($ancestor -is [System.Xml.XmlElement] -and
+            ($ancestor.GetAttribute("AutomationProperties.AutomationId") -eq $entry.Owner -or
+             $ancestor.GetAttribute("Visibility").Contains($entry.Owner))) {
+            $correctOwner = $true
+            break
+        }
+    }
+    Assert-True -Condition $correctOwner -Message "Shell action escaped its owning surface: $($entry.Id)"
+    if ($entry.Owner -eq "Skybridge.Actions.TopBar") {
+        Assert-True -Condition ($control.GetAttribute("Width") -eq "36" -and $control.GetAttribute("Height") -eq "36") -Message "Top-bar action must retain its 36-pixel capsule: $($entry.Id)"
+    } else {
+        Assert-True -Condition ($control.GetAttribute("Tag") -eq ($entry.Id -split '\.')[-1]) -Message "Discovery mode tag differs from its action identity: $($entry.Id)"
+    }
+    [void]$control.ParentNode.RemoveChild($control)
+}
+Assert-Count -Text $actionTemplateDocument.OuterXml -Pattern '<Button\b' -ExpectedCount 5 -Message "MainWindow must retain three shared action templates and two weather refresh buttons without extra sidebar/session controls."
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
-    'ItemsSource="{Binding TopBarActions}"',
-    'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
-    'ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}"',
     'ItemsSource="{Binding DashboardQuickActions}"',
     'ItemsPanel="{StaticResource DashboardQuickActionItemsPanel}"',
     'ItemTemplate="{StaticResource DashboardQuickActionTemplate}"',
