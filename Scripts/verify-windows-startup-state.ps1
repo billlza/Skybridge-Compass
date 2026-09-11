@@ -29,7 +29,7 @@ function Assert-WindowsHostForWinUiBuild {
 Assert-WindowsHostForWinUiBuild -ScriptName "windows startup-state smoke"
 
 $sourceFiles = @()
-$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
+$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" -Recurse |
     Sort-Object Name |
     ForEach-Object { $_.FullName }
 $sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Converters") -Filter "*.cs" |
@@ -71,6 +71,7 @@ try {
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
@@ -80,6 +81,9 @@ $compileItemText
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
   </ItemGroup>
 </Project>
 "@
