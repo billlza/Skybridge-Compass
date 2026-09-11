@@ -24,14 +24,15 @@ private struct LiquidGlassCardModifier: ViewModifier {
                 let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 content
                     .padding(contentPadding)
-                    // Clear system glass keeps the animated scene optically visible. A local
-                    // contrast layer supports text without blurring the entire panel or scene.
-                    .background {
-                        shape.fill((colorScheme == .dark ? Color.black : Color.white)
-                            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.48 : 0.64)))
-                    }
                     .glassEffect(
                         reduceTransparency || contrast == .increased ? .regular : .clear,
+                        in: shape
+                    )
+                    // Keep the contrast backing beneath the system glass so its
+                    // refraction is visible, instead of covering it with a filled card.
+                    .background(
+                        (colorScheme == .dark ? Color.black : Color.white)
+                            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.24 : 0.18)),
                         in: shape
                     )
             } else {
@@ -58,6 +59,9 @@ private struct LiquidGlassCardModifier: ViewModifier {
 private struct LiquidGlassCapsuleModifier: ViewModifier {
     let contentPaddingH: CGFloat
     let contentPaddingV: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         Group {
@@ -65,7 +69,15 @@ private struct LiquidGlassCapsuleModifier: ViewModifier {
                 content
                     .padding(.horizontal, contentPaddingH)
                     .padding(.vertical, contentPaddingV)
-                    .glassEffect(.regular.interactive(), in: .capsule)
+                    .glassEffect(
+                        (reduceTransparency || contrast == .increased ? Glass.regular : Glass.clear).interactive(),
+                        in: .capsule
+                    )
+                    .background(
+                        (colorScheme == .dark ? Color.black : Color.white)
+                            .opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.24 : 0.18)),
+                        in: Capsule()
+                    )
             } else {
                 content
                     .padding(.horizontal, contentPaddingH)

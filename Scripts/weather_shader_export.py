@@ -20,6 +20,11 @@ def replace_field(text: str, name: str, source: str) -> str:
     start = text.index(begin) + len(begin)
     finish = text.index(end, start)
     hlsl = source.replace('fract(', 'frac(').replace('mix(', 'lerp(')
+    # Unit view/light vectors make this phase denominator positive. FXC cannot prove
+    # the bound and warns on pow; abs preserves its value while stating that domain.
+    hlsl = hlsl.replace(
+        'pow(1.0 + g * g - 2.0 * g * alignment, 1.5)',
+        'pow(abs(1.0 + g * g - 2.0 * g * alignment), 1.5)')
     return text[:start] + hlsl + '\n' + text[finish:]
 
 

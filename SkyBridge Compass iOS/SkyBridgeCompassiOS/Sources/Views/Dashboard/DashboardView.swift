@@ -1110,13 +1110,7 @@ private struct LiveTransferBannerView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(16)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .stroke(LinearGradient(colors: [.white.opacity(0.4), .clear, .cyan.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
-        )
+        .liquidGlassCard(cornerRadius: 24, padding: 16)
     }
     
     private func byteCount(_ bytes: Int64) -> String {
@@ -1290,8 +1284,7 @@ private struct QRCodeHubSheet: View {
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                 }
-                                .padding(24)
-                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                .liquidGlassCard(cornerRadius: 20, padding: 24)
                                 .padding(.horizontal, 24)
                                 .transition(.opacity)
                             }

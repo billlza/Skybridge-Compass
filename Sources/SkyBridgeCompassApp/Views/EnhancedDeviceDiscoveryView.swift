@@ -1223,7 +1223,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 connectionModeButton(mode)
             }
         }
-        .background(themeConfiguration.cardBackgroundMaterial)
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             Rectangle()
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1273,8 +1273,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             .background(isSelected ? mode.accentColor.opacity(0.12) : Color.clear)
             .background(
                 Rectangle()
-                    .fill(themeConfiguration.cardBackgroundMaterial)
-                    .opacity(isHovered ? 0.35 : 0)
+                    .fill(Color.white.opacity(0.06))
+                    .opacity(isHovered ? 1 : 0)
             )
             .overlay(
                 Rectangle()
@@ -1383,7 +1383,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .help(LocalizationManager.shared.localizedString("discovery.refresh"))
             }
             .padding(12)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1435,7 +1435,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.blue.opacity(0.6), lineWidth: 1)
@@ -1460,7 +1460,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.green.opacity(0.5), lineWidth: 1)
@@ -1486,7 +1486,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.green.opacity(0.35), lineWidth: 1)
@@ -1521,7 +1521,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .dashboardGlassSurface(cornerRadius: 6)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -3495,7 +3495,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 }
             }
             .padding(16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -3642,7 +3642,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 }
             }
             .padding(settingsManager.compactMode ? 10 : 16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(device.isLocalDevice ? Color.blue : themeConfiguration.borderColor, lineWidth: device.isLocalDevice ? 2 : 1)
@@ -3932,7 +3932,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding(16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -4052,7 +4052,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             .disabled(!device.isOnline)
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -4917,7 +4917,7 @@ struct InfoBanner: View {
             Spacer()
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -5067,7 +5067,7 @@ struct CloudDeviceCardEnhanced: View {
             }
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
