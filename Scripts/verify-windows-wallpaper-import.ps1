@@ -5,18 +5,7 @@ param(
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes,System.Drawing,System.Windows.Forms
 
-# Reuse the repository's window, input and screenshot helpers without running
-# its build/launch body. This lane exercises popups and actual wallpaper changes.
-$smoke=Join-Path $RepoRoot 'Scripts\verify-windows-ui-automation-smoke.ps1'
-$parseErrors=$null;$tokens=$null
-$ast=[Management.Automation.Language.Parser]::ParseFile($smoke,[ref]$tokens,[ref]$parseErrors)
-if($parseErrors.Count){throw 'UI helper script did not parse.'}
-foreach($definition in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false)) {
-    Invoke-Expression $definition.Extent.Text
-}
-$nativeBlocks=@($ast.FindAll({param($node) ($node -is [Management.Automation.Language.ExpandableStringExpressionAst] -or $node -is [Management.Automation.Language.StringConstantExpressionAst]) -and $node.Value.Contains('public static class NativeMethods')},$true))
-if($nativeBlocks.Count -ne 1){throw 'Expected the repository native window helper.'}
-Add-Type -TypeDefinition $nativeBlocks[0].Value
+. (Join-Path $PSScriptRoot "windows-ui-automation-helpers.ps1")
 Assert-True ([NativeMethods]::SetThreadDpiAwarenessContext([IntPtr](-4)) -ne [IntPtr]::Zero) "Physical UI verification DPI context is unavailable."
 
 

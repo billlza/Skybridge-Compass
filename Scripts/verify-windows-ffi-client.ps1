@@ -209,6 +209,8 @@ $startupStateSmoke = Get-Content -Raw -LiteralPath $startupStateSmokePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 $fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
 $uiAutomationSmoke = Get-Content -Raw -LiteralPath $uiAutomationSmokePath
+$uiAutomationHelpersPath = Join-Path $RepoRoot "Scripts/windows-ui-automation-helpers.ps1"
+$uiAutomationSmoke += "`n" + (Get-Content -Raw -LiteralPath $uiAutomationHelpersPath)
 $uiVisualEvidenceSmoke = Get-Content -Raw -LiteralPath $uiVisualEvidenceSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
@@ -415,8 +417,9 @@ foreach ($signal in @(
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }
-Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace)" -Message "MainWindow should create SessionViewModel through the configured dependency factory."
-Assert-Contains -Text $dependencyFactory -Needle "CreateConfigured(IFileTransferWorkspaceClient? fileTransferClient = null)" -Message "Dependency factory should expose explicit configured runtime selection."
+Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace, _notifications, settings, ShowAppearanceMenu)" -Message "MainWindow should pass its file transfer, notification, settings, and appearance owners through the configured dependency factory."
+Assert-Contains -Text $dependencyFactory -Needle "CreateConfigured(IFileTransferWorkspaceClient? fileTransferClient = null, ITopBarStatusClient? topBarStatusClient = null, SettingsService? settingsService = null)" -Message "Dependency factory should expose explicit configured runtime selection with the shared window services."
+Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment(fileTransferClient, topBarStatusClient, settingsService)" -Message "Configured window services must reach the native runtime composition root."
 Assert-Contains -Text $dependencyFactory -Needle "CreateDefault()" -Message "Dependency factory should retain the product default runtime entrypoint."
 Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment()" -Message "Dependency factory should route configured/default startup through the Windows runtime composition root."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not bypass the configured lifecycle composition root."
@@ -1033,7 +1036,8 @@ foreach ($uiAutomationSmokeSignal in @(
     "CrossNetworkQr",
     "WorkspaceAction.FileTransfer.GenerateQr",
     "FileTransferShareQrImage",
-    "no local files were read"
+    "LAN sessions must not advertise QR sharing without a real share manifest.",
+    "Unsupported QR sharing must never display an empty or unrelated identity."
 )) {
     Assert-Contains -Text $uiAutomationSmoke -Needle $uiAutomationSmokeSignal -Message "WinUI automation smoke missing signal: $uiAutomationSmokeSignal"
 }
