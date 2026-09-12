@@ -1128,6 +1128,35 @@ final class QPeriaptRoundTripTests: XCTestCase {
         }
     }
 
+    func testCommittedQPairingPublicReadRequiresExplicitProviderAndNeverProvisions() async throws {
+        let provider = QPeriaptCryptoProvider(session: try await makeSession())
+        let context = try DeviceIdentityKeychainTestContext()
+        addTeardownBlock {
+            try await context.manager.clearKEMIdentityRecordsForTesting()
+            try context.reset()
+        }
+        let absent = try await context.manager.existingKEMPublicKey(
+            for: .qperiaptABI2PolicyBound, baseProvider: provider, qPeriaptProvider: provider)
+        XCTAssertNil(absent, "Reading public pairing information must not create a key")
+        let created = try await context.manager.getOrCreateKEMIdentityKey(for: .qperiaptABI2PolicyBound, provider: provider)
+        created.privateKey.zeroize()
+        let before = try await context.manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId, tier: .qperiaptPQC)
+        let publicKey = try await context.manager.existingKEMPublicKey(
+            for: .qperiaptABI2PolicyBound, baseProvider: provider, qPeriaptProvider: provider)
+        XCTAssertEqual(publicKey, created.publicKey)
+        XCTAssertEqual(publicKey?.count, 1_216)
+        let after = try await context.manager.storedKEMIdentityRecordForTesting(
+            suiteWireId: CryptoSuite.qperiaptABI2PolicyBound.wireId, tier: .qperiaptPQC)
+        XCTAssertTrue(after == before)
+        do {
+            _ = try await context.manager.existingKEMPublicKey(for: .qperiaptABI2PolicyBound, baseProvider: provider)
+            XCTFail("The pairing read must require the explicitly captured Q provider")
+        } catch CryptoProviderError.providerNotAvailable(.qPeriapt) {
+            // The absent explicit runtime provider must fail closed even with a stored key.
+        }
+    }
+
     private func makeSession() async throws -> QPeriaptRuntimeSession {
         let vector = try loadFixture()
         return try await QPeriaptPolicyRuntime().resolveSession(

@@ -1516,13 +1516,12 @@ public final class TrustSyncService: ObservableObject {
     /// revocation cannot be overwritten between the check and persistence.
     @discardableResult
     func addTrustRecordIfNeeded(
-        _ record: TrustRecord,
-        admission: @escaping @MainActor @Sendable ([TrustRecord]) throws -> Bool
+        prepare: @escaping @MainActor @Sendable ([TrustRecord]) throws -> TrustRecord?
     ) async throws -> Bool {
         try await requireInitialLoadSucceeded()
-        return try await mutationGate.run { [self, record] in
+        return try await mutationGate.run { [self, prepare] in
             try Task.checkCancellation()
-            guard try admission(Array(localCache.values)) else { return false }
+            guard let record = try prepare(Array(localCache.values)) else { return false }
             _ = try await addTrustRecordWithinMutation(record)
             return true
         }

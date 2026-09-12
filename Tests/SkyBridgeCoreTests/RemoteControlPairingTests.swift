@@ -23,6 +23,120 @@ final class RemoteControlPairingTests: XCTestCase {
         XCTAssertFalse(String(decoding: try input.encoded(), as: UTF8.self).contains("private"))
     }
 
+    func testPolicyBoundPublicMaterialRoundTripPreservesBothSuites() throws {
+        let legacy = try material()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy.encoded()) as? [String: Any])
+        let qKey = Data(repeating: 0x42, count: 1_216)
+        object["kemPublicKeys"] = [
+            ["suiteWireId": 18, "publicKey": qKey.base64EncodedString()],
+            ["suiteWireId": 257, "publicKey": legacy.kemPublicKey.base64EncodedString()]
+        ]
+        let decoded = try RemoteControlPairingMaterial.decode(JSONSerialization.data(withJSONObject: object))
+        let exported = try XCTUnwrap(JSONSerialization.jsonObject(with: decoded.encoded()) as? [String: Any])
+        let keys = try XCTUnwrap(exported["kemPublicKeys"] as? [[String: Any]])
+        XCTAssertEqual(Set(keys.compactMap { $0["suiteWireId"] as? Int }), [18, 257])
+        XCTAssertEqual(decoded.protocolPublicKeyFingerprint, legacy.protocolPublicKeyFingerprint)
+        XCTAssertEqual(try RemoteControlPairingMaterial.decode(decoded.encoded()), decoded)
+    }
+
+    func testPolicyBoundOnlyPublicMaterialUsesTheSameWireContract() throws {
+        let legacy = try material()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy.encoded()) as? [String: Any])
+        object["kemPublicKeys"] = [["suiteWireId": 18, "publicKey": Data(repeating: 0x42, count: 1_216).base64EncodedString()]]
+        let decoded = try RemoteControlPairingMaterial.decode(JSONSerialization.data(withJSONObject: object))
+        let record = decoded.trustRecord(approvedAt: Date())
+        XCTAssertEqual(record.kemPublicKeys?.map(\.suiteWireId), [18])
+        XCTAssertEqual(try RemoteControlPairingMaterial.decode(decoded.encoded()), decoded)
+    }
+
+    func testExplicitQUpgradePreservesLegacyAuthorityAndRejectsReplacement() throws {
+        let legacy = try material()
+        let record = legacy.trustRecord(approvedAt: Date(timeIntervalSince1970: 1_735_689_600))
+        let q = try RemoteControlPairingMaterial(deviceId: legacy.deviceId, name: legacy.name,
+            protocolPublicKey: legacy.protocolPublicKey, kemPublicKey: legacy.kemPublicKey,
+            qPeriaptPublicKey: Data(repeating: 0x42, count: 1_216))
+        let upgraded = try XCTUnwrap(q.recordForImport(in: [record], approvedAt: Date()))
+        XCTAssertEqual(upgraded.kemPublicKeys?.count, 2)
+        XCTAssertEqual(upgraded.kemPublicKeys?.first { $0.suiteWireId == 257 }?.publicKey, legacy.kemPublicKey)
+        XCTAssertEqual(upgraded.protocolIdentityBindingsV2, record.protocolIdentityBindingsV2)
+        XCTAssertEqual(upgraded.protocolPublicKeyFingerprint, record.protocolPublicKeyFingerprint)
+        XCTAssertEqual(upgraded.createdAt, record.createdAt)
+        XCTAssertEqual(upgraded.knownDeviceIdsMetadata, record.knownDeviceIdsMetadata)
+        XCTAssertEqual(upgraded.lifecycleStateMetadata, record.lifecycleStateMetadata)
+        XCTAssertFalse(try q.requiresImport(in: [upgraded]))
+        XCTAssertFalse(try legacy.requiresImport(in: [upgraded]), "Legacy reimport must not remove the Q key")
+        let changed = try RemoteControlPairingMaterial(deviceId: legacy.deviceId, name: legacy.name,
+            protocolPublicKey: legacy.protocolPublicKey, kemPublicKey: legacy.kemPublicKey,
+            qPeriaptPublicKey: Data(repeating: 0x43, count: 1_216))
+        XCTAssertThrowsError(try changed.requiresImport(in: [upgraded]))
+        XCTAssertThrowsError(try q.requiresImport(in: [record.revoked(signature: Data())]))
+    }
+
+    func testQOnlyUpgradePreservesExistingLegacyKeyAndMetadata() throws {
+        let legacy = try material()
+        let original = legacy.trustRecord(approvedAt: Date())
+        let record = TrustRecord(deviceId: original.deviceId, pubKeyFP: original.pubKeyFP, publicKey: original.publicKey,
+            secureEnclavePublicKey: Data([0x31]), protocolPublicKey: original.protocolPublicKey,
+            protocolSigningAlgorithm: original.protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: original.protocolPublicKeyFingerprint,
+            protocolIdentityBindingsV2: original.protocolIdentityBindingsV2,
+            signatureAlgorithm: original.signatureAlgorithm, kemPublicKeys: original.kemPublicKeys,
+            attestationData: Data([0x41]), capabilities: ["file_transfer"], createdAt: original.createdAt,
+            version: 7, signature: Data(), deviceName: "Established name", currentDeviceId: original.currentDeviceId,
+            knownDeviceIds: [original.currentDeviceId, "old-alias"], lifecycleState: .active)
+        let q = try RemoteControlPairingMaterial(deviceId: legacy.deviceId, name: "Imported display name",
+            protocolPublicKey: legacy.protocolPublicKey, kemPublicKey: Data(),
+            qPeriaptPublicKey: Data(repeating: 0x42, count: 1_216))
+        let upgraded = try XCTUnwrap(q.recordForImport(in: [record], approvedAt: Date()))
+        XCTAssertEqual(upgraded.kemPublicKeys?.count, 2)
+        XCTAssertEqual(upgraded.capabilities, record.capabilities)
+        XCTAssertEqual(upgraded.attestationData, record.attestationData)
+        XCTAssertEqual(upgraded.secureEnclavePublicKey, record.secureEnclavePublicKey)
+        XCTAssertEqual(upgraded.deviceName, record.deviceName)
+        XCTAssertEqual(upgraded.knownDeviceIdsMetadata, record.knownDeviceIdsMetadata)
+    }
+
+    func testMalformedAndDuplicatePolicyBoundKeySharesAreRejected() throws {
+        let legacy = try material()
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy.encoded()) as? [String: Any])
+        for length in [0, 1_215, 1_217] {
+            object["kemPublicKeys"] = [["suiteWireId": 18, "publicKey": Data(repeating: 0x42, count: length).base64EncodedString()]]
+            XCTAssertThrowsError(try RemoteControlPairingMaterial.decode(JSONSerialization.data(withJSONObject: object)))
+        }
+        let key: [String: Any] = ["suiteWireId": 18, "publicKey": Data(repeating: 0x42, count: 1_216).base64EncodedString()]
+        object["kemPublicKeys"] = [key, key]
+        XCTAssertThrowsError(try RemoteControlPairingMaterial.decode(JSONSerialization.data(withJSONObject: object)))
+    }
+
+    @MainActor
+    func testConcurrentQUpgradesKeepOnlyTheFirstExplicitlyApprovedKey() async throws {
+        let legacy = try material(deviceId: "id:" + UUID().uuidString.lowercased())
+        let original = legacy.trustRecord(approvedAt: Date())
+        let trust = TrustSyncService(initialRecordsForTesting: [original])
+        let upgrades = try [UInt8(0x42), UInt8(0x43)].map { byte in
+            try RemoteControlPairingMaterial(deviceId: legacy.deviceId, name: legacy.name,
+                protocolPublicKey: legacy.protocolPublicKey, kemPublicKey: legacy.kemPublicKey,
+                qPeriaptPublicKey: Data(repeating: byte, count: 1_216))
+        }
+        let tasks = upgrades.map { upgrade in Task { @MainActor in
+            try await trust.addTrustRecordIfNeeded { try upgrade.recordForImport(in: $0, approvedAt: Date()) }
+        } }
+        var added = 0
+        var conflicts = 0
+        for task in tasks {
+            do { if try await task.value { added += 1 } }
+            catch RemoteControlPairingError.conflictingTrust { conflicts += 1 }
+        }
+        XCTAssertEqual(added, 1)
+        XCTAssertEqual(conflicts, 1)
+        let records = trust.activeTrustRecords.filter { $0.currentDeviceId == legacy.deviceId }
+        XCTAssertEqual(records.count, 1)
+        let record = try XCTUnwrap(records.first)
+        XCTAssertEqual(record.kemPublicKeys?.first { $0.suiteWireId == 257 }?.publicKey, legacy.kemPublicKey)
+        let winner = try XCTUnwrap(record.kemPublicKeys?.first { $0.suiteWireId == 18 }?.publicKey)
+        XCTAssertTrue(upgrades.map(\.qPeriaptPublicKey).contains(winner))
+    }
+
     func testMalformedFingerprintAlgorithmAndSuiteAreRejected() throws {
         let source = try material()
         for (field, replacement) in [
@@ -226,10 +340,10 @@ final class RemoteControlPairingTests: XCTestCase {
         let first = try material(deviceId: deviceId)
         let second = try material(deviceId: deviceId, keyByte: 1)
         let firstTask = Task { @MainActor in
-            try await trust.addTrustRecordIfNeeded(first.trustRecord(approvedAt: Date())) { try first.requiresImport(in: $0) }
+            try await trust.addTrustRecordIfNeeded { try first.recordForImport(in: $0, approvedAt: Date()) }
         }
         let secondTask = Task { @MainActor in
-            try await trust.addTrustRecordIfNeeded(second.trustRecord(approvedAt: Date())) { try second.requiresImport(in: $0) }
+            try await trust.addTrustRecordIfNeeded { try second.recordForImport(in: $0, approvedAt: Date()) }
         }
         var added = 0
         var conflicts = 0

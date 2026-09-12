@@ -1393,12 +1393,13 @@ public actor DeviceIdentityKeyManager {
     /// resolves the requested suite within that tier independently of preference.
     public func existingKEMPublicKey(
         for suite: CryptoSuite,
-        baseProvider: any CryptoProvider
+        baseProvider: any CryptoProvider,
+        qPeriaptProvider: QPeriaptCryptoProvider? = nil
     ) async throws -> Data? {
         let suiteProvider = try Self.pairingIdentityProvider(
             for: suite,
             baseProvider: baseProvider,
-            qPeriaptProvider: nil
+            qPeriaptProvider: qPeriaptProvider
         )
         guard let material = try await existingKEMIdentityKeyStrict(for: suite, provider: suiteProvider) else {
             return nil
