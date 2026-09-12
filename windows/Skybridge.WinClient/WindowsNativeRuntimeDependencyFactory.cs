@@ -104,6 +104,9 @@ internal static class WindowsNativeRuntimeDependencyFactory
             ? new SettingsWorkspaceClient(new WindowsSystemPreferencesLauncher())
             : new SettingsWorkspaceClient();
 
+    internal static WindowsDiscoveryBrowserClient CreateFeaturePeerDiscoveryClient() =>
+        CreateDiscoveryBrowserClientFromEnvironment(new CoreDiscoveryClient(new CoreBridge()));
+
     private static WindowsDiscoveryBrowserClient CreateDiscoveryBrowserClientFromEnvironment(
         IDiscoveryClient discoveryClient) =>
         IsNativeRuntimeRequested()

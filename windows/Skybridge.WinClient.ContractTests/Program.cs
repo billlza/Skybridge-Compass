@@ -127,6 +127,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("discovery browser names canonical Apple records without granting trust", TestDiscoveryBrowserResolvedNames),
     ("discovery browser does not trust TXT ports without resolved endpoint", TestDiscoveryBrowserIgnoresTxtPortsWithoutResolvedEndpoint),
     ("discovery browser stale stop waits callback barrier and preserves replacement", TestDiscoveryBrowserStaleStopWaitsForOwnerBarrier),
+    ("feature discovery cancellation drains its native owner", TestFeatureDiscoveryCancellationWaitsForOwnerBarrier),
+    ("cancelled lookup does not supersede an active browser", TestCancelledLookupDoesNotSupersedeActiveBrowser),
+    ("feature discovery owns a separate browser snapshot", TestFeatureDiscoveryDoesNotCancelUiBrowser),
     ("native dns-sd lifecycle uses callback barrier instead of fixed drain", TestNativeDnsSdCallbackBarrierContract),
     ("connection workspace validated state retains discovery candidate routes", TestConnectionWorkspaceValidatedStateRetainsDiscoveryCandidateRoutes),
     ("product action targets require authenticated route binding", TestProductActionTargetsRequireAuthenticatedRouteBinding),
@@ -1195,6 +1198,61 @@ static async Task TestDiscoveryBrowserStaleStopWaitsForOwnerBarrier()
     Require(
         published.SequenceEqual(new[] { snapshotB.OperationOwner!.Generation }),
         "only replacement browse B may publish after the A/B stale-stop sequence");
+}
+
+static async Task TestFeatureDiscoveryCancellationWaitsForOwnerBarrier()
+{
+    var native = new ControlledDnsSdBrowseClient();
+    var browser = new WindowsDiscoveryBrowserClient(new StaticDiscoveryClient(new string('a', 64)), native);
+    using var cancellation = new CancellationTokenSource();
+    var task = browser.BuildReadOnlySnapshotAsync(new(DiscoveryBrowserAction.Refresh, "", "", "", false, 2), cancellation.Token);
+    var call = await native.WaitForNextCallAsync();
+    cancellation.Cancel();
+    await call.WaitForCancellationAsync();
+    Require(!task.IsCompleted, "Cancelling a feature lookup must retain its native callback owner until the callback drains.");
+    call.Complete();
+    try { await task; throw new InvalidOperationException("Cancelled lookup returned a successful empty snapshot."); }
+    catch (OperationCanceledException error) { Require(error.CancellationToken == cancellation.Token, "Lookup cancellation must retain its caller token."); }
+}
+
+static async Task TestCancelledLookupDoesNotSupersedeActiveBrowser()
+{
+    var native = new ControlledDnsSdBrowseClient();
+    var browser = new WindowsDiscoveryBrowserClient(new StaticDiscoveryClient(new string('b', 64)), native);
+    var request = new DiscoveryBrowserRequest(DiscoveryBrowserAction.Refresh, "", "", "", false, 2);
+    var active = browser.BuildReadOnlySnapshotAsync(request);
+    var call = await native.WaitForNextCallAsync();
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    try { await browser.BuildReadOnlySnapshotAsync(request, cancellation.Token); throw new InvalidOperationException("Pre-cancelled lookup was accepted."); }
+    catch (OperationCanceledException error) { Require(error.CancellationToken == cancellation.Token, "The cancelled lookup must report its caller token."); }
+    Require(!call.IsCancellationRequested, "A pre-cancelled request must not cancel an existing native browser owner.");
+    call.Complete();
+    var snapshot = await active;
+    Require(browser.TryPublish(snapshot, _ => { }), "Pre-cancelled lookup must not steal snapshot publication ownership.");
+}
+
+static async Task TestFeatureDiscoveryDoesNotCancelUiBrowser()
+{
+    var native = new ControlledDnsSdBrowseClient();
+    var parser = new StaticDiscoveryClient(new string('c', 64));
+    var ui = new WindowsDiscoveryBrowserClient(parser, native);
+    var feature = new WindowsDiscoveryBrowserClient(parser, native);
+    var request = new DiscoveryBrowserRequest(DiscoveryBrowserAction.Refresh, "", "", "", false, 2);
+    var uiTask = ui.BuildReadOnlySnapshotAsync(request);
+    var uiCall = await native.WaitForNextCallAsync();
+    using var cancellation = new CancellationTokenSource();
+    var lookup = feature.BuildReadOnlySnapshotAsync(request, cancellation.Token);
+    var featureCall = await native.WaitForNextCallAsync();
+    Require(!uiCall.IsCancellationRequested, "A file peer lookup must not replace a UI scan.");
+    cancellation.Cancel();
+    await featureCall.WaitForCancellationAsync();
+    Require(!uiCall.IsCancellationRequested, "Cancelling a file picker must not cancel the UI browser.");
+    featureCall.Complete();
+    try { await lookup; throw new InvalidOperationException("Cancelled feature lookup returned success."); }
+    catch (OperationCanceledException error) { Require(error.CancellationToken == cancellation.Token, "The cancelled lookup must report its caller token."); }
+    uiCall.Complete();
+    Require(ui.TryPublish(await uiTask, _ => { }), "The UI browser must retain its independent snapshot.");
 }
 
 static Task TestNativeDnsSdCallbackBarrierContract()

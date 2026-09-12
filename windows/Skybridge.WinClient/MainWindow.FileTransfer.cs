@@ -81,6 +81,8 @@ public sealed partial class MainWindow
     private sealed class NativeFileTransferSelection(MainWindow window) : IFileTransferSelectionClient
     {
         private readonly SemaphoreSlim _dialogs = new(1, 1);
+        private readonly WindowsDiscoveryBrowserClient _peerDiscovery =
+            WindowsNativeRuntimeDependencyFactory.CreateFeaturePeerDiscoveryClient();
         private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcher = window.DispatcherQueue;
         public string DestinationDirectory => Environment.ExpandEnvironmentVariables(window.ViewModel.Settings.DefaultTransferPath);
 
@@ -99,9 +101,12 @@ public sealed partial class MainWindow
 
         public async Task<DiscoveryBrowserPeerCandidate?> SelectPeerAsync(CancellationToken cancellationToken)
         {
-            await window.ViewModel.RefreshRemoteDesktopPeersAsync();
-            cancellationToken.ThrowIfCancellationRequested();
-            var candidates = window.ViewModel.DiscoveredPeers.Select(peer => peer.Candidate).OfType<DiscoveryBrowserPeerCandidate>().ToArray();
+            // File operations own their discovery result. The UI refresh command may
+            // legitimately skip while busy, and its filtered cache is not a lookup result.
+            var snapshot = await _peerDiscovery.BuildReadOnlySnapshotAsync(new(
+                DiscoveryBrowserAction.Refresh, SkyBridgeProtocolConstants.TcpControlDnsSdService,
+                "", "", false, WindowsDiscoveryBrowserClient.DefaultInputPolicy.ExtendedSearchSeconds), cancellationToken);
+            var candidates = snapshot.Peers.ToArray();
             var files = candidates.Where(peer => peer.Routes.FileTransfer is not null)
                 .DistinctBy(peer => (peer.Peer.DeviceId, peer.Peer.PublicKeyFingerprint, peer.Routes.FileTransfer)).ToArray();
             if (files.Length == 0) throw new InvalidOperationException(window.RemoteControlText("FileTransferLiveNoPeers"));

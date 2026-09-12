@@ -79,9 +79,14 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
             "pubKeyFP fingerprint only; pairing must provide the peer public key.");
     }
 
-    public async Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request)
+    public Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(DiscoveryBrowserRequest request) =>
+        BuildReadOnlySnapshotAsync(request, CancellationToken.None);
+
+    public async Task<DiscoveryBrowserSnapshot> BuildReadOnlySnapshotAsync(
+        DiscoveryBrowserRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
         if (request.Action == DiscoveryBrowserAction.Stop)
         {
             var stop = BeginStopOperation();
@@ -91,6 +96,7 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
                 await stop.Target.Completion.ConfigureAwait(false);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return (await BuildSnapshotCoreAsync(request, CancellationToken.None).ConfigureAwait(false)) with
             {
                 OperationOwner = stop.Owner
@@ -100,10 +106,12 @@ public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient
         var operation = BeginBrowseOperation();
         try
         {
-            return (await BuildSnapshotCoreAsync(request, operation.CancellationToken).ConfigureAwait(false)) with
-            {
-                OperationOwner = operation.Owner
-            };
+            using var cancellation = cancellationToken.Register(operation.Cancel);
+            var snapshot = await BuildSnapshotCoreAsync(request, operation.CancellationToken).ConfigureAwait(false);
+            // The native callback owner has drained before returning cancellation.
+            // Callers must not confuse a cancelled browse with an empty successful result.
+            cancellationToken.ThrowIfCancellationRequested();
+            return snapshot with { OperationOwner = operation.Owner };
         }
         finally
         {
