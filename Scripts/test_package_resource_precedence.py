@@ -96,23 +96,23 @@ class ResourcePrecedenceTests(unittest.TestCase):
 
     def test_plain_swiftpm_resources_replace_native_bundle_shader_at_its_lookup_path(self):
         name = 'SkyBridgeWeatherRendering_SkyBridgeWeatherRendering.bundle'
-        current = self.primary / name / 'Resources'
+        current = self.primary / name / 'ShaderAssets'
         current.mkdir(parents=True)
         (current / 'RainVolume.metal').write_text('current rain and foreground entry points')
         native = self.xcode / name / 'Contents/Resources'
-        (native / 'Resources').mkdir(parents=True)
+        (native / 'ShaderAssets').mkdir(parents=True)
         (native.parent / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'com.skybridge.weather.resources'}))
-        (native / 'Resources/RainVolume.metal').write_text('stale rain shader')
+        (native / 'ShaderAssets/RainVolume.metal').write_text('stale rain shader')
         (native / 'default.metallib').write_bytes(b'compiled native assets')
         start = SCRIPT.index('found_bundle=0\nresource_bundle_dirs=')
         end = SCRIPT.index('\nAPP_RESOURCE_BUNDLE=', start)
         self.run_shell(SCRIPT[start:end])
         output = self.output / name
-        self.assertEqual((output / 'Contents/Resources/Resources/RainVolume.metal').read_bytes(),
+        self.assertEqual((output / 'Contents/Resources/ShaderAssets/RainVolume.metal').read_bytes(),
                          (current / 'RainVolume.metal').read_bytes())
         self.assertEqual(len(list(output.rglob('RainVolume.metal'))), 1)
         self.assertEqual((output / 'Contents/Resources/default.metallib').read_bytes(), b'compiled native assets')
-        self.assertEqual((native / 'Resources/RainVolume.metal').read_text(), 'stale rain shader')
+        self.assertEqual((native / 'ShaderAssets/RainVolume.metal').read_text(), 'stale rain shader')
         self.assertFalse((self.primary / name / 'Info.plist').exists())
 
 

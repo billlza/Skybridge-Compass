@@ -92,7 +92,7 @@ def main():
     source = read_agsl(args.android_root / 'app/src/main/kotlin/com/skybridge/compass/android/ui/components/CinematicRainAgsl.kt')
     windows = args.windows_root / 'windows/Skybridge.WinClient/WeatherBackdropDX.xaml.cs'
     write_outputs({
-        root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources/RainVolume.metal': METAL_PREFIX + source + METAL_SUFFIX,
+        root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/ShaderAssets/RainVolume.metal': METAL_PREFIX + source + METAL_SUFFIX,
         windows: replace_field(windows.read_text(), 'RAIN OPTICS', source),
     }, args.check)
 

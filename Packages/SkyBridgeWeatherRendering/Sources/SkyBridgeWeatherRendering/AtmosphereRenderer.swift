@@ -56,7 +56,7 @@ final class AtmosphereRenderer {
         self.queue = queue
         self.kind = kind
         let bundle = try Self.resourceBundle()
-        guard let sourceURL = bundle.url(forResource: kind.resource, withExtension: "metal", subdirectory: "Resources") else {
+        guard let sourceURL = bundle.url(forResource: kind.resource, withExtension: "metal", subdirectory: "ShaderAssets") else {
             throw AtmosphereRenderError.unavailable("\(kind.resource) shader is missing from the resource bundle")
         }
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
@@ -91,7 +91,7 @@ final class AtmosphereRenderer {
     }
 
     private static func loadDensity(device: any MTLDevice, bundle: Bundle) throws -> any MTLTexture {
-        guard let densityURL = bundle.url(forResource: "cloud_noise_volume", withExtension: "rgba", subdirectory: "Resources") else {
+        guard let densityURL = bundle.url(forResource: "cloud_noise_volume", withExtension: "rgba", subdirectory: "ShaderAssets") else {
             throw AtmosphereRenderError.unavailable("cloud density atlas is missing from the resource bundle")
         }
         // This is linear data, not a colour image. Preserve all three density channels.

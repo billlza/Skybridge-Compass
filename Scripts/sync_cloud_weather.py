@@ -49,7 +49,7 @@ def main():
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    resources = root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources'
+    resources = root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/ShaderAssets'
     source = (args.android_root / 'app/src/main/kotlin/com/skybridge/compass/android/ui/components/CinematicCloudsAgsl.kt').read_text()
     source = source.split('val SOURCE = """', 1)[1].split('""".trimIndent()', 1)[0].strip()
     source = source.replace('cloudNoiseAtlas.eval(cloudSliceOrigin(slice) + voxel.xy)',

@@ -44,7 +44,7 @@ def main():
     windows_path = args.windows_root / 'windows/Skybridge.WinClient/WeatherBackdropDX.xaml.cs'
     windows = replace_field(windows_path.read_text(), 'AEROSOL FIELD', source)
     outputs = {
-        root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources/HazeVolume.metal': METAL_PREFIX + source + METAL_SUFFIX,
+        root / 'Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/ShaderAssets/HazeVolume.metal': METAL_PREFIX + source + METAL_SUFFIX,
         windows_path: windows,
     }
     write_outputs(outputs, args.check)

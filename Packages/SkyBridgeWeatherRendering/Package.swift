@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [.library(name: "SkyBridgeWeatherRendering", targets: ["SkyBridgeWeatherRendering"])],
     targets: [
-        .target(name: "SkyBridgeWeatherRendering", resources: [.copy("Resources")]),
+        .target(name: "SkyBridgeWeatherRendering", resources: [.copy("ShaderAssets")]),
         .testTarget(name: "SkyBridgeWeatherRenderingTests", dependencies: ["SkyBridgeWeatherRendering"])
     ]
 )
