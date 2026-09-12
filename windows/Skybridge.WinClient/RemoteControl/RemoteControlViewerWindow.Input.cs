@@ -160,8 +160,8 @@ public sealed partial class RemoteControlViewerWindow
 
     private void OnRemotePointerMoved(object sender, PointerRoutedEventArgs args)
     {
-        if (args.IsGenerated || CurrentInputAccess is not { } access || !ReadPointer(args, _leftPressed || _rightPressed)) return;
-        if (!_pointerMotion.Accept(args.IsGenerated, args.Pointer.PointerId, _pointerX, _pointerY)) return;
+        if (CurrentInputAccess is not { } access || !ReadPointer(args, _leftPressed || _rightPressed)) return;
+        if (!_pointerMotion.Accept(args.Pointer.PointerId, _pointerX, _pointerY)) return;
         Pointer(access, "mouseMoved");
         args.Handled = true;
     }

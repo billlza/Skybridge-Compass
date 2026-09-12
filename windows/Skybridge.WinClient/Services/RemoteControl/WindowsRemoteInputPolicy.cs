@@ -6,9 +6,9 @@ internal sealed class RemotePointerMotionFilter
 {
     private (uint Id, double X, double Y)? _last;
 
-    internal bool Accept(bool generated, uint pointerId, double x, double y)
+    internal bool Accept(uint pointerId, double x, double y)
     {
-        if (generated || !double.IsFinite(x) || !double.IsFinite(y)) return false;
+        if (!double.IsFinite(x) || !double.IsFinite(y)) return false;
         var point = (pointerId, x, y);
         if (_last == point) return false;
         _last = point;
