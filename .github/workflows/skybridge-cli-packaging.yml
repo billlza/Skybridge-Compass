@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: billlza/q-periapt
-          ref: 5664fd86a617f92b620ea37e7692d3417d0e307d
+          ref: 7ed1f96a7ec33732f02a989dd5a4669cdcce39ad
           path: External/pqt_hybrid_suite
           persist-credentials: false
 
@@ -46,7 +46,7 @@ jobs:
           dependency_path="$PWD/External/pqt_hybrid_suite"
           [[ -f "$dependency_path/Cargo.toml" ]]
           [[ -f "$dependency_path/crates/q-periapt-backends/Cargo.toml" ]]
-          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "5664fd86a617f92b620ea37e7692d3417d0e307d" ]]
+          [[ "$(git -C "$dependency_path" rev-parse HEAD)" == "7ed1f96a7ec33732f02a989dd5a4669cdcce39ad" ]]
 
       - name: Install the pinned Rust toolchain
         run: |

@@ -731,7 +731,19 @@ class BoundaryCommandTests(unittest.TestCase):
     def test_upload_preflight_reads_the_existing_source_version_transaction(
         self,
     ) -> None:
-        self.assertEqual(upload_preflight.source_release_version(), (VERSION, BUILD))
+        source_identity = upload_preflight.source_release_version()
+        for relative_path in (
+            "SkyBridgeCompassiOS/Supporting Files/Info.plist",
+            "Widgets/Info.plist",
+        ):
+            with self.subTest(plist=relative_path):
+                info = plistlib.loads(
+                    (ROOT / "SkyBridge Compass iOS" / relative_path).read_bytes()
+                )
+                self.assertEqual(
+                    source_identity,
+                    (info["CFBundleShortVersionString"], info["CFBundleVersion"]),
+                )
 
     def test_upload_preflight_rejects_failed_or_malformed_version_checker(self) -> None:
         for error in (
@@ -921,6 +933,7 @@ class BoundaryCommandTests(unittest.TestCase):
             self.assertFalse(token_output.exists())
 
     def test_upload_preflight_requires_current_build_and_unchanged_ipa(self) -> None:
+        source_version, source_build = upload_preflight.source_release_version()
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             export = root / "export"
@@ -942,8 +955,8 @@ class BoundaryCommandTests(unittest.TestCase):
                 "swiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
                 "sourceCommit": SOURCE_COMMIT,
                 "archiveIdentityPurpose": archive_identity.IDENTITY_PURPOSE,
-                "releaseVersion": VERSION,
-                "releaseBuild": BUILD,
+                "releaseVersion": source_version,
+                "releaseBuild": source_build,
                 "appBundleIdentifier": archive_identity.APP_BUNDLE_IDENTIFIER,
                 "widgetBundleIdentifier": archive_identity.WIDGET_BUNDLE_IDENTIFIER,
                 "teamIdentifier": app_store_verifier.EXPECTED_TEAM,
@@ -965,7 +978,7 @@ class BoundaryCommandTests(unittest.TestCase):
                 ).returncode,
                 0,
             )
-            payload["releaseBuild"] = "2"
+            payload["releaseBuild"] = str(int(source_build) + 1)
             verification.write_text(json.dumps(payload), encoding="utf-8")
             old_build = self.run_script(
                 "ios_app_store_upload_preflight.py",
@@ -976,7 +989,7 @@ class BoundaryCommandTests(unittest.TestCase):
             )
             self.assertNotEqual(old_build.returncode, 0)
             self.assertIn("releaseBuild does not match this release", old_build.stderr)
-            payload["releaseBuild"] = BUILD
+            payload["releaseBuild"] = source_build
             verification.write_text(json.dumps(payload), encoding="utf-8")
             ipa.write_bytes(b"changed")
             self.assertNotEqual(
