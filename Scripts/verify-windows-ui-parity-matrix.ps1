@@ -271,12 +271,12 @@ foreach ($path in @($matrixPath, $mainWindowPath, $featureCatalogPath, $actionCa
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing UI parity matrix input: $path"
 }
 
-$matrix = Get-Content -Raw -LiteralPath $matrixPath
-$mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
-$featureCatalog = Get-Content -Raw -LiteralPath $featureCatalogPath
-$actionCatalog = Get-Content -Raw -LiteralPath $actionCatalogPath
-$actionOrderSmoke = Get-Content -Raw -LiteralPath $actionOrderSmokePath
-$paritySmoke = Get-Content -Raw -LiteralPath $paritySmokePath
+$matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $matrixPath
+$mainWindow = Get-Content -Raw -Encoding UTF8 -LiteralPath $mainWindowPath
+$featureCatalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $featureCatalogPath
+$actionCatalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $actionCatalogPath
+$actionOrderSmoke = Get-Content -Raw -Encoding UTF8 -LiteralPath $actionOrderSmokePath
+$paritySmoke = Get-Content -Raw -Encoding UTF8 -LiteralPath $paritySmokePath
 $gitObjectDatabaseAvailable = (Invoke-Git -Arguments @("rev-parse", "--git-dir")).ExitCode -eq 0
 
 $macBaselineCommit = "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c"
