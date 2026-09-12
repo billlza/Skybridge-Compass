@@ -23,6 +23,8 @@ param(
     [ValidateRange(1, 65535)]
     [int]$LocalSshPort = 22,
     [string]$TaskUserId = "NT AUTHORITY\LOCAL SERVICE",
+    [ValidateRange(1, 1440)]
+    [int]$SelfHealIntervalMinutes = 5,
     [string]$LogPath = "C:\ProgramData\SkyBridge\reverse-ssh-relay\logs\skybridge-relay-tunnel.log",
     [string]$EvidencePath = "",
     [switch]$RepairPrivateKeyAcl,
@@ -285,6 +287,45 @@ function Test-TcpConnect {
     }
 }
 
+function Get-TaskAccountExecutionPolicy {
+    # PowerShell resolves execution policy scope by scope: MachinePolicy, UserPolicy, Process,
+    # CurrentUser, LocalMachine. The scheduled task runs as a service account, in a fresh process,
+    # with no -ExecutionPolicy argument, so Process and the per-user scopes belong to whoever runs
+    # this registration and say nothing about the task. Only the machine-wide scopes apply to it.
+    foreach ($scope in @("MachinePolicy", "LocalMachine")) {
+        $policy = [string](Get-ExecutionPolicy -Scope $scope)
+        if ($policy -ne "Undefined") {
+            return $policy
+        }
+    }
+
+    # Windows client SKUs ship every scope Undefined, which resolves to Restricted.
+    return "Restricted"
+}
+
+function Get-FileSystemRightsCapability {
+    param([System.Security.AccessControl.FileSystemRights]$Rights)
+
+    # FileSystemRights values such as Read, ReadAndExecute, Modify and FullControl are
+    # composite masks: Modify and FullControl carry every read bit as well. Testing
+    # -band against them therefore reports "write" for a read-only ACE, so read and write
+    # capability must be decided from the specific bits instead.
+    $writeMask = [System.Security.AccessControl.FileSystemRights]::WriteData -bor
+        [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+
+    # ReadData and ListDirectory share the same bit, so this covers files and directories.
+    return [ordered]@{
+        canRead  = (($Rights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0)
+        canWrite = (($Rights -band $writeMask) -ne 0)
+    }
+}
+
 function Test-PrivateKeyAcl {
     param(
         [string]$Path,
@@ -325,15 +366,9 @@ function Test-PrivateKeyAcl {
 
         $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
         $rights = [System.Security.AccessControl.FileSystemRights]$rule.FileSystemRights
-        $canRead = (($rights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0) -or (($rights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) -or (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
-        $canWrite = (($rights -band [System.Security.AccessControl.FileSystemRights]::Write) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::WriteData) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::AppendData) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::Delete) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::ChangePermissions) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::TakeOwnership) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::Modify) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
+        $capability = Get-FileSystemRightsCapability -Rights $rights
+        $canRead = [bool]$capability.canRead
+        $canWrite = [bool]$capability.canWrite
         if ($canRead) {
             [void]$readableSids.Add($sid)
         }
@@ -522,6 +557,19 @@ Set-StrictReadableDirectoryAcl -Path $managedRelayRoot -TaskUserId $TaskUserId
 Set-StrictReadableDirectoryAcl -Path $installedStartScriptDirectory -TaskUserId $TaskUserId
 Copy-Item -LiteralPath $sourceStartScriptFullPath -Destination $installedStartScriptFullPath -Force
 Set-StrictReadableFileAcl -Path $installedStartScriptFullPath -TaskUserId $TaskUserId
+
+# The task action is a bare "powershell.exe -NoProfile -NonInteractive -File <script>" on purpose:
+# the lifecycle gate fails closed on any ExecutionPolicy, Bypass, EncodedCommand or interpreter
+# indirection in that command line. That makes the machine execution policy a real precondition -
+# under Restricted the task exits 1 before the start script can log a single line, while this
+# registration would otherwise report success for a task that can never run.
+$taskAccountExecutionPolicy = Get-TaskAccountExecutionPolicy
+Assert-True -Condition ($taskAccountExecutionPolicy -ne "Restricted") -Message "Machine execution policy resolves to Restricted for the task account, so the scheduled task cannot load $installedStartScriptFullPath. Set a machine-wide policy that permits it, for example: Set-ExecutionPolicy -Scope LocalMachine RemoteSigned."
+if ($taskAccountExecutionPolicy -eq "AllSigned") {
+    $installedStartScriptSignature = Get-AuthenticodeSignature -LiteralPath $installedStartScriptFullPath
+    Assert-True -Condition ([string]$installedStartScriptSignature.Status -eq "Valid") -Message "Machine execution policy is AllSigned but $installedStartScriptFullPath has signature status $($installedStartScriptSignature.Status); sign the start script or use RemoteSigned."
+}
+
 $sourceStartScriptSha256 = Get-FileSha256 -Path $sourceStartScriptFullPath
 $installedStartScriptSha256 = Get-FileSha256 -Path $installedStartScriptFullPath
 Assert-True -Condition ($sourceStartScriptSha256 -eq $installedStartScriptSha256) -Message "Installed reverse relay start script hash does not match repo source script."
@@ -582,7 +630,23 @@ $taskArgumentsList = @(
 )
 $taskArgumentString = ($taskArgumentsList | ForEach-Object { ConvertTo-TaskArgument -Value $_ }) -join " "
 $action = New-ScheduledTaskAction -Execute $powerShellFullPath -Argument $taskArgumentString
-$trigger = New-ScheduledTaskTrigger -AtStartup
+# An at-startup trigger alone leaves the tunnel down until the next reboot: RestartCount only
+# applies to an instance Task Scheduler itself started and then saw fail, so an ssh process that
+# dies - or one orphaned by a -Force re-registration - is never replaced. Pair it with a
+# repeating trigger; MultipleInstances=IgnoreNew makes each repeat a no-op while a tunnel is
+# alive and a recovery when it is not.
+$startupTrigger = New-ScheduledTaskTrigger -AtStartup
+$selfHealTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes $SelfHealIntervalMinutes)
+# An empty repetition duration is how the task XML expresses "repeat indefinitely".
+# -RepetitionDuration ([TimeSpan]::MaxValue) is NOT the way to say that: it serialises to
+# P99999999DT23H59M59S and Register-ScheduledTask rejects the XML outright, and any finite
+# duration silently stops self-healing when it elapses.
+$selfHealTrigger.Repetition.Duration = ''
+$selfHealTrigger.Repetition.StopAtDurationEnd = $false
+$trigger = @($startupTrigger, $selfHealTrigger)
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -ExecutionTimeLimit (New-TimeSpan -Days 0) `
@@ -602,9 +666,13 @@ $evidence = [ordered]@{
     script = "register-windows-reverse-ssh-relay-task.ps1"
     taskName = $TaskName
     taskState = [string]$task.State
-    taskLastTaskResult = [int]$taskInfo.LastTaskResult
+    # LastTaskResult is a UInt32 HRESULT: values such as 0x800710E0 (2147946720) exceed
+    # Int32.MaxValue, and casting them to [int] throws and aborts evidence writing after the
+    # task has already been registered and started.
+    taskLastTaskResult = [uint32]$taskInfo.LastTaskResult
     taskActionExecute = [string]$task.Actions[0].Execute
     taskActionArguments = [string]$task.Actions[0].Arguments
+    taskAccountExecutionPolicy = $taskAccountExecutionPolicy
     taskPrincipalUserId = [string]$task.Principal.UserId
     taskPrincipalRunLevel = [string]$task.Principal.RunLevel
     taskPrincipalSid = $taskUserSid
@@ -631,6 +699,8 @@ $evidence = [ordered]@{
     powershellPath = $powerShellFullPath
     sshPath = $sshFullPath
     logPath = $logFullPath
+    selfHealIntervalMinutes = $SelfHealIntervalMinutes
+    taskTriggerTypes = @($task.Triggers | ForEach-Object { [string]$_.CimClass.CimClassName })
     startAfterRegister = [bool]$StartAfterRegister
     accepted = $true
 }

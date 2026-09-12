@@ -17,7 +17,7 @@ namespace Skybridge.WinClient.Services;
 /// <summary>
 /// First real Microsoft-native QUIC (MsQuic via <see cref="System.Net.Quic"/>) transport adapter for
 /// Windows-to-Windows same-LAN sessions. Per docs/windows-architecture.md:11,34 and AGENTS.md:11,
-/// Windows-to-Windows must prefer <c>WindowsNativeMsQuicTransport</c>; MsQuic v2.5.9 is the pinned
+/// Windows-to-Windows must prefer <c>WindowsNativeMsQuicTransport</c>; MsQuic v2.6.1 is the pinned
 /// native QUIC stack and sits BELOW SkyBridge Core transport binding (it does not own session identity).
 ///
 /// This adapter opens a live QUIC connection on the LAN to a Windows peer, derives the transport-binding
@@ -46,10 +46,6 @@ namespace Skybridge.WinClient.Services;
 /// </summary>
 public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTransportAdapterClient
 {
-    // SkyBridge Win-to-Win QUIC ALPN. MsQuic requires at least one ALPN; this keeps the SkyBridge
-    // session distinguishable from any other QUIC listener on the LAN and is bound into the secret.
-    private const string SkyBridgeAlpn = "skybridge/1";
-
     private readonly WindowsNativeMsQuicTransportAdapterOptions _options;
 
     public WindowsNativeMsQuicTransportAdapterClient(WindowsNativeMsQuicTransportAdapterOptions options)
@@ -88,7 +84,7 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
         if (!QuicConnection.IsSupported)
         {
             throw new InvalidOperationException(
-                "Windows native MsQuic adapter requires System.Net.Quic / libmsquic (MsQuic v2.5.9) support, which is unavailable in this runtime.");
+                "Windows native MsQuic adapter requires System.Net.Quic / libmsquic (MsQuic v2.6.1) support, which is unavailable in this runtime.");
         }
 
         var live = await DialAsync(request).ConfigureAwait(false);
@@ -99,7 +95,7 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
                 "Windows MsQuic adapter",
                 "live quic session",
                 $"MsQuic (System.Net.Quic) opened a QUIC connection {live.LocalEndpoint} -> {live.RemoteEndpoint} "
-                + $"with ALPN '{SkyBridgeAlpn}'; control/file/clipboard map to QUIC streams (MsQuicStream) per channel.rs."),
+                + $"with ALPN '{SkyBridgeProtocolConstants.MsQuicAlpn}'; control/file/clipboard map to QUIC streams (MsQuicStream) per channel.rs."),
             new ConnectionPreflightFact(
                 "MsQuic capability",
                 "negotiated",
@@ -129,9 +125,48 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
     /// <summary>
     /// Opens the live QUIC connection and derives the binding material from the negotiated session.
     /// </summary>
+    /// <summary>
+    /// Decide where to dial. Precedence is explicit-over-discovered: a pinned
+    /// <see cref="WindowsNativeMsQuicTransportAdapterOptions.PeerEndpoint"/> is an operator
+    /// override and wins, otherwise the control endpoint discovery resolved for this peer is
+    /// used. With neither, this fails closed — an adapter that guessed an address would be
+    /// reporting a live session to a host nobody discovered.
+    /// </summary>
+    /// <summary>
+    /// Picks the address this adapter dials: a pinned option wins, otherwise the control route
+    /// discovery resolved for the peer, otherwise it fails closed. Internal rather than private so
+    /// verify-windows-msquic-dial-target can exercise that precedence for real; the gate compiles
+    /// this source into its own assembly, so no InternalsVisibleTo is involved.
+    /// </summary>
+    internal (string Host, int Port) ResolveDialTarget(WindowsTransportAdapterRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(_options.PeerEndpoint))
+        {
+            return ParseEndpoint(_options.PeerEndpoint!);
+        }
+
+        var control = request.DiscoveredRoutes?.Control;
+        if (control is null)
+        {
+            throw new InvalidOperationException(
+                "Windows native MsQuic adapter has no endpoint to dial: no peer endpoint was pinned in options, "
+                + "and discovery resolved no control route for this peer. Resolve the peer's "
+                + $"{SkyBridgeProtocolConstants.QuicControlDnsSdService} / {SkyBridgeProtocolConstants.TcpControlDnsSdService} "
+                + "record before preflight, or pin SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT for the harness path.");
+        }
+
+        if (string.IsNullOrWhiteSpace(control.HostName) || control.Port == 0)
+        {
+            throw new InvalidOperationException(
+                "Windows native MsQuic adapter received a discovered control route with no usable host or port.");
+        }
+
+        return (control.HostName.Trim(), control.Port);
+    }
+
     private async Task<LiveQuicBinding> DialAsync(WindowsTransportAdapterRequest request)
     {
-        var (host, port) = ParseEndpoint(_options.PeerEndpoint);
+        var (host, port) = ResolveDialTarget(request);
         var remote = await ResolveRemoteAsync(host, port).ConfigureAwait(false);
 
         // The dialer presents its OWN ephemeral leaf cert so the listener can read it via
@@ -147,7 +182,10 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
             DefaultCloseErrorCode = 0,
             ClientAuthenticationOptions = new SslClientAuthenticationOptions
             {
-                ApplicationProtocols = new List<SslApplicationProtocol> { new(SkyBridgeAlpn) },
+                ApplicationProtocols = new List<SslApplicationProtocol>
+                {
+                    new(SkyBridgeProtocolConstants.MsQuicAlpn)
+                },
                 TargetHost = host,
                 ClientCertificates = new X509CertificateCollection { clientCertificate },
                 // QUIC mandates TLS 1.3. The SkyBridge PQC handshake rides OVER QUIC (inside the
@@ -191,7 +229,7 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
             // MsQuic analogue of an ICE candidate pair and is bound into the Core transcript digest.
             var selectedCandidatePair = $"msquic/udp/{localEndpoint}->{remoteEndpoint}/alpn={negotiatedAlpn}";
             var adapterBinding =
-                "windows native msquic (System.Net.Quic, MsQuic v2.5.9) same-LAN; "
+                "windows native msquic (System.Net.Quic, MsQuic v2.6.1) same-LAN; "
                 + "streams=control,file,clipboard datagrams(pending-runtime)=telemetry,realtime";
 
             return new LiveQuicBinding(
@@ -291,24 +329,31 @@ public sealed class WindowsNativeMsQuicTransportAdapterClient : IWindowsTranspor
 
 public sealed class WindowsNativeMsQuicTransportAdapterOptions
 {
-    public WindowsNativeMsQuicTransportAdapterOptions(string peerEndpoint, ulong timestampWindowMs)
+    /// <param name="peerEndpoint">
+    /// Optional pinned peer endpoint, host:port. Null means "dial whatever discovery resolved",
+    /// which is the product path: the address then comes from
+    /// <see cref="WindowsTransportAdapterRequest.DiscoveredRoutes"/> per request rather than from
+    /// configuration fixed at construction. A non-null value pins the dial to one address and
+    /// exists for the environment-variable harness
+    /// (SKYBRIDGE_WINDOWS_MSQUIC_PEER_ENDPOINT), which is how this adapter could be exercised
+    /// before discovery was wired to it.
+    /// </param>
+    public WindowsNativeMsQuicTransportAdapterOptions(string? peerEndpoint, ulong timestampWindowMs)
     {
-        if (string.IsNullOrWhiteSpace(peerEndpoint))
-        {
-            throw new InvalidOperationException("Windows native MsQuic adapter requires a peer endpoint (host:port).");
-        }
-
         if (timestampWindowMs == 0)
         {
             throw new InvalidOperationException("Windows native MsQuic adapter requires a non-zero timestamp window.");
         }
 
-        PeerEndpoint = peerEndpoint.Trim();
+        PeerEndpoint = string.IsNullOrWhiteSpace(peerEndpoint) ? null : peerEndpoint.Trim();
         TimestampWindowMs = timestampWindowMs;
     }
 
-    /// <summary>Target Windows peer QUIC endpoint on the LAN, host:port (e.g. 192.168.0.42:5443).</summary>
-    public string PeerEndpoint { get; }
+    /// <summary>
+    /// Pinned target Windows peer QUIC endpoint on the LAN, host:port (e.g. 192.168.0.42:5443),
+    /// or null to dial the endpoint discovery resolved for the peer being connected to.
+    /// </summary>
+    public string? PeerEndpoint { get; }
 
     public ulong TimestampWindowMs { get; }
 }

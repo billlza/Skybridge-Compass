@@ -1,0 +1,6 @@
+# The vendored C sources are UTF-8. These defaults apply only to MSVC targets.
+# An explicit same-name environment override must retain UTF-8 source handling.
+[env]
+CFLAGS_x86_64_pc_windows_msvc = { value = "/utf-8", force = false }
+CFLAGS_aarch64_pc_windows_msvc = { value = "/utf-8", force = false }
+CFLAGS_i686_pc_windows_msvc = { value = "/utf-8", force = false }

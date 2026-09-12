@@ -29,10 +29,13 @@ public sealed class SessionViewModelDependencies
         ISessionStatusClient? sessionStatusClient = null,
         IFeatureCatalogClient? featureCatalogClient = null,
         ISessionCommandStateClient? sessionCommandStateClient = null,
-        IWorkspaceCommandStateClient? workspaceCommandStateClient = null)
+        IWorkspaceCommandStateClient? workspaceCommandStateClient = null,
+        IProductSessionActionGateClient? productSessionActionGateClient = null,
+        SettingsService? settingsService = null)
     {
         ArgumentNullException.ThrowIfNull(engineClient);
 
+        SettingsService = settingsService;
         EngineClient = engineClient;
         DiscoveryClient = discoveryClient ?? new UnavailableDiscoveryClient();
         DiscoveryBrowserClient = discoveryBrowserClient ?? new UnavailableDiscoveryBrowserClient();
@@ -58,7 +61,10 @@ public sealed class SessionViewModelDependencies
         FeatureCatalogClient = featureCatalogClient ?? new FeatureCatalogClient();
         SessionCommandStateClient = sessionCommandStateClient ?? new SessionCommandStateClient();
         WorkspaceCommandStateClient = workspaceCommandStateClient ?? new WorkspaceCommandStateClient();
+        ProductSessionActionGateClient = productSessionActionGateClient ?? new ProductSessionActionGateClient();
     }
+
+    public SettingsService? SettingsService { get; }
 
     public IEngineClient EngineClient { get; }
 
@@ -109,4 +115,6 @@ public sealed class SessionViewModelDependencies
     public ISessionCommandStateClient SessionCommandStateClient { get; }
 
     public IWorkspaceCommandStateClient WorkspaceCommandStateClient { get; }
+
+    public IProductSessionActionGateClient ProductSessionActionGateClient { get; }
 }

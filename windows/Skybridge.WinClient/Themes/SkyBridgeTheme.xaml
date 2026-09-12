@@ -48,35 +48,79 @@
     <SolidColorBrush x:Key="SkyBridgeAccentHoverBrush" Color="{StaticResource SkyBridgeAccentHoverColor}" />
     <SolidColorBrush x:Key="SkyBridgeAccentSecondaryBrush" Color="{StaticResource SkyBridgeAccentSecondaryColor}" />
 
-    <!-- ===== Glass / surface brushes (frosted material over the dark gradient) =====
-         The Mac uses .ultraThinMaterial — a live frosted BLUR that reads as lit glass,
-         lighter at the top edge with real depth, never a flat opaque rectangle (that
-         flatness was the main 'looks like a knock-off' tell). True desktop-blur on
-         Windows needs a window-level SystemBackdrop (Mica/DesktopAcrylic) wired in
-         code-behind, which doesn't exist here; in-app AcrylicBrush only blurs content
-         WITHIN the window and collapses to its fallback over the empty gradient, reading
-         muddy. So the surfaces here are tuned multi-stop GLOSS gradients that emulate the
-         frost optically: a bright top-left highlight rolling off to a faint cool
-         blue-gray bottom (pulled toward starryNight, not pure white), giving the lit-glass
-         curvature the Mac material has while degrading perfectly (this IS the fallback).
-         FUTURE (needs human visual check + code-behind): set Window.SystemBackdrop =
-         DesktopAcrylicBackdrop and drop these tints to ~half opacity for true OS frost. -->
+    <!-- ===== Glass / surface brushes =====
+         The Mac lays one live material (.ultraThinMaterial, a blur of the weather scene behind it)
+         under the sidebar and the top bar, and puts plain white washes on the cards that sit on
+         them (StatCard: white@0.04 fill, white@0.08 stroke). On Windows the blur cannot come from
+         XAML: with the weather renderer's swap chain attached to the tree, WinUI paints every
+         in-app AcrylicBrush as its FallbackColor (verified on hardware: the brush went live the
+         moment the swap chain was detached), and Window.SystemBackdrop blurs the desktop behind
+         the window, not the scene. So WeatherBackdropDX frosts the sidebar and top-bar rects
+         itself (blur + dim + white film + grain), the two shell fills below are transparent so that
+         frost shows through, and everything laid over it stays an achromatic white wash: sheen,
+         rims and hairlines. Never a coloured tint (it read as tinted plastic) and never a second
+         material on top of the first. -->
     <SolidColorBrush x:Key="SkyBridgeShellSurfaceFillBrush" Color="#1AFFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" Color="#14FFFFFF" />
-    <!-- Dark idle-screen backdrop — mirrors the Mac Remote Desktop preview
+    <!-- Capsules, chips and the account block: a lit top-left edge like the Mac glass capsule
+         (strokeBorder white@0.18), fading toward the bottom-right. -->
+    <LinearGradientBrush x:Key="SkyBridgeShellSurfaceStrokeBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#4DFFFFFF" Offset="0.0" />
+        <GradientStop Color="#1FFFFFFF" Offset="0.5" />
+        <GradientStop Color="#0DFFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+    <!-- Dark idle-screen backdrop: mirrors the Mac Remote Desktop preview
          empty-state RoundedRectangle fill black.opacity(0.22), so an idle "screen"
          reads as an off display area rather than a light translucent panel. -->
     <SolidColorBrush x:Key="SkyBridgeIdleScreenBackdropBrush" Color="#38000000" />
-    <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="#E62E3857" />
-    <!-- Panel = large section surface. 3-stop gloss: bright cool-white top-left
-         highlight (#33) -> mid body (#1F) -> faint blue-tinted bottom-right (#14, the
-         starryNight slate bleeding through) so the panel reads as a curved lit pane. -->
-    <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="0.85,1">
-        <GradientStop Color="#1AFFFFFF" Offset="0.0" />
-        <GradientStop Color="#0FFFFFFF" Offset="0.5" />
-        <GradientStop Color="#0ABCD0F2" Offset="1.0" />
+    <!-- A local smoked-glass backing keeps white labels legible over bright weather.
+         Nested cards retain their existing light wash on this shared backing. -->
+    <LinearGradientBrush x:Key="SkyBridgePanelFillBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#A308101D" Offset="0.0" />
+        <GradientStop Color="#B30B1422" Offset="1.0" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="SkyBridgePanelStrokeBrush" Color="#14FFFFFF" />
+
+    <!-- Sidebar and top bar: transparent, because the weather renderer paints the frosted glass
+         under exactly these two regions (MainWindow hands it their rects after each layout pass).
+         Consumed by the NavigationView pane keys in App.xaml and by the top-bar Border in
+         MainWindow. Cards, pills and the account block that sit on them stay white washes. -->
+    <SolidColorBrush x:Key="SkyBridgeSidebarFillBrush" Color="Transparent" />
+    <SolidColorBrush x:Key="SkyBridgeTopBarFillBrush" Color="Transparent" />
+
+    <!-- Sheen: a white wash fading down from the top edge, laid over a glass surface (top bar
+         interior, sidebar header). It is the top-lit highlight of the Mac glass and it is only
+         ever a wash: never a second material over the frost. -->
+    <LinearGradientBrush x:Key="SkyBridgeGlassSheenBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#1FFFFFFF" Offset="0.0" />
+        <GradientStop Color="#0AFFFFFF" Offset="0.55" />
+        <GradientStop Color="#00FFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <!-- Hairline dividers and the top bar's bottom rule: a horizontal glint, brightest in the
+         middle, averaging the Mac's flat white@0.10 rule. -->
+    <LinearGradientBrush x:Key="SkyBridgeHairlineBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#0DFFFFFF" Offset="0.0" />
+        <GradientStop Color="#2EFFFFFF" Offset="0.5" />
+        <GradientStop Color="#0DFFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <!-- Specular rim. This is the single strongest "this is glass" cue and it has to be a
+         gradient, not a flat hairline: real glass catches the light on the edge facing it
+         and loses it around the curve, so the stroke runs bright cool-white at the top-left
+         through to almost nothing at the bottom-right. A uniform #14FFFFFF hairline (what
+         was here) reads as a drawn border on a matte card instead. Apple's material gets
+         the same effect from its lensing edge; this is the flat-shaded equivalent, and it
+         works even when the animated backdrop behind the panel is calm and there is nothing
+         for the frost to refract. -->
+    <!-- The rim is WHITE only (an earlier blue-tinted rim is what made the surface read as
+         purple plastic): bright where the light hits the top-left edge, fading to almost
+         nothing at the bottom-right, the lensing edge of the Mac liquid glass. Four-sided
+         strokes only: a 1px divider maps this diagonal onto its width and reads as a half
+         line, so dividers use SkyBridgeHairlineBrush below. -->
+    <LinearGradientBrush x:Key="SkyBridgePanelStrokeBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#6BFFFFFF" Offset="0.0" />
+        <GradientStop Color="#24FFFFFF" Offset="0.45" />
+        <GradientStop Color="#0DFFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
     <!-- Card = nested glass, a touch brighter than the panel so it lifts off it.
          Same cool-tinted roll-off (top-left highlight -> blue-gray base). -->
     <!-- Aligned to the Mac StatCard material (bg white@0.04, stroke white@0.08): a much
@@ -84,36 +128,54 @@
          透出感 is the depth the old near-opaque ~16% white card was missing). A faint
          top-left→bottom gloss is kept (12%→8%→4%) for lit-glass curvature, but the average
          now sits near Mac's 4-8% instead of ~16%. -->
-    <LinearGradientBrush x:Key="SkyBridgeCardFillBrush" StartPoint="0,0" EndPoint="0.85,1">
-        <GradientStop Color="#1FFFFFFF" Offset="0.0" />
+    <!-- Card = nested glass. Same material as the panel, one step brighter so a card
+         still lifts off the panel it sits on, matching the Mac's StatCard-over-section
+         separation. -->
+    <!-- A card is NOT its own sheet of glass. On the Mac a StatCard is
+         `Color.white.opacity(0.04)` laid on top of the section's material — one material,
+         with a thin white wash marking the nested surface. Giving the card a material of its
+         own (as an earlier revision did) double-frosts the same pixels: the backdrop stops
+         showing through, and the card goes opaque and grey. Plain white at Mac's exact 0.04
+         and 0.08 instead. -->
+    <SolidColorBrush x:Key="SkyBridgeCardFillBrush" Color="#0AFFFFFF" />
+    <!-- Nested cards get the same lit edge at a lower key, so they sit inside the panel's light. -->
+    <LinearGradientBrush x:Key="SkyBridgeCardStrokeBrush" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#3DFFFFFF" Offset="0.0" />
         <GradientStop Color="#14FFFFFF" Offset="0.5" />
-        <GradientStop Color="#0ABCD0F2" Offset="1.0" />
+        <GradientStop Color="#08FFFFFF" Offset="1.0" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="SkyBridgeCardStrokeBrush" Color="#14FFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeTopBarFillBrush" Color="#8C47618F" />
     <SolidColorBrush x:Key="SkyBridgeSelectedNavFillBrush" Color="#D12368E0" />
 
     <!-- ===== Text brushes ===== -->
+    <!-- Opacity ladder, not a lightness ladder. Apple keeps secondary/tertiary label
+         legible because the material underneath lifts the surface; these tints sit on a
+         4-10% white panel over a near-black gradient, so the same nominal alphas render
+         far weaker here. Secondary was 0.72 and muted 0.46, which is where the reported
+         "字看不清" comes from: at 0.46 over this ground the muted labels (workspace
+         subtitles, metric captions) fall below usable contrast. Raised to 0.88 / 0.69,
+         which keeps three clearly distinct steps while putting the weakest step back
+         above a comfortable reading contrast on the surfaces below. -->
     <SolidColorBrush x:Key="SkyBridgeTextPrimaryBrush" Color="#FFF7FAFF" />
-    <SolidColorBrush x:Key="SkyBridgeTextSecondaryBrush" Color="#B8FFFFFF" />
-    <SolidColorBrush x:Key="SkyBridgeTextMutedBrush" Color="#75FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeTextSecondaryBrush" Color="#E0FFFFFF" />
+    <SolidColorBrush x:Key="SkyBridgeTextMutedBrush" Color="#B0FFFFFF" />
 
     <!-- ===== Status brushes ===== -->
     <SolidColorBrush x:Key="SkyBridgeSuccessBrush" Color="#FF4DC770" />
     <SolidColorBrush x:Key="SkyBridgeWarningBrush" Color="#FFFF9A4D" />
     <SolidColorBrush x:Key="SkyBridgeDangerBrush" Color="#FFFF5C5C" />
 
-    <!-- ===== Per-feature nav accent brushes (distinct on-brand hues) =====
-         One hue per sidebar feature so each section reads as its own
-         destination while staying inside the .starryNight palette:
-           dashboard = accent blue   devices = cyan      usb = teal
-           file = green              remote  = indigo    quantum = violet
-           monitor = orange          settings = slate -->
+    <!-- ===== Per-feature accent brushes = the Mac sidebar tab colours =====
+         GlassSidebar.swift assigns: dashboard .blue, deviceDiscovery .green,
+         usbManagement .indigo, fileTransfer .orange, remoteDesktop .cyan,
+         systemMonitor .orange, settings .secondary. A feature keeps one colour
+         everywhere it appears (sidebar glyph, selected pill, page headers, badges),
+         so these tokens are the single source for that hue. Quantum has no Mac tab
+         and keeps its violet. -->
     <SolidColorBrush x:Key="SkyBridgeNavDashboardBrush" Color="#FF3072EF" />
-    <SolidColorBrush x:Key="SkyBridgeNavDevicesBrush" Color="#FF00D9FF" />
-    <SolidColorBrush x:Key="SkyBridgeNavUsbBrush" Color="#FF1FC9B0" />
-    <SolidColorBrush x:Key="SkyBridgeNavFileTransferBrush" Color="#FF4DC770" />
-    <SolidColorBrush x:Key="SkyBridgeNavRemoteDesktopBrush" Color="#FF6E7BF2" />
+    <SolidColorBrush x:Key="SkyBridgeNavDevicesBrush" Color="#FF4DC770" />
+    <SolidColorBrush x:Key="SkyBridgeNavUsbBrush" Color="#FF6E7BF2" />
+    <SolidColorBrush x:Key="SkyBridgeNavFileTransferBrush" Color="#FFFF9A4D" />
+    <SolidColorBrush x:Key="SkyBridgeNavRemoteDesktopBrush" Color="#FF00D9FF" />
     <SolidColorBrush x:Key="SkyBridgeNavQuantumBrush" Color="#FFB07CF5" />
     <SolidColorBrush x:Key="SkyBridgeNavMonitorBrush" Color="#FFFF9A4D" />
     <SolidColorBrush x:Key="SkyBridgeNavSettingsBrush" Color="#FF9AA7BF" />

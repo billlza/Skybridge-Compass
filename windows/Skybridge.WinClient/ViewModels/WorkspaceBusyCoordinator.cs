@@ -48,6 +48,22 @@ internal sealed class WorkspaceBusyCoordinator
         }
     }
 
+    public async Task RunWithoutBusyGuardAsync(
+        WorkspaceErrorScope errorScope,
+        Func<Task> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        try
+        {
+            await action();
+        }
+        catch (Exception ex)
+        {
+            _statusPatchApplier.Apply(
+                _workspaceErrorStatusClient.BuildErrorPatch(errorScope, ex.Message));
+        }
+    }
+
     public Task RefreshReadOnlyWorkspaceAsync<TSnapshot>(
         WorkspaceErrorScope errorScope,
         Func<string> buildPendingStatus,

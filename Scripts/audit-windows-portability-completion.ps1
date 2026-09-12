@@ -6,6 +6,15 @@ param(
     [string]$WinUiEvidenceDir = "",
     [switch]$AllowStandaloneWinUiVisualEvidence,
     [string]$MacSshEvidencePath = "",
+    [string]$CurrentPathProductControlEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-appcontrol.json",
+    [string]$CurrentPathProductControlFileTransferEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-file-transfer.json",
+    [string]$CurrentPathProductControlAnswererEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-answerer-transport.json",
+    [string]$CurrentPathProductControlAnswererAppControlEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-answerer-appcontrol.json",
+    [string]$CurrentPathProductControlAnswererFileTransferEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-answerer-file-transfer.json",
+    [string]$CurrentPathProductControlAppControlSessionImportEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-session-import.json",
+    [string]$CurrentPathProductControlAnswererAppControlSessionImportEvidencePath = "artifacts/windows-portability/latest-local/current-path-product-control-answerer-appcontrol-session-import.json",
+    [string]$LiveFileTransferEvidencePath = "artifacts/windows-portability/latest-local/live-file-transfer.json",
+    [string]$LiveRemoteDesktopEvidencePath = "artifacts/windows-portability/latest-local/live-remote-desktop.json",
     [string]$ReportPath = "",
     [string]$ExpectedBranch = "Bill/windows-portability",
     [string]$ExpectedHead = "",
@@ -70,6 +79,31 @@ function Test-GatePassed {
 
     $gate = Get-Gate -Acceptance $Acceptance -Name $Name
     return ([string]$gate.status -eq "passed")
+}
+
+function Get-GateOrNull {
+    param(
+        $Acceptance,
+        [string]$Name
+    )
+
+    $matches = @($Acceptance.gateResults | Where-Object { [string]$_.name -eq $Name })
+    Assert-True -Condition ($matches.Count -le 1) -Message "Expected at most one acceptance gate named $Name, found $($matches.Count)."
+    if ($matches.Count -eq 0) {
+        return $null
+    }
+
+    return $matches[0]
+}
+
+function Test-GatePassedIfPresent {
+    param(
+        $Acceptance,
+        [string]$Name
+    )
+
+    $gate = Get-GateOrNull -Acceptance $Acceptance -Name $Name
+    return ($null -ne $gate -and [string]$gate.status -eq "passed")
 }
 
 function Add-AuditItem {
@@ -232,6 +266,23 @@ $verifierArguments = @{
     RequireRustCliCoverage = $true
     RequireOnlineStackFreshness = $true
     RequireNativeDnsSdAcceptance = $true
+    RequireCurrentPathProductControlAppControl = $true
+    RequireCurrentPathProductControlFileTransfer = $true
+    RequireCurrentPathProductControlAnswererTransport = $true
+    RequireCurrentPathProductControlAnswererAppControl = $true
+    RequireCurrentPathProductControlAnswererFileTransfer = $true
+    RequireCurrentPathProductControlSessionImport = $true
+    RequireCurrentPathProductControlAnswererAppControlSessionImport = $true
+    RequireWindowsReverseSshRelayLifecycle = $true
+    CurrentPathProductControlEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlEvidencePath)
+    CurrentPathProductControlFileTransferEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlFileTransferEvidencePath)
+    CurrentPathProductControlAnswererEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlAnswererEvidencePath)
+    CurrentPathProductControlAnswererAppControlEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlAnswererAppControlEvidencePath)
+    CurrentPathProductControlAnswererFileTransferEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlAnswererFileTransferEvidencePath)
+    CurrentPathProductControlAppControlSessionImportEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlAppControlSessionImportEvidencePath)
+    CurrentPathProductControlAnswererAppControlSessionImportEvidencePath = (Resolve-RepoPath -Path $CurrentPathProductControlAnswererAppControlSessionImportEvidencePath)
+    LiveFileTransferEvidencePath = (Resolve-RepoPath -Path $LiveFileTransferEvidencePath)
+    LiveRemoteDesktopEvidencePath = (Resolve-RepoPath -Path $LiveRemoteDesktopEvidencePath)
     ExpectedBranch = $ExpectedBranch
     ExpectedHead = $ExpectedHead
 }
@@ -266,9 +317,64 @@ else {
     Add-AuditItem -Items $items -Id "REQ-UI" -Status "incomplete" -Evidence "Static UI gates passed." -Gap "Interactive WinUI automation and visual evidence must pass for release-quality UI parity."
 }
 Add-AuditItem -Items $items -Id "REQ-RUST-CLI" -Status "complete" -Evidence "Rust CLI coverage evidence was required and accepted at or above 90% total and cli.rs line coverage."
+if ((Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-session-import") -and (Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-answerer-appcontrol-session-import")) {
+    Add-AuditItem -Items $items -Id "REQ-RUST-CLI-SESSION-IMPORT" -Status "complete" -Evidence "Offerer and answerer AppControl evidence were imported into the Rust product-control session registry with redacted, digest-checked session import reports."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-RUST-CLI-SESSION-IMPORT" -Status "incomplete" -Evidence "One or both Rust product-control session import gates are not passed." -Gap "Run portability smoke with -ImportCurrentPathProductControlAppControlSession and -ImportCurrentPathProductControlAnswererAppControlSession, dedicated state directories, and dedicated session import report paths after the corresponding AppControl live gates pass."
+}
 Add-AuditItem -Items $items -Id "REQ-BASIC-SMOKE" -Status "complete" -Evidence "Repository smoke evidence has no failed gates and required local evidence gates passed."
 Add-AuditItem -Items $items -Id "REQ-APPLE-PRESERVATION" -Status "complete" -Evidence "apple-native-preservation gate passed; CLI/FFI tests keep Apple-to-Apple native and Windows-to-Apple WebRTC interop."
 Add-AuditItem -Items $items -Id "REQ-NATIVE-DNS-SD" -Status "complete" -Evidence "native DNS-SD acceptance was required and passed."
+
+if (Test-GatePassedIfPresent -Acceptance $acceptance -Name "windows-live-file-transfer") {
+    Add-AuditItem -Items $items -Id "REQ-LIVE-FILE-TRANSFER" -Status "complete" -Evidence "windows-live-file-transfer gate passed with non-zero manifest/transferred bytes, full chunk/complete ACK coverage, sent/receipt SHA-256 equality, and peer/session/transport digest evidence."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-LIVE-FILE-TRANSFER" -Status "incomplete" -Evidence "windows-live-file-transfer gate is missing or not passed." -Gap "Run portability smoke with -RequireLiveFileTransfer -LiveFileTransferEvidencePath <path> after a real Windows peer transfers a file and records FileChannelObserved, ManifestFileCount, ManifestBytes, TransferredBytes, ChunkCount, ChunkAckCount equal to ChunkCount, CompleteAckReceived, SentFileSha256 equal to FileSha256Receipt, ReceiptMatchesSentHash, SessionIdSha256, PeerDeviceIdSha256, PeerFingerprintSha256, TransportBindingDigestHex, and all raw secret/path/signaling/payload capture flags false."
+}
+
+if (Test-GatePassedIfPresent -Acceptance $acceptance -Name "windows-live-remote-desktop") {
+    Add-AuditItem -Items $items -Id "REQ-LIVE-REMOTE-DESKTOP" -Status "complete" -Evidence "windows-live-remote-desktop gate passed with notice lifecycle, encrypted session, frame data, input closure, and disconnect evidence."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-LIVE-REMOTE-DESKTOP" -Status "incomplete" -Evidence "windows-live-remote-desktop gate is missing or not passed." -Gap "Run portability smoke with -RequireLiveRemoteDesktop -LiveRemoteDesktopEvidencePath <path> after a real Windows remote-desktop session records NoticeLifecycleObserved, EncryptedSessionEstablished, CaptureInputVideoDataPathObserved, frame dimensions/bytes/count, ObservedFps, mouse/keyboard/text/clipboard input, and disconnect state."
+}
+
+if (Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-appcontrol") {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-APPCONTROL" -Status "complete" -Evidence "current-path product-control AppControl gate passed with admission/lookup/signaling bind, WebRTC SDP/ICE transport, PQC handshake, Established secure session, and encrypted AppControl pong evidence."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-APPCONTROL" -Status "incomplete" -Evidence "windows-current-path-product-control-appcontrol gate is not passed." -Gap "Run portability smoke with -RequireCurrentPathProductControlAppControl, expected peer identity, Windows current-path credentials, Mac connection code, peer ML-KEM-768 public key evidence, and CurrentPathProductControlEvidencePath after a Mac product peer is waiting on the current-path connection code."
+}
+
+if (Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-file-transfer") {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-FILE-TRANSFER" -Status "complete" -Evidence "current-path product-control FileTransfer gate passed with admission/lookup/signaling bind, WebRTC SDP/ICE DataChannel open, initiator PQC product handshake, Established secure session, authenticated SBWC FileTransfer receipt, chunk ACK coverage, sent/receipt SHA-256 equality, and raw payload/path/signaling capture flags false."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-FILE-TRANSFER" -Status "incomplete" -Evidence "windows-current-path-product-control-file-transfer gate is not passed." -Gap "Run portability smoke with -RequireCurrentPathProductControlFileTransfer, expected peer identity, Windows current-path credentials, Mac connection code, peer ML-KEM-768 public key evidence, CurrentPathProductControlFileTransferEvidencePath, and a remote mac/iOS peer that accepts the Windows-originated signed current-path product-control FileTransfer offer. This current-path receipt proof remains separate from the answerer FileTransfer gate and the broader windows-live-file-transfer business gate."
+}
+
+if (Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-answerer-transport") {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-ANSWERER-TRANSPORT" -Status "complete" -Evidence "current-path answerer transport gate passed with admission/register/signaling bind and WebRTC SDP/ICE DataChannel open evidence. This is transport-only and does not satisfy AppControl or Mac product App proof."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-ANSWERER-TRANSPORT" -Status "incomplete" -Evidence "windows-current-path-product-control-answerer-transport gate is not passed." -Gap "Run portability smoke with -RequireCurrentPathProductControlAnswererTransport, expected peer identity, Windows current-path credentials, CurrentPathProductControlAnswererEvidencePath, and a remote mac/iOS peer that sends a current-path product-control offer to the Windows registered connection code."
+}
+
+if (Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-answerer-appcontrol") {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-ANSWERER-APPCONTROL" -Status "complete" -Evidence "current-path answerer AppControl gate passed with admission/register/signaling bind, WebRTC SDP/ICE DataChannel open, responder PQC product handshake, Established secure session, and encrypted AppControl ping/pong evidence."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-ANSWERER-APPCONTROL" -Status "incomplete" -Evidence "windows-current-path-product-control-answerer-appcontrol gate is not passed." -Gap "Run portability smoke with -RequireCurrentPathProductControlAnswererAppControl, expected peer identity, Windows current-path credentials, local ML-KEM-768 decapsulation key material, matching local ML-KEM-768 public key material, CurrentPathProductControlAnswererAppControlEvidencePath, and a remote mac/iOS peer that sends a signed current-path product-control MessageA plus encrypted AppControl ping to the Windows registered connection code."
+}
+
+if (Test-GatePassed -Acceptance $acceptance -Name "windows-current-path-product-control-answerer-file-transfer") {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-ANSWERER-FILE-TRANSFER" -Status "complete" -Evidence "current-path answerer FileTransfer gate passed with admission/register/signaling bind, WebRTC SDP/ICE DataChannel open, responder PQC product handshake, Established secure session, authenticated SBWC FileTransfer receipt, chunk ACK coverage, sent/receipt SHA-256 equality, and raw payload/path/signaling capture flags false."
+}
+else {
+    Add-AuditItem -Items $items -Id "REQ-CURRENT-PATH-ANSWERER-FILE-TRANSFER" -Status "incomplete" -Evidence "windows-current-path-product-control-answerer-file-transfer gate is not passed." -Gap "Run portability smoke with -RequireCurrentPathProductControlAnswererFileTransfer, expected peer identity, Windows current-path credentials, local ML-KEM-768 decapsulation key material, matching local ML-KEM-768 public key material, CurrentPathProductControlAnswererFileTransferEvidencePath, a distinct registered-code output path if other answerer gates run in the same package, and a remote mac/iOS peer that sends a signed current-path product-control MessageA plus encrypted FileTransfer payloads to the Windows registered connection code. This current-path receipt proof remains separate from the broader windows-live-file-transfer business gate."
+}
 
 if (Test-GatePassed -Acceptance $acceptance -Name "windows-reverse-ssh-relay-lifecycle") {
     Add-AuditItem -Items $items -Id "REQ-WINDOWS-REVERSE-SSH-RELAY" -Status "complete" -Evidence "Windows reverse SSH relay lifecycle gate passed with pinned host key, least-privilege task principal, strict key ACL, local sshd reachability, and task-owned process evidence."

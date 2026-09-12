@@ -14,10 +14,10 @@ public sealed class CurrentPathWebRtcProductControlSessionConnectorOptions
         string remotePublicKeyFingerprint,
         CurrentPathProtocolSigningAlgorithm remoteProtocolSigningAlgorithm,
         TimeSpan? signalFileTimeout = null,
-        TimeSpan? remoteAnswerTimeout = null,
+        TimeSpan? remoteSignalTimeout = null,
         int maxRemoteIceCandidates = 128)
     {
-        SessionId = CurrentPathWebRtcSignalingEnvelope.NormalizeSessionId(sessionId);
+        SessionId = CurrentPathWebRtcSignalingEnvelope.ValidateSessionId(sessionId);
         LocalDeviceId = CurrentPathProtocolIdentityBinding.NormalizeDeviceId(localDeviceId);
         RemoteDeviceId = CurrentPathProtocolIdentityBinding.NormalizeDeviceId(remoteDeviceId);
         ArgumentException.ThrowIfNullOrWhiteSpace(remotePublicKeyFingerprint);
@@ -34,15 +34,15 @@ public sealed class CurrentPathWebRtcProductControlSessionConnectorOptions
         }
 
         SignalFileTimeout = signalFileTimeout ?? TimeSpan.FromSeconds(30);
-        RemoteAnswerTimeout = remoteAnswerTimeout ?? TimeSpan.FromSeconds(120);
+        RemoteSignalTimeout = remoteSignalTimeout ?? TimeSpan.FromSeconds(120);
         if (SignalFileTimeout <= TimeSpan.Zero)
         {
             throw new InvalidDataException("Current-path product-control signal file timeout must be positive.");
         }
 
-        if (RemoteAnswerTimeout <= TimeSpan.Zero)
+        if (RemoteSignalTimeout <= TimeSpan.Zero)
         {
-            throw new InvalidDataException("Current-path product-control remote answer timeout must be positive.");
+            throw new InvalidDataException("Current-path product-control remote signal timeout must be positive.");
         }
 
         if (maxRemoteIceCandidates is < 0 or > 256)
@@ -65,7 +65,7 @@ public sealed class CurrentPathWebRtcProductControlSessionConnectorOptions
 
     public TimeSpan SignalFileTimeout { get; }
 
-    public TimeSpan RemoteAnswerTimeout { get; }
+    public TimeSpan RemoteSignalTimeout { get; }
 
     public int MaxRemoteIceCandidates { get; }
 }
@@ -116,9 +116,10 @@ public sealed class CurrentPathWebRtcProductControlSessionConnector : IWebRtcPro
                 pendingSession.LocalSignalPath,
                 pendingSession.RemoteSignalPath,
                 _options.SignalFileTimeout,
-                _options.RemoteAnswerTimeout,
+                _options.RemoteSignalTimeout,
                 _options.MaxRemoteIceCandidates);
 
+            var expectedRemoteSignalType = sessionRequest.AsAnswerer ? "offer" : "answer";
             if (sessionRequest.AsAnswerer)
             {
                 await _bridge.ExchangeAnswererAsync(_signalingClient, bridgeOptions, cancellationToken)
@@ -130,7 +131,16 @@ public sealed class CurrentPathWebRtcProductControlSessionConnector : IWebRtcPro
                     .ConfigureAwait(false);
             }
 
-            var liveSession = await pendingSession.WaitReadyAsync(cancellationToken).ConfigureAwait(false);
+            var readyTask = pendingSession.WaitReadyAsync(cancellationToken);
+            var lateRemoteIceCandidateRelayCount = await _bridge.RelayRemoteIceCandidatesUntilAsync(
+                    _signalingClient,
+                    bridgeOptions,
+                    expectedRemoteSignalType,
+                    readyTask,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var liveSession = await readyTask.ConfigureAwait(false);
+            liveSession.LateRemoteIceCandidateRelayCount = lateRemoteIceCandidateRelayCount;
             pendingSession = null;
             return liveSession;
         }

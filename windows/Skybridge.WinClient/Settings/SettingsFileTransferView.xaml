@@ -347,7 +347,7 @@
                 </Grid>
 
                 <!-- 传输时保持唤醒 → Settings.KeepSystemAwakeDuringTransfer. The preference flips a
-                     real keep-awake gate (WindowsPowerKeepAwake / SetThreadExecutionState) that an
+                     real keep-awake gate (WindowsPowerKeepAwake / Windows power request) that an
                      active transfer wraps itself in. -->
                 <Grid>
                     <Grid.ColumnDefinitions>

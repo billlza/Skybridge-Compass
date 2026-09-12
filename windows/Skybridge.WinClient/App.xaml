@@ -4,11 +4,12 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:local="using:Skybridge.WinClient"
     xmlns:vm="using:Skybridge.WinClient.ViewModels"
-    RequestedTheme="Dark">
+>
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///VisualParity/GeneratedVisualParity.xaml" />
                 <ResourceDictionary Source="ms-appx:///Themes/SkyBridgeTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///Themes/SkyBridgeControls.xaml" />
             </ResourceDictionary.MergedDictionaries>
@@ -28,57 +29,82 @@
             <vm:MonitorDisplayPrefs x:Key="MonitorDisplayPrefs" />
 
             <!-- ===================================================================
-                 NavigationView on-brand theme-resource overrides.
-                 These are the documented WinUI keys the NavigationViewItemPresenter
-                 reads for its selection indicator + selected/pointer-over surfaces.
-                 Overriding them here (App-level, theme-keyed) keeps the standard
-                 NavigationView control template intact — NO custom container hack —
-                 while making the selected item read on the dark glass sidebar.
-                 The selection pill / indicator now comes from the native control,
-                 so only ONE item highlights at a time (fixes the multi-pill bug).
+                 NavigationView theme-resource overrides = the Mac GlassSidebar.
+                 The stock NavigationViewItemPresenter keeps selection, hover, keyboard
+                 and UI Automation; these keys only restyle what it paints. Values are
+                 transcribed from GlassSidebar.swift (SidebarTabButton) so the two
+                 sidebars read as one design. Per-row colour (the selected pill in the
+                 feature's own hue, the glyph in that hue at rest) is stamped into each
+                 container by SidebarItemStyleSelector; the keys here are the base.
                  =================================================================== -->
 
-            <!-- Left selection indicator bar — hidden (Transparent). The Mac sidebar
-                 marks the selected item with a FILLED rounded accent pill, NOT a
-                 left rail indicator; suppressing the rail makes the selected look
-                 read as the Mac's solid pill instead of "a flat blue bar with a
-                 left stripe". -->
+            <!-- Rows are prepared through this selector (MenuItemContainerStyleSelector on
+                 the NavigationView in MainWindow): it colours each row after its feature. -->
+            <vm:SidebarItemStyleSelector x:Key="SidebarItemStyleSelector" />
+
+            <!-- Pill radius (Mac RoundedRectangle cornerRadius: 10). NavigationViewItem.CornerRadius
+                 is template-bound into the presenter's LayoutRoot and the built-in style sets it
+                 from ControlCornerRadius (4); the selector applies this token to each row. (A
+                 NavigationViewItemPresenterCornerRadius key used to be set here; no such key
+                 exists in WinUI, so the pill was 4 all along.) -->
+            <CornerRadius x:Key="SkyBridgeSidebarPillCornerRadius">10</CornerRadius>
+
+            <!-- The Mac marks the selected tab with a filled rounded pill, not a left
+                 rail, so the rail indicator is hidden. -->
             <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="Transparent" />
 
-            <!-- Selected-item background = a soft neutral rounded highlight pill,
-                 painted by the STOCK NavigationViewItemPresenter (no custom
-                 ControlTemplate). The custom per-feature presenter was removed
-                 because its Selected state never painted; the stock presenter
-                 renders these theme brushes reliably. A neutral white-alpha fill
-                 (not a per-feature accent) keeps the selected row readable on the
-                 dark glass sidebar while the per-feature COLORED icon still comes
-                 from the NavigationItemTemplate DataTemplate. CornerRadius 12
-                 (below) rounds it into a pill. -->
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#2EFFFFFF" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#3DFFFFFF" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPressed" Color="#42FFFFFF" />
+            <!-- Selected pill base = the accent blue gradient (SwiftUI color.gradient:
+                 lighter at the top, darker at the bottom). Every prepared row overrides
+                 these three keys with its own feature colour; this base only shows for a
+                 row the selector never saw, which does not happen with the feature list. -->
+            <LinearGradientBrush x:Key="NavigationViewItemBackgroundSelected" StartPoint="0,0" EndPoint="0,1">
+                <GradientStop Color="#FF4983F1" Offset="0.0" />
+                <GradientStop Color="#FF2A64D2" Offset="1.0" />
+            </LinearGradientBrush>
+            <StaticResource x:Key="NavigationViewItemBackgroundSelectedPointerOver" ResourceKey="NavigationViewItemBackgroundSelected" />
+            <StaticResource x:Key="NavigationViewItemBackgroundSelectedPressed" ResourceKey="NavigationViewItemBackgroundSelected" />
 
-            <!-- Unselected hover / press surfaces (subtle glass) -->
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#29FFFFFF" />
-            <SolidColorBrush x:Key="NavigationViewItemBackgroundPressed" Color="#33FFFFFF" />
+            <!-- Hover on an unselected row is a frosted patch (Mac: RoundedRectangle r10
+                 filled with .ultraThinMaterial); an achromatic white wash over the pane's
+                 frost (painted by the weather renderer) reads the same and never stacks a
+                 second material. -->
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#1FFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemBackgroundPressed" Color="#29FFFFFF" />
 
-            <!-- Foreground (text + glyph) across states -->
-            <SolidColorBrush x:Key="NavigationViewItemForeground" Color="#FFF7FAFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundPointerOver" Color="#FFF7FAFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundPressed" Color="#FFF7FAFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#FFF7FAFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#FFF7FAFF" />
-            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#FFF7FAFF" />
+            <!-- Foregrounds: the glyph inherits these through the presenter (its rest and
+                 hover colour is the feature accent, stamped per row); white when selected,
+                 like the Mac. The label carries its own brush in the row template. -->
+            <SolidColorBrush x:Key="NavigationViewItemForeground" Color="#D9F7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundPointerOver" Color="#D9F7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundPressed" Color="#D9F7FAFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelected" Color="#FFFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPointerOver" Color="#FFFFFFFF" />
+            <SolidColorBrush x:Key="NavigationViewItemForegroundSelectedPressed" Color="#FFFFFFFF" />
 
-            <!-- Pane background = the Mac sidebar glass (NavigationView has no PaneBackground
-                 property in WinUI 3; the pane chrome is driven by these theme resources). -->
-            <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="#E62E3857" />
-            <SolidColorBrush x:Key="NavigationViewExpandedPaneBackground" Color="#E62E3857" />
+            <!-- Pane = the Mac sidebar material (.ultraThinMaterial). The frost itself is
+                 painted by the weather renderer under the pane rect (SkyBridgeTheme explains
+                 why XAML acrylic cannot do it here), so the pane fill is transparent. In the
+                 Left pane mode the live key is the Expanded one; both are set. Content
+                 stays transparent so the backdrop shows through. -->
+            <StaticResource x:Key="NavigationViewDefaultPaneBackground" ResourceKey="SkyBridgeSidebarFillBrush" />
+            <StaticResource x:Key="NavigationViewExpandedPaneBackground" ResourceKey="SkyBridgeSidebarFillBrush" />
             <SolidColorBrush x:Key="NavigationViewContentBackground" Color="Transparent" />
-            <Thickness x:Key="NavigationViewContentGridBorderThickness">0</Thickness>
 
-            <!-- Widen the selected-item pill so it fills the 280px pane nicely -->
-            <CornerRadius x:Key="NavigationViewItemPresenterCornerRadius">12</CornerRadius>
+            <!-- Pane/content divider = the Mac sidebar's trailing 1px white@0.10 rule,
+                 drawn by the content grid's left border (its default rounded corner is
+                 zeroed so the rule runs straight from the top). -->
+            <SolidColorBrush x:Key="NavigationViewContentGridBorderBrush" Color="#1AFFFFFF" />
+            <Thickness x:Key="NavigationViewContentGridBorderThickness">1,0,0,0</Thickness>
+            <CornerRadius x:Key="NavigationViewContentGridCornerRadius">0</CornerRadius>
+
+            <!-- Row geometry (Mac: rows inset 12 from the pane edge, 4pt apart, 44pt tall).
+                 The presenter's LayoutRoot margin is this button margin; the pane content
+                 grid sits at -1, so 13 renders as 12. The content presenter's stock
+                 4,-1,8,-1 margin bleeds 1px out of the 44pt row template on each side;
+                 zeroing the vertical bleed makes the pill exactly 44 and the pitch 48.
+                 (NavigationViewItemButtonMargin also pads the pane toggle button, hidden here.) -->
+            <Thickness x:Key="NavigationViewItemButtonMargin">13,2</Thickness>
+            <Thickness x:Key="NavigationViewItemContentPresenterMargin">4,0,8,0</Thickness>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

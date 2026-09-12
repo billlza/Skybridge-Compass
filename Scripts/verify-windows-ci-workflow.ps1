@@ -31,8 +31,9 @@ $portabilitySmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-
 $acceptanceEvidencePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
 $rustCoveragePath = Join-Path $RepoRoot "Scripts/verify-rust-cli-coverage.ps1"
 $gitSshRemotePath = Join-Path $RepoRoot "Scripts/verify-git-ssh-remote.ps1"
+$powershellAstPath = Join-Path $RepoRoot "Scripts/verify-windows-powershell-ast.ps1"
 
-foreach ($path in @($workflowPath, $portabilitySmokePath, $acceptanceEvidencePath, $rustCoveragePath, $gitSshRemotePath)) {
+foreach ($path in @($workflowPath, $portabilitySmokePath, $acceptanceEvidencePath, $rustCoveragePath, $gitSshRemotePath, $powershellAstPath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing Windows CI gate input: $path"
 }
 
@@ -41,13 +42,14 @@ $portabilitySmoke = Get-Content -Raw -LiteralPath $portabilitySmokePath
 $acceptanceEvidence = Get-Content -Raw -LiteralPath $acceptanceEvidencePath
 $rustCoverage = Get-Content -Raw -LiteralPath $rustCoveragePath
 $gitSshRemote = Get-Content -Raw -LiteralPath $gitSshRemotePath
+$powershellAst = Get-Content -Raw -LiteralPath $powershellAstPath
 
 foreach ($signal in @(
     "name: Windows Portability",
     "windows-latest",
-    "actions/checkout@v7.0.0",
-    "actions/setup-dotnet@v5.3.0",
-    "dotnet-version: '10.0.x'",
+    "actions/checkout@v7.0.1",
+    "actions/setup-dotnet@v6.0.0",
+    "global-json-file: global.json",
     "Fetch mac UI parity baseline",
     "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c",
     'git fetch --no-tags --depth=1 origin $baselineCommit',
@@ -55,10 +57,9 @@ foreach ($signal in @(
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
-    "rustup toolchain install stable --profile minimal",
-    "rustup component add clippy",
-    "rustup component add llvm-tools-preview",
-    "cargo install cargo-llvm-cov --locked",
+    "rustup toolchain install 1.98.1 --profile minimal --component clippy --component llvm-tools-preview --component rustfmt",
+    "rustup default 1.98.1",
+    "cargo install cargo-llvm-cov --version 0.9.1 --locked",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
     "git remote set-url --push origin git@github.com:billlza/Skybridge-Compass.git",
     "New-Item -ItemType Directory -Force -Path artifacts",
@@ -97,6 +98,8 @@ foreach ($forbidden in @(
 foreach ($signal in @(
     "CiMode",
     "verify-windows-ci-workflow.ps1",
+    "verify-windows-powershell-ast.ps1",
+    "windows-powershell-ast",
     "CI mode keeps the SSH-only remote check",
     "RequireConfiguredSshCommand",
     "RequireKnownHosts",
@@ -117,9 +120,21 @@ foreach ($signal in @(
     "cliLineCoverage",
     "sourceUris",
     "online",
+    "windows-powershell-ast",
     "windows-portability-acceptance-evidence: ok"
 )) {
     Assert-Contains -Text $acceptanceEvidence -Needle $signal -Message "Acceptance evidence verifier missing CI signal: $signal"
+}
+
+foreach ($signal in @(
+    "System.Management.Automation.Language.Parser",
+    "ParseFile",
+    "windows-powershell-ast: parse-ok",
+    "windows-powershell-ast: ok",
+    "Invoke-Expression",
+    "CommandAst"
+)) {
+    Assert-Contains -Text $powershellAst -Needle $signal -Message "PowerShell AST gate missing signal: $signal"
 }
 
 foreach ($signal in @(

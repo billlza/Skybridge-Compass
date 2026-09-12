@@ -40,6 +40,8 @@ internal sealed class WorkspaceShellStateSource
 
     public ConnectionWorkspaceValidatedState ValidatedState => _viewModel.ValidatedConnectionState;
 
+    public ConnectionWorkspaceValidatedState GetValidatedState() => ValidatedState;
+
     public bool IsUsbManagementSelected => _viewModel.IsUsbManagementSelected;
 
     public bool IsFileTransferSelected => _viewModel.IsFileTransferSelected;

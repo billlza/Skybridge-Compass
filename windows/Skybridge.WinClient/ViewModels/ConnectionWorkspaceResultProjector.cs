@@ -115,7 +115,7 @@ internal sealed class ConnectionWorkspaceResultProjector
         DiscoveryBrowserPeerCandidate candidate)
     {
         _connectionInputCoordinator.ApplyValidatedState(
-            _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(peer));
+            _connectionWorkspaceStateClient.BuildDiscoveryPeerValidatedState(candidate));
         WorkspaceCollectionProjector.Replace(
             _discoveredPeers,
             new[] { candidate },

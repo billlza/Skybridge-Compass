@@ -45,6 +45,11 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
     private static readonly Dictionary<string, string> CanonicalToResourceKey =
         new(StringComparer.Ordinal)
         {
+            ["Sending"] = "FileTransferLiveSendingState",
+            ["Receiving"] = "FileTransferLiveReceivingState",
+            ["Sent"] = "FileTransferLiveSent",
+            ["Received"] = "FileTransferLiveReceived",
+            ["Failed"] = "FileTransferLiveFailed",
             // Indicator labels (SystemMonitorIndicators).
             ["Health"] = "SysMonLabel.Health",
             ["Monitoring"] = "SysMonLabel.Monitoring",
@@ -155,6 +160,11 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["SysMonLabel.Disk"] = new() { ["en"] = "Disk", ["zh"] = "磁盘", ["ja"] = "ディスク" },
             ["SysMonLabel.Network"] = new() { ["en"] = "Network", ["zh"] = "网络", ["ja"] = "ネットワーク" },
             ["SysMonLabel.Bandwidth"] = new() { ["en"] = "Bandwidth", ["zh"] = "带宽", ["ja"] = "帯域" },
+            ["FileTransferLiveSendingState"] = new() { ["en"] = "Sending", ["zh"] = "发送中", ["ja"] = "送信中" },
+            ["FileTransferLiveReceivingState"] = new() { ["en"] = "Receiving", ["zh"] = "接收中", ["ja"] = "受信中" },
+            ["FileTransferLiveSent"] = new() { ["en"] = "Sent", ["zh"] = "已发送", ["ja"] = "送信済み" },
+            ["FileTransferLiveReceived"] = new() { ["en"] = "Received", ["zh"] = "已接收", ["ja"] = "受信済み" },
+            ["FileTransferLiveFailed"] = new() { ["en"] = "Transfer failed", ["zh"] = "传输失败", ["ja"] = "転送に失敗しました" },
             ["SysMonState.Healthy"] = new() { ["en"] = "Healthy", ["zh"] = "良好", ["ja"] = "正常" },
             ["SysMonState.Caution"] = new() { ["en"] = "Caution", ["zh"] = "注意", ["ja"] = "注意" },
             ["SysMonState.NetworkOffline"] = new() { ["en"] = "Network offline", ["zh"] = "网络离线", ["ja"] = "ネットワークオフライン" },
@@ -176,7 +186,10 @@ public sealed class LabelKeyToLocalizedConverter : IValueConverter
             ["Nav.UsbManagement"] = new() { ["en"] = "USB Management", ["zh"] = "USB 管理", ["ja"] = "USB 管理" },
             ["Nav.FileTransfer"] = new() { ["en"] = "File Transfer", ["zh"] = "文件传输", ["ja"] = "ファイル転送" },
             ["Nav.RemoteDesktop"] = new() { ["en"] = "Remote Desktop", ["zh"] = "远程桌面", ["ja"] = "リモートデスクトップ" },
-            ["Nav.Quantum"] = new() { ["en"] = "Quantum", ["zh"] = "量子", ["ja"] = "量子" },
+            // Must equal the Mac "quantum.title" string. It is no longer a navigation label
+            // of its own — the Mac sidebar has no quantum tab — but the parenthetical the
+            // Mac appends to File Transfer and Remote Desktop, so the wording has to match.
+            ["Nav.Quantum"] = new() { ["en"] = "Quantum Communication", ["zh"] = "量子通信", ["ja"] = "量子通信" },
             ["Nav.SystemMonitor"] = new() { ["en"] = "System Monitor", ["zh"] = "系统监控", ["ja"] = "システムモニター" },
             ["Nav.Settings"] = new() { ["en"] = "Settings", ["zh"] = "设置", ["ja"] = "設定" },
             // Settings left sub-nav tab names (mirror the Mac SettingsView tab localizedName).

@@ -9,8 +9,9 @@ use crate::discovery::{
 use crate::error::{CoreError, CoreResult};
 use crate::frame::{
     decode_frame, decode_frame_payload as core_decode_frame_payload, encode_frame,
-    encode_sbp2_frame, CoreFrame, FrameFlags, FRAME_HEADER_LEN,
+    encode_sbp2_frame, CoreFrame, FrameError, FrameFlags, FRAME_HEADER_LEN,
 };
+use crate::padding::Sbp2Error;
 use crate::session::{
     AsyncSessionManager, HeartbeatEmitter, SessionAdapterBindingKind, SessionChannelBinding,
     SessionConfig, SessionState, SessionTransportBinding,
@@ -49,6 +50,9 @@ pub enum SkybridgeErrorCode {
     NoMutualCryptoSuite = 202,
     UnknownCryptoSuite = 203,
     TimeoutCannotDowngrade = 204,
+    /// A panic was caught at the FFI boundary. Callers get a failure they can log and
+    /// recover from instead of the process being torn down; see `guard_error_code`.
+    InternalPanic = 900,
 }
 
 #[repr(C)]
@@ -339,6 +343,8 @@ pub enum SkybridgeDiscoveryServiceKind {
     Unknown = 0,
     QuicPrimary = 1,
     TcpFallback = 2,
+    FileTransfer = 3,
+    RemoteControl = 4,
 }
 
 #[repr(C)]
@@ -828,6 +834,8 @@ fn map_discovery_service(service: DiscoveryServiceKind) -> SkybridgeDiscoverySer
     match service {
         DiscoveryServiceKind::QuicPrimary => SkybridgeDiscoveryServiceKind::QuicPrimary,
         DiscoveryServiceKind::TcpFallback => SkybridgeDiscoveryServiceKind::TcpFallback,
+        DiscoveryServiceKind::FileTransfer => SkybridgeDiscoveryServiceKind::FileTransfer,
+        DiscoveryServiceKind::RemoteControl => SkybridgeDiscoveryServiceKind::RemoteControl,
     }
 }
 
@@ -955,7 +963,10 @@ impl FfiSessionManager {
 #[async_trait::async_trait(?Send)]
 impl AsyncSessionManager for FfiSessionManager {
     async fn establish_async(&self, config: SessionConfig) -> CoreResult<()> {
-        let mut guard = self.state.lock().unwrap();
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *guard = SessionState::Connected;
         if config.client_id.is_empty() {
             return Err(CoreError::Session("missing client id".into()));
@@ -964,16 +975,25 @@ impl AsyncSessionManager for FfiSessionManager {
     }
 
     async fn reconnect_async(&self) -> CoreResult<()> {
-        *self.state.lock().unwrap() = SessionState::Connected;
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = SessionState::Connected;
         Ok(())
     }
 
     async fn terminate_async(&self) {
-        *self.state.lock().unwrap() = SessionState::Disconnected;
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = SessionState::Disconnected;
     }
 
     fn state(&self) -> SessionState {
-        *self.state.lock().unwrap()
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -992,14 +1012,20 @@ impl FfiStreamController {
     }
 
     fn record_input(&self, data: &[u8]) {
-        *self.last_input.lock().unwrap() = data.to_vec();
+        *self
+            .last_input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = data.to_vec();
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl StreamController for FfiStreamController {
     async fn adjust_flow(&self, rate: FlowRate) {
-        *self.last_rate.lock().unwrap() = Some(rate);
+        *self
+            .last_rate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rate);
     }
 
     async fn metrics(&self) -> StreamMetrics {
@@ -1114,7 +1140,10 @@ impl SkybridgeEngineHandle {
     }
 
     fn push_event(&self, event: FfiEvent) {
-        let mut queue = self.events.lock().unwrap();
+        let mut queue = self
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if queue.len() >= SKYBRIDGE_EVENT_CAPACITY {
             queue.pop_front();
         }
@@ -1122,9 +1151,15 @@ impl SkybridgeEngineHandle {
     }
 
     fn pop_event(&self) -> SkybridgeEvent {
-        let mut queue = self.events.lock().unwrap();
+        let mut queue = self
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(event) = queue.pop_front() {
-            let mut payload = self.last_event_payload.lock().unwrap();
+            let mut payload = self
+                .last_event_payload
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             *payload = event.payload;
             let ptr = if payload.is_empty() {
                 std::ptr::null()
@@ -1146,8 +1181,14 @@ impl SkybridgeEngineHandle {
     }
 
     fn clear_events(&self) {
-        self.events.lock().unwrap().clear();
-        self.last_event_payload.lock().unwrap().clear();
+        self.events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.last_event_payload
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     fn write_crypto_output(
@@ -1159,7 +1200,10 @@ impl SkybridgeEngineHandle {
             return SkybridgeErrorCode::InvalidInput;
         }
 
-        let mut buffer = self.last_crypto_output.lock().unwrap();
+        let mut buffer = self
+            .last_crypto_output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         *buffer = data;
 
         let view = SkybridgeBuffer {
@@ -1189,13 +1233,35 @@ impl SkybridgeEngineHandle {
     }
 }
 
+/// Stop a panic at the C ABI boundary and report it as an error code.
+///
+/// Every `extern "C"` function below is called from the .NET client through P/Invoke. A
+/// panic that reaches the boundary aborts the whole process (guaranteed since Rust 1.81 —
+/// previously undefined behaviour), so the managed side gets no exception, no error code,
+/// and no diagnostics: the app simply disappears. That silently bypasses the
+/// `SkybridgeErrorCode` contract this module exists to provide.
+///
+/// Wrapping the body converts that into `InternalPanic`, which the caller can log, surface,
+/// and recover from. `AssertUnwindSafe` is sound here because the guarded bodies operate on
+/// the handle's own state and return a plain `repr(C)` enum; a caught panic leaves the
+/// handle unusable but not observably torn, and the caller's contract is already "on a
+/// non-Ok code, stop using this operation's result".
+fn guard_error_code(body: impl FnOnce() -> SkybridgeErrorCode) -> SkybridgeErrorCode {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(code) => code,
+        Err(_) => SkybridgeErrorCode::InternalPanic,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FfiEvent {
     kind: SkybridgeEventKind,
     payload: Vec<u8>,
 }
 
-#[no_mangle]
+// Unit-test harnesses call these functions through Rust names, so only production and
+// integration builds reserve the stable C ABI symbols.
+#[cfg_attr(not(test), no_mangle)]
 /// Selects the Core-owned transport adapter for a peer pair.
 ///
 /// # Safety
@@ -1207,24 +1273,26 @@ pub unsafe extern "C" fn skybridge_select_transport(
     path: SkybridgeNetworkPath,
     out_selection: *mut SkybridgeTransportSelection,
 ) -> SkybridgeErrorCode {
-    if out_selection.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
+    guard_error_code(|| {
+        if out_selection.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
 
-    let plan = TransportSelector::select(
-        map_peer_capabilities(local),
-        map_peer_capabilities(remote),
-        map_network_path(path),
-    );
+        let plan = TransportSelector::select(
+            map_peer_capabilities(local),
+            map_peer_capabilities(remote),
+            map_network_path(path),
+        );
 
-    unsafe {
-        *out_selection = map_transport_selection(plan);
-    }
+        unsafe {
+            *out_selection = map_transport_selection(plan);
+        }
 
-    SkybridgeErrorCode::Ok
+        SkybridgeErrorCode::Ok
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Computes the Core transcript digest that binds a selected transport adapter
 /// and candidate pair to the session handshake.
 ///
@@ -1249,70 +1317,72 @@ pub unsafe extern "C" fn skybridge_transport_binding_digest(
     capability_digest_len: usize,
     out_digest: *mut SkybridgeTransportBindingDigest,
 ) -> SkybridgeErrorCode {
-    if out_digest.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
-
-    let Some(transport_kind) = map_ffi_transport_kind(transport) else {
-        return SkybridgeErrorCode::InvalidInput;
-    };
-    let local_endpoint = match unsafe { read_utf8(local_endpoint_ptr, local_endpoint_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let remote_endpoint = match unsafe { read_utf8(remote_endpoint_ptr, remote_endpoint_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let selected_candidate_pair =
-        match unsafe { read_utf8(selected_candidate_pair_ptr, selected_candidate_pair_len) } {
-            Ok(value) => value,
-            Err(err) => return err,
-        };
-    let transport_secret_fingerprint = match unsafe {
-        read_bytes(
-            transport_secret_fingerprint_ptr,
-            transport_secret_fingerprint_len,
-        )
-    } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let relay_id = if relay_id_len == 0 {
-        None
-    } else {
-        match unsafe { read_utf8(relay_id_ptr, relay_id_len) } {
-            Ok(value) => Some(value.to_string()),
-            Err(err) => return err,
+    guard_error_code(|| {
+        if out_digest.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
         }
-    };
-    let capability_digest =
-        match unsafe { read_bytes(capability_digest_ptr, capability_digest_len) } {
+
+        let Some(transport_kind) = map_ffi_transport_kind(transport) else {
+            return SkybridgeErrorCode::InvalidInput;
+        };
+        let local_endpoint = match unsafe { read_utf8(local_endpoint_ptr, local_endpoint_len) } {
             Ok(value) => value,
             Err(err) => return err,
         };
-
-    let material = TransportBindingMaterial {
-        transport_kind,
-        local_endpoint: local_endpoint.to_string(),
-        remote_endpoint: remote_endpoint.to_string(),
-        selected_candidate_pair: selected_candidate_pair.to_string(),
-        transport_secret_fingerprint: transport_secret_fingerprint.to_vec(),
-        relay_id,
-        timestamp_window_ms,
-        capability_digest: capability_digest.to_vec(),
-    };
-
-    unsafe {
-        *out_digest = SkybridgeTransportBindingDigest {
-            digest: material.transcript_digest(),
+        let remote_endpoint = match unsafe { read_utf8(remote_endpoint_ptr, remote_endpoint_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
         };
-    }
+        let selected_candidate_pair =
+            match unsafe { read_utf8(selected_candidate_pair_ptr, selected_candidate_pair_len) } {
+                Ok(value) => value,
+                Err(err) => return err,
+            };
+        let transport_secret_fingerprint = match unsafe {
+            read_bytes(
+                transport_secret_fingerprint_ptr,
+                transport_secret_fingerprint_len,
+            )
+        } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let relay_id = if relay_id_len == 0 {
+            None
+        } else {
+            match unsafe { read_utf8(relay_id_ptr, relay_id_len) } {
+                Ok(value) => Some(value.to_string()),
+                Err(err) => return err,
+            }
+        };
+        let capability_digest =
+            match unsafe { read_bytes(capability_digest_ptr, capability_digest_len) } {
+                Ok(value) => value,
+                Err(err) => return err,
+            };
 
-    SkybridgeErrorCode::Ok
+        let material = TransportBindingMaterial {
+            transport_kind,
+            local_endpoint: local_endpoint.to_string(),
+            remote_endpoint: remote_endpoint.to_string(),
+            selected_candidate_pair: selected_candidate_pair.to_string(),
+            transport_secret_fingerprint: transport_secret_fingerprint.to_vec(),
+            relay_id,
+            timestamp_window_ms,
+            capability_digest: capability_digest.to_vec(),
+        };
+
+        unsafe {
+            *out_digest = SkybridgeTransportBindingDigest {
+                digest: material.transcript_digest(),
+            };
+        }
+
+        SkybridgeErrorCode::Ok
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Builds the Core-owned pre-adapter connection plan for Windows and diagnostics.
 ///
 /// # Safety
@@ -1329,41 +1399,45 @@ pub unsafe extern "C" fn skybridge_plan_connection(
     traffic_padding: SkybridgeTrafficPaddingPlan,
     out_plan: *mut SkybridgeConnectionPlan,
 ) -> SkybridgeErrorCode {
-    if out_plan.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
-    if remote_suite_wire_ids_len > 0 && remote_suite_wire_ids_ptr.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
-
-    let remote_suite_wire_ids = if remote_suite_wire_ids_len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(remote_suite_wire_ids_ptr, remote_suite_wire_ids_len) }
-            .to_vec()
-    };
-    let request = ConnectionRequest {
-        local: map_peer_capabilities(local),
-        remote: map_peer_capabilities(remote),
-        path: map_network_path(path),
-        local_crypto: map_crypto_provider_capabilities(local_crypto),
-        remote_suite_wire_ids,
-        suite_policy: map_crypto_suite_policy(suite_policy),
-        traffic_padding: map_traffic_padding_plan(traffic_padding),
-    };
-
-    match plan_connection(request) {
-        Ok(plan) => {
-            unsafe {
-                *out_plan = map_connection_plan(plan);
-            }
-            SkybridgeErrorCode::Ok
+    guard_error_code(|| {
+        if out_plan.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
         }
-        Err(err) => map_connection_plan_error(err),
-    }
+        if remote_suite_wire_ids_len > 0 && remote_suite_wire_ids_ptr.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
+
+        let remote_suite_wire_ids = if remote_suite_wire_ids_len == 0 {
+            Vec::new()
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(remote_suite_wire_ids_ptr, remote_suite_wire_ids_len)
+            }
+            .to_vec()
+        };
+        let request = ConnectionRequest {
+            local: map_peer_capabilities(local),
+            remote: map_peer_capabilities(remote),
+            path: map_network_path(path),
+            local_crypto: map_crypto_provider_capabilities(local_crypto),
+            remote_suite_wire_ids,
+            suite_policy: map_crypto_suite_policy(suite_policy),
+            traffic_padding: map_traffic_padding_plan(traffic_padding),
+        };
+
+        match plan_connection(request) {
+            Ok(plan) => {
+                unsafe {
+                    *out_plan = map_connection_plan(plan);
+                }
+                SkybridgeErrorCode::Ok
+            }
+            Err(err) => map_connection_plan_error(err),
+        }
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Maps a Core logical channel to the adapter-specific binding selected by Core.
 ///
 /// # Safety
@@ -1373,27 +1447,29 @@ pub unsafe extern "C" fn skybridge_map_channel(
     channel: SkybridgeChannelKind,
     out_mapping: *mut SkybridgeChannelMapping,
 ) -> SkybridgeErrorCode {
-    if out_mapping.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
+    guard_error_code(|| {
+        if out_mapping.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
 
-    let Some(transport) = map_ffi_transport_kind(transport) else {
-        return SkybridgeErrorCode::InvalidInput;
-    };
+        let Some(transport) = map_ffi_transport_kind(transport) else {
+            return SkybridgeErrorCode::InvalidInput;
+        };
 
-    let profile = match map_channel(transport, map_ffi_channel_kind(channel)) {
-        Ok(profile) => profile,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
+        let profile = match map_channel(transport, map_ffi_channel_kind(channel)) {
+            Ok(profile) => profile,
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
 
-    unsafe {
-        *out_mapping = map_channel_profile(&profile);
-    }
+        unsafe {
+            *out_mapping = map_channel_profile(&profile);
+        }
 
-    SkybridgeErrorCode::Ok
+        SkybridgeErrorCode::Ok
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Encodes a Core channel frame into the caller-provided output buffer.
 ///
 /// # Safety
@@ -1410,29 +1486,31 @@ pub unsafe extern "C" fn skybridge_encode_frame(
     out_frame_capacity: usize,
     out_written_len: *mut usize,
 ) -> SkybridgeErrorCode {
-    let payload = match unsafe { read_bytes(payload_ptr, payload_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let flags = if ffi_flag(end_of_message) {
-        FrameFlags::END_OF_MESSAGE
-    } else {
-        FrameFlags::NONE
-    };
-    let encoded = match encode_frame(&CoreFrame {
-        channel: map_ffi_channel_kind(channel),
-        sequence,
-        flags,
-        payload: payload.to_vec(),
-    }) {
-        Ok(value) => value,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
+    guard_error_code(|| {
+        let payload = match unsafe { read_bytes(payload_ptr, payload_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let flags = if ffi_flag(end_of_message) {
+            FrameFlags::END_OF_MESSAGE
+        } else {
+            FrameFlags::NONE
+        };
+        let encoded = match encode_frame(&CoreFrame {
+            channel: map_ffi_channel_kind(channel),
+            sequence,
+            flags,
+            payload: payload.to_vec(),
+        }) {
+            Ok(value) => value,
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
 
-    unsafe { write_bytes(out_frame_ptr, out_frame_capacity, &encoded, out_written_len) }
+        unsafe { write_bytes(out_frame_ptr, out_frame_capacity, &encoded, out_written_len) }
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Encodes a Core channel frame whose payload is wrapped in SBP2 padding.
 ///
 /// # Safety
@@ -1449,24 +1527,29 @@ pub unsafe extern "C" fn skybridge_encode_sbp2_frame(
     out_frame_capacity: usize,
     out_written_len: *mut usize,
 ) -> SkybridgeErrorCode {
-    let payload = match unsafe { read_bytes(payload_ptr, payload_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let encoded = match encode_sbp2_frame(
-        map_ffi_channel_kind(channel),
-        sequence,
-        payload,
-        padded_payload_len,
-    ) {
-        Ok(value) => value,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
+    guard_error_code(|| {
+        let payload = match unsafe { read_bytes(payload_ptr, payload_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let encoded = match encode_sbp2_frame(
+            map_ffi_channel_kind(channel),
+            sequence,
+            payload,
+            padded_payload_len,
+        ) {
+            Ok(value) => value,
+            Err(FrameError::Padding(Sbp2Error::RandomnessUnavailable)) => {
+                return SkybridgeErrorCode::CryptoError;
+            }
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
 
-    unsafe { write_bytes(out_frame_ptr, out_frame_capacity, &encoded, out_written_len) }
+        unsafe { write_bytes(out_frame_ptr, out_frame_capacity, &encoded, out_written_len) }
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Decodes frame metadata without returning the frame payload.
 ///
 /// # Safety
@@ -1477,30 +1560,32 @@ pub unsafe extern "C" fn skybridge_decode_frame_metadata(
     frame_len: usize,
     out_metadata: *mut SkybridgeFrameMetadata,
 ) -> SkybridgeErrorCode {
-    if out_metadata.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
+    guard_error_code(|| {
+        if out_metadata.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
+        }
 
-    let encoded = match unsafe { read_bytes(frame_ptr, frame_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let frame = match decode_frame(encoded) {
-        Ok(value) => value,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
-    let metadata = match map_frame_metadata(&frame, frame_len) {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
+        let encoded = match unsafe { read_bytes(frame_ptr, frame_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let frame = match decode_frame(encoded) {
+            Ok(value) => value,
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
+        let metadata = match map_frame_metadata(&frame, frame_len) {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
 
-    unsafe {
-        *out_metadata = metadata;
-    }
-    SkybridgeErrorCode::Ok
+        unsafe {
+            *out_metadata = metadata;
+        }
+        SkybridgeErrorCode::Ok
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Decodes the application payload from a Core frame, unwrapping SBP2 when set.
 ///
 /// # Safety
@@ -1514,30 +1599,32 @@ pub unsafe extern "C" fn skybridge_decode_frame_payload(
     out_payload_capacity: usize,
     out_written_len: *mut usize,
 ) -> SkybridgeErrorCode {
-    let encoded = match unsafe { read_bytes(frame_ptr, frame_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let frame = match decode_frame(encoded) {
-        Ok(value) => value,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
-    let payload = match core_decode_frame_payload(&frame) {
-        Ok(value) => value,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
+    guard_error_code(|| {
+        let encoded = match unsafe { read_bytes(frame_ptr, frame_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let frame = match decode_frame(encoded) {
+            Ok(value) => value,
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
+        let payload = match core_decode_frame_payload(&frame) {
+            Ok(value) => value,
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
 
-    unsafe {
-        write_bytes(
-            out_payload_ptr,
-            out_payload_capacity,
-            &payload,
-            out_written_len,
-        )
-    }
+        unsafe {
+            write_bytes(
+                out_payload_ptr,
+                out_payload_capacity,
+                &payload,
+                out_written_len,
+            )
+        }
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Parses a DNS-SD discovery advertisement using the Core-owned TXT contract.
 ///
 /// # Safety
@@ -1551,45 +1638,47 @@ pub unsafe extern "C" fn skybridge_parse_discovery_advertisement(
     txt_len: usize,
     out_advertisement: *mut SkybridgeDiscoveryAdvertisement,
 ) -> SkybridgeErrorCode {
-    if out_advertisement.is_null() {
-        return SkybridgeErrorCode::InvalidInput;
-    }
-
-    let service = match unsafe { read_utf8(service_ptr, service_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-    let txt = match unsafe { read_utf8(txt_ptr, txt_len) } {
-        Ok(value) => value,
-        Err(err) => return err,
-    };
-
-    let Some(service_kind) = parse_service_kind(service) else {
-        return SkybridgeErrorCode::InvalidInput;
-    };
-    let advertisement = match parse_txt_advertisement(txt) {
-        Ok(value) => value,
-        Err(_) => return SkybridgeErrorCode::InvalidInput,
-    };
-
-    match map_discovery_advertisement(service_kind, advertisement) {
-        Ok(advertisement) => {
-            unsafe {
-                *out_advertisement = advertisement;
-            }
-            SkybridgeErrorCode::Ok
+    guard_error_code(|| {
+        if out_advertisement.is_null() {
+            return SkybridgeErrorCode::InvalidInput;
         }
-        Err(err) => err,
-    }
+
+        let service = match unsafe { read_utf8(service_ptr, service_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+        let txt = match unsafe { read_utf8(txt_ptr, txt_len) } {
+            Ok(value) => value,
+            Err(err) => return err,
+        };
+
+        let Some(service_kind) = parse_service_kind(service) else {
+            return SkybridgeErrorCode::InvalidInput;
+        };
+        let advertisement = match parse_txt_advertisement(txt) {
+            Ok(value) => value,
+            Err(_) => return SkybridgeErrorCode::InvalidInput,
+        };
+
+        match map_discovery_advertisement(service_kind, advertisement) {
+            Ok(advertisement) => {
+                unsafe {
+                    *out_advertisement = advertisement;
+                }
+                SkybridgeErrorCode::Ok
+            }
+            Err(err) => err,
+        }
+    })
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_new() -> *mut SkybridgeEngineHandle {
     let handle = SkybridgeEngineHandle::new();
     Box::into_raw(Box::new(handle))
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// The caller must ensure `handle` either originates from `skybridge_engine_new` or is null.
 pub unsafe extern "C" fn skybridge_engine_free(handle: *mut SkybridgeEngineHandle) {
@@ -1731,49 +1820,53 @@ fn parse_config(config: SkybridgeSessionConfig) -> Result<SessionConfig, Skybrid
     Ok(config)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_connect(
     handle: *mut SkybridgeEngineHandle,
     config: SkybridgeSessionConfig,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| match parse_config(config) {
-        Ok(config) => handle
-            .runtime
-            .block_on(handle.engine.initialize(config))
-            .map(|_| {
-                handle.push_event(FfiEvent {
-                    kind: SkybridgeEventKind::Connected,
-                    payload: Vec::new(),
-                });
-                SkybridgeErrorCode::Ok
-            })
-            .unwrap_or_else(map_core_error),
-        Err(code) => code,
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| match parse_config(config) {
+            Ok(config) => handle
+                .runtime
+                .block_on(handle.engine.initialize(config))
+                .map(|_| {
+                    handle.push_event(FfiEvent {
+                        kind: SkybridgeEventKind::Connected,
+                        payload: Vec::new(),
+                    });
+                    SkybridgeErrorCode::Ok
+                })
+                .unwrap_or_else(map_core_error),
+            Err(code) => code,
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_reconnect(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        handle
-            .runtime
-            .block_on(handle.engine.reconnect())
-            .map(|_| {
-                handle.push_event(FfiEvent {
-                    kind: SkybridgeEventKind::Reconnected,
-                    payload: Vec::new(),
-                });
-                SkybridgeErrorCode::Ok
-            })
-            .unwrap_or_else(map_core_error)
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            handle
+                .runtime
+                .block_on(handle.engine.reconnect())
+                .map(|_| {
+                    handle.push_event(FfiEvent {
+                        kind: SkybridgeEventKind::Reconnected,
+                        payload: Vec::new(),
+                    });
+                    SkybridgeErrorCode::Ok
+                })
+                .unwrap_or_else(map_core_error)
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// Returns the engine's local public key, generating one if necessary.
 ///
 /// # Safety
@@ -1783,126 +1876,139 @@ pub unsafe extern "C" fn skybridge_engine_local_public_key(
     handle: *mut SkybridgeEngineHandle,
     out_buffer: *mut SkybridgeBuffer,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if out_buffer.is_null() {
-            return SkybridgeErrorCode::InvalidInput;
-        }
-        let result = handle.runtime.block_on(async {
-            if let Some(existing) = handle.engine.crypto.local_public_key() {
-                Ok(existing)
-            } else {
-                handle.engine.crypto.begin_handshake().await
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if out_buffer.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
             }
-        });
-
-        match result {
-            Ok(key) => {
-                let mut buffer = handle.last_public_key.lock().unwrap();
-                *buffer = key;
-                let view = SkybridgeBuffer {
-                    data_ptr: if buffer.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        buffer.as_ptr()
-                    },
-                    data_len: buffer.len(),
-                };
-                unsafe {
-                    *out_buffer = view;
+            let result = handle.runtime.block_on(async {
+                if let Some(existing) = handle.engine.crypto.local_public_key() {
+                    Ok(existing)
+                } else {
+                    handle.engine.crypto.begin_handshake().await
                 }
-                SkybridgeErrorCode::Ok
+            });
+
+            match result {
+                Ok(key) => {
+                    let mut buffer = handle
+                        .last_public_key
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    *buffer = key;
+                    let view = SkybridgeBuffer {
+                        data_ptr: if buffer.is_empty() {
+                            std::ptr::null()
+                        } else {
+                            buffer.as_ptr()
+                        },
+                        data_len: buffer.len(),
+                    };
+                    unsafe {
+                        *out_buffer = view;
+                    }
+                    SkybridgeErrorCode::Ok
+                }
+                Err(err) => map_core_error(err),
             }
-            Err(err) => map_core_error(err),
-        }
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_send_heartbeat(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        handle
-            .runtime
-            .block_on(handle.engine.send_heartbeat())
-            .map(|_| {
-                handle.push_event(FfiEvent {
-                    kind: SkybridgeEventKind::HeartbeatAck,
-                    payload: Vec::new(),
-                });
-                SkybridgeErrorCode::Ok
-            })
-            .unwrap_or_else(map_core_error)
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            handle
+                .runtime
+                .block_on(handle.engine.send_heartbeat())
+                .map(|_| {
+                    handle.push_event(FfiEvent {
+                        kind: SkybridgeEventKind::HeartbeatAck,
+                        payload: Vec::new(),
+                    });
+                    SkybridgeErrorCode::Ok
+                })
+                .unwrap_or_else(map_core_error)
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_check_liveness(
     handle: *mut SkybridgeEngineHandle,
     grace_multiplier: u32,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        handle
-            .runtime
-            .block_on(handle.engine.check_liveness(grace_multiplier))
-            .map(|_| SkybridgeErrorCode::Ok)
-            .unwrap_or_else(|err| {
-                if let CoreError::HeartbeatTimeout { .. } = err {
-                    handle.push_event(FfiEvent {
-                        kind: SkybridgeEventKind::HeartbeatTimeout,
-                        payload: Vec::new(),
-                    });
-                }
-                map_core_error(err)
-            })
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            handle
+                .runtime
+                .block_on(handle.engine.check_liveness(grace_multiplier))
+                .map(|_| SkybridgeErrorCode::Ok)
+                .unwrap_or_else(|err| {
+                    if let CoreError::HeartbeatTimeout { .. } = err {
+                        handle.push_event(FfiEvent {
+                            kind: SkybridgeEventKind::HeartbeatTimeout,
+                            payload: Vec::new(),
+                        });
+                    }
+                    map_core_error(err)
+                })
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_throttle_stream(
     handle: *mut SkybridgeEngineHandle,
     flow: SkybridgeFlowRate,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        handle
-            .runtime
-            .block_on(handle.engine.throttle_stream(FlowRate {
-                target_bitrate_bps: flow.target_bitrate_bps,
-                max_latency_ms: flow.max_latency_ms,
-            }));
-        SkybridgeErrorCode::Ok
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            handle
+                .runtime
+                .block_on(handle.engine.throttle_stream(FlowRate {
+                    target_bitrate_bps: flow.target_bitrate_bps,
+                    max_latency_ms: flow.max_latency_ms,
+                }));
+            SkybridgeErrorCode::Ok
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// The caller must provide a valid handle and a non-null pointer to writable metrics output.
 pub unsafe extern "C" fn skybridge_engine_metrics(
     handle: *mut SkybridgeEngineHandle,
     out_metrics: *mut SkybridgeStreamMetrics,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if out_metrics.is_null() {
-            return SkybridgeErrorCode::InvalidInput;
-        }
-        let metrics = handle.runtime.block_on(handle.engine.metrics());
-        let ppm = (metrics.packet_loss * 1_000_000.0) as u32;
-        unsafe {
-            *out_metrics = SkybridgeStreamMetrics {
-                bitrate_bps: metrics.bitrate_bps,
-                packet_loss_ppm: ppm,
-            };
-        }
-        SkybridgeErrorCode::Ok
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if out_metrics.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
+            }
+            let metrics = handle.runtime.block_on(handle.engine.metrics());
+            let ppm = (metrics.packet_loss * 1_000_000.0) as u32;
+            unsafe {
+                *out_metrics = SkybridgeStreamMetrics {
+                    bitrate_bps: metrics.bitrate_bps,
+                    packet_loss_ppm: ppm,
+                };
+            }
+            SkybridgeErrorCode::Ok
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// The caller must provide a valid engine handle and, when `input_len > 0`, a non-null pointer
 /// to at least `input_len` bytes of readable memory.
@@ -1911,53 +2017,57 @@ pub unsafe extern "C" fn skybridge_engine_send_input(
     input_ptr: *const u8,
     input_len: usize,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if input_len > 0 && input_ptr.is_null() {
-            return SkybridgeErrorCode::InvalidInput;
-        }
-        let data = if input_len == 0 {
-            &[]
-        } else {
-            std::slice::from_raw_parts(input_ptr, input_len)
-        };
-        handle.engine.stream_controller.record_input(data);
-        handle.push_event(FfiEvent {
-            kind: SkybridgeEventKind::InputReceived,
-            payload: data.to_vec(),
-        });
-        SkybridgeErrorCode::Ok
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if input_len > 0 && input_ptr.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
+            }
+            let data = if input_len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(input_ptr, input_len)
+            };
+            handle.engine.stream_controller.record_input(data);
+            handle.push_event(FfiEvent {
+                kind: SkybridgeEventKind::InputReceived,
+                payload: data.to_vec(),
+            });
+            SkybridgeErrorCode::Ok
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_shutdown(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        handle
-            .runtime
-            .block_on(handle.engine.shutdown())
-            .map(|_| {
-                handle.push_event(FfiEvent {
-                    kind: SkybridgeEventKind::Disconnected,
-                    payload: Vec::new(),
-                });
-                SkybridgeErrorCode::Ok
-            })
-            .unwrap_or_else(map_core_error)
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            handle
+                .runtime
+                .block_on(handle.engine.shutdown())
+                .map(|_| {
+                    handle.push_event(FfiEvent {
+                        kind: SkybridgeEventKind::Disconnected,
+                        payload: Vec::new(),
+                    });
+                    SkybridgeErrorCode::Ok
+                })
+                .unwrap_or_else(map_core_error)
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_disconnect(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
-    skybridge_engine_shutdown(handle)
+    guard_error_code(|| skybridge_engine_shutdown(handle))
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// `out_buffer` must be a valid, writable pointer to `SkybridgeBuffer`. The returned pointer
 /// remains valid until the next call to encrypt/decrypt or the engine handle is freed.
@@ -1967,25 +2077,27 @@ pub unsafe extern "C" fn skybridge_engine_encrypt_payload(
     plaintext_len: usize,
     out_buffer: *mut SkybridgeBuffer,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if plaintext_len > 0 && plaintext_ptr.is_null() {
-            return SkybridgeErrorCode::InvalidInput;
-        }
-        let plaintext = if plaintext_len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(plaintext_ptr, plaintext_len) }
-        };
-        handle
-            .engine
-            .encrypt_payload(plaintext)
-            .map(|ciphertext| handle.write_crypto_output(ciphertext, out_buffer))
-            .unwrap_or_else(map_core_error)
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if plaintext_len > 0 && plaintext_ptr.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
+            }
+            let plaintext = if plaintext_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(plaintext_ptr, plaintext_len) }
+            };
+            handle
+                .engine
+                .encrypt_payload(plaintext)
+                .map(|ciphertext| handle.write_crypto_output(ciphertext, out_buffer))
+                .unwrap_or_else(map_core_error)
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// `out_buffer` must be a valid, writable pointer to `SkybridgeBuffer`. The returned pointer
 /// remains valid until the next encrypt/decrypt call or engine destruction.
@@ -1995,36 +2107,40 @@ pub unsafe extern "C" fn skybridge_engine_decrypt_payload(
     ciphertext_len: usize,
     out_buffer: *mut SkybridgeBuffer,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if ciphertext_len > 0 && ciphertext_ptr.is_null() {
-            return SkybridgeErrorCode::InvalidInput;
-        }
-        let ciphertext = if ciphertext_len == 0 {
-            &[]
-        } else {
-            unsafe { std::slice::from_raw_parts(ciphertext_ptr, ciphertext_len) }
-        };
-        handle
-            .engine
-            .decrypt_payload(ciphertext)
-            .map(|plaintext| handle.write_crypto_output(plaintext, out_buffer))
-            .unwrap_or_else(map_core_error)
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if ciphertext_len > 0 && ciphertext_ptr.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
+            }
+            let ciphertext = if ciphertext_len == 0 {
+                &[]
+            } else {
+                unsafe { std::slice::from_raw_parts(ciphertext_ptr, ciphertext_len) }
+            };
+            handle
+                .engine
+                .decrypt_payload(ciphertext)
+                .map(|plaintext| handle.write_crypto_output(plaintext, out_buffer))
+                .unwrap_or_else(map_core_error)
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_clear_events(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        handle.clear_events();
-        SkybridgeErrorCode::Ok
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            handle.clear_events();
+            SkybridgeErrorCode::Ok
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_state(
     handle: *mut SkybridgeEngineHandle,
 ) -> SkybridgeSessionState {
@@ -2034,7 +2150,7 @@ pub extern "C" fn skybridge_engine_state(
     .unwrap_or(SkybridgeSessionState::Disconnected)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// `out_snapshot` must be a valid writable pointer. The caller owns the memory
 /// and must ensure the handle is not freed while the snapshot is being
@@ -2043,39 +2159,47 @@ pub unsafe extern "C" fn skybridge_engine_snapshot(
     handle: *mut SkybridgeEngineHandle,
     out_snapshot: *mut SkybridgeEngineSnapshot,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if out_snapshot.is_null() {
-            return SkybridgeErrorCode::InvalidInput;
-        }
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if out_snapshot.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
+            }
 
-        let snapshot = handle.engine.snapshot();
-        let ffi_snapshot = SkybridgeEngineSnapshot {
-            state: map_session_state(snapshot.state),
-            last_heartbeat_ms: snapshot.last_heartbeat_ms.unwrap_or(0),
-            has_last_heartbeat: snapshot.last_heartbeat_ms.is_some(),
-            has_secrets: snapshot.has_secrets,
-            has_transport_binding: snapshot.has_transport_binding,
-            transport_kind: map_transport_kind(snapshot.transport_kind),
-            adapter_kind: map_transport_kind(snapshot.adapter_kind),
-            transport_binding_digest: snapshot.transport_binding_digest.unwrap_or([0; 32]),
-        };
+            let snapshot = handle.engine.snapshot();
+            let ffi_snapshot = SkybridgeEngineSnapshot {
+                state: map_session_state(snapshot.state),
+                last_heartbeat_ms: snapshot.last_heartbeat_ms.unwrap_or(0),
+                has_last_heartbeat: snapshot.last_heartbeat_ms.is_some(),
+                has_secrets: snapshot.has_secrets,
+                has_transport_binding: snapshot.has_transport_binding,
+                transport_kind: map_transport_kind(snapshot.transport_kind),
+                adapter_kind: map_transport_kind(snapshot.adapter_kind),
+                transport_binding_digest: snapshot.transport_binding_digest.unwrap_or([0; 32]),
+            };
 
-        unsafe {
-            *out_snapshot = ffi_snapshot;
-        }
+            unsafe {
+                *out_snapshot = ffi_snapshot;
+            }
 
-        SkybridgeErrorCode::Ok
+            SkybridgeErrorCode::Ok
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 pub extern "C" fn skybridge_engine_last_input_len(handle: *mut SkybridgeEngineHandle) -> usize {
-    SkybridgeEngineHandle::with_handle(handle, |handle| handle.input_buffer.lock().unwrap().len())
-        .unwrap_or(0)
+    SkybridgeEngineHandle::with_handle(handle, |handle| {
+        handle
+            .input_buffer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    })
+    .unwrap_or(0)
 }
 
-#[no_mangle]
+#[cfg_attr(not(test), no_mangle)]
 /// # Safety
 /// `out_event` must be a valid, writable pointer to `SkybridgeEvent` and is populated
 /// with the next queued event. The returned payload pointer remains valid until the
@@ -2084,15 +2208,254 @@ pub unsafe extern "C" fn skybridge_engine_poll_events(
     handle: *mut SkybridgeEngineHandle,
     out_event: *mut SkybridgeEvent,
 ) -> SkybridgeErrorCode {
-    SkybridgeEngineHandle::with_handle(handle, |handle| {
-        if out_event.is_null() {
+    guard_error_code(|| {
+        SkybridgeEngineHandle::with_handle(handle, |handle| {
+            if out_event.is_null() {
+                return SkybridgeErrorCode::InvalidInput;
+            }
+            let event = handle.pop_event();
+            unsafe {
+                *out_event = event;
+            }
+            SkybridgeErrorCode::Ok
+        })
+        .unwrap_or(SkybridgeErrorCode::NullHandle)
+    })
+}
+
+#[cfg_attr(not(test), no_mangle)]
+/// RFC 7748 X25519 key agreement for the product handshake's ephemeral contribution.
+///
+/// # Safety
+/// Both inputs must point to 32 readable bytes; `out_secret` must point to 32
+/// writable bytes. Input and output buffers may overlap. Invalid inputs and
+/// non-contributory peer points return an error without publishing a secret.
+pub unsafe extern "C" fn skybridge_x25519_shared_secret(
+    private: *const u8,
+    private_len: usize,
+    peer: *const u8,
+    peer_len: usize,
+    out_secret: *mut u8,
+    out_capacity: usize,
+) -> SkybridgeErrorCode {
+    guard_error_code(|| {
+        if private_len != 32
+            || peer_len != 32
+            || out_capacity != 32
+            || private.is_null()
+            || peer.is_null()
+            || out_secret.is_null()
+        {
             return SkybridgeErrorCode::InvalidInput;
         }
-        let event = handle.pop_event();
+        let mut private_bytes = zeroize::Zeroizing::new([0u8; 32]);
+        let mut peer_bytes = [0u8; 32];
         unsafe {
-            *out_event = event;
+            std::ptr::copy_nonoverlapping(private, private_bytes.as_mut_ptr(), 32);
+            std::ptr::copy_nonoverlapping(peer, peer_bytes.as_mut_ptr(), 32);
+            std::ptr::write_bytes(out_secret, 0, 32);
         }
-        SkybridgeErrorCode::Ok
+        match crate::crypto::x25519_shared_secret(&private_bytes, &peer_bytes) {
+            Ok(secret) => {
+                let secret = zeroize::Zeroizing::new(secret);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(secret.as_ptr(), out_secret, 32);
+                }
+                SkybridgeErrorCode::Ok
+            }
+            Err(_) => SkybridgeErrorCode::CryptoError,
+        }
     })
-    .unwrap_or(SkybridgeErrorCode::NullHandle)
+}
+
+// Q-Periapt ABI2 stays behind the existing native Core boundary.
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn skybridge_q_periapt_abi_version() -> u32 {
+    q_periapt_ffi_abi2::q_periapt_abi_version()
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn skybridge_q_periapt_version() -> *const c_char {
+    q_periapt_ffi_abi2::q_periapt_version()
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn skybridge_q_periapt_fixed_suite_id() -> *const c_char {
+    q_periapt_ffi_abi2::q_periapt_fixed_suite_id()
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn skybridge_q_periapt_fixed_suite_id_len() -> usize {
+    q_periapt_ffi_abi2::q_periapt_fixed_suite_id_len()
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+#[cfg_attr(not(test), no_mangle)]
+pub extern "C" fn skybridge_q_periapt_status_name(code: i32) -> *const c_char {
+    q_periapt_ffi_abi2::q_periapt_status_name(code)
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+///
+/// # Safety
+/// All pointers, lengths, and non-overlap requirements are those of the
+/// corresponding q_periapt.h entry point. The caller owns every buffer.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn skybridge_q_periapt_decision_from_signed_policy(
+    toml: *const u8,
+    toml_len: usize,
+    signature: *const u8,
+    signature_len: usize,
+    vk: *const u8,
+    vk_len: usize,
+    last_trusted_state: *const u8,
+    last_trusted_state_len: usize,
+    out_decision: *mut u8,
+    out_decision_len: usize,
+) -> i32 {
+    unsafe {
+        q_periapt_ffi_abi2::q_periapt_decision_from_signed_policy(
+            toml,
+            toml_len,
+            signature,
+            signature_len,
+            vk,
+            vk_len,
+            last_trusted_state,
+            last_trusted_state_len,
+            out_decision,
+            out_decision_len,
+        )
+    }
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+///
+/// # Safety
+/// All pointers, lengths, and non-overlap requirements are those of the
+/// corresponding q_periapt.h entry point. The caller owns every buffer.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn skybridge_q_periapt_generate_keypair(
+    decision: *const u8,
+    decision_len: usize,
+    out_sk_pq: *mut u8,
+    out_sk_pq_len: usize,
+    out_pk_pq: *mut u8,
+    out_pk_pq_len: usize,
+    out_sk_trad: *mut u8,
+    out_sk_trad_len: usize,
+    out_pk_trad: *mut u8,
+    out_pk_trad_len: usize,
+) -> i32 {
+    unsafe {
+        q_periapt_ffi_abi2::q_periapt_generate_keypair(
+            decision,
+            decision_len,
+            out_sk_pq,
+            out_sk_pq_len,
+            out_pk_pq,
+            out_pk_pq_len,
+            out_sk_trad,
+            out_sk_trad_len,
+            out_pk_trad,
+            out_pk_trad_len,
+        )
+    }
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+///
+/// # Safety
+/// All pointers, lengths, and non-overlap requirements are those of the
+/// corresponding q_periapt.h entry point. The caller owns every buffer.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn skybridge_q_periapt_encapsulate(
+    decision: *const u8,
+    decision_len: usize,
+    pk_pq: *const u8,
+    pk_pq_len: usize,
+    pk_trad: *const u8,
+    pk_trad_len: usize,
+    application_context: *const u8,
+    application_context_len: usize,
+    out_ct_pq: *mut u8,
+    out_ct_pq_len: usize,
+    out_ct_trad: *mut u8,
+    out_ct_trad_len: usize,
+    out_secret: *mut u8,
+    out_secret_len: usize,
+) -> i32 {
+    unsafe {
+        q_periapt_ffi_abi2::q_periapt_encapsulate(
+            decision,
+            decision_len,
+            pk_pq,
+            pk_pq_len,
+            pk_trad,
+            pk_trad_len,
+            application_context,
+            application_context_len,
+            out_ct_pq,
+            out_ct_pq_len,
+            out_ct_trad,
+            out_ct_trad_len,
+            out_secret,
+            out_secret_len,
+        )
+    }
+}
+
+/// Forward the fixed ABI2 contract without remapping status codes.
+///
+/// # Safety
+/// All pointers, lengths, and non-overlap requirements are those of the
+/// corresponding q_periapt.h entry point. The caller owns every buffer.
+#[cfg_attr(not(test), no_mangle)]
+pub unsafe extern "C" fn skybridge_q_periapt_decapsulate(
+    decision: *const u8,
+    decision_len: usize,
+    sk_pq: *const u8,
+    sk_pq_len: usize,
+    ct_pq: *const u8,
+    ct_pq_len: usize,
+    pk_pq: *const u8,
+    pk_pq_len: usize,
+    sk_trad: *const u8,
+    sk_trad_len: usize,
+    ct_trad: *const u8,
+    ct_trad_len: usize,
+    pk_trad: *const u8,
+    pk_trad_len: usize,
+    application_context: *const u8,
+    application_context_len: usize,
+    out_secret: *mut u8,
+    out_secret_len: usize,
+) -> i32 {
+    unsafe {
+        q_periapt_ffi_abi2::q_periapt_decapsulate(
+            decision,
+            decision_len,
+            sk_pq,
+            sk_pq_len,
+            ct_pq,
+            ct_pq_len,
+            pk_pq,
+            pk_pq_len,
+            sk_trad,
+            sk_trad_len,
+            ct_trad,
+            ct_trad_len,
+            pk_trad,
+            pk_trad_len,
+            application_context,
+            application_context_len,
+            out_secret,
+            out_secret_len,
+        )
+    }
 }

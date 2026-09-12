@@ -2,8 +2,11 @@ use crate::error::CoreError;
 use crate::suite::CryptoSuite;
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit};
 use hkdf::Hkdf;
-use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
-use rand_core::{OsRng, RngCore};
+use p256::{
+    ecdh::EphemeralSecret,
+    elliptic_curve::{sec1::ToSec1Point, Generate},
+    PublicKey,
+};
 use sha2::Sha256;
 use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -24,8 +27,19 @@ impl std::fmt::Debug for SessionSecrets {
     }
 }
 
-#[allow(deprecated)]
-type AeadNonce = aes_gcm::aead::generic_array::GenericArray<u8, aes_gcm::aead::consts::U12>;
+/// Derive the RFC 7748 X25519 contribution used by the v2 product handshake.
+/// Low-order peer points are rejected because they contribute no secret entropy.
+pub fn x25519_shared_secret(private: &[u8; 32], peer: &[u8; 32]) -> Result<[u8; 32], CoreError> {
+    let private = x25519_dalek::StaticSecret::from(*private);
+    let peer = x25519_dalek::PublicKey::from(*peer);
+    let shared = private.diffie_hellman(&peer);
+    if !shared.was_contributory() {
+        return Err(CoreError::InvalidCryptoKey);
+    }
+    Ok(shared.to_bytes())
+}
+
+type AeadNonce = aes_gcm::Nonce<aes_gcm::aead::consts::U12>;
 
 impl SessionSecrets {
     /// Derives AES-256-GCM material from a raw shared secret via HKDF-SHA256,
@@ -58,7 +72,8 @@ impl SessionSecrets {
     pub(crate) fn seal(&self, plaintext: &[u8]) -> Result<Vec<u8>, CoreError> {
         let cipher = self.cipher()?;
         let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        getrandom::fill(&mut nonce_bytes)
+            .map_err(|e| CoreError::Crypto(format!("secure nonce generation failed: {e}")))?;
         let nonce: AeadNonce = nonce_bytes.into();
         let mut ciphertext = cipher
             .encrypt(&nonce, plaintext)
@@ -141,10 +156,12 @@ pub struct P256KeyExchange;
 #[async_trait::async_trait(?Send)]
 impl KeyExchangeProvider for P256KeyExchange {
     async fn generate(&self) -> Result<KeyMaterial, CoreError> {
-        let secret = EphemeralSecret::random(&mut rand_core::OsRng);
-        let public_point = PublicKey::from(&secret);
+        let secret = EphemeralSecret::try_generate().map_err(|e| {
+            CoreError::CryptoHandshake(format!("P-256 ephemeral key generation failed: {e}"))
+        })?;
+        let public_point = secret.public_key();
         Ok(KeyMaterial {
-            public_key: public_point.to_encoded_point(false).as_bytes().to_vec(),
+            public_key: public_point.to_sec1_point(false).as_bytes().to_vec(),
             secret,
         })
     }
@@ -260,6 +277,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn p256_public_key_keeps_uncompressed_sec1_wire_encoding() {
+        let crypto = P256SessionCrypto::new(P256KeyExchange);
+
+        let public_key = crypto.begin_handshake().await.unwrap();
+
+        assert_eq!(public_key.len(), 65);
+        assert_eq!(public_key.first(), Some(&0x04));
+    }
+
+    #[tokio::test]
     async fn handshake_fails_with_invalid_peer_key() {
         let crypto = P256SessionCrypto::new(P256KeyExchange);
         crypto.begin_handshake().await.unwrap();
@@ -304,6 +331,18 @@ mod tests {
             .expect("decrypt");
 
         assert_eq!(payload.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn aes_gcm_frame_keeps_nonce_prefix_and_tag_lengths() {
+        let secrets =
+            SessionSecrets::new(&[9u8; 32], CryptoSuite::P256Ecdsa).expect("construct secrets");
+        let plaintext = b"wire-format";
+
+        let sealed = secrets.seal(plaintext).expect("seal");
+
+        assert_eq!(sealed.len(), 12 + plaintext.len() + 16);
+        assert_eq!(secrets.open(&sealed).expect("open"), plaintext);
     }
 
     #[tokio::test]

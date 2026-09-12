@@ -93,9 +93,7 @@ internal sealed class WebRtcSignalDocument
                 $"WebRTC signaling file exceeds the maximum size of {MaxSignalDocumentBytes} bytes: {path}");
         }
 
-        var tmp = path + ".tmp";
-        File.WriteAllText(tmp, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        File.Move(tmp, path, overwrite: true);
+        WebRtcArtifactFileWriter.WriteUtf8TextAtomically(path, json);
     }
 
     private static bool IsOfferOrAnswer(string type) =>
@@ -173,14 +171,19 @@ internal sealed class WebRtcSignalDocument
 
     private static string ReadTextWithSizeLimit(string path)
     {
-        var fileInfo = new FileInfo(path);
-        if (fileInfo.Length > MaxSignalDocumentBytes)
+        using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length > MaxSignalDocumentBytes)
         {
             throw new InvalidDataException(
                 $"WebRTC signaling file exceeds the maximum size of {MaxSignalDocumentBytes} bytes: {path}");
         }
 
-        return File.ReadAllText(path);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
     }
 
     public string Fingerprint()

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Skybridge.WinClient.RemoteControl.RemoteControlHostBanner"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <InfoBar
+        x:Uid="RemoteControlHostActiveBanner"
+        AutomationProperties.AutomationId="Skybridge.RemoteControl.Host.ActiveNotice"
+        Title="Remote access is enabled"
+        Message="{Binding StatusText}"
+        IsOpen="{Binding IsEnabled}"
+        Severity="Warning"
+        IsClosable="False">
+        <InfoBar.ActionButton>
+            <Button x:Uid="RemoteControlHostStop" Content="Stop" Command="{Binding StopCommand}" AutomationProperties.AutomationId="Skybridge.RemoteControl.Host.Stop" />
+        </InfoBar.ActionButton>
+        <InfoBar.Content>
+            <ItemsControl ItemsSource="{Binding Sessions}" HorizontalAlignment="Stretch">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Spacing="6" Margin="0,8,0,8" HorizontalAlignment="Stretch">
+                            <TextBlock Text="{Binding DeviceName}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                            <TextBlock Text="{Binding DeviceId}" FontSize="12" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <CommandBar DefaultLabelPosition="Right" Background="Transparent" HorizontalAlignment="Stretch">
+                                <AppBarButton x:Uid="RemoteControlHostSessionApproveViewing" Icon="View" Label="Allow viewing" Command="{Binding ApproveViewingCommand}" />
+                                <AppBarButton x:Uid="RemoteControlHostSessionApproveControl" Icon="Accept" Label="Allow control" Command="{Binding ApproveControlCommand}" />
+                                <CommandBar.SecondaryCommands>
+                                    <AppBarButton x:Uid="RemoteControlHostSessionTransferInput" Label="Give input control" Command="{Binding TransferInputCommand}" />
+                                    <AppBarButton x:Uid="RemoteControlHostSessionDisconnect" Label="Reject / disconnect" Command="{Binding DisconnectCommand}" />
+                                </CommandBar.SecondaryCommands>
+                            </CommandBar>
+                            <TextBlock Text="{Binding ErrorMessage}" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </InfoBar.Content>
+    </InfoBar>
+    </ScrollViewer>
+</UserControl>

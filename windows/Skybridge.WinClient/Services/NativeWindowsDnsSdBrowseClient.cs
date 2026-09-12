@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Skybridge.WinClient.Services;
@@ -16,10 +17,10 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
     private const int MaxBrowseSeconds = 30;
     private const int MaxResolveSeconds = 3;
     private const int MaxDnsRecords = 128;
-    private const int MaxTxtProperties = 64;
-    private static readonly TimeSpan CallbackDrainDelay = TimeSpan.FromMilliseconds(250);
 
-    public async Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(WindowsDnsSdBrowseRequest request)
+    public async Task<WindowsDnsSdBrowseSnapshot> BrowseAsync(
+        WindowsDnsSdBrowseRequest request,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -49,7 +50,11 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         var browseTasks = new List<Task<NativeBrowseResult>>();
         foreach (var service in services)
         {
-            browseTasks.Add(BrowseServiceInstancesAsync(service, NormalizeBrowseQueryName(service), browseWindow));
+            browseTasks.Add(BrowseServiceInstancesAsync(
+                service,
+                NormalizeBrowseQueryName(service),
+                browseWindow,
+                cancellationToken));
         }
 
         var browseResults = await Task.WhenAll(browseTasks).ConfigureAwait(false);
@@ -67,6 +72,15 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
             }
         }
 
+        if (cancellationToken.IsCancellationRequested)
+        {
+            facts.Add(new DiscoveryBrowserFact(
+                "Native browse",
+                "cancelled",
+                "All exact-owner DnsServiceBrowse cancellation callbacks completed; resolve operations were not started."));
+            return new WindowsDnsSdBrowseSnapshot(records, facts);
+        }
+
         if (resolveTargets.Count == 0)
         {
             facts.Add(new DiscoveryBrowserFact(
@@ -79,7 +93,7 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         var resolveTasks = new List<Task<NativeResolveResult>>();
         foreach (var target in resolveTargets)
         {
-            resolveTasks.Add(ResolveServiceInstanceAsync(target, resolveWindow));
+            resolveTasks.Add(ResolveServiceInstanceAsync(target, resolveWindow, cancellationToken));
         }
 
         var resolveResults = await Task.WhenAll(resolveTasks).ConfigureAwait(false);
@@ -95,17 +109,32 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
     private static async Task<NativeBrowseResult> BrowseServiceInstancesAsync(
         string service,
         string queryName,
-        TimeSpan browseWindow)
+        TimeSpan browseWindow,
+        CancellationToken cancellationToken)
     {
         var context = new BrowseCallbackContext(service, queryName);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            context.AddFact(
+                "Native browse",
+                "cancelled",
+                $"{queryName} was cancelled before DnsServiceBrowse acquired a native callback lease.");
+            return context.ToResult();
+        }
+
         DnsServiceBrowseCallback callback = BrowseCallback;
-        var contextHandle = GCHandle.Alloc(context);
-        var queryNamePointer = Marshal.StringToHGlobalUni(queryName);
-        var cancel = new DnsServiceCancel();
+        var contextHandle = default(GCHandle);
+        var requestHandle = default(GCHandle);
+        var cancelHandle = default(GCHandle);
+        var queryNamePointer = IntPtr.Zero;
+        var cancel = new DnsServiceCancel[1];
 
         try
         {
-            var nativeRequest = new DnsServiceBrowseRequestNative
+            contextHandle = GCHandle.Alloc(context);
+            queryNamePointer = Marshal.StringToHGlobalUni(queryName);
+            var nativeRequest = new DnsServiceBrowseRequestNative[1];
+            nativeRequest[0] = new DnsServiceBrowseRequestNative
             {
                 Version = DnsQueryRequestVersion1,
                 InterfaceIndex = 0,
@@ -118,21 +147,28 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
                 "Native browse",
                 "query",
                 $"{queryName} via DnsServiceBrowse; returned PTR records are resolved with DnsServiceResolve.");
-            var status = DnsServiceBrowse(ref nativeRequest, ref cancel);
+            // DNS-SD owns these native addresses across the asynchronous operation.
+            // A ref argument is pinned only during the P/Invoke; a compacting GC
+            // after the await must not move the request or cancellation handle.
+            requestHandle = GCHandle.Alloc(nativeRequest, GCHandleType.Pinned);
+            cancelHandle = GCHandle.Alloc(cancel, GCHandleType.Pinned);
+            var status = DnsServiceBrowse(requestHandle.AddrOfPinnedObject(), cancelHandle.AddrOfPinnedObject());
             if (status != DnsRequestPending)
             {
-                context.AddFact("Native browse", FormatStatus(status), "DnsServiceBrowse did not enter the pending asynchronous state.");
+                context.AddFailure(new InvalidOperationException(
+                    $"DnsServiceBrowse for {queryName} did not enter the pending asynchronous state ({FormatStatus(status)})."));
                 return context.ToResult();
             }
 
-            await Task.Delay(browseWindow).ConfigureAwait(false);
-            var cancelStatus = DnsServiceBrowseCancel(ref cancel);
+            await WaitForWindowOrCancellationAsync(browseWindow, cancellationToken).ConfigureAwait(false);
+            var cancelStatus = DnsServiceBrowseCancel(cancelHandle.AddrOfPinnedObject());
             if (cancelStatus != ErrorSuccess && cancelStatus != ErrorCancelled)
             {
-                context.AddFact("Native browse cancel", FormatStatus(cancelStatus), "DnsServiceBrowseCancel returned a non-success status.");
+                context.AddFailure(new InvalidOperationException(
+                    $"DnsServiceBrowseCancel for {queryName} failed ({FormatStatus(cancelStatus)})."));
             }
 
-            await Task.Delay(CallbackDrainDelay).ConfigureAwait(false);
+            await context.CallbackCompleted.ConfigureAwait(false);
             return context.ToResult();
         }
         catch (DllNotFoundException ex)
@@ -152,7 +188,13 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         }
         finally
         {
-            Marshal.FreeHGlobal(queryNamePointer);
+            if (requestHandle.IsAllocated) requestHandle.Free();
+            if (cancelHandle.IsAllocated) cancelHandle.Free();
+            if (queryNamePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(queryNamePointer);
+            }
+
             if (contextHandle.IsAllocated)
             {
                 contextHandle.Free();
@@ -164,17 +206,32 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
 
     private static async Task<NativeResolveResult> ResolveServiceInstanceAsync(
         NativeResolveTarget target,
-        TimeSpan resolveWindow)
+        TimeSpan resolveWindow,
+        CancellationToken cancellationToken)
     {
         var context = new ResolveCallbackContext(target);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            context.AddFact(
+                "Native resolve",
+                "cancelled",
+                $"{target.InstanceName} was cancelled before DnsServiceResolve acquired a native callback lease.");
+            return context.ToResult();
+        }
+
         DnsServiceResolveComplete callback = ResolveCallback;
-        var contextHandle = GCHandle.Alloc(context);
-        var queryNamePointer = Marshal.StringToHGlobalUni(target.InstanceName);
-        var cancel = new DnsServiceCancel();
+        var contextHandle = default(GCHandle);
+        var requestHandle = default(GCHandle);
+        var cancelHandle = default(GCHandle);
+        var queryNamePointer = IntPtr.Zero;
+        var cancel = new DnsServiceCancel[1];
 
         try
         {
-            var nativeRequest = new DnsServiceResolveRequestNative
+            contextHandle = GCHandle.Alloc(context);
+            queryNamePointer = Marshal.StringToHGlobalUni(target.InstanceName);
+            var nativeRequest = new DnsServiceResolveRequestNative[1];
+            nativeRequest[0] = new DnsServiceResolveRequestNative
             {
                 Version = DnsQueryRequestVersion1,
                 InterfaceIndex = 0,
@@ -183,21 +240,32 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
                 QueryContext = GCHandle.ToIntPtr(contextHandle)
             };
 
-            var status = DnsServiceResolve(ref nativeRequest, ref cancel);
+            // DNS-SD owns these native addresses across the asynchronous operation.
+            // A ref argument is pinned only during the P/Invoke; a compacting GC
+            // after the await must not move the request or cancellation handle.
+            requestHandle = GCHandle.Alloc(nativeRequest, GCHandleType.Pinned);
+            cancelHandle = GCHandle.Alloc(cancel, GCHandleType.Pinned);
+            var status = DnsServiceResolve(requestHandle.AddrOfPinnedObject(), cancelHandle.AddrOfPinnedObject());
             if (status != DnsRequestPending)
             {
-                context.AddFact("Native resolve", FormatStatus(status), $"DnsServiceResolve did not enter the pending state for {target.InstanceName}.");
+                context.AddFailure(new InvalidOperationException(
+                    $"DnsServiceResolve for {target.InstanceName} did not enter the pending asynchronous state ({FormatStatus(status)})."));
                 return context.ToResult();
             }
 
-            await Task.Delay(resolveWindow).ConfigureAwait(false);
-            var cancelStatus = DnsServiceResolveCancel(ref cancel);
-            if (cancelStatus != ErrorSuccess && cancelStatus != ErrorCancelled)
+            var windowOrCancellation = WaitForWindowOrCancellationAsync(resolveWindow, cancellationToken);
+            var completed = await Task.WhenAny(context.CallbackCompleted, windowOrCancellation).ConfigureAwait(false);
+            if (completed != context.CallbackCompleted && !context.CallbackCompleted.IsCompleted)
             {
-                context.AddFact("Native resolve cancel", FormatStatus(cancelStatus), "DnsServiceResolveCancel returned a non-success status.");
+                var cancelStatus = DnsServiceResolveCancel(cancelHandle.AddrOfPinnedObject());
+                if (cancelStatus != ErrorSuccess && cancelStatus != ErrorCancelled)
+                {
+                    context.AddFailure(new InvalidOperationException(
+                        $"DnsServiceResolveCancel for {target.InstanceName} failed ({FormatStatus(cancelStatus)})."));
+                }
             }
 
-            await Task.Delay(CallbackDrainDelay).ConfigureAwait(false);
+            await context.CallbackCompleted.ConfigureAwait(false);
             return context.ToResult();
         }
         catch (DllNotFoundException ex)
@@ -217,7 +285,13 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         }
         finally
         {
-            Marshal.FreeHGlobal(queryNamePointer);
+            if (requestHandle.IsAllocated) requestHandle.Free();
+            if (cancelHandle.IsAllocated) cancelHandle.Free();
+            if (queryNamePointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(queryNamePointer);
+            }
+
             if (contextHandle.IsAllocated)
             {
                 contextHandle.Free();
@@ -248,6 +322,21 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         return services;
     }
 
+    private static async Task WaitForWindowOrCancellationAsync(
+        TimeSpan window,
+        CancellationToken cancellationToken)
+    {
+        var windowElapsed = Task.Delay(window);
+        if (!cancellationToken.CanBeCanceled)
+        {
+            await windowElapsed.ConfigureAwait(false);
+            return;
+        }
+
+        var cancellationRequested = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        await Task.WhenAny(windowElapsed, cancellationRequested).ConfigureAwait(false);
+    }
+
     private static string NormalizeBrowseQueryName(string service) =>
         service.EndsWith(".local", StringComparison.OrdinalIgnoreCase)
             ? service
@@ -265,7 +354,8 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
 
             if (status != ErrorSuccess && status != ErrorCancelled)
             {
-                context.AddFact("Native browse callback", FormatStatus(status), "DnsServiceBrowse callback returned a non-success status.");
+                context.AddFailure(new InvalidOperationException(
+                    $"DnsServiceBrowse callback failed ({FormatStatus(status)})."));
             }
 
             if (dnsRecord == IntPtr.Zero)
@@ -280,13 +370,18 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or MarshalDirectiveException)
         {
-            context?.AddFact("Native browse callback", "parse error", ex.Message);
+            context?.AddFailure(ex);
         }
         finally
         {
             if (dnsRecord != IntPtr.Zero)
             {
                 DnsRecordListFree(dnsRecord, DnsFreeType.DnsFreeRecordList);
+            }
+
+            if (status == ErrorCancelled)
+            {
+                context?.CompleteCallbackBarrier();
             }
         }
     }
@@ -303,7 +398,8 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
 
             if (status != ErrorSuccess && status != ErrorCancelled)
             {
-                context.AddFact("Native resolve callback", FormatStatus(status), "DnsServiceResolve callback returned a non-success status.");
+                context.AddFailure(new InvalidOperationException(
+                    $"DnsServiceResolve callback failed ({FormatStatus(status)})."));
             }
 
             if (instance == IntPtr.Zero)
@@ -322,7 +418,7 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or MarshalDirectiveException)
         {
-            context?.AddFact("Native resolve callback", "parse error", ex.Message);
+            context?.AddFailure(ex);
         }
         finally
         {
@@ -330,6 +426,7 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
             {
                 DnsServiceFreeInstance(instance);
             }
+            context?.CompleteCallbackBarrier();
         }
     }
 
@@ -403,28 +500,29 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
             return "";
         }
 
-        var parts = new List<string>();
-        var count = (int)Math.Min(native.PropertyCount, (uint)MaxTxtProperties);
+        if (native.PropertyCount > NativeWindowsDnsSdTxtRecordCodec.MaxTxtProperties)
+        {
+            throw new InvalidOperationException(
+                $"DNS-SD TXT property count exceeds {NativeWindowsDnsSdTxtRecordCodec.MaxTxtProperties}.");
+        }
+
+        var count = checked((int)native.PropertyCount);
+        var properties = new List<KeyValuePair<string, string>>(count);
         for (var index = 0; index < count; index++)
         {
             var keyPointer = Marshal.ReadIntPtr(native.Keys, index * IntPtr.Size);
-            if (keyPointer == IntPtr.Zero)
-            {
-                continue;
-            }
-
-            var key = Marshal.PtrToStringUni(keyPointer);
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                continue;
-            }
-
+            var key = keyPointer == IntPtr.Zero ? "" : Marshal.PtrToStringUni(keyPointer) ?? "";
             var valuePointer = Marshal.ReadIntPtr(native.Values, index * IntPtr.Size);
             var value = valuePointer == IntPtr.Zero ? "" : Marshal.PtrToStringUni(valuePointer) ?? "";
-            parts.Add($"{key}={value}");
+            properties.Add(new KeyValuePair<string, string>(key, value));
         }
 
-        return string.Join(";", parts);
+        if (!NativeWindowsDnsSdTxtRecordCodec.TrySerialize(properties, out var txtRecord, out var error))
+        {
+            throw new InvalidOperationException(error);
+        }
+
+        return txtRecord;
     }
 
     private static string FormatStatus(uint status) =>
@@ -435,6 +533,9 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         private readonly object _sync = new();
         private readonly List<string> _instanceNames = new();
         private readonly List<DiscoveryBrowserFact> _facts = new();
+        private readonly TaskCompletionSource _callbackCompleted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Exception? _failure;
 
         public BrowseCallbackContext(string service, string queryName)
         {
@@ -445,6 +546,8 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         public string Service { get; }
 
         public string QueryName { get; }
+
+        public Task CallbackCompleted => _callbackCompleted.Task;
 
         public void AddInstanceName(string instanceName)
         {
@@ -469,10 +572,28 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
             }
         }
 
+        public void AddFailure(Exception failure)
+        {
+            ArgumentNullException.ThrowIfNull(failure);
+            lock (_sync)
+            {
+                _failure ??= failure;
+            }
+        }
+
+        public void CompleteCallbackBarrier() => _callbackCompleted.TrySetResult();
+
         public NativeBrowseResult ToResult()
         {
             lock (_sync)
             {
+                if (_failure is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"Native DNS-SD browse failed for {QueryName}.",
+                        _failure);
+                }
+
                 return new NativeBrowseResult(Service, _instanceNames.ToArray(), _facts.ToArray());
             }
         }
@@ -483,6 +604,9 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         private readonly object _sync = new();
         private readonly List<WindowsDnsSdResolvedTxtRecord> _records = new();
         private readonly List<DiscoveryBrowserFact> _facts = new();
+        private readonly TaskCompletionSource _callbackCompleted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private Exception? _failure;
 
         public ResolveCallbackContext(NativeResolveTarget target)
         {
@@ -490,6 +614,8 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
         }
 
         public NativeResolveTarget Target { get; }
+
+        public Task CallbackCompleted => _callbackCompleted.Task;
 
         public void AddRecord(WindowsDnsSdResolvedTxtRecord record)
         {
@@ -511,10 +637,28 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
             }
         }
 
+        public void AddFailure(Exception failure)
+        {
+            ArgumentNullException.ThrowIfNull(failure);
+            lock (_sync)
+            {
+                _failure ??= failure;
+            }
+        }
+
+        public void CompleteCallbackBarrier() => _callbackCompleted.TrySetResult();
+
         public NativeResolveResult ToResult()
         {
             lock (_sync)
             {
+                if (_failure is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"Native DNS-SD resolve failed for {Target.InstanceName}.",
+                        _failure);
+                }
+
                 return new NativeResolveResult(_records.ToArray(), _facts.ToArray());
             }
         }
@@ -603,19 +747,19 @@ public sealed class NativeWindowsDnsSdBrowseClient : IWindowsDnsSdBrowseClient
 
     [DllImport("dnsapi.dll", EntryPoint = "DnsServiceBrowse", SetLastError = true)]
     private static extern uint DnsServiceBrowse(
-        ref DnsServiceBrowseRequestNative request,
-        ref DnsServiceCancel cancel);
+        IntPtr request,
+        IntPtr cancel);
 
     [DllImport("dnsapi.dll", EntryPoint = "DnsServiceBrowseCancel", SetLastError = true)]
-    private static extern uint DnsServiceBrowseCancel(ref DnsServiceCancel cancel);
+    private static extern uint DnsServiceBrowseCancel(IntPtr cancel);
 
     [DllImport("dnsapi.dll", EntryPoint = "DnsServiceResolve", SetLastError = true)]
     private static extern uint DnsServiceResolve(
-        ref DnsServiceResolveRequestNative request,
-        ref DnsServiceCancel cancel);
+        IntPtr request,
+        IntPtr cancel);
 
     [DllImport("dnsapi.dll", EntryPoint = "DnsServiceResolveCancel", SetLastError = true)]
-    private static extern uint DnsServiceResolveCancel(ref DnsServiceCancel cancel);
+    private static extern uint DnsServiceResolveCancel(IntPtr cancel);
 
     [DllImport("dnsapi.dll", EntryPoint = "DnsRecordListFree", SetLastError = true)]
     private static extern void DnsRecordListFree(IntPtr records, DnsFreeType freeType);

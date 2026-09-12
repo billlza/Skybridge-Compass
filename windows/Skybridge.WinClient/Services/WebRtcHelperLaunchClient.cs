@@ -825,6 +825,8 @@ public sealed class WebRtcHelperSession : IAsyncDisposable
 
     public string AnswerPath { get; }
 
+    public int LateRemoteIceCandidateRelayCount { get; internal set; }
+
     internal ReadOnlyMemory<byte> RequireProductControlIpcAuthToken()
     {
         if (_ipcAuthToken is null)
@@ -876,8 +878,24 @@ public sealed class WebRtcHelperSession : IAsyncDisposable
             _process.Dispose();
             DeleteSessionArtifactIfExists(OfferPath);
             DeleteSessionArtifactIfExists(AnswerPath);
-            DeleteSessionArtifactIfExists(OfferPath + ".tmp");
-            DeleteSessionArtifactIfExists(AnswerPath + ".tmp");
+            DeleteSessionTempArtifacts(OfferPath);
+            DeleteSessionTempArtifacts(AnswerPath);
+        }
+    }
+
+    private static void DeleteSessionTempArtifacts(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var directory = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        {
+            return;
+        }
+
+        var fileName = Path.GetFileName(fullPath);
+        foreach (var tempPath in Directory.EnumerateFiles(directory, fileName + ".tmp-*"))
+        {
+            DeleteSessionArtifactIfExists(tempPath);
         }
     }
 
@@ -1069,7 +1087,8 @@ public sealed class LaunchingWebRtcVerifiedPreflightClient : IConnectionPrefligh
 
     public async Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,
-        PairingMaterial pairingMaterial)
+        PairingMaterial pairingMaterial,
+        DiscoveryPeerRoutes? discoveredRoutes = null)
     {
         ArgumentNullException.ThrowIfNull(discoveredPeer);
         ArgumentNullException.ThrowIfNull(pairingMaterial);

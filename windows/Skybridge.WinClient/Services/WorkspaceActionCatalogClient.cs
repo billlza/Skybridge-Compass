@@ -144,6 +144,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
             WorkspaceActionGateId.CanOpenTopBarNotifications => gates.CanOpenTopBarNotifications,
             WorkspaceActionGateId.CanToggleTopBarTheme => gates.CanToggleTopBarTheme,
             WorkspaceActionGateId.CanUseDiscoveryBrowser => gates.CanUseDiscoveryBrowser,
+            WorkspaceActionGateId.CanStopDiscoveryBrowser => gates.CanStopDiscoveryBrowser,
             WorkspaceActionGateId.CanPrepareManualConnection => gates.CanPrepareManualConnection,
             WorkspaceActionGateId.CanParseAdvertisement => gates.CanParseAdvertisement,
             WorkspaceActionGateId.CanValidatePairing => gates.CanValidatePairing,
@@ -364,7 +365,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 true,
                 "Mac-parity discovery scan action; command only stops browser state.",
                 CommandId: WorkspaceActionCommandId.StopDiscovery,
-                GateId: WorkspaceActionGateId.CanUseDiscoveryBrowser),
+                GateId: WorkspaceActionGateId.CanStopDiscoveryBrowser),
             new(
                 "Refresh",
                 "Refresh",
@@ -480,7 +481,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Refresh Plan",
                 "\uE895",
                 true,
-                "Mac-parity File Transfer header action; command refreshes the read-only Core plan.",
+                "Refresh the current file transfers and completed results.",
                 CommandId: WorkspaceActionCommandId.RefreshFileTransfer,
                 GateId: WorkspaceActionGateId.CanRefreshFileTransfer)
         };
@@ -493,7 +494,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Select Files",
                 "\uE8E5",
                 true,
-                "Mac-parity quick action; prepares an in-memory file selection intent without opening a picker or reading files.",
+                "Choose local files and send them to a paired device.",
                 CommandId: WorkspaceActionCommandId.SelectFileTransferFiles,
                 GateId: WorkspaceActionGateId.CanSelectFileTransferFiles),
             new(
@@ -501,7 +502,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Select Folder",
                 "\uE8B7",
                 true,
-                "Mac-parity quick action; prepares an in-memory folder selection intent without opening a picker or scanning directories.",
+                "Choose a local folder and send it as a ZIP file.",
                 CommandId: WorkspaceActionCommandId.SelectFileTransferFolder,
                 GateId: WorkspaceActionGateId.CanSelectFileTransferFolder),
             new(
@@ -509,7 +510,7 @@ public sealed class WorkspaceActionCatalogClient : IWorkspaceActionCatalogClient
                 "Generate QR",
                 "\uE97E",
                 true,
-                "Mac-parity quick action; prepares an in-memory QR share plan without reading files or starting transport.",
+                "QR sharing is unavailable until a supported share manifest is ready.",
                 CommandId: WorkspaceActionCommandId.GenerateFileTransferQr,
                 GateId: WorkspaceActionGateId.CanGenerateFileTransferQr)
         };
@@ -821,6 +822,7 @@ public enum WorkspaceActionGateId
     CanOpenTopBarNotifications,
     CanToggleTopBarTheme,
     CanUseDiscoveryBrowser,
+    CanStopDiscoveryBrowser,
     CanPrepareManualConnection,
     CanParseAdvertisement,
     CanValidatePairing,
@@ -914,11 +916,8 @@ public sealed record WorkspaceActionGateSnapshot(
     bool CanOpenSystemPreferences,
     bool CanApplySettings,
     bool CanRestoreDefaults,
-    bool CanResetMonitorData);
-
-public sealed record WorkspaceActionDetailSnapshot(
-    string TopBarNotificationsStatus,
-    string TopBarThemeStatus);
+    bool CanResetMonitorData,
+    bool CanStopDiscoveryBrowser = false);
 
 public sealed record WorkspaceActionItem(
     string Key,

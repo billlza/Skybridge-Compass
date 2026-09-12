@@ -1,0 +1,17 @@
+{
+  "description": "Public deterministic Q ABI2 application session KDF interoperability vector; no production secret material",
+  "suite_wire_id": 18,
+  "composition_label": "qperiapt-abi2-policy-bound-v1",
+  "inputs": {
+    "shared_secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "transcript_a": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "transcript_b": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "client_nonce": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "server_nonce": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+  },
+  "transcript_hash": "ae02e99bbdd3713ac87427589a48fc45818ef9a7ecd27941142d8f6f61afb7c1",
+  "i2r_key": "dcbcf496a5dd5427b1509b81f8f164ed4aa80631e2e398cd6a9262fb50ebefd4",
+  "r2i_key": "488034fee3011e38bd891a2b1d27231b821c73817c50fb35805777ced2a9c3df",
+  "i2r_finished_mac": "1e82c222fe7aec715e61efa4427e967d510d6904bc92b83ec7e26e3f75996b18",
+  "r2i_finished_mac": "0b2ef22081f4ed4b872034a0b4eed7833e86003d8e82a8f6ce27d68d0729acd7"
+}

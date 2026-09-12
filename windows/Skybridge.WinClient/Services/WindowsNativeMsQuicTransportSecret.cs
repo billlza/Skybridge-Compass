@@ -35,14 +35,14 @@ internal static class WindowsNativeMsQuicTransportSecret
     private const string DomainSeparator = "skybridge-msquic-transport-secret/v2";
 
     /// <summary>
-    /// Computes the lowercase-hex SHA-256 fingerprint of a leaf certificate's DER bytes, or a stable
-    /// sentinel when the certificate is absent (which must not happen on a healthy session, but is handled
-    /// so the two sides still agree on the sentinel rather than throwing asymmetrically).
+    /// Computes the lowercase-hex SHA-256 fingerprint of a required leaf certificate's DER bytes.
+    /// A missing peer certificate is a failed transport-authentication precondition, not binding material.
     /// </summary>
-    public static string LeafFingerprint(X509Certificate2? certificate) =>
-        certificate is null
-            ? "no-leaf-cert"
-            : Convert.ToHexString(SHA256.HashData(certificate.RawData)).ToLowerInvariant();
+    public static string LeafFingerprint(X509Certificate2? certificate)
+    {
+        ArgumentNullException.ThrowIfNull(certificate);
+        return Convert.ToHexString(SHA256.HashData(certificate.RawData)).ToLowerInvariant();
+    }
 
     /// <summary>
     /// Derives the 32-byte transport secret from the two peers' views of the same QUIC session.
@@ -54,7 +54,7 @@ internal static class WindowsNativeMsQuicTransportSecret
     /// </summary>
     /// <param name="localEndpoint">This peer's local QUIC UDP endpoint (host:port).</param>
     /// <param name="remoteEndpoint">The other peer's QUIC UDP endpoint (host:port).</param>
-    /// <param name="negotiatedAlpn">The ALPN negotiated on the QUIC connection (must be "skybridge/1").</param>
+    /// <param name="negotiatedAlpn">The ALPN negotiated on the QUIC connection (must match the protocol ADR).</param>
     /// <param name="pairingPublicKeyFingerprint">The shared SkyBridge pairing public-key fingerprint.</param>
     /// <param name="ownLeafFingerprint">Lowercase-hex SHA-256 of THIS peer's presented leaf cert.</param>
     /// <param name="peerLeafFingerprint">Lowercase-hex SHA-256 of the OTHER peer's leaf cert.</param>
@@ -68,10 +68,19 @@ internal static class WindowsNativeMsQuicTransportSecret
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(localEndpoint);
         ArgumentException.ThrowIfNullOrWhiteSpace(remoteEndpoint);
-        ArgumentNullException.ThrowIfNull(negotiatedAlpn);
+        ArgumentException.ThrowIfNullOrWhiteSpace(negotiatedAlpn);
         ArgumentNullException.ThrowIfNull(pairingPublicKeyFingerprint);
         ArgumentNullException.ThrowIfNull(ownLeafFingerprint);
         ArgumentNullException.ThrowIfNull(peerLeafFingerprint);
+
+        if (!string.Equals(
+            negotiatedAlpn,
+            SkyBridgeProtocolConstants.MsQuicAlpn,
+            StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Negotiated MsQuic ALPN must be '{SkyBridgeProtocolConstants.MsQuicAlpn}'.");
+        }
 
         // 1. Canonicalize the endpoint pair (order-independent): dialer.local == listener.remote and
         //    vice versa, so a fixed local|remote ordering would diverge between the two ends.

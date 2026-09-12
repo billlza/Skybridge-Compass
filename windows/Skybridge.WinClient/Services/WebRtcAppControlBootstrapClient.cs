@@ -1,6 +1,5 @@
 using System;
 using System.Buffers.Binary;
-using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -25,7 +24,10 @@ public sealed class WebRtcAppControlBootstrapException : InvalidOperationExcepti
 
 public sealed class WebRtcAppControlBootstrapOptions
 {
-    public WebRtcAppControlBootstrapOptions(TimeSpan timeout, int maxQueuedInboundMessages = 8)
+    public WebRtcAppControlBootstrapOptions(
+        TimeSpan timeout,
+        int maxQueuedInboundMessages = 8,
+        WebRtcAppControlPayloadFormat payloadFormat = WebRtcAppControlPayloadFormat.SkybridgeSecureEnvelopeV1)
     {
         if (timeout <= TimeSpan.Zero)
         {
@@ -38,8 +40,14 @@ public sealed class WebRtcAppControlBootstrapOptions
                 "WebRTC AppControl bootstrap inbound queue capacity must be between 1 and 32 messages.");
         }
 
+        if (!Enum.IsDefined(typeof(WebRtcAppControlPayloadFormat), payloadFormat))
+        {
+            throw new InvalidOperationException("Unsupported WebRTC AppControl payload format.");
+        }
+
         Timeout = timeout;
         MaxQueuedInboundMessages = maxQueuedInboundMessages;
+        PayloadFormat = payloadFormat;
     }
 
     public static WebRtcAppControlBootstrapOptions Default { get; } = new(TimeSpan.FromSeconds(10));
@@ -47,20 +55,56 @@ public sealed class WebRtcAppControlBootstrapOptions
     public TimeSpan Timeout { get; }
 
     public int MaxQueuedInboundMessages { get; }
+
+    public WebRtcAppControlPayloadFormat PayloadFormat { get; }
 }
 
 public sealed record WebRtcAppControlBootstrapResult(
     string SessionId,
     ulong PingId,
-    ulong OutboundCounter,
-    ulong InboundCounter,
-    ulong SessionHash,
-    ulong TranscriptPrefix,
-    string ReceivedMessageKind);
+    ulong? OutboundCounter,
+    ulong? InboundCounter,
+    ulong? SessionHash,
+    ulong? TranscriptPrefix,
+    string ReceivedMessageKind,
+    string PayloadFormat);
+
+public sealed record WebRtcAppControlResponderResult(
+    string SessionId,
+    ulong PingId,
+    ulong? OutboundCounter,
+    ulong? InboundCounter,
+    ulong? SessionHash,
+    ulong? TranscriptPrefix,
+    string ReceivedMessageKind,
+    string SentMessageKind,
+    string PayloadFormat);
+
+internal static class WebRtcAppControlBootstrapPayloadPolicy
+{
+    public const int MaxJsonPayloadBytes = 1024;
+
+    public static void RequireJsonPayloadWithinLimit(ReadOnlySpan<byte> payload, string context)
+    {
+        if (payload.Length > MaxJsonPayloadBytes)
+        {
+            throw new WebRtcAppControlBootstrapException(
+                $"{context} JSON AppMessage payload exceeded {MaxJsonPayloadBytes} bytes.");
+        }
+    }
+}
 
 public interface IWebRtcAppControlBootstrapClient
 {
     Task<WebRtcAppControlBootstrapResult> ExchangePingAsync(
+        LiveWebRtcProductControlContext establishedContext,
+        ushort suiteWireId,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IWebRtcAppControlResponderHost
+{
+    Task<WebRtcAppControlResponderResult> AnswerPingAsync(
         LiveWebRtcProductControlContext establishedContext,
         ushort suiteWireId,
         CancellationToken cancellationToken = default);
@@ -106,20 +150,17 @@ public sealed class WebRtcAppControlBootstrapClient : IWebRtcAppControlBootstrap
         }
 
         var pingId = RandomPingId();
-        var outboundCounter = NextOutboundCounter();
         var plaintext = BuildPingPayload(pingId);
-        var ciphertext = WebRtcControlChannelCodec.EncryptAppPayload(
-            plaintext,
-            keys,
-            WebRtcAppSecurePacketType.AppControl,
-            outboundCounter);
+        var sealedPayload = SealAppControlPayload(plaintext, keys);
 
-        await using var inbox = new AppControlMessageInbox(
+        await using var inbox = new WebRtcProductControlMessageInbox(
             establishedContext.ControlPlane,
-            _options.MaxQueuedInboundMessages);
+            _options.MaxQueuedInboundMessages,
+            "WebRTC AppControl bootstrap",
+            message => new WebRtcAppControlBootstrapException(message));
 
         await establishedContext.ControlPlane
-            .SendAsync(ciphertext, cancellationToken)
+            .SendAsync(sealedPayload.Ciphertext, cancellationToken)
             .ConfigureAwait(false);
 
         var inboundFrame = await inbox
@@ -131,25 +172,39 @@ public sealed class WebRtcAppControlBootstrapClient : IWebRtcAppControlBootstrap
         return new WebRtcAppControlBootstrapResult(
             keys.SessionId,
             pingId,
-            outboundCounter,
+            sealedPayload.Counter,
             opened.Counter,
             opened.SessionHash,
             opened.TranscriptPrefix,
-            messageKind);
+            messageKind,
+            WebRtcAppControlPayloadFormats.Label(_options.PayloadFormat));
     }
 
-    private WebRtcAppSecureOpenedPayload OpenAndRecordAppControl(
+    private OpenedAppControlPayload OpenAndRecordAppControl(
         ReadOnlySpan<byte> ciphertext,
         WebRtcAppSecureSessionKeys keys)
     {
         try
         {
+            if (_options.PayloadFormat == WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined)
+            {
+                return new OpenedAppControlPayload(
+                    WebRtcControlChannelCodec.DecryptAppleLegacyAppPayload(ciphertext, keys),
+                    Counter: null,
+                    SessionHash: null,
+                    TranscriptPrefix: null);
+            }
+
             var opened = WebRtcControlChannelCodec.DecryptAppPayload(
-                ciphertext,
-                keys,
-                new[] { WebRtcAppSecurePacketType.AppControl });
+                    ciphertext,
+                    keys,
+                    new[] { WebRtcAppSecurePacketType.AppControl });
             _replayWindow.ValidateAndRecord(opened);
-            return opened;
+            return new OpenedAppControlPayload(
+                opened.Payload,
+                opened.Counter,
+                opened.SessionHash,
+                opened.TranscriptPrefix);
         }
         catch (Exception ex) when (ex is WebRtcAppSecureEnvelopeException or WebRtcAppSecureReplayException)
         {
@@ -157,6 +212,27 @@ public sealed class WebRtcAppControlBootstrapClient : IWebRtcAppControlBootstrap
                 "WebRTC AppControl bootstrap failed to authenticate inbound AppControl payload.",
                 ex);
         }
+    }
+
+    private SealedAppControlPayload SealAppControlPayload(
+        ReadOnlySpan<byte> plaintext,
+        WebRtcAppSecureSessionKeys keys)
+    {
+        if (_options.PayloadFormat == WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined)
+        {
+            return new SealedAppControlPayload(
+                WebRtcControlChannelCodec.EncryptAppleLegacyAppPayload(plaintext, keys),
+                Counter: null);
+        }
+
+        var outboundCounter = NextOutboundCounter();
+        return new SealedAppControlPayload(
+            WebRtcControlChannelCodec.EncryptAppPayload(
+                plaintext,
+                keys,
+                WebRtcAppSecurePacketType.AppControl,
+                outboundCounter),
+            outboundCounter);
     }
 
     private static WebRtcAppSecureRole ExpectedRole(LiveWebRtcProductControlContext context) =>
@@ -207,6 +283,9 @@ public sealed class WebRtcAppControlBootstrapClient : IWebRtcAppControlBootstrap
 
     private static string RequirePong(ReadOnlySpan<byte> payload, ulong expectedPingId)
     {
+        WebRtcAppControlBootstrapPayloadPolicy.RequireJsonPayloadWithinLimit(
+            payload,
+            "WebRTC AppControl bootstrap");
         try
         {
             using var document = JsonDocument.Parse(payload.ToArray());
@@ -239,117 +318,234 @@ public sealed class WebRtcAppControlBootstrapClient : IWebRtcAppControlBootstrap
 
     private static byte[] UnwrapTrafficPaddingIfNeeded(byte[] frame)
     {
-        if (frame.Length < 8 ||
-            frame[0] != 0x53 ||
-            frame[1] != 0x42 ||
-            frame[2] != 0x50 ||
-            frame[3] != 0x32)
-        {
-            return frame;
-        }
-
-        var actualLength = BinaryPrimitives.ReadUInt32BigEndian(frame.AsSpan(4, 4));
-        if (actualLength > frame.Length - 8)
+        try { return ProductControlTrafficPadding.Unwrap(frame); }
+        catch (InvalidDataException error)
         {
             throw new WebRtcAppControlBootstrapException(
-                "WebRTC AppControl bootstrap received malformed SBP2 traffic padding.");
+                "WebRTC AppControl bootstrap received malformed SBP2 traffic padding.", error);
         }
-
-        return frame.AsSpan(8, checked((int)actualLength)).ToArray();
     }
 
-    private sealed class AppControlMessageInbox : IAsyncDisposable
+}
+
+public sealed class WebRtcAppControlResponderHost : IWebRtcAppControlResponderHost
+{
+    private static readonly JsonWriterOptions JsonWriterOptions = new()
     {
-        private readonly IWebRtcProductControlPlane _controlPlane;
-        private readonly Queue<byte[]> _messages = new();
-        private readonly SemaphoreSlim _signal = new(0);
-        private readonly object _gate = new();
-        private readonly int _maxQueuedMessages;
-        private Exception? _failure;
-        private bool _disposed;
+        Indented = false
+    };
 
-        public AppControlMessageInbox(IWebRtcProductControlPlane controlPlane, int maxQueuedMessages)
+    private readonly WebRtcProductSecureSessionStore _sessionStore;
+    private readonly WebRtcAppControlBootstrapOptions _options;
+    private readonly WebRtcAppSecureReplayWindow _replayWindow = new();
+    private readonly object _counterGate = new();
+    private ulong _nextOutboundCounter = 1;
+
+    public WebRtcAppControlResponderHost(
+        WebRtcProductSecureSessionStore sessionStore,
+        WebRtcAppControlBootstrapOptions? options = null)
+    {
+        _sessionStore = sessionStore ?? throw new ArgumentNullException(nameof(sessionStore));
+        _options = options ?? WebRtcAppControlBootstrapOptions.Default;
+    }
+
+    public async Task<WebRtcAppControlResponderResult> AnswerPingAsync(
+        LiveWebRtcProductControlContext establishedContext,
+        ushort suiteWireId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(establishedContext);
+        WebRtcProductHandshakeCodec.RequireKnownSuite(suiteWireId);
+
+        using var keys = _sessionStore.RequireEstablishedKeys(
+            establishedContext,
+            suiteWireId,
+            ExpectedRole(establishedContext));
+        if (!establishedContext.ControlPlane.IsConnected)
         {
-            _controlPlane = controlPlane ?? throw new ArgumentNullException(nameof(controlPlane));
-            _maxQueuedMessages = maxQueuedMessages;
-            _controlPlane.MessageReceived += OnMessageReceived;
+            throw new WebRtcAppControlBootstrapException(
+                "WebRTC AppControl responder requires a connected product-control plane.");
         }
 
-        public async Task<byte[]> ReadAsync(
-            string expectedMessage,
-            TimeSpan timeout,
-            CancellationToken cancellationToken)
+        await using var inbox = new WebRtcProductControlMessageInbox(
+            establishedContext.ControlPlane,
+            _options.MaxQueuedInboundMessages,
+            "WebRTC AppControl responder",
+            message => new WebRtcAppControlBootstrapException(message));
+
+        var inboundFrame = await inbox
+            .ReadAsync("AppControl ping", _options.Timeout, cancellationToken)
+            .ConfigureAwait(false);
+        var unwrapped = UnwrapTrafficPaddingIfNeeded(inboundFrame);
+        var opened = OpenAndRecordAppControl(unwrapped, keys);
+        var pingId = RequirePing(opened.Payload);
+
+        var plaintext = BuildPongPayload(pingId);
+        var sealedPayload = SealAppControlPayload(plaintext, keys);
+        await establishedContext.ControlPlane
+            .SendAsync(sealedPayload.Ciphertext, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new WebRtcAppControlResponderResult(
+            keys.SessionId,
+            pingId,
+            sealedPayload.Counter,
+            opened.Counter,
+            opened.SessionHash,
+            opened.TranscriptPrefix,
+            ReceivedMessageKind: "ping",
+            SentMessageKind: "pong",
+            PayloadFormat: WebRtcAppControlPayloadFormats.Label(_options.PayloadFormat));
+    }
+
+    private OpenedAppControlPayload OpenAndRecordAppControl(
+        ReadOnlySpan<byte> ciphertext,
+        WebRtcAppSecureSessionKeys keys)
+    {
+        try
         {
-            using var timeoutCts = new CancellationTokenSource(timeout);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
-            try
+            if (_options.PayloadFormat == WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined)
             {
-                await _signal.WaitAsync(linkedCts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
-            {
-                throw new TimeoutException(
-                    $"WebRTC AppControl bootstrap timed out waiting for {expectedMessage} after {timeout.TotalSeconds:F0}s.");
+                return new OpenedAppControlPayload(
+                    WebRtcControlChannelCodec.DecryptAppleLegacyAppPayload(ciphertext, keys),
+                    Counter: null,
+                    SessionHash: null,
+                    TranscriptPrefix: null);
             }
 
-            lock (_gate)
-            {
-                if (_failure is not null)
-                {
-                    throw _failure;
-                }
-
-                if (_messages.Count == 0)
-                {
-                    throw new WebRtcAppControlBootstrapException(
-                        $"WebRTC AppControl bootstrap inbox signaled without {expectedMessage} bytes.");
-                }
-
-                return _messages.Dequeue();
-            }
+            var opened = WebRtcControlChannelCodec.DecryptAppPayload(
+                    ciphertext,
+                    keys,
+                    new[] { WebRtcAppSecurePacketType.AppControl });
+            _replayWindow.ValidateAndRecord(opened);
+            return new OpenedAppControlPayload(
+                opened.Payload,
+                opened.Counter,
+                opened.SessionHash,
+                opened.TranscriptPrefix);
         }
-
-        public ValueTask DisposeAsync()
+        catch (Exception ex) when (ex is WebRtcAppSecureEnvelopeException or WebRtcAppSecureReplayException)
         {
-            lock (_gate)
-            {
-                if (_disposed)
-                {
-                    return ValueTask.CompletedTask;
-                }
-
-                _disposed = true;
-                _messages.Clear();
-                _failure = null;
-            }
-
-            _controlPlane.MessageReceived -= OnMessageReceived;
-            _signal.Dispose();
-            return ValueTask.CompletedTask;
-        }
-
-        private void OnMessageReceived(byte[] message)
-        {
-            ArgumentNullException.ThrowIfNull(message);
-            lock (_gate)
-            {
-                if (_disposed || _failure is not null)
-                {
-                    return;
-                }
-
-                if (_messages.Count >= _maxQueuedMessages)
-                {
-                    _failure = new WebRtcAppControlBootstrapException(
-                        $"WebRTC AppControl bootstrap inbound queue exceeded {_maxQueuedMessages} messages before the client could process them.");
-                }
-                else
-                {
-                    _messages.Enqueue(message.ToArray());
-                }
-            }
-
-            _signal.Release();
+            throw new WebRtcAppControlBootstrapException(
+                "WebRTC AppControl responder failed to authenticate inbound AppControl payload.",
+                ex);
         }
     }
+
+    private SealedAppControlPayload SealAppControlPayload(
+        ReadOnlySpan<byte> plaintext,
+        WebRtcAppSecureSessionKeys keys)
+    {
+        if (_options.PayloadFormat == WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined)
+        {
+            return new SealedAppControlPayload(
+                WebRtcControlChannelCodec.EncryptAppleLegacyAppPayload(plaintext, keys),
+                Counter: null);
+        }
+
+        var outboundCounter = NextOutboundCounter();
+        return new SealedAppControlPayload(
+            WebRtcControlChannelCodec.EncryptAppPayload(
+                plaintext,
+                keys,
+                WebRtcAppSecurePacketType.AppControl,
+                outboundCounter),
+            outboundCounter);
+    }
+
+    private static WebRtcAppSecureRole ExpectedRole(LiveWebRtcProductControlContext context) =>
+        context.Role switch
+        {
+            "answer" => WebRtcAppSecureRole.Responder,
+            _ => throw new WebRtcAppControlBootstrapException(
+                $"Unsupported WebRTC product-control role '{context.Role}' for AppControl responder.")
+        };
+
+    private ulong NextOutboundCounter()
+    {
+        lock (_counterGate)
+        {
+            if (_nextOutboundCounter == ulong.MaxValue)
+            {
+                throw new WebRtcAppControlBootstrapException(
+                    "WebRTC AppControl responder outbound counter exhausted.");
+            }
+
+            return _nextOutboundCounter++;
+        }
+    }
+
+    private static ulong RequirePing(ReadOnlySpan<byte> payload)
+    {
+        WebRtcAppControlBootstrapPayloadPolicy.RequireJsonPayloadWithinLimit(
+            payload,
+            "WebRTC AppControl responder");
+        try
+        {
+            using var document = JsonDocument.Parse(payload.ToArray());
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("ping", out var ping) ||
+                ping.ValueKind != JsonValueKind.Object ||
+                !ping.TryGetProperty("id", out var idElement) ||
+                idElement.ValueKind != JsonValueKind.Number ||
+                !idElement.TryGetUInt64(out var pingId) ||
+                pingId == 0)
+            {
+                throw new WebRtcAppControlBootstrapException(
+                    "WebRTC AppControl responder expected a JSON AppMessage ping payload.");
+            }
+
+            return pingId;
+        }
+        catch (JsonException ex)
+        {
+            throw new WebRtcAppControlBootstrapException(
+                "WebRTC AppControl responder received malformed JSON AppMessage payload.",
+                ex);
+        }
+    }
+
+    private static byte[] BuildPongPayload(ulong pingId)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream, JsonWriterOptions))
+        {
+            writer.WriteStartObject();
+            writer.WriteStartObject("pong");
+            writer.WriteNumber("id", pingId);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        return stream.ToArray();
+    }
+
+    private static byte[] UnwrapTrafficPaddingIfNeeded(byte[] frame)
+    {
+        try { return ProductControlTrafficPadding.Unwrap(frame); }
+        catch (InvalidDataException error)
+        {
+            throw new WebRtcAppControlBootstrapException(
+                "WebRTC AppControl responder received malformed SBP2 traffic padding.", error);
+        }
+    }
+}
+
+internal sealed record OpenedAppControlPayload(
+    byte[] Payload,
+    ulong? Counter,
+    ulong? SessionHash,
+    ulong? TranscriptPrefix);
+
+internal sealed record SealedAppControlPayload(byte[] Ciphertext, ulong? Counter);
+
+internal static class WebRtcAppControlPayloadFormats
+{
+    public static string Label(WebRtcAppControlPayloadFormat payloadFormat) =>
+        payloadFormat switch
+        {
+            WebRtcAppControlPayloadFormat.SkybridgeSecureEnvelopeV1 => "SkybridgeSecureEnvelopeV1",
+            WebRtcAppControlPayloadFormat.AppleLegacyAesGcmCombined => "AppleLegacyAesGcmCombined",
+            _ => payloadFormat.ToString()
+        };
 }

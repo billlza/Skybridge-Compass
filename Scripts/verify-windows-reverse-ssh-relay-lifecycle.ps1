@@ -21,6 +21,8 @@ param(
     [ValidateRange(1, 65535)]
     [int]$LocalSshPort = 22,
     [string]$TaskUserId = "NT AUTHORITY\LOCAL SERVICE",
+    [ValidateRange(1, 1440)]
+    [int]$SelfHealIntervalMinutes = 5,
     [string]$EvidencePath = "",
     [switch]$RequireRunning
 )
@@ -211,6 +213,29 @@ function Get-KnownHostsFingerprints {
     } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+function Get-FileSystemRightsCapability {
+    param([System.Security.AccessControl.FileSystemRights]$Rights)
+
+    # FileSystemRights values such as Read, ReadAndExecute, Modify and FullControl are
+    # composite masks: Modify and FullControl carry every read bit as well. Testing
+    # -band against them therefore reports "write" for a read-only ACE, so read and write
+    # capability must be decided from the specific bits instead.
+    $writeMask = [System.Security.AccessControl.FileSystemRights]::WriteData -bor
+        [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [System.Security.AccessControl.FileSystemRights]::Delete -bor
+        [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [System.Security.AccessControl.FileSystemRights]::TakeOwnership
+
+    # ReadData and ListDirectory share the same bit, so this covers files and directories.
+    return [ordered]@{
+        canRead  = (($Rights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0)
+        canWrite = (($Rights -band $writeMask) -ne 0)
+    }
+}
+
 function Test-PrivateKeyAcl {
     param(
         [string]$Path,
@@ -251,15 +276,9 @@ function Test-PrivateKeyAcl {
 
         $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
         $rights = [System.Security.AccessControl.FileSystemRights]$rule.FileSystemRights
-        $canRead = (($rights -band [System.Security.AccessControl.FileSystemRights]::ReadData) -ne 0) -or (($rights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) -or (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
-        $canWrite = (($rights -band [System.Security.AccessControl.FileSystemRights]::Write) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::WriteData) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::AppendData) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::Delete) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::ChangePermissions) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::TakeOwnership) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::Modify) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
+        $capability = Get-FileSystemRightsCapability -Rights $rights
+        $canRead = [bool]$capability.canRead
+        $canWrite = [bool]$capability.canWrite
         if ($canRead) {
             [void]$readableSids.Add($sid)
         }
@@ -320,15 +339,9 @@ function Test-TaskDirectoryAcl {
 
         $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
         $rights = [System.Security.AccessControl.FileSystemRights]$rule.FileSystemRights
-        $canRead = (($rights -band [System.Security.AccessControl.FileSystemRights]::Read) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::ReadAndExecute) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0)
-        $canWrite = (($rights -band [System.Security.AccessControl.FileSystemRights]::Write) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::Modify) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::Delete) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::ChangePermissions) -ne 0) -or
-            (($rights -band [System.Security.AccessControl.FileSystemRights]::TakeOwnership) -ne 0)
+        $capability = Get-FileSystemRightsCapability -Rights $rights
+        $canRead = [bool]$capability.canRead
+        $canWrite = [bool]$capability.canWrite
         if (-not $allowedSids.Contains($sid) -or $broadSids.Contains($sid)) {
             $violations.Add(("unexpectedAce:{0}:{1}" -f $rule.IdentityReference.Value, $rights))
         }
@@ -497,7 +510,21 @@ $runtimeAclOk = ([bool]$keyAcl.ok) -and
     ([bool]$installedStartScriptDirectoryAcl.ok) -and
     ([bool]$logDirectoryAcl.ok)
 
-$accepted = $taskActionExpected -and
+# A boot-only trigger leaves the tunnel down until the next reboot whenever the ssh process
+# dies, so the repeating self-heal trigger is part of the durability contract, not a nicety.
+$taskTriggerTypes = @($task.Triggers | ForEach-Object { [string]$_.CimClass.CimClassName })
+$bootTriggerPresent = ($taskTriggerTypes -contains "MSFT_TaskBootTrigger")
+$expectedRepetitionInterval = [System.Xml.XmlConvert]::ToString((New-TimeSpan -Minutes $SelfHealIntervalMinutes))
+$selfHealTriggers = @($task.Triggers | Where-Object {
+    $null -ne $_.Repetition -and
+    -not [string]::IsNullOrWhiteSpace([string]$_.Repetition.Interval) -and
+    ([string]$_.Repetition.Interval) -eq $expectedRepetitionInterval
+})
+$selfHealTriggerPresent = ($selfHealTriggers.Count -ge 1)
+
+$accepted = $bootTriggerPresent -and
+    $selfHealTriggerPresent -and
+    $taskActionExpected -and
     $taskActionFailClosed -and
     $taskPrincipalExpected -and
     $startScriptInstalledAndCurrent -and
@@ -511,7 +538,15 @@ $evidence = [ordered]@{
     script = "verify-windows-reverse-ssh-relay-lifecycle.ps1"
     taskName = $TaskName
     taskState = [string]$task.State
-    taskLastTaskResult = [int]$taskInfo.LastTaskResult
+    # LastTaskResult is a UInt32 HRESULT: values such as 0x800710E0 (2147946720) exceed
+    # Int32.MaxValue, and casting them to [int] throws and aborts evidence writing after the
+    # task has already been registered and started.
+    taskLastTaskResult = [uint32]$taskInfo.LastTaskResult
+    taskTriggerTypes = $taskTriggerTypes
+    bootTriggerPresent = [bool]$bootTriggerPresent
+    expectedSelfHealRepetitionInterval = $expectedRepetitionInterval
+    observedRepetitionIntervals = @($task.Triggers | ForEach-Object { [string]$_.Repetition.Interval } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    selfHealTriggerPresent = [bool]$selfHealTriggerPresent
     taskActionExecute = [string]$action.Execute
     taskActionArguments = $taskActionArguments
     expectedTaskActionExecute = $powerShellFullPath

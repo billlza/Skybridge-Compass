@@ -171,6 +171,7 @@ $transport = Get-Content -Raw -LiteralPath $transportPath
 
 foreach ($signal in @(
     "cli_version_smoke",
+    "cli_version_json_reports_windows_contract_identity",
     "cli_apple_to_apple_selects_apple_native",
     "cli_ios_to_macos_selects_apple_native",
     "cli_windows_to_ios_selects_webrtc_interop",
@@ -191,6 +192,11 @@ foreach ($signal in @(
     "cli_discovery_parse_accepts_mac_bonjour_txt",
     "cli_webrtc_proof_validate_accepts_schema_smoke",
     "cli_webrtc_proof_validate_rejects_missing_sbf1_smoke",
+    "cli_capabilities_reports_skybridge_cli_surface",
+    "cli_operator_commands_fail_closed_without_live_success_claims",
+    "cli_operator_contracts_report_read_only_windows_surface",
+    "cli_product_control_evidence_status_reports_read_only_boundaries",
+    "cli_product_control_evidence_rejects_secret_capture_without_input_leaks",
     "cli_no_args_prints_help_smoke",
     "cli_rejects_incomplete_transport_command",
     "cli_rejects_unknown_command",
@@ -204,7 +210,72 @@ foreach ($signal in @(
     "invalid suite id: 0xzz",
     "webrtc-proof validate",
     "webrtc_proof=valid",
-    "SBF1 echo frame"
+    "evidence status --evidence",
+    "product_control_evidence_secret_capture_detected",
+    "appcontrol_sbwc_ping_pong",
+    "AuthenticatedAppControlPingPongProof",
+    "SBF1 echo frame",
+    "SkyBridge CLI",
+    "discovery_snapshot_remote_desktop_and_file_transfer_request_registries_available_windows_agent_observation_required",
+    "cli_device_discover_state_dir_returns_fresh_snapshot_read_only",
+    "cli_device_discover_scan_state_dir_reads_active_scan_snapshot_without_starting_scan",
+    "cli_device_discover_state_dir_errors_are_redacted_and_classified",
+    "cli_capabilities_quantifies_remaining_operator_gaps",
+    "operator_gap_summary",
+    "nearby-discovery-snapshots.json",
+    "device_discovery_snapshot_stale",
+    "device_discovery_snapshot_registry_invalid",
+    "snapshot_authorizes_connection",
+    "active_scan_started",
+    "connection_authorized",
+    "cli_remote_desktop_registers_pending_request_for_established_session_registry",
+    "cli_file_transfer_registers_pending_send_request_for_established_session_registry",
+    "cli_file_transfer_state_dir_errors_are_redacted_and_classified",
+    "cli_session_ls_projects_agent_owned_session_registry_without_secret_leak",
+    "cli_session_inspect_projects_single_session_without_secret_leak",
+    "cli_session_inspect_errors_are_redacted_and_classified",
+    "cli_session_import_product_control_writes_authority_for_request_registries",
+    "cli_session_import_product_control_rejects_hash_mismatch_without_mutation",
+    "cli_session_import_product_control_rejects_ambiguous_session_id_sources",
+    "session.ls",
+    "session.inspect",
+    "session.import_product_control",
+    "--session-id-file",
+    "session_id_file_used",
+    "SessionIdSha256",
+    "RemoteDeviceIdSha256",
+    "RemoteProtocolPublicKeyFingerprint",
+    "session_import_session_hash_mismatch",
+    "session_import_session_id_ambiguous",
+    "session_import_not_live_runtime_start",
+    "session_inventory_not_live_runtime_proof",
+    "raw_session_ids_redacted",
+    "session_registry_too_large",
+    "file_transfer_session_not_established",
+    "file_transfer_peer_mismatch",
+    "request_registered_not_live_transfer",
+    "request_registered_not_live_remote_apply",
+    "file_transfer_request_registry_supported",
+    "remote_desktop_session_not_established",
+    "request_registry_supported",
+    "pending_agent_observation",
+    "planned_fail_closed",
+    "request_registered",
+    "mutation_supported",
+    "cli_pqc_status_reports_operator_policy_and_missing_key_gates",
+    "cli_pqc_offer_lists_provider_derived_suites",
+    "cli_pqc_select_prefers_pqc_suite",
+    "pqc.handshake",
+    "suite_negotiation_diagnostic_not_handshake_proof",
+    "suite_negotiation_not_handshake_proof",
+    "ml_dsa_signed_handshake",
+    "ml_kem_or_xwing_session_keys",
+    "sbwc_secure_session_established",
+    "real_device_p2p_remote_gate",
+    "file_sha256_receipt",
+    "NotHandshakeProof",
+    "NotAppControlProof",
+    "NotMacProductAppProof"
 )) {
     Assert-True -Condition ($cliSmoke.Contains($signal)) -Message "CLI smoke coverage missing signal: $signal"
 }
@@ -234,6 +305,11 @@ foreach ($signal in @(
     "RelayPolicy::NotNeeded"
 )) {
     Assert-True -Condition ($transport.Contains($signal)) -Message "Transport Apple interop invariant missing signal: $signal"
+}
+
+# Bind a relative output path to the caller before entering the nested Rust directory.
+if (-not [string]::IsNullOrWhiteSpace($EvidencePath)) {
+    $EvidencePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EvidencePath)
 }
 
 Push-Location $coreRoot

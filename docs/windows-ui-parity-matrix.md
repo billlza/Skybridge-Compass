@@ -21,9 +21,8 @@ This matrix is the compact, auditable map for macOS-to-Windows button and featur
 | 3 | UsbManagement | USB Management | `IsUsbManagementSelected` | `UsbManagementHeader` | `WorkspaceAction.UsbManagementHeader.RefreshDevices` |
 | 4 | FileTransfer | File Transfer | `IsFileTransferSelected` | `FileTransferHeader`; `FileTransfer` | `WorkspaceAction.FileTransfer.SelectFiles`; `WorkspaceAction.FileTransfer.SelectFolder`; `WorkspaceAction.FileTransfer.GenerateQr`; `FileTransferShareQrPreview` |
 | 5 | RemoteDesktop | Remote Desktop | `IsRemoteDesktopSelected` | `RemoteDesktopHeader`; `RemoteDesktop` | `WorkspaceAction.RemoteDesktop.RecommendedConnect`; `WorkspaceAction.RemoteDesktop.AdvancedConnect`; `WorkspaceAction.RemoteDesktop.DisconnectSession` |
-| 6 | Quantum | Quantum / Core Diagnostics | `IsQuantumSelected` | `QuantumDiagnosticsHeader` | `WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics` |
-| 7 | SystemMonitor | System Monitor | `IsSystemMonitorSelected` | `SystemMonitorHeader`; `SystemMonitorControls` | `WorkspaceAction.SystemMonitorControls.Monitoring`; `WorkspaceAction.SystemMonitorControls.StopMonitoring`; `WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring` |
-| 8 | Settings | Settings | `IsSettingsSelected` | `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` | `WorkspaceAction.SettingsToolbar.ExportSettings`; `WorkspaceAction.SettingsToolbar.OpenSystemPreferences`; `WorkspaceAction.SettingsMaintenance.ApplySettings` |
+| 6 | SystemMonitor | System Monitor | `IsSystemMonitorSelected` | `SystemMonitorHeader`; `SystemMonitorControls` | `WorkspaceAction.SystemMonitorControls.Monitoring`; `WorkspaceAction.SystemMonitorControls.StopMonitoring`; `WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring` |
+| 7 | Settings | Settings | `IsSettingsSelected` | `SettingsHeader`; `SettingsToolbar`; `SettingsMaintenance` | `WorkspaceAction.SettingsToolbar.ExportSettings`; `WorkspaceAction.SettingsToolbar.OpenSystemPreferences`; `WorkspaceAction.SettingsMaintenance.ApplySettings` |
 
 ## Mac-To-Windows Baseline Signal Matrix
 

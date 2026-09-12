@@ -66,7 +66,11 @@ internal sealed class DiscoveryBrowserActions
     }
 
     private Task RunAsync(DiscoveryBrowserAction action) =>
-        _busyCoordinator.RunAsync(WorkspaceErrorScope.DeviceDiscovery, async () =>
+        RunAsync(action, allowWhileBusy: action == DiscoveryBrowserAction.Stop);
+
+    private Task RunAsync(DiscoveryBrowserAction action, bool allowWhileBusy)
+    {
+        var execute = async () =>
         {
             _setDiscoveryBrowserStatus(_discoveryBrowserClient.BuildPendingStatus(action));
             var snapshot = await _discoveryBrowserClient.BuildReadOnlySnapshotAsync(
@@ -78,9 +82,16 @@ internal sealed class DiscoveryBrowserActions
                     _getIsDiscoveryCompatibilityModeEnabled(),
                     _getExtendedSearchCountdown()));
 
-            _connectionResultProjector.ApplyDiscoveryBrowserResult(
-                action,
+            _discoveryBrowserClient.TryPublish(
                 snapshot,
-                _getPairingStatus());
-        });
+                current => _connectionResultProjector.ApplyDiscoveryBrowserResult(
+                    action,
+                    current,
+                    _getPairingStatus()));
+        };
+
+        return allowWhileBusy
+            ? _busyCoordinator.RunWithoutBusyGuardAsync(WorkspaceErrorScope.DeviceDiscovery, execute)
+            : _busyCoordinator.RunAsync(WorkspaceErrorScope.DeviceDiscovery, execute);
+    }
 }

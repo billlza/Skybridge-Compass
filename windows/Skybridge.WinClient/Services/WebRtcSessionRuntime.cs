@@ -11,33 +11,6 @@ using System.Threading.Tasks;
 
 namespace Skybridge.WinClient.Services;
 
-public interface IWebRtcSessionDataPlaneProvider
-{
-    LiveWebRtcSessionContext RequireLiveSession(ConnectionLaunchRequest request);
-}
-
-public sealed record LiveWebRtcSessionContext(
-    ISkyBridgeDataPlane DataPlane,
-    string PeerDeviceId,
-    string PeerPublicKeyFingerprint,
-    string SessionIdHex,
-    string AdapterBinding,
-    string LocalEndpoint,
-    string RemoteEndpoint,
-    string SelectedCandidatePair,
-    ulong TimestampWindowMs,
-    IReadOnlyList<ChannelMapping> ChannelMappings);
-
-public interface IWebRtcSessionRuntimeConsumer
-{
-    Task StartAsync(
-        LiveWebRtcSessionContext session,
-        ConnectionLaunchRequest request,
-        CancellationToken cancellationToken = default);
-
-    Task StopAsync(CancellationToken cancellationToken = default);
-}
-
 public sealed class WebRtcControlSmokeOptions
 {
     public WebRtcControlSmokeOptions(TimeSpan timeout, string? evidencePath = null)
@@ -69,6 +42,7 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
     private TaskCompletionSource<byte[]>? _ack;
     private byte[]? _probePayload;
     private ISkyBridgeDataPlane? _subscribedDataPlane;
+    private WebRtcSessionRuntimeLease? _activeLease;
     private bool _subscribed;
 
     public WebRtcControlSmokeClient(WebRtcControlSmokeOptions options)
@@ -76,7 +50,7 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
         _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
-    public async Task StartAsync(
+    public async Task<WebRtcSessionRuntimeLease> StartAsync(
         LiveWebRtcSessionContext session,
         ConnectionLaunchRequest request,
         CancellationToken cancellationToken = default)
@@ -100,6 +74,7 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
             + $"candidate={session.SelectedCandidatePair}";
         var payload = Encoding.UTF8.GetBytes(payloadText);
         var ack = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lease = WebRtcSessionRuntimeLease.Create();
 
         lock (_gate)
         {
@@ -111,6 +86,7 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
             _ack = ack;
             _probePayload = payload;
             _subscribedDataPlane = session.DataPlane;
+            _activeLease = lease;
             session.DataPlane.FrameReceived += OnFrameReceived;
             _subscribed = true;
         }
@@ -134,17 +110,22 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
         }
         finally
         {
-            await StopAsync(cancellationToken).ConfigureAwait(false);
+            await StopAsync(lease, CancellationToken.None).ConfigureAwait(false);
         }
+
+        return lease;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken = default)
+    public Task StopAsync(
+        WebRtcSessionRuntimeLease lease,
+        CancellationToken cancellationToken = default)
     {
+        lease.RequireValid();
         _ = cancellationToken;
         ISkyBridgeDataPlane? dataPlane;
         lock (_gate)
         {
-            if (!_subscribed)
+            if (!_subscribed || _activeLease != lease)
             {
                 return Task.CompletedTask;
             }
@@ -153,6 +134,7 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
             _ack = null;
             _probePayload = null;
             _subscribedDataPlane = null;
+            _activeLease = null;
             _subscribed = false;
         }
 
@@ -226,12 +208,6 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
             return;
         }
 
-        var parent = Path.GetDirectoryName(_options.EvidencePath);
-        if (!string.IsNullOrWhiteSpace(parent))
-        {
-            Directory.CreateDirectory(parent);
-        }
-
         var evidence = new WebRtcControlSmokeEvidence(
             FactoryMode: "webrtc-session",
             RuntimeProfile: "windows-product-service",
@@ -258,9 +234,7 @@ public sealed class WebRtcControlSmokeClient : IWebRtcSessionRuntimeConsumer
             Scope: "Windows WinClient service runtime over live WebRTC helper session; Mac side is a temporary helper echo peer, not the Mac product app.");
 
         var json = JsonSerializer.Serialize(evidence, EvidenceJsonOptions);
-        var tmp = _options.EvidencePath + ".tmp";
-        File.WriteAllText(tmp, json, new UTF8Encoding(false));
-        File.Move(tmp, _options.EvidencePath, overwrite: true);
+        WebRtcArtifactFileWriter.WriteUtf8TextAtomically(_options.EvidencePath, json);
     }
 
     private static string Sha256Hex(byte[] bytes) =>

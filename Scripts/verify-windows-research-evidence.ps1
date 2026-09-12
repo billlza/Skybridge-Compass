@@ -44,7 +44,8 @@ $acceptanceMap = Read-RequiredText -Path $acceptanceMapPath
 $stackFreshness = Read-RequiredText -Path $stackFreshnessPath
 
 foreach ($signal in @(
-    "current TDSC mac branch",
+    "current cross-platform contracts are Apple project",
+    "Docs/ADR-0002-Remote-Control-Authority-and-Sessions.md",
     "Docs/CoreLayering.md",
     "Docs/ProtocolAlignmentPlan.md",
     "Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",

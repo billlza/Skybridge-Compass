@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -10,27 +9,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 namespace Skybridge.WinClient.Services;
-
-public enum WebRtcProductControlSecureSessionState
-{
-    TransportOnly,
-    Established
-}
-
-public sealed record LiveWebRtcProductControlContext(
-    IWebRtcProductControlPlane ControlPlane,
-    string PeerDeviceId,
-    string PeerPublicKeyFingerprint,
-    string Role,
-    string TransportProfile,
-    string DataChannelLabel,
-    string AdapterBinding,
-    string LocalEndpoint,
-    string RemoteEndpoint,
-    string SelectedCandidatePair,
-    string TransportBindingDigestHex,
-    ulong TimestampWindowMs,
-    WebRtcProductControlSecureSessionState SecureSessionState);
 
 public sealed class WebRtcProductControlTransportOptions
 {
@@ -99,7 +77,8 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
     private readonly WebRtcProductControlTransportOptions _options;
     private readonly SemaphoreSlim _mutex = new(1, 1);
     private ActiveTransport? _activeTransport;
-    private bool _disposed;
+    private bool _disposeRequested;
+    private bool _disposeCompleted;
 
     public WebRtcProductControlTransportProvider(
         IWebRtcHelperLaunchClient helperLaunchClient,
@@ -121,6 +100,7 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
+        ThrowIfDisposed();
         ValidateRequest(request);
 
         await _mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -134,6 +114,7 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
                     return _activeTransport.Context;
                 }
 
+                _activeTransport.Claim.RequireUnclaimedForReplacement();
                 await DisposeActiveTransportAsync().ConfigureAwait(false);
             }
 
@@ -168,15 +149,7 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
             }
             finally
             {
-                if (controlPlaneClient is not null)
-                {
-                    await controlPlaneClient.DisposeAsync().ConfigureAwait(false);
-                }
-
-                if (helperSession is not null)
-                {
-                    await helperSession.DisposeAsync().ConfigureAwait(false);
-                }
+                await DisposeTransportResourcesAsync(controlPlaneClient, helperSession).ConfigureAwait(false);
             }
         }
         finally
@@ -215,6 +188,50 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
         await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
+            _activeTransport?.Claim.RequireUnclaimedForOwnerlessTeardown();
+            await DisposeActiveTransportAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    internal async Task<OwnedWebRtcProductControlContext> ClaimLiveTransportAsync(
+        string peerDeviceId,
+        string peerPublicKeyFingerprint)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(peerDeviceId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(peerPublicKeyFingerprint);
+        await _mutex.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            var active = RequireLiveTransportOwner(
+                peerDeviceId,
+                peerPublicKeyFingerprint);
+            var lease = active.Claim.ClaimForEngine();
+            return new OwnedWebRtcProductControlContext(lease, active.Context);
+        }
+        finally
+        {
+            _mutex.Release();
+        }
+    }
+
+    internal async Task DisposeTransportAsync(WebRtcProductControlTransportLease lease)
+    {
+        lease.RequireValid();
+        await _mutex.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var active = _activeTransport;
+            if (active is null || !active.Claim.IsOwnedBy(lease))
+            {
+                return;
+            }
+
             await DisposeActiveTransportAsync().ConfigureAwait(false);
         }
         finally
@@ -225,7 +242,7 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (_disposeCompleted)
         {
             return;
         }
@@ -233,13 +250,15 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
         await _mutex.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (_disposed)
+            if (_disposeCompleted)
             {
                 return;
             }
 
-            _disposed = true;
+            _activeTransport?.Claim.RequireUnclaimedForOwnerlessTeardown();
+            _disposeRequested = true;
             await DisposeActiveTransportAsync().ConfigureAwait(false);
+            _disposeCompleted = true;
         }
         finally
         {
@@ -263,11 +282,13 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
         var remoteFingerprint = remoteSignal.Fingerprint();
         var selectedCandidatePair =
             $"webrtc/dtls/sctp/{localSignal.FirstCandidateLabel()}-{remoteSignal.FirstCandidateLabel()}/{DataChannelLabel}";
+        var transportIncarnation = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
         var adapterBinding =
-            $"{TransportProfile}/{role}/datachannel={DataChannelLabel}/ipc=127.0.0.1:{helperSession.IpcPort}";
+            $"{TransportProfile}/{role}/incarnation={transportIncarnation}/"
+            + $"datachannel={DataChannelLabel}/ipc=127.0.0.1:{helperSession.IpcPort}";
         var bindingDigest = Sha256Hex(
             "skybridge-webrtc-product-control:"
-            + $"profile={TransportProfile};role={role};label={DataChannelLabel};"
+            + $"profile={TransportProfile};role={role};incarnation={transportIncarnation};label={DataChannelLabel};"
             + $"localFingerprint={localFingerprint};remoteFingerprint={remoteFingerprint};"
             + $"localEndpoint={localEndpoint};remoteEndpoint={remoteEndpoint};"
             + $"peer={request.PairingMaterial.DeviceId};fingerprint={request.PairingMaterial.PublicKeyFingerprint}");
@@ -283,6 +304,7 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
             localEndpoint,
             remoteEndpoint,
             selectedCandidatePair,
+            helperSession.LateRemoteIceCandidateRelayCount,
             bindingDigest,
             _options.TimestampWindowMs,
             WebRtcProductControlSecureSessionState.TransportOnly);
@@ -291,21 +313,65 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
     private async Task DisposeActiveTransportAsync()
     {
         var active = _activeTransport;
-        _activeTransport = null;
         if (active is null)
         {
             return;
         }
 
-        await active.ControlPlaneClient.DisposeAsync().ConfigureAwait(false);
-        await active.HelperSession.DisposeAsync().ConfigureAwait(false);
+        await active.Resources.DisposePendingAsync().ConfigureAwait(false);
+        _activeTransport = null;
     }
 
     private void ThrowIfDisposed()
     {
-        if (_disposed)
+        if (_disposeRequested)
         {
             throw new ObjectDisposedException(nameof(WebRtcProductControlTransportProvider));
+        }
+    }
+
+    private ActiveTransport RequireLiveTransportOwner(
+        string peerDeviceId,
+        string peerPublicKeyFingerprint)
+    {
+        var active = _activeTransport;
+        if (active is null)
+        {
+            throw new InvalidOperationException("WebRTC product-control transport is not live.");
+        }
+
+        if (!active.Matches(peerDeviceId, peerPublicKeyFingerprint))
+        {
+            throw new InvalidOperationException("WebRTC product-control transport identity does not match the requested peer.");
+        }
+
+        if (!active.IsLive)
+        {
+            throw new InvalidOperationException("WebRTC product-control transport is no longer live; refusing to use a closed helper session.");
+        }
+
+        return active;
+    }
+
+    private static async Task DisposeTransportResourcesAsync(
+        WebRtcProductControlPlaneClient? controlPlaneClient,
+        WebRtcHelperSession? helperSession)
+    {
+        if (controlPlaneClient is not null && helperSession is not null)
+        {
+            var resources = new WebRtcSessionResourceOwner(controlPlaneClient, helperSession);
+            await resources.DisposePendingAsync().ConfigureAwait(false);
+            return;
+        }
+
+        if (controlPlaneClient is not null)
+        {
+            await controlPlaneClient.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (helperSession is not null)
+        {
+            await helperSession.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -375,6 +441,8 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
             HelperSession = helperSession;
             ControlPlaneClient = controlPlaneClient;
             Context = context;
+            Resources = new WebRtcSessionResourceOwner(controlPlaneClient, helperSession);
+            Claim = new WebRtcProductControlTransportClaim();
         }
 
         public string PeerDeviceId { get; }
@@ -387,6 +455,10 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
 
         public LiveWebRtcProductControlContext Context { get; }
 
+        public WebRtcSessionResourceOwner Resources { get; }
+
+        public WebRtcProductControlTransportClaim Claim { get; }
+
         public bool IsLive => HelperSession.IsRunning && ControlPlaneClient.IsConnected;
 
         public bool Matches(WindowsTransportAdapterRequest request) =>
@@ -398,7 +470,9 @@ public sealed class WebRtcProductControlTransportProvider : IAsyncDisposable
     }
 }
 
-public sealed class WebRtcProductControlTransportAdapterClient : IWindowsTransportAdapterClient, IAsyncDisposable
+public sealed class WebRtcProductControlTransportAdapterClient :
+    IWindowsTransportAdapterClient,
+    IAsyncDisposable
 {
     private readonly WebRtcProductControlTransportProvider _transportProvider;
 
@@ -452,6 +526,44 @@ public sealed class WebRtcProductControlTransportAdapterClient : IWindowsTranspo
         ValidatePlanMatchesContext(request.Plan, context);
         return context;
     }
+
+    internal async Task<OwnedWebRtcProductControlContext> ClaimLiveTransportAsync(
+        ConnectionLaunchRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Plan.ValidateForLaunch(request.PairingMaterial);
+        var owned = await _transportProvider
+            .ClaimLiveTransportAsync(
+                request.PairingMaterial.DeviceId,
+                request.PairingMaterial.PublicKeyFingerprint)
+            .ConfigureAwait(false);
+        try
+        {
+            ValidatePlanMatchesContext(request.Plan, owned.Context);
+            return owned;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                await _transportProvider
+                    .DisposeTransportAsync(owned.Lease)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception cleanupEx)
+            {
+                throw new AggregateException(
+                    "WebRTC product-control transport claim validation failed and exact-lease cleanup also reported an error.",
+                    ex,
+                    cleanupEx);
+            }
+
+            throw;
+        }
+    }
+
+    internal Task DisposeTransportAsync(WebRtcProductControlTransportLease lease) =>
+        _transportProvider.DisposeTransportAsync(lease);
 
     public Task DisposeTransportAsync() => _transportProvider.DisposeTransportAsync();
 
@@ -538,166 +650,37 @@ public sealed class WebRtcProductControlTransportAdapterClient : IWindowsTranspo
     }
 }
 
-public sealed class WebRtcProductControlEngineClient : IEngineClient, IDisposable
+public sealed partial class WebRtcProductControlEngineClient
 {
-    private readonly IEngineClient _inner;
-    private readonly WebRtcProductControlTransportAdapterClient _transportAdapter;
-    private readonly IReadOnlyList<IWebRtcProductControlRuntimeConsumer> _runtimeConsumers;
-    private readonly List<IWebRtcProductControlRuntimeConsumer> _startedConsumers = new();
-
     public WebRtcProductControlEngineClient(
         IEngineClient inner,
         WebRtcProductControlTransportAdapterClient transportAdapter,
         IReadOnlyList<IWebRtcProductControlRuntimeConsumer>? runtimeConsumers = null)
-    {
-        _inner = inner ?? throw new ArgumentNullException(nameof(inner));
-        _transportAdapter = transportAdapter ?? throw new ArgumentNullException(nameof(transportAdapter));
-        _runtimeConsumers = runtimeConsumers ?? Array.Empty<IWebRtcProductControlRuntimeConsumer>();
-        _inner.ConnectionStateChanged += OnInnerConnectionStateChanged;
-    }
-
-    public EngineConnectionState State => _inner.State;
-
-    public event EventHandler<EngineConnectionState>? ConnectionStateChanged;
-
-    public async Task ConnectAsync(ConnectionLaunchRequest request)
-    {
-        _transportAdapter.RequireLiveTransportFor(request);
-        try
-        {
-            await _inner.ConnectAsync(request).ConfigureAwait(false);
-            var context = _transportAdapter.RequireLiveTransport(request);
-            foreach (var consumer in _runtimeConsumers)
-            {
-                await consumer.StartAsync(context).ConfigureAwait(false);
-                _startedConsumers.Add(consumer);
-            }
-        }
-        catch (Exception ex)
-        {
-            var cleanupErrors = new List<Exception>();
-            cleanupErrors.AddRange(await StopStartedConsumersAsync().ConfigureAwait(false));
-            try
-            {
-                await _inner.DisconnectAsync().ConfigureAwait(false);
-            }
-            catch (Exception cleanupEx)
-            {
-                cleanupErrors.Add(cleanupEx);
-            }
-
-            try
-            {
-                await _transportAdapter.DisposeTransportAsync().ConfigureAwait(false);
-            }
-            catch (Exception cleanupEx)
-            {
-                cleanupErrors.Add(cleanupEx);
-            }
-
-            if (cleanupErrors.Count > 0)
-            {
-                cleanupErrors.Insert(0, ex);
-                throw new AggregateException(
-                    "WebRTC product-control engine connect failed and cleanup also reported errors.",
-                    cleanupErrors);
-            }
-
-            ExceptionDispatchInfo.Capture(ex).Throw();
-            throw;
-        }
-    }
-
-    public async Task DisconnectAsync()
-    {
-        var stopErrors = await StopStartedConsumersAsync().ConfigureAwait(false);
-        try
-        {
-            await _inner.DisconnectAsync().ConfigureAwait(false);
-        }
-        finally
-        {
-            await _transportAdapter.DisposeTransportAsync().ConfigureAwait(false);
-        }
-
-        if (stopErrors.Count > 0)
-        {
-            throw new AggregateException("One or more WebRTC product-control runtime consumers failed to stop.", stopErrors);
-        }
-    }
-
-    public Task SendHeartbeatAsync() => _inner.SendHeartbeatAsync();
-
-    public void Dispose()
-    {
-        _inner.ConnectionStateChanged -= OnInnerConnectionStateChanged;
-        var stopErrors = StopStartedConsumersAsync().GetAwaiter().GetResult();
-        if (_inner is IDisposable disposable)
-        {
-            disposable.Dispose();
-        }
-
-        _transportAdapter.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        if (stopErrors.Count > 0)
-        {
-            throw new AggregateException("One or more WebRTC product-control runtime consumers failed to stop.", stopErrors);
-        }
-    }
-
-    private void OnInnerConnectionStateChanged(object? sender, EngineConnectionState state) =>
-        ConnectionStateChanged?.Invoke(this, state);
-
-    private async Task<IReadOnlyList<Exception>> StopStartedConsumersAsync()
-    {
-        var errors = new List<Exception>();
-        for (var index = _startedConsumers.Count - 1; index >= 0; index--)
-        {
-            try
-            {
-                await _startedConsumers[index].StopAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                errors.Add(ex);
-            }
-        }
-
-        _startedConsumers.Clear();
-        return errors;
-    }
-}
-
-public interface IWebRtcAppSessionKeyProvider
-{
-    WebRtcAppSecureSessionKeys RequireEstablishedKeys(LiveWebRtcProductControlContext context);
-}
-
-public sealed class WebRtcAppSessionKeysUnavailableException : InvalidOperationException
-{
-    public WebRtcAppSessionKeysUnavailableException(string message)
-        : base(message)
+        : this(
+            inner,
+            new ProductControlEngineTransportBoundary(transportAdapter),
+            runtimeConsumers)
     {
     }
-}
 
-public sealed class UnavailableWebRtcAppSessionKeyProvider : IWebRtcAppSessionKeyProvider
-{
-    public WebRtcAppSecureSessionKeys RequireEstablishedKeys(LiveWebRtcProductControlContext context)
+    private sealed class ProductControlEngineTransportBoundary : IWebRtcProductControlEngineTransport
     {
-        ArgumentNullException.ThrowIfNull(context);
-        throw new WebRtcAppSessionKeysUnavailableException(
-            "WebRTC product-control secure session keys are not established. "
-            + "Run the Mac-compatible MessageA/MessageB/FIN1 handshake before sending SBWC business payloads.");
+        private readonly WebRtcProductControlTransportAdapterClient _transportAdapter;
+
+        public ProductControlEngineTransportBoundary(WebRtcProductControlTransportAdapterClient transportAdapter)
+        {
+            _transportAdapter = transportAdapter ?? throw new ArgumentNullException(nameof(transportAdapter));
+        }
+
+        public Task<OwnedWebRtcProductControlContext> ClaimLiveTransportAsync(
+            ConnectionLaunchRequest request) =>
+            _transportAdapter.ClaimLiveTransportAsync(request);
+
+        public Task DisposeTransportAsync(WebRtcProductControlTransportLease lease) =>
+            _transportAdapter.DisposeTransportAsync(lease);
+
+        public ValueTask DisposeAsync() => _transportAdapter.DisposeAsync();
     }
-}
-
-public interface IWebRtcProductControlRuntimeConsumer
-{
-    Task StartAsync(
-        LiveWebRtcProductControlContext context,
-        CancellationToken cancellationToken = default);
-
-    Task StopAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class WebRtcProductControlSmokeOptions
@@ -731,6 +714,7 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
     private TaskCompletionSource<byte[]>? _ack;
     private byte[]? _probePayload;
     private IWebRtcProductControlPlane? _subscribedControlPlane;
+    private WebRtcProductControlRuntimeLease? _activeLease;
     private bool _subscribed;
 
     public WebRtcProductControlSmokeClient(WebRtcProductControlSmokeOptions options)
@@ -738,7 +722,7 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
         _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
-    public async Task StartAsync(
+    public async Task<WebRtcProductControlRuntimeLease> StartAsync(
         LiveWebRtcProductControlContext context,
         CancellationToken cancellationToken = default)
     {
@@ -765,6 +749,7 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
             + $"binding={context.AdapterBinding}";
         var payload = Encoding.UTF8.GetBytes(payloadText);
         var ack = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lease = WebRtcProductControlRuntimeLease.Create();
 
         lock (_gate)
         {
@@ -776,6 +761,7 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
             _ack = ack;
             _probePayload = payload;
             _subscribedControlPlane = context.ControlPlane;
+            _activeLease = lease;
             context.ControlPlane.MessageReceived += OnMessageReceived;
             _subscribed = true;
         }
@@ -789,17 +775,22 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
         }
         finally
         {
-            await StopAsync(cancellationToken).ConfigureAwait(false);
+            await StopAsync(lease, cancellationToken).ConfigureAwait(false);
         }
+
+        return lease;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken = default)
+    public Task StopAsync(
+        WebRtcProductControlRuntimeLease lease,
+        CancellationToken cancellationToken = default)
     {
+        lease.RequireValid();
         _ = cancellationToken;
         IWebRtcProductControlPlane? controlPlane;
         lock (_gate)
         {
-            if (!_subscribed)
+            if (!_subscribed || _activeLease != lease)
             {
                 return Task.CompletedTask;
             }
@@ -808,6 +799,7 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
             _ack = null;
             _probePayload = null;
             _subscribedControlPlane = null;
+            _activeLease = null;
             _subscribed = false;
         }
 
@@ -873,12 +865,6 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
             return;
         }
 
-        var parent = Path.GetDirectoryName(_options.EvidencePath);
-        if (!string.IsNullOrWhiteSpace(parent))
-        {
-            Directory.CreateDirectory(parent);
-        }
-
         var evidence = new WebRtcProductControlSmokeEvidence(
             FactoryMode: "webrtc-product-control",
             RuntimeProfile: WebRtcProductControlTransportProvider.TransportProfile,
@@ -905,9 +891,7 @@ public sealed class WebRtcProductControlSmokeClient : IWebRtcProductControlRunti
             Scope: "Windows WinClient service runtime over raw mac-product-control-v1 helper transport; this proves WebRTC/DataChannel/IPC liveness only, not Mac product app handshake, SBWC session keys, or product signaling.");
 
         var json = JsonSerializer.Serialize(evidence, EvidenceJsonOptions);
-        var tmp = _options.EvidencePath + ".tmp";
-        File.WriteAllText(tmp, json, new UTF8Encoding(false));
-        File.Move(tmp, _options.EvidencePath, overwrite: true);
+        WebRtcArtifactFileWriter.WriteUtf8TextAtomically(_options.EvidencePath, json);
     }
 
     private static string Sha256Hex(byte[] bytes) =>

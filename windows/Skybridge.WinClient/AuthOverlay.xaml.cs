@@ -1,6 +1,4 @@
-using System;
 using System.ComponentModel;
-using System.Diagnostics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -21,12 +19,10 @@ namespace Skybridge.WinClient;
 //  • EMAIL is fully functional: the 邮箱登录 button calls ViewModel.SignInWithEmailAsync,
 //    which runs the REAL Supabase email/password sign-in through the coordinator. The busy
 //    spinner + inline error mirror the VM's IsAuthBusy / AuthErrorMessage (subscribed below).
-//  • Microsoft is HONEST: Supabase's azure provider is not enabled on this project, so the
-//    button surfaces an inline "需先在 Supabase 启用 Azure 登录" hint — it does NOT fake a
-//    sign-in or open a broken OAuth flow.
-//  • Nebula opens the system browser to the Supabase OAuth authorize URL (the same GoTrue
-//    project + client-safe key the rest of the app uses); Phone routes to email (no Windows
-//    phone-OTP path) — none of these fake a signed-in success.
+//  • Microsoft remains disabled until Windows owns state, PKCE, callback validation, and
+//    Supabase session installation as one closed flow.
+//  • Nebula and Phone remain explicitly unavailable until Windows owns a complete OAuth/OTP
+//    callback, verification, and session-install path. Neither entry point fakes success.
 //  • Guest mode just dismisses the overlay (the shell already runs signed-out).
 //
 //  The password is read ONLY from PasswordInput.Password (user input) — never defaulted.
@@ -34,13 +30,6 @@ namespace Skybridge.WinClient;
 
 public sealed partial class AuthOverlay : UserControl
 {
-    // Supabase GoTrue project + client-safe publishable key (the SAME values the
-    // SupabaseAuthClient bundles). Used only to build the browser OAuth authorize URL for the
-    // Nebula provider + the password-recovery page — no secret is involved (publishable/anon
-    // key only).
-    private const string SupabaseBaseUrl = "https://hloqytmhjludmuhwyyzb.supabase.co";
-    private const string OAuthRedirect = "skybridge://auth/callback";
-
     private static readonly SolidColorBrush SelectedTabRing = new(Color.FromArgb(0xFF, 0x30, 0x72, 0xEF));
     private static readonly SolidColorBrush UnselectedTabRing = new(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
 
@@ -168,18 +157,8 @@ public sealed partial class AuthOverlay : UserControl
         // Password read verbatim from user input — never defaulted or hardcoded.
         var password = PasswordInput.Password ?? string.Empty;
 
-        // The VM owns the busy/error state + the real coordinator call; it never throws.
+        // The VM owns the busy/error state + typed coordinator failures.
         await _viewModel.SignInWithEmailAsync(email, password);
-    }
-
-    // ---- Microsoft (honest: Azure provider not enabled) -----------------------------
-
-    // Microsoft sign-in maps to Supabase's "azure" OAuth provider, which is NOT enabled on
-    // this GoTrue project yet. Rather than open a flow that would dead-end at GoTrue's
-    // "provider is not enabled" error, be explicit in the UI and don't fake success.
-    private void OnMicrosoftContinue(object sender, RoutedEventArgs e)
-    {
-        MicrosoftHint.Text = "需先在 Supabase 启用 Azure 登录后才能使用 Microsoft 账号。";
     }
 
     // ---- Email-form register hint (hosted; inert for now) ---------------------------
@@ -200,57 +179,12 @@ public sealed partial class AuthOverlay : UserControl
         PhoneHint.Text = "手机验证码登录暂未在 Windows 端开放，请暂用邮箱登录。";
     }
 
-    // ---- Nebula browser OAuth -------------------------------------------------------
-
-    private void OnNebulaBrowserLogin(object sender, RoutedEventArgs e) =>
-        OpenOAuthInBrowser("nebula", null);
-
     private void OnForgotPassword(object sender, RoutedEventArgs e)
     {
-        // Supabase password-recovery is a hosted flow; open it in the browser. If the email
-        // box already has an address, pass it through so the page can prefill.
-        var email = EmailInput.Text?.Trim() ?? string.Empty;
-        var url = $"{SupabaseBaseUrl}/auth/v1/recover";
-        if (!string.IsNullOrWhiteSpace(email))
-        {
-            url += $"?email={Uri.EscapeDataString(email)}";
-        }
-
-        TryOpenBrowser(url, null);
-    }
-
-    // Opens the GoTrue OAuth authorize URL for the given provider in the system browser. The
-    // redirect is the app's custom scheme (skybridge://) — the same callback contract the Mac
-    // uses; if no browser can be launched we surface a clear "暂用邮箱登录" hint rather than
-    // pretending success.
-    private void OpenOAuthInBrowser(string provider, TextBlock? hintTarget)
-    {
-        var url =
-            $"{SupabaseBaseUrl}/auth/v1/authorize" +
-            $"?provider={Uri.EscapeDataString(provider)}" +
-            $"&redirect_to={Uri.EscapeDataString(OAuthRedirect)}";
-
-        TryOpenBrowser(url, hintTarget);
-    }
-
-    private static void TryOpenBrowser(string url, TextBlock? hintTarget)
-    {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true
-            });
-        }
-        catch (Exception)
-        {
-            // Could not launch a browser: be honest, don't fake a login.
-            if (hintTarget is not null)
-            {
-                hintTarget.Text = "无法打开浏览器，请暂用邮箱登录。";
-            }
-        }
+        // /auth/v1/recover is a POST API, not a hosted GET page. Do not launch a dead URL or put
+        // credentials in a query string. A real implementation must call the typed auth client.
+        ErrorBanner.Visibility = Visibility.Visible;
+        ErrorText.Text = "密码恢复尚未在 Windows 端接通，请先在其他已验证客户端完成重置。";
     }
 
     // ---- Guest mode -----------------------------------------------------------------

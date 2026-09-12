@@ -1,6 +1,6 @@
 using System;
-using System.Text;
-using System.Text.Json;
+using System.Diagnostics.CodeAnalysis;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
 using Skybridge.WinClient.Services;
@@ -29,7 +29,8 @@ namespace Skybridge.WinClient.ViewModels;
 public sealed class AccountSessionCoordinator
 {
     private readonly ISupabaseAuthClient _authClient;
-    private readonly SessionStore _sessionStore;
+    private readonly ISessionStore _sessionStore;
+    private readonly SemaphoreSlim _mutationGate = new(1, 1);
 
     private string? _accessToken;
     private string? _refreshToken;
@@ -38,13 +39,13 @@ public sealed class AccountSessionCoordinator
     // Refresh a little before the JWT actually expires so a call never races the boundary.
     private static readonly TimeSpan RefreshSkew = TimeSpan.FromMinutes(5);
 
-    public AccountSessionCoordinator(ISupabaseAuthClient? authClient = null, SessionStore? sessionStore = null)
+    public AccountSessionCoordinator(ISupabaseAuthClient? authClient = null, ISessionStore? sessionStore = null)
     {
         // Self-provision the real implementations by default (the whole point of the escape
         // hatch). Tests may pass fakes, but production never touches the DI root.
         _authClient = authClient ?? new SupabaseAuthClient();
         _sessionStore = sessionStore ?? new SessionStore();
-        SignOutCommand = new AsyncRelayCommand(SignOutAsync);
+        SignOutCommand = new AsyncRelayCommand(async () => { await SignOutAsync().ConfigureAwait(true); });
     }
 
     // The account block binds the dialog trigger here: the VM forwards this so MainWindow can
@@ -76,35 +77,17 @@ public sealed class AccountSessionCoordinator
 
     // Called by MainWindow after a successful SignInDialog: persist the session and set the
     // identity from user_metadata, falling back to GetUser / user_profiles when thin.
-    public async Task ApplyAuthAsync(AuthToken token)
+    public async Task<AccountSessionResult> ApplyAuthAsync(AuthToken token)
     {
-        if (token is null || string.IsNullOrWhiteSpace(token.AccessToken))
+        await _mutationGate.WaitAsync().ConfigureAwait(true);
+        try
         {
-            return;
+            return await ApplyAuthCoreAsync(token).ConfigureAwait(true);
         }
-
-        _accessToken = token.AccessToken;
-        _refreshToken = token.RefreshToken;
-        _userId = token.User?.Id;
-
-        var metadata = token.User?.UserMetadata;
-
-        // If the token's embedded user_metadata is thin, re-fetch the full user (which itself
-        // falls back to the user_profiles REST row inside the client).
-        if (IsMetadataThin(metadata))
+        finally
         {
-            var user = await _authClient
-                .GetUserAsync(token.AccessToken, _userId)
-                .ConfigureAwait(true);
-            if (user is not null)
-            {
-                _userId ??= user.Id;
-                metadata = MergeMetadata(metadata, user.UserMetadata);
-            }
+            _mutationGate.Release();
         }
-
-        ApplyIdentity(metadata, token.User?.Email);
-        Persist();
     }
 
     // ---- Email sign-in (in-window AuthOverlay path) ---------------------------------
@@ -112,38 +95,56 @@ public sealed class AccountSessionCoordinator
     // Called by the in-window AuthOverlay's 邮箱登录 button (via the VM). Validates non-empty
     // input, performs the REAL Supabase email/password sign-in through the owned auth client,
     // and on success applies + persists the identity. Returns a result the overlay binds to:
-    // Success flips the overlay closed; a failure keeps it open with the inline error string.
-    // NEVER throws — the auth client is result-or-null and any surprise is caught here.
+    // Success flips the overlay closed; a typed auth/storage failure keeps it open with the
+    // inline error string. Unexpected programming/platform failures are not hidden here.
     public async Task<EmailSignInResult> SignInWithEmailAsync(string email, string password)
     {
-        var trimmedEmail = email?.Trim() ?? string.Empty;
-        // The password is taken verbatim from user input — never trimmed-away or defaulted.
-        var rawPassword = password ?? string.Empty;
-
-        if (string.IsNullOrWhiteSpace(trimmedEmail) || string.IsNullOrEmpty(rawPassword))
-        {
-            return EmailSignInResult.Failed("请输入邮箱和密码。");
-        }
-
+        await _mutationGate.WaitAsync().ConfigureAwait(true);
         try
         {
+            var trimmedEmail = email?.Trim() ?? string.Empty;
+            // The password is taken verbatim from user input — never trimmed-away or defaulted.
+            var rawPassword = password ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(trimmedEmail) || string.IsNullOrEmpty(rawPassword))
+            {
+                return EmailSignInResult.Failed(
+                    EmailSignInFailureKind.Input,
+                    "请输入邮箱和密码。");
+            }
+
             var token = await _authClient
                 .SignInWithPasswordAsync(trimmedEmail, rawPassword)
                 .ConfigureAwait(true);
 
-            if (token is null || string.IsNullOrWhiteSpace(token.AccessToken))
+            if (!token.Succeeded || token.Value is null)
             {
-                return EmailSignInResult.Failed("登录失败，请检查邮箱和密码后重试。");
+                return EmailFailureFor(token.Failure);
             }
 
-            await ApplyAuthAsync(token).ConfigureAwait(true);
-            return EmailSignInResult.Succeeded();
+            var result = await ApplyAuthCoreAsync(token.Value)
+                .ConfigureAwait(true);
+            if (result.Success)
+            {
+                return EmailSignInResult.Succeeded();
+            }
+
+            return result.FailureKind switch
+            {
+                AccountSessionFailureKind.SessionPersistenceFailed => EmailSignInResult.Failed(
+                    EmailSignInFailureKind.Storage,
+                    "登录已验证，但本机安全存储失败。请检查磁盘或账户目录权限后重试。"),
+                AccountSessionFailureKind.Network => EmailSignInResult.Failed(
+                    EmailSignInFailureKind.Network,
+                    "网络或认证服务暂时不可用，请稍后重试。"),
+                _ => EmailSignInResult.Failed(
+                    EmailSignInFailureKind.Verification,
+                    "登录响应未通过账号身份连续性验证，请重新登录。")
+            };
         }
-        catch (Exception)
+        finally
         {
-            // The client never throws (result-or-null), but be defensive: any unexpected
-            // failure shows a generic error rather than bubbling into the UI thread.
-            return EmailSignInResult.Failed("登录失败，请稍后重试。");
+            _mutationGate.Release();
         }
     }
 
@@ -151,84 +152,306 @@ public sealed class AccountSessionCoordinator
 
     // Load the persisted session; if the JWT is within the refresh skew of expiry, refresh it
     // first; then GetUser to re-confirm identity. Any failure leaves the block signed out.
-    public async Task HydrateFromStoreAsync()
+    public async Task<AccountSessionResult> HydrateFromStoreAsync()
     {
-        var persisted = _sessionStore.Load();
-        if (persisted is null || string.IsNullOrWhiteSpace(persisted.AccessToken))
+        await _mutationGate.WaitAsync().ConfigureAwait(true);
+        try
         {
-            return;
+            return await HydrateFromStoreCoreAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _mutationGate.Release();
+        }
+    }
+
+    private async Task<AccountSessionResult> HydrateFromStoreCoreAsync(bool requestRefresh = false)
+    {
+        var loadResult = _sessionStore.Load();
+        if (loadResult.IsQuietSignedOut)
+        {
+            return AccountSessionResult.SignedOutResult();
         }
 
-        _accessToken = persisted.AccessToken;
-        _refreshToken = persisted.RefreshToken;
-        _userId = persisted.UserId;
+        if (!loadResult.Succeeded || loadResult.Session is null)
+        {
+            return ClearStoredSessionAfterFailure(
+                AccountSessionFailureKind.SessionPersistenceFailed,
+                loadResult.Status.ToString());
+        }
 
-        // Show the persisted identity immediately (optimistic) so the block isn't blank while
-        // the network refresh runs; a live GetUser below upgrades/corrects it.
-        ApplyPersistedIdentity(persisted);
+        var persisted = loadResult.Session;
+        if (persisted.Authority is null
+            || persisted.Authority != _authClient.SessionAuthority)
+        {
+            return ClearStoredSessionAfterFailure(
+                AccountSessionFailureKind.AuthorityMismatch,
+                "auth_persisted_authority_mismatch");
+        }
+
+        if (!SessionJwtValidator.TryValidate(
+                persisted.AccessToken,
+                _authClient.SessionAuthority,
+                persisted.Subject,
+                requireUnexpired: false,
+                out var persistedClaims,
+                out var persistedTokenError)
+            || persistedClaims is null)
+        {
+            return ClearStoredSessionAfterFailure(
+                FailureKindForTokenError(persistedTokenError),
+                persistedTokenError);
+        }
+
+        var accessToken = persisted.AccessToken!;
+        var refreshToken = persisted.RefreshToken!;
+        var subject = persistedClaims.Subject;
 
         // Refresh the access token if it is expired or within the skew window.
-        if (NeedsRefresh(_accessToken) && !string.IsNullOrWhiteSpace(_refreshToken))
+        if (NeedsRefresh(persistedClaims.ExpiresAtUnix))
         {
-            var refreshed = await _authClient.RefreshAsync(_refreshToken!).ConfigureAwait(true);
-            if (refreshed is not null && !string.IsNullOrWhiteSpace(refreshed.AccessToken))
+            var refreshed = await _authClient.RefreshAsync(refreshToken).ConfigureAwait(true);
+            if (!refreshed.Succeeded
+                || refreshed.Value is null
+                || string.IsNullOrWhiteSpace(refreshed.Value.AccessToken)
+                || string.IsNullOrWhiteSpace(refreshed.Value.RefreshToken))
             {
-                _accessToken = refreshed.AccessToken;
-                _refreshToken = refreshed.RefreshToken ?? _refreshToken;
-                _userId ??= refreshed.User?.Id;
+                if (IsTransientAuthFailure(refreshed.Failure))
+                    return requestRefresh ? AccountSessionResult.Failed(AccountSessionFailureKind.Network, refreshed.Failure.Code) : DeferHydration(refreshed.Failure.Code);
+                return ClearStoredSessionAfterFailure(
+                    AccountSessionFailureKind.RefreshRejected,
+                    refreshed.Failure?.Code ?? "auth_refresh_missing_rotated_token");
             }
-            else
+
+            if (!SessionJwtValidator.TryValidate(
+                    refreshed.Value.AccessToken,
+                    _authClient.SessionAuthority,
+                    subject,
+                    requireUnexpired: true,
+                    out var refreshedClaims,
+                    out var refreshTokenError)
+                || refreshedClaims is null
+                || !EmbeddedUserMatchesSubject(refreshed.Value, subject))
             {
-                // Refresh failed (revoked/expired refresh token): the persisted identity is
-                // still shown optimistically, but we cannot make authenticated calls. Keep
-                // the optimistic identity rather than forcing a sign-out blank — the next
-                // sign-out/sign-in corrects state. Do not re-persist a dead token.
-                return;
+                return ClearStoredSessionAfterFailure(
+                    string.IsNullOrEmpty(refreshTokenError)
+                        ? AccountSessionFailureKind.SubjectMismatch
+                        : FailureKindForTokenError(refreshTokenError),
+                    string.IsNullOrEmpty(refreshTokenError)
+                        ? "auth_refresh_embedded_subject_mismatch"
+                        : refreshTokenError);
+            }
+
+            accessToken = refreshed.Value.AccessToken;
+            refreshToken = refreshed.Value.RefreshToken;
+            // Rotation has already happened on the server. Commit the replacement
+            // before another network request can fail; do not publish identity yet.
+            var rotated = _sessionStore.Save(persisted with
+            {
+                AccessToken = accessToken, RefreshToken = refreshToken,
+                IssuedAtUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            });
+            if (!rotated.Succeeded)
+            {
+                ClearInMemoryAndNotify();
+                return AccountSessionResult.Failed(AccountSessionFailureKind.SessionPersistenceFailed, rotated.Status.ToString());
             }
         }
 
-        // Re-confirm the live identity (and pick up any profile changes since last launch).
+        // Re-confirm the live identity on every launch, even when the access token did not
+        // require refresh. Parsed JWT claims alone are never authentication proof.
         var user = await _authClient
-            .GetUserAsync(_accessToken!, _userId)
+            .GetUserAsync(accessToken, subject)
             .ConfigureAwait(true);
-        if (user is not null)
+        var returnedSubjectMismatch = user.Value is not null
+            && !string.Equals(user.Value.Id, subject, StringComparison.Ordinal);
+        if (!user.Succeeded
+            || user.Value is null
+            || returnedSubjectMismatch)
         {
-            _userId ??= user.Id;
-            ApplyIdentity(user.UserMetadata, user.Email);
+            if (!returnedSubjectMismatch && IsTransientAuthFailure(user.Failure))
+                return requestRefresh ? AccountSessionResult.Failed(AccountSessionFailureKind.Network, user.Failure.Code) : DeferHydration(user.Failure.Code);
+            return ClearStoredSessionAfterFailure(
+                FailureKindForUserFailure(user.Failure, returnedSubjectMismatch),
+                user.Failure?.Code ?? "auth_user_subject_mismatch");
         }
 
-        Persist();
+        var previous = CaptureState();
+        ApplyVerifiedIdentity(accessToken, refreshToken, subject, user.Value);
+        var saveResult = Persist();
+        if (!saveResult.Succeeded)
+        {
+            RestoreState(previous);
+            var clearResult = _sessionStore.Clear();
+            _ = await _authClient.SignOutAsync(accessToken).ConfigureAwait(true);
+            if (!clearResult.Succeeded)
+            {
+                return AccountSessionResult.Failed(
+                    AccountSessionFailureKind.SessionPersistenceFailed,
+                    $"{saveResult.Status}:{clearResult.Status}");
+            }
+
+            ClearInMemoryAndNotify();
+            return AccountSessionResult.FailedSignedOut(
+                AccountSessionFailureKind.SessionPersistenceFailed,
+                saveResult.Status.ToString());
+        }
+
+        RaiseIdentityChanged();
+        return AccountSessionResult.Succeeded();
+    }
+
+
+    internal string? AccountDeviceScope => IsSignedIn && _userId is not null
+        ? _authClient.SessionAuthority.Issuer + "/" + _userId : null;
+
+    // Captured under the same mutation gate as sign-in, sign-out and refresh. The
+    // device request receives one immutable authority/token pair, never two providers
+    // observing opposite sides of an account switch.
+    internal async Task<AccountDeviceAuthentication?> GetDeviceAuthenticationAsync(CancellationToken cancellationToken)
+    {
+        await _mutationGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+        try
+        {
+            if (!IsSignedIn) return null;
+            if (!SessionJwtValidator.TryValidate(_accessToken, _authClient.SessionAuthority, _userId,
+                requireUnexpired: false, out var claims, out _) || claims is null)
+                throw new InvalidDataException("Authenticated account token no longer matches its authority.");
+            if (NeedsRefresh(claims.ExpiresAtUnix))
+            {
+                var refreshed = await HydrateFromStoreCoreAsync(requestRefresh: true).ConfigureAwait(true);
+                if (!refreshed.Success) throw new AccountDeviceAuthenticationException(refreshed.FailureKind);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsSignedIn || _accessToken is null || _userId is null) return null;
+            return AccountDeviceAuthentication.FromVerifiedSession(_accessToken, _authClient.SessionAuthority, _userId);
+        }
+        finally { _mutationGate.Release(); }
     }
 
     // ---- Sign-out -------------------------------------------------------------------
 
-    public async Task SignOutAsync()
+    public async Task<AccountSessionResult> SignOutAsync()
     {
-        var token = _accessToken;
-        if (!string.IsNullOrWhiteSpace(token))
+        await _mutationGate.WaitAsync().ConfigureAwait(true);
+        try
         {
-            await _authClient.SignOutAsync(token!).ConfigureAwait(true);
+            var token = _accessToken;
+
+            // Local cleanup is authoritative for the UI and happens first. If it fails, keep
+            // the exact in-memory identity and do not tell either the UI or server that logout
+            // completed; a retry still has the token needed to finish safely.
+            var clearResult = _sessionStore.Clear();
+            if (!clearResult.Succeeded)
+            {
+                return AccountSessionResult.Failed(
+                    AccountSessionFailureKind.SessionPersistenceFailed,
+                    clearResult.Status.ToString());
+            }
+
+            ClearInMemoryAndNotify();
+
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return AccountSessionResult.SignedOutResult();
+            }
+
+            var signOutResult = await _authClient.SignOutAsync(token).ConfigureAwait(true);
+            if (!signOutResult.Succeeded || signOutResult.Value?.ServerRevoked != true)
+            {
+                return AccountSessionResult.FailedSignedOut(
+                    AccountSessionFailureKind.ServerSignOutFailed,
+                    signOutResult.Failure?.Code ?? "auth_sign_out_not_revoked");
+            }
+
+            return AccountSessionResult.SignedOutResult();
         }
-
-        _accessToken = null;
-        _refreshToken = null;
-        _userId = null;
-
-        _sessionStore.Clear();
-
-        IsSignedIn = false;
-        DisplayName = string.Empty;
-        NebulaId = string.Empty;
-        AvatarUrl = string.Empty;
-        Email = string.Empty;
-        PhoneNumber = string.Empty;
-        RaiseIdentityChanged();
+        finally
+        {
+            _mutationGate.Release();
+        }
     }
 
     // ---- Identity application -------------------------------------------------------
 
-    private void ApplyIdentity(AuthUserMetadata? metadata, string? email)
+    private async Task<AccountSessionResult> ApplyAuthCoreAsync(AuthToken token)
     {
+        if (token is null
+            || string.IsNullOrWhiteSpace(token.AccessToken)
+            || string.IsNullOrWhiteSpace(token.RefreshToken))
+        {
+            return AccountSessionResult.Failed(
+                AccountSessionFailureKind.InvalidToken,
+                "auth_token_bundle_incomplete");
+        }
+
+        if (!SessionJwtValidator.TryValidate(
+                token.AccessToken,
+                _authClient.SessionAuthority,
+                expectedSubject: null,
+                requireUnexpired: true,
+                out var claims,
+                out var tokenError)
+            || claims is null)
+        {
+            return AccountSessionResult.Failed(FailureKindForTokenError(tokenError), tokenError);
+        }
+
+        if (!EmbeddedUserMatchesSubject(token, claims.Subject))
+        {
+            return AccountSessionResult.Failed(
+                AccountSessionFailureKind.SubjectMismatch,
+                "auth_embedded_subject_mismatch");
+        }
+
+        var userResult = await _authClient
+            .GetUserAsync(token.AccessToken, claims.Subject)
+            .ConfigureAwait(true);
+        var returnedSubjectMismatch = userResult.Value is not null
+            && !string.Equals(userResult.Value.Id, claims.Subject, StringComparison.Ordinal);
+        if (!userResult.Succeeded
+            || userResult.Value is null
+            || returnedSubjectMismatch)
+        {
+            return AccountSessionResult.Failed(
+                FailureKindForUserFailure(userResult.Failure, returnedSubjectMismatch),
+                userResult.Failure?.Code ?? "auth_user_subject_mismatch");
+        }
+
+        var previous = CaptureState();
+        ApplyVerifiedIdentity(
+            token.AccessToken,
+            token.RefreshToken,
+            claims.Subject,
+            userResult.Value);
+
+        var saveResult = Persist();
+        if (!saveResult.Succeeded)
+        {
+            RestoreState(previous);
+            _ = await _authClient.SignOutAsync(token.AccessToken).ConfigureAwait(true);
+
+            return AccountSessionResult.Failed(
+                AccountSessionFailureKind.SessionPersistenceFailed,
+                saveResult.Status.ToString());
+        }
+
+        RaiseIdentityChanged();
+        return AccountSessionResult.Succeeded();
+    }
+
+    private void ApplyVerifiedIdentity(
+        string accessToken,
+        string refreshToken,
+        string subject,
+        AuthUser user)
+    {
+        _accessToken = accessToken;
+        _refreshToken = refreshToken;
+        _userId = subject;
+
+        var metadata = user.UserMetadata;
+        var email = user.Email;
         var display = FirstNonEmpty(
             metadata?.DisplayName,
             metadata?.FullName,
@@ -240,21 +463,7 @@ public sealed class AccountSessionCoordinator
         // Prefer the top-level AuthUser.Email; fall back to a metadata email if present.
         Email = FirstNonEmpty(email, metadata?.Email) ?? string.Empty;
         PhoneNumber = metadata?.Phone ?? string.Empty;
-        IsSignedIn = !string.IsNullOrWhiteSpace(DisplayName) || !string.IsNullOrWhiteSpace(_accessToken);
-        RaiseIdentityChanged();
-    }
-
-    private void ApplyPersistedIdentity(PersistedSession persisted)
-    {
-        DisplayName = persisted.DisplayName ?? string.Empty;
-        NebulaId = persisted.NebulaId ?? string.Empty;
-        AvatarUrl = persisted.AvatarUrl ?? string.Empty;
-        // PersistedSession deliberately stays small (no email/phone); the live GetUser that
-        // runs right after hydrate fills these in. Show empty (→ "未绑定") until then.
-        Email = string.Empty;
-        PhoneNumber = string.Empty;
-        IsSignedIn = !string.IsNullOrWhiteSpace(_accessToken);
-        RaiseIdentityChanged();
+        IsSignedIn = true;
     }
 
     private void RaiseIdentityChanged()
@@ -263,18 +472,20 @@ public sealed class AccountSessionCoordinator
             DisplayName, NebulaId, AvatarUrl, IsSignedIn, Email, PhoneNumber));
     }
 
-    private void Persist()
+    private SessionStoreWriteResult Persist()
     {
         if (string.IsNullOrWhiteSpace(_accessToken))
         {
-            return;
+            return SessionStoreWriteResult.InvalidSession();
         }
 
-        _sessionStore.Save(new PersistedSession
+        return _sessionStore.Save(new PersistedSession
         {
+            SchemaVersion = PersistedSession.CurrentSchemaVersion,
+            Authority = _authClient.SessionAuthority,
+            Subject = _userId,
             AccessToken = _accessToken,
             RefreshToken = _refreshToken,
-            UserId = _userId,
             NebulaId = NebulaId,
             DisplayName = DisplayName,
             AvatarUrl = AvatarUrl,
@@ -282,90 +493,128 @@ public sealed class AccountSessionCoordinator
         });
     }
 
+    private AccountSessionResult ClearStoredSessionAfterFailure(
+        AccountSessionFailureKind failureKind,
+        string errorCode)
+    {
+        var clearResult = _sessionStore.Clear();
+        if (!clearResult.Succeeded)
+        {
+            return AccountSessionResult.Failed(
+                AccountSessionFailureKind.SessionPersistenceFailed,
+                clearResult.Status.ToString());
+        }
+
+        ClearInMemoryAndNotify();
+        return AccountSessionResult.FailedSignedOut(failureKind, errorCode);
+    }
+
+    private static bool IsTransientAuthFailure([NotNullWhen(true)] AuthClientFailure? failure) =>
+        failure?.Kind is AuthFailureKind.Network or AuthFailureKind.Timeout or AuthFailureKind.HttpFailure;
+
+    private AccountSessionResult DeferHydration(string errorCode)
+    {
+        // A transport failure does not revoke a credential. Keep its DPAPI record,
+        // but require a successful live check before exposing a signed-in identity.
+        ClearInMemoryAndNotify();
+        return AccountSessionResult.Failed(AccountSessionFailureKind.Network, errorCode);
+    }
+
+    private void ClearInMemoryAndNotify()
+    {
+        _accessToken = null;
+        _refreshToken = null;
+        _userId = null;
+
+        IsSignedIn = false;
+        DisplayName = string.Empty;
+        NebulaId = string.Empty;
+        AvatarUrl = string.Empty;
+        Email = string.Empty;
+        PhoneNumber = string.Empty;
+        RaiseIdentityChanged();
+    }
+
     // ---- JWT expiry decode ----------------------------------------------------------
 
-    // True when the access token is missing, undecodable, or its `exp` is within the refresh
-    // skew of now. Decode failures conservatively return true so we attempt a refresh.
-    private static bool NeedsRefresh(string? accessToken)
+    private static bool NeedsRefresh(long expiresAtUnix)
     {
-        var exp = DecodeJwtExpiry(accessToken);
-        if (exp is null)
-        {
-            return true;
-        }
-
-        return DateTimeOffset.UtcNow + RefreshSkew >= exp.Value;
+        return DateTimeOffset.UtcNow + RefreshSkew >= DateTimeOffset.FromUnixTimeSeconds(expiresAtUnix);
     }
 
-    // Decodes the `exp` claim (Unix seconds) from a JWT's payload segment. Returns null if the
-    // token is malformed — the caller treats null as "needs refresh".
-    private static DateTimeOffset? DecodeJwtExpiry(string? jwt)
+    private static bool EmbeddedUserMatchesSubject(AuthToken token, string subject)
     {
-        if (string.IsNullOrWhiteSpace(jwt))
-        {
-            return null;
-        }
-
-        try
-        {
-            var parts = jwt.Split('.');
-            if (parts.Length < 2)
-            {
-                return null;
-            }
-
-            var payloadJson = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
-            using var document = JsonDocument.Parse(payloadJson);
-            if (document.RootElement.TryGetProperty("exp", out var expElement)
-                && expElement.TryGetInt64(out var expSeconds))
-            {
-                return DateTimeOffset.FromUnixTimeSeconds(expSeconds);
-            }
-
-            return null;
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        return string.IsNullOrWhiteSpace(token.User?.Id)
+            || string.Equals(token.User.Id, subject, StringComparison.Ordinal);
     }
 
-    private static byte[] Base64UrlDecode(string segment)
+    private static AccountSessionFailureKind FailureKindForTokenError(string errorCode)
     {
-        var padded = segment.Replace('-', '+').Replace('_', '/');
-        switch (padded.Length % 4)
+        if (errorCode.StartsWith("auth_authority_", StringComparison.Ordinal))
         {
-            case 2: padded += "=="; break;
-            case 3: padded += "="; break;
+            return AccountSessionFailureKind.AuthorityMismatch;
         }
 
-        return Convert.FromBase64String(padded);
+        return errorCode is "auth_subject_missing" or "auth_subject_mismatch"
+            ? AccountSessionFailureKind.SubjectMismatch
+            : AccountSessionFailureKind.InvalidToken;
     }
 
-    // ---- Small helpers --------------------------------------------------------------
-
-    private static bool IsMetadataThin(AuthUserMetadata? metadata)
+    private static EmailSignInResult EmailFailureFor(AuthClientFailure? failure)
     {
-        if (metadata is null)
+        return failure?.Kind switch
         {
-            return true;
-        }
-
-        return string.IsNullOrWhiteSpace(metadata.DisplayName)
-            && string.IsNullOrWhiteSpace(metadata.FullName)
-            && string.IsNullOrWhiteSpace(metadata.NebulaId)
-            && string.IsNullOrWhiteSpace(metadata.AvatarUrl);
-    }
-
-    private static AuthUserMetadata MergeMetadata(AuthUserMetadata? primary, AuthUserMetadata? secondary)
-    {
-        return new AuthUserMetadata
-        {
-            DisplayName = FirstNonEmpty(primary?.DisplayName, secondary?.DisplayName),
-            FullName = FirstNonEmpty(primary?.FullName, secondary?.FullName),
-            NebulaId = FirstNonEmpty(primary?.NebulaId, secondary?.NebulaId),
-            AvatarUrl = FirstNonEmpty(primary?.AvatarUrl, secondary?.AvatarUrl)
+            AuthFailureKind.InvalidCredentials or AuthFailureKind.Unauthorized or AuthFailureKind.Forbidden =>
+                EmailSignInResult.Failed(
+                    EmailSignInFailureKind.Credentials,
+                    "邮箱或密码不正确，请检查后重试。"),
+            AuthFailureKind.Network or AuthFailureKind.Timeout or AuthFailureKind.HttpFailure =>
+                EmailSignInResult.Failed(
+                    EmailSignInFailureKind.Network,
+                    "网络或认证服务暂时不可用，请稍后重试。"),
+            _ => EmailSignInResult.Failed(
+                EmailSignInFailureKind.Verification,
+                "认证服务返回了无效的会话数据，请重新登录。")
         };
+    }
+
+    private static AccountSessionFailureKind FailureKindForUserFailure(
+        AuthClientFailure? failure,
+        bool returnedSubjectMismatch)
+    {
+        if (returnedSubjectMismatch || failure?.Kind == AuthFailureKind.SubjectMismatch)
+        {
+            return AccountSessionFailureKind.SubjectMismatch;
+        }
+
+        return failure?.Kind is AuthFailureKind.Network or AuthFailureKind.Timeout or AuthFailureKind.HttpFailure
+            ? AccountSessionFailureKind.Network
+            : AccountSessionFailureKind.UserVerificationFailed;
+    }
+
+    private AccountState CaptureState() =>
+        new(
+            _accessToken,
+            _refreshToken,
+            _userId,
+            IsSignedIn,
+            DisplayName,
+            NebulaId,
+            AvatarUrl,
+            Email,
+            PhoneNumber);
+
+    private void RestoreState(AccountState state)
+    {
+        _accessToken = state.AccessToken;
+        _refreshToken = state.RefreshToken;
+        _userId = state.Subject;
+        IsSignedIn = state.IsSignedIn;
+        DisplayName = state.DisplayName;
+        NebulaId = state.NebulaId;
+        AvatarUrl = state.AvatarUrl;
+        Email = state.Email;
+        PhoneNumber = state.PhoneNumber;
     }
 
     private static string? FirstNonEmpty(params string?[] candidates)
@@ -380,15 +629,68 @@ public sealed class AccountSessionCoordinator
 
         return null;
     }
+
+    private sealed record AccountState(
+        string? AccessToken,
+        string? RefreshToken,
+        string? Subject,
+        bool IsSignedIn,
+        string DisplayName,
+        string NebulaId,
+        string AvatarUrl,
+        string Email,
+        string PhoneNumber);
 }
 
 // Result of an email/password sign-in attempt: either success, or failure carrying a
 // user-facing (already-localized) error string the AuthOverlay shows inline.
-public readonly record struct EmailSignInResult(bool Success, string ErrorMessage)
+public enum EmailSignInFailureKind
 {
-    public static EmailSignInResult Succeeded() => new(true, string.Empty);
+    Input,
+    Credentials,
+    Network,
+    Storage,
+    Verification
+}
 
-    public static EmailSignInResult Failed(string message) => new(false, message);
+public readonly record struct EmailSignInResult(
+    bool Success,
+    EmailSignInFailureKind? FailureKind,
+    string ErrorMessage)
+{
+    public static EmailSignInResult Succeeded() => new(true, null, string.Empty);
+
+    public static EmailSignInResult Failed(EmailSignInFailureKind kind, string message) =>
+        new(false, kind, message);
+}
+
+public enum AccountSessionFailureKind
+{
+    InvalidToken,
+    RefreshRejected,
+    Network,
+    UserVerificationFailed,
+    SessionPersistenceFailed,
+    ServerSignOutFailed,
+    AuthorityMismatch,
+    SubjectMismatch
+}
+
+public readonly record struct AccountSessionResult(
+    bool Success,
+    bool SignedOut,
+    AccountSessionFailureKind? FailureKind,
+    string ErrorCode)
+{
+    public static AccountSessionResult Succeeded() => new(true, false, null, string.Empty);
+
+    public static AccountSessionResult SignedOutResult() => new(true, true, null, string.Empty);
+
+    public static AccountSessionResult Failed(AccountSessionFailureKind kind, string errorCode) =>
+        new(false, false, kind, errorCode);
+
+    public static AccountSessionResult FailedSignedOut(AccountSessionFailureKind kind, string errorCode) =>
+        new(false, true, kind, errorCode);
 }
 
 // Identity payload the VM forwards into its bindable props. Email / PhoneNumber feed the

@@ -27,6 +27,8 @@ internal sealed class WorkspaceCommandAvailability
 
     public bool CanUseDiscoveryBrowser() => _coordinator.CanUseDiscoveryBrowser(BuildState());
 
+    public bool CanStopDiscoveryBrowser() => _coordinator.CanStopDiscoveryBrowser(BuildState());
+
     public bool CanPrepareManualConnection() => _coordinator.CanPrepareManualConnection(BuildState());
 
     public bool CanUseCrossNetworkConnection() => _coordinator.CanUseCrossNetworkConnection(BuildState());

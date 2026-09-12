@@ -31,9 +31,14 @@ public sealed class FeatureCatalogClient : IFeatureCatalogClient
             new(FeatureEntryId.Dashboard, LabelKeyToLocalizedConverter.Localize("Dashboard"), "\uE80F", "Live overview", true),
             new(FeatureEntryId.DeviceDiscovery, LabelKeyToLocalizedConverter.Localize("Device Discovery"), "\uE8B9", "Core TXT parse", true),
             new(FeatureEntryId.UsbManagement, LabelKeyToLocalizedConverter.Localize("USB Management"), "\uE88E", "Device routing", true),
-            new(FeatureEntryId.FileTransfer, LabelKeyToLocalizedConverter.Localize("File Transfer"), "\uE8E5", "Queue and history", true),
-            new(FeatureEntryId.RemoteDesktop, LabelKeyToLocalizedConverter.Localize("Remote Desktop"), "\uE7F4", "Sessions", true),
-            new(FeatureEntryId.Quantum, LabelKeyToLocalizedConverter.Localize("Quantum"), "\uE72E", "Core diagnostics", true),
+            // File Transfer and Remote Desktop carry the quantum parenthetical, composed the
+            // same way the Mac GlassSidebar composes it:
+            //     localizedString("sidebar.fileTransfer") + "\uFF08" + quantumTitle + "\uFF09"
+            // Quantum is a property of these two transports on the Mac, not a page, so it is
+            // surfaced as their suffix and has no navigation entry of its own. The Core
+            // diagnostics panel it used to open now lives inside the System Monitor workspace.
+            new(FeatureEntryId.FileTransfer, LabelKeyToLocalizedConverter.Localize("File Transfer") + "\uFF08" + LabelKeyToLocalizedConverter.Localize("Quantum") + "\uFF09", "\uE8E5", "Queue and history", true),
+            new(FeatureEntryId.RemoteDesktop, LabelKeyToLocalizedConverter.Localize("Remote Desktop") + "\uFF08" + LabelKeyToLocalizedConverter.Localize("Quantum") + "\uFF09", "\uE7F4", "Sessions", true),
             new(FeatureEntryId.SystemMonitor, LabelKeyToLocalizedConverter.Localize("System Monitor"), "\uE9D9", "Metrics", true),
             new(FeatureEntryId.Settings, LabelKeyToLocalizedConverter.Localize("Settings"), "\uE713", "Preferences", true)
         }.AsReadOnly();

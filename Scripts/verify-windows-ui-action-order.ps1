@@ -15,8 +15,21 @@ function Assert-True {
     }
 }
 
+function Assert-WindowsHostForWinUiBuild {
+    param([string]$ScriptName)
+
+    $isWindowsHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $isWindowsHost) {
+        $osDescription = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        throw "$ScriptName requires a Windows host because WindowsAppSDK/WinUI resource generation invokes MakePri.exe from Microsoft.Windows.SDK.BuildTools; current host is $osDescription."
+    }
+}
+
+Assert-WindowsHostForWinUiBuild -ScriptName "windows UI action-order smoke"
+
 $sourceFiles = @()
-$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" |
+$sourceFiles += Get-ChildItem -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services") -Filter "*.cs" -Recurse |
     Sort-Object Name |
     ForEach-Object { $_.FullName }
 $sourceFiles += Join-Path $RepoRoot "windows/Skybridge.WinClient/Converters/LabelKeyToLocalizedConverter.cs"
@@ -48,19 +61,24 @@ try {
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <UseWinUI>true</UseWinUI>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
 $compileItemText
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.2.0" />
-    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2270" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.4.0" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2705" PrivateAssets="all" />
     <PackageReference Include="QRCoder" Version="1.8.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
   </ItemGroup>
 </Project>
 "@
@@ -85,7 +103,6 @@ AssertSequence(
         "UsbManagement",
         "FileTransfer",
         "RemoteDesktop",
-        "Quantum",
         "SystemMonitor",
         "Settings"
     });
@@ -97,9 +114,8 @@ AssertSequence(
         "Dashboard",
         "Device Discovery",
         "USB Management",
-        "File Transfer",
-        "Remote Desktop",
-        "Quantum",
+        "File Transfer\uFF08Quantum Communication\uFF09",
+        "Remote Desktop\uFF08Quantum Communication\uFF09",
         "System Monitor",
         "Settings"
     });

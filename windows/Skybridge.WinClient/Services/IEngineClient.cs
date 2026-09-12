@@ -4,7 +4,7 @@ using System.Threading.Tasks;
 namespace Skybridge.WinClient.Services;
 
 public enum EngineConnectionState
-{    
+{
     Disconnected,
     Connecting,
     Connected,

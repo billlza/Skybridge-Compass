@@ -69,6 +69,23 @@ Assert-Equal -Expected $false -Actual $evidence.QueryTokenPresent -Message "Quer
 Assert-Equal -Expected $false -Actual $evidence.HeaderValuesCaptured -Message "Header values must not be captured."
 Assert-Equal -Expected $false -Actual $evidence.SecretInputsCaptured -Message "Secret inputs must not be captured."
 Assert-Equal -Expected $true -Actual $evidence.Bound -Message "Expected fake signaling client to bind."
+$maxWebRtcEnvelopeBytes = [System.Convert]::ToInt64($evidence.MaxWebRtcEnvelopeBytes, [Globalization.CultureInfo]::InvariantCulture)
+$maxSdpBytes = [System.Convert]::ToInt64($evidence.MaxSdpBytes, [Globalization.CultureInfo]::InvariantCulture)
+$nearLimitSdpHeadroomBytes = [System.Convert]::ToInt64($evidence.NearLimitSdpHeadroomBytes, [Globalization.CultureInfo]::InvariantCulture)
+$inboundAnswerSdpBytes = [System.Convert]::ToInt64($evidence.InboundAnswerSdpBytes, [Globalization.CultureInfo]::InvariantCulture)
+$inboundOfferSdpBytes = [System.Convert]::ToInt64($evidence.InboundOfferSdpBytes, [Globalization.CultureInfo]::InvariantCulture)
+$outboundMaxFrameBytes = [System.Convert]::ToInt64($evidence.OutboundMaxFrameBytes, [Globalization.CultureInfo]::InvariantCulture)
+Assert-True -Condition ($maxWebRtcEnvelopeBytes -gt $maxSdpBytes) -Message "Max WebRTC envelope bytes must exceed MaxSdpBytes."
+Assert-True -Condition ($nearLimitSdpHeadroomBytes -gt 0 -and $nearLimitSdpHeadroomBytes -le 4096) -Message "Near-limit SDP headroom is too wide."
+Assert-True -Condition ($inboundAnswerSdpBytes -ge ($maxSdpBytes - $nearLimitSdpHeadroomBytes)) -Message "Answer SDP does not exercise the near-limit current-path SDP boundary."
+Assert-True -Condition ($inboundOfferSdpBytes -ge ($maxSdpBytes - $nearLimitSdpHeadroomBytes)) -Message "Offer SDP does not exercise the near-limit current-path SDP boundary."
+Assert-True -Condition ($outboundMaxFrameBytes -le $maxWebRtcEnvelopeBytes) -Message "Outbound WebSocket frame exceeded the configured envelope limit."
+Assert-Equal -Expected $true -Actual $evidence.OversizeSdpRejected -Message "Oversized current-path SDP must be rejected."
+Assert-Equal -Expected 7 -Actual $evidence.SessionIdentityContractCases -Message "Expected exact session identity and case-only mismatch fixtures."
+Assert-Equal -Expected 94 -Actual $evidence.PrintableAsciiPathCases -Message "Expected the complete printable ASCII path contract."
+Assert-Equal -Expected 4 -Actual @($evidence.RawPathRequestTargets).Count -Message "Expected four raw request-target socket fixtures."
+Assert-Equal -Expected $true -Actual $evidence.OutboundSessionIdsMatchOwner -Message "Outbound envelope session IDs must match the exact owner."
+Assert-Equal -Expected $true -Actual $evidence.ExceedsLegacy16KiBProbe -Message "Bridge contract must exercise SDP payloads above the old 16KiB limit."
 Assert-Equal -Expected 6 -Actual $evidence.OutboundFrameCount -Message "Expected bidirectional bridge signaling frames."
 Assert-Equal -Expected "join" -Actual $evidence.OutboundTypes[0] -Message "Unexpected first outbound type."
 Assert-Equal -Expected "offer" -Actual $evidence.OutboundTypes[1] -Message "Unexpected second outbound type."

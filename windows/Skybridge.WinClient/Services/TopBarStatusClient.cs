@@ -151,6 +151,7 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
 {
     private readonly ITopBarNotificationCenterClient _notificationCenterClient;
     private readonly ITopBarThemePreferenceClient _themePreferenceClient;
+    private readonly Action? _openThemePicker;
 
     public TopBarStatusClient()
         : this(new InMemoryTopBarNotificationCenterClient(), new InMemoryTopBarThemePreferenceClient())
@@ -164,8 +165,9 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
 
     public TopBarStatusClient(
         ITopBarNotificationCenterClient notificationCenterClient,
-        ITopBarThemePreferenceClient themePreferenceClient)
+        ITopBarThemePreferenceClient themePreferenceClient, Action? openThemePicker = null)
     {
+        _openThemePicker = openThemePicker;
         _notificationCenterClient =
             notificationCenterClient ?? throw new ArgumentNullException(nameof(notificationCenterClient));
         _themePreferenceClient = themePreferenceClient ?? throw new ArgumentNullException(nameof(themePreferenceClient));
@@ -274,8 +276,13 @@ public sealed class TopBarStatusClient : ITopBarStatusClient
     public Task<TopBarWorkspaceActionResult> BuildNotificationsActionAsync() =>
         Task.FromResult(_notificationCenterClient.OpenNotifications());
 
-    public Task<TopBarWorkspaceActionResult> BuildThemeActionAsync() =>
-        Task.FromResult(BuildThemeUpdatedActionResult(_themePreferenceClient.Toggle()));
+    public Task<TopBarWorkspaceActionResult> BuildThemeActionAsync()
+    {
+        if (_openThemePicker is null)
+            return Task.FromResult(BuildThemeUpdatedActionResult(_themePreferenceClient.Toggle()));
+        _openThemePicker();
+        return Task.FromResult(new TopBarWorkspaceActionResult(_themePreferenceClient.CurrentStatus, "Appearance menu opened"));
+    }
 
     public static string DefaultNotificationsPendingStatus { get; } = "Preparing notifications...";
 

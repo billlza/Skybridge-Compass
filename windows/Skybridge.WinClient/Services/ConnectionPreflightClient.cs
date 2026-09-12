@@ -9,9 +9,16 @@ public interface IConnectionPreflightClient
 {
     string BuildPendingStatus();
 
+    /// <param name="discoveredRoutes">
+    /// The DNS-SD endpoints discovery resolved for this peer, when it resolved any. Optional so
+    /// existing callers and the preflight-only path are unchanged; supplying it is what lets a
+    /// live adapter dial the peer that was actually discovered instead of an address configured
+    /// out of band.
+    /// </param>
     Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,
-        PairingMaterial pairingMaterial);
+        PairingMaterial pairingMaterial,
+        DiscoveryPeerRoutes? discoveredRoutes = null);
 }
 
 public sealed class ConnectionPreflightClient : IConnectionPreflightClient
@@ -38,7 +45,8 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
 
     public async Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,
-        PairingMaterial pairingMaterial)
+        PairingMaterial pairingMaterial,
+        DiscoveryPeerRoutes? discoveredRoutes = null)
     {
         ArgumentNullException.ThrowIfNull(discoveredPeer);
         ArgumentNullException.ThrowIfNull(pairingMaterial);
@@ -88,7 +96,8 @@ public sealed class ConnectionPreflightClient : IConnectionPreflightClient
                 plan.Transport.RelayAllowed,
                 local,
                 remote,
-                path));
+                path,
+                discoveredRoutes));
         var bindingDigest = await _coreBridge.ComputeTransportBindingDigestAsync(
             adapterSnapshot.BuildTransportBindingMaterial(plan.Transport.Kind));
         var provider = pairingMaterial.ToPeerPublicKeyProvider();

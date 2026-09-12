@@ -31,6 +31,15 @@ internal sealed class UnavailableDiscoveryBrowserClient : IDiscoveryBrowserClien
     {
         throw new InvalidOperationException("Discovery browser client is not configured.");
     }
+
+    public bool TryPublish(
+        DiscoveryBrowserSnapshot snapshot,
+        Action<DiscoveryBrowserSnapshot> publish)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(publish);
+        throw new InvalidOperationException("Discovery browser client is not configured.");
+    }
 }
 
 internal sealed class UnavailableManualConnectionClient : IManualConnectionClient
@@ -95,7 +104,8 @@ internal sealed class UnavailableConnectionPreflightClient : IConnectionPrefligh
 
     public Task<ConnectionPreflightSnapshot> BuildReadOnlySnapshotAsync(
         DiscoveredPeer discoveredPeer,
-        PairingMaterial pairingMaterial)
+        PairingMaterial pairingMaterial,
+        DiscoveryPeerRoutes? discoveredRoutes = null)
     {
         throw new InvalidOperationException("Connection preflight client is not configured.");
     }

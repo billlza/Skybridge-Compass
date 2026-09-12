@@ -399,8 +399,8 @@ public sealed class WebRtcProductHandshakeMessageA
         ExtensionsRaw = ValidateExtensions(extensionsRaw.Span).ToArray();
         Signature = RequireNonEmpty(signature, "MessageA signature").ToArray();
         SecureEnclaveSignature = secureEnclaveSignature.HasValue && !secureEnclaveSignature.Value.IsEmpty
-            ? secureEnclaveSignature.Value.ToArray()
-            : null;
+            ? new ReadOnlyMemory<byte>(secureEnclaveSignature.Value.ToArray())
+            : (ReadOnlyMemory<byte>?)null;
         InitiatorContribution = ValidateInitiatorContribution(
                 SupportedSuiteWireIds,
                 initiatorContribution.HasValue ? initiatorContribution.Value.Span : ReadOnlySpan<byte>.Empty)
@@ -770,8 +770,8 @@ public sealed class WebRtcProductHandshakeMessageB
         IdentityPublicKey = RequireNonEmpty(identityPublicKey, "MessageB identity public key").ToArray();
         Signature = RequireNonEmpty(signature, "MessageB signature").ToArray();
         SecureEnclaveSignature = secureEnclaveSignature.HasValue && !secureEnclaveSignature.Value.IsEmpty
-            ? secureEnclaveSignature.Value.ToArray()
-            : null;
+            ? new ReadOnlyMemory<byte>(secureEnclaveSignature.Value.ToArray())
+            : (ReadOnlyMemory<byte>?)null;
     }
 
     public byte Version { get; }
@@ -1004,6 +1004,7 @@ public static class WebRtcProductHandshakeCodec
 
     public const ushort SuiteXWingMldsa65 = 0x0001;
     public const ushort SuiteQPeriaptContextBound = 0x0011;
+    public const ushort SuiteQPeriaptPolicyBound = 0x0012;
     public const ushort SuiteMlKem768Mldsa65 = 0x0101;
     public const ushort SuiteMlKem768Mldsa65ForwardSecure = 0x0102;
     public const ushort SuiteX25519Ed25519 = 0x1001;
@@ -1068,6 +1069,7 @@ public static class WebRtcProductHandshakeCodec
     public static bool IsKnownSuite(ushort suiteWireId) =>
         suiteWireId is SuiteXWingMldsa65
             or SuiteQPeriaptContextBound
+            or SuiteQPeriaptPolicyBound
             or SuiteMlKem768Mldsa65
             or SuiteMlKem768Mldsa65ForwardSecure
             or SuiteX25519Ed25519
@@ -1100,6 +1102,7 @@ public static class WebRtcProductHandshakeCodec
         suiteWireId switch
         {
             SuiteQPeriaptContextBound => 1120,
+            SuiteQPeriaptPolicyBound => 1120,
             SuiteXWingMldsa65 => 1120,
             SuiteMlKem768Mldsa65 => 1088,
             SuiteMlKem768Mldsa65ForwardSecure => 1088,
@@ -1113,6 +1116,7 @@ public static class WebRtcProductHandshakeCodec
         {
             SuiteMlKem768Mldsa65ForwardSecure => 32,
             SuiteQPeriaptContextBound => 0,
+            SuiteQPeriaptPolicyBound => 0,
             SuiteXWingMldsa65 => 0,
             SuiteMlKem768Mldsa65 => 0,
             _ => ExpectedKeyShareLength(suiteWireId)

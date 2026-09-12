@@ -271,12 +271,12 @@ foreach ($path in @($matrixPath, $mainWindowPath, $featureCatalogPath, $actionCa
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing UI parity matrix input: $path"
 }
 
-$matrix = Get-Content -Raw -LiteralPath $matrixPath
-$mainWindow = Get-Content -Raw -LiteralPath $mainWindowPath
-$featureCatalog = Get-Content -Raw -LiteralPath $featureCatalogPath
-$actionCatalog = Get-Content -Raw -LiteralPath $actionCatalogPath
-$actionOrderSmoke = Get-Content -Raw -LiteralPath $actionOrderSmokePath
-$paritySmoke = Get-Content -Raw -LiteralPath $paritySmokePath
+$matrix = Get-Content -Raw -Encoding UTF8 -LiteralPath $matrixPath
+$mainWindow = Get-Content -Raw -Encoding UTF8 -LiteralPath $mainWindowPath
+$featureCatalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $featureCatalogPath
+$actionCatalog = Get-Content -Raw -Encoding UTF8 -LiteralPath $actionCatalogPath
+$actionOrderSmoke = Get-Content -Raw -Encoding UTF8 -LiteralPath $actionOrderSmokePath
+$paritySmoke = Get-Content -Raw -Encoding UTF8 -LiteralPath $paritySmokePath
 $gitObjectDatabaseAvailable = (Invoke-Git -Arguments @("rev-parse", "--git-dir")).ExitCode -eq 0
 
 $macBaselineCommit = "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c"
@@ -399,9 +399,8 @@ $featureRows = @(
     [pscustomobject]@{ Order = "3"; Id = "UsbManagement"; Title = "USB Management"; Gate = "IsUsbManagementSelected"; Heading = 'Text="USB Management"'; Surfaces = @("UsbManagementHeader"); Anchors = @("WorkspaceAction.UsbManagementHeader.RefreshDevices") },
     [pscustomobject]@{ Order = "4"; Id = "FileTransfer"; Title = "File Transfer"; Gate = "IsFileTransferSelected"; Heading = 'Text="File Transfer"'; Surfaces = @("FileTransferHeader", "FileTransfer"); Anchors = @("WorkspaceAction.FileTransfer.SelectFiles", "WorkspaceAction.FileTransfer.SelectFolder", "WorkspaceAction.FileTransfer.GenerateQr", "FileTransferShareQrPreview") },
     [pscustomobject]@{ Order = "5"; Id = "RemoteDesktop"; Title = "Remote Desktop"; Gate = "IsRemoteDesktopSelected"; Heading = 'Text="Remote Desktop"'; Surfaces = @("RemoteDesktopHeader", "RemoteDesktop"); Anchors = @("WorkspaceAction.RemoteDesktop.RecommendedConnect", "WorkspaceAction.RemoteDesktop.AdvancedConnect", "WorkspaceAction.RemoteDesktop.DisconnectSession") },
-    [pscustomobject]@{ Order = "6"; Id = "Quantum"; Title = "Quantum / Core Diagnostics"; Gate = "IsQuantumSelected"; Heading = 'Text="Quantum / Core Diagnostics"'; Surfaces = @("QuantumDiagnosticsHeader"); Anchors = @("WorkspaceAction.QuantumDiagnosticsHeader.RunDiagnostics") },
-    [pscustomobject]@{ Order = "7"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
-    [pscustomobject]@{ Order = "8"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
+    [pscustomobject]@{ Order = "6"; Id = "SystemMonitor"; Title = "System Monitor"; Gate = "IsSystemMonitorSelected"; Heading = 'Text="System Monitor"'; Surfaces = @("SystemMonitorHeader", "SystemMonitorControls"); Anchors = @("WorkspaceAction.SystemMonitorControls.Monitoring", "WorkspaceAction.SystemMonitorControls.StopMonitoring", "WorkspaceAction.SystemMonitorControls.EnableAdvancedMonitoring") },
+    [pscustomobject]@{ Order = "7"; Id = "Settings"; Title = "Settings"; Gate = "IsSettingsSelected"; Heading = 'Text="Settings"'; Surfaces = @("SettingsHeader", "SettingsToolbar", "SettingsMaintenance"); Anchors = @("WorkspaceAction.SettingsToolbar.ExportSettings", "WorkspaceAction.SettingsToolbar.OpenSystemPreferences", "WorkspaceAction.SettingsMaintenance.ApplySettings") }
 )
 
 $navigationMatrixRows = Get-MarkdownTableRows `
@@ -446,7 +445,6 @@ Assert-Ordered -Text $featureCatalog -Context "FeatureCatalog mac navigation ord
     "FeatureEntryId.UsbManagement",
     "FeatureEntryId.FileTransfer",
     "FeatureEntryId.RemoteDesktop",
-    "FeatureEntryId.Quantum",
     "FeatureEntryId.SystemMonitor",
     "FeatureEntryId.Settings"
 )
@@ -457,7 +455,6 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow selected workspace visibil
     "Visibility=`"{Binding IsUsbManagementSelected",
     "Visibility=`"{Binding IsFileTransferSelected",
     "Visibility=`"{Binding IsRemoteDesktopSelected",
-    "Visibility=`"{Binding IsQuantumSelected",
     "Visibility=`"{Binding IsSystemMonitorSelected",
     "Visibility=`"{Binding IsSettingsSelected"
 )
@@ -467,11 +464,14 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow global shell anchor order"
     'ItemsSource="{Binding NavigationItems}"',
     'carries NO sidebar Connect / Disconnect actions',
     'AutomationProperties.AutomationId="Skybridge.SelectedFeature.Title"',
-    'AutomationProperties.AutomationId="Skybridge.Status.Message"',
+    'AutomationProperties.HelpText="{Binding StatusMessage, Converter={StaticResource StatusKeyToLocalizedConverter}}"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.ConnectionStatus"',
     'AutomationProperties.AutomationId="Skybridge.TopBar.DiagnosticsStatus"',
     'AutomationProperties.AutomationId="Skybridge.Actions.TopBar"',
-    'ItemsSource="{Binding TopBarActions}"'
+    'AutomationProperties.AutomationId="WorkspaceAction.TopBarActions.Notifications"',
+    'Command="{Binding OpenTopBarNotificationsCommand}"',
+    'AutomationProperties.AutomationId="WorkspaceAction.TopBarActions.Theme"',
+    'Command="{Binding ToggleTopBarThemeCommand}"'
 )
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Needles @(
@@ -499,23 +499,76 @@ Assert-Ordered -Text $mainWindow -Context "MainWindow action binding order" -Nee
 foreach ($templateSignal in @(
     '<DataTemplate x:Key="WorkspaceActionButtonTemplate">',
     '<DataTemplate x:Key="WorkspaceActionButtonWithDetailTemplate">',
-    '<DataTemplate x:Key="TopBarStatusActionButtonTemplate">',
     '<DataTemplate x:Key="DashboardQuickActionTemplate">',
     'AutomationProperties.AutomationId="{Binding AutomationId}"',
     'Command="{Binding Command}"',
-    'Width="44"',
     'Height="36"',
     'ToolTipService.ToolTip="{Binding Title}"'
 )) {
     Assert-Contains -Text $mainWindow -Needle $templateSignal -Message "MainWindow missing shared action-template signal: $templateSignal"
 }
 
-Assert-Count -Text $mainWindow -Pattern '<Button\b' -ExpectedCount 6 -Message "MainWindow must render catalog action buttons through the four shared action templates without reintroducing sidebar session buttons."
+# The file workspace owns two explicit connection lifecycle controls. Check their
+# location and handlers before excluding them from the shared-template inventory.
+[xml]$actionTemplateDocument = $mainWindow
+foreach ($lifecycle in @(
+    @{ Name = "FileTransferConnectButton"; Handler = "OnFileTransferConnectClicked"; AutomationId = "Skybridge.FileTransfer.Connect" },
+    @{ Name = "FileTransferDisconnectButton"; Handler = "OnFileTransferDisconnectClicked"; AutomationId = "Skybridge.FileTransfer.Disconnect" }
+)) {
+    $controls = @($actionTemplateDocument.SelectNodes("//*[local-name()='Button']") | Where-Object {
+        $_.GetAttribute("Name", "http://schemas.microsoft.com/winfx/2006/xaml") -eq $lifecycle.Name
+    })
+    Assert-True -Condition ($controls.Count -eq 1) -Message "File-transfer lifecycle control must occur exactly once: $($lifecycle.Name)"
+    $control = $controls[0]
+    Assert-True -Condition ($control.GetAttribute("Click") -eq $lifecycle.Handler) -Message "File-transfer lifecycle handler differs: $($lifecycle.Name)"
+    Assert-True -Condition ($control.GetAttribute("AutomationProperties.AutomationId") -eq $lifecycle.AutomationId) -Message "File-transfer lifecycle automation anchor differs: $($lifecycle.Name)"
+    $inFileWorkspace = $false
+    for ($ancestor = $control.ParentNode; $null -ne $ancestor; $ancestor = $ancestor.ParentNode) {
+        if ($ancestor -is [System.Xml.XmlElement] -and $ancestor.GetAttribute("Visibility").Contains("IsFileTransferSelected")) {
+            $inFileWorkspace = $true
+            break
+        }
+    }
+    Assert-True -Condition $inFileWorkspace -Message "File-transfer lifecycle control must remain inside the file workspace: $($lifecycle.Name)"
+    [void]$control.ParentNode.RemoveChild($control)
+}
+# Explicit shell and discovery buttons replaced the old top-bar item template.
+# Verify each owner, identity, and command before removing it from the template inventory.
+foreach ($entry in @(
+    @{ Id = "WorkspaceAction.TopBarActions.Notifications"; Attribute = "Command"; Value = "{Binding OpenTopBarNotificationsCommand}"; Owner = "Skybridge.Actions.TopBar" },
+    @{ Id = "WorkspaceAction.TopBarActions.Theme"; Attribute = "Command"; Value = "{Binding ToggleTopBarThemeCommand}"; Owner = "Skybridge.Actions.TopBar" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.AccountDevices"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.LocalScan"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.Qr"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.Cloud"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" },
+    @{ Id = "Skybridge.DeviceDiscovery.Mode.Code"; Attribute = "Click"; Value = "OnDiscoveryModeTabClicked"; Owner = "IsDeviceDiscoverySelected" }
+)) {
+    $controls = @($actionTemplateDocument.SelectNodes("//*[local-name()='Button']") | Where-Object {
+        $_.GetAttribute("AutomationProperties.AutomationId") -eq $entry.Id
+    })
+    Assert-True -Condition ($controls.Count -eq 1) -Message "Shell action must occur exactly once: $($entry.Id)"
+    $control = $controls[0]
+    Assert-True -Condition ($control.GetAttribute($entry.Attribute) -eq $entry.Value) -Message "Shell action binding differs: $($entry.Id)"
+    $correctOwner = $false
+    for ($ancestor = $control.ParentNode; $null -ne $ancestor; $ancestor = $ancestor.ParentNode) {
+        if ($ancestor -is [System.Xml.XmlElement] -and
+            ($ancestor.GetAttribute("AutomationProperties.AutomationId") -eq $entry.Owner -or
+             $ancestor.GetAttribute("Visibility").Contains($entry.Owner))) {
+            $correctOwner = $true
+            break
+        }
+    }
+    Assert-True -Condition $correctOwner -Message "Shell action escaped its owning surface: $($entry.Id)"
+    if ($entry.Owner -eq "Skybridge.Actions.TopBar") {
+        Assert-True -Condition ($control.GetAttribute("Width") -eq "36" -and $control.GetAttribute("Height") -eq "36") -Message "Top-bar action must retain its 36-pixel capsule: $($entry.Id)"
+    } else {
+        Assert-True -Condition ($control.GetAttribute("Tag") -eq ($entry.Id -split '\.')[-1]) -Message "Discovery mode tag differs from its action identity: $($entry.Id)"
+    }
+    [void]$control.ParentNode.RemoveChild($control)
+}
+Assert-Count -Text $actionTemplateDocument.OuterXml -Pattern '<Button\b' -ExpectedCount 5 -Message "MainWindow must retain three shared action templates and two weather refresh buttons without extra sidebar/session controls."
 
 Assert-Ordered -Text $mainWindow -Context "MainWindow shared action template usage" -Needles @(
-    'ItemsSource="{Binding TopBarActions}"',
-    'ItemsPanel="{StaticResource HorizontalWorkspaceActionItemsPanel}"',
-    'ItemTemplate="{StaticResource TopBarStatusActionButtonTemplate}"',
     'ItemsSource="{Binding DashboardQuickActions}"',
     'ItemsPanel="{StaticResource DashboardQuickActionItemsPanel}"',
     'ItemTemplate="{StaticResource DashboardQuickActionTemplate}"',

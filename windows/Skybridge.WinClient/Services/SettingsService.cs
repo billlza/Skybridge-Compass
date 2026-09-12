@@ -27,7 +27,10 @@ public sealed class SkyBridgeSettings
     public string Language { get; set; } = "system";
     public bool AutoScanOnStartup { get; set; } = true;
     public bool ShowSystemNotifications { get; set; } = true;
-    public bool UseDarkMode { get; set; } = true; // Windows ships dark-locked; deliberate divergence from Mac (false)
+    public string? AppearanceMode { get; set; }
+    public string BackgroundTheme { get; set; } = "weather";
+    public string? CustomBackgroundPath { get; set; }
+    public bool UseDarkMode { get; set; } = true; // Legacy default; AppearanceMode preserves existing installs and allows system/light/dark.
     public int ScanInterval { get; set; } = 30;
     public bool ShowDeviceDetails { get; set; } = true;
     public bool ShowConnectionStats { get; set; } = true;
@@ -160,11 +163,12 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
 {
     private static readonly TimeSpan SaveDebounce = TimeSpan.FromMilliseconds(300);
 
-    private readonly SettingsStore _store;
+    private readonly ISettingsStore _store;
     private readonly object _sync = new();
     private SkyBridgeSettings _model;
     private Timer? _saveTimer;
     private bool _disposed;
+    private SettingsRuntimeTruth _runtimeTruth;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -172,14 +176,18 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     /// subscribers (theme/discovery/top-bar) bind to this instead of N individual handlers.</summary>
     public event EventHandler<SettingsChangedEventArgs>? SettingsChanged;
 
-    public SettingsService(SettingsStore? store = null)
+    public SettingsService(ISettingsStore? store = null)
     {
         _store = store ?? new SettingsStore();
-        _model = _store.Load();
+        var loadResult = _store.Load();
+        _model = loadResult.Settings;
+        _runtimeTruth = SettingsRuntimeTruth.FromLoad(loadResult);
     }
 
     /// <summary>Read-only snapshot of the current model (for Export and bulk reads).</summary>
     public SkyBridgeSettings Snapshot => _model.Clone();
+
+    public SettingsRuntimeTruth RuntimeTruth => _runtimeTruth;
 
     // ---- Write-through plumbing ------------------------------------------------------
 
@@ -239,14 +247,47 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
             toSave = _model.Clone();
         }
 
-        _store.Save(toSave);
+        var saveResult = _store.Save(toSave);
+        _runtimeTruth = _runtimeTruth with
+        {
+            LastWriteStatus = saveResult.Status,
+            LastErrorCode = saveResult.Succeeded ? _runtimeTruth.LastErrorCode : saveResult.ErrorCode
+        };
     }
 
     // ---- General ---------------------------------------------------------------------
     public string Language { get => _model.Language; set => Set(_model.Language, value, v => _model.Language = v); }
     public bool AutoScanOnStartup { get => _model.AutoScanOnStartup; set => Set(_model.AutoScanOnStartup, value, v => _model.AutoScanOnStartup = v); }
     public bool ShowSystemNotifications { get => _model.ShowSystemNotifications; set => Set(_model.ShowSystemNotifications, value, v => _model.ShowSystemNotifications = v); }
-    public bool UseDarkMode { get => _model.UseDarkMode; set => Set(_model.UseDarkMode, value, v => _model.UseDarkMode = v); }
+    public string AppearanceMode
+    {
+        get => _model.AppearanceMode ?? (_model.UseDarkMode ? "dark" : "light");
+        set
+        {
+            if (value is not ("system" or "dark" or "light")) throw new ArgumentOutOfRangeException(nameof(value));
+            Set(_model.AppearanceMode, value, v => _model.AppearanceMode = v);
+            if (value != "system") Set(_model.UseDarkMode, value == "dark", v => _model.UseDarkMode = v, nameof(UseDarkMode));
+        }
+    }
+    public string BackgroundTheme
+    {
+        get => _model.BackgroundTheme;
+        set
+        {
+            if (value is not ("weather" or "starryNight" or "deepSpace" or "aurora" or "classic" or "custom")) throw new ArgumentOutOfRangeException(nameof(value));
+            Set(_model.BackgroundTheme, value, v => _model.BackgroundTheme = v);
+        }
+    }
+    public string? CustomBackgroundPath { get => _model.CustomBackgroundPath; set => Set(_model.CustomBackgroundPath, value, v => _model.CustomBackgroundPath = v); }
+    public bool UseDarkMode
+    {
+        get => _model.UseDarkMode;
+        set
+        {
+            Set(_model.UseDarkMode, value, v => _model.UseDarkMode = v);
+            AppearanceMode = value ? "dark" : "light";
+        }
+    }
     public int ScanInterval { get => _model.ScanInterval; set => Set(_model.ScanInterval, value, v => _model.ScanInterval = v); }
     public bool ShowDeviceDetails { get => _model.ShowDeviceDetails; set => Set(_model.ShowDeviceDetails, value, v => _model.ShowDeviceDetails = v); }
     public bool ShowConnectionStats { get => _model.ShowConnectionStats; set => Set(_model.ShowConnectionStats, value, v => _model.ShowConnectionStats = v); }
@@ -378,16 +419,14 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
             return false;
         }
 
-        try
+        FlushSave();
+        var result = _store.ExportTo(path, _model.Clone());
+        _runtimeTruth = _runtimeTruth with
         {
-            FlushSave();
-            _store.ExportTo(path, _model.Clone());
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+            LastWriteStatus = result.Status,
+            LastErrorCode = result.Succeeded ? _runtimeTruth.LastErrorCode : result.ErrorCode
+        };
+        return result.Succeeded;
     }
 
     /// <summary>
@@ -398,12 +437,18 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     public bool ImportFrom(string path)
     {
         var imported = _store.ImportFrom(path);
-        if (imported is null)
+        if (!imported.Succeeded || !imported.Trusted)
         {
+            _runtimeTruth = _runtimeTruth with
+            {
+                LoadStatus = imported.Status,
+                LastErrorCode = imported.ErrorCode
+            };
             return false;
         }
 
-        ReplaceModel(imported);
+        _runtimeTruth = SettingsRuntimeTruth.FromLoad(imported);
+        ReplaceModel(imported.Settings);
         return true;
     }
 
@@ -411,10 +456,22 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
     /// Reset all settings to their defaults: delete the on-disk file and swap in a fresh-default
     /// model, then notify (a single bulk PropertyChanged with a null name = "everything changed").
     /// </summary>
-    public void Reset()
+    public bool Reset()
     {
-        _store.Reset();
+        var result = _store.Reset();
+        _runtimeTruth = _runtimeTruth with
+        {
+            LastWriteStatus = result.Status,
+            Trusted = result.Succeeded || _runtimeTruth.Trusted,
+            LastErrorCode = result.Succeeded ? string.Empty : result.ErrorCode
+        };
+        if (!result.Succeeded)
+        {
+            return false;
+        }
+
         ReplaceModel(new SkyBridgeSettings());
+        return true;
     }
 
     private void ReplaceModel(SkyBridgeSettings next)
@@ -471,8 +528,23 @@ public sealed class SettingsService : INotifyPropertyChanged, IDisposable
         // Flush any pending debounced write so a change made in the last 300 ms before close is
         // not lost, then release the timer.
         timer?.Dispose();
-        _store.Save(_model.Clone());
+        var saveResult = _store.Save(_model.Clone());
+        _runtimeTruth = _runtimeTruth with
+        {
+            LastWriteStatus = saveResult.Status,
+            LastErrorCode = saveResult.Succeeded ? _runtimeTruth.LastErrorCode : saveResult.ErrorCode
+        };
     }
+}
+
+public sealed record SettingsRuntimeTruth(
+    SettingsStoreLoadStatus LoadStatus,
+    SettingsStoreWriteStatus? LastWriteStatus,
+    bool Trusted,
+    string LastErrorCode)
+{
+    public static SettingsRuntimeTruth FromLoad(SettingsStoreLoadResult result) =>
+        new(result.Status, null, result.Trusted, result.ErrorCode);
 }
 
 /// <summary>Carries the name of the settings property that changed (empty == bulk/all).</summary>

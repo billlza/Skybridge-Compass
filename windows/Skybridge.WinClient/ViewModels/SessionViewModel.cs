@@ -65,6 +65,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
     // the sign-out command (the AsyncRelayCommand construction lives in the coordinator, not
     // here). Self-provisioned in the ctor; never routed through the DI composition root.
     private readonly AccountSessionCoordinator _accountSessionCoordinator;
+    internal AccountSessionCoordinator AccountSession => _accountSessionCoordinator;
     // Owns the live top-bar network telemetry loop (net speed / latency / IP+proxy) and its
     // own ITopBarNetworkStatusClient. Self-provisioned in the ctor; never routed through the
     // DI composition root. Disposed via Dispose on teardown.
@@ -227,7 +228,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         ISessionStatusClient? sessionStatusClient = null,
         IFeatureCatalogClient? featureCatalogClient = null,
         ISessionCommandStateClient? sessionCommandStateClient = null,
-        IWorkspaceCommandStateClient? workspaceCommandStateClient = null)
+        IWorkspaceCommandStateClient? workspaceCommandStateClient = null,
+        IProductSessionActionGateClient? productSessionActionGateClient = null)
         : this(new SessionViewModelDependencies(
             engineClient,
             discoveryClient,
@@ -253,7 +255,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
             sessionStatusClient,
             featureCatalogClient,
             sessionCommandStateClient,
-            workspaceCommandStateClient))
+            workspaceCommandStateClient,
+            productSessionActionGateClient))
     {
     }
 
@@ -297,7 +300,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
             _settingsClient,
             _discoveryClient,
             _pairingMaterialClient,
-            _connectionWorkspaceStateClient);
+            _connectionWorkspaceStateClient,
+            dependencies.ProductSessionActionGateClient);
         _workspaceViewStateBuilder = new WorkspaceViewStateBuilder();
         _remoteDesktopProfileSelectionCoordinator = new RemoteDesktopProfileSelectionCoordinator(
             _remoteDesktopProfileCatalogClient,
@@ -387,6 +391,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         var collections = new WorkspaceObservableCollections(
             startupState.FeatureEntries,
             startupState.RemoteDesktopProfileCatalog);
+        var workspaceShellStateSource = new WorkspaceShellStateSource(this);
         NavigationItems = collections.NavigationItems;
         _selectedFeature = startupState.SelectedFeature;
         DashboardMetrics = collections.DashboardMetrics;
@@ -418,6 +423,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         _remoteDesktopWorkspaceActions = new RemoteDesktopWorkspaceActions(
             _workspaceBusyCoordinator,
             _remoteDesktopClient,
+            dependencies.ProductSessionActionGateClient,
+            workspaceShellStateSource.GetValidatedState,
             () => SelectedBitrate,
             () => SelectedFramerate,
             value => RemoteDesktopStatus = value,
@@ -465,17 +472,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         _accountSessionCoordinator = new AccountSessionCoordinator();
         _accountSessionCoordinator.IdentityChanged += OnAccountIdentityChanged;
         SignOutCommand = _accountSessionCoordinator.SignOutCommand;
-        // Self-provision the top-bar network coordinator (it owns its own real
-        // ITopBarNetworkStatusClient — net-speed counters, latency HEAD probe, ipapi.co +
-        // registry proxy read — internally, NOT via the DI root). Forward its four scalar
-        // values into the SetField-backed props. These are string/bool updates only (no
-        // collections), so the periodic loop never touches the WorkspaceCollectionProjector
-        // path and cannot reintroduce the dashboard flicker.
+        // Telemetry owns independent samplers; publication uses the window dispatcher.
+        var networkDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()
+            ?? throw new InvalidOperationException("Network telemetry requires the window dispatcher.");
+        var networkResources = new Microsoft.Windows.ApplicationModel.Resources.ResourceLoader();
         _topBarNetworkCoordinator = new TopBarNetworkCoordinator(
             value => TopBarNetworkSpeed = value,
             value => TopBarNetworkLatency = value,
             value => TopBarIpLocation = value,
-            value => IsSystemProxyEnabled = value);
+            value => IsSystemProxyEnabled = value,
+            action =>
+            {
+                if (!networkDispatcher.TryEnqueue(() => action()))
+                    throw new InvalidOperationException("The network status could not be posted to the window.");
+            },
+            key => networkResources.GetString(key));
         // The Settings coordinator is self-provisioned LATER in this ctor (after the discovery
         // browser actions exist), so its live-effect sinks can route into the discovery Start/Stop/
         // Refresh delegates. See the `_settingsCoordinator = new SettingsCoordinator(...)` block
@@ -536,7 +547,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         // subsystems this VM already owns — thin Action delegates, the same shape the TopBar /
         // Weather / DashboardMetrics coordinators use. Disposed in Dispose.
         _settingsCoordinator = new SettingsCoordinator(
-            service: null,
+            service: dependencies.SettingsService,
             sinks: new SettingsEffectSinks
             {
                 // 启用深色模式 / 主题颜色 — routed up to MainWindow (it owns the RootShell
@@ -583,7 +594,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
                 SetClipboardSyncEnabled = value => IsClipboardSyncEnabled = value,
                 // 信号平滑 alpha — push the EMA coefficient into the real signal smoother.
                 SetSignalSmoothingAlpha = alpha => WindowsSignalSmoother.Alpha = alpha,
-                // 传输时保持唤醒 — arm/disarm the SetThreadExecutionState gate used during transfers.
+                // 传输时保持唤醒 — arm/disarm the Windows power request gate used during transfers.
                 SetKeepAwakeDuringTransfer = value => KeepSystemAwakeDuringTransfer = value,
                 // 系统监控 显示项 — push the six metric show-flags into the MonitorDisplayPrefs
                 // resource the tiles read, then re-issue the System-Monitor read so the projected
@@ -692,7 +703,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         SystemMonitorIndicators.CollectionChanged += OnSystemMonitorIndicatorsChanged;
         _selectedBitrate = startupState.RemoteDesktopProfileCatalog.DefaultBitrateProfile;
         _selectedFramerate = startupState.RemoteDesktopProfileCatalog.DefaultFramerateProfile;
-        var workspaceShellStateSource = new WorkspaceShellStateSource(this);
         _workspaceShellStateAccessor = new WorkspaceShellStateAccessor(
             _workspaceViewStateBuilder,
             workspaceShellStateSource);
@@ -939,6 +949,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
     public ObservableCollection<FileTransferHistoryItemView> FileTransferHistory { get; }
 
     public ObservableCollection<FileTransferSecurityFactView> FileTransferSecurityFacts { get; }
+
+    internal void ApplyLiveFileTransfer(FileTransferWorkspaceSnapshot snapshot, string status)
+    {
+        _readOnlyWorkspaceSnapshotHandlers.ApplyFileTransfer(snapshot);
+        FileTransferStatus = status;
+    }
 
     public ObservableCollection<RemoteDesktopSessionItemView> RemoteDesktopSessions { get; }
 
@@ -1191,8 +1207,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
 
     // The in-window AuthOverlay's 邮箱登录 button calls this. Runs the REAL Supabase
     // email/password sign-in via the coordinator (which applies + persists on success). On
-    // success: hide the overlay (IsSignedIn flips via the identity event). On failure: keep
-    // the overlay open and surface the inline error. Never throws into the UI.
+    // success: hide the overlay (IsSignedIn flips via the identity event). On typed failure:
+    // keep the overlay open and surface the inline error.
     public async Task SignInWithEmailAsync(string email, string password)
     {
         if (IsAuthBusy)
@@ -1233,10 +1249,28 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
 
     // Applies an externally-obtained token (e.g. a future OAuth callback) — persists + sets
     // identity. The in-window email login uses SignInWithEmailAsync instead.
-    public Task ApplyAuthAsync(AuthToken token) => _accountSessionCoordinator.ApplyAuthAsync(token);
+    public Task<AccountSessionResult> ApplyAuthAsync(AuthToken token) => _accountSessionCoordinator.ApplyAuthAsync(token);
 
     // Fired on launch (on the dispatcher) to restore a remembered session and show the user.
-    public Task HydrateFromStoreAsync() => _accountSessionCoordinator.HydrateFromStoreAsync();
+    public async Task<AccountSessionResult> HydrateFromStoreAsync()
+    {
+        var result = await _accountSessionCoordinator.HydrateFromStoreAsync();
+        if (!result.Success)
+        {
+            var key = result.FailureKind switch
+            {
+                AccountSessionFailureKind.Network => "AccountRestoreNetworkFailure",
+                AccountSessionFailureKind.SessionPersistenceFailed => "AccountRestoreStorageFailure",
+                _ => "AccountRestoreVerificationFailure"
+            };
+            var message = new Microsoft.Windows.ApplicationModel.Resources.ResourceLoader().GetString(key);
+            if (string.IsNullOrWhiteSpace(message)) throw new InvalidOperationException($"The account text resource '{key}' is missing.");
+            StatusMessage = message;
+            WindowsRuntimeLog.Write(WindowsLogLevel.Warning, "account.restore",
+                $"Session restoration failed; kind={result.FailureKind}; code={result.ErrorCode}.");
+        }
+        return result;
+    }
 
     // The Settings page bindable surface. The Settings tab views bind {Binding Settings.<Prop>,
     // Mode=TwoWay} — each property delegates to a self-provisioned SettingsService that
@@ -1270,7 +1304,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
 
     /// <summary>
     /// Live keep-awake gate (文件传输 > 选项 > 传输时保持唤醒). The transfer path consults this and
-    /// calls SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) for the duration of a
+    /// calls a scoped Windows power request for the duration of a
     /// transfer when on, releasing it when the transfer ends. Pushed by the SettingsCoordinator.
     /// </summary>
     public bool KeepSystemAwakeDuringTransfer { get; private set; }
@@ -1563,6 +1597,46 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    /// <summary>
+    /// "&lt;machine name&gt; · &lt;CPU model&gt;" — the sidebar header's third line.
+    ///
+    /// The Mac GlassSidebar header is a three-line VStack: app name, app slogan, then
+    /// "\(localDeviceName) · \(localCPUModel)". Windows previously rendered the slogan
+    /// twice there as a placeholder for this line, which showed the same sentence twice in
+    /// the pane header. This supplies the real third line so the two shells match.
+    ///
+    /// Both halves are real values — machine name from the OS, processor name from the
+    /// registry key Windows itself populates. If the processor name cannot be read we show
+    /// the machine name alone rather than inventing a chip string, consistent with the
+    /// "never fabricated" rule the local-device card above already follows.
+    /// </summary>
+    public string LocalDeviceSummary { get; } = BuildLocalDeviceSummary();
+
+    private static string BuildLocalDeviceSummary()
+    {
+        var name = BuildLocalDeviceName();
+        var cpu = BuildLocalCpuModel();
+        return string.IsNullOrWhiteSpace(cpu) ? name : $"{name} · {cpu}";
+    }
+
+    private static string BuildLocalCpuModel()
+    {
+        try
+        {
+            // The same key the OS fills in for every x64/ARM64 Windows install; this is the
+            // string Task Manager and winver surface, not a derived guess.
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+            var value = key?.GetValue("ProcessorNameString") as string;
+            return value?.Trim() ?? string.Empty;
+        }
+        catch (Exception)
+        {
+            // Registry access denied / key absent → no chip line, never a fabricated one.
+            return string.Empty;
+        }
+    }
+
     public FeatureEntry SelectedFeature
     {
         get => _selectedFeature;
@@ -1629,6 +1703,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         {
             if (SetField(ref _selectedDiscoveryMode, value))
             {
+                OnPropertyChanged(nameof(IsDiscoveryAccountDevicesModeSelected));
+                OnPropertyChanged(nameof(IsDiscoveryNetworkModeSelected));
                 OnPropertyChanged(nameof(IsDiscoveryLocalScanModeSelected));
                 OnPropertyChanged(nameof(IsDiscoveryQrModeSelected));
                 OnPropertyChanged(nameof(IsDiscoveryCloudModeSelected));
@@ -1639,6 +1715,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
     }
 
     public bool IsDiscoveryLocalScanModeSelected => _selectedDiscoveryMode == DiscoveryMode.LocalScan;
+
+    public bool IsDiscoveryAccountDevicesModeSelected => _selectedDiscoveryMode == DiscoveryMode.AccountDevices;
+
+    public bool IsDiscoveryNetworkModeSelected => !IsDiscoveryAccountDevicesModeSelected;
 
     public bool IsDiscoveryQrModeSelected => _selectedDiscoveryMode == DiscoveryMode.Qr;
 
@@ -1687,9 +1767,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
 
     // =====================================================================
     // Remote Desktop connection-mode view-state (Mac connectionModeSelector .auto/.nearField/.farFieldRDP).
-    // Auto routes to the existing Device Discovery navigation; Far raises the existing
-    // advanced-connect status; Near surfaces an honest "pending capture adapter" status
-    // (no Windows capture transport exists yet — fail-closed, not fabricated).
+    // Auto routes to Device Discovery; Far uses the advanced-connect workspace;
+    // Near asks the presentation owner to open the native paired-device viewer.
     // =====================================================================
     public RemoteDesktopConnectionMode SelectedRemoteDesktopMode
     {
@@ -1697,9 +1776,24 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
         set => SetField(ref _selectedRemoteDesktopMode, value);
     }
 
+    public event Action? NearFieldRemoteDesktopRequested;
+
+    public void ReportRemoteDesktopError(Exception failure)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+        var message = WorkspaceErrorStatusClient.Redact(failure.Message);
+        RemoteDesktopStatus = message;
+        StatusMessage = message;
+    }
+
+    public async Task<string> RefreshRemoteDesktopPeersAsync()
+    {
+        await _discoveryBrowserActions.RefreshAsync();
+        return DiscoveryBrowserStatus;
+    }
+
     // Invoked from the RD mode-segment Border.Tapped handlers. Sets the selected pill and
-    // performs the mode's route. Auto = real nav; Far = existing advanced-connect status;
-    // Near = honest pending-adapter status (batch 2 will replace with a real backend string).
+    // performs the mode's existing navigation or viewer request.
     public void SelectRemoteDesktopMode(RemoteDesktopConnectionMode mode)
     {
         SelectedRemoteDesktopMode = mode;
@@ -1725,11 +1819,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged, IDisposable
                 break;
 
             case RemoteDesktopConnectionMode.Near:
-                // Honest fail-closed status from the RD workspace client: no Windows near-field
-                // capture adapter exists yet, so selecting Near states that plainly. Sourced from
-                // the backend (RemoteDesktopWorkspaceClient.BuildNearFieldPendingStatus), not a
-                // VM-local literal — and never a fabricated transport claim.
-                RemoteDesktopStatus = _remoteDesktopClient.BuildNearFieldPendingStatus();
+                if (NearFieldRemoteDesktopRequested is { } showNearField) showNearField();
+                else RemoteDesktopStatus = _remoteDesktopClient.BuildNearFieldPendingStatus();
                 break;
         }
     }
@@ -2508,7 +2599,8 @@ public enum DiscoveryMode
     LocalScan,
     Qr,
     Cloud,
-    Code
+    Code,
+    AccountDevices
 }
 
 /// <summary>

@@ -72,7 +72,7 @@
             <StackPanel Spacing="14">
                 <StackPanel Spacing="2">
                     <TextBlock x:Uid="SettingsSystemMonitorConfigHeader" Text="监控配置" Style="{StaticResource SettingsSectionTitle}" />
-                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" Margin="0,4,0,0" />
                 </StackPanel>
 
                 <!-- 刷新间隔 (Slider, double, 1…30s) — contract=Slider; Mac dropdown 1/5/10/30s -->
@@ -181,7 +181,7 @@
             <StackPanel Spacing="14">
                 <StackPanel Spacing="2">
                     <TextBlock x:Uid="SettingsSystemMonitorDisplayHeader" Text="显示项" Style="{StaticResource SettingsSectionTitle}" />
-                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" Margin="0,4,0,0" />
                 </StackPanel>
 
                 <!-- CPU -->
@@ -304,7 +304,7 @@
             <StackPanel Spacing="14">
                 <StackPanel Spacing="2">
                     <TextBlock x:Uid="SettingsSystemMonitorAlertsHeader" Text="警报阈值" Style="{StaticResource SettingsSectionTitle}" />
-                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" Margin="0,4,0,0" />
                 </StackPanel>
 
                 <!-- CPU 阈值 (50…95 step 5, %) -->
@@ -473,7 +473,7 @@
             <StackPanel Spacing="14">
                 <StackPanel Spacing="2">
                     <TextBlock x:Uid="SettingsSystemMonitorAdvancedHeader" Text="高级" Style="{StaticResource SettingsSectionTitle}" />
-                    <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,4,0,0" />
+                    <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" Margin="0,4,0,0" />
                 </StackPanel>
 
                 <!-- 启用热节流警报 -->
@@ -537,7 +537,7 @@
                          existing RefreshSystemMonitor read so a fresh sample repopulates them.
                      (重置监控数据 already maps to the Maintenance ResetMonitorData push-button —
                      left alone, not duplicated here.) -->
-                <Border Height="1" Background="{StaticResource SkyBridgeCardStrokeBrush}" Margin="0,2,0,0" />
+                <Border Height="1" Background="{StaticResource SkyBridgeHairlineBrush}" Margin="0,2,0,0" />
 
                 <!-- 导出监控数据 -->
                 <Border

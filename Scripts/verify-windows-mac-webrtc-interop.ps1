@@ -46,9 +46,9 @@ function Invoke-InteropGate {
     Assert-True -Condition (Test-Path -LiteralPath $scriptPath) -Message "Missing Windows/mac WebRTC interop gate script: $scriptPath"
 
     Write-Output "windows-mac-webrtc-interop: running $Name"
-    $LASTEXITCODE = 0
     & $scriptPath @Parameters
-    Assert-True -Condition ($LASTEXITCODE -eq 0) -Message "Windows/mac WebRTC interop gate failed: $Name exitCode=$LASTEXITCODE"
+    $gateSucceeded = $?
+    Assert-True -Condition $gateSucceeded -Message "Windows/mac WebRTC interop gate failed: $Name exitCode=$LASTEXITCODE"
     Write-Output "windows-mac-webrtc-interop: passed $Name"
 }
 

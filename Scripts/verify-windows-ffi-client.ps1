@@ -40,9 +40,17 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
 $clientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FfiEngineClient.cs"
 $coreBridgePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CoreBridge.cs"
 $nativeLibraryResolverPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SkybridgeNativeLibraryResolver.cs"
+$winClientProjectPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Skybridge.WinClient.csproj"
 $discoveryClientPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryClient.cs"
 $discoveryBrowserPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs"
+$protocolConstantsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/SkyBridgeProtocolConstants.cs"
+$routeBindingPayloadPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WebRtcAuthenticatedRouteBindingPayload.cs"
+$routeBindingStorePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WebRtcAuthenticatedRouteBindingStore.cs"
+$msQuicDialerPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WindowsNativeMsQuicTransportAdapterClient.cs"
+$msQuicListenerPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WindowsNativeMsQuicListenerTransportAdapterClient.cs"
+$msQuicSecretPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WindowsNativeMsQuicTransportSecret.cs"
 $nativeDnsSdBrowsePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs"
+$nativeDnsSdTxtCodecPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/NativeWindowsDnsSdTxtRecordCodec.cs"
 $deviceDiscoveryInputDefaultsPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/DeviceDiscoveryInputDefaultsClient.cs"
 $manualConnectionPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ManualConnectionClient.cs"
 $crossNetworkConnectionCodePolicyPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/CrossNetworkConnectionCodePolicy.cs"
@@ -51,6 +59,9 @@ $pairingPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/Pairing
 $connectionPreflightPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs"
 $connectionLaunchRequestPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionLaunchRequest.cs"
 $windowsTransportAdapterPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WindowsTransportAdapterClient.cs"
+$webRtcAppControlBootstrapPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WebRtcAppControlBootstrapClient.cs"
+$webRtcFileTransferRuntimeProofPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WebRtcFileTransferRuntimeProof.cs"
+$currentPathLiveGateFileSystemPath = Join-Path $RepoRoot "Scripts/windows-current-path-live-gate-file-system.ps1"
 $connectionWorkspaceStatePath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs"
 $workspaceErrorStatusPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/WorkspaceErrorStatusClient.cs"
 $usbManagementPath = Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/UsbManagementWorkspaceClient.cs"
@@ -84,6 +95,7 @@ $reverseSshRelayStartPath = Join-Path $RepoRoot "Scripts/start-windows-reverse-s
 $reverseSshRelayRegisterPath = Join-Path $RepoRoot "Scripts/register-windows-reverse-ssh-relay-task.ps1"
 $reverseSshRelayLifecycleSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-reverse-ssh-relay-lifecycle.ps1"
 $portabilityAcceptanceEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-portability-acceptance-evidence.ps1"
+$publicArtifactRedactionPath = Join-Path $RepoRoot "Scripts/verify-windows-public-artifact-redaction.ps1"
 $portabilityCompletionAuditPath = Join-Path $RepoRoot "Scripts/audit-windows-portability-completion.ps1"
 $researchEvidenceSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-research-evidence.ps1"
 $ciWorkflowSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-ci-workflow.ps1"
@@ -105,19 +117,40 @@ $webrtcProofSchemaSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-webrtc
 $webrtcProofSchemaPath = Join-Path $RepoRoot "docs/windows-webrtc-proof-schema.md"
 $macWebRtcInteropPath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-interop.ps1"
 $macWebRtcHelperLivePath = Join-Path $RepoRoot "Scripts/verify-windows-mac-webrtc-helper-live.ps1"
+$currentPathBridgeContractPath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-bridge-contract.ps1"
+$runtimeSmokeProgramPath = Join-Path $RepoRoot "windows/Skybridge.WinClient.RuntimeSmoke/Program.cs"
 $webrtcHelperProgramPath = Join-Path $RepoRoot "windows/Skybridge.WebRtcHelper/Program.cs"
 $appleNativePreservationSmokePath = Join-Path $RepoRoot "Scripts/verify-apple-native-preservation.ps1"
+$powershellAstPath = Join-Path $RepoRoot "Scripts/verify-windows-powershell-ast.ps1"
+$currentPathProductControlTransportSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-product-control-transport-live.ps1"
+$currentPathProductControlAppControlSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-product-control-appcontrol-live.ps1"
+$currentPathProductControlFileTransferSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-product-control-file-transfer-live.ps1"
+$currentPathProductControlAnswererSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-product-control-answerer-transport-live.ps1"
+$currentPathProductControlAnswererAppControlSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-product-control-answerer-appcontrol-live.ps1"
+$currentPathProductControlAnswererFileTransferSmokePath = Join-Path $RepoRoot "Scripts/verify-windows-current-path-product-control-answerer-file-transfer-live.ps1"
+$gitIgnorePath = Join-Path $RepoRoot ".gitignore"
 
-foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $discoveryClientPath, $discoveryBrowserPath, $nativeDnsSdBrowsePath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $opensshPqKexPath, $reverseSshRelayLifecyclePath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $opensshPqKexSmokePath, $reverseSshRelayStartPath, $reverseSshRelayRegisterPath, $reverseSshRelayLifecycleSmokePath, $portabilityAcceptanceEvidenceSmokePath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath)) {
+foreach ($path in @($clientPath, $coreBridgePath, $nativeLibraryResolverPath, $winClientProjectPath, $discoveryClientPath, $discoveryBrowserPath, $protocolConstantsPath, $routeBindingPayloadPath, $routeBindingStorePath, $msQuicDialerPath, $msQuicListenerPath, $msQuicSecretPath, $nativeDnsSdBrowsePath, $nativeDnsSdTxtCodecPath, $deviceDiscoveryInputDefaultsPath, $manualConnectionPath, $crossNetworkConnectionCodePolicyPath, $crossNetworkPath, $pairingPath, $connectionPreflightPath, $connectionLaunchRequestPath, $windowsTransportAdapterPath, $webRtcAppControlBootstrapPath, $webRtcFileTransferRuntimeProofPath, $currentPathLiveGateFileSystemPath, $connectionWorkspaceStatePath, $workspaceErrorStatusPath, $usbManagementPath, $coreDiagnosticsPath, $fileTransferPath, $workspaceActionCatalogPath, $remoteDesktopPath, $remoteDesktopProfileCatalogPath, $systemMonitorPath, $settingsPath, $dashboardMetricsPath, $featureCatalogPath, $topBarStatusPath, $sessionStatusPath, $sessionCommandStatePath, $workspaceCommandStatePath, $unavailableClientStubsPath, $interfacePath, $dependencyFactoryPath, $nativeRuntimeFactoryPath, $mainWindowPath, $architecturePath, $researchSynthesisPath, $portabilityAcceptanceMapPath, $opensshPqKexPath, $reverseSshRelayLifecyclePath, $portabilitySmokePath, $portabilityAcceptanceMapSmokePath, $opensshPqKexSmokePath, $reverseSshRelayStartPath, $reverseSshRelayRegisterPath, $reverseSshRelayLifecycleSmokePath, $portabilityAcceptanceEvidenceSmokePath, $publicArtifactRedactionPath, $portabilityCompletionAuditPath, $researchEvidenceSmokePath, $ciWorkflowSmokePath, $githubWorkflowPath, $stackFreshnessSmokePath, $macSshProbePath, $macRustCliCodbgPath, $macRustCliCodbgWrapperSmokePath, $startupStateSmokePath, $connectionLaunchSmokePath, $fileTransferQrSmokePath, $uiAutomationSmokePath, $uiVisualEvidenceSmokePath, $nativeRuntimeProfileSmokePath, $nativeDnsSdAcceptancePath, $webrtcProofSmokePath, $rustWebRtcProofCliPath, $webrtcProofSchemaSmokePath, $webrtcProofSchemaPath, $macWebRtcInteropPath, $macWebRtcHelperLivePath, $currentPathBridgeContractPath, $runtimeSmokeProgramPath, $webrtcHelperProgramPath, $appleNativePreservationSmokePath, $powershellAstPath, $currentPathProductControlFileTransferSmokePath, $currentPathProductControlAnswererSmokePath, $currentPathProductControlAnswererAppControlSmokePath, $currentPathProductControlAnswererFileTransferSmokePath, $gitIgnorePath)) {
     Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing FFI client file: $path"
+}
+foreach ($path in @($currentPathProductControlTransportSmokePath, $currentPathProductControlAppControlSmokePath, $currentPathProductControlFileTransferSmokePath)) {
+    Assert-True -Condition (Test-Path -LiteralPath $path) -Message "Missing current-path product-control live gate file: $path"
 }
 
 $client = Get-Content -Raw -LiteralPath $clientPath
 $coreBridge = Get-Content -Raw -LiteralPath $coreBridgePath
 $nativeLibraryResolver = Get-Content -Raw -LiteralPath $nativeLibraryResolverPath
+$winClientProject = Get-Content -Raw -LiteralPath $winClientProjectPath
 $discoveryClient = Get-Content -Raw -LiteralPath $discoveryClientPath
 $discoveryBrowser = Get-Content -Raw -LiteralPath $discoveryBrowserPath
+$protocolConstants = Get-Content -Raw -LiteralPath $protocolConstantsPath
+$routeBindingPayload = Get-Content -Raw -LiteralPath $routeBindingPayloadPath
+$routeBindingStore = Get-Content -Raw -LiteralPath $routeBindingStorePath
+$msQuicDialer = Get-Content -Raw -LiteralPath $msQuicDialerPath
+$msQuicListener = Get-Content -Raw -LiteralPath $msQuicListenerPath
+$msQuicSecret = Get-Content -Raw -LiteralPath $msQuicSecretPath
 $nativeDnsSdBrowse = Get-Content -Raw -LiteralPath $nativeDnsSdBrowsePath
+$nativeDnsSdTxtCodec = Get-Content -Raw -LiteralPath $nativeDnsSdTxtCodecPath
 $deviceDiscoveryInputDefaults = Get-Content -Raw -LiteralPath $deviceDiscoveryInputDefaultsPath
 $manualConnection = Get-Content -Raw -LiteralPath $manualConnectionPath
 $crossNetworkConnectionCodePolicy = Get-Content -Raw -LiteralPath $crossNetworkConnectionCodePolicyPath
@@ -127,11 +160,14 @@ $pairing = Get-Content -Raw -LiteralPath $pairingPath
 $connectionPreflight = Get-Content -Raw -LiteralPath $connectionPreflightPath
 $connectionLaunchRequest = Get-Content -Raw -LiteralPath $connectionLaunchRequestPath
 $windowsTransportAdapter = Get-Content -Raw -LiteralPath $windowsTransportAdapterPath
+$webRtcAppControlBootstrap = Get-Content -Raw -LiteralPath $webRtcAppControlBootstrapPath
+$webRtcFileTransferRuntimeProof = Get-Content -Raw -LiteralPath $webRtcFileTransferRuntimeProofPath
+$currentPathLiveGateFileSystem = Get-Content -Raw -LiteralPath $currentPathLiveGateFileSystemPath
 $connectionWorkspaceState = Get-Content -Raw -LiteralPath $connectionWorkspaceStatePath
 $workspaceErrorStatus = Get-Content -Raw -LiteralPath $workspaceErrorStatusPath
 $usbManagement = Get-Content -Raw -LiteralPath $usbManagementPath
 $coreDiagnostics = Get-Content -Raw -LiteralPath $coreDiagnosticsPath
-$fileTransfer = Get-Content -Raw -LiteralPath $fileTransferPath
+$fileTransfer = (Get-Content -Raw -LiteralPath $fileTransferPath) + (Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "windows/Skybridge.WinClient/Services/FileTransferWorkspaceContracts.cs"))
 $workspaceActionCatalog = Get-Content -Raw -LiteralPath $workspaceActionCatalogPath
 $remoteDesktop = Get-Content -Raw -LiteralPath $remoteDesktopPath
 $remoteDesktopProfileCatalog = Get-Content -Raw -LiteralPath $remoteDesktopProfileCatalogPath
@@ -160,6 +196,7 @@ $reverseSshRelayStart = Get-Content -Raw -LiteralPath $reverseSshRelayStartPath
 $reverseSshRelayRegister = Get-Content -Raw -LiteralPath $reverseSshRelayRegisterPath
 $reverseSshRelayLifecycleSmoke = Get-Content -Raw -LiteralPath $reverseSshRelayLifecycleSmokePath
 $portabilityAcceptanceEvidenceSmoke = Get-Content -Raw -LiteralPath $portabilityAcceptanceEvidenceSmokePath
+$publicArtifactRedaction = Get-Content -Raw -LiteralPath $publicArtifactRedactionPath
 $portabilityCompletionAudit = Get-Content -Raw -LiteralPath $portabilityCompletionAuditPath
 $researchEvidenceSmoke = Get-Content -Raw -LiteralPath $researchEvidenceSmokePath
 $ciWorkflowSmoke = Get-Content -Raw -LiteralPath $ciWorkflowSmokePath
@@ -172,6 +209,8 @@ $startupStateSmoke = Get-Content -Raw -LiteralPath $startupStateSmokePath
 $connectionLaunchSmoke = Get-Content -Raw -LiteralPath $connectionLaunchSmokePath
 $fileTransferQrSmoke = Get-Content -Raw -LiteralPath $fileTransferQrSmokePath
 $uiAutomationSmoke = Get-Content -Raw -LiteralPath $uiAutomationSmokePath
+$uiAutomationHelpersPath = Join-Path $RepoRoot "Scripts/windows-ui-automation-helpers.ps1"
+$uiAutomationSmoke += "`n" + (Get-Content -Raw -LiteralPath $uiAutomationHelpersPath)
 $uiVisualEvidenceSmoke = Get-Content -Raw -LiteralPath $uiVisualEvidenceSmokePath
 $nativeRuntimeProfileSmoke = Get-Content -Raw -LiteralPath $nativeRuntimeProfileSmokePath
 $nativeDnsSdAcceptance = Get-Content -Raw -LiteralPath $nativeDnsSdAcceptancePath
@@ -181,8 +220,18 @@ $webrtcProofSchemaSmoke = Get-Content -Raw -LiteralPath $webrtcProofSchemaSmokeP
 $webrtcProofSchema = Get-Content -Raw -LiteralPath $webrtcProofSchemaPath
 $macWebRtcInterop = Get-Content -Raw -LiteralPath $macWebRtcInteropPath
 $macWebRtcHelperLive = Get-Content -Raw -LiteralPath $macWebRtcHelperLivePath
+$currentPathBridgeContract = Get-Content -Raw -LiteralPath $currentPathBridgeContractPath
+$runtimeSmokeSource = Get-Content -Raw -LiteralPath $runtimeSmokeProgramPath
 $webrtcHelperProgram = Get-Content -Raw -LiteralPath $webrtcHelperProgramPath
 $appleNativePreservationSmoke = Get-Content -Raw -LiteralPath $appleNativePreservationSmokePath
+$powershellAst = Get-Content -Raw -LiteralPath $powershellAstPath
+$currentPathProductControlTransportSmoke = Get-Content -Raw -LiteralPath $currentPathProductControlTransportSmokePath
+$currentPathProductControlAppControlSmoke = Get-Content -Raw -LiteralPath $currentPathProductControlAppControlSmokePath
+$currentPathProductControlFileTransferSmoke = Get-Content -Raw -LiteralPath $currentPathProductControlFileTransferSmokePath
+$currentPathProductControlAnswererSmoke = Get-Content -Raw -LiteralPath $currentPathProductControlAnswererSmokePath
+$currentPathProductControlAnswererAppControlSmoke = Get-Content -Raw -LiteralPath $currentPathProductControlAnswererAppControlSmokePath
+$currentPathProductControlAnswererFileTransferSmoke = Get-Content -Raw -LiteralPath $currentPathProductControlAnswererFileTransferSmokePath
+$gitIgnore = Get-Content -Raw -LiteralPath $gitIgnorePath
 
 foreach ($member in @("ConnectAsync", "DisconnectAsync", "SendHeartbeatAsync")) {
     Assert-Contains -Text $interface -Needle $member -Message "IEngineClient missing member: $member"
@@ -214,6 +263,18 @@ foreach ($resolverSignal in @(
 }
 Assert-Contains -Text $client -Needle "SkybridgeNativeLibraryResolver.Register();" -Message "FfiEngineClient must register the app-directory native library resolver."
 Assert-Contains -Text $coreBridge -Needle "SkybridgeNativeLibraryResolver.Register();" -Message "CoreBridge must register the app-directory native library resolver."
+
+Assert-Contains -Text $winClientProject -Needle '<Import Project="..\NativeCore.targets" />' -Message "WinClient must import the shared native Core build."
+$nativeBuildTargets = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot "windows/NativeCore.targets")
+foreach ($nativeBuildSignal in @(
+    '<SkybridgeCoreRustTarget Condition="''$(RuntimeIdentifier)''==''win-x64''">x86_64-pc-windows-msvc</SkybridgeCoreRustTarget>',
+    '<SkybridgeCoreTargetDir Condition="''$(SkybridgeCoreTargetDir)''==''''">',
+    'EnvironmentVariables="CARGO_TARGET_DIR=$(SkybridgeCoreTargetDir)"',
+    '<SkybridgeCoreNativeDll>$(SkybridgeCoreTargetDir)\$(SkybridgeCoreCargoTargetSegment)$(SkybridgeCoreCargoProfile)\skybridge_core.dll</SkybridgeCoreNativeDll>',
+    'CopyToOutputDirectory="PreserveNewest"'
+)) {
+    Assert-Contains -Text $nativeBuildTargets -Needle $nativeBuildSignal -Message "WinClient project missing native build contract: $nativeBuildSignal"
+}
 
 foreach ($signal in @(
     "public sealed class FfiEngineClient : IEngineClient, IDisposable",
@@ -356,8 +417,9 @@ foreach ($signal in @(
 )) {
     Assert-Contains -Text $connectionLaunchSmoke -Needle $signal -Message "Windows connection launch smoke missing signal: $signal"
 }
-Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateConfigured()" -Message "MainWindow should create SessionViewModel through the configured dependency factory."
-Assert-Contains -Text $dependencyFactory -Needle "CreateConfigured()" -Message "Dependency factory should expose explicit configured runtime selection."
+Assert-Contains -Text $mainWindow -Needle "SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace, _notifications, settings, ShowAppearanceMenu)" -Message "MainWindow should pass its file transfer, notification, settings, and appearance owners through the configured dependency factory."
+Assert-Contains -Text $dependencyFactory -Needle "CreateConfigured(IFileTransferWorkspaceClient? fileTransferClient = null, ITopBarStatusClient? topBarStatusClient = null, SettingsService? settingsService = null)" -Message "Dependency factory should expose explicit configured runtime selection with the shared window services."
+Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment(fileTransferClient, topBarStatusClient, settingsService)" -Message "Configured window services must reach the native runtime composition root."
 Assert-Contains -Text $dependencyFactory -Needle "CreateDefault()" -Message "Dependency factory should retain the product default runtime entrypoint."
 Assert-Contains -Text $dependencyFactory -Needle "WindowsNativeRuntimeDependencyFactory.CreateFromEnvironment()" -Message "Dependency factory should route configured/default startup through the Windows runtime composition root."
 Assert-True -Condition (-not $mainWindow.Contains("new FfiEngineClient()")) -Message "MainWindow must not bypass the configured lifecycle composition root."
@@ -439,6 +501,7 @@ foreach ($portabilitySmokeSignal in @(
     "verify-windows-native-dns-sd-acceptance.ps1",
     "verify-windows-webrtc-proof.ps1",
     "verify-windows-mac-webrtc-interop.ps1",
+    "verify-windows-public-artifact-redaction.ps1",
     "verify-rust-cli-coverage.ps1",
     "IncludeRustCliCoverage",
     "MinimumLineCoverage",
@@ -453,10 +516,25 @@ foreach ($portabilitySmokeSignal in @(
     "AcceptanceEvidencePath",
     "Write-AcceptanceEvidence",
     "acceptance-evidence=",
+    "verify-windows-powershell-ast.ps1",
+    "windows-powershell-ast",
     "PortabilitySmokeGateResults",
     "Add-SmokeGateResult",
     "gateResults",
     "evidencePaths",
+    "artifactDigests",
+    "RequirePublicArtifactRedaction",
+    "PublicArtifactPath",
+    "PublicArtifactScanEvidencePath",
+    "publicArtifactPaths",
+    "publicArtifactScanEvidencePath",
+    "windows-public-artifact-redaction",
+    "pathSha256",
+    "pathScope",
+    "Test-IsDigestibleEvidencePathProperty",
+    "runId",
+    "sha256",
+    "byteLength",
     "rustCliCoverageEvidencePath",
     "generatedAtUtc",
     "branch = Get-GitText",
@@ -523,6 +601,9 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "REQ-BASIC-SMOKE",
     "REQ-APPLE-PRESERVATION",
     "REQ-MAC-INTEROP",
+    "REQ-CURRENT-PATH-APPCONTROL",
+    "REQ-CURRENT-PATH-ANSWERER-TRANSPORT",
+    "REQ-CURRENT-PATH-ANSWERER-APPCONTROL",
     "REQ-OPENSSH-PQ-KEX",
     "REQ-WINDOWS-REVERSE-SSH-RELAY",
     "REQ-GITHUB-SSH",
@@ -534,6 +615,7 @@ foreach ($portabilityAcceptanceMapSignal in @(
     "verify-apple-native-preservation.ps1",
     "prepare-mac-rust-cli-codbg.ps1",
     "verify-windows-mac-webrtc-interop.ps1",
+    "verify-windows-current-path-product-control-appcontrol-live.ps1",
     "verify-openssh-pq-kex.ps1",
     "register-windows-reverse-ssh-relay-task.ps1",
     "start-windows-reverse-ssh-relay.ps1",
@@ -605,6 +687,16 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "AcceptanceEvidencePath",
     "gateResults",
     "generatedAtUtc",
+    "windows-powershell-ast",
+    "runId",
+    "artifactDigests",
+    "pathSha256",
+    "pathScope",
+    "pathType",
+    "ExpectedArtifactPaths",
+    "Test-IsDigestibleEvidencePathProperty",
+    "sha256",
+    "byteLength",
     "ExpectedBranch",
     "ExpectedHead",
     "RequireRustCliCoverage",
@@ -616,6 +708,11 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "RequireNativeDnsSdAcceptance",
     "RequireMacInterop",
     "RequireWindowsReverseSshRelayLifecycle",
+    "RequirePublicArtifactRedaction",
+    "PublicArtifactPath",
+    "PublicArtifactScanEvidencePath",
+    "Invoke-PublicArtifactRedactionVerifier",
+    "windows-public-artifact-redaction",
     "windowsReverseSshRelayEvidencePath",
     "windows-reverse-ssh-relay-lifecycle",
     "totalLineCoverage",
@@ -627,9 +724,122 @@ foreach ($portabilityAcceptanceEvidenceSignal in @(
     "cargo llvm-cov --fail-under-lines",
     "sourceUris",
     "directLanLikely",
-    "hostKeyPinned"
+    "hostKeyPinned",
+    "RequireCurrentPathProductControlAppControl",
+    "CurrentPathProductControlEvidencePath",
+    "windows-current-path-product-control-appcontrol",
+    "AdmissionLookupBoundSdpIceProductControlHandshakeAppControlPong",
+    "AppControlCryptoFormat",
+    "AppControlSbwcEnvelope",
+    "AppControlSbwcCounterPresent",
+    "AppControlReplayProtection",
+    "sbwc-replay-window",
+    "AppControlLegacyAadLength",
+    "AppControlOutboundCounter",
+    "AppControlInboundCounter",
+    "AppControlSessionHash",
+    "AppControlTranscriptPrefix",
+    "LateRemoteIceCandidateRelayCount",
+    "PeerMlKem768PublicKeySource",
+    "PeerMlKem768PublicKeyServerAttested",
+    "RequireCurrentPathProductControlFileTransfer",
+    "CurrentPathProductControlFileTransferEvidencePath",
+    "windows-current-path-product-control-file-transfer",
+    "AdmissionLookupBoundSdpIceProductControlHandshakeFileTransferReceipt",
+    "FileTransferPacketType",
+    "FileTransferSbwcEnvelope",
+    "FileTransferReplayProtection",
+    "AuthenticatedFileTransferReceiptProof",
+    "ReceiptMatchesSentHash",
+    "RequireCurrentPathProductControlAnswererTransport",
+    "CurrentPathProductControlAnswererEvidencePath",
+    "windows-current-path-product-control-answerer-transport",
+    "AdmissionRegisterBoundSdpIceProductControlAnswererTransportOpen",
+    "RequireCurrentPathProductControlAnswererAppControl",
+    "CurrentPathProductControlAnswererAppControlEvidencePath",
+    "AdmissionRegisterBoundSdpIceProductControlAnswererHandshakeAppControlPong",
+    "RequireCurrentPathProductControlAnswererFileTransfer",
+    "CurrentPathProductControlAnswererFileTransferEvidencePath",
+    "AdmissionRegisterBoundSdpIceProductControlAnswererHandshakeFileTransferReceipt"
 )) {
     Assert-Contains -Text $portabilityAcceptanceEvidenceSmoke -Needle $portabilityAcceptanceEvidenceSignal -Message "Portability acceptance evidence verifier missing signal: $portabilityAcceptanceEvidenceSignal"
+}
+foreach ($publicArtifactRedactionSignal in @(
+    "windows-public-artifact-redaction: ok",
+    "Public artifact scan refuses reparse-point",
+    "Public artifact scan found no scan-eligible files",
+    "Public artifact package contains denied sensitive artifact path",
+    "Windows public artifacts contain unredacted sensitive content",
+    "MaxFileBytes",
+    "MaxTotalBytes",
+    "MaxFileCount",
+    "denylistVersion",
+    "raw sensitive JSON field",
+    "currentPathProductControlAnswererConnectionCodePath",
+    "currentPathProductControlAnswererTransportConnectionCodePath",
+    "currentPathProductControlAnswererAppControlConnectionCodePath",
+    "currentPathProductControlAnswererFileTransferConnectionCodePath",
+    "raw bearer authorization",
+    "raw Windows path"
+)) {
+    Assert-Contains -Text $publicArtifactRedaction -Needle $publicArtifactRedactionSignal -Message "Windows public artifact redaction scanner missing signal: $publicArtifactRedactionSignal"
+}
+foreach ($powershellAstSignal in @(
+    "System.Management.Automation.Language.Parser",
+    "ParseFile",
+    "CommandAst",
+    "Invoke-Expression",
+    "windows-powershell-ast: parse-ok",
+    "windows-powershell-ast: ok"
+)) {
+    Assert-Contains -Text $powershellAst -Needle $powershellAstSignal -Message "PowerShell AST verifier missing signal: $powershellAstSignal"
+}
+foreach ($currentPathBridgeContractSignal in @(
+    "MaxWebRtcEnvelopeBytes",
+    "MaxSdpBytes",
+    "NearLimitSdpHeadroomBytes",
+    "InboundAnswerSdpBytes",
+    "InboundOfferSdpBytes",
+    "OversizeSdpRejected",
+    "ExceedsLegacy16KiBProbe"
+)) {
+    Assert-Contains -Text ($currentPathBridgeContract + $runtimeSmokeSource) -Needle $currentPathBridgeContractSignal -Message "Current-path bridge contract missing near-limit signal: $currentPathBridgeContractSignal"
+}
+foreach ($appControlBootstrapPayloadSignal in @(
+    "WebRtcAppControlBootstrapPayloadPolicy",
+    "MaxJsonPayloadBytes",
+    "RequireJsonPayloadWithinLimit",
+    "RequirePong",
+    "RequirePing"
+)) {
+    Assert-Contains -Text $webRtcAppControlBootstrap -Needle $appControlBootstrapPayloadSignal -Message "AppControl bootstrap missing payload bound signal: $appControlBootstrapPayloadSignal"
+}
+foreach ($fileTransferRuntimeProofSignal in @(
+    "WebRtcFileTransferProofClient",
+    "WebRtcFileTransferResponderHost",
+    "ExchangeSingleChunkAsync",
+    "ReceiveSingleChunkAndAckAsync",
+    "FileTransfer",
+    "BuildManifestPayload",
+    "BuildChunkPayload",
+    "BuildCompletePayload",
+    "RequireCompleteAck",
+    "ReceiptMatchesSentHash",
+    "ReceiptMatchesReceivedHash",
+    "WebRtcProductControlMessageInbox",
+    "WebRtcAppSecureRole.Initiator",
+    "WebRtcAppSecureRole.Responder"
+)) {
+    Assert-Contains -Text $webRtcFileTransferRuntimeProof -Needle $fileTransferRuntimeProofSignal -Message "WebRTC FileTransfer runtime proof missing signal: $fileTransferRuntimeProofSignal"
+}
+foreach ($currentPathLiveGateEnvironmentSignal in @(
+    "Save-WindowsCurrentPathProcessEnvironment",
+    "Restore-WindowsCurrentPathProcessEnvironment",
+    "GetEnvironmentVariables(`"Process`")",
+    'SetEnvironmentVariable($name, $null, "Process")',
+    "secretEnvironmentSnapshot"
+)) {
+    Assert-Contains -Text ($currentPathLiveGateFileSystem + $currentPathProductControlTransportSmoke + $currentPathProductControlAppControlSmoke + $currentPathProductControlFileTransferSmoke + $currentPathProductControlAnswererSmoke + $currentPathProductControlAnswererAppControlSmoke + $currentPathProductControlAnswererFileTransferSmoke) -Needle $currentPathLiveGateEnvironmentSignal -Message "Current-path live gate missing process-environment restoration signal: $currentPathLiveGateEnvironmentSignal"
 }
 foreach ($portabilityCompletionAuditSignal in @(
     "windows-portability-completion-audit",
@@ -638,10 +848,130 @@ foreach ($portabilityCompletionAuditSignal in @(
     "AllowStandaloneWinUiVisualEvidence",
     "REQ-GITHUB-UPLOAD",
     "REQ-MAC-INTEROP",
+    "REQ-CURRENT-PATH-APPCONTROL",
+    "REQ-CURRENT-PATH-FILE-TRANSFER",
+    "REQ-CURRENT-PATH-ANSWERER-TRANSPORT",
+    "REQ-CURRENT-PATH-ANSWERER-APPCONTROL",
+    "REQ-CURRENT-PATH-ANSWERER-FILE-TRANSFER",
+    "RequireCurrentPathProductControlAppControl",
+    "RequireCurrentPathProductControlFileTransfer",
+    "CurrentPathProductControlFileTransferEvidencePath",
+    "RequireCurrentPathProductControlAnswererTransport",
+    "RequireCurrentPathProductControlAnswererAppControl",
+    "RequireCurrentPathProductControlAnswererFileTransfer",
     "RequireNativeDnsSdAcceptance",
     "ls-remote --heads origin"
 )) {
     Assert-Contains -Text $portabilityCompletionAudit -Needle $portabilityCompletionAuditSignal -Message "Portability completion audit missing signal: $portabilityCompletionAuditSignal"
+}
+foreach ($currentPathAnswererSignal in @(
+    "verify-windows-current-path-product-control-answerer-transport-live.ps1",
+    "Role answer",
+    "ExpectedBoundRole",
+    "RegisteredCodeOutPath",
+    "CurrentPathProductControlAnswererTransportConnectionCodePath",
+    "RemoteOfferTimeoutSeconds",
+    "RemoteSignalWaitType",
+    "RemoteSignalTimeoutSeconds",
+    "LateRemoteIceCandidateRelayCount",
+    "current-path-product-control-answerer-transport",
+    "product-control-answer",
+    "RemoteIdentitySource",
+    "NotRemoteIdentityProof"
+)) {
+    Assert-Contains -Text ($currentPathProductControlAnswererSmoke + $portabilitySmoke + $portabilityAcceptanceMap + $portabilityAcceptanceEvidenceSmoke) -Needle $currentPathAnswererSignal -Message "Current-path answerer transport wrapper missing signal: $currentPathAnswererSignal"
+}
+foreach ($currentPathAnswererAppControlSignal in @(
+    "verify-windows-current-path-product-control-answerer-appcontrol-live.ps1",
+    "RequireCurrentPathProductControlAnswererAppControl",
+    "CurrentPathProductControlAnswererAppControlEvidencePath",
+    "CurrentPathProductControlAnswererAppControlConnectionCodePath",
+    "LocalMlKem768DecapsulationKeyBase64EnvVar",
+    "LocalMlKem768EncapsulationKeyBase64EnvVar",
+    "SkybridgeSecureEnvelopeV1",
+    "AppControlCryptoFormat",
+    "AppControlSbwcEnvelope",
+    "AppControlSbwcCounterPresent",
+    "AppControlReplayProtection",
+    "sbwc-replay-window",
+    "AppControlLegacyAadLength",
+    "AppControlOutboundCounter",
+    "AppControlInboundCounter",
+    "AppControlSessionHash",
+    "AppControlTranscriptPrefix",
+    "AuthenticatedAppControlPingPongProof",
+    "LateRemoteIceCandidateRelayCount",
+    "RemoteProductAppObserved",
+    "PeerTrustPersistenceProof",
+    "LocalMlKem768DecapsulationKeyInputPresent",
+    "LocalMlKem768EncapsulationKeySource",
+    "LocalMlKem768EncapsulationKeyServerPublished",
+    "LocalMlKem768KeyPairVerified",
+    "current-path-product-control-answerer-appcontrol",
+    "AdmissionRegisterBoundSdpIceProductControlAnswererHandshakeAppControlPong",
+    "HandshakeRole",
+    "responder",
+    "InitiatorIdentityFingerprintVerified",
+    "InitiatorSignatureVerified",
+    "ResponderFinishedSent",
+    "InitiatorFinishedVerified",
+    "AppControlReceivedMessageKind",
+    "ping",
+    "AppControlResponseMessageKind",
+    "pong",
+    "operatorExpectedPeerHandshakeVerifiedNotServerAttested"
+)) {
+    Assert-Contains -Text ($currentPathProductControlAnswererAppControlSmoke + $portabilitySmoke + $portabilityAcceptanceMap + $portabilityAcceptanceEvidenceSmoke + $portabilityCompletionAudit) -Needle $currentPathAnswererAppControlSignal -Message "Current-path answerer AppControl wrapper missing signal: $currentPathAnswererAppControlSignal"
+}
+foreach ($currentPathFileTransferSignal in @(
+    "verify-windows-current-path-product-control-file-transfer-live.ps1",
+    "RequireCurrentPathProductControlFileTransfer",
+    "CurrentPathProductControlFileTransferEvidencePath",
+    "current-path-product-control-file-transfer",
+    "AdmissionLookupBoundSdpIceProductControlHandshakeFileTransferReceipt",
+    "fileTransferReceipt",
+    "FileTransferPayloadBytes",
+    "PeerMlKem768PublicKeyBase64EnvVar",
+    "FileTransferPacketType",
+    "FileTransferSbwcEnvelope",
+    "FileTransferReplayProtection",
+    "AuthenticatedFileTransferReceiptProof",
+    "ManifestBytes",
+    "TransferredBytes",
+    "ChunkAckCount",
+    "CompleteAckReceived",
+    "SentFileSha256",
+    "FileSha256Receipt",
+    "ReceiptMatchesSentHash",
+    "runtime-smoke-filetransfer-exchange",
+    "RawPayloadCaptured"
+)) {
+    Assert-Contains -Text ($currentPathProductControlFileTransferSmoke + $runtimeSmokeSource + $portabilitySmoke + $portabilityAcceptanceMap + $portabilityAcceptanceEvidenceSmoke) -Needle $currentPathFileTransferSignal -Message "Current-path FileTransfer live gate missing signal: $currentPathFileTransferSignal"
+}
+foreach ($currentPathAnswererFileTransferSignal in @(
+    "verify-windows-current-path-product-control-answerer-file-transfer-live.ps1",
+    "RequireCurrentPathProductControlAnswererFileTransfer",
+    "CurrentPathProductControlAnswererFileTransferEvidencePath",
+    "CurrentPathProductControlAnswererFileTransferConnectionCodePath",
+    "current-path-product-control-answerer-file-transfer",
+    "AdmissionRegisterBoundSdpIceProductControlAnswererHandshakeFileTransferReceipt",
+    "LocalMlKem768DecapsulationKeyBase64EnvVar",
+    "LocalMlKem768EncapsulationKeyBase64EnvVar",
+    "CompleteAckSent",
+    "ReceivedBytes",
+    "ReceivedFileSha256",
+    "ReceiptMatchesReceivedHash",
+    "operatorExpectedPeerHandshakeVerifiedNotServerAttested"
+)) {
+    Assert-Contains -Text ($currentPathProductControlAnswererFileTransferSmoke + $currentPathProductControlFileTransferSmoke + $runtimeSmokeSource + $portabilitySmoke + $portabilityAcceptanceMap + $portabilityAcceptanceEvidenceSmoke + $portabilityCompletionAudit) -Needle $currentPathAnswererFileTransferSignal -Message "Current-path answerer FileTransfer live gate missing signal: $currentPathAnswererFileTransferSignal"
+}
+foreach ($currentPathSensitiveArtifactIgnorePattern in @(
+    "artifacts/**/skybridge-current-path-product-control-answerer-code-*/",
+    "artifacts/**/skybridge-current-path-product-control-signaling-*/",
+    "**/skybridge-current-path-product-control-signaling-*/",
+    "**/webrtc-signaling/"
+)) {
+    Assert-Contains -Text $gitIgnore -Needle $currentPathSensitiveArtifactIgnorePattern -Message "Current-path sensitive artifact ignore pattern missing: $currentPathSensitiveArtifactIgnorePattern"
 }
 foreach ($macSshProbeSignal in @(
     "RequireKnownHost",
@@ -658,18 +988,10 @@ foreach ($macSshProbeSignal in @(
 )) {
     Assert-Contains -Text $macSshProbe -Needle $macSshProbeSignal -Message "Mac SSH probe missing host-key pinning signal: $macSshProbeSignal"
 }
-foreach ($fileTransferQrSmokeSignal in @(
-    "windows-file-transfer-qr: ok",
-    "BuildShareQrActionAsync",
-    "skybridge://file-transfer?data=",
-    "ShareQrPayload",
-    "ShareQrPngBase64",
-    "manifestFileCount",
-    "no local files were read",
-    "no transport or signaling session was started"
-)) {
-    Assert-Contains -Text $fileTransferQrSmoke -Needle $fileTransferQrSmokeSignal -Message "File transfer QR smoke missing signal: $fileTransferQrSmokeSignal"
+foreach ($fileTransferQrSmokeSignal in @("verify-windows-native-runtime-profile.ps1", "-FileTransferOnly")) {
+    Assert-Contains -Text $fileTransferQrSmoke -Needle $fileTransferQrSmokeSignal -Message "File transfer QR capability gate is not wired: $fileTransferQrSmokeSignal"
 }
+
 foreach ($uiAutomationSmokeSignal in @(
     "windows-ui-automation-smoke: ok",
     "windows-ui-visual-evidence: ok",
@@ -714,7 +1036,8 @@ foreach ($uiAutomationSmokeSignal in @(
     "CrossNetworkQr",
     "WorkspaceAction.FileTransfer.GenerateQr",
     "FileTransferShareQrImage",
-    "no local files were read"
+    "LAN sessions must not advertise QR sharing without a real share manifest.",
+    "Unsupported QR sharing must never display an empty or unrelated identity."
 )) {
     Assert-Contains -Text $uiAutomationSmoke -Needle $uiAutomationSmokeSignal -Message "WinUI automation smoke missing signal: $uiAutomationSmokeSignal"
 }
@@ -747,19 +1070,18 @@ foreach ($uiVisualEvidenceSmokeSignal in @(
 foreach ($ciWorkflowSmokeSignal in @(
     "windows-ci-workflow: ok",
     ".github/workflows/windows-portability.yml",
-    "actions/checkout@v7.0.0",
-    "actions/setup-dotnet@v5.3.0",
-    "dotnet-version: '10.0.x'",
+    "actions/checkout@v7.0.1",
+    "actions/setup-dotnet@v6.0.0",
+    "global-json-file: global.json",
     "Fetch mac UI parity baseline",
     "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c",
     "Sources/SkyBridgeCompassApp/Dashboard/Navigation/NavigationItem.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
-    "rustup toolchain install stable --profile minimal",
-    "rustup component add clippy",
-    "rustup component add llvm-tools-preview",
-    "cargo install cargo-llvm-cov --locked",
+    "rustup toolchain install 1.98.1 --profile minimal --component clippy --component llvm-tools-preview --component rustfmt",
+    "rustup default 1.98.1",
+    "cargo install cargo-llvm-cov --version 0.9.1 --locked",
     "New-Item -ItemType Directory -Force -Path artifacts",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
     "-CiMode -CheckOnlineStackFreshness -IncludeRustCliCoverage",
@@ -779,9 +1101,9 @@ foreach ($ciWorkflowSmokeSignal in @(
 foreach ($githubWorkflowSignal in @(
     "name: Windows Portability",
     "windows-latest",
-    "actions/checkout@v7.0.0",
-    "actions/setup-dotnet@v5.3.0",
-    "dotnet-version: '10.0.x'",
+    "actions/checkout@v7.0.1",
+    "actions/setup-dotnet@v6.0.0",
+    "global-json-file: global.json",
     "Fetch mac UI parity baseline",
     "23ba06343bbaa58c30ef6b9bbddd09bb4e80241c",
     'git fetch --no-tags --depth=1 origin $baselineCommit',
@@ -789,10 +1111,9 @@ foreach ($githubWorkflowSignal in @(
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/DashboardContentView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/Sections/QuickActionsPanelView.swift",
     "Sources/SkyBridgeCompassApp/Dashboard/TopBar/TopNavigationBarView.swift",
-    "rustup toolchain install stable --profile minimal",
-    "rustup component add clippy",
-    "rustup component add llvm-tools-preview",
-    "cargo install cargo-llvm-cov --locked",
+    "rustup toolchain install 1.98.1 --profile minimal --component clippy --component llvm-tools-preview --component rustfmt",
+    "rustup default 1.98.1",
+    "cargo install cargo-llvm-cov --version 0.9.1 --locked",
     "New-Item -ItemType Directory -Force -Path artifacts",
     "git remote set-url origin git@github.com:billlza/Skybridge-Compass.git",
     "git remote set-url --push origin git@github.com:billlza/Skybridge-Compass.git",
@@ -940,14 +1261,15 @@ foreach ($stackFreshnessSignal in @(
     "TargetPlatformMinVersion",
     "10.0.19041.0",
     "Microsoft.WindowsAppSDK",
-    "2.2.0",
+    "2.4.0",
     "Microsoft.Windows.SDK.BuildTools",
-    "10.0.28000.2270",
+    "10.0.28000.2705",
     "edition = `"2021`"",
     "crate-type = [`"rlib`", `"cdylib`"]",
-    "10.0.9",
+    "10.0.12",
+    "10.0.401",
     "2028-11-14",
-    "v2.5.9",
+    "v2.6.1",
     "v0.24.5",
     "CheckOnline",
     "api.nuget.org",
@@ -966,6 +1288,10 @@ foreach ($startupStateSmokeSignal in @(
     "DeviceDiscoveryInputDefaultsClient",
     "_skybridge._udp",
     "_skybridge._tcp",
+    "_skybridge-xfer._tcp",
+    "_skybridge-rd._tcp",
+    "_skybridge-transfer._tcp",
+    "_skybridge-remote._tcp",
     "11550",
     "default discovery TXT input",
     "default pairing code input",
@@ -1052,7 +1378,7 @@ Assert-Contains -Text $nativeRuntimeFactory -Needle "new ConnectionPreflightClie
 Assert-Contains -Text $nativeRuntimeFactory -Needle "new ConnectionWorkspaceStateClient()" -Message "Runtime composition root should wire ConnectionWorkspaceStateClient for explicit connection state gates."
 Assert-Contains -Text $nativeRuntimeFactory -Needle "new WorkspaceErrorStatusClient()" -Message "Runtime composition root should wire WorkspaceErrorStatusClient for explicit workspace error routing."
 Assert-Contains -Text $nativeRuntimeFactory -Needle "new CoreDiagnosticsClient(coreBridge)" -Message "Runtime composition root should wire CoreDiagnosticsClient for explicit Quantum diagnostics."
-Assert-Contains -Text $nativeRuntimeFactory -Needle "new FileTransferWorkspaceClient(coreBridge)" -Message "Runtime composition root should wire FileTransferWorkspaceClient for explicit File Transfer diagnostics."
+Assert-Contains -Text $nativeRuntimeFactory -Needle "fileTransferClient ?? new UnavailableFileTransferWorkspaceClient()" -Message "Runtime composition must use the supplied window-owned file runtime and keep an absent picker unavailable."
 Assert-Contains -Text $nativeRuntimeFactory -Needle "new WorkspaceActionCatalogClient()" -Message "Runtime composition root should wire WorkspaceActionCatalogClient for explicit workspace action order."
 Assert-Contains -Text $nativeRuntimeFactory -Needle "new RemoteDesktopWorkspaceClient(coreBridge)" -Message "Runtime composition root should wire RemoteDesktopWorkspaceClient for explicit Remote Desktop diagnostics."
 Assert-Contains -Text $nativeRuntimeFactory -Needle "new RemoteDesktopProfileCatalogClient()" -Message "Runtime composition root should wire RemoteDesktopProfileCatalogClient for explicit Remote Desktop profile parity."
@@ -1126,6 +1452,31 @@ Assert-True -Condition (-not $discoveryClient.Contains("StaticPeerPublicKeyProvi
 Assert-Contains -Text $architecture -Needle "CoreDiscoveryClient" -Message "Architecture doc missing CoreDiscoveryClient status."
 
 foreach ($signal in @(
+    "internal static class SkyBridgeProtocolConstants",
+    'FileTransferDnsSdService = "_skybridge-xfer._tcp"',
+    'RemoteDesktopDnsSdService = "_skybridge-rd._tcp"',
+    'LegacyFileTransferDnsSdService = "_skybridge-transfer._tcp"',
+    'LegacyRemoteDesktopDnsSdService = "_skybridge-remote._tcp"',
+    'MsQuicAlpn = "skybridge-sbq/1"',
+    "WindowsDnsSdQueryOrder",
+    "TryCanonicalizeDnsSdServiceType",
+    "CanonicalizeDnsSdInstanceName"
+)) {
+    Assert-Contains -Text $protocolConstants -Needle $signal -Message "SkyBridge protocol constants missing canonical protocol signal: $signal"
+}
+Assert-Contains -Text $discoveryBrowser -Needle "SkyBridgeProtocolConstants.WindowsDnsSdQueryOrder" -Message "Discovery browser must consume the shared DNS-SD query order."
+Assert-Contains -Text $routeBindingPayload -Needle "TryCanonicalizeDnsSdServiceType" -Message "Authenticated route-binding decode must canonicalize input service aliases."
+Assert-Contains -Text $routeBindingStore -Needle "SkyBridgeProtocolConstants.FileTransferDnsSdService" -Message "Authenticated route-binding storage must require canonical service names."
+Assert-Contains -Text $msQuicDialer -Needle "SkyBridgeProtocolConstants.MsQuicAlpn" -Message "MsQuic dialer must consume the shared ALPN constant."
+Assert-Contains -Text $msQuicListener -Needle "SkyBridgeProtocolConstants.MsQuicAlpn" -Message "MsQuic listener must consume the shared ALPN constant."
+Assert-Contains -Text $msQuicSecret -Needle "SkyBridgeProtocolConstants.MsQuicAlpn" -Message "MsQuic transport-secret derivation must validate the shared ALPN constant."
+Assert-Contains -Text $msQuicSecret -Needle "StringComparison.Ordinal" -Message "MsQuic ALPN validation must be exact and case-sensitive."
+Assert-Contains -Text $msQuicSecret -Needle "ArgumentNullException.ThrowIfNull(certificate)" -Message "MsQuic transport-secret derivation must reject a missing leaf certificate."
+Assert-True -Condition (-not $msQuicSecret.Contains("no-leaf-cert")) -Message "MsQuic transport-secret derivation must not substitute a sentinel for a missing leaf certificate."
+Assert-True -Condition (-not $msQuicDialer.Contains('private const string SkyBridgeAlpn')) -Message "MsQuic dialer must not define a parallel ALPN constant."
+Assert-True -Condition (-not $msQuicListener.Contains('private const string SkyBridgeAlpn')) -Message "MsQuic listener must not define a parallel ALPN constant."
+
+foreach ($signal in @(
     "public interface IDiscoveryBrowserClient",
     "public interface IWindowsDnsSdBrowseClient",
     "public sealed class WindowsDiscoveryBrowserClient : IDiscoveryBrowserClient",
@@ -1148,8 +1499,6 @@ foreach ($signal in @(
     "Stop",
     "Refresh",
     "ExtendedSearch",
-    "_skybridge._udp",
-    "_skybridge._tcp",
     "DnsServiceBrowse",
     "DnsServiceResolve",
     "DnsServiceRegister",
@@ -1175,17 +1524,44 @@ foreach ($signal in @(
     "Marshal.StringToHGlobalUni",
     "Marshal.GetFunctionPointerForDelegate",
     "GCHandle.Alloc",
-    "CallbackDrainDelay",
+    "CancellationToken cancellationToken",
+    "CallbackCompleted",
+    "CompleteCallbackBarrier",
+    "status == ErrorCancelled",
     "WindowsDnsSdResolvedTxtRecord",
-    "DnsServiceBrowse callback returned a non-success status.",
+    "NativeWindowsDnsSdTxtRecordCodec.TrySerialize",
+    "DnsServiceBrowse callback failed",
     "TXT is still parsed by CoreDiscoveryClient."
 )) {
     Assert-Contains -Text $nativeDnsSdBrowse -Needle $signal -Message "NativeWindowsDnsSdBrowseClient missing Win32 DNS-SD signal: $signal"
 }
 Assert-True -Condition (-not $nativeDnsSdBrowse.Contains("DnssdServiceWatcher")) -Message "NativeWindowsDnsSdBrowseClient must not use unsupported WinRT DnssdServiceWatcher."
+Assert-True -Condition (-not $nativeDnsSdBrowse.Contains("Math.Min(native.PropertyCount")) -Message "NativeWindowsDnsSdBrowseClient must reject oversized native TXT property sets instead of truncating them."
+Assert-True -Condition (-not $nativeDnsSdBrowse.Contains("CallbackDrainDelay")) -Message "NativeWindowsDnsSdBrowseClient must await its native callback completion barrier instead of using a fixed drain delay."
+Assert-True -Condition (-not $nativeDnsSdBrowse.Contains("FromMilliseconds(250)")) -Message "NativeWindowsDnsSdBrowseClient must not use a fixed 250ms callback drain."
+foreach ($signal in @(
+    "internal static class NativeWindowsDnsSdTxtRecordCodec",
+    "TrySerialize",
+    "MaxTxtRecordBytes",
+    "MaxTxtKeyBytes",
+    "MaxTxtValueBytes",
+    "MaxTxtProperties",
+    "StringComparer.Ordinal",
+    "Encoding.UTF8.GetByteCount",
+    "ContainsTxtKeySeparatorOrControl",
+    "ContainsTxtValueSeparatorOrControl",
+    "DNS-SD TXT property count exceeds",
+    "DNS-SD TXT key is empty.",
+    "DNS-SD TXT key",
+    "DNS-SD TXT value for"
+)) {
+    Assert-Contains -Text $nativeDnsSdTxtCodec -Needle $signal -Message "NativeWindowsDnsSdTxtRecordCodec missing TXT validation signal: $signal"
+}
 foreach ($signal in @(
     "windows-native-dns-sd-acceptance: ok",
     "NativeWindowsDnsSdBrowseClient",
+    "NativeWindowsDnsSdTxtRecordCodec.cs",
+    "NativeWindowsDnsSdTxtRecordCodec.TrySerialize",
     "CoreDiscoveryClient(new CoreBridge())",
     "DnsServiceBrowse",
     "DnsServiceResolve",
@@ -1727,64 +2103,36 @@ foreach ($signal in @(
 Assert-Contains -Text $architecture -Needle "CoreDiagnosticsClient" -Message "Architecture doc missing CoreDiagnosticsClient status."
 
 foreach ($signal in @(
-    "origin/tdsc-2026-01-0318-ios-sim-fix",
-    "Docs/CoreLayering.md",
-    "SkyBridgeProtocolCore",
-    "SkyBridgeAppleTransport",
-    "Docs/ProtocolAlignmentPlan.md",
-    "binary handshake path is the only wire protocol",
-    "legacy JSON handshake is no longer present",
+    "Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md",
+    "version 1.1, reviewed 2026-09-08",
+    "Docs/ADR-0002-Remote-Control-Authority-and-Sessions.md",
+    '`SkyBridgeProtocolCore` owns shared contracts without platform UI or networking dependencies',
+    'Apple transport implementations remain in `SkyBridgeAppleTransport`',
+    "binary product handshake remains the only handshake wire",
+    "must not become a second JSON handshake or identity system",
+    "Shared protocol ownership and current implementation evidence take precedence over historical paper claims",
     "Docs/CrossPlatformDiscoveryDesign.md",
     "lower precedence than the ADR",
-    "MsQuic v2.5.9"
+    "MsQuic v2.6.1"
 )) {
-    Assert-Contains -Text $architecture -Needle $signal -Message "Architecture doc missing TDSC source-hierarchy signal: $signal"
+    Assert-Contains -Text $architecture -Needle $signal -Message "Architecture doc missing current ADR source-hierarchy signal: $signal"
 }
 
 foreach ($signal in @(
     "public interface IFileTransferWorkspaceClient",
-    "public interface IFileTransferSelectionIntentClient",
-    "public sealed class InMemoryFileTransferSelectionIntentClient : IFileTransferSelectionIntentClient",
-    "public interface IFileTransferShareIntentClient",
-    "public sealed class InMemoryFileTransferShareIntentClient : IFileTransferShareIntentClient",
-    "public sealed class FileTransferWorkspaceClient : IFileTransferWorkspaceClient",
-    "BuildSelectFilesIntent",
-    "BuildSelectFolderIntent",
-    "BuildShareQrIntent",
-    "BuildInitialStatus",
-    "DefaultInitialStatus",
-    "BuildPendingStatus",
-    "DefaultPendingStatus",
-    "BuildCompletedStatus",
-    "BuildCompletedStatusMessage",
-    "BuildDefaultCompletedStatus",
-    "DefaultCompletedStatusMessage",
+    "IFileTransferSelectionClient",
+    "WindowsDeviceWorkspace",
+    "ConnectControlAsync",
+    "AuthorizeFileTransfer",
+    "ClassicFileTransferSender.SendAsync",
+    "ClassicFileTransferListener",
     "BuildReadOnlySnapshotAsync",
-    "PlanConnectionAsync",
-    "ChannelMappings",
-    "CoreChannelMappingResolver",
-    "Transport plan",
-    "EncodeFrameAsync",
-    "DecodeFrameMetadataAsync",
-    "FileTransferSelectionIntentSnapshot",
-    "FileTransferSecurityFact",
-    "Selection intent",
-    "HMAC",
-    "Signature",
-    "CanSelectFiles() => _selectionIntentClient.CanSelectFiles()",
-    "CanSelectFolder() => _selectionIntentClient.CanSelectFolder()",
-    "CanGenerateShareQr() => _shareIntentClient.CanGenerateShareQr()",
-    "DefaultSelectFilesIntentReadyStatus",
-    "DefaultSelectFolderIntentReadyStatus",
-    "BuildSelectFilesIntentActionResult",
-    "BuildSelectFolderIntentActionResult",
-    "NormalizeSelectionIntentId",
-    "DefaultShareQrReadyStatus",
-    "DefaultShareQrReadyMessage",
-    "BuildShareQrIntentActionResult",
-    "NormalizeShareIntentId"
+    "FileTransferWorkspaceSnapshot",
+    "CanGenerateShareQr() => false",
+    "DisconnectControlSessionsAsync",
+    "CryptographicOperations.ZeroMemory"
 )) {
-    Assert-Contains -Text $fileTransfer -Needle $signal -Message "FileTransferWorkspaceClient missing Core file-transfer signal: $signal"
+    Assert-Contains -Text $fileTransfer -Needle $signal -Message "FileTransferWorkspaceClient missing live transfer integration: $signal"
 }
 
 Assert-Contains -Text $architecture -Needle "FileTransferWorkspaceClient" -Message "Architecture doc missing FileTransferWorkspaceClient status."
@@ -2159,7 +2507,6 @@ foreach ($signal in @(
     "FeatureEntryId.UsbManagement",
     "FeatureEntryId.FileTransfer",
     "FeatureEntryId.RemoteDesktop",
-    "FeatureEntryId.Quantum",
     "FeatureEntryId.SystemMonitor",
     "FeatureEntryId.Settings"
 )) {

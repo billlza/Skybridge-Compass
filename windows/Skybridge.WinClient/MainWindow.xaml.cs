@@ -1,10 +1,15 @@
 using System;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Skybridge.WinClient.ViewModels;
+using Skybridge.WinClient.Services;
+using Skybridge.WinClient.Services.RemoteControl;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using Windows.UI;
 
@@ -12,19 +17,66 @@ namespace Skybridge.WinClient;
 
 public sealed partial class MainWindow : Window
 {
-    // Match the macOS app's window proportions (VisualParity windowSize = 1200x800, 3:2),
-    // instead of the stretched WinUI default that read as "a long strip". The Mac is the
-    // parity target, so the Windows shell opens at the same aspect, centered.
+    // Match the macOS app's logical window proportions (VisualParity windowSize =
+    // 1200x800, 3:2), instead of treating those device-independent dimensions as raw
+    // Win32 screen pixels. AppWindow.Resize consumes screen coordinates, so the requested
+    // size must be scaled for the window's current monitor DPI first.
     private const int DefaultWidth = 1200;
     private const int DefaultHeight = 800;
+    private const uint DefaultDpi = 96;
 
     public SessionViewModel ViewModel { get; }
+    public RemoteControlHostViewModel RemoteControlHost { get; }
+    private readonly WindowsDeviceWorkspace _remoteControlWorkspace = new();
+    private readonly FileTransferWorkspaceClient _fileTransferWorkspace;
+    private RemoteControl.RemoteControlViewerWindow? _remoteControlViewer;
+    private Window? _remoteControlNotice;
+    private bool _closingRemoteControlNotice;
+    private bool _hostShutdownInProgress;
+    private bool _hostShutdownComplete;
+    private readonly Microsoft.Windows.ApplicationModel.Resources.ResourceLoader _remoteControlResources = new();
 
     public MainWindow()
     {
         InitializeComponent();
-        ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured());
+        WeatherGlassSurface.SetRenderer(RootShell, WeatherBackdrop);
+
+        // The taskbar button, Alt-Tab entry and window chrome all read Window.Title. WinUI
+        // leaves it at the project-template default ("WinUI Desktop") unless it is set, and
+        // that default was what shipped. The Mac creates its window as
+        // WindowGroup(localizedString("app.name")), so the same localized product name is
+        // used here — read from the PRI resources rather than hardcoded, so it follows the
+        // trilingual selection App.OnLaunched already applies.
+        Title = ResolveWindowTitle();
+        AppWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "SkyBridgeCompass.ico"));
+        ConfigureShellGlass();
+        ConfigureTitleBar();
+
+        _fileTransferWorkspace = new(_remoteControlWorkspace, new NativeFileTransferSelection(this),
+            ReadCurrentDeviceAccount, RemoteControlText);
+        var settings = new SettingsService();
+        _notifications = new WorkspaceNotificationCenter(ShowNotifications);
+        ViewModel = new SessionViewModel(SessionViewModelDependencyFactory.CreateConfigured(_fileTransferWorkspace, _notifications, settings, ShowAppearanceMenu));
+        _fileTransferWorkspace.Changed += OnFileTransferChanged;
+        ViewModel.PropertyChanged += OnFileTransferAccountChanged;
         RootShell.DataContext = ViewModel;
+        RemoteControlHost = new RemoteControlHostViewModel(
+            _remoteControlWorkspace,
+            RemoteControlText,
+            CopyRemoteControlPairingTextAsync,
+            ReadRemoteControlPairingTextAsync,
+            action =>
+            {
+                if (!DispatcherQueue.TryEnqueue(() => action()) && !_hostShutdownComplete)
+                {
+                    throw new InvalidOperationException("The remote-control status could not be presented in the application window.");
+                }
+            });
+        RemoteControlHostPanel.DataContext = RemoteControlHost;
+        RemoteControlHostBanner.DataContext = RemoteControlHost;
+        RemoteControlHost.ConnectedNoticeChanged += OnRemoteControlNoticeChanged;
+        ViewModel.NearFieldRemoteDesktopRequested += OnNearFieldRemoteDesktopRequested;
+        AppWindow.Closing += OnWindowClosing;
 
         // Subscribe to the two Settings theme effects the VM cannot host itself (it has no
         // FrameworkElement). The VM raises these from the SettingsCoordinator's live-effect hooks
@@ -47,12 +99,14 @@ public sealed partial class MainWindow : Window
         OnDarkModeEffectRequested(ViewModel.Settings.UseDarkMode);
         OnAccentColorEffectRequested(ViewModel.Settings.ThemeColorHex);
 
+        ConfigureShellActions();
+        ConfigureAccountDevices();
         SizeAndCenter();
 
         // Restore a remembered Supabase session (DPAPI) on launch so the account block shows
         // the real signed-in user without a tap. Queued on the UI dispatcher: HydrateFromStore
         // touches the network + the VM's UI-thread-affine SetField props, and it must run after
-        // the window is up. It never throws (the coordinator swallows all failures internally).
+        // the window is up. Expected auth/storage failures remain typed and visible.
         DispatcherQueue.TryEnqueue(async () =>
         {
             await ViewModel.HydrateFromStoreAsync();
@@ -65,20 +119,193 @@ public sealed partial class MainWindow : Window
 
     private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        AppWindow.Closing -= OnWindowClosing;
+        AppWindow.Changed -= OnAppWindowChangedForChrome;
+        if (_chromeScaleChanged is not null && RootShell.XamlRoot is not null)
+        {
+            RootShell.XamlRoot.Changed -= _chromeScaleChanged;
+        }
+
+        if (_chromeLayoutUpdated is not null)
+        {
+            RootShell.LayoutUpdated -= _chromeLayoutUpdated;
+        }
+
+        if (_glassLayoutUpdated is not null)
+        {
+            RootShell.LayoutUpdated -= _glassLayoutUpdated;
+        }
+
+        RemoteControlHost.ConnectedNoticeChanged -= OnRemoteControlNoticeChanged;
+        ViewModel.NearFieldRemoteDesktopRequested -= OnNearFieldRemoteDesktopRequested;
         ViewModel.DarkModeEffectRequested -= OnDarkModeEffectRequested;
         ViewModel.AccentColorEffectRequested -= OnAccentColorEffectRequested;
+        _fileTransferWorkspace.Changed -= OnFileTransferChanged;
+        ViewModel.PropertyChanged -= OnFileTransferAccountChanged;
+        DisposeShellActions();
         ViewModel.Dispose();
     }
 
-    // 启用深色模式 live effect: set the root FrameworkElement.RequestedTheme. The app ships
-    // dark-locked at App.xaml (RequestedTheme="Dark"); overriding it on the root content element
-    // re-themes the whole visual tree live. Non-throwing — a theme set never faults, but guard the
-    // root just in case it is not yet realized.
+    private async void OnWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_hostShutdownComplete) return;
+        args.Cancel = true;
+        if (_hostShutdownInProgress) return;
+        _hostShutdownInProgress = true;
+        try
+        {
+            if (_remoteControlViewer is { } viewer) await viewer.CloseForShutdownAsync();
+            await StopAccountDevicesAsync();
+            await _fileTransferWorkspace.DisposeAsync();
+            await RemoteControlHost.DisposeAsync();
+            await StopShellActionsAsync();
+            _hostShutdownComplete = true;
+            OnRemoteControlNoticeChanged(false);
+            Close();
+        }
+        catch (Exception error)
+        {
+            _hostShutdownInProgress = false;
+            RemoteControlHost.ReportError(error);
+        }
+    }
+
+    private void OnNearFieldRemoteDesktopRequested()
+    {
+        try
+        {
+            if (_remoteControlViewer is { } existing) { existing.Activate(); return; }
+            var position = AppWindow.Position;
+            var size = AppWindow.Size;
+            var viewer = new RemoteControl.RemoteControlViewerWindow(_remoteControlWorkspace, ViewModel.DiscoveredPeers,
+                ViewModel.RefreshRemoteDesktopPeersAsync, RemoteControlText,
+                ReadCurrentDeviceAccount,
+                new RectInt32(position.X, position.Y, size.Width, size.Height));
+            _remoteControlViewer = viewer;
+            viewer.Closed += (_, _) => { if (ReferenceEquals(_remoteControlViewer, viewer)) _remoteControlViewer = null; };
+            viewer.Activate();
+        }
+        catch (Exception failure) { ViewModel.ReportRemoteDesktopError(failure); }
+    }
+
+    private void OnRemoteControlNoticeChanged(bool connected)
+    {
+        if (_remoteNotificationConnected != connected)
+        {
+            _remoteNotificationConnected = connected;
+            _notifications.Add(RemoteControlText(connected ? "NotificationsRemoteConnected" : "NotificationsRemoteEnded"),
+                RemoteControlText(connected ? "NotificationsRemoteConnectedDetail" : "NotificationsRemoteEndedDetail"), "\uE7F4");
+        }
+        if (!connected)
+        {
+            if (!_hostShutdownComplete && RemoteControlHost.IsEnabled && RemoteControlHost.HasError) return;
+            if (_remoteControlNotice is not { } notice) return;
+            _closingRemoteControlNotice = true;
+            _remoteControlNotice = null;
+            notice.Close();
+            _closingRemoteControlNotice = false;
+            return;
+        }
+
+        if (_remoteControlNotice is not null) return;
+        var window = new Window
+        {
+            Title = RemoteControlText("RemoteControlHostNoticeWindowTitle"),
+            Content = new RemoteControl.RemoteControlHostBanner { DataContext = RemoteControlHost }
+        };
+        _remoteControlNotice = window;
+        var presenter = OverlappedPresenter.Create();
+        presenter.IsAlwaysOnTop = true;
+        presenter.IsResizable = true;
+        presenter.IsMaximizable = false;
+        presenter.IsMinimizable = false;
+        window.AppWindow.SetPresenter(presenter);
+        window.AppWindow.Closing += async (_, args) =>
+        {
+            if (_closingRemoteControlNotice || _hostShutdownComplete) return;
+            args.Cancel = true;
+            await RemoteControlHost.SetEnabledAsync(false);
+        };
+        window.Activate();
+        var handle = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        var scale = GetDpiForWindow(handle) / (double)DefaultDpi;
+        var display = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest);
+        var width = (int)Math.Round(540 * scale);
+        var height = (int)Math.Round(440 * scale);
+        if (display is not null)
+        {
+            width = Math.Min(width, Math.Max(1, display.WorkArea.Width - 32));
+            height = Math.Min(height, Math.Max(1, display.WorkArea.Height - 32));
+        }
+        window.AppWindow.Resize(new SizeInt32(width, height));
+        if (display is not null)
+        {
+            var bounds = window.AppWindow.Size;
+            window.AppWindow.Move(new PointInt32(
+                display.WorkArea.X + Math.Max(0, display.WorkArea.Width - bounds.Width - 16),
+                display.WorkArea.Y + 16));
+        }
+    }
+
+    private string RemoteControlText(string key)
+    {
+        var value = _remoteControlResources.GetString(key);
+        return string.IsNullOrWhiteSpace(value)
+            ? throw new InvalidOperationException($"The remote-control text resource '{key}' is missing.")
+            : value;
+    }
+
+    // Feature operations invoke this after startup, so both features read the same
+    // current account without publishing a second cached account identity.
+    private RemoteControlViewerAccount? ReadCurrentDeviceAccount() => ViewModel.IsSignedIn
+        ? new RemoteControlViewerAccount(ViewModel.DisplayName, ViewModel.NebulaId) : null;
+
+    private static Task CopyRemoteControlPairingTextAsync(string value)
+    {
+        var package = new DataPackage();
+        package.SetText(value);
+        Clipboard.SetContent(package);
+        Clipboard.Flush();
+        return Task.CompletedTask;
+    }
+
+    private static async Task<string> ReadRemoteControlPairingTextAsync()
+    {
+        var content = Clipboard.GetContent();
+        return content.Contains(StandardDataFormats.Text) ? await content.GetTextAsync() : string.Empty;
+    }
+
+    // Resolve the localized product name for Window.Title from the app PRI. The literal
+    // fallback is the en-US value of the same resource, so a resource-loader failure still
+    // shows the product name rather than reintroducing "WinUI Desktop".
+    private static string ResolveWindowTitle()
+    {
+        const string Fallback = "SkyBridge Compass";
+
+        try
+        {
+            var value = new Microsoft.Windows.ApplicationModel.Resources.ResourceLoader()
+                .GetString("AppWindowTitle");
+            return string.IsNullOrWhiteSpace(value) ? Fallback : value;
+        }
+        catch (Exception)
+        {
+            return Fallback;
+        }
+    }
+
+    // The settings page and top-bar menu share one persisted appearance preference.
+    // Default keeps native controls subscribed to Windows appearance changes.
     private void OnDarkModeEffectRequested(bool useDark)
     {
         if (RootShell is { } root)
         {
-            root.RequestedTheme = useDark ? ElementTheme.Dark : ElementTheme.Light;
+            root.RequestedTheme = ViewModel.Settings.AppearanceMode switch
+            {
+                "system" => ElementTheme.Default,
+                "light" => ElementTheme.Light,
+                _ => ElementTheme.Dark
+            };
         }
     }
 
@@ -157,8 +384,8 @@ public sealed partial class MainWindow : Window
     // FrameworkElement.Tag; the handler parses it and routes to the VM's pure view-state
     // setter. Mirrors the Mac segmented controls / modernTabBar selection.
 
-    // Device Discovery connection-mode tab tapped (Tag = LocalScan / Qr / Cloud / Code).
-    private void OnDiscoveryModeTabTapped(object sender, TappedRoutedEventArgs e)
+    // Native buttons support both pointer and keyboard selection for all five modes.
+    private void OnDiscoveryModeTabClicked(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement element &&
             element.Tag is string tag &&
@@ -266,10 +493,26 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var windowHandle = Microsoft.UI.Win32Interop.GetWindowFromWindowId(appWindow.Id);
+        var dpi = GetDpiForWindow(windowHandle);
+        if (dpi == 0)
+        {
+            throw new InvalidOperationException("Unable to resolve the WinUI window DPI before sizing.");
+        }
+
+        var desiredWidth = ScaleLogicalPixels(DefaultWidth, dpi);
+        var desiredHeight = ScaleLogicalPixels(DefaultHeight, dpi);
         var work = DisplayArea.GetFromWindowId(appWindow.Id, DisplayAreaFallback.Primary)?.WorkArea;
-        // Clamp to the work area so the 3:2 window still fits smaller displays without clipping.
-        var width = work is { } w ? System.Math.Min(DefaultWidth, w.Width) : DefaultWidth;
-        var height = work is { } h ? System.Math.Min(DefaultHeight, h.Height) : DefaultHeight;
+
+        // AppWindow and DisplayArea both use screen coordinates. Fit the DPI-scaled 3:2
+        // rectangle inside a smaller work area as one unit so clamping cannot distort it.
+        var fitScale = work is { } available
+            ? System.Math.Min(1d, System.Math.Min(
+                available.Width / (double)desiredWidth,
+                available.Height / (double)desiredHeight))
+            : 1d;
+        var width = System.Math.Max(1, (int)System.Math.Round(desiredWidth * fitScale));
+        var height = System.Math.Max(1, (int)System.Math.Round(desiredHeight * fitScale));
         appWindow.Resize(new SizeInt32(width, height));
 
         if (work is { } area)
@@ -279,6 +522,240 @@ public sealed partial class MainWindow : Window
                 area.Y + System.Math.Max(0, (area.Height - height) / 2)));
         }
     }
+
+    private static int ScaleLogicalPixels(int logicalPixels, uint dpi) =>
+        checked((int)System.Math.Round(
+            logicalPixels * (dpi / (double)DefaultDpi),
+            MidpointRounding.AwayFromZero));
+
+    // Window chrome, Mac parity: the macOS window is `.windowStyle(.hiddenTitleBar)`, so the app's
+    // own top strip is the title bar. The AppWindow title bar API is used rather than
+    // Window.SetTitleBar because only it lets the caption (drag) area and the interactive
+    // pass-through areas be stated as explicit rectangles: the top bar and the sidebar header drag
+    // the window, while the telemetry strip and the action buttons inside the top bar keep their
+    // tooltips, scrolling and clicks (under Window.SetTitleBar the whole element is caption,
+    // whatever sits above it in z-order). The system caption buttons draw transparent over the
+    // glass, and the top bar reserves their width on its right so the actions never sit under them.
+    private void ConfigureTitleBar()
+    {
+        if (!AppWindowTitleBar.IsCustomizationSupported())
+        {
+            WindowsRuntimeLog.Write(
+                WindowsLogLevel.Warning,
+                "window",
+                "AppWindow title bar customization is not supported here; the system title bar stays visible.");
+            return;
+        }
+
+        AppWindowTitleBar titleBar = AppWindow.TitleBar;
+        titleBar.ExtendsContentIntoTitleBar = true;
+        // 48px caption buttons sit inside the 56px top bar instead of the 32px default strip.
+        titleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        ApplyCaptionButtonColors();
+
+        RootShell.Loaded += OnRootShellLoadedForChrome;
+        // The caption buttons, and with them RightInset, exist once the window is shown; the window
+        // reports that through AppWindow.Changed before any XAML layout that follows it.
+        AppWindow.Changed += OnAppWindowChangedForChrome;
+    }
+
+    // Handlers kept so OnWindowClosed can detach them like the other window subscriptions.
+    private Windows.Foundation.TypedEventHandler<XamlRoot, XamlRootChangedEventArgs>? _chromeScaleChanged;
+    private EventHandler<object>? _chromeLayoutUpdated;
+    private EventHandler<object>? _glassLayoutUpdated;
+
+    private void OnRootShellLoadedForChrome(object sender, RoutedEventArgs e)
+    {
+        RootShell.Loaded -= OnRootShellLoadedForChrome;
+        if (RootShell.XamlRoot is null)
+        {
+            throw new InvalidOperationException("The shell content has no XamlRoot at Loaded; the window chrome cannot be laid out.");
+        }
+
+        LayOutWindowChrome();
+        _chromeScaleChanged = (_, _) => LayOutWindowChrome();      // scale changes
+        RootShell.XamlRoot.Changed += _chromeScaleChanged;
+        // Elements inside the top bar move when the caption-button column is reserved or the
+        // window resizes; a move without a size change only shows up as a layout pass, so the
+        // regions are re-derived after every pass and re-applied only when they differ.
+        _chromeLayoutUpdated = (_, _) => ApplyNonClientRegions();
+        RootShell.LayoutUpdated += _chromeLayoutUpdated;
+    }
+
+    private void OnAppWindowChangedForChrome(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (args.DidVisibilityChange || args.DidSizeChange || args.DidPresenterChange)
+        {
+            LayOutWindowChrome();
+        }
+    }
+
+    private void LayOutWindowChrome()
+    {
+        // Before the content has a XamlRoot there is nothing to measure; the Loaded pass follows.
+        if (RootShell.XamlRoot is null || TopBarChrome.ActualWidth <= 0)
+        {
+            return;
+        }
+
+        ReserveCaptionButtonsWidth(RootShell.XamlRoot.RasterizationScale);
+        ApplyNonClientRegions();
+    }
+
+    // Shell glass: the weather renderer frosts the sidebar and the top bar itself (with its swap
+    // chain attached, XAML acrylic is not available; see WeatherBackdropDX). It needs the two
+    // rects in its own dip space after every layout pass, whether or not the title bar could be
+    // customized, so this subscription is independent of ConfigureTitleBar.
+    private void ConfigureShellGlass()
+    {
+        RootShell.Loaded += OnRootShellLoadedForGlass;
+    }
+
+    private void OnRootShellLoadedForGlass(object sender, RoutedEventArgs e)
+    {
+        RootShell.Loaded -= OnRootShellLoadedForGlass;
+        ApplyGlassRegions();
+        _glassLayoutUpdated = (_, _) => ApplyGlassRegions();
+        RootShell.LayoutUpdated += _glassLayoutUpdated;
+    }
+
+    private (double, double, double, double, double) _glassSignature;
+
+    // The sidebar is the NavigationView pane: RootShell has no rows, so the pane spans the whole
+    // shell height at the open (or compact) pane width. The top bar is its own element.
+    private void ApplyGlassRegions()
+    {
+        WeatherBackdrop.RefreshGlassSurfaces();
+        if (WeatherBackdrop.ActualWidth <= 0 || RootShell.ActualHeight <= 0 || TopBarChrome.ActualWidth <= 0)
+        {
+            return;
+        }
+
+        double paneWidth = SidebarNavigation.IsPaneOpen ? SidebarNavigation.OpenPaneLength : SidebarNavigation.CompactPaneLength;
+        var signature = (WeatherBackdrop.ActualWidth, WeatherBackdrop.ActualHeight, RootShell.ActualHeight, TopBarChrome.ActualHeight, paneWidth);
+        if (signature == _glassSignature)
+        {
+            return;
+        }
+
+        _glassSignature = signature;
+        Windows.Foundation.Rect sidebar = RootShell.TransformToVisual(WeatherBackdrop)
+            .TransformBounds(new Windows.Foundation.Rect(0, 0, paneWidth, RootShell.ActualHeight));
+        // The top-bar band spans the full width so the 1 dip content-grid rule between the pane
+        // and the bar is frosted too (the two rects may overlap; the shader unions them).
+        Windows.Foundation.Rect topBarBounds = TopBarChrome.TransformToVisual(WeatherBackdrop)
+            .TransformBounds(new Windows.Foundation.Rect(0, 0, TopBarChrome.ActualWidth, TopBarChrome.ActualHeight));
+        var topBar = new Windows.Foundation.Rect(0, topBarBounds.Y, WeatherBackdrop.ActualWidth, topBarBounds.Height);
+        WeatherBackdrop.SetGlassRegions(sidebar, topBar);
+    }
+
+    private RectInt32[] _appliedCaptionRegions = Array.Empty<RectInt32>();
+    private RectInt32[] _appliedPassthroughRegions = Array.Empty<RectInt32>();
+    // The sizes that determine every region rect; unchanged sizes mean unchanged rects, so a
+    // layout pass that moved nothing costs a tuple comparison and no transforms.
+    private (double, double, double, double, double, double, double, double, double, double) _chromeSignature;
+
+    private void ApplyNonClientRegions()
+    {
+        if (RootShell.XamlRoot is null || TopBarChrome.ActualWidth <= 0)
+        {
+            return;
+        }
+
+        double scale = RootShell.XamlRoot.RasterizationScale;
+        var signature = (RootShell.ActualWidth, RootShell.ActualHeight, TopBarChrome.ActualWidth, TopBarChrome.ActualHeight,
+            TelemetryStrip.ActualWidth, TopBarActionsHost.ActualWidth, SidebarHeader.ActualWidth, SidebarHeader.ActualHeight,
+            CaptionButtonsColumn.Width.Value, scale);
+        if (signature == _chromeSignature)
+        {
+            return;
+        }
+
+        _chromeSignature = signature;
+        RectInt32[] caption = { PhysicalRect(TopBarChrome, scale), PhysicalRect(SidebarHeader, scale) };
+        RectInt32[] passthrough = { PhysicalRect(TelemetryStrip, scale), PhysicalRect(TopBarActionsHost, scale) };
+        if (SameRects(caption, _appliedCaptionRegions) && SameRects(passthrough, _appliedPassthroughRegions))
+        {
+            return;
+        }
+
+        var source = Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(AppWindow.Id);
+        source.SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Caption, caption);
+        source.SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough, passthrough);
+        _appliedCaptionRegions = caption;
+        _appliedPassthroughRegions = passthrough;
+        string Fmt(RectInt32[] rects) => string.Join(" | ", System.Linq.Enumerable.Select(rects, r => $"{r.X},{r.Y},{r.Width},{r.Height}"));
+        WindowsRuntimeLog.Write(WindowsLogLevel.Debug, "window",
+            $"Non-client regions at scale {scale:0.##}: caption=[{Fmt(caption)}] passthrough=[{Fmt(passthrough)}].");
+    }
+
+    private static bool SameRects(RectInt32[] a, RectInt32[] b)
+    {
+        if (a.Length != b.Length)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < a.Length; i++)
+        {
+            if (a[i].X != b[i].X || a[i].Y != b[i].Y || a[i].Width != b[i].Width || a[i].Height != b[i].Height)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Window-relative physical pixels, which is what the non-client region API expects.
+    private RectInt32 PhysicalRect(FrameworkElement element, double scale)
+    {
+        Windows.Foundation.Point origin = element.TransformToVisual(RootShell).TransformPoint(new Windows.Foundation.Point(0, 0));
+        return checked(new RectInt32(
+            (int)System.Math.Round(origin.X * scale),
+            (int)System.Math.Round(origin.Y * scale),
+            (int)System.Math.Round(element.ActualWidth * scale),
+            (int)System.Math.Round(element.ActualHeight * scale)));
+    }
+
+    private void ReserveCaptionButtonsWidth(double scale)
+    {
+        int inset = AppWindow.TitleBar.RightInset;
+        double logical = inset / scale;
+        if (CaptionButtonsColumn.Width.Value != logical)
+        {
+            CaptionButtonsColumn.Width = new GridLength(logical);
+            // A zero inset once the window is up means the caption buttons would overlay the
+            // top-bar actions; it is reported rather than left to be discovered on screen.
+            WindowsRuntimeLog.Write(
+                inset > 0 ? WindowsLogLevel.Info : WindowsLogLevel.Warning,
+                "window",
+                $"Caption buttons reserve {logical:0.#} logical px on the top bar (inset {inset} px at scale {scale:0.##}).");
+        }
+    }
+
+    // Caption buttons follow the shell surface, which is dark glass regardless of the Fluent
+    // theme toggle (the shell has no light variant): white glyphs, a faint white wash on
+    // hover/press (the same washes the sidebar rows use), inactive at half strength.
+    private void ApplyCaptionButtonColors()
+    {
+        AppWindowTitleBar titleBar = AppWindow.TitleBar;
+        Color foreground = Microsoft.UI.ColorHelper.FromArgb(0xFF, 0xF7, 0xFA, 0xFF);
+        Color hover = Microsoft.UI.ColorHelper.FromArgb(0x1A, 0xFF, 0xFF, 0xFF);
+        Color pressed = Microsoft.UI.ColorHelper.FromArgb(0x29, 0xFF, 0xFF, 0xFF);
+
+        titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+        titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+        titleBar.ButtonForegroundColor = foreground;
+        titleBar.ButtonInactiveForegroundColor = Microsoft.UI.ColorHelper.FromArgb(0x80, foreground.R, foreground.G, foreground.B);
+        titleBar.ButtonHoverBackgroundColor = hover;
+        titleBar.ButtonHoverForegroundColor = foreground;
+        titleBar.ButtonPressedBackgroundColor = pressed;
+        titleBar.ButtonPressedForegroundColor = foreground;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr windowHandle);
 
     // Ctrl+Shift+Down / Ctrl+Shift+Up — move the selected sidebar feature, matching the
     // macOS app's Cmd+Shift+Up/Down sidebar navigation. The NavigationView's SelectedItem is
