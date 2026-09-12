@@ -6,6 +6,51 @@ import XCTest
 @available(macOS 14.0, *)
 @MainActor
 final class InboundFileTransferApprovalWindowControllerTests: XCTestCase {
+    func testFileApprovalRemainsUsableWhileAnotherWindowHasASheet() async throws {
+        _ = NSApplication.shared
+        let service = InboundFileTransferApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        let controller = InboundFileTransferApprovalWindowController(
+            approvalService: service,
+            applicationActivator: {}
+        )
+        let host = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        let existingSheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 150),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        host.isReleasedWhenClosed = false
+        existingSheet.isReleasedWhenClosed = false
+        host.orderFront(nil)
+        host.beginSheet(existingSheet, completionHandler: nil)
+        controller.start()
+        defer {
+            controller.stop()
+            service.userDismissedCurrentPrompt()
+            host.endSheet(existingSheet)
+            existingSheet.close()
+            host.close()
+        }
+
+        let request = Self.request(name: "while-pairing-result-is-open.bin", bytes: 1)
+        let decisionTask = Task { @MainActor in await service.decide(for: request) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(controller.presentedRequestIDForTesting, request.id)
+        let approvalWindow = try XCTUnwrap(NSApplication.shared.windows.first {
+            $0.title == "SkyBridge File Transfer Approval" && $0.isVisible
+        })
+        XCTAssertNil(approvalWindow.sheetParent)
+        XCTAssertTrue(host.attachedSheet === existingSheet)
+        service.resolve(request, decision: .allowOnce)
+        let decision = await decisionTask.value
+        XCTAssertEqual(decision, .allowOnce)
+        XCTAssertTrue(host.attachedSheet === existingSheet)
+        XCTAssertNil(service.pendingRequest)
+    }
+
     func testConsecutiveFilesReplaceResolvedWindowAndClosingRejectsOnlyCurrentFile() async throws {
         _ = NSApplication.shared
         let service = InboundFileTransferApprovalService.shared

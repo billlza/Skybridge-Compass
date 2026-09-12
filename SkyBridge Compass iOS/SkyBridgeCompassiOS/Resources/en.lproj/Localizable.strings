@@ -317,7 +317,7 @@
 "取消连接" = "Cancel Connection";
 "连接摄像头" = "Connect";
 "摄像头连接失败" = "Camera Connection Failed";
-"fileTransfer.receiptDeliveryUnknown" = "File saved or sent, but delivery confirmation is unknown. Do not retransmit automatically.";
+"fileTransfer.receiptDeliveryUnknown" = "Delivery confirmation is unknown. Check the file on the receiving device before retransmitting.";
 "fileTransfer.committedFileReleaseFailed" = "File was saved, but internal transfer cleanup failed. Restart the app before receiving more files.";
 
 /* Account Devices (账号设备) */
@@ -375,3 +375,7 @@
 "settings.background_style.classic" = "Classic Starfield";
 "settings.background_style.light" = "Luminous Sky";
 "settings.background_style.description" = "Switch the background, glass and text colors together. Weather effects stay enabled as configured.";
+"选择接收设备" = "Choose recipient";
+"文件操作失败" = "File operation failed";
+"请先选择接收设备，再选择文件。" = "Choose a recipient before selecting files.";
+"等待中" = "Pending";

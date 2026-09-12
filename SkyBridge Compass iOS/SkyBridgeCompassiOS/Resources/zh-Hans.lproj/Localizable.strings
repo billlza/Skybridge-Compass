@@ -317,7 +317,7 @@
 "取消连接" = "取消连接";
 "连接摄像头" = "连接";
 "摄像头连接失败" = "摄像头连接失败";
-"fileTransfer.receiptDeliveryUnknown" = "文件已保存或发送，但投递确认状态未知；请勿自动重传。";
+"fileTransfer.receiptDeliveryUnknown" = "投递确认状态未知。请核对接收设备上的文件，确认前请勿重传。";
 "fileTransfer.committedFileReleaseFailed" = "文件已保存，但内部传输资源清理失败。再次接收文件前请重启应用。";
 
 /* Account Devices (账号设备) */
@@ -375,3 +375,7 @@
 "settings.background_style.classic" = "经典星空";
 "settings.background_style.light" = "清透天光";
 "settings.background_style.description" = "背景、玻璃与文字配色一同切换，天气效果保持不变。";
+"选择接收设备" = "选择接收设备";
+"文件操作失败" = "文件操作失败";
+"请先选择接收设备，再选择文件。" = "请先选择接收设备，再选择文件。";
+"等待中" = "等待中";

@@ -317,7 +317,7 @@
 "取消连接" = "接続をキャンセル";
 "连接摄像头" = "接続";
 "摄像头连接失败" = "カメラへの接続に失敗しました";
-"fileTransfer.receiptDeliveryUnknown" = "ファイルは保存または送信されましたが、配信確認は不明です。自動再送しないでください。";
+"fileTransfer.receiptDeliveryUnknown" = "配信確認の状態が不明です。再送する前に受信デバイスのファイルを確認してください。";
 "fileTransfer.committedFileReleaseFailed" = "ファイルは保存されましたが、内部転送リソースの解放に失敗しました。次の受信前にアプリを再起動してください。";
 
 /* Account Devices (账号设备) */
@@ -375,3 +375,7 @@
 "settings.background_style.classic" = "クラシック星空";
 "settings.background_style.light" = "明るい空";
 "settings.background_style.description" = "背景・ガラス・文字の配色をまとめて切り替えます。天気エフェクトの設定は変わりません。";
+"选择接收设备" = "受信デバイスを選択";
+"文件操作失败" = "ファイル操作に失敗しました";
+"请先选择接收设备，再选择文件。" = "ファイルを選ぶ前に受信デバイスを選択してください。";
+"等待中" = "待機中";

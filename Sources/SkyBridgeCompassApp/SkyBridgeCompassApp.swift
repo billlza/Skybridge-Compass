@@ -199,7 +199,7 @@ struct SkyBridgeCompassApp: App {
  /// 本地化管理器
     @StateObject private var localizationManager = LocalizationManager.shared
     @StateObject private var pairingTrustApproval = PairingTrustApprovalService.shared
-    @StateObject private var inboundFileTransferApproval = InboundFileTransferApprovalService.shared
+    private let inboundFileTransferApprovalWindowController = InboundFileTransferApprovalWindowController()
 
     private let renderConfig: DMGBackgroundRenderConfig?
     private let iconApplied: Bool
@@ -261,22 +261,14 @@ struct SkyBridgeCompassApp: App {
                     }
                 )
             }
-            .sheet(item: Binding(get: { inboundFileTransferApproval.pendingRequest }, set: { newValue in
-                if newValue == nil {
-                    inboundFileTransferApproval.userDismissedCurrentPrompt()
-                }
-            })) { req in
-                InboundFileTransferApprovalSheet(
-                    request: req,
-                    onDecision: { decision in
-                        inboundFileTransferApproval.resolve(req, decision: decision)
-                    }
-                )
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                inboundFileTransferApprovalWindowController.stop()
             }
             .task {
                 if renderConfig == nil {
                     await MainActor.run {
                         RemoteControlSecurityNoticePanelController.shared.start()
+                        inboundFileTransferApprovalWindowController.start()
                     }
 #if DEBUG || SKYBRIDGE_TESTING
                     macOnlineIPadSmokeHarness.appendAppBootIfNeeded()
