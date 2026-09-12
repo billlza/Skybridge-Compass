@@ -715,7 +715,7 @@ private extension AppleCompatibilityVectorCaptureTests {
         fileTransferShippingCallerPath:
             "9e8a2dbfc0e22eced3b6cd0ddd2e135104318643e3d9dca2d4dc25df87d21c5f",
         fileTransferMacResponseCallerPath:
-            "ca8a8dec38859792769a8cf10d13dcdbba27aebf1eaf6ffd01a9b0f6a385ecd9",
+            "13a064ea0dfd97a52ee5fce9765fab016862a4a9c32ccbe412d9b927cec9a653",
         fileTransferIOSCallerPath:
             "0e8abdbce52fda3c6904c8eedc7d0ae1fbbf00a0aa0e35757e941439384232f7",
         cryptoCapabilitiesPath:
@@ -727,7 +727,7 @@ private extension AppleCompatibilityVectorCaptureTests {
         hpkeSealedBoxPath:
             "e2943f721252d7751fded95ab3e47b0ecfb6d250aaf325c278244fdcc7fb094b",
         bonjourAdapterPath:
-            "a12564720db40d83561357c1d6608db471495e6772a04edc4f37f7006175da98",
+            "ce974c296a91621c95c067d7255aab63acbc8f5e91a0e68c31b56961ff17dfcf",
         bonjourContractPath:
             "4d8bbf100a52d92e14a2b38cd2c1738aac4a6970212330b93f15118b36d9cc87",
         iosBonjourDiscoveryCallerPath:

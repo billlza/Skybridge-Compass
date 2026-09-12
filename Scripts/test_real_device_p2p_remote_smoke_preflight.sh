@@ -449,14 +449,12 @@ for provenance_key in \
 done
 script_has_literal '"OTHER_SWIFT_FLAGS=\$(inherited) -D SKYBRIDGE_TESTING"' \
   || fail "the P2P harness test surface must remain an explicit compile-time diagnostic condition"
-grep -Fq 'REQUIRED_IDENTITY_ALGORITHM = "mldsa87"' "$RELEASE_ACCEPTANCE_VALIDATOR" \
-  || fail "release acceptance must require the production ML-DSA-87 identity algorithm"
-grep -Fq 'REQUIRED_IDENTITY_PROTECTION = "secureEnclaveRequired"' "$RELEASE_ACCEPTANCE_VALIDATOR" \
-  || fail "release acceptance must require the Secure Enclave identity policy"
-grep -Fq '"handshakePersistenceVerified"' "$RELEASE_ACCEPTANCE_VALIDATOR" \
-  || fail "release acceptance must prove the production identity survives into handshake use"
-grep -Fq '"currentPathAuthorityVerified"' "$RELEASE_ACCEPTANCE_VALIDATOR" \
-  || fail "release acceptance must prove current-path authority on the production identity"
+grep -Fq 'validate_manifest_identity_policy(payload)' "$RELEASE_ACCEPTANCE_VALIDATOR" \
+  || fail "release acceptance must validate the explicitly selected identity policy"
+grep -Fq 'validate_public_proof(' "$RELEASE_ACCEPTANCE_VALIDATOR" \
+  || fail "release acceptance must validate identity lifecycle and session binding"
+python3 -W error "$SCRIPT_DIR/test_extract_ios_production_identity_evidence.py" >/dev/null \
+  || fail "shared production identity policy and lifecycle regressions failed"
 
 [[ -n "$verify_call_line" && -n "$performance_line" && -n "$mac_online_line" && -n "$host_final_line" && -n "$ios_final_line" ]] \
   || fail "smoke script should contain capture verification, performance validation, Mac online button smoke, and final sentinels"
@@ -1344,8 +1342,8 @@ contains_literal "$host_bundle_prepare_body" 'runtimeFrameworks=WebRTC,BoundSess
   || fail "product-identity helper status must record the closed signed runtime framework set"
 script_has_literal '--env "SKYBRIDGE_SMOKE_REQUIRE_EMBEDDED_CORE_RESOURCES=1"' \
   || fail "packaged-product helper launch must require the embedded signed localization bundle"
-script_has_literal 'remote-control-localization requiredKeys=24 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
-  || fail "packaged-product acceptance must wait for the runtime 20-key embedded localization probe"
+script_has_literal 'remote-control-localization requiredKeys=25 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
+  || fail "packaged-product acceptance must wait for the runtime 25-key embedded localization probe"
 ! contains_literal "$host_bundle_prepare_body" 'debug/*.bundle' \
   || fail "product-identity helper must never copy an open-ended set of SwiftPM resource bundles"
 contains_literal "$host_bundle_prepare_body" '--sign "$MAC_HOST_PRODUCT_SIGN_IDENTITY_HASH"' \

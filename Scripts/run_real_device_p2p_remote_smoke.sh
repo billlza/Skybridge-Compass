@@ -695,6 +695,7 @@ REMOTE_CONTROL_SECURITY_NOTICE_LOCALIZATION_KEYS=(
   "remoteControl.securityNotice.approve"
   "remoteControl.securityNotice.approveView"
   "remoteControl.securityNotice.inputController"
+  "remoteControl.securityNotice.localInputController"
   "remoteControl.securityNotice.observer"
   "remoteControl.securityNotice.transferInput"
   "remoteControl.securityNotice.close"
@@ -7559,7 +7560,7 @@ MAC_HOST_STARTED=1
 if mac_host_uses_signed_app_bundle; then
   wait_for_file_pattern \
     "$HOST_STATUS" \
-    'remote-control-localization requiredKeys=24 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
+    'remote-control-localization requiredKeys=25 embeddedRawKeys=0 managerRawKeys=0 source=embedded-signed-core' \
     30 \
     "embedded signed SkyBridgeCore localization contract"
 fi

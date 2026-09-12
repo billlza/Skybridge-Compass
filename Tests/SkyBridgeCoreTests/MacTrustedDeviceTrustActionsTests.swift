@@ -906,7 +906,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(p2pSource.contains("连接码功能将支持"))
     }
 
-    func testMacMainSceneIsSingletonWhileAuxiliaryScenesRemainMultiWindow() throws {
+    func testMacMainAndNearFieldScenesAreSingletonWhileIndependentSessionsRemainMultiWindow() throws {
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let appDelegateSource = try repositorySource(
             "Sources/SkyBridgeCompassApp/Core/RemoteNotificationAppDelegate.swift"
@@ -919,7 +919,8 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(
             appSource.contains("WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")")
         )
-        XCTAssertTrue(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
+        XCTAssertTrue(appSource.contains("Window(\"近距远程控制\", id: \"near-field-mirror\")"))
+        XCTAssertFalse(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"cross-network-connection\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"vnc-viewer\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"ssh-terminal\", for: UUID.self)"))

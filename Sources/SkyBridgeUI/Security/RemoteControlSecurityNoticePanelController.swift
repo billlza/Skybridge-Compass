@@ -12,6 +12,7 @@ public enum RemoteControlSecurityNoticeLocalizationContract {
         "remoteControl.securityNotice.approve",
         "remoteControl.securityNotice.approveView",
         "remoteControl.securityNotice.inputController",
+        "remoteControl.securityNotice.localInputController",
         "remoteControl.securityNotice.observer",
         "remoteControl.securityNotice.transferInput",
         "remoteControl.securityNotice.close",

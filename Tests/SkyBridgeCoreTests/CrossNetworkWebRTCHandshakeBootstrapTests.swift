@@ -1467,7 +1467,7 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
 
         let remoteControlSource = try readSource("Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift")
         let remoteControlInitBody = try sourceSlice(
-            from: "public init() {",
+            from: "public init(controlledHostStreamTier: ControlledHostSessionPolicy.StreamTier = .focused) {",
             to: "private func configureViewingRenderersIfNeeded()",
             in: remoteControlSource
         )
@@ -3110,11 +3110,11 @@ final class CrossNetworkWebRTCHandshakeBootstrapTests: XCTestCase {
         XCTAssertTrue(productAppSource.contains("maximumChunkBytes = 64 * 1_024"))
         XCTAssertFalse(productAppSource.contains("String(contentsOf: statusURL"))
 
-        XCTAssertTrue(noticeSource.contains("private func approveCurrentNoticeFromUserInteraction()"))
+        XCTAssertTrue(noticeSource.contains("public func approveNoticeFromUserInteraction(id: UUID)"))
         XCTAssertTrue(noticeSource.contains("@_spi(RemoteControlSecurityNoticeUI)"))
         let ordinaryApproval = try sourceSlice(
             from: "public func approveCurrentNotice()",
-            to: "/// Approval entry point reserved for the real user-facing panel action.",
+            to: "@_spi(RemoteControlSecurityNoticeUI)",
             in: noticeSource
         )
         XCTAssertFalse(ordinaryApproval.contains("HumanApproved"))

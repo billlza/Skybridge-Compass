@@ -1031,7 +1031,7 @@ import XCTest
             )
             try FileManager.default.createDirectory(
                 at: directory,
-                withIntermediateDirectories: false,
+                withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
             guard chmod(directory.path, 0o700) == 0 else {
