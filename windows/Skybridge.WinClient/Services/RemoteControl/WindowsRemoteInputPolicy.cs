@@ -1,5 +1,23 @@
 namespace Skybridge.WinClient.Services.RemoteControl;
 
+/// UI refreshes can raise pointer events without user movement. Keep one
+/// position per grant/focus lifetime so they cannot replay an old host cursor.
+internal sealed class RemotePointerMotionFilter
+{
+    private (uint Id, double X, double Y)? _last;
+
+    internal bool Accept(bool generated, uint pointerId, double x, double y)
+    {
+        if (generated || !double.IsFinite(x) || !double.IsFinite(y)) return false;
+        var point = (pointerId, x, y);
+        if (_last == point) return false;
+        _last = point;
+        return true;
+    }
+
+    internal void Reset() => _last = null;
+}
+
 [Flags]
 internal enum WindowsRemoteModifiers { None = 0, Shift = 1, Control = 2, Alt = 4, Command = 8 }
 internal enum WindowsRemoteMouseButton { Left, Right, Middle, Extra1, Extra2 }

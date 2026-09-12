@@ -12,6 +12,7 @@ internal static class RemoteControlViewerSessionTests
         ("viewer SBRF decoding validates framing, codec, geometry and keyframe metadata", DecodeScreen),
         ("viewer and host share one physical-key mapping with a canonical keypad Enter", PhysicalKeyMapping),
         ("viewer pointer uses frame pixels and excludes letterbox bars", ViewerPointerMapping),
+        ("viewer ignores generated and stationary pointer motion until a fresh input lifetime", PointerMotion),
         ("viewer approval metadata rejects incomplete identities and invalid UTF-8 bounds", ApprovalMetadata),
         ("viewer rejects authenticated video before local host approval", RejectUnapprovedVideo),
         ("viewer binds approval and subsequent input to the current host grant", ApprovalAndHandoff),
@@ -26,6 +27,22 @@ internal static class RemoteControlViewerSessionTests
     // Structural access-unit fixture; native decoding is a separate platform test.
     private static readonly byte[] AccessUnit = [0, 0, 0, 1, 0x67, 0x42, 1, 0, 0, 0, 1, 0x68, 1, 0, 0, 0, 1, 0x65, 1];
     private static byte[] Frame(ulong sequence = 1) => RemoteControlWire.EncodeH264Frame(AccessUnit, 1280, 720, 1_788_860_000 + sequence, true, sequence);
+
+    private static Task PointerMotion()
+    {
+        var filter = new RemotePointerMotionFilter();
+        Require(!filter.Accept(true, 1, 100, 200), "A generated event cannot claim the initial cursor.");
+        Require(filter.Accept(false, 1, 100, 200), "First actual movement must be forwarded.");
+        for (var count = 0; count < 1000; count++)
+            Require(!filter.Accept(false, 1, 100, 200), "A stationary cursor must not be replayed.");
+        Require(!filter.Accept(true, 1, 101, 200), "UI layout changes must not move the host cursor.");
+        Require(filter.Accept(false, 1, 101, 200), "Actual movement must survive a generated event at the same position.");
+        Require(filter.Accept(false, 2, 101, 200), "A new pointer has a distinct movement lifetime.");
+        Require(!filter.Accept(false, 2, double.NaN, 200), "Nonfinite input cannot poison the stored position.");
+        filter.Reset();
+        Require(filter.Accept(false, 2, 101, 200), "A fresh grant or focus lifetime must accept its initial position.");
+        return Task.CompletedTask;
+    }
 
     private static Task DecodeScreen()
     {

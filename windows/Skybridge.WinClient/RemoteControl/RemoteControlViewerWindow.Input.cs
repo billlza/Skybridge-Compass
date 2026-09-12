@@ -17,6 +17,7 @@ public sealed partial class RemoteControlViewerWindow
     private readonly HashSet<ushort> _pressedKeys = [];
     private bool _leftPressed, _rightPressed, _presenting;
     private double _pointerX, _pointerY;
+    private readonly RemotePointerMotionFilter _pointerMotion = new();
     private int _wheelRemainder;
 
     private void AttachInput()
@@ -125,8 +126,11 @@ public sealed partial class RemoteControlViewerWindow
         return true;
     }
 
-    private void Pointer(RemoteControlAccess access, string type) =>
+    private void Pointer(RemoteControlAccess access, string type)
+    {
+        if (type != "mouseMoved") _pointerMotion.Reset();
         Enqueue(new PointerInput(access, new(type, _pointerX, _pointerY, InputTime, null)));
+    }
 
     private void OnRemotePointerPressed(object sender, PointerRoutedEventArgs args)
     {
@@ -156,7 +160,8 @@ public sealed partial class RemoteControlViewerWindow
 
     private void OnRemotePointerMoved(object sender, PointerRoutedEventArgs args)
     {
-        if (CurrentInputAccess is not { } access || !ReadPointer(args, _leftPressed || _rightPressed)) return;
+        if (args.IsGenerated || CurrentInputAccess is not { } access || !ReadPointer(args, _leftPressed || _rightPressed)) return;
+        if (!_pointerMotion.Accept(args.IsGenerated, args.Pointer.PointerId, _pointerX, _pointerY)) return;
         Pointer(access, "mouseMoved");
         args.Handled = true;
     }
@@ -196,7 +201,7 @@ public sealed partial class RemoteControlViewerWindow
         }
         ClearInputState();
     }
-    private void ClearInputState() { _pressedKeys.Clear(); _leftPressed = false; _rightPressed = false; _wheelRemainder = 0; }
+    private void ClearInputState() { _pressedKeys.Clear(); _leftPressed = false; _rightPressed = false; _wheelRemainder = 0; _pointerMotion.Reset(); }
 
     private abstract record InputCommand(RemoteControlAccess Access)
     {
