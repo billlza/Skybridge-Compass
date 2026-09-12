@@ -14,12 +14,14 @@ final class RemoteControlHostAccessCoordinator {
         case atCapacity
         case unavailable
         case handoffInProgress
+        case localInputReclaimed
 
         var errorDescription: String? {
             switch self {
             case .atCapacity: "远程观看会话已达到上限"
             case .unavailable: "远程控制会话已结束"
             case .handoffInProgress: "正在交接输入权，请等待完成"
+            case .localInputReclaimed: "本机已收回键盘和鼠标控制权"
             }
         }
     }
@@ -35,6 +37,7 @@ final class RemoteControlHostAccessCoordinator {
     private let changed: @MainActor () -> Void
     private var entries: [UUID: Entry] = [:]
     private var operation: UUID?
+    private var localInputGeneration = UUID()
     private(set) var controllerID: UUID?
     var isTransferring: Bool { operation != nil }
 
@@ -77,6 +80,26 @@ final class RemoteControlHostAccessCoordinator {
         return lease == expected
     }
 
+    /// Local input invalidates the lease and releases held HID state before
+    /// returning to event dispatch. Publishing the observer receipt may suspend;
+    /// neither queued input nor a suspended handoff can restore this old lease.
+    func reclaimForLocalInput() throws -> UUID? {
+        localInputGeneration = UUID()
+        guard let id = controllerID, let entry = entries[id] else { return nil }
+        controllerID = nil
+        entry.access = try nextAccess(for: entry, role: .observer)
+        changed()
+        try entry.handlers.releaseInput()
+        return id
+    }
+
+    func publishLocalReclamation(for id: UUID) async throws {
+        guard let entry = entries[id], let access = entry.access, access.role == .observer else {
+            throw Failure.unavailable
+        }
+        try await entry.handlers.publishAccess(access)
+    }
+
     /// The old grant is invalidated before any suspension or release. Failure
     /// leaves no new controller; it never restores a possibly-observed grant.
     func transfer(to id: UUID) async throws {
@@ -84,6 +107,7 @@ final class RemoteControlHostAccessCoordinator {
         guard let target = entries[id], target.access != nil, target.isReady else { throw Failure.unavailable }
         if controllerID == id { return }
         let token = UUID()
+        let localGeneration = localInputGeneration
         operation = token
         changed()
         defer {
@@ -101,6 +125,7 @@ final class RemoteControlHostAccessCoordinator {
             if let access = previous.access { try await previous.handlers.publishAccess(access) }
         }
         try Task.checkCancellation()
+        guard localInputGeneration == localGeneration else { throw Failure.localInputReclaimed }
         let previousIsCurrent = previousID.map { entries[$0] === previous } ?? true
         guard operation == token, entries[id] === target, previousIsCurrent else {
             throw Failure.unavailable
@@ -113,10 +138,12 @@ final class RemoteControlHostAccessCoordinator {
         do {
             try await target.handlers.publishAccess(granted)
             try Task.checkCancellation()
+            guard localInputGeneration == localGeneration else { throw Failure.localInputReclaimed }
             guard operation == token, entries[id] === target, controllerID == id else {
                 throw Failure.unavailable
             }
         } catch {
+            if localInputGeneration != localGeneration { throw Failure.localInputReclaimed }
             if entries[id] === target, controllerID == id {
                 controllerID = nil
                 target.access = try nextAccess(for: target, role: .observer)

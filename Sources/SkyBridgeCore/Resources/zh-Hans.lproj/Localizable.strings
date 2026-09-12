@@ -1314,3 +1314,5 @@
 "info.reqAppleSilicon" = "需要 Apple 芯片";
 "info.deviceUnsupported" = "不支持此设备";
 "info.standardMode" = "标准模式";
+
+"remoteControl.securityNotice.localInputController" = "本机已收回键盘和鼠标控制权，远端仍可观看。";

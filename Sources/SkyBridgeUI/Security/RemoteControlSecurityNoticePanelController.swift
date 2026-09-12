@@ -428,9 +428,11 @@ private struct RemoteControlSecurityNoticePanelView: View {
                         .accessibilityIdentifier("remoteControlSecurityNoticeApproveButton")
                     } else {
                         if center.controlAccess(for: notice.id) != nil {
-                            Text(localized(center.inputControllerNoticeID == notice.id
-                                ? "remoteControl.securityNotice.inputController"
-                                : "remoteControl.securityNotice.observer"))
+                            Text(localized(center.localInputHasControl
+                                ? "remoteControl.securityNotice.localInputController"
+                                : center.inputControllerNoticeID == notice.id
+                                    ? "remoteControl.securityNotice.inputController"
+                                    : "remoteControl.securityNotice.observer"))
                                 .font(.caption)
                             if center.inputControllerNoticeID != notice.id {
                                 Button {

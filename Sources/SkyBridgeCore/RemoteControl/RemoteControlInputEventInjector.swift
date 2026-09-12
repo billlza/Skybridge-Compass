@@ -700,8 +700,22 @@ enum RemoteControlInputEventInjector {
     @discardableResult
     private static func post(_ cgEvent: CGEvent?) -> Bool {
         guard let cgEvent else { return false }
+        markInjectedEvent(cgEvent)
         cgEvent.post(tap: .cghidEventTap)
         return true
+    }
+
+    // A process tag distinguishes our remote HID events from local activity,
+    // including accessibility input produced by a different local application.
+    private static let injectionTag: Int64 = 0x534259494E505554
+
+    static func markInjectedEvent(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: injectionTag)
+    }
+
+    static func isOwnInjectedEvent(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == injectionTag
+            && event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(ProcessInfo.processInfo.processIdentifier)
     }
 }
 #endif

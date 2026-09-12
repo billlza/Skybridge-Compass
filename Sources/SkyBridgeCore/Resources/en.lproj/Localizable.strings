@@ -1288,3 +1288,5 @@
 "info.reqAppleSilicon" = "Apple silicon required";
 "info.deviceUnsupported" = "Unsupported device";
 "info.standardMode" = "Standard mode";
+
+"remoteControl.securityNotice.localInputController" = "This Mac has keyboard and mouse control. Remote viewing continues.";

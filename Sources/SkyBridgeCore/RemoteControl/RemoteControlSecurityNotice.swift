@@ -925,7 +925,7 @@ enum RemoteControlSecurityAdmissionPolicy {
 
 @MainActor
 public final class RemoteControlSecurityNoticeCenter: ObservableObject {
-    public static let shared = RemoteControlSecurityNoticeCenter()
+    public static let shared = RemoteControlSecurityNoticeCenter(monitorsLocalInput: true)
 
     public typealias LocalIdentityProvider = @MainActor () -> RemoteControlSecurityIdentity?
     public typealias DisconnectHandler = @MainActor () -> Void
@@ -933,6 +933,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
     @Published public private(set) var currentNotice: RemoteControlSecurityNotice?
     @Published public private(set) var notices: [RemoteControlSecurityNotice] = []
     @Published public private(set) var controlHandoffError: String?
+    @Published public private(set) var localInputHasControl = false
 
     public var inputControllerNoticeID: UUID? {
         hostAccess.controllerID ?? notices.first(where: {
@@ -940,8 +941,12 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         })?.id
     }
 
-    public var isTransferringControl: Bool { inputHandoffOperationID != nil }
+    public var isTransferringControl: Bool { inputHandoffOperationID != nil || localReclamationID != nil }
     private var inputHandoffOperationID: UUID?
+    private var localReclamationID: UUID?
+#if os(macOS)
+    private let localInputMonitor: RemoteControlLocalInputMonitor?
+#endif
     private let maximumViewers = ControlledHostSessionPolicy.defaultConcurrentHostLimit
     private lazy var hostAccess = RemoteControlHostAccessCoordinator(limit: maximumViewers) { [weak self] in
         self?.objectWillChange.send()
@@ -956,8 +961,11 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         [UUID: ProductReleaseEvidenceSessionOwner] = [:]
     private var productEvidencePanelPresentedNoticeIds = Set<UUID>()
 
-    init(productEvidenceRecorder: ProductReleaseEvidenceRecorder = .shared) {
+    init(productEvidenceRecorder: ProductReleaseEvidenceRecorder = .shared, monitorsLocalInput: Bool = false) {
         self.productEvidenceRecorder = productEvidenceRecorder
+#if os(macOS)
+        localInputMonitor = monitorsLocalInput ? RemoteControlLocalInputMonitor() : nil
+#endif
     }
 
     public func setLocalIdentityProvider(_ provider: LocalIdentityProvider?) {
@@ -1012,6 +1020,49 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         return notices.count == 1 && inputControllerNoticeID == noticeID && lease == nil
     }
 
+    private func armLocalInputMonitor() throws {
+#if os(macOS)
+        try localInputMonitor?.arm { [weak self] in self?.reclaimInputForLocalActivity() }
+#endif
+    }
+
+    /// Called synchronously by AppKit, before any subsequent remote HID commit.
+    /// The existing observer grant keeps video alive while retiring input.
+    func reclaimInputForLocalActivity() {
+        let previousID = inputControllerNoticeID
+        guard previousID != nil || inputHandoffOperationID != nil else { return }
+        localInputHasControl = true
+        do {
+            let revokedID = try hostAccess.reclaimForLocalInput()
+            if let previousID, !hostAccess.isRegistered(previousID) {
+                // Legacy peers cannot acknowledge an observer grant.
+                disconnectNotice(id: previousID)
+            }
+            guard let revokedID else { refreshCurrentNotice(); return }
+            let reclamationID = UUID()
+            localReclamationID = reclamationID
+            refreshCurrentNotice()
+            Task { @MainActor in
+                defer {
+                    if localReclamationID == reclamationID { localReclamationID = nil }
+                    refreshCurrentNotice()
+                }
+                do {
+                    try await hostAccess.publishLocalReclamation(for: revokedID)
+                } catch {
+                    if hostAccess.isRegistered(revokedID) {
+                        controlHandoffError = error.localizedDescription
+                        disconnectNotice(id: revokedID)
+                    }
+                }
+            }
+        } catch {
+            controlHandoffError = error.localizedDescription
+            if let previousID { disconnectNotice(id: previousID) }
+            refreshCurrentNotice()
+        }
+    }
+
     /// Only a local host action selects the next input controller. A remote
     /// viewer cannot request or manufacture a grant through a stream refresh.
     public func transferInputControl(to noticeID: UUID) async {
@@ -1028,8 +1079,13 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             refreshCurrentNotice()
         }
         do {
+            try armLocalInputMonitor()
             try await hostAccess.transfer(to: noticeID)
+            localInputHasControl = false
             controlHandoffError = nil
+        } catch RemoteControlHostAccessCoordinator.Failure.localInputReclaimed {
+            // Local activity already retired the grant and owns its publication.
+            localInputHasControl = true
         } catch RemoteControlHostAccessCoordinator.Failure.handoffInProgress {
             controlHandoffError = RemoteControlHostAccessCoordinator.Failure.handoffInProgress.localizedDescription
         } catch {
@@ -1052,6 +1108,9 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
     }
 
     private func refreshCurrentNotice() {
+#if os(macOS)
+        if !notices.contains(where: { $0.phase == .active }) { localInputMonitor?.stop() }
+#endif
         currentNotice = notices.first(where: { $0.phase == .awaitingApproval })
             ?? notices.first(where: { $0.id == inputControllerNoticeID })
             ?? notices.first
@@ -1246,6 +1305,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
         guard let index = notices.firstIndex(where: { $0.id == id && $0.phase == .awaitingApproval }) else { return }
         let notice = notices[index]
         do {
+            try armLocalInputMonitor()
             if hostAccess.isRegistered(id) {
                 try hostAccess.approve(id: id, allowsInitialInput: !isTransferringControl)
             }
@@ -1255,6 +1315,7 @@ public final class RemoteControlSecurityNoticeCenter: ObservableObject {
             return
         }
         notices[index] = notice.updatingPhase(.active, approvedAt: Date())
+        if inputControllerNoticeID == id { localInputHasControl = false }
         refreshCurrentNotice()
         appendEvidence(event: "Approved", descriptor: notice.descriptor)
         appendEvidence(event: "Active", descriptor: notice.descriptor)

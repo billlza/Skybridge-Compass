@@ -215,6 +215,114 @@ final class RemoteControlHostAuthorizationTests: XCTestCase {
         center.closeAllNoticesFailClosed()
     }
 
+    func testLocalActivityRevokesBeforeReceiptAndNeedsExplicitFreshGrant() async throws {
+        let center = RemoteControlSecurityNoticeCenter()
+        let first = descriptor("local-takeover")
+        let receipt = ReceiptGate()
+        var releases = 0
+        var published: [RemoteControlAccess] = []
+        try await approve(first, center: center, release: { releases += 1 }, publish: { access in
+            published.append(access)
+            if access.role == .observer { await receipt.wait() }
+        })
+        let original = try XCTUnwrap(center.controlAccess(for: first.id))
+        center.reclaimInputForLocalActivity()
+        XCTAssertEqual(releases, 1)
+        XCTAssertFalse(center.permitsInput(noticeID: first.id, lease: original.lease))
+        XCTAssertNil(center.inputControllerNoticeID)
+        XCTAssertEqual(center.notices.first?.phase, .active)
+        XCTAssertTrue(center.localInputHasControl)
+        await waitUntil { receipt.isWaiting }
+        XCTAssertFalse(center.canTransferInputControl(to: first.id))
+        center.reclaimInputForLocalActivity()
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(published.count, 1)
+        receipt.open()
+        await waitUntil { !center.isTransferringControl }
+        XCTAssertEqual(center.controlAccess(for: first.id)?.role, .observer)
+        await center.transferInputControl(to: first.id)
+        let restored = try XCTUnwrap(center.controlAccess(for: first.id))
+        XCTAssertNotEqual(restored.lease, original.lease)
+        XCTAssertTrue(center.permitsInput(noticeID: first.id, lease: restored.lease))
+        XCTAssertFalse(center.permitsInput(noticeID: first.id, lease: original.lease))
+        XCTAssertFalse(center.localInputHasControl)
+        center.closeAllNoticesFailClosed()
+    }
+
+    func testLocalActivityFencesSuspendedHandoffBeforeTargetGrant() async throws {
+        let center = RemoteControlSecurityNoticeCenter()
+        let receipt = ReceiptGate()
+        let first = descriptor("old-controller")
+        let target = descriptor("next-controller")
+        var grants = 0
+        try await approve(first, center: center, publish: { _ in await receipt.wait() })
+        try await approve(target, center: center, publish: { if $0.role == .controller { grants += 1 } })
+        let transfer = Task { await center.transferInputControl(to: target.id) }
+        await waitUntil { receipt.isWaiting }
+        center.reclaimInputForLocalActivity()
+        receipt.open()
+        await transfer.value
+        XCTAssertEqual(grants, 0)
+        XCTAssertNil(center.inputControllerNoticeID)
+        XCTAssertEqual(center.notices.count, 2)
+        XCTAssertTrue(center.localInputHasControl)
+        center.closeAllNoticesFailClosed()
+    }
+
+    func testLocalActivityRetiresGrantAlreadyBeingPublished() async throws {
+        let center = RemoteControlSecurityNoticeCenter()
+        let receipt = ReceiptGate()
+        let first = descriptor("previous")
+        let target = descriptor("pending-grant")
+        var releases = 0
+        try await approve(first, center: center)
+        try await approve(target, center: center, release: { releases += 1 }, publish: { access in
+            if access.role == .controller { await receipt.wait() }
+        })
+        let transfer = Task { await center.transferInputControl(to: target.id) }
+        await waitUntil { receipt.isWaiting }
+        let retiredLease = try XCTUnwrap(center.controlAccess(for: target.id)?.lease)
+        center.reclaimInputForLocalActivity()
+        XCTAssertEqual(releases, 1)
+        XCTAssertFalse(center.permitsInput(noticeID: target.id, lease: retiredLease))
+        receipt.open()
+        await transfer.value
+        await waitUntil { !center.isTransferringControl }
+        XCTAssertNil(center.inputControllerNoticeID)
+        XCTAssertEqual(center.controlAccess(for: target.id)?.role, .observer)
+        XCTAssertEqual(center.notices.count, 2)
+        center.closeAllNoticesFailClosed()
+    }
+
+    func testLocalReclamationFailureDisconnectsOnlyAffectedViewer() async throws {
+        for failsDuringRelease in [true, false] {
+            let center = RemoteControlSecurityNoticeCenter()
+            let first = descriptor("failed-reclamation")
+            let observer = descriptor("unaffected-observer")
+            try await approve(first, center: center, release: {
+                if failsDuringRelease { throw ControlledHostSessionError.inputReleaseFailed }
+            }, publish: { _ in throw ControlledHostSessionError.inputControlDeliveryTimedOut })
+            try await approve(observer, center: center)
+            center.reclaimInputForLocalActivity()
+            await waitUntil { !center.isTransferringControl }
+            XCTAssertNil(center.inputControllerNoticeID)
+            XCTAssertEqual(center.notices.map(\.id), [observer.id])
+            XCTAssertNotNil(center.controlHandoffError)
+            center.closeAllNoticesFailClosed()
+        }
+    }
+
+    func testInjectedEventsAreExcludedOnlyForThisProcessAndTag() throws {
+        let event = try XCTUnwrap(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+            mouseCursorPosition: CGPoint(x: 10, y: 10), mouseButton: .left))
+        event.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(ProcessInfo.processInfo.processIdentifier))
+        XCTAssertFalse(RemoteControlInputEventInjector.isOwnInjectedEvent(event))
+        RemoteControlInputEventInjector.markInjectedEvent(event)
+        XCTAssertTrue(RemoteControlInputEventInjector.isOwnInjectedEvent(event))
+        event.setIntegerValueField(.eventSourceUnixProcessID, value: 0)
+        XCTAssertFalse(RemoteControlInputEventInjector.isOwnInjectedEvent(event))
+    }
+
     private func approve(
         _ descriptor: RemoteControlSecurityDescriptor,
         center: RemoteControlSecurityNoticeCenter,
