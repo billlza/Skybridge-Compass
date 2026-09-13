@@ -11,7 +11,7 @@ widget_profile="$3"
 for path in "$certificate" "$app_profile" "$widget_profile"; do
   [[ -f "$path" && ! -L "$path" ]] || { echo "signing input must be a real file" >&2; exit 1; }
 done
-[[ "$(rg -c '^-----BEGIN CERTIFICATE-----$' "$certificate")" == "1" ]] || {
+[[ "$(/usr/bin/grep -c '^-----BEGIN CERTIFICATE-----$' "$certificate")" == "1" ]] || {
   echo "signing P12 must contain exactly one client certificate" >&2; exit 1;
 }
 certificate_sha1="$(openssl x509 -in "$certificate" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
