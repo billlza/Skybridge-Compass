@@ -34,7 +34,7 @@ still fail. No launch arguments, child environment, or terminate-existing
 option is used.
 
 If installation wakes the app in the background, the producer retains that
-process snapshot and waits up to three minutes for the operator to close only
+process snapshot and waits up to the configured producer timeout for the operator to close only
 SkyBridge. A new snapshot must independently prove absence; typing `CLOSED`
 alone cannot satisfy the gate. An unverifiable snapshot still fails immediately.
 

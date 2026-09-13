@@ -178,7 +178,7 @@ python3 "$ROOT_DIR/Scripts/ios_product_installation.py" \
   --output "$IOS_INSTALLATION_BINDING"
 skybridge_ios_require_postinstall_app_absence \
   "$OWNERSHIP_HELPER" "$IOS_DEVICE_ID" "$IOS_EXTRACTED_APP" \
-  "$IOS_PRELAUNCH_PROCESSES" 180
+  "$IOS_PRELAUNCH_PROCESSES" "$TIMEOUT_SECONDS"
 IOS_LAUNCH_PERSISTENT_IDENTIFIER="$(
   python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
 import json
