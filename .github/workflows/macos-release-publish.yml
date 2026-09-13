@@ -43,7 +43,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require Independent Publication Approval Environment
+      - name: Require Single-Maintainer Publication Approval Environment
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ENVIRONMENT_NAME: macos-production-release
@@ -58,7 +58,8 @@ jobs:
             > "$response"
           python3 Scripts/validate_release_environment_protection.py \
             --response "$response" \
-            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+            --expected-name "$RELEASE_ENVIRONMENT_NAME" \
+            --approval-policy single-maintainer
 
   publish-immutable-candidate:
     needs: verify-publish-environment-protection
@@ -101,7 +102,8 @@ jobs:
             > "$response"
           python3 Scripts/validate_release_environment_protection.py \
             --response "$response" \
-            --expected-name "$RELEASE_ENVIRONMENT_NAME"
+            --expected-name "$RELEASE_ENVIRONMENT_NAME" \
+            --approval-policy single-maintainer
 
       - name: Select Xcode 26.6 / Swift 6.3.3 Toolchain
         shell: bash

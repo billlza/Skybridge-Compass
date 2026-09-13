@@ -270,10 +270,17 @@ For a release, do not build after physical validation. Dispatch the workflows in
 3. `macos-release-publish.yml` revalidates all four identities and publishes the original
    candidate bytes behind the `macos-production-release` approval environment.
 
-The evidence and publication workflows also read back the GitHub environment configuration
-before entering the protected job. Missing environments, missing required reviewers, enabled
-self-review, or administrator bypass all fail closed; do not weaken this preflight to work
-around absent repository configuration.
+The evidence and publication workflows read back the GitHub environment configuration both
+before entering the protected job and after approval. Their explicit `single-maintainer`
+policy requires `billlza` (GitHub user ID `149552943`) as the only reviewer and permits that
+maintainer to approve a run they initiated. This is owner approval, not independent review.
+The release owner authorized this policy on 2026-09-13 for `release-real-device-evidence`
+and `macos-production-release`. Other environments retain the independent-review policy.
+Missing environments, missing or unexpected reviewers, administrator bypass, and unrestricted
+deployment policies all fail closed. Configure protected branches before enabling deployment;
+GitHub permits all branches under a protected-branches policy if no branch protection exists.
+Self-approval does not waive candidate identity, signing, notarization, provenance, or any
+physical acceptance requirement.
 
 The local notice-panel and local WebRTC probes are diagnostics. They are not separate release
 artifacts and cannot replace notice/approval evidence from the normal P2P/WebRTC product session.
