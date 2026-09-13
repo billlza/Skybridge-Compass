@@ -54,6 +54,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  macos-signing-inputs:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Verify Supplied Signing Certificate and Profiles
+        env:
+          DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
+          DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          MACOS_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_PROVISION_PROFILE_BASE64 }}
+          MACOS_WIDGET_PROVISION_PROFILE_BASE64: ${{ secrets.MACOS_WIDGET_PROVISION_PROFILE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          signing_input_dir="$(mktemp -d "$RUNNER_TEMP/signing-inputs.XXXXXX")"
+          trap '/bin/rm -rf "$signing_input_dir"' EXIT
+          printf '%s' "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$signing_input_dir/identity.p12"
+          printf '%s' "$MACOS_PROVISION_PROFILE_BASE64" | base64 --decode > "$signing_input_dir/app.provisionprofile"
+          printf '%s' "$MACOS_WIDGET_PROVISION_PROFILE_BASE64" | base64 --decode > "$signing_input_dir/widget.provisionprofile"
+          /usr/bin/openssl pkcs12 -in "$signing_input_dir/identity.p12" -clcerts -nokeys \
+            -passin env:DEVELOPER_ID_CERT_PASSWORD -out "$signing_input_dir/certificate.pem"
+          bash Scripts/check_macos_release_signing_inputs.sh \
+            "$signing_input_dir/certificate.pem" \
+            "$signing_input_dir/app.provisionprofile" \
+            "$signing_input_dir/widget.provisionprofile"
+
   macos-preflight:
     runs-on: macos-26
     timeout-minutes: 90
@@ -105,6 +135,9 @@ jobs:
 
       - name: Self-Test Release Environment Protection
         run: python3 Scripts/test_validate_release_environment_protection.py
+
+      - name: Self-Test Release Keychain Restoration
+        run: python3 -W error Scripts/test_release_keychain_state.py
 
       - name: Self-Test Release Acceptance Manifest Finalization
         run: python3 Scripts/test_finalize_release_acceptance_manifests.py
@@ -298,13 +331,14 @@ jobs:
         run: bash Scripts/run_os27_beta_compatibility.sh --verify-source-contracts
 
   macos-signed-release-candidate:
-    needs: [macos-preflight, os27-source-contracts]
+    needs: [macos-preflight, os27-source-contracts, macos-signing-inputs]
     runs-on: macos-26
     timeout-minutes: 120
     if: >-
       github.event_name == 'workflow_dispatch' &&
       needs.macos-preflight.result == 'success' &&
-      needs.os27-source-contracts.result == 'success'
+      needs.os27-source-contracts.result == 'success' &&
+      needs.macos-signing-inputs.result == 'success'
     permissions:
       contents: read
       actions: read
@@ -381,11 +415,12 @@ jobs:
         env:
           DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
           DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}-skybridge
         run: |
           set -euo pipefail
           umask 077
           KEYCHAIN_PATH="$RUNNER_TEMP/skybridge-release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
           CERT_PATH="$RUNNER_TEMP/developer-id.p12"
           ORIGINAL_KEYCHAIN_LIST_PATH="$RUNNER_TEMP/original-user-keychains.txt"
           ORIGINAL_DEFAULT_KEYCHAIN_PATH="$RUNNER_TEMP/original-default-keychain.txt"
@@ -399,6 +434,10 @@ jobs:
 
           security list-keychains -d user > "$ORIGINAL_KEYCHAIN_LIST_PATH"
           security default-keychain -d user > "$ORIGINAL_DEFAULT_KEYCHAIN_PATH"
+          python3 Scripts/release_keychain_state.py \
+            --list-snapshot "$ORIGINAL_KEYCHAIN_LIST_PATH" \
+            --default-snapshot "$ORIGINAL_DEFAULT_KEYCHAIN_PATH"
+          echo "RELEASE_KEYCHAIN_STATE_VERIFIED=1" >> "$GITHUB_ENV"
 
           echo "$DEVELOPER_ID_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
 
@@ -576,23 +615,12 @@ jobs:
           set -u
           cleanup_failed=0
 
-          if [[ -n "${ORIGINAL_KEYCHAIN_LIST_PATH:-}" && -s "$ORIGINAL_KEYCHAIN_LIST_PATH" ]]; then
-            original_keychains=()
-            while IFS= read -r keychain; do
-              keychain="${keychain#\"}"
-              keychain="${keychain%\"}"
-              [[ -n "$keychain" ]] && original_keychains+=("$keychain")
-            done < "$ORIGINAL_KEYCHAIN_LIST_PATH"
-            if (( ${#original_keychains[@]} > 0 )) && ! security list-keychains -d user -s "${original_keychains[@]}"; then
-              echo "::error::Unable to restore the original user keychain list."
-              cleanup_failed=1
-            fi
-          fi
-
-          if [[ -n "${ORIGINAL_DEFAULT_KEYCHAIN_PATH:-}" && -s "$ORIGINAL_DEFAULT_KEYCHAIN_PATH" ]]; then
-            original_default="$(tr -d '\"\r\n' < "$ORIGINAL_DEFAULT_KEYCHAIN_PATH")"
-            if [[ -n "$original_default" ]] && ! security default-keychain -d user -s "$original_default"; then
-              echo "::error::Unable to restore the original default keychain."
+          if [[ "${RELEASE_KEYCHAIN_STATE_VERIFIED:-}" == "1" ]]; then
+            if ! python3 Scripts/release_keychain_state.py \
+              --list-snapshot "$ORIGINAL_KEYCHAIN_LIST_PATH" \
+              --default-snapshot "$ORIGINAL_DEFAULT_KEYCHAIN_PATH" \
+              --restore; then
+              echo "::error::Unable to restore the original user keychain state."
               cleanup_failed=1
             fi
           fi

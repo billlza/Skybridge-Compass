@@ -1490,7 +1490,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
 
         XCTAssertTrue(workflow.contains("os27-source-contracts:"))
         XCTAssertTrue(workflow.contains("bash Scripts/run_os27_beta_compatibility.sh --verify-source-contracts"))
-        XCTAssertTrue(workflow.contains("needs: [macos-preflight, os27-source-contracts]"))
+        XCTAssertTrue(workflow.contains("needs: [macos-preflight, os27-source-contracts, macos-signing-inputs]"))
 
         guard
             let sourceContractsRange = workflow.range(of: "  os27-source-contracts:"),
