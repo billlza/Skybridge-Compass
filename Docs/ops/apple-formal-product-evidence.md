@@ -33,6 +33,11 @@ is unavailable; it is never passed as a token. Missing or malformed identifiers
 still fail. No launch arguments, child environment, or terminate-existing
 option is used.
 
+If installation wakes the app in the background, the producer retains that
+process snapshot and waits up to three minutes for the operator to close only
+SkyBridge. A new snapshot must independently prove absence; typing `CLOSED`
+alone cannot satisfy the gate. An unverifiable snapshot still fails immediately.
+
 Every private OSLog event must match the owned launch's PID and executable
 path, and its `processImageUUID` must match the sealed IPA executable UUID.
 The native final `{"count":N,"finished":1}` record is command framing, not an

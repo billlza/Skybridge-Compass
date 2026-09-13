@@ -176,19 +176,9 @@ python3 "$ROOT_DIR/Scripts/ios_product_installation.py" \
   --release-testing-ipa "$IOS_RELEASE_TESTING_IPA" \
   --expected-device-identifier "$IOS_DEVICE_ID" \
   --output "$IOS_INSTALLATION_BINDING"
-skybridge_ios_process_snapshot "$IOS_DEVICE_ID" "$IOS_PRELAUNCH_PROCESSES" 60
-if python3 "$OWNERSHIP_HELPER" ios-presence \
-  --processes-json "$IOS_PRELAUNCH_PROCESSES" \
-  --app-path "$IOS_EXTRACTED_APP"; then
-  echo "installed iOS product is already running before the first launch" >&2
-  exit 1
-else
-  prelaunch_status=$?
-  (( prelaunch_status == 1 )) || {
-    echo "post-install iOS product absence is unverifiable" >&2
-    exit 1
-  }
-fi
+skybridge_ios_require_postinstall_app_absence \
+  "$OWNERSHIP_HELPER" "$IOS_DEVICE_ID" "$IOS_EXTRACTED_APP" \
+  "$IOS_PRELAUNCH_PROCESSES" 180
 IOS_LAUNCH_PERSISTENT_IDENTIFIER="$(
   python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
 import json

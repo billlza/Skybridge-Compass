@@ -89,6 +89,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             self.assertIn('[[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]', source)
             self.assertIn("--installation-binding", source)
             self.assertIn("ios-postinstall-prelaunch-processes.json", source)
+            self.assertIn("skybridge_ios_require_postinstall_app_absence", source)
         for required in (
             "launchServicesIdentifier",
             "devicectl.device.install.app",
