@@ -1157,6 +1157,57 @@ final class QPeriaptRoundTripTests: XCTestCase {
         }
     }
 
+    func testLANHandshakePreparationPreservesAdmittedQSession() async throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Native Q admission requires macOS 26 or newer.")
+        }
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        defer {
+            if let previous { setenv("SB_ENABLE_QPERIAPT", previous, 1) }
+            else { unsetenv("SB_ENABLE_QPERIAPT") }
+            QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        }
+        let session = try await makeSession()
+        try await QPeriaptPlatformPolicy.activateRuntimeSession(session)
+        let provider = P2PConnection.makeHandshakeCryptoProvider(policy: .requirePQC)
+        XCTAssertEqual(provider.tier, .qperiaptPQC)
+        let preparation = try TwoAttemptHandshakeManager.prepareAttempt(
+            strategy: .pqcOnly, cryptoProvider: provider,
+            pqcOfferMode: .preferredSingle, pqcSignatureAlgorithm: .mlDSA65
+        )
+        XCTAssertEqual(preparation.offeredSuites, [.qperiaptABI2PolicyBound])
+        let context = try await HandshakeContext.create(
+            role: .initiator, cryptoProvider: provider,
+            protocolSignatureProvider: preparation.signatureProvider,
+            cryptoPolicy: HandshakeCryptoPolicyResolver.policy(for: preparation.offeredSuites),
+            offeredSuites: preparation.offeredSuites,
+            activeProtocolSigningAlgorithm: preparation.sigAAlgorithm
+        )
+        await context.zeroize()
+    }
+
+    func testLANHandshakePreparationRejectsUnadmittedQWithoutOrdinaryOffer() throws {
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        defer {
+            if let previous { setenv("SB_ENABLE_QPERIAPT", previous, 1) }
+            else { unsetenv("SB_ENABLE_QPERIAPT") }
+            QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        }
+        let provider = P2PConnection.makeHandshakeCryptoProvider(policy: .requirePQC)
+        XCTAssertTrue(CryptoProviderFactory.handshakeOfferedPQCSuites(using: provider).isEmpty)
+        XCTAssertThrowsError(try TwoAttemptHandshakeManager.prepareAttempt(
+            strategy: .pqcOnly, cryptoProvider: provider, pqcSignatureAlgorithm: .mlDSA65
+        )) { error in
+            guard case AttemptPreparationError.pqcProviderUnavailable = error else {
+                return XCTFail("Unexpected preparation error: \(error)")
+            }
+        }
+    }
+
     private func makeSession() async throws -> QPeriaptRuntimeSession {
         let vector = try loadFixture()
         return try await QPeriaptPolicyRuntime().resolveSession(
