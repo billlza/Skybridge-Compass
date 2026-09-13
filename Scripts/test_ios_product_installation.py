@@ -76,7 +76,7 @@ class IOSProductInstallationTests(unittest.TestCase):
 
     def _write_install_result(self, **mutations: object) -> None:
         installed = {
-            "bundleIdentifier": "com.skybridge.compass.ios",
+            "bundleID": "com.skybridge.compass.ios",
             "launchServicesIdentifier": self.launch_identifier,
         }
         installed.update(mutations)
@@ -184,14 +184,31 @@ class IOSProductInstallationTests(unittest.TestCase):
         ):
             self._verify()
 
-        self._write_install_result(bundleIdentifier="com.example.unrelated")
+        self._write_install_result(bundleID="com.example.unrelated")
+        with self.assertRaisesRegex(installation.IOSInstallationError, "different bundle"):
+            self._verify()
+
+    def test_install_receipt_does_not_substitute_the_apps_query_field(self) -> None:
+        payload = json.loads(self.install_result.read_text(encoding="utf-8"))
+        installed = payload["result"]["installedApplications"][0]
+        installed["bundleIdentifier"] = installed.pop("bundleID")
+        self._write_json(self.install_result, payload)
+        with self.assertRaisesRegex(installation.IOSInstallationError, "different bundle"):
+            self._verify()
+
+        self._write_install_result(
+            bundleID="com.example.unrelated",
+            bundleIdentifier="com.skybridge.compass.ios",
+        )
         with self.assertRaisesRegex(installation.IOSInstallationError, "different bundle"):
             self._verify()
 
     def test_malformed_persistent_identifier_fails_closed(self) -> None:
-        self._write_install_result(launchServicesIdentifier="not base64")
-        with self.assertRaisesRegex(installation.IOSInstallationError, "base64"):
-            self._verify()
+        for identifier in ("not base64", "unknown"):
+            with self.subTest(identifier=identifier):
+                self._write_install_result(launchServicesIdentifier=identifier)
+                with self.assertRaisesRegex(installation.IOSInstallationError, "base64"):
+                    self._verify()
 
 
 if __name__ == "__main__":

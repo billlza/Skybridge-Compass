@@ -1,3 +1,4 @@
+import Combine
 import CryptoKit
 import Dispatch
 import Network
@@ -841,9 +842,14 @@ final class RegressionHardeningTests: XCTestCase {
       timeout: .seconds(30),
       sleep: { _ in throw PairingTimerTestError.injectedFailure }
     )
-    for _ in 0..<100 where manager.testOnlyHasPendingPairingApproval {
-      await Task.yield()
-    }
+    let rejected = expectation(description: "Failed timer clears its pairing request")
+    let observation = manager.$pendingPairingTrustRequest
+      .dropFirst()
+      .filter { $0 == nil }
+      .prefix(1)
+      .sink { _ in rejected.fulfill() }
+    defer { observation.cancel() }
+    await fulfillment(of: [rejected], timeout: 5)
 
     XCTAssertFalse(manager.testOnlyHasPendingPairingApproval)
     XCTAssertEqual(manager.testOnlyStandalonePairingTimeoutTaskCount, 0)

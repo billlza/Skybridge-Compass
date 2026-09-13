@@ -217,7 +217,9 @@ def verify_installation(
     ):
         _fail("devicectl install result must contain exactly one installed application")
     installed_application = installed_applications[0]
-    if installed_application.get("bundleIdentifier") != APP_BUNDLE_IDENTIFIER:
+    # devicectl's install receipt uses bundleID; the subsequent apps query
+    # uses bundleIdentifier. Keep both checks tied to their actual schemas.
+    if installed_application.get("bundleID") != APP_BUNDLE_IDENTIFIER:
         _fail("devicectl install result installed a different bundle")
     raw_launch_identifier = installed_application.get("launchServicesIdentifier")
     if not isinstance(raw_launch_identifier, str) or not raw_launch_identifier:
