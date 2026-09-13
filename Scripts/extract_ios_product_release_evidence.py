@@ -42,6 +42,12 @@ MAX_JSON_BYTES = 2 * 1024 * 1024
 EXPECTED_BUNDLE_IDENTIFIER = "com.skybridge.compass.ios"
 EXPECTED_EXECUTABLE = "SkyBridgeCompass-iOS"
 START_TIME_PATTERN = re.compile(r"[1-9][0-9]*:[0-9]{1,6}\Z", re.ASCII)
+PRODUCT_IMAGE_PATH = re.compile(
+    r"/private/var/containers/Bundle/Application/"
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/"
+    r"SkyBridgeCompass-iOS\.app/SkyBridgeCompass-iOS\Z",
+    re.ASCII,
+)
 INSTALLATION_CAPTURE_PROFILE = "skybridge-formal-ios-product-installation-capture"
 IDENTITY_EVENT_NAMES = frozenset(
     {
@@ -223,6 +229,8 @@ def _remote_image_path(value: object, line_number: int) -> str:
     image = PurePosixPath(value)
     if not value.startswith("/") or str(image) != value:
         _fail(f"raw iOS OSLog line {line_number} has a non-canonical image path")
+    if PRODUCT_IMAGE_PATH.fullmatch(value) is None:
+        _fail(f"raw iOS OSLog line {line_number} is outside the exact capture boundary")
     return value
 
 
@@ -259,14 +267,18 @@ def bound_oslog_rows(raw_path: Path, identity: dict[str, Any]) -> list[dict[str,
             ):
                 _fail("raw iOS OSLog native completion trailer is invalid")
             continue
+        # Unified log resolves an executable UUID through its image catalog.
+        # Reinstalling identical bytes can leave that display path pointing to
+        # the first container. Verify the product path shape here; the actual
+        # launch path is independently receipt-bound in the private identity,
+        # and every row must match both the owned PID and sealed image UUID.
+        _remote_image_path(row.get("processImagePath"), line_number)
         if (
             row.get("eventType") != "logEvent"
             or row.get("messageType") != "Default"
             or row.get("subsystem") != SUBSYSTEM
             or row.get("category") != CATEGORY
             or row.get("processID") != identity["processIdentifier"]
-            or _remote_image_path(row.get("processImagePath"), line_number)
-            != identity["executablePath"]
         ):
             _fail(f"raw iOS OSLog line {line_number} is outside the exact capture boundary")
         runtime_uuid = row.get("processImageUUID")

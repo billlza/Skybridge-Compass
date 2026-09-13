@@ -212,6 +212,18 @@ class IOSProductEvidenceExtractionTests(unittest.TestCase):
         self._extract()
         self.assertEqual(self.output_log.read_text(), "\n".join(self.ios_lines) + "\n")
 
+    def test_native_catalog_path_may_refer_to_previous_container_of_same_image(self) -> None:
+        cached = self.executable_path.replace(
+            "11111111-2222-3333-4444-555555555555",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        self._write_raw(self.raw, self.ios_lines, process_image_path=cached)
+        self._extract()
+        self.assertEqual(self.output_log.read_text(), "\n".join(self.ios_lines) + "\n")
+        capture = json.loads(self.output_capture.read_text())
+        self.assertEqual(capture["processID"], self.process_id)
+        self.assertEqual(capture["iosReleaseArchive"], self.binding)
+
     def test_rejects_incorrect_or_premature_native_completion(self) -> None:
         original = self.raw.read_text()
         count = len(self.ios_lines)

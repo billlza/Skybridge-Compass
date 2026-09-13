@@ -179,7 +179,8 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             self.assertIn(required, self.ios_log_reader)
         for required in (
             'row.get("processID") != identity["processIdentifier"]',
-            '!= identity["executablePath"]',
+            'installation.get("remoteApplicationPath") != str(executable.parent)',
+            "PRODUCT_IMAGE_PATH.fullmatch(value)",
             '"iosReleaseArchive": binding',
             '"releaseArchiveBindingVerified": True',
             "IDENTITY_EVENT_NAMES",

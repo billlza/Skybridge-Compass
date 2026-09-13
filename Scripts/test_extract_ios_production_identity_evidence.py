@@ -18,7 +18,7 @@ IDENTITY_REFERENCE = "id1:0123456789abcdef0123456789abcdef"
 SESSION_REFERENCE = "ev1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ATTEMPT_REFERENCE = "at1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 EXECUTABLE_PATH = (
-    "/private/var/containers/Bundle/Application/release/"
+    "/private/var/containers/Bundle/Application/11111111-2222-3333-4444-555555555555/"
     "SkyBridgeCompass-iOS.app/SkyBridgeCompass-iOS"
 )
 

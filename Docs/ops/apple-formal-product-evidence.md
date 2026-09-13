@@ -38,8 +38,13 @@ process snapshot and waits up to three minutes for the operator to close only
 SkyBridge. A new snapshot must independently prove absence; typing `CLOSED`
 alone cannot satisfy the gate. An unverifiable snapshot still fails immediately.
 
-Every private OSLog event must match the owned launch's PID and executable
-path, and its `processImageUUID` must match the sealed IPA executable UUID.
+Every private OSLog event must match the owned launch's PID, and its
+`processImageUUID` must match the sealed IPA executable UUID. The launch
+identity's actual executable path remains bound to the installation receipt
+and independent app query. Unified log's image catalog can display the first
+container path for a UUID after identical bytes are reinstalled: that private
+display path must retain the exact product bundle/executable and a canonical
+iOS container, but is not substituted for the actual launch path.
 The native final `{"count":N,"finished":1}` record is command framing, not an
 event: its integer count must equal all preceding events. Altered counts,
 extra fields, and premature or duplicate trailers fail.
