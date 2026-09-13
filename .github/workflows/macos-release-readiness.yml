@@ -58,11 +58,14 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-26
     timeout-minutes: 10
+    outputs:
+      certificate-sha1: ${{ steps.signing-inputs.outputs.certificate-sha1 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: Verify Supplied Signing Certificate and Profiles
+        id: signing-inputs
         env:
           DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
           DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
@@ -82,7 +85,10 @@ jobs:
           bash Scripts/check_macos_release_signing_inputs.sh \
             "$signing_input_dir/certificate.pem" \
             "$signing_input_dir/app.provisionprofile" \
-            "$signing_input_dir/widget.provisionprofile"
+            "$signing_input_dir/widget.provisionprofile" | tee "$signing_input_dir/result.log"
+          certificate_sha1="$(sed -n 's/^Developer ID certificate fingerprint: //p' "$signing_input_dir/result.log")"
+          [[ "$certificate_sha1" =~ ^[A-F0-9]{40}$ ]] || exit 1
+          echo "certificate-sha1=$certificate_sha1" >> "$GITHUB_OUTPUT"
 
   macos-preflight:
     runs-on: macos-26
@@ -138,6 +144,9 @@ jobs:
 
       - name: Self-Test Release Keychain Restoration
         run: python3 -W error Scripts/test_release_keychain_state.py
+
+      - name: Self-Test Profile-Bound Release Signing Identity
+        run: python3 -W error Scripts/test_macos_release_signing_inputs.py
 
       - name: Self-Test Release Acceptance Manifest Finalization
         run: python3 Scripts/test_finalize_release_acceptance_manifests.py
@@ -415,6 +424,7 @@ jobs:
         env:
           DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERT_P12_BASE64 }}
           DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERT_PASSWORD }}
+          EXPECTED_SIGNING_CERTIFICATE_SHA1: ${{ needs.macos-signing-inputs.outputs.certificate-sha1 }}
         run: |
           set -euo pipefail
           umask 077
@@ -458,11 +468,10 @@ jobs:
             -k "$KEYCHAIN_PASSWORD" \
             "$KEYCHAIN_PATH"
 
-          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
-          if [[ -z "$SIGNING_IDENTITY" ]]; then
-            echo "::error::Unable to resolve a Developer ID Application identity after importing the certificate."
-            exit 1
-          fi
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH" > "$RUNNER_TEMP/imported-signing-identities.txt"
+          SIGNING_IDENTITY="$(python3 Scripts/select_macos_release_signing_identity.py \
+            --identities "$RUNNER_TEMP/imported-signing-identities.txt" \
+            --fingerprint "$EXPECTED_SIGNING_CERTIFICATE_SHA1")"
 
           {
             echo "SIGNING_IDENTITY=$SIGNING_IDENTITY"
