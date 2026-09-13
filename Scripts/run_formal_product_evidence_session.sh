@@ -287,6 +287,21 @@ PY
   echo "verified installation has no launch persistent identifier" >&2
   exit 1
 }
+IOS_REMOTE_APP_PATH="$(python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
+import json
+import pathlib
+import sys
+
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["remoteApplicationPath"])
+PY
+)"
+IOS_PRODUCT_LAUNCH_ARGS=("$IOS_REMOTE_APP_PATH")
+if [[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]; then
+  IOS_PRODUCT_LAUNCH_ARGS=(
+    --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER"
+    "$IOS_REMOTE_APP_PATH"
+  )
+fi
 
 echo "==> Launching immutable Mac candidate through its ordinary application entry"
 /usr/bin/open "$CANDIDATE_APP"
@@ -320,9 +335,8 @@ echo "==> Launching sealed iOS product with no arguments or child environment"
 xcrun devicectl --timeout "$((TIMEOUT_SECONDS + 120))" device process launch \
   --device "$IOS_DEVICE_ID" \
   --console \
-  --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" \
   --json-output "$IOS_LAUNCH_RESULT" \
-  com.skybridge.compass.ios \
+  "${IOS_PRODUCT_LAUNCH_ARGS[@]}" \
   >"$IOS_CONSOLE_STDOUT" 2>"$IOS_CONSOLE_STDERR" &
 IOS_CONSOLE_PID="$!"
 skybridge_ios_capture_console_handle \

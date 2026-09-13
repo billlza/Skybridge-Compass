@@ -264,45 +264,12 @@ def _parse_message(message: str) -> Event:
 
 def _identity_events(raw_path: Path, identity: dict[str, Any]) -> list[Event]:
     try:
-        text = _read_regular(
-            raw_path, "private iOS identity OSLog NDJSON", MAX_INPUT_BYTES
-        ).decode("utf-8")
-    except UnicodeDecodeError as exc:
-        _fail(f"private iOS identity OSLog NDJSON is not UTF-8: {exc}")
+        rows = product_evidence.bound_oslog_rows(raw_path, identity)
+    except product_evidence.IOSProductEvidenceError as exc:
+        _fail(f"private iOS identity OSLog is invalid: {exc}")
     events: list[Event] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
-        if not line:
-            _fail(f"raw identity OSLog line {line_number} is empty")
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError as exc:
-            _fail(f"raw identity OSLog line {line_number} is invalid JSON: {exc}")
-        if not isinstance(row, dict):
-            _fail(f"raw identity OSLog line {line_number} is not an object")
-        if (
-            row.get("eventType") != "logEvent"
-            or row.get("messageType") != "Default"
-            or row.get("subsystem") != SUBSYSTEM
-            or row.get("category") != CATEGORY
-            or row.get("processID") != identity["processIdentifier"]
-            or product_evidence._remote_image_path(
-                row.get("processImagePath"), line_number
-            )
-            != identity["executablePath"]
-        ):
-            _fail(
-                f"raw identity OSLog line {line_number} is outside the exact process boundary"
-            )
-        if (
-            not isinstance(row.get("formatString"), str)
-            or "public" not in row["formatString"]
-        ):
-            _fail(
-                f"raw identity OSLog line {line_number} was not emitted as public data"
-            )
-        message = row.get("eventMessage")
-        if not isinstance(message, str):
-            _fail(f"raw identity OSLog line {line_number} has no eventMessage")
+    for row in rows:
+        message = row["eventMessage"]
         if message.startswith("productionIdentity"):
             events.append(_parse_message(message))
     if len(events) > MAX_EVENT_COUNT:

@@ -199,6 +199,21 @@ payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 print(payload["launchServicesIdentifier"])
 PY
 )"
+IOS_REMOTE_APP_PATH="$(python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
+import json
+import pathlib
+import sys
+
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["remoteApplicationPath"])
+PY
+)"
+IOS_PRODUCT_LAUNCH_ARGS=("$IOS_REMOTE_APP_PATH")
+if [[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]; then
+  IOS_PRODUCT_LAUNCH_ARGS=(
+    --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER"
+    "$IOS_REMOTE_APP_PATH"
+  )
+fi
 
 launch_and_capture() {
   local prefix="${1:?missing launch prefix}"
@@ -227,9 +242,8 @@ PY
   xcrun devicectl --timeout "$((TIMEOUT_SECONDS + 120))" device process launch \
     --device "$IOS_DEVICE_ID" \
     --console \
-    --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" \
     --json-output "$launch_result" \
-    com.skybridge.compass.ios \
+    "${IOS_PRODUCT_LAUNCH_ARGS[@]}" \
     >"$console_stdout" 2>"$console_stderr" &
   IOS_CONSOLE_PID="$!"
   IOS_CONSOLE_HANDLE_IDENTITY="$console_identity"

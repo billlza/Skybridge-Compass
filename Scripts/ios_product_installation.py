@@ -114,13 +114,18 @@ def _remote_app_path(raw_url: object) -> str:
     if not isinstance(raw_url, str):
         _fail("installed product URL is missing")
     parsed = urllib.parse.urlparse(raw_url)
-    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc not in {"", "localhost"}
+        or parsed.params or parsed.query or parsed.fragment
+    ):
         _fail("installed product URL must be a local file URL")
     path = urllib.parse.unquote(parsed.path)
     normalized = str(PurePosixPath(path.rstrip("/")))
     if (
         not normalized.startswith("/private/var/containers/Bundle/Application/")
-        or not normalized.endswith(".app")
+        or PurePosixPath(normalized).name != "SkyBridgeCompass-iOS.app"
+        or path.rstrip("/") != normalized
         or any(component in {".", ".."} for component in PurePosixPath(normalized).parts)
     ):
         _fail("installed product URL is outside the iOS application container")
@@ -224,9 +229,13 @@ def verify_installation(
     raw_launch_identifier = installed_application.get("launchServicesIdentifier")
     if not isinstance(raw_launch_identifier, str) or not raw_launch_identifier:
         _fail("installed application has no launchServicesIdentifier")
-    launch_identifier = _validate_launch_services_identifier(
-        raw_launch_identifier
+    # A successful CoreDevice install can report this unavailable sentinel.
+    # It is not a token: the producer then launches the receipt-bound app path.
+    launch_identifier = (
+        raw_launch_identifier if raw_launch_identifier == "unknown"
+        else _validate_launch_services_identifier(raw_launch_identifier)
     )
+    installed_app_path = _remote_app_path(installed_application.get("installationURL"))
 
     query = _devicectl_result(
         apps_result,
@@ -250,6 +259,8 @@ def verify_installation(
     ):
         _fail("installed product bundle/version/build does not match the sealed product")
     remote_app_path = _remote_app_path(app.get("url"))
+    if remote_app_path != installed_app_path:
+        _fail("installed-app query path does not match the exact installation receipt")
     return {
         "bundleIdentifier": APP_BUNDLE_IDENTIFIER,
         "deviceIdentifier": expected_device_identifier,

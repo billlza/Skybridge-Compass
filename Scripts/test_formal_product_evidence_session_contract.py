@@ -28,6 +28,7 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
         cls.lifecycle = LIFECYCLE_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.all_orchestrator = ALL_ORCHESTRATOR.read_text(encoding="utf-8")
         cls.ios_capture = IOS_CAPTURE.read_text(encoding="utf-8")
+        cls.ios_log_reader = (ROOT / "Scripts/ios_product_oslog_capture.py").read_text(encoding="utf-8")
         cls.ios_extractor = IOS_EXTRACTOR.read_text(encoding="utf-8")
         cls.identity_extractor = IDENTITY_EXTRACTOR.read_text(encoding="utf-8")
         cls.ios_installation = IOS_INSTALLATION.read_text(encoding="utf-8")
@@ -82,6 +83,10 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
             self.assertLess(install, verify)
             self.assertLess(verify, launch)
             self.assertIn("--launch-persistent-identifier", source)
+            self.assertIn('IOS_PRODUCT_LAUNCH_ARGS=("$IOS_REMOTE_APP_PATH")', source)
+            self.assertIn('"remoteApplicationPath"', source)
+            self.assertIn('"${IOS_PRODUCT_LAUNCH_ARGS[@]}"', source)
+            self.assertIn('[[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]', source)
             self.assertIn("--installation-binding", source)
             self.assertIn("ios-postinstall-prelaunch-processes.json", source)
         for required in (
@@ -160,18 +165,25 @@ class FormalProductEvidenceSessionContractTests(unittest.TestCase):
 
     def test_current_ios_capture_is_exact_pid_and_archive_bound(self) -> None:
         for required in (
-            "processIdentifier == $IOS_PROCESS_ID",
-            'subsystem == \\"com.skybridge.compass.release-evidence\\"',
-            'category == \\"ProductSession\\"',
             "bind-launch",
+            '--process-id "$IOS_PROCESS_ID"',
+            '--start-epoch "$LAUNCH_START_EPOCH"',
         ):
             self.assertIn(required, self.ios_capture)
+        for required in (
+            "processIdentifier == {process_id}",
+            'subsystem == "com.skybridge.compass.release-evidence"',
+            'category == "ProductSession"',
+        ):
+            self.assertIn(required, self.ios_log_reader)
         for required in (
             'row.get("processID") != identity["processIdentifier"]',
             '!= identity["executablePath"]',
             '"iosReleaseArchive": binding',
             '"releaseArchiveBindingVerified": True',
             "IDENTITY_EVENT_NAMES",
+            'row.get("processImageUUID")',
+            '"appExecutableUUIDs"',
         ):
             self.assertIn(required, self.ios_extractor)
 

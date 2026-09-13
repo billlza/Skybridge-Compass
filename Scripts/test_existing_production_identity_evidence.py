@@ -69,6 +69,7 @@ class ExistingProductionIdentityEvidenceTests(unittest.TestCase):
                 "category": evidence.CATEGORY,
                 "processID": 8100 + index,
                 "processImagePath": self.files.executable_path,
+                "processImageUUID": self.files.binding["appExecutableUUIDs"][0]["uuid"],
                 "formatString": "%{public}s",
                 "eventMessage": message,
             }

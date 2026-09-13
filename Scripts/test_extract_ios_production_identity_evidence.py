@@ -87,6 +87,7 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
                 "category": identity_evidence.CATEGORY,
                 "processID": process_id,
                 "processImagePath": EXECUTABLE_PATH,
+                "processImageUUID": self.archive["appExecutableUUIDs"][0]["uuid"],
                 "formatString": "%{public}s",
                 "eventMessage": message,
             },
@@ -189,6 +190,21 @@ class IOSProductionIdentityEvidenceTests(unittest.TestCase):
         self.assertNotIn(IDENTITY_REFERENCE, public_text)
         self.assertNotIn(IDENTITY_REFERENCE[4:], public_text)
         self.assertEqual(os.stat(output).st_mode & 0o777, 0o600)
+
+    def test_identity_events_accept_native_trailer_but_reject_wrong_runtime_uuid(self) -> None:
+        first, _ = self._write_logs([self._restored()], [self._restored()])
+        with first.open("a") as handle:
+            handle.write('{"count":1,"finished":1}\n')
+        events = identity_evidence._identity_events(first, self.first_identity)
+        self.assertEqual(len(events), 1)
+        rows = first.read_text().splitlines()
+        event = json.loads(rows[0])
+        event["processImageUUID"] = "0" * 36
+        first.write_text(json.dumps(event) + "\n" + rows[1] + "\n")
+        with self.assertRaisesRegex(
+            identity_evidence.ProductionIdentityEvidenceError, "sealed executable UUID"
+        ):
+            identity_evidence._identity_events(first, self.first_identity)
 
     def test_rejects_same_process_or_start_token_as_fake_relaunch(self) -> None:
         duplicate = self._launch_identity(101, "1000:1")
