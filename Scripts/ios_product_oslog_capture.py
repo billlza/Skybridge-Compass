@@ -60,9 +60,14 @@ def capture(*, device_udid: str, process_id: int, start_epoch: int, raw_output: 
     complete = False
     try:
         with os.fdopen(descriptor, "wb") as output:
-            result = subprocess.run(
-                argv, stdout=output, stderr=subprocess.PIPE, check=False, timeout=300
-            )
+            try:
+                result = subprocess.run(
+                    argv, stdout=output, stderr=subprocess.PIPE, check=False, timeout=300
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    "scoped iOS log capture timed out waiting for system authentication or the log reader"
+                ) from None
             if result.returncode != 0:
                 detail = result.stderr.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(f"scoped iOS log collection failed ({result.returncode}): {detail}")
