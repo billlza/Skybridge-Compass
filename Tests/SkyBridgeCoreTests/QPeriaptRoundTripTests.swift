@@ -1157,6 +1157,43 @@ final class QPeriaptRoundTripTests: XCTestCase {
         }
     }
 
+    func testLANBootstrapRequestsTheAdmittedQHandshakeSuite() async throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Native Q admission requires macOS 26 or newer.")
+        }
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        defer {
+            if let previous { setenv("SB_ENABLE_QPERIAPT", previous, 1) }
+            else { unsetenv("SB_ENABLE_QPERIAPT") }
+            QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        }
+        let session = try await makeSession()
+        try await QPeriaptPlatformPolicy.activateRuntimeSession(session)
+        let target = await P2PDiscoveryService.preferredStrictPQCOutboundTargetSuite()
+        let requestedSuites = await P2PDiscoveryService.signedLANRefreshRequestedSuites(
+            preferredTargetSuite: target
+        )
+        let handshakeProvider = P2PConnection.makeHandshakeCryptoProvider(policy: .requirePQC)
+        XCTAssertEqual(target, .qperiaptABI2PolicyBound)
+        XCTAssertEqual(requestedSuites, [.qperiaptABI2PolicyBound])
+        XCTAssertEqual(requestedSuites, handshakeProvider.supportedSuites)
+    }
+
+    func testLANBootstrapDoesNotSelectOrdinaryKeysForUnadmittedQ() async {
+        let previous = ProcessInfo.processInfo.environment["SB_ENABLE_QPERIAPT"]
+        XCTAssertEqual(setenv("SB_ENABLE_QPERIAPT", "1", 1), 0)
+        QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        defer {
+            if let previous { setenv("SB_ENABLE_QPERIAPT", previous, 1) }
+            else { unsetenv("SB_ENABLE_QPERIAPT") }
+            QPeriaptPlatformPolicy.resetRuntimeSessionForTesting()
+        }
+        let target = await P2PDiscoveryService.preferredStrictPQCOutboundTargetSuite()
+        XCTAssertNil(target, "An unadmitted Q request must not bootstrap ordinary PQC keys.")
+    }
+
     func testLANHandshakePreparationPreservesAdmittedQSession() async throws {
         guard #available(macOS 26.0, *) else {
             throw XCTSkip("Native Q admission requires macOS 26 or newer.")

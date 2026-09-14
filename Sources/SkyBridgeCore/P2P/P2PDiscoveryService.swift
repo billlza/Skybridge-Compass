@@ -2908,7 +2908,9 @@ public class P2PDiscoveryService: BaseManager {
 	        }
 
         let candidates = Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: targetDeviceId)
-        let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite()
+        guard let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite() else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("local PQC provider unavailable")
+        }
         let trustProvider = DefaultHandshakeTrustProvider()
         let trustedKEMSuites = await Self.trustedKEMSuites(
             provider: trustProvider,
@@ -3625,17 +3627,19 @@ public class P2PDiscoveryService: BaseManager {
         policy: CryptoProviderFactory.SelectionPolicy
     ) async -> [CryptoSuite] {
         await Task.detached(priority: .utility) {
-            CryptoProviderFactory.make(policy: policy).supportedSuites
+            // Bootstrap must request the same key family as the actual LAN
+            // handshake, including an explicitly admitted Q provider.
+            P2PConnection.makeHandshakeCryptoProvider(policy: policy).supportedSuites
         }.value
     }
 
-    private static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
+    static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
         await cryptoProviderSupportedSuites(policy: .requirePQC)
             .first(where: { $0.isPQCGroup && $0.isNegotiable })?
             .canonicalKEMSuite
     }
 
-    private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+    static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
         if preferredTargetSuite?.canonicalKEMSuite == .qperiaptABI2PolicyBound {
             return [.qperiaptABI2PolicyBound]
         }
@@ -3694,12 +3698,8 @@ public class P2PDiscoveryService: BaseManager {
         return trustedPeerKEMSuites.contains(where: { $0.isPQCGroup })
     }
 
-    private static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
-        if availableSuite == target { return true }
-        if availableSuite.canonicalKEMSuite == target.canonicalKEMSuite { return true }
-        if target.isHybrid { return availableSuite.isHybrid }
-        if availableSuite.isHybrid { return target.isHybrid }
-        return false
+    static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
+        availableSuite.canonicalKEMSuite == target.canonicalKEMSuite
     }
 
     private static func signedRefreshEvidenceSatisfiesStrictPQC(

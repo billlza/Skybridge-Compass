@@ -4239,6 +4239,18 @@ final class P2PBootstrapRekeyTargetTests: XCTestCase {
         )
     }
 
+    func testQAndXWingRequireDifferentKEMIdentityMaterial() {
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(
+            .xwing, target: .qperiaptABI2PolicyBound
+        ))
+        XCTAssertFalse(P2PConnectionManager.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .xwing
+        ))
+        XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(
+            .qperiaptABI2PolicyBound, target: .qperiaptABI2PolicyBound
+        ))
+    }
+
     func testSuiteSupportsTargetKEMTreatsFSAndCanonicalMLKEMAsEquivalent() {
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768, target: .mlkem768fs))
         XCTAssertTrue(P2PConnectionManager.suiteSupportsTargetKEM(.mlkem768fs, target: .mlkem768))
