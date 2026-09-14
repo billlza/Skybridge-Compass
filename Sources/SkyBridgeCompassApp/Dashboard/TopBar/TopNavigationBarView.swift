@@ -87,7 +87,7 @@ public struct TopNavigationBarView: View {
                 HStack {
                     Spacer()
                     Button(LocalizationManager.shared.localizedString("action.cancel")) { showManualConnectSheet = false }
-                    Button(LocalizationManager.shared.localizedString("device.action.connect")) {
+                    Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                         showManualConnectSheet = false
                         let port = UInt16(manualPort) ?? 0
                         Task { await appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode) }

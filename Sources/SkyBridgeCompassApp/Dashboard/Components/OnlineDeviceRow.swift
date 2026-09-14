@@ -129,7 +129,7 @@ public struct OnlineDeviceRow: View {
                     HStack {
                         Image(systemName: device.connectionStatus == .connected ? "link" : "link.circle")
                             .font(.caption)
-                        Text(device.connectionStatus == .connected ? connectedStatusText : LocalizationManager.shared.localizedString("device.action.connect"))
+                        Text(device.connectionStatus == .connected ? connectedStatusText : LocalizationManager.shared.localizedString("discovery.action.connect"))
                             .font(.caption.weight(.medium))
                     }
                     .foregroundColor(.white)

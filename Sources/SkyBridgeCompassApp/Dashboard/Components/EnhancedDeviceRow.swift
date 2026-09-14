@@ -92,7 +92,7 @@ public struct EnhancedDeviceRow: View {
                 HStack {
                     Image(systemName: "link")
                         .font(.caption)
-                    Text(LocalizationManager.shared.localizedString("device.action.connect"))
+                    Text(LocalizationManager.shared.localizedString("discovery.action.connect"))
                         .font(.caption.weight(.medium))
                 }
                 .foregroundColor(.white)
