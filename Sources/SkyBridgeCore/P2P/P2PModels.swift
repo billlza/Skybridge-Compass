@@ -2879,23 +2879,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     public func deriveClassicFileTransferKey(transferId: String) throws -> SymmetricKey {
+        try classicTransferKeyMaterial(transferId: transferId).transferKey
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferKeyMaterial(transferId: String) throws -> ClassicTransferKeyMaterial {
         guard let keys = sessionKeysLock.withLock({ $0 }) else {
             throw P2PConnectionError.noSessionKeys
         }
-
-        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
-            lhs.lexicographicallyPrecedes(rhs)
-        }
-        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
-            partial.append(key)
-        }
-
-        return HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
-            salt: Data("skybridge-classic-file-transfer-v1".utf8),
-            info: Data(transferId.utf8),
-            outputByteCount: 32
-        )
+        return ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId)
     }
 
     @available(macOS 14.0, iOS 17.0, *)

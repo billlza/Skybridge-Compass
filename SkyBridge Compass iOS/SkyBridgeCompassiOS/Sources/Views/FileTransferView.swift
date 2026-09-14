@@ -253,6 +253,12 @@ struct FileTransferView: View {
             
             ForEach(fileTransferManager.activeTransfers) { transfer in
                 FileTransferCard(transfer: transfer)
+                    .onAppear {
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
+                    .onChange(of: transfer.status) { _, _ in
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
             }
         }
         .padding(16)
@@ -304,6 +310,12 @@ struct FileTransferView: View {
                         onOpenFile: openLocalFile,
                         onShareFile: shareLocalFile
                     )
+                    .onAppear {
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
+                    .onChange(of: transfer.status) { _, _ in
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
                 }
             }
         }

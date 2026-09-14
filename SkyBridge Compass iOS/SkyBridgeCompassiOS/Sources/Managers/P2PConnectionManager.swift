@@ -12580,13 +12580,68 @@ public class P2PConnectionManager: ObservableObject {
     /// This mirrors the macOS derivation so local file-transfer metadata/chunks/receipts
     /// stay cryptographically bound to the already authenticated P2P session.
     public func deriveClassicFileTransferKey(transferId: String, deviceId: String) throws -> SymmetricKey {
+        try classicTransferKeyMaterial(transferId: transferId, deviceId: deviceId).transferKey
+    }
+
+    struct ClassicFileTransferKeyMaterial: Sendable {
+        let transferKey: SymmetricKey
+        let sessionReference: String?
+        let role: ProductConnectivityHandshakeRole
+        let suite: CryptoSuite
+        let connectionGeneration: UUID
+
+        init(sessionKeys: SessionKeys, transferId: String, connectionGeneration: UUID) {
+            self.connectionGeneration = connectionGeneration
+            let orderedKeys = [sessionKeys.sendKey, sessionKeys.receiveKey].sorted { lhs, rhs in
+                lhs.lexicographicallyPrecedes(rhs)
+            }
+            let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
+                partial.append(key)
+            }
+
+            transferKey = HKDF<SHA256>.deriveKey(
+                inputKeyMaterial: SymmetricKey(data: combinedMaterial),
+                salt: Data("skybridge-classic-file-transfer-v1".utf8),
+                info: Data(transferId.utf8),
+                outputByteCount: 32
+            )
+            sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: sessionKeys.sessionId,
+                transcriptHash: sessionKeys.transcriptHash
+            )
+            role = sessionKeys.role == .initiator ? .initiator : .responder
+            suite = sessionKeys.negotiatedSuite
+        }
+
+        func matches(_ other: Self) -> Bool {
+            guard connectionGeneration == other.connectionGeneration,
+                  sessionReference == other.sessionReference,
+                  role == other.role, suite == other.suite else { return false }
+            return transferKey.withUnsafeBytes { lhs in
+                other.transferKey.withUnsafeBytes { rhs in
+                    guard lhs.count == rhs.count else { return false }
+                    var difference: UInt8 = 0
+                    for index in lhs.indices { difference |= lhs[index] ^ rhs[index] }
+                    return difference == 0
+                }
+            }
+        }
+    }
+
+    /// Derive the file key and evidence reference from one exact authenticated
+    /// incarnation. This synchronous read cannot straddle a rekey or replacement.
+    func classicTransferKeyMaterial(
+        transferId: String,
+        deviceId: String
+    ) throws -> ClassicFileTransferKeyMaterial {
         guard let current = currentAuthenticatedSession(
             forAnyPeerId: deviceId,
             requireConnectedStatus: true
         ) else { throw P2PError.noSessionKey }
-        return deriveClassicFileTransferKey(
-            from: current.keys,
-            transferId: transferId
+        return ClassicFileTransferKeyMaterial(
+            sessionKeys: current.keys,
+            transferId: transferId,
+            connectionGeneration: current.receipt.lease.generation
         )
     }
 
@@ -12679,22 +12734,7 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
-    private func deriveClassicFileTransferKey(from keys: SessionKeys, transferId: String) -> SymmetricKey {
-        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
-            lhs.lexicographicallyPrecedes(rhs)
-        }
-        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
-            partial.append(key)
-        }
 
-        return HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
-            salt: Data("skybridge-classic-file-transfer-v1".utf8),
-            info: Data(transferId.utf8),
-            outputByteCount: 32
-        )
-    }
-    
     /// 获取设备的协商套件
     public func getNegotiatedSuite(for deviceId: String) -> CryptoSuite? {
         currentAuthenticatedSession(

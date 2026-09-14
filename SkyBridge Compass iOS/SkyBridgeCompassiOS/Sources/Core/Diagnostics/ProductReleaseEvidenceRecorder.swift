@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import OSLog
 import SkyBridgeProtocolCore
 
@@ -644,6 +645,14 @@ enum ProductEvidenceTransport: String, Sendable, Hashable {
 enum ProductEvidenceRouteClass: String, Sendable {
     case wifi
     case awdl
+
+    static func current(for connection: NWConnection) -> Self? {
+        guard let path = connection.currentPath else { return nil }
+        if path.availableInterfaces.contains(where: { $0.name.lowercased().hasPrefix("awdl") }) {
+            return .awdl
+        }
+        return path.usesInterfaceType(.wifi) ? .wifi : nil
+    }
 }
 
 enum ProductEvidenceSelectedTransport: String, Sendable {

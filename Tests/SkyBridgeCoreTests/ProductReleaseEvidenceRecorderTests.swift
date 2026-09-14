@@ -940,14 +940,29 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         let fileManagerSource = try source(
             "Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift"
         )
-        XCTAssertTrue(fileManagerSource.contains("exactSnapshot: ClassicTransferSessionSnapshot?"))
-        XCTAssertTrue(fileManagerSource.contains("symmetricKeyMaterialEquals("))
+        XCTAssertTrue(fileManagerSource.contains("material = try connection.classicTransferKeyMaterial("))
+        XCTAssertTrue(fileManagerSource.contains("transferKey: material.transferKey"))
+        XCTAssertTrue(fileManagerSource.contains("let routeClass = ProductReleaseEvidenceRouteClass.current(for: connection)"))
+        XCTAssertTrue(fileManagerSource.contains("context.integrityReceiptVerified"))
+        let liveKeySource = try source("Sources/SkyBridgeCore/P2P/P2PModels.swift")
+        XCTAssertTrue(liveKeySource.contains("ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId)"))
         XCTAssertTrue(fileManagerSource.contains("recordProductFileTransferCompletionVisible("))
         let fileViewSource = try source(
             "Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift"
         )
         XCTAssertTrue(fileViewSource.contains(".onAppear"))
         XCTAssertTrue(fileViewSource.contains("recordProductFileTransferCompletionVisible("))
+        let iOSFileManagerSource = try source(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/FileTransferManager.swift"
+        )
+        XCTAssertTrue(iOSFileManagerSource.contains("recordFileTransferStarted("))
+        XCTAssertTrue(iOSFileManagerSource.contains("recordFileTransferCompleted("))
+        XCTAssertTrue(iOSFileManagerSource.contains("confirmProductFileTransferIntegrityReceipt(for: transfer.id)"))
+        XCTAssertTrue(iOSFileManagerSource.contains("receiptDeliveryStatus == .delivered"))
+        let iOSFileViewSource = try source(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/FileTransferView.swift"
+        )
+        XCTAssertTrue(iOSFileViewSource.contains("recordProductFileTransferCompletionVisible(for: transfer)"))
 
         let webRTCSource = try source(
             "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"

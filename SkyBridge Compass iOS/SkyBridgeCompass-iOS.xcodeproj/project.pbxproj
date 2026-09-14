@@ -251,6 +251,7 @@
 		DBA0D3E1B12FFDC81DA73DAF /* RemoteDesktopPresentationTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEBFD5E35938C55AB49FAFB0 /* RemoteDesktopPresentationTypes.swift */; };
 		DCEFA18F51EEAC5A498234D7 /* CapabilityResolutionParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABC561404FEB156CA37E8009 /* CapabilityResolutionParityTests.swift */; };
 		DE19D5E16D0FAAF7C039E43A /* FileTransferLANRoutePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E702E9A3AC9F6266ABD535AF /* FileTransferLANRoutePolicyTests.swift */; };
+		6CB8841326F28103D46AB062 /* ClassicTransferKeyMaterialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE8B76220BBC9E0DDBA59A49 /* ClassicTransferKeyMaterialTests.swift */; };
 		DEAD343C44E418D122732A1E /* RemoteDesktopAudioPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14EEBFF202E02182024AA6BD /* RemoteDesktopAudioPlayback.swift */; };
 		E23B454FC096814D60AACC6E /* SkyBridgeServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF1C80121FB209395A52D1EA /* SkyBridgeServerConfig.swift */; };
 		E3CBE7A2A39E645AA21D1F46 /* AccountPresenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11513397DE272D8BD6C664EB /* AccountPresenceService.swift */; };
@@ -559,6 +560,7 @@
 		E5A36F3729987BE2BB947D1F /* RemoteDesktopWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopWorkspace.swift; sourceTree = "<group>"; };
 		E6996ECCE7666AD331B6D5AC /* RemoteDesktopTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopTypes.swift; sourceTree = "<group>"; };
 		E702E9A3AC9F6266ABD535AF /* FileTransferLANRoutePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransferLANRoutePolicyTests.swift; sourceTree = "<group>"; };
+		EE8B76220BBC9E0DDBA59A49 /* ClassicTransferKeyMaterialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicTransferKeyMaterialTests.swift; sourceTree = "<group>"; };
 		E70429CAA30A51AC58CCD63E /* CrossNetworkQRCodePayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrossNetworkQRCodePayload.swift; sourceTree = "<group>"; };
 		E75A3366A6C7B572423B5D44 /* TrafficPadding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficPadding.swift; sourceTree = "<group>"; };
 		E80D3DE7DA8FBEA3506BAF07 /* DeviceMessagingServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceMessagingServiceTests.swift; sourceTree = "<group>"; };
@@ -731,6 +733,7 @@
 				E80D3DE7DA8FBEA3506BAF07 /* DeviceMessagingServiceTests.swift */,
 				4160F9F87D13AA571CE03308 /* FallbackSemanticsParityTests.swift */,
 				E702E9A3AC9F6266ABD535AF /* FileTransferLANRoutePolicyTests.swift */,
+				EE8B76220BBC9E0DDBA59A49 /* ClassicTransferKeyMaterialTests.swift */,
 				65C90057705D92FEF526C65C /* HandshakeCryptoPolicyParityTests.swift */,
 				30096A9F3693EDFD4BBE9AB4 /* HandshakeFinishedDeliveryTests.swift */,
 				7A68AC9933B0C76F43F3C4EC /* InboundFileTransferApprovalServiceTests.swift */,
@@ -1432,6 +1435,7 @@
 				87D1A833B5EA3686AE4E2590 /* DeviceMessagingServiceTests.swift in Sources */,
 				B9B1776A08627F2AC1499D85 /* FallbackSemanticsParityTests.swift in Sources */,
 				DE19D5E16D0FAAF7C039E43A /* FileTransferLANRoutePolicyTests.swift in Sources */,
+				6CB8841326F28103D46AB062 /* ClassicTransferKeyMaterialTests.swift in Sources */,
 				CA33646C6E8E1E7769FAE1CB /* HandshakeCryptoPolicyParityTests.swift in Sources */,
 				6CD4942580E8AAD15E67DCAD /* HandshakeFinishedDeliveryTests.swift in Sources */,
 				B871B653EC5D405B70932B07 /* InboundFileTransferApprovalServiceTests.swift in Sources */,

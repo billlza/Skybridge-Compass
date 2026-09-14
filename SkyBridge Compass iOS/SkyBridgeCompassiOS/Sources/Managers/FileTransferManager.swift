@@ -11,6 +11,7 @@ import Network
 import CryptoKit
 import ActivityKit
 import enum SkyBridgeProtocolCore.ApplePeerConnectivityPolicy
+import enum SkyBridgeProtocolCore.P2PEvidenceReference
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferMessage
 import class SkyBridgeProtocolCore.ClassicTransferChunkCryptoWorker
@@ -132,7 +133,19 @@ public class FileTransferManager: ObservableObject {
         let matchedBy: ClassicTransferPeerResolutionBranch
         let declaredCandidates: [String]
         let endpointCandidates: [String]
+        let productEvidenceBinding: P2PConnectionManager.ClassicFileTransferKeyMaterial
     }
+
+    private struct ProductFileTransferEvidenceContext {
+        let transferID: String
+        let fileName: String
+        let fileSize: Int64
+        let owner: ProductEvidenceSessionOwner
+        let transferReference: String
+        let direction: ProductEvidenceFileDirection
+        var integrityReceiptVerified = false
+    }
+    private var productFileTransferEvidenceContext: ProductFileTransferEvidenceContext?
 
     private struct WebRTCOutboundPresentationOwner {
         let token: UUID
@@ -385,6 +398,12 @@ public class FileTransferManager: ObservableObject {
                 over: connection
             )
 
+            beginProductFileTransferEvidence(
+                for: transfer,
+                securityContext: securityContext,
+                connection: connection
+            )
+
             // 分块发送文件
             try await sendFileInChunks(
                 from: url,
@@ -415,6 +434,7 @@ public class FileTransferManager: ObservableObject {
                 throw receiptError
             }
 
+            confirmProductFileTransferIntegrityReceipt(for: transfer.id)
             // 完成传输
             await completeTransfer(transfer.id, success: true)
             
@@ -1290,6 +1310,37 @@ public class FileTransferManager: ObservableObject {
             "file-transfer inbound-authenticated stage=metadata"
         )
 
+        // Authentication proves who sent the request. Saving this particular
+        // file still requires the existing product Accept/Reject interaction.
+        let approvalRequest = CrossNetworkWebRTCManager.InboundFileTransferApprovalRequest(
+            transferId: metadata.transferId,
+            fileName: metadata.fileName,
+            fileSize: metadata.fileSize,
+            chunkSize: metadata.chunkSize,
+            totalChunks: metadata.fileSize == 0
+                ? 0 : Int((metadata.fileSize - 1) / Int64(metadata.chunkSize) + 1),
+            senderDeviceId: securityContext.resolvedPeerDeviceId,
+            senderDeviceName: metadata.senderDeviceName ?? peerContext.peerLabel
+                ?? securityContext.resolvedPeerDeviceId
+        )
+        do {
+            let decision = await InboundFileTransferApprovalService.shared.decide(for: approvalRequest)
+            guard decision == .approved else { throw FileTransferError.transferCancelled }
+            try Task.checkCancellation()
+            let currentMaterial = try connectionManager.classicTransferKeyMaterial(
+                transferId: metadata.transferId, deviceId: securityContext.matchDeviceId
+            )
+            guard securityContext.productEvidenceBinding.matches(currentMaterial) else {
+                throw FileTransferError.secureSessionRequired
+            }
+        } catch {
+            await sendFailureReceiptIfPossible(
+                transferId: metadata.transferId, securityVersion: metadata.securityVersion,
+                error: error, securityContext: securityContext, over: connection
+            )
+            throw error
+        }
+
         try await acquireTransferSlot()
         defer { releaseTransferSlot() }
         try await prepareClassicInboundDirectory()
@@ -1349,6 +1400,12 @@ public class FileTransferManager: ObservableObject {
         state.localURL = nil
         transferStates[transfer.id] = state
 
+        beginProductFileTransferEvidence(
+            for: transfer,
+            securityContext: securityContext,
+            connection: connection
+        )
+
         var inboundIOHandle: InboundFileTransferIOHandle?
         var committedURL: URL?
         do {
@@ -1400,6 +1457,12 @@ public class FileTransferManager: ObservableObject {
             }
             try await InboundFileTransferIOActor.shared.releaseCommittedFile(using: ioHandle)
             inboundIOHandle = nil
+
+            if receiptDeliveryStatus == .delivered {
+                confirmProductFileTransferIntegrityReceipt(for: transfer.id)
+            } else {
+                retireProductFileTransferEvidence(for: transfer.id, reason: .protocolFailure)
+            }
 
             // 完成传输
             await completeTransfer(transfer.id, success: true)
@@ -2424,6 +2487,86 @@ public class FileTransferManager: ObservableObject {
         return data
     }
 
+    private func beginProductFileTransferEvidence(
+        for transfer: FileTransfer,
+        securityContext: ClassicTransferSecurityContext,
+        connection: NWConnection
+    ) {
+        let binding = securityContext.productEvidenceBinding
+        guard transfer.fileSize > 0,
+              let transferID = UUID(uuidString: transfer.id),
+              let reference = binding.sessionReference,
+              let route = ProductEvidenceRouteClass.current(for: connection) else { return }
+        if let current = productFileTransferEvidenceContext {
+            retireProductFileTransferEvidence(for: current.transferID, reason: .sessionReplaced)
+        }
+        let recorder = ProductReleaseEvidenceRecorder.shared
+        guard let owner = recorder.beginSession(
+            transport: .p2p,
+            sessionReference: reference,
+            routeClass: route
+        ) else { return }
+        guard recorder.recordP2PSessionAuthenticated(owner: owner, role: binding.role, suite: binding.suite) else {
+            _ = recorder.endSession(owner: owner, reason: .protocolFailure)
+            return
+        }
+        let direction: ProductEvidenceFileDirection = transfer.isIncoming ? .receive : .send
+        let transferReference = P2PEvidenceReference.transaction(transferID)
+        guard recorder.recordFileTransferStarted(
+            owner: owner, transferReference: transferReference, direction: direction
+        ) else {
+            _ = recorder.endSession(owner: owner, reason: .protocolFailure)
+            return
+        }
+        productFileTransferEvidenceContext = ProductFileTransferEvidenceContext(
+            transferID: transfer.id, fileName: transfer.fileName, fileSize: transfer.fileSize,
+            owner: owner, transferReference: transferReference, direction: direction
+        )
+    }
+
+    private func confirmProductFileTransferIntegrityReceipt(for transferID: String) {
+        guard productFileTransferEvidenceContext?.transferID == transferID else { return }
+        productFileTransferEvidenceContext?.integrityReceiptVerified = true
+    }
+
+    private func retireProductFileTransferEvidence(
+        for transferID: String,
+        reason: ProductEvidenceDisconnectReason
+    ) {
+        guard let context = productFileTransferEvidenceContext,
+              context.transferID == transferID else { return }
+        productFileTransferEvidenceContext = nil
+        _ = ProductReleaseEvidenceRecorder.shared.endSession(owner: context.owner, reason: reason)
+    }
+
+    /// Invoked by the actual mounted active/history card. Persisted history alone
+    /// has no process-local owner or verified receipt and cannot create evidence.
+    @discardableResult
+    func recordProductFileTransferCompletionVisible(for transfer: FileTransfer) -> Bool {
+        guard let context = productFileTransferEvidenceContext,
+              context.transferID == transfer.id,
+              context.fileName == transfer.fileName,
+              context.fileSize == transfer.fileSize,
+              context.direction == (transfer.isIncoming ? .receive : .send),
+              context.integrityReceiptVerified,
+              transfer.status == .completed,
+              transfer.progress == 1,
+              transfer.receiptDeliveryStatus != .unknown,
+              transfer.operationalWarning == nil,
+              (activeTransfers + transferHistory).contains(where: {
+                  $0.id == transfer.id && $0.status == .completed && $0.progress == 1
+              }) else { return false }
+        let recorded = ProductReleaseEvidenceRecorder.shared.recordFileTransferCompleted(
+            owner: context.owner, transferReference: context.transferReference,
+            direction: context.direction, authenticatedReceipt: true,
+            integrityVerified: true, uiEffectVisible: true
+        )
+        retireProductFileTransferEvidence(
+            for: transfer.id, reason: context.direction == .send ? .user : .peer
+        )
+        return recorded
+    }
+
     private func classicTransferSecurityContext(
         peerContext: FileTransferPeerContext
     ) throws -> ClassicTransferSecurityContext {
@@ -2447,18 +2590,19 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.secureSessionRequired
         }
 
-        let transferKey = try connectionManager.deriveClassicFileTransferKey(
+        let material = try connectionManager.classicTransferKeyMaterial(
             transferId: peerContext.transferId,
             deviceId: resolution.matchDeviceId
         )
 
         return ClassicTransferSecurityContext(
-            transferKey: transferKey,
+            transferKey: material.transferKey,
             matchDeviceId: resolution.matchDeviceId,
             resolvedPeerDeviceId: resolution.resolvedPeerDeviceId,
             matchedBy: resolution.matchedBy,
             declaredCandidates: resolution.declaredCandidates,
-            endpointCandidates: resolution.endpointCandidates
+            endpointCandidates: resolution.endpointCandidates,
+            productEvidenceBinding: material
         )
     }
 
@@ -2908,6 +3052,9 @@ public class FileTransferManager: ObservableObject {
     
     /// 完成传输
     private func completeTransfer(_ transferId: String, success: Bool, error: Error? = nil) async {
+        if !success {
+            retireProductFileTransferEvidence(for: transferId, reason: .protocolFailure)
+        }
         let savedURL = transferStates[transferId]?.localURL
         var finalizedTransfer: FileTransfer?
 
