@@ -1290,3 +1290,8 @@
 "info.standardMode" = "Standard mode";
 
 "remoteControl.securityNotice.localInputController" = "This Mac has keyboard and mouse control. Remote viewing continues.";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "Trusted devices";
+"discovery.pendingPairings.section" = "Pairings needing verification";
+"discovery.pendingPairings.explanation" = "These pairing records still need identity verification. They cannot establish whether a device is online.";

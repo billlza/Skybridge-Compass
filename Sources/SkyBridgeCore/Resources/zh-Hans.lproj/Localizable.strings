@@ -1316,3 +1316,8 @@
 "info.standardMode" = "标准模式";
 
 "remoteControl.securityNotice.localInputController" = "本机已收回键盘和鼠标控制权，远端仍可观看。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "已信任设备";
+"discovery.pendingPairings.section" = "待验证的配对记录";
+"discovery.pendingPairings.explanation" = "这些配对记录尚未完成身份验证，不能据此判断设备是否在线。";

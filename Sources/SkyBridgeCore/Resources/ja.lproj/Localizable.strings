@@ -1165,3 +1165,8 @@
 "info.standardMode" = "標準モード";
 
 "remoteControl.securityNotice.localInputController" = "この Mac がキーボードとマウスの操作権を持っています。リモート閲覧は継続します。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "信頼済みデバイス";
+"discovery.pendingPairings.section" = "確認が必要なペアリング記録";
+"discovery.pendingPairings.explanation" = "これらのペアリング記録は本人確認が未完了です。デバイスがオンラインかどうかは判断できません。";

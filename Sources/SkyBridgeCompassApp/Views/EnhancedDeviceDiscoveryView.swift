@@ -124,7 +124,10 @@ private enum DeviceDiscoveryPresentationProjector {
 
         let representedDevices = connected + active + recent
         let displayedTrusted = input.trustedGroups
-            .filter { !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input) }
+            .filter {
+                $0.displayRecord.requiresIdentityVerificationForPresentation
+                    || !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input)
+            }
             .map { group in
                 TrustedRecordCardPresentation(
                     group: group,
@@ -1442,30 +1445,16 @@ public struct EnhancedDeviceDiscoveryView: View {
                 )
             }
 
-            // 受信任设备（已配对/已允许）——来自 TrustSyncService
+            // Saved pairing hints cannot claim the reachability of a trusted identity.
             let trustedRecords = displayedTrustedRecordsForUI
-            if !trustedRecords.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("已信任设备")
-                        .font(.headline)
-
-                    ForEach(trustedRecords) { group in
-                        TrustedDeviceCard(
-                            record: group.group.displayRecord,
-                            subtitle: group.subtitle,
-                            status: group.status
-                        ) {
-                            selectedTrustedGroupSelection = TrustedGroupSelection(id: group.id)
-                        }
-                    }
-                }
-                .padding(16)
-                .dashboardGlassSurface(cornerRadius: 12)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.green.opacity(0.5), lineWidth: 1)
-                )
-            }
+            savedDeviceSection(
+                trustedRecords.filter { !$0.group.displayRecord.requiresIdentityVerificationForPresentation },
+                requiresVerification: false
+            )
+            savedDeviceSection(
+                trustedRecords.filter { $0.group.displayRecord.requiresIdentityVerificationForPresentation },
+                requiresVerification: true
+            )
 
             // 最近连接（不等同于“信任/已配对”，但应立即可见）
             let recentlyConnected = groupedRecentlyConnectedDevices
@@ -1552,6 +1541,41 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     // MARK: - Trusted Devices helpers
+
+    @ViewBuilder
+    private func savedDeviceSection(
+        _ records: [TrustedRecordCardPresentation],
+        requiresVerification: Bool
+    ) -> some View {
+        if !records.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(LocalizationManager.shared.localizedString(
+                    requiresVerification ? "discovery.pendingPairings.section" : "discovery.trustedDevices.section"
+                ))
+                .font(.headline)
+                if requiresVerification {
+                    Text(LocalizationManager.shared.localizedString("discovery.pendingPairings.explanation"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(records) { presentation in
+                    TrustedDeviceCard(
+                        record: presentation.group.displayRecord,
+                        subtitle: presentation.subtitle,
+                        status: presentation.status
+                    ) {
+                        selectedTrustedGroupSelection = TrustedGroupSelection(id: presentation.id)
+                    }
+                }
+            }
+            .padding(16)
+            .dashboardGlassSurface(cornerRadius: 12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke((requiresVerification ? Color.orange : Color.green).opacity(0.5), lineWidth: 1)
+            )
+        }
+    }
 
     private var trustedRecordsForUI: [TrustRecordDisplayGroup] {
         cachedTrustedRecordGroups

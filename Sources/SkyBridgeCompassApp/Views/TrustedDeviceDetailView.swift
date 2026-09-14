@@ -13,7 +13,7 @@ struct TrustedDeviceCard: View {
             HStack(spacing: 12) {
                 Image(systemName: iconName)
                     .font(.title2)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(record.requiresIdentityVerificationForPresentation ? .orange : .green)
                     .frame(width: 28)
                 
                 VStack(alignment: .leading, spacing: 2) {
@@ -58,6 +58,7 @@ struct TrustedDeviceCard: View {
     }
     
     private var statusColor: Color {
+        if record.requiresIdentityVerificationForPresentation { return .orange }
         switch status {
         case .connected:
             return .green
@@ -68,7 +69,10 @@ struct TrustedDeviceCard: View {
         }
     }
 
-    private var statusText: String {
+    var statusText: String {
+        if record.requiresIdentityVerificationForPresentation {
+            return localizedText(chinese: "待验证", english: "Needs verification", japanese: "要確認")
+        }
         switch status {
         case .connected:
             return localizedText(
@@ -149,14 +153,14 @@ struct TrustedDeviceDetailView: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
 
-                Image(systemName: "checkmark.shield.fill")
+                Image(systemName: record.requiresIdentityVerificationForPresentation ? "person.crop.circle.badge.clock" : "checkmark.shield.fill")
                     .font(.title2)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(record.requiresIdentityVerificationForPresentation ? .orange : .green)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(record.deviceName ?? "受信任设备")
                         .font(.title3)
                         .fontWeight(.semibold)
-                    Text(ui(chinese: "已配对/已信任", english: "Paired / Trusted", japanese: "ペア済み / 信頼済み"))
+                    Text(trustSummaryText)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -164,12 +168,22 @@ struct TrustedDeviceDetailView: View {
             }
             
             Divider()
+
+            if record.requiresIdentityVerificationForPresentation {
+                Text(ui(
+                    chinese: "此配对记录尚未完成身份验证，不能据此判断设备是否在线。",
+                    english: "This pairing record still needs identity verification. It cannot establish whether the device is online.",
+                    japanese: "このペアリング記録は本人確認が未完了です。デバイスがオンラインかどうかは判断できません。"
+                ))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
             
             VStack(alignment: .leading, spacing: 10) {
                 infoRow(ui(chinese: "设备 ID", english: "Device ID", japanese: "デバイス ID"), value: record.deviceId)
                 infoRow(
                     ui(chinese: "公钥指纹", english: "Public Key Fingerprint", japanese: "公開鍵フィンガープリント"),
-                    value: record.pubKeyFP.isEmpty ? ui(chinese: "（未绑定/引导模式）", english: "(Bootstrap / Unbound)", japanese: "（未バインド / ブートストラップ）") : record.pubKeyFP
+                    value: identityFingerprintText
                 )
                 
                 let normalizedMetadata = presentationMetadata
@@ -268,6 +282,21 @@ struct TrustedDeviceDetailView: View {
                 .textSelection(.enabled)
             Spacer()
         }
+    }
+
+    var trustSummaryText: String {
+        if record.requiresIdentityVerificationForPresentation {
+            return ui(chinese: "配对记录待验证", english: "Pairing needs verification", japanese: "ペアリング記録の確認が必要")
+        }
+        return ui(chinese: "已配对/已信任", english: "Paired / Trusted", japanese: "ペア済み / 信頼済み")
+    }
+
+    var identityFingerprintText: String {
+        let fingerprints = record.currentPathAuthorityFingerprints.sorted()
+        if !fingerprints.isEmpty { return fingerprints.joined(separator: "\n") }
+        let legacyFingerprint = record.pubKeyFP.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !legacyFingerprint.isEmpty { return legacyFingerprint }
+        return ui(chinese: "未绑定", english: "Unbound", japanese: "未バインド")
     }
     
     private var capsDict: [String: String] {

@@ -2,6 +2,17 @@ import Foundation
 import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
+extension TrustRecord {
+    /// Presentation only. A saved pairing hint is not evidence that a trusted
+    /// peer is offline; authentication continues to use the trust admission path.
+    public var requiresIdentityVerificationForPresentation: Bool {
+        guard isAuthenticationEligible else { return true }
+        if !currentPathAuthorityPins.isEmpty { return false }
+        return pubKeyFP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || publicKey.isEmpty
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
 public struct TrustRecordDisplayGroup: Identifiable, Sendable, Equatable {
     public let id: String
     public let primaryRecord: TrustRecord
@@ -369,6 +380,9 @@ extension TrustSyncService {
     private nonisolated static func displayAnchors(for record: TrustRecord) -> Set<String> {
         var anchors = Set<String>()
 
+        for fingerprint in record.currentPathAuthorityFingerprints {
+            anchors.insert("fp:\(fingerprint)")
+        }
         if let fingerprint = normalizedFingerprint(record.currentPathAuthorityFingerprint) {
             anchors.insert("fp:\(fingerprint)")
         }
@@ -394,7 +408,8 @@ extension TrustSyncService {
         let caps = capabilityDictionary(for: record.capabilities)
         var score = 0
 
-        if let fingerprint = record.currentPathAuthorityFingerprint, !fingerprint.isEmpty {
+        if normalizedFingerprint(record.currentPathAuthorityFingerprint) != nil
+            || !record.currentPathAuthorityFingerprints.isEmpty {
             score += 500
         }
         if !record.pubKeyFP.isEmpty {
@@ -454,6 +469,8 @@ extension TrustSyncService {
             protocolPublicKey: primaryRecord.protocolPublicKey,
             protocolSigningAlgorithm: primaryRecord.protocolSigningAlgorithm,
             protocolPublicKeyFingerprint: primaryRecord.protocolPublicKeyFingerprint,
+            protocolIdentityPins: primaryRecord.protocolIdentityPins,
+            protocolIdentityBindingsV2: primaryRecord.protocolIdentityBindingsV2,
             legacyP256PublicKey: primaryRecord.legacyP256PublicKey,
             signatureAlgorithm: primaryRecord.signatureAlgorithm,
             kemPublicKeys: primaryRecord.kemPublicKeys,
@@ -463,6 +480,7 @@ extension TrustSyncService {
             createdAt: primaryRecord.createdAt,
             updatedAt: primaryRecord.updatedAt,
             version: primaryRecord.version,
+            signaturePayloadVersion: primaryRecord.signaturePayloadVersion,
             signature: primaryRecord.signature,
             recordType: primaryRecord.recordType,
             revokedAt: primaryRecord.revokedAt,
@@ -707,6 +725,7 @@ extension TrustSyncService {
         let caps = capabilityDictionary(for: record.capabilities)
 
         return normalizedFingerprint(record.currentPathAuthorityFingerprint) != nil
+            || !record.currentPathAuthorityFingerprints.isEmpty
             || normalizedFingerprint(record.pubKeyFP) != nil
             || !(record.currentDeviceIdMetadata?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
             || !((record.knownDeviceIdsMetadata ?? []).isEmpty)
