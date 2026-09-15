@@ -19,6 +19,7 @@ import class SkyBridgeProtocolCore.ClassicTransferJSONWorker
 import class SkyBridgeProtocolCore.ClassicTransferOutboundFileReadSession
 import class SkyBridgeProtocolCore.ClassicTransferReceiveOperation
 import class SkyBridgeProtocolCore.ClassicTransferSendOperation
+import struct SkyBridgeProtocolCore.ClassicTransferReceiverDecisionWindow
 import class SkyBridgeProtocolCore.ClassicTransferSourceFileInspectionWorker
 import class SkyBridgeProtocolCore.ClassicTransferZlibCompressionWorker
 import class SkyBridgeProtocolCore.ClassicTransferZlibDecompressionWorker
@@ -397,6 +398,7 @@ public class FileTransferManager: ObservableObject {
                 securityContext: securityContext,
                 over: connection
             )
+            let receiverDecisionWindow = ClassicTransferReceiverDecisionWindow()
 
             beginProductFileTransferEvidence(
                 for: transfer,
@@ -412,7 +414,8 @@ public class FileTransferManager: ObservableObject {
                 over: connection,
                 chunkSize: effectiveChunkSize,
                 compression: state.metadata!.compression,
-                expectedFileHash: fileHash
+                expectedFileHash: fileHash,
+                receiverDecisionWindow: receiverDecisionWindow
             )
 
             // 必须等待接收端“落盘回执”，否则不能标记发送成功
@@ -422,7 +425,8 @@ public class FileTransferManager: ObservableObject {
                     securityContext: securityContext,
                     expectedTransferId: transfer.id,
                     expectedFileSize: fileSize,
-                    expectedFileHash: fileHash
+                    expectedFileHash: fileHash,
+                    receiverDecisionWindow: receiverDecisionWindow
                 )
             } catch {
                 let receiptError = ClassicTransferDeliveryConfirmationPolicy
@@ -1595,7 +1599,8 @@ public class FileTransferManager: ObservableObject {
         over connection: NWConnection,
         chunkSize: Int,
         compression: String?,
-        expectedFileHash: String
+        expectedFileHash: String,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow
     ) async throws {
         let fileReader = try await ClassicTransferOutboundFileReadSession.open(
             url: url,
@@ -1663,7 +1668,11 @@ public class FileTransferManager: ObservableObject {
             )
             
             // 发送分块
-            try await sendChunk(chunk, over: connection)
+            try await sendChunk(
+                chunk,
+                over: connection,
+                receiverDecisionWindow: receiverDecisionWindow
+            )
             
             sentBytes += Int64(chunkData.count)
             chunkIndex += 1
@@ -1678,7 +1687,10 @@ public class FileTransferManager: ObservableObject {
                 throw FileTransferError.checksumMismatch
             }
             // 发送完成信号
-            try await sendComplete(over: connection)
+            try await sendComplete(
+                over: connection,
+                receiverDecisionWindow: receiverDecisionWindow
+            )
             logClassicReceiptPhase("all_chunks_sent", transferId: transfer.id)
         } catch {
             let transferError = error
@@ -1754,7 +1766,11 @@ public class FileTransferManager: ObservableObject {
     }
     
     /// 发送分块
-    private func sendChunk(_ chunk: FileChunk, over connection: NWConnection) async throws {
+    private func sendChunk(
+        _ chunk: FileChunk,
+        over connection: NWConnection,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow
+    ) async throws {
         let data = try await ClassicTransferJSONWorker.shared.encode(
             chunk,
             maximumOutputSize: maxMessageBytes
@@ -1763,13 +1779,26 @@ public class FileTransferManager: ObservableObject {
             throw FileTransferError.invalidMetadata
         }
         let header = TransferHeader(type: .chunk, length: data.count)
-        try await sendData(header.encoded + data, over: connection, stage: "send_chunk_\(chunk.index)")
+        try await sendData(
+            header.encoded + data,
+            over: connection,
+            stage: "send_chunk_\(chunk.index)",
+            receiverDecisionWindow: receiverDecisionWindow
+        )
     }
     
     /// 发送完成信号
-    private func sendComplete(over connection: NWConnection) async throws {
+    private func sendComplete(
+        over connection: NWConnection,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow
+    ) async throws {
         let header = TransferHeader(type: .complete, length: 0)
-        try await sendData(header.encoded, over: connection, stage: "send_complete")
+        try await sendData(
+            header.encoded,
+            over: connection,
+            stage: "send_complete",
+            receiverDecisionWindow: receiverDecisionWindow
+        )
     }
 
     /// 发送接收端回执（落盘确认/失败原因）
@@ -1908,13 +1937,14 @@ public class FileTransferManager: ObservableObject {
         securityContext: ClassicTransferSecurityContext,
         expectedTransferId: String,
         expectedFileSize: Int64,
-        expectedFileHash: String
+        expectedFileHash: String,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow
     ) async throws -> TransferReceipt {
         let header: TransferHeader
         do {
             header = try await receiveHeader(
                 from: connection,
-                timeout: receiptWaitTimeoutSeconds,
+                timeout: receiptWaitTimeoutSeconds + receiverDecisionWindow.remainingGraceSeconds(),
                 stage: "receipt_header"
             )
         } catch FileTransferError.networkStageFailed(let stage, let endpoint, let details) {
@@ -2357,11 +2387,21 @@ public class FileTransferManager: ObservableObject {
     }
 
     /// 发送数据
-    private func sendData(_ data: Data, over connection: NWConnection, stage: String = "send_data") async throws {
+    private func sendData(
+        _ data: Data,
+        over connection: NWConnection,
+        stage: String = "send_data",
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow? = nil
+    ) async throws {
         // 上传限速（KB/s），0 表示不限制
         let kbps = SettingsManager.instance.fileTransferUploadLimitKBps
         if kbps <= 0 {
-            try await sendDataSlice(data, over: connection, stage: stage)
+            try await sendDataSlice(
+                data,
+                over: connection,
+                stage: stage,
+                receiverDecisionWindow: receiverDecisionWindow
+            )
             return
         }
 
@@ -2372,7 +2412,12 @@ public class FileTransferManager: ObservableObject {
         while offset < data.count {
             let end = min(data.count, offset + chunkBytes)
             let slice = data.subdata(in: offset..<end)
-            try await sendDataSlice(slice, over: connection, stage: stage)
+            try await sendDataSlice(
+                slice,
+                over: connection,
+                stage: stage,
+                receiverDecisionWindow: receiverDecisionWindow
+            )
 
             offset = end
 
@@ -2728,14 +2773,15 @@ public class FileTransferManager: ObservableObject {
     private func sendDataSlice(
         _ data: Data,
         over connection: NWConnection,
-        stage: String
+        stage: String,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow?
     ) async throws {
         let operation = ClassicTransferSendOperation()
+        let timeout = ClassicTransferInboundPolicy.frameSendTimeoutSeconds
+            + (receiverDecisionWindow?.remainingGraceSeconds() ?? 0)
         let timeoutTask = Task.detached(priority: .utility) {
             do {
-                try await Task.sleep(
-                    for: .seconds(ClassicTransferInboundPolicy.frameSendTimeoutSeconds)
-                )
+                try await Task.sleep(for: .seconds(timeout))
             } catch is CancellationError {
                 return
             } catch {
@@ -2747,7 +2793,7 @@ public class FileTransferManager: ObservableObject {
             let timeoutError = FileTransferError.networkStageFailed(
                 stage: "\(stage)_timeout",
                 endpoint: nil,
-                details: "\(ClassicTransferInboundPolicy.frameSendTimeoutSeconds)s"
+                details: "\(timeout)s"
             )
             if operation.fail(timeoutError) {
                 connection.cancel()

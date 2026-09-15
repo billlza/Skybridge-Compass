@@ -3242,6 +3242,7 @@ public class FileTransferManager: BaseManager {
                     securityContext: securityContext,
                     to: connection
                 )
+                let receiverDecisionWindow = ClassicTransferReceiverDecisionWindow()
                 try ensureCurrentLifecycle(transferLifecycleGeneration)
                 beginProductFileTransferEvidenceIfPossible(
                     for: transfer,
@@ -3254,7 +3255,8 @@ public class FileTransferManager: BaseManager {
                     negotiatedChunkSize: negotiatedChunkSize,
                     negotiatedCompression: negotiatedCompression,
                     securityContext: securityContext,
-                    to: connection
+                    to: connection,
+                    receiverDecisionWindow: receiverDecisionWindow
                 )
                 try ensureCurrentLifecycle(transferLifecycleGeneration)
 
@@ -3263,7 +3265,8 @@ public class FileTransferManager: BaseManager {
                     securityContext: securityContext,
                     expectedTransferId: transfer.id,
                     expectedFileSize: fileSize,
-                    expectedFileHash: transfer.fileHash
+                    expectedFileHash: transfer.fileHash,
+                    receiverDecisionWindow: receiverDecisionWindow
                 )
                 try ensureCurrentLifecycle(transferLifecycleGeneration)
                 confirmProductFileTransferIntegrityReceipt(for: transfer)
@@ -4557,6 +4560,7 @@ public class FileTransferManager: BaseManager {
             negotiatedCompression: negotiatedCompression,
             securityContext: securityContext,
             to: connection,
+            receiverDecisionWindow: nil,
             startOffset: acceptedOffset
         )
         try ensureCurrentLifecycle(lifecycleGeneration)
@@ -4566,7 +4570,8 @@ public class FileTransferManager: BaseManager {
             securityContext: securityContext,
             expectedTransferId: transfer.id,
             expectedFileSize: transfer.fileSize,
-            expectedFileHash: transfer.fileHash
+            expectedFileHash: transfer.fileHash,
+            receiverDecisionWindow: nil
         )
         try ensureCurrentLifecycle(lifecycleGeneration)
         logger.info("✅ 接收端已确认恢复传输落盘: transfer=\(receipt.transferId) bytes=\(receipt.receivedBytes)")
@@ -5174,6 +5179,7 @@ public class FileTransferManager: BaseManager {
         negotiatedCompression: String?,
         securityContext: ClassicTransferSecurityContext,
         to connection: NWConnection,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow?,
         startOffset: Int64 = 0
     ) async throws {
         let fileReader = try await ClassicTransferOutboundFileReadSession.open(
@@ -5242,7 +5248,11 @@ public class FileTransferManager: BaseManager {
                     bytes: Int64(chunkData.count),
                     transfer: transfer
                 )
-                try await sendFileChunk(chunk, to: connection)
+                try await sendFileChunk(
+                    chunk,
+                    to: connection,
+                    receiverDecisionWindow: receiverDecisionWindow
+                )
                 try await applySpeedLimitIfNeeded(for: transfer.id, transferredBytes: chunkData.count)
 
                 sentBytes += Int64(chunkData.count)
@@ -5266,7 +5276,10 @@ public class FileTransferManager: BaseManager {
                   Self.sha256Hex(sourceDigest) == expectedFileHash else {
                 throw FileTransferError.integrityCheckFailed
             }
-            try await sendTransferComplete(to: connection)
+            try await sendTransferComplete(
+                to: connection,
+                receiverDecisionWindow: receiverDecisionWindow
+            )
             logClassicReceiptPhase("all_chunks_sent", transferId: transfer.id)
         } catch {
             let operationError = error
@@ -5404,14 +5417,22 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 发送文件块
-    private func sendFileChunk(_ chunk: FileChunk, to connection: NWConnection) async throws {
+    private func sendFileChunk(
+        _ chunk: FileChunk,
+        to connection: NWConnection,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow?
+    ) async throws {
         let chunkData = try await ClassicTransferJSONWorker.shared.encode(
             chunk,
             maximumOutputSize: maxMessageBytes
         )
         let header = createHeader(type: .chunk, length: chunkData.count)
 
-        try await sendData(header + chunkData, to: connection)
+        try await sendData(
+            header + chunkData,
+            to: connection,
+            receiverDecisionWindow: receiverDecisionWindow
+        )
     }
 
  /// 接收文件块
@@ -5453,9 +5474,12 @@ public class FileTransferManager: BaseManager {
     }
 
  /// 发送传输完成信号
-    private func sendTransferComplete(to connection: NWConnection) async throws {
+    private func sendTransferComplete(
+        to connection: NWConnection,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow?
+    ) async throws {
         let header = createHeader(type: .complete, length: 0)
-        try await sendData(header, to: connection)
+        try await sendData(header, to: connection, receiverDecisionWindow: receiverDecisionWindow)
     }
 
  /// 接收传输完成信号
@@ -5478,11 +5502,17 @@ public class FileTransferManager: BaseManager {
         securityContext: ClassicTransferSecurityContext,
         expectedTransferId: String,
         expectedFileSize: Int64,
-        expectedFileHash: String?
+        expectedFileHash: String?,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow?
     ) async throws -> FileTransferReceipt {
         let headerData: Data
         do {
-            headerData = try await receiveData(length: 8, from: connection, timeout: receiptWaitTimeoutSeconds)
+            headerData = try await receiveData(
+                length: 8,
+                from: connection,
+                timeout: receiptWaitTimeoutSeconds
+                    + (receiverDecisionWindow?.remainingGraceSeconds() ?? 0)
+            )
         } catch FileTransferError.timeout {
             logClassicReceiptPhase(FileTransferReceiptWaitStage.headerTimeout.rawValue, transferId: expectedTransferId)
             throw FileTransferError.receiptWaitFailed(stage: .headerTimeout, details: nil)
@@ -5711,13 +5741,17 @@ public class FileTransferManager: BaseManager {
     }
 
     /// 发送数据
-    private func sendData(_ data: Data, to connection: NWConnection) async throws {
+    private func sendData(
+        _ data: Data,
+        to connection: NWConnection,
+        receiverDecisionWindow: ClassicTransferReceiverDecisionWindow? = nil
+    ) async throws {
         let operation = ClassicTransferSendOperation()
+        let timeout = ClassicTransferInboundPolicy.frameSendTimeoutSeconds
+            + (receiverDecisionWindow?.remainingGraceSeconds() ?? 0)
         let timeoutTask = Task.detached(priority: .utility) {
             do {
-                try await Task.sleep(
-                    for: .seconds(ClassicTransferInboundPolicy.frameSendTimeoutSeconds)
-                )
+                try await Task.sleep(for: .seconds(timeout))
             } catch is CancellationError {
                 return
             } catch {

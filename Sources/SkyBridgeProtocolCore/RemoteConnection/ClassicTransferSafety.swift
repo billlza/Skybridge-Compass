@@ -10,12 +10,45 @@ public enum ClassicTransferInboundPolicy {
     public static let maximumPendingTransfers = 32
     public static let initialHeaderTimeoutSeconds: TimeInterval = 5
     public static let metadataPayloadTimeoutSeconds: TimeInterval = 10
+    public static let receiverDecisionTimeoutSeconds: TimeInterval = 60
     public static let frameIdleTimeoutSeconds: TimeInterval = 30
     public static let frameSendTimeoutSeconds: TimeInterval = 30
     public static let maximumFileSizeBytes: Int64 = 2 * 1_024 * 1_024 * 1_024
     public static let minimumDeclaredChunkSizeBytes = 64 * 1_024
     public static let maximumDeclaredChunkSizeBytes = 512 * 1_024
     public static let maximumChunkCount = 65_536
+}
+
+/// One monotonic allowance for a new transfer's receiver-consent phase.
+///
+/// The receiver authenticates metadata and waits for consent before reading file
+/// bytes. Network.framework can therefore leave a payload write pending even
+/// while the receiver is operating normally. Small/empty files can instead fit
+/// in the socket buffers and reach the receipt wait before consent is given.
+/// Share this window across those operations; never renew it for each frame.
+/// Once an authenticated resume ACK has arrived, no decision allowance applies.
+public struct ClassicTransferReceiverDecisionWindow: Sendable {
+    private static let maximumGraceSeconds =
+        ClassicTransferInboundPolicy.initialHeaderTimeoutSeconds
+        + ClassicTransferInboundPolicy.metadataPayloadTimeoutSeconds
+        + ClassicTransferInboundPolicy.receiverDecisionTimeoutSeconds
+
+    private let deadline: ContinuousClock.Instant
+
+    /// Start after the metadata write completes, once per connection attempt.
+    public init(startedAt: ContinuousClock.Instant = ContinuousClock().now) {
+        deadline = startedAt.advanced(by: .seconds(Self.maximumGraceSeconds))
+    }
+
+    /// Add only this remaining allowance to the operation's normal I/O timeout.
+    public func remainingGraceSeconds(
+        at now: ContinuousClock.Instant = ContinuousClock().now
+    ) -> TimeInterval {
+        let remaining = now.duration(to: deadline).components
+        let seconds = Double(remaining.seconds)
+            + Double(remaining.attoseconds) / 1_000_000_000_000_000_000
+        return min(Self.maximumGraceSeconds, max(0, seconds))
+    }
 }
 
 public enum ClassicTransferResumeAcknowledgmentContractError: Error, Equatable, Sendable {

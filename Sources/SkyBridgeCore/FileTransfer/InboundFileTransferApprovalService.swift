@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import OSLog
+import SkyBridgeProtocolCore
 
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor
@@ -63,7 +64,9 @@ public final class InboundFileTransferApprovalService: ObservableObject {
         let timeoutTask: Task<Void, Never>
     }
     private static let maximumCoalescedWaiters = 8
-    private let decisionTimeout: Duration = .seconds(60)
+    private let decisionTimeout: Duration = .seconds(
+        ClassicTransferInboundPolicy.receiverDecisionTimeoutSeconds
+    )
     private var waitersByRequestId: [UUID: [UUID: Waiter]] = [:]
     private var earlyDecisionByRequestId: [UUID: Decision] = [:]
 
