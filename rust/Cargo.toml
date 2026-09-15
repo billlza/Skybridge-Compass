@@ -17,19 +17,19 @@ rust-version = "1.94"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-aes-gcm = "0.11.0"
-async-trait = "0.1.91"
+aes-gcm = "0.11.1"
+async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["http1", "json", "tokio"] }
 # `simd-unsafe` (new default in 0.23) is deliberately off: it opts into freshly
 # introduced unsafe runtime-SIMD code, and no SkyBridge base64 path is
 # throughput-bound enough to justify the added unsafe surface. Scalar output is
 # byte-identical.
-base64 = { version = "0.23.0", default-features = false, features = ["std"] }
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 bytes = "1.12.1"
-clap = { version = "4.6.4", features = ["derive", "env"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 directories = "6.0.0"
 ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
-futures-util = "0.3.33"
+futures-util = "0.3.34"
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 hmac = "0.13.0"
@@ -38,24 +38,24 @@ hostname = "0.4.2"
 # The 0.14 defaults would additionally pull the ML-KEM/X-Wing/SHAKE stack
 # (SkyBridge's PQC suites go through fips203/fips204 directly) and `getrandom`
 # (the sender RNG is passed explicitly via `setup_sender_with_rng`).
-hpke = { version = "0.14.0", default-features = false, features = ["alloc", "chacha", "x25519"] }
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "chacha", "x25519"] }
 fips203 = { version = "0.4.3", default-features = false, features = ["ml-kem-768"] }
 fips204 = { version = "0.4.6", default-features = false, features = ["ml-dsa-65", "ml-dsa-87"] }
-mdns-sd = "0.20.2"
+mdns-sd = "0.21.3"
 rand = "0.10.2"
 rand_core = "0.10.1"
-rtc = "0.20.0"
+rtc = "0.20.5"
 # reqwest 0.13 renames: `rustls-tls` -> `rustls` (roots now come from the OS
 # trust store via rustls-platform-verifier instead of compiled-in webpki roots),
 # `macos-system-configuration` -> `system-proxy`, and `.form()` moved behind the
 # new `form` feature.
-reqwest = { version = "0.13.4", default-features = false, features = ["charset", "form", "http2", "json", "rustls", "system-proxy"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["charset", "form", "http2", "json", "rustls", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 sha3 = "0.12.0"
-thiserror = "2.0.19"
-time = { version = "0.3.54", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
+thiserror = "2.0.20"
+time = { version = "0.3.55", features = ["formatting", "local-offset", "macros", "parsing", "serde"] }
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 tokio-util = { version = "0.7.19", features = ["rt"] }
@@ -63,18 +63,18 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json", "time"] }
 url = "2.5.8"
-uuid = { version = "1.24.0", features = ["serde", "v4", "v7"] }
-webbrowser = "1.2.2"
-webrtc = "0.20.0"
+uuid = { version = "1.26.1", features = ["serde", "v4", "v7"] }
+webbrowser = "1.2.4"
+webrtc = "0.20.5"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom"] }
 
 [patch.crates-io]
-# rtc 0.20.0 with a surgical stats fix: the selected ICE pair's candidates are
+# rtc 0.20.5 with a surgical stats fix: the selected ICE pair's candidates are
 # registered into the stats accumulator before each snapshot, so a
 # peer-reflexive remote (created inside the agent, never signaled) is
 # resolvable by `get_stats` consumers. Without this, the native transport's
 # selected-route observation can never complete when the nominated remote is
 # prflx, and every fresh Rust-agent session is torn down after the 5s
-# observation window. Upstream 0.21 is still in beta; drop this patch when a
+# observation window. Upstream 0.21 is still pre-release; drop this patch when a
 # stable release lands with the fix. See rust/vendor/rtc/README-SKYBRIDGE.md.
 rtc = { path = "vendor/rtc" }

@@ -131,7 +131,7 @@ where
             peer_connection_state: RTCPeerConnectionState::New,
             can_trickle_ice_candidates: None,
             pipeline_context,
-            data_channels: HashMap::new(),
+            data_channels: DataChannelRegistry::new(),
             rtp_transceivers: Vec::new(),
             greater_mid: -1,
             sdp_origin: Origin::default(),
@@ -855,11 +855,14 @@ where
                         }],
                     ));
 
-                    receiver.interceptor_remote_streams_op(
-                        &self.media_engine,
-                        &mut self.interceptor,
-                        true,
-                    );
+                    // Deliberately no `interceptor_remote_streams_op` here. It bound nothing: that
+                    // walks the track's codings and skips any whose codec does not resolve, and the
+                    // codec above is `Default::default()` — deferred until the first RTP packet
+                    // names a payload type. So the call read as "bound", always did nothing, and
+                    // the streams stayed unbound for the life of the connection.
+                    //
+                    // The bind happens once the codec is known, in the endpoint handler's
+                    // `find_track_id_by_ssrc`.
                 } else if only_one_rtp_transceiver {
                     // If the remote SDP has only one media rtp transceiver, the ssrc doesn't have to be explicitly declared
                     // here, we should add a track but with 0 ssrc. The reason is to provide stream_id and track_id information for later usage
@@ -931,26 +934,6 @@ where
         self.pipeline_context.event_outs.push_back(
             RTCPeerConnectionEvent::OnConnectionStateChangeEvent(connection_state),
         );
-    }
-
-    pub(crate) fn generate_data_channel_id(&self) -> Result<RTCDataChannelId> {
-        let mut id = 0u16;
-        if self.dtls_transport().role() != RTCDtlsRole::Client {
-            id += 1;
-        }
-
-        // Create map of ids so we can compare without double-looping each time.
-        let ids: HashSet<RTCDataChannelId> = self.data_channels.keys().cloned().collect();
-        let max = self.sctp_transport().max_channels();
-        while id < max - 1 {
-            if ids.contains(&id) {
-                id += 2;
-            } else {
-                return Ok(id);
-            }
-        }
-
-        Err(Error::ErrMaxDataChannelID)
     }
 
     /// Called by the public `RTCRtpTransceiver::set_direction` when a transceiver's preferred
@@ -1346,7 +1329,7 @@ where
         {
             let pair_id = format!("RTCIceCandidatePair_{}_{}", local.id(), remote.id());
 
-            // SKYBRIDGE PATCH (rtc-0.20.0): peer-reflexive candidates are
+            // SKYBRIDGE PATCH (rtc-0.20.5): peer-reflexive candidates are
             // created inside the ICE agent and never pass through
             // `add_ice_local_candidate` / `add_ice_remote_candidate`, so the
             // selected pair could reference candidate ids with no matching
