@@ -408,6 +408,13 @@ impl PeerConnectionEventHandler for NativeWebRtcEventRouter {
 
 impl NativeWebRtcSession {
     pub async fn new(config: NativeWebRtcConfig) -> Result<Self> {
+        Self::new_with_udp_bind_addrs(config, native_webrtc_udp_bind_addrs).await
+    }
+
+    async fn new_with_udp_bind_addrs(
+        config: NativeWebRtcConfig,
+        resolve_udp_bind_addrs: fn() -> Vec<String>,
+    ) -> Result<Self> {
         let local_device_name = config
             .classic_initiator
             .as_ref()
@@ -479,7 +486,7 @@ impl NativeWebRtcSession {
             disconnect_tx,
             gather_complete_tx,
         });
-        let udp_bind_addrs = native_webrtc_udp_bind_addrs();
+        let udp_bind_addrs = resolve_udp_bind_addrs();
         let peer_builder = PeerConnectionBuilder::new()
             .with_configuration(rtc_configuration)
             .with_media_engine(media_engine)
