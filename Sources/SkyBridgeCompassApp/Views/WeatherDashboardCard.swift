@@ -33,50 +33,8 @@ public struct WeatherDashboardCard: View {
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 18)
- // 🔮 液态玻璃效果核心 - SwiftUI 2025
-        .background(
-            ZStack {
- // 基础磨砂玻璃层
-                Color.white.opacity(0.04)
-                
- // 渐变光泽层
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(isHovering ? 0.08 : 0.03),
-                        Color.white.opacity(0.01)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(isHovering ? 0.15 : 0.08),
-                            Color.white.opacity(0.04)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1.5
-                )
-        )
- // 动态阴影效果
-        .shadow(
-            color: weatherColor.opacity(refreshFlash ? 0.3 : 0.1),
-            radius: refreshFlash ? 20 : 8,
-            x: 0,
-            y: refreshFlash ? 8 : 4
-        )
- // 悬停缩放效果
-        .scaleEffect(isHovering ? 1.005 : 1.0)
- // 液态动画
-        .animation(.spring(response: 0.4, dampingFraction: 0.75), value: isHovering)
-        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: refreshFlash)
+ // 🔮 液态玻璃效果核心（与账号设备面板共用 DashboardLiquidGlassChrome）
+        .dashboardLiquidGlassChrome(accent: weatherColor, isHovering: isHovering, isFlashing: refreshFlash)
         .onHover { hovering in
             isHovering = hovering
         }

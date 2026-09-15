@@ -60,6 +60,33 @@ final class InboundFileTransferApprovalServiceTests: XCTestCase {
         XCTAssertNil(service.pendingRequest)
     }
 
+    func testConsecutiveFilesRequireIndependentDecisionsWithoutRetainedPrompt() async throws {
+        let service = InboundFileTransferApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        defer { service.userDismissedCurrentPrompt() }
+
+        let first = Self.request()
+        let firstTask = Task { @MainActor in await service.decide(for: first) }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(service.pendingRequest?.id, first.id)
+        service.resolve(first, decision: .allowOnce)
+        let firstDecision = await firstTask.value
+        XCTAssertEqual(firstDecision, .allowOnce)
+        XCTAssertNil(service.pendingRequest)
+
+        let second = Self.request()
+        let secondTask = Task { @MainActor in await service.decide(for: second) }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(service.pendingRequest?.id, second.id)
+        // A delayed UI callback for the completed file cannot approve this new file.
+        service.resolve(first, decision: .allowOnce)
+        XCTAssertEqual(service.pendingRequest?.id, second.id)
+        service.resolve(second, decision: .reject)
+        let secondDecision = await secondTask.value
+        XCTAssertEqual(secondDecision, .reject)
+        XCTAssertNil(service.pendingRequest)
+    }
+
     func testProductionApprovalServiceHasNoEnvironmentAutoApproveBypass() throws {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

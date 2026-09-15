@@ -1,0 +1,22 @@
+{
+  "clouds-wide.png": {
+    "meanAbsoluteChannelDifference": 0.05474906859522244,
+    "maximumChannelDifference": 2.0
+  },
+  "clouds-quality-0.0.png": {
+    "meanAbsoluteChannelDifference": 0.05843252083992825,
+    "maximumChannelDifference": 2.0
+  },
+  "clouds-quality-0.45.png": {
+    "meanAbsoluteChannelDifference": 0.05843252083992825,
+    "maximumChannelDifference": 2.0
+  },
+  "clouds-after-12-seconds.png": {
+    "meanAbsoluteChannelDifference": 0.05370489078822412,
+    "maximumChannelDifference": 2.0
+  },
+  "clouds-quality-1.0.png": {
+    "meanAbsoluteChannelDifference": 0.05683655165136647,
+    "maximumChannelDifference": 2.0
+  }
+}

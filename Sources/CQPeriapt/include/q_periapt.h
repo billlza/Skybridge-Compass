@@ -186,7 +186,8 @@ const char *q_periapt_status_name(int32_t code);
  *
  * # Safety
  * `toml`/`signature`/`vk`/`last_trusted_state` must be readable for their lengths;
- * `out_decision` writable for `out_decision_len`, which must equal
+ * `out_decision` writable (it may be uninitialized — it is only written, through raw
+ * pointers) for `out_decision_len`, which must equal
  * [`Q_PERIAPT_POLICY_DECISION_LEN`]. `last_trusted_state_len` must be zero or
  * [`Q_PERIAPT_TRUSTED_POLICY_STATE_LEN`]. Inputs and output must not overlap.
  */
@@ -217,7 +218,8 @@ int32_t q_periapt_decision_from_signed_policy(const uint8_t *toml,
  * # Safety
  * `decision` must be readable for `decision_len`. All four outputs must be
  * writable for their exact published lengths and disjoint from the input and
- * from one another.
+ * from one another; they may be uninitialized (they are only written, through
+ * raw pointers).
  */
 int32_t q_periapt_generate_keypair(const uint8_t *decision,
                                    uintptr_t decision_len,
@@ -236,7 +238,7 @@ int32_t q_periapt_generate_keypair(const uint8_t *decision,
  * This is the only product encapsulation entry point. It derives suite/profile/version from one
  * canonical decision and injectively wraps `application_context` together with the exact signed
  * policy digest before invoking the context-bound combiner. `CompatXWing` decisions are rejected
- * because that profile intentionally ignores context and therefore cannot commit the digest.
+ * because that profile has no context input and therefore cannot commit the digest.
  * Encapsulation coins come from the operating-system CSPRNG; deterministic coins are not exposed
  * by the product ABI.
  *
@@ -246,7 +248,8 @@ int32_t q_periapt_generate_keypair(const uint8_t *decision,
  *
  * # Safety
  * Every `(ptr, len)` pair must describe a valid region. Outputs must be writable and disjoint
- * from every input and from each other.
+ * from every input and from each other; they may be uninitialized (they are only written,
+ * through raw pointers).
  */
 int32_t q_periapt_encapsulate(const uint8_t *decision,
                               uintptr_t decision_len,
@@ -272,7 +275,8 @@ int32_t q_periapt_encapsulate(const uint8_t *decision,
  *
  * # Safety
  * Every `(ptr, len)` pair must describe a valid region. `out_secret` must be writable and
- * disjoint from every input.
+ * disjoint from every input; it may be uninitialized (it is only written, through raw
+ * pointers).
  */
 int32_t q_periapt_decapsulate(const uint8_t *decision,
                               uintptr_t decision_len,

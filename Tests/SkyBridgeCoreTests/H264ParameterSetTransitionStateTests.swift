@@ -69,6 +69,27 @@ final class H264ParameterSetTransitionStateTests: XCTestCase {
         XCTAssertEqual(updated.pictureParameterSet, pps1)
     }
 
+    func testExplicitOldPairCancelsAnUncommittedPartialUpdate() throws {
+        var state = H264ParameterSetTransitionState()
+        state.commit(.init(sequenceParameterSet: sps1, pictureParameterSet: pps1))
+        state.stage(sequenceParameterSet: sps2, pictureParameterSet: nil)
+        state.stage(sequenceParameterSet: sps1, pictureParameterSet: pps1)
+        XCTAssertNil(state.candidateForIDR(carriesSequenceParameterSet: true,
+            carriesPictureParameterSet: true, containsIDR: true))
+        XCTAssertNil(state.pendingSequenceParameterSet)
+        XCTAssertNil(state.pendingPictureParameterSet)
+    }
+
+    func testSeparatelyRepeatedPPSIsFreshEvidenceForPendingSPS() throws {
+        var state = H264ParameterSetTransitionState()
+        state.commit(.init(sequenceParameterSet: sps1, pictureParameterSet: pps1))
+        state.stage(sequenceParameterSet: sps2, pictureParameterSet: nil)
+        state.stage(sequenceParameterSet: nil, pictureParameterSet: pps1)
+        let candidate = try XCTUnwrap(state.candidateForIDR(carriesSequenceParameterSet: false,
+            carriesPictureParameterSet: false, containsIDR: true))
+        XCTAssertEqual(candidate, .init(sequenceParameterSet: sps2, pictureParameterSet: pps1))
+    }
+
     func testNonIDRNeverCommitsCompletePendingPair() {
         var state = H264ParameterSetTransitionState()
         state.stage(sequenceParameterSet: sps2, pictureParameterSet: pps2)

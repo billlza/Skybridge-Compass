@@ -866,11 +866,7 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
         XCTAssertThrowsError(try shortABI2QPeriapt.validatedForStrictPQCImport(now: now, pinnedProtocolFingerprints: [fingerprint])) { error in
             XCTAssertEqual(
                 error as? AppMessage.KEMRefreshValidationError,
-                .invalidKEMPublicKeyLength(
-                    wireId: CryptoSuite.qperiaptABI2PolicyBound.wireId,
-                    expected: 1216,
-                    actual: 1184
-                )
+                .policyMismatch
             )
         }
 
@@ -880,12 +876,12 @@ final class SignedKEMRefreshPayloadTests: XCTestCase {
                 publicKey: Data(repeating: 0x57, count: 1216)
             )
         ])
-        XCTAssertNoThrow(
-            try validABI2QPeriapt.validatedForStrictPQCImport(
-                now: now,
-                pinnedProtocolFingerprints: [fingerprint]
-            )
-        )
+        // Version 1 does not authenticate platform eligibility and cannot carry Q material.
+        XCTAssertThrowsError(try validABI2QPeriapt.validatedForStrictPQCImport(
+            now: now, pinnedProtocolFingerprints: [fingerprint]
+        )) { error in
+            XCTAssertEqual(error as? AppMessage.KEMRefreshValidationError, .policyMismatch)
+        }
     }
 
     func testStrictImportRejectsMissingPinnedIdentityPolicyMismatchAndRollback() {

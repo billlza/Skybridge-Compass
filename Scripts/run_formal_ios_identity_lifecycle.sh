@@ -21,11 +21,17 @@ Usage:
     --ios-release-testing-ipa <sealed physical-testing IPA> \
     --ios-device-id <devicectl identifier> \
     --ios-device-udid <xcdevice physical UDID> \
+    [--identity-purpose <new-secure-enclave-identity|existing-production-identity>] \
+    [--expected-suite <0x0012>] \
+    [--expected-identity-protection <softwareKeychain|secureEnclaveRequired>] \
     [--timeout-seconds <30-900>]
 
 This transaction installs the exact app extracted from the sealed IPA, records
-one normal launch that commits a newly created production identity, then a
-different fresh launch that restores it and completes its signing self-test.
+two distinct normal launches. The creation purpose requires an actual new
+identity commit followed by restoration. The existing-identity Q purpose
+requires restoration and a signing self-test on both launches, with the same
+committed identity and the explicitly selected key protection. It does not
+claim continuity across an upgrade without a separately bound prior archive.
 It must be run once per immutable identity lifecycle, not once per evidence
 kind. It never clears Keychain, injects state, or enables a testing surface.
 USAGE
@@ -37,6 +43,9 @@ IOS_ARCHIVE_IDENTITY=""
 IOS_RELEASE_TESTING_IPA=""
 IOS_DEVICE_ID=""
 IOS_DEVICE_UDID=""
+IDENTITY_PURPOSE="new-secure-enclave-identity"
+EXPECTED_SUITE=""
+EXPECTED_IDENTITY_PROTECTION=""
 TIMEOUT_SECONDS=600
 
 while (( $# > 0 )); do
@@ -47,11 +56,24 @@ while (( $# > 0 )); do
     --ios-release-testing-ipa) IOS_RELEASE_TESTING_IPA="${2:-}"; shift 2 ;;
     --ios-device-id) IOS_DEVICE_ID="${2:-}"; shift 2 ;;
     --ios-device-udid) IOS_DEVICE_UDID="${2:-}"; shift 2 ;;
+    --identity-purpose) IDENTITY_PURPOSE="${2:-}"; shift 2 ;;
+    --expected-suite) EXPECTED_SUITE="${2:-}"; shift 2 ;;
+    --expected-identity-protection) EXPECTED_IDENTITY_PROTECTION="${2:-}"; shift 2 ;;
     --timeout-seconds) TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+IDENTITY_POLICY_ARGS=(--identity-purpose "$IDENTITY_PURPOSE")
+if [[ -n "$EXPECTED_SUITE" ]]; then
+  IDENTITY_POLICY_ARGS+=(--expected-suite "$EXPECTED_SUITE")
+fi
+if [[ -n "$EXPECTED_IDENTITY_PROTECTION" ]]; then
+  IDENTITY_POLICY_ARGS+=(--expected-identity-protection "$EXPECTED_IDENTITY_PROTECTION")
+fi
+python3 "$ROOT_DIR/Scripts/extract_ios_production_identity_evidence.py" validate-policy \
+  "${IDENTITY_POLICY_ARGS[@]}"
 
 if [[ ! "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
   || (( TIMEOUT_SECONDS < 30 || TIMEOUT_SECONDS > 900 )); then
@@ -154,19 +176,9 @@ python3 "$ROOT_DIR/Scripts/ios_product_installation.py" \
   --release-testing-ipa "$IOS_RELEASE_TESTING_IPA" \
   --expected-device-identifier "$IOS_DEVICE_ID" \
   --output "$IOS_INSTALLATION_BINDING"
-skybridge_ios_process_snapshot "$IOS_DEVICE_ID" "$IOS_PRELAUNCH_PROCESSES" 60
-if python3 "$OWNERSHIP_HELPER" ios-presence \
-  --processes-json "$IOS_PRELAUNCH_PROCESSES" \
-  --app-path "$IOS_EXTRACTED_APP"; then
-  echo "installed iOS product is already running before the first launch" >&2
-  exit 1
-else
-  prelaunch_status=$?
-  (( prelaunch_status == 1 )) || {
-    echo "post-install iOS product absence is unverifiable" >&2
-    exit 1
-  }
-fi
+skybridge_ios_require_postinstall_app_absence \
+  "$OWNERSHIP_HELPER" "$IOS_DEVICE_ID" "$IOS_EXTRACTED_APP" \
+  "$IOS_PRELAUNCH_PROCESSES" "$TIMEOUT_SECONDS"
 IOS_LAUNCH_PERSISTENT_IDENTIFIER="$(
   python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
 import json
@@ -177,6 +189,21 @@ payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 print(payload["launchServicesIdentifier"])
 PY
 )"
+IOS_REMOTE_APP_PATH="$(python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
+import json
+import pathlib
+import sys
+
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["remoteApplicationPath"])
+PY
+)"
+IOS_PRODUCT_LAUNCH_ARGS=("$IOS_REMOTE_APP_PATH")
+if [[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]; then
+  IOS_PRODUCT_LAUNCH_ARGS=(
+    --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER"
+    "$IOS_REMOTE_APP_PATH"
+  )
+fi
 
 launch_and_capture() {
   local prefix="${1:?missing launch prefix}"
@@ -205,9 +232,8 @@ PY
   xcrun devicectl --timeout "$((TIMEOUT_SECONDS + 120))" device process launch \
     --device "$IOS_DEVICE_ID" \
     --console \
-    --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" \
     --json-output "$launch_result" \
-    com.skybridge.compass.ios \
+    "${IOS_PRODUCT_LAUNCH_ARGS[@]}" \
     >"$console_stdout" 2>"$console_stderr" &
   IOS_CONSOLE_PID="$!"
   IOS_CONSOLE_HANDLE_IDENTITY="$console_identity"
@@ -247,14 +273,19 @@ PY
     --launch-identity-output "$launch_identity"
 }
 
-launch_and_capture \
-  first \
-  "==> In normal Settings UI, create and commit the ML-DSA-87 Secure Enclave identity only after the real remote rotation receipt and runtime self-test succeed. Do not clear or inject Keychain state."
+if [[ "$IDENTITY_PURPOSE" == "existing-production-identity" ]]; then
+  launch_and_capture first \
+    "==> Restore the existing ML-DSA-65 identity with $EXPECTED_IDENTITY_PROTECTION and complete its signing self-test. Do not rotate or recreate it."
+else
+  launch_and_capture first \
+    "==> In normal Settings UI, create and commit the ML-DSA-87 Secure Enclave identity only after the real remote rotation receipt and runtime self-test succeed. Do not clear or inject Keychain state."
+fi
 launch_and_capture \
   second \
   "==> This fresh launch must restore the same immutable Keychain authority and complete a real signing self-test. Do not rotate or recreate it."
 
 python3 "$IDENTITY_EXTRACTOR" extract-lifecycle \
+  "${IDENTITY_POLICY_ARGS[@]}" \
   --first-raw-oslog "$PRIVATE_RUNTIME/first-product.ndjson" \
   --first-launch-identity "$PRIVATE_RUNTIME/first-product-identity.json" \
   --second-raw-oslog "$PRIVATE_RUNTIME/second-product.ndjson" \
@@ -263,6 +294,7 @@ python3 "$IDENTITY_EXTRACTOR" extract-lifecycle \
   --private-binding "$PRIVATE_OUTPUT_DIR/ios-production-identity-lifecycle-binding.json" \
   --public-proof "$PUBLIC_OUTPUT_DIR/ios-production-identity-lifecycle-proof.json"
 python3 "$IDENTITY_EXTRACTOR" validate-lifecycle-proof \
+  "${IDENTITY_POLICY_ARGS[@]}" \
   --proof "$PUBLIC_OUTPUT_DIR/ios-production-identity-lifecycle-proof.json" \
   --archive-identity "$IOS_ARCHIVE_IDENTITY"
 

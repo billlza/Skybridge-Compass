@@ -1547,13 +1547,26 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     @available(macOS 14.0, iOS 17.0, *)
+    static func makeHandshakeCryptoProvider(
+        policy: CryptoProviderFactory.SelectionPolicy
+    ) -> any CryptoProvider {
+        // LAN prepares its local offer before receiving an authenticated peer
+        // offer. The outbound selector still captures an admitted explicit Q
+        // request here; trusted peer keys are loaded by HandshakeDriver later.
+        CryptoProviderFactory.makeOutboundPQCInitiatorProvider(
+            policy: policy,
+            peerAdvertisedSuites: []
+        )
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     private func performHandshake(
         operation: P2PHandshakeOperationToken
     ) async throws -> EstablishedHandshakeReceipt {
         let compatibilityModeEnabled = UserDefaults.standard.bool(forKey: "Settings.EnableCompatibilityMode")
         let policy = HandshakePolicy.recommendedDefault(compatibilityModeEnabled: compatibilityModeEnabled)
         let selection: CryptoProviderFactory.SelectionPolicy = policy.requirePQC ? .requirePQC : .preferPQC
-        let requestedProvider = CryptoProviderFactory.make(policy: selection)
+        let requestedProvider = Self.makeHandshakeCryptoProvider(policy: selection)
 
         do {
             let receipt = try await performHandshakeAttempt(
@@ -1656,7 +1669,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         operation: P2PHandshakeOperationToken
     ) async throws -> EstablishedHandshakeReceipt {
         try requireCurrentHandshakeOperation(operation)
-        let baseProvider = CryptoProviderFactory.make(policy: selectionPolicy)
+        let baseProvider = Self.makeHandshakeCryptoProvider(policy: selectionPolicy)
         let successfulConnectivityAttemptOwner = OSAllocatedUnfairLock<
             ProductConnectivityAttemptOwner?
         >(initialState: nil)
@@ -1734,7 +1747,9 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     let cryptoProvider: any CryptoProvider = {
                         switch preparation.strategy {
                         case .pqcOnly:
-                            return CryptoProviderFactory.make(policy: selectionPolicy)
+                            // Use the provider captured for this attempt's
+                            // offered suites throughout the actual handshake.
+                            return baseProvider
                         case .classicOnly:
                             return CryptoProviderFactory.make(policy: .classicOnly)
                         }
@@ -2691,7 +2706,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             return
         }
         let protocolIdentityPublicKeys = try await localProtocolIdentityPublicKeysForPairing()
-        let localPresentation = LocalDevicePresentation.current()
+        let localPresentation = LocalDevicePresentation.currentProtocolMetadata()
         let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
 
         let message = AppMessage.pairingIdentityExchange(.init(
@@ -2864,23 +2879,15 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     @available(macOS 14.0, iOS 17.0, *)
     public func deriveClassicFileTransferKey(transferId: String) throws -> SymmetricKey {
+        try classicTransferKeyMaterial(transferId: transferId).transferKey
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
+    func classicTransferKeyMaterial(transferId: String) throws -> ClassicTransferKeyMaterial {
         guard let keys = sessionKeysLock.withLock({ $0 }) else {
             throw P2PConnectionError.noSessionKeys
         }
-
-        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
-            lhs.lexicographicallyPrecedes(rhs)
-        }
-        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
-            partial.append(key)
-        }
-
-        return HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
-            salt: Data("skybridge-classic-file-transfer-v1".utf8),
-            info: Data(transferId.utf8),
-            outputByteCount: 32
-        )
+        return ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId)
     }
 
     @available(macOS 14.0, iOS 17.0, *)

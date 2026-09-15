@@ -15,6 +15,7 @@ public struct DashboardContentView: View {
     @Binding var showManualConnectSheet: Bool
     @Binding var extendedSearchCountdown: Int
     @Binding var systemPerformanceMonitor: SystemPerformanceMonitor?
+    @Binding var requestedDiscoveryMode: DiscoveryMode?
     let showDeferredContent: Bool
     
     private let cardSpacing: CGFloat = 20
@@ -29,6 +30,7 @@ public struct DashboardContentView: View {
         showManualConnectSheet: Binding<Bool>,
         extendedSearchCountdown: Binding<Int>,
         systemPerformanceMonitor: Binding<SystemPerformanceMonitor?>,
+        requestedDiscoveryMode: Binding<DiscoveryMode?>,
         showDeferredContent: Bool
     ) {
         self._selectedNavigation = selectedNavigation
@@ -39,6 +41,7 @@ public struct DashboardContentView: View {
         self._showManualConnectSheet = showManualConnectSheet
         self._extendedSearchCountdown = extendedSearchCountdown
         self._systemPerformanceMonitor = systemPerformanceMonitor
+        self._requestedDiscoveryMode = requestedDiscoveryMode
         self.showDeferredContent = showDeferredContent
     }
     
@@ -51,6 +54,12 @@ public struct DashboardContentView: View {
  // 🌦️ 液态玻璃天气卡片（全宽）
                 WeatherDashboardCard()
                     .frame(height: 180)
+
+ // 👥 账号设备液态玻璃面板（实时天气之下、发现设备之上）
+                AccountDevicesPanelView {
+                    requestedDiscoveryMode = .accountDevices
+                    selectedNavigation = .deviceManagement
+                }
 
  // 主要内容区域 - 2x2网格布局
                 LazyVGrid(columns: [

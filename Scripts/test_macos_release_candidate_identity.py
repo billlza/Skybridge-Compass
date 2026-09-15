@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import macos_release_candidate_identity as identity
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "Scripts/macos_release_candidate_identity.py"
@@ -46,6 +47,25 @@ def valid_payload() -> dict[str, object]:
 
 
 class CandidateIdentityTests(unittest.TestCase):
+    def test_requirement_excludes_executable_metadata_in_either_stream_order(self) -> None:
+        requirement = 'identifier "com.skybridge.compass.pro" and anchor apple generic'
+        for executable in ("/build/App.app/Contents/MacOS/App", "/Applications/App.app/Contents/MacOS/App"):
+            for output in (
+                f"designated => {requirement}\nExecutable={executable}\n",
+                f"Executable={executable}\ndesignated => {requirement}\n",
+            ):
+                with self.subTest(output=output):
+                    self.assertEqual(identity.canonical_requirement(output), requirement)
+
+    def test_requirement_preserves_quoted_whitespace(self) -> None:
+        requirement = 'identifier "example.app" and certificate leaf[subject.CN] = "Example  Name"'
+        self.assertEqual(identity.canonical_requirement(f"designated => {requirement}\n"), requirement)
+
+    def test_requirement_rejects_missing_empty_or_ambiguous_designation(self) -> None:
+        for output in ("Executable=/tmp/App\n", "designated => \n", "designated => first\ndesignated => second\n"):
+            with self.subTest(output=output), self.assertRaises(identity.CandidateIdentityError):
+                identity.canonical_requirement(output)
+
     def write_manifest(self, path: Path, payload: dict[str, object], *, canonical: bool = True) -> None:
         if canonical:
             content = json.dumps(payload, indent=2, sort_keys=True) + "\n"

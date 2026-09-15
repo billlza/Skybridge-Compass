@@ -660,7 +660,7 @@
 "transferStatus.transferring" = "Transferring";
 "transferStatus.paused" = "Paused";
 "transferStatus.completed" = "Completed";
-"fileTransfer.receiptDeliveryUnknown" = "File saved, but sender confirmation is unknown. Do not retransmit automatically.";
+"fileTransfer.receiptDeliveryUnknown" = "Delivery confirmation is unknown. Check the file on the receiving device before retransmitting.";
 "transferStatus.failed" = "Failed";
 "transferStatus.cancelled" = "Cancelled";
 "action.close" = "Close";
@@ -704,7 +704,7 @@
 "remote.connectionMode.near" = "Near";
 "remote.connectionMode.far" = "Far";
 "remote.connectionMode.auto.description" = "Automatically selects the best mode (prefers near-field on same network)";
-"remote.connectionMode.near.description" = "Near-field hardware mirroring — low latency on same network (ScreenCaptureKit + HEVC + QUIC)";
+"remote.connectionMode.near.description" = "View and control devices on the same network";
 "remote.connectionMode.far.description" = "Manual RDP (restricted preview) — FreeRDP 3.30 software GDI, strict certificate validation, no channel redirection";
 "common.unknown" = "Unknown";
 "profile.title" = "Profile";
@@ -1224,3 +1224,74 @@
 "remote.camera.feedUnavailable.title" = "Video unavailable";
 "remote.camera.feedUnavailable.failed" = "The camera stream failed and its credentials and transport were released. Verify the exact URL, credentials, H.264 profile, and local network, then reconnect.";
 "remote.camera.feedUnavailable.released" = "The session renderer has been released. Reconnect to continue.";
+
+/* Account Devices (账号设备) */
+"discovery.mode.accountDevices" = "Account Devices";
+"discovery.mode.subtitle.accountDevices" = "Same Account";
+"discovery.accountDevices.title" = "Account Devices";
+"discovery.accountDevices.description" = "Devices signed in with the same account are recorded automatically: name, IP, OS and online state, across networks";
+"discovery.accountDevices.nebulaId" = "Nebula ID";
+"discovery.accountDevices.empty.title" = "No other devices yet";
+"discovery.accountDevices.empty.message" = "Sign in to SkyBridge with the same account on another device and it will appear here";
+"discovery.accountDevices.signedOut" = "Sign in to see the devices of this account";
+"discovery.accountDevices.loading" = "Syncing account devices…";
+"discovery.accountDevices.retryHint" = "Retrying automatically; you can also refresh";
+"discovery.accountDevices.stale" = "The list may be outdated (last update: %@)";
+"discovery.accountDevices.truncated" = "More than 200 devices; only the first 200 are shown";
+"discovery.accountDevices.lastUpdated" = "Updated %@";
+"discovery.accountDevices.status.lanReachable" = "LAN reachable";
+"discovery.accountDevices.status.online" = "Online";
+"discovery.accountDevices.status.offline" = "Offline";
+"discovery.accountDevices.capability.controllable" = "Controllable";
+"discovery.accountDevices.capability.controlOnly" = "Controller only";
+"discovery.accountDevices.lan" = "LAN";
+"discovery.accountDevices.public" = "Public";
+"discovery.accountDevices.deviceId" = "Device ID";
+"discovery.accountDevices.lastSeen" = "Last seen";
+"discovery.accountDevices.neverSeen" = "Never online";
+"discovery.accountDevices.registration.pending" = "Pending approval";
+"discovery.accountDevices.registration.frozen" = "Frozen";
+"discovery.accountDevices.action.useConnectionCode" = "Connect with code";
+"discovery.accountDevices.hint.online" = "This device is online but not on the same LAN: generate a connection code on it and enter it here";
+"discovery.accountDevices.copyAddress" = "Copy address";
+"discovery.accountDevices.copyDeviceId" = "Copy device ID";
+"discovery.accountDevices.failure.notAuthenticated" = "Not signed in";
+"discovery.accountDevices.failure.deviceNotActive" = "This device is not active in the account yet (%@)";
+"discovery.accountDevices.failure.rateLimited" = "Too many requests; retrying later";
+"discovery.accountDevices.failure.registryUnavailable" = "Device registry unavailable (%@)";
+"discovery.accountDevices.failure.serverRejected" = "The server rejected the request (HTTP %d)";
+"discovery.accountDevices.failure.transport" = "Cannot reach the signaling server";
+"discovery.accountDevices.failure.malformedResponse" = "The server response could not be parsed";
+"discovery.accountDevices.failure.localIdentityUnavailable" = "Local device identity is not ready yet";
+"discovery.accountDevices.failure.localAuthenticationUnavailable" = "Local sign-in state is unusable (%@)";
+"discovery.accountDevices.serviceInactive.title" = "Account device sync is not running";
+"discovery.accountDevices.serviceInactive.message" = "You are signed in, but account device sync has not started. Reopen the dashboard; restart the app if this persists.";
+"discovery.accountDevices.heartbeatFailed" = "Reporting this device as online failed; other devices may not see it";
+"dashboard.accountDevices" = "Account Devices";
+"dashboard.accountDevices.summary" = "%d devices · %d online";
+"dashboard.accountDevices.viewAll" = "View All";
+"dashboard.accountDevices.empty" = "Other devices signed in with the same account will appear here";
+
+"remoteControl.securityNotice.inputController" = "Input controller";
+
+"remoteControl.securityNotice.observer" = "View only";
+
+"remoteControl.securityNotice.transferInput" = "Transfer input control";
+
+"remoteControl.securityNotice.approveView" = "Allow viewing";
+
+"info.appleSilicon" = "Apple silicon";
+"info.optimizationEnabled" = "Optimizations enabled";
+"info.pCore" = "Performance cores";
+"info.eCore" = "Efficiency cores";
+"info.multiCoreOpt" = "Multicore optimization";
+"info.reqAppleSilicon" = "Apple silicon required";
+"info.deviceUnsupported" = "Unsupported device";
+"info.standardMode" = "Standard mode";
+
+"remoteControl.securityNotice.localInputController" = "This Mac has keyboard and mouse control. Remote viewing continues.";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "Trusted devices";
+"discovery.pendingPairings.section" = "Pairings needing verification";
+"discovery.pendingPairings.explanation" = "These pairing records still need identity verification. They cannot establish whether a device is online.";

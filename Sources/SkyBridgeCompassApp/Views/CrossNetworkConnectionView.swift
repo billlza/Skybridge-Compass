@@ -1020,7 +1020,7 @@ struct CloudDeviceCard: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Text(LocalizationManager.shared.localizedString("device.action.connect"))
+                        Text(LocalizationManager.shared.localizedString("discovery.action.connect"))
                     }
                 }
                 .buttonStyle(.borderedProminent)

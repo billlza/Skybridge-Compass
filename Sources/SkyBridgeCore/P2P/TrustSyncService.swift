@@ -39,6 +39,7 @@ public enum ProtocolIdentityPinSource: String, Codable, Sendable, Equatable, Has
     case legacyMigration = "legacy-migration"
     case authenticatedHandshake = "authenticated-handshake"
     case pib1OperatorApproval = "pib-1-operator-approval"
+    case manualPairingImport = "manual-pairing-import"
 }
 
 public struct ProtocolIdentityPin: Codable, Sendable, Equatable, Hashable {
@@ -1020,6 +1021,22 @@ public enum TrustSyncError: Error, LocalizedError, Sendable {
 
 typealias PairingAuthorityCommitValidator = @MainActor @Sendable () async -> Bool
 
+/// Expected authority-policy rejections. Reason codes contain no peer identifiers
+/// or key material and can be reported at the pairing boundary.
+enum AuthenticatedRemoteAuthorityRejection: String, Error, LocalizedError, Sendable {
+    case invalidDeviceId = "invalid_device_id"
+    case invalidFingerprint = "invalid_fingerprint"
+    case invalidPublicKey = "invalid_public_key"
+    case ambiguousDirectIdentity = "ambiguous_direct_identity"
+    case conflictingIdentityClaims = "conflicting_identity_claims"
+    case authorityBindingConflict = "authority_binding_conflict"
+    case missingStableIdentity = "missing_stable_identity"
+
+    var errorDescription: String? {
+        "Authenticated remote authority rejected: \(rawValue)"
+    }
+}
+
 public enum CurrentPathTrustConflict: Sendable, Equatable {
     case identityConflict
     case deviceIdMigrationRequired
@@ -1494,6 +1511,22 @@ public final class TrustSyncService: ObservableObject {
         }
     }
 
+    /// An explicit public-key import checks every authority inside the same
+    /// mutation gate that commits the new record. A concurrent pairing or
+    /// revocation cannot be overwritten between the check and persistence.
+    @discardableResult
+    func addTrustRecordIfNeeded(
+        prepare: @escaping @MainActor @Sendable ([TrustRecord]) throws -> TrustRecord?
+    ) async throws -> Bool {
+        try await requireInitialLoadSucceeded()
+        return try await mutationGate.run { [self, prepare] in
+            try Task.checkCancellation()
+            guard let record = try prepare(Array(localCache.values)) else { return false }
+            _ = try await addTrustRecordWithinMutation(record)
+            return true
+        }
+    }
+
     /// Performs read-modify-write inside the mutation admission gate. Callers
     /// that merge KEM keys, capabilities, or authority metadata must use this
     /// path instead of reading `getTrustRecord` before a later async write.
@@ -1903,15 +1936,44 @@ public final class TrustSyncService: ObservableObject {
         authenticatedProtocolPublicKey: Data? = nil,
         pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
     ) -> TrustRecord? {
+        // Read-only callers need a candidate or no candidate. Durable writes
+        // consume the same resolution's typed rejection instead of losing it.
+        switch authenticatedRemoteAuthorityResolution(
+            existingRecords: existingRecords,
+            deviceId: deviceId,
+            displayName: displayName,
+            preferredCurrentDeviceId: preferredCurrentDeviceId,
+            knownDeviceIds: knownDeviceIds,
+            protocolSigningAlgorithm: protocolSigningAlgorithm,
+            protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
+            authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
+            pinSource: pinSource
+        ) {
+        case .success(let record): return record
+        case .failure: return nil
+        }
+    }
+
+    nonisolated static func authenticatedRemoteAuthorityResolution(
+        existingRecords: [TrustRecord],
+        deviceId: String,
+        displayName: String? = nil,
+        preferredCurrentDeviceId: String? = nil,
+        knownDeviceIds: [String] = [],
+        protocolSigningAlgorithm: ProtocolSigningAlgorithm,
+        protocolPublicKeyFingerprint: String,
+        authenticatedProtocolPublicKey: Data? = nil,
+        pinSource: ProtocolIdentityPinSource = .authenticatedHandshake
+    ) -> Result<TrustRecord, AuthenticatedRemoteAuthorityRejection> {
         let normalizedDeviceId = deviceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedDeviceId.isEmpty else { return nil }
+        guard !normalizedDeviceId.isEmpty else { return .failure(.invalidDeviceId) }
 
         let normalizedFingerprint = protocolPublicKeyFingerprint
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard normalizedFingerprint.count == 64,
               normalizedFingerprint.allSatisfy(\.isHexDigit) else {
-            return nil
+            return .failure(.invalidFingerprint)
         }
 
         func validatedProtocolPublicKey(_ publicKey: Data?) -> Data? {
@@ -1935,7 +1997,7 @@ public final class TrustSyncService: ObservableObject {
 
         if authenticatedProtocolPublicKey != nil,
            validatedProtocolPublicKey(authenticatedProtocolPublicKey) == nil {
-            return nil
+            return .failure(.invalidPublicKey)
         }
 
         let normalizedDisplayName = LocalDevicePresentation.sanitizedDisplayNameCandidate(displayName)
@@ -1983,16 +2045,18 @@ public final class TrustSyncService: ObservableObject {
         } else {
             targetRecord = nil
         }
-        guard matchingRecords.count <= 1 || targetRecord != nil else { return nil }
+        guard matchingRecords.count <= 1 || targetRecord != nil else {
+            return .failure(.ambiguousDirectIdentity)
+        }
 
-        func conflictsWithAnotherRecord(_ claims: [String]) -> Bool {
+        func conflictingRecords(_ claims: [String]) -> [TrustRecord] {
             let claimedCandidates = Set(
                 claims.flatMap { PeerTrustLookup.lookupCandidates(for: $0) }
             )
-            guard !claimedCandidates.isEmpty else { return false }
+            guard !claimedCandidates.isEmpty else { return [] }
             let claimedCandidatesLower = Set(claimedCandidates.map { $0.lowercased() })
             let targetStorageKey = targetRecord?.deviceId
-            return existingRecords.contains { record in
+            return existingRecords.filter { record in
                 guard !record.isExpired, record.deviceId != targetStorageKey else { return false }
                 let directCandidates = [record.deviceId, record.currentDeviceIdMetadata]
                     .compactMap { $0 }
@@ -2011,12 +2075,29 @@ public final class TrustSyncService: ObservableObject {
             existingIdentityClaims.append(targetRecord.currentDeviceId)
             existingIdentityClaims.append(contentsOf: targetRecord.knownDeviceIdsMetadata ?? [])
         }
-        guard !conflictsWithAnotherRecord(existingIdentityClaims) else { return nil }
+        let identityConflicts = conflictingRecords(existingIdentityClaims)
+        guard identityConflicts.isEmpty else {
+            for record in identityConflicts {
+                let pins = record.currentPathAuthorityPins
+                let sameAlgorithmPinCount = pins.filter { $0.algorithm == protocolSigningAlgorithm }.count
+                let samePin = pins.contains {
+                    $0.algorithm == protocolSigningAlgorithm && $0.fingerprint == normalizedFingerprint
+                }
+                let sameRawKey = authenticatedProtocolPublicKey.map {
+                    record.authenticatedProtocolIdentityBinding(for: protocolSigningAlgorithm)?.publicKey == $0
+                } ?? false
+                let sameLegacyKey = authenticatedProtocolPublicKey.map { record.publicKey == $0 } ?? false
+                SkyBridgeLogger.p2p.warning(
+                    "Authority claim conflict: algorithm=\(protocolSigningAlgorithm.rawValue, privacy: .public) directIdentity=\(directRecordMatchesAuthenticatedIdentity(record), privacy: .public) sameAlgorithmPinCount=\(sameAlgorithmPinCount, privacy: .public) samePin=\(samePin, privacy: .public) sameRawKey=\(sameRawKey, privacy: .public) sameLegacyKey=\(sameLegacyKey, privacy: .public) lifecycle=\(record.lifecycleState.rawValue, privacy: .public) tombstone=\(record.isTombstone, privacy: .public)"
+                )
+            }
+            return .failure(.conflictingIdentityClaims)
+        }
 
         // Retain only non-conflicting remote aliases. Alias claims cannot select
         // an authority record or cause another record's durable alias deletion.
         let retainedKnownDeviceIds = knownDeviceIds.filter {
-            !conflictsWithAnotherRecord([$0])
+            conflictingRecords([$0]).isEmpty
         }
 
         func mergeKnownDeviceIds(existing: [String?]) -> [String]? {
@@ -2042,7 +2123,7 @@ public final class TrustSyncService: ObservableObject {
                 approvedAt: approvedAt,
                 source: pinSource
             )
-            guard v2Update.accepted else { return nil }
+            guard v2Update.accepted else { return .failure(.authorityBindingConflict) }
 
             let preservesLegacyMLDSA65 = targetRecord.protocolSigningAlgorithm == .mlDSA65
                 && protocolSigningAlgorithm != .mlDSA65
@@ -2074,7 +2155,7 @@ public final class TrustSyncService: ObservableObject {
                     approvedAt: approvedAt,
                     source: pinSource
                 )
-            return TrustRecord(
+            return .success(TrustRecord(
                 deviceId: canonicalDeviceId,
                 pubKeyFP: targetRecord.pubKeyFP,
                 publicKey: targetRecord.publicKey,
@@ -2099,11 +2180,11 @@ public final class TrustSyncService: ObservableObject {
                         .map(Optional.some)
                 ),
                 lifecycleState: .active
-            )
+            ))
         }
 
         guard let stableCurrentDeviceId, !stableCurrentDeviceId.isEmpty else {
-            return nil
+            return .failure(.missingStableIdentity)
         }
 
         let approvedAt = Date()
@@ -2115,10 +2196,10 @@ public final class TrustSyncService: ObservableObject {
             approvedAt: approvedAt,
             source: pinSource
         )
-        guard v2Update.accepted else { return nil }
+        guard v2Update.accepted else { return .failure(.authorityBindingConflict) }
         let writesLegacyAuthority = protocolSigningAlgorithm != .mlDSA87
 
-        return TrustRecord(
+        return .success(TrustRecord(
             deviceId: stableCurrentDeviceId,
             pubKeyFP: "",
             publicKey: Data(),
@@ -2144,7 +2225,7 @@ public final class TrustSyncService: ObservableObject {
             currentDeviceId: stableCurrentDeviceId,
             knownDeviceIds: mergeKnownDeviceIds(existing: []),
             lifecycleState: .active
-        )
+        ))
     }
 
     @discardableResult
@@ -2215,7 +2296,7 @@ public final class TrustSyncService: ObservableObject {
         pinSource: ProtocolIdentityPinSource,
         commitValidator: PairingAuthorityCommitValidator? = nil
     ) async throws -> Bool {
-        guard let record = Self.resolvedAuthenticatedRemoteAuthorityRecord(
+        let record = try Self.authenticatedRemoteAuthorityResolution(
             existingRecords: Array(localCache.values),
             deviceId: deviceId,
             displayName: displayName,
@@ -2225,9 +2306,7 @@ public final class TrustSyncService: ObservableObject {
             protocolPublicKeyFingerprint: protocolPublicKeyFingerprint,
             authenticatedProtocolPublicKey: authenticatedProtocolPublicKey,
             pinSource: pinSource
-        ) else {
-            return false
-        }
+        ).get()
         let signedRecord = try await addTrustRecordWithinMutation(
             record,
             commitValidator: commitValidator

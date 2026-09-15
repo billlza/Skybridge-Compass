@@ -310,7 +310,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(contract.contains("q_periapt_fixed_suite_id()"))
         XCTAssertTrue(contract.contains("Q-Periapt C ABI mismatch"))
         XCTAssertTrue(contract.contains("Q-Periapt header changed the frozen SkyBridge ABI2 PolicyBound contract"))
-        XCTAssertTrue(contract.contains("expectedRuntimeVersion = \"0.1.0-alpha.2\""))
+        XCTAssertTrue(contract.contains("expectedRuntimeVersion = \"0.1.5\""))
 
         let provider = try readSource("Sources/SkyBridgeCore/P2P/Providers/QPeriaptCryptoProvider.swift")
         XCTAssertTrue(provider.contains("QPeriaptNativeAdapter(session: session)"))
@@ -353,8 +353,8 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(buildScript.contains("q_periapt_abi_version"))
         XCTAssertTrue(buildScript.contains("q_periapt_fixed_suite_id"))
         XCTAssertTrue(buildScript.contains("Q_PERIAPT_POLICY_DECISION_LEN 40"))
-        XCTAssertTrue(buildScript.contains("QPERIAPT_RELEASE_TAG=\"v0.1.0-alpha.2-r1\""))
-        XCTAssertTrue(buildScript.contains("QPERIAPT_SOURCE_COMMIT=\"5664fd86a617f92b620ea37e7692d3417d0e307d\""))
+        XCTAssertTrue(buildScript.contains("QPERIAPT_RELEASE_TAG=\"v0.1.5\""))
+        XCTAssertTrue(buildScript.contains("QPERIAPT_SOURCE_COMMIT=\"2b9c485f6c72f99b4cb8942269063692f3f2498e\""))
         XCTAssertTrue(buildScript.contains("QPERIAPT_ZIP_SHA256="))
         XCTAssertTrue(buildScript.contains("declared_qperiapt_symbols"))
         XCTAssertTrue(buildScript.contains("frozen ABI2 exact-nine symbol set"))
@@ -836,8 +836,24 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
         XCTAssertTrue(deviceLane.contains("validate_apple_pqc_sdk_condition_env()"))
         XCTAssertTrue(deviceLane.contains(#"build_args+=("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=${SKYBRIDGE_APPLE_PQC_SDK_CONDITION}")"#))
         XCTAssertTrue(releaseProducer.contains(#"source "${ROOT_DIR}/Scripts/apple_pqc_sdk_probe.sh""#))
+        XCTAssertTrue(releaseProducer.contains(#"source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh""#))
         XCTAssertTrue(releaseProducer.contains("skybridge_require_apple_pqc_sdk_symbol_probe iphoneos"))
         XCTAssertTrue(releaseProducer.contains("SKYBRIDGE_APPLE_PQC_SDK_CONDITION=HAS_APPLE_PQC_SDK"))
+        let verifiedProbe = try XCTUnwrap(releaseProducer.range(of: "log \"Apple PQC symbols verified"))
+        let archiveInvocation = try XCTUnwrap(releaseProducer.range(of: "skybridge_run_xcodebuild archive"))
+        for productionSetting in [
+            "export SKYBRIDGE_ENABLE_APPLE_PQC_SDK=1",
+            "export SKYBRIDGE_RELEASE_EXCLUDE_SMOKE_SUPPORT=1",
+            "export SKYBRIDGE_XCODE_WARNINGS_AS_ERRORS=1"
+        ] {
+            let setting = try XCTUnwrap(releaseProducer.range(of: productionSetting))
+            XCTAssertLessThan(verifiedProbe.lowerBound, setting.lowerBound)
+            XCTAssertLessThan(setting.lowerBound, archiveInvocation.lowerBound)
+        }
+        XCTAssertTrue(releaseProducer.contains("skybridge_run_xcodebuild -exportArchive"))
+        XCTAssertTrue(releaseProducer.contains("SWIFT_TREAT_WARNINGS_AS_ERRORS=YES"))
+        XCTAssertTrue(releaseProducer.contains("GCC_TREAT_WARNINGS_AS_ERRORS=YES"))
+        XCTAssertTrue(releaseProducer.contains("working tree is dirty; commit before producing a release candidate"))
         XCTAssertTrue(releaseProducer.contains("validate_release_output_directory.py"))
         XCTAssertTrue(releaseProducer.contains("verify_source_snapshot \"archive\""))
         XCTAssertTrue(releaseProducer.contains("verify_source_snapshot \"export\""))
@@ -1474,7 +1490,7 @@ final class ApplePQCSDKGateSourceContractTests: XCTestCase {
 
         XCTAssertTrue(workflow.contains("os27-source-contracts:"))
         XCTAssertTrue(workflow.contains("bash Scripts/run_os27_beta_compatibility.sh --verify-source-contracts"))
-        XCTAssertTrue(workflow.contains("needs: [macos-preflight, os27-source-contracts]"))
+        XCTAssertTrue(workflow.contains("needs: [macos-preflight, os27-source-contracts, macos-signing-inputs]"))
 
         guard
             let sourceContractsRange = workflow.range(of: "  os27-source-contracts:"),

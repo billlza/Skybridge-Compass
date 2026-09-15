@@ -1,0 +1,17 @@
+# SkyBridgeCore 规则（自动附带）
+
+globs 设：Sources/SkyBridgeCore/**
+
+并发与线程：
+
+- 共享数组/字典只能在单一 Actor 或串行队列中写。
+
+- 任何 devices[index] 前必须边界检查。
+
+- Timer/循环必须可取消、可回收，不准 Thread.sleep。
+
+性能：
+
+- 大文件只允许流式处理（FileHandle 分块）。
+
+- 禁止 Data(contentsOf:) 读整文件做哈希/加密。

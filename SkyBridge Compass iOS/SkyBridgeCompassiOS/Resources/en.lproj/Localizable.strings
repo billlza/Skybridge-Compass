@@ -317,5 +317,65 @@
 "取消连接" = "Cancel Connection";
 "连接摄像头" = "Connect";
 "摄像头连接失败" = "Camera Connection Failed";
-"fileTransfer.receiptDeliveryUnknown" = "File saved or sent, but delivery confirmation is unknown. Do not retransmit automatically.";
+"fileTransfer.receiptDeliveryUnknown" = "Delivery confirmation is unknown. Check the file on the receiving device before retransmitting.";
 "fileTransfer.committedFileReleaseFailed" = "File was saved, but internal transfer cleanup failed. Restart the app before receiving more files.";
+
+/* Account Devices (账号设备) */
+"账号设备" = "Account Devices";
+"同一账号" = "Same Account";
+"登录同一账号的设备会自动记录名称、IP、系统与在线状态" = "Devices signed in with the same account are recorded automatically: name, IP, OS and online state";
+"还没有其他设备" = "No other devices yet";
+"在其他设备上用同一账号登录 SkyBridge，它就会出现在这里" = "Sign in to SkyBridge with the same account on another device and it will appear here";
+"登录后才能看到本账号的设备" = "Sign in to see the devices of this account";
+"正在同步账号设备…" = "Syncing account devices…";
+"将自动重试；也可以点击刷新" = "Retrying automatically; you can also refresh";
+"列表可能已过期（上次更新：%@）" = "The list may be outdated (last update: %@)";
+"设备数量超过 200 台，仅显示前 200 台" = "More than 200 devices; only the first 200 are shown";
+"更新于 %@" = "Updated %@";
+"局域网可达" = "LAN reachable";
+"本机" = "This Device";
+"可被控" = "Controllable";
+"仅控制端" = "Controller only";
+"局域网" = "LAN";
+"公网" = "Public";
+"设备 ID" = "Device ID";
+"最近活跃" = "Last seen";
+"尚未上线" = "Never online";
+"待批准" = "Pending approval";
+"已冻结" = "Frozen";
+"用连接码连接" = "Connect with code";
+"复制地址" = "Copy address";
+"复制设备 ID" = "Copy device ID";
+"本机尚未在账号中激活（%@）" = "This device is not active in the account yet (%@)";
+"请求过于频繁，稍后自动重试" = "Too many requests; retrying later";
+"设备注册表暂不可用（%@）" = "Device registry unavailable (%@)";
+"服务器拒绝了请求（HTTP %d）" = "The server rejected the request (HTTP %d)";
+"无法连接信令服务器" = "Cannot reach the signaling server";
+"服务器响应无法解析" = "The server response could not be parsed";
+"本机身份尚未就绪" = "Local device identity is not ready yet";
+"本机登录状态异常（%@）" = "Local sign-in state is unusable (%@)";
+"本机在线状态上报失败，其他设备可能看不到这台设备" = "Reporting this device as online failed; other devices may not see it";
+"%d 台设备 · %d 台在线" = "%d devices · %d online";
+"登录同一账号的其他设备会显示在这里" = "Other devices signed in with the same account will appear here";
+"刚刚" = "Just now";
+"%d 分钟前" = "%d min ago";
+"%d 小时前" = "%d h ago";
+"%d 天前" = "%d d ago";
+
+/* Account device registration and hardware metadata */
+"本机身份与历史登记不一致，需要重新验证设备。" = "This device’s identity differs from its historical registration. Verify the device again.";
+"本机尚未登记，需由已登记设备批准。" = "This device is not registered. Approval from a registered device is required.";
+"本机登记正在等待批准。" = "This device’s registration is awaiting approval.";
+"本机登记已冻结。" = "This device’s registration is frozen.";
+"暂时无法确认本机的登记状态。" = "This device’s registration status could not be confirmed.";
+"型号尚未上报" = "Model not reported";
+
+// Background appearance
+"settings.background_style" = "Background style";
+"settings.background_style.classic" = "Classic Starfield";
+"settings.background_style.light" = "Luminous Sky";
+"settings.background_style.description" = "Switch the background, glass and text colors together. Weather effects stay enabled as configured.";
+"选择接收设备" = "Choose recipient";
+"文件操作失败" = "File operation failed";
+"请先选择接收设备，再选择文件。" = "Choose a recipient before selecting files.";
+"等待中" = "Pending";

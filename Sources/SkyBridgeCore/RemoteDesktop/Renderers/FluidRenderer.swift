@@ -41,6 +41,28 @@ public final class FluidRenderer: @unchecked Sendable {
     /// 帧输出回调。texture 为当前帧纹理，backing 持有引用防止提前释放。
     public var frameHandler: ((MTLTexture, AnyObject?) -> Void)?
 
+    /// Decode failures are delivered at the stream boundary, never represented as a frame.
+    public var failureHandler: (@Sendable (RemoteFrameRenderError) -> Void)?
+    var syncFrameHandler: (@Sendable () -> Void)?
+    private lazy var h264Decoder = H264VideoDecoder(
+        maximumWidth: Int32(BGRAFrameBuilder.maximumWidth),
+        maximumHeight: Int32(BGRAFrameBuilder.maximumHeight),
+        frameHandler: { [weak self] frame in
+            guard let self else { return }
+            self.ringBuffer.push(frame)
+            // A completed decode drives presentation, including a single final frame.
+            self.pullAndRender()
+        },
+        failureHandler: { [weak self] error in self?.reportH264Failure(error) },
+        syncFrameHandler: { [weak self] in self?.syncFrameHandler?() }
+    )
+
+    private func reportH264Failure(_ error: RemoteFrameRenderError) {
+        log.error("H.264 decode failed: \(error.localizedDescription, privacy: .public)")
+        healthMonitor?.recordDroppedFrame(reason: .decodeFailed)
+        failureHandler?(error)
+    }
+
     // MARK: - Metal 资源
 
     private let device: MTLDevice?
@@ -51,6 +73,7 @@ public final class FluidRenderer: @unchecked Sendable {
     // MARK: - Ring Buffer
 
     private let ringBuffer = DecodedFrameRingBuffer(capacity: 3)
+    private let presentationQueue = DispatchQueue(label: "com.skybridge.compass.fluid.present")
 
     // MARK: - VideoToolbox
 
@@ -94,13 +117,16 @@ public final class FluidRenderer: @unchecked Sendable {
     // MARK: - 生命周期
 
     public func teardown() {
+        h264Decoder.teardown()
         invalidateDecompressionSession()
-        ringBuffer.reset()
-        lastTexture = nil
-        lastBacking = nil
-        hasPresented = false
-        textureCache = nil
-        pipelineState = nil
+        presentationQueue.sync {
+            ringBuffer.reset()
+            lastTexture = nil
+            lastBacking = nil
+            hasPresented = false
+            textureCache = nil
+            pipelineState = nil
+        }
     }
 
     // MARK: - 帧输入（解码线程调用）
@@ -127,7 +153,11 @@ public final class FluidRenderer: @unchecked Sendable {
         switch type {
         case .bgra:
             processBGRAFrame(data: data, width: width, height: height, stride: stride, recvTime: recvTime)
-        case .h264, .hevc:
+        case .h264:
+            if case .failure(let error) = h264Decoder.submit(data: data) {
+                reportH264Failure(error)
+            }
+        case .hevc:
             processCompressedFrame(data: data, width: width, height: height, codec: type, recvTime: recvTime)
         }
 
@@ -152,6 +182,14 @@ public final class FluidRenderer: @unchecked Sendable {
     public func pullAndRender(
         renderPassDescriptor: MTLRenderPassDescriptor? = nil,
         drawable: (any MTLDrawable)? = nil
+    ) -> Bool {
+        presentationQueue.sync {
+            pullAndRenderSerially(renderPassDescriptor: renderPassDescriptor, drawable: drawable)
+        }
+    }
+
+    private func pullAndRenderSerially(
+        renderPassDescriptor: MTLRenderPassDescriptor?, drawable: (any MTLDrawable)?
     ) -> Bool {
         guard let frame = ringBuffer.latestFrame() else {
             return false // 没有新帧，保持上一帧

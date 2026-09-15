@@ -26,6 +26,7 @@ process.env.HTTP_LOOKUP_RATE_LIMIT_PER_MIN = process.env.HTTP_LOOKUP_RATE_LIMIT_
 process.env.HTTP_TURN_RATE_LIMIT_PER_MIN = process.env.HTTP_TURN_RATE_LIMIT_PER_MIN || '1000';
 process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN = process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN || '1000';
 process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN = process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN || '1000';
+process.env.HTTP_PRESENCE_RATE_LIMIT_PER_MIN = process.env.HTTP_PRESENCE_RATE_LIMIT_PER_MIN || '1000';
 process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH = process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH || '/current-path/ws';
 process.env.SKYBRIDGE_SIGNALING_ALLOW_LEGACY_QUERY_TOKEN = 'false';
 const expectedSignalingWebSocketPath = process.env.SKYBRIDGE_SIGNALING_WEBSOCKET_PATH;
@@ -81,6 +82,10 @@ class FakeRegistryStore {
     this.rotationByRequest = new Map();
     this.identityHistory = [];
     this.nextCommitFailure = null;
+    this.presenceTouchCalls = [];
+    this.nextPresenceTouchFailure = null;
+    this.listCalls = [];
+    this.nextListFailure = null;
     this.sessionsByAccessToken = new Map([
       [bearerToken, { userId, tenantId, email: 'integration@example.com' }],
       [sameTenantOtherUserBearerToken, { userId: sameTenantOtherUserId, tenantId, email: 'integration-user-2@example.com' }],
@@ -234,6 +239,78 @@ class FakeRegistryStore {
 
   clearSyntheticOnly(deviceId) {
     this.syntheticOnlyDeviceIds.delete(deviceId);
+  }
+
+  async listRegisteredDevices({ tenantId: requestedTenantId, userId: requestedUserId, limit = 200 }) {
+    this.listCalls.push({ tenantId: requestedTenantId, userId: requestedUserId, limit });
+    if (this.nextListFailure) {
+      throw this.nextListFailure;
+    }
+    const lastSeen = (record) => (record.last_seen_at ? Date.parse(record.last_seen_at) : null);
+    return [...this.devices.values()]
+      .filter((record) => record.tenant_id === requestedTenantId
+        && record.user_id === requestedUserId
+        && ['active', 'pending', 'frozen'].includes(record.status))
+      .sort((left, right) => {
+        const leftSeen = lastSeen(left);
+        const rightSeen = lastSeen(right);
+        if (leftSeen !== rightSeen) {
+          if (leftSeen === null) return 1;
+          if (rightSeen === null) return -1;
+          return rightSeen - leftSeen;
+        }
+        return String(left.device_id).localeCompare(String(right.device_id));
+      })
+      .slice(0, limit)
+      .map((record) => copyJSON({
+        device_id: record.device_id,
+        protocol_signing_algorithm: record.protocol_signing_algorithm,
+        protocol_public_key_fingerprint: record.protocol_public_key_fingerprint,
+        device_name: record.device_name ?? null,
+        status: record.status,
+        registered_at: record.registered_at ?? null,
+        last_seen_at: record.last_seen_at ?? null,
+        platform: record.platform ?? null,
+        device_model: record.device_model ?? null,
+        os_version: record.os_version ?? null,
+        app_version: record.app_version ?? null,
+        last_lan_addresses: record.last_lan_addresses ?? null,
+        last_public_address: record.last_public_address ?? null,
+        last_presence_at: record.last_presence_at ?? null,
+        last_capabilities: record.last_capabilities ?? null
+      }));
+  }
+
+  async touchRegisteredDevicePresence(payload) {
+    this.presenceTouchCalls.push(copyJSON(payload));
+    if (this.nextPresenceTouchFailure) {
+      throw this.nextPresenceTouchFailure;
+    }
+    const key = this.deviceKey(payload.p_tenant_id, payload.p_user_id, payload.p_device_id);
+    const device = this.devices.get(key);
+    const touchedAt = new Date().toISOString();
+    if (
+      !device
+      || device.status !== 'active'
+      || device.protocol_signing_algorithm !== payload.p_protocol_signing_algorithm
+      || String(device.protocol_public_key_fingerprint).toLowerCase()
+        !== String(payload.p_protocol_public_key_fingerprint).toLowerCase()
+    ) {
+      return { updated: false, touched_at: touchedAt };
+    }
+    if (typeof payload.p_device_name === 'string' && payload.p_device_name) {
+      device.device_name = payload.p_device_name;
+    }
+    device.platform = payload.p_platform ?? null;
+    device.device_model = payload.p_device_model ?? null;
+    device.os_version = payload.p_os_version ?? null;
+    device.app_version = payload.p_app_version ?? null;
+    device.last_lan_addresses = payload.p_lan_addresses ?? null;
+    device.last_public_address = payload.p_public_address ?? null;
+    device.last_capabilities = payload.p_capabilities ?? null;
+    device.last_presence_at = touchedAt;
+    device.last_seen_at = touchedAt;
+    return { updated: true, touched_at: touchedAt };
   }
 
   async bootstrapRegisterDevice(payload) {
@@ -604,6 +681,8 @@ beforeEach(() => {
   fakeSMSClient.reset();
   if (registryStore) {
     registryStore.nextCommitFailure = null;
+    registryStore.nextPresenceTouchFailure = null;
+    registryStore.nextListFailure = null;
   }
 });
 
@@ -2823,6 +2902,615 @@ test('identity rotation RPC failure has no partial success and response loss is 
   assert.equal(retry.json.generation, 2);
 });
 
+
+// --- presence heartbeat + account device list --------------------------------------------------
+
+function presenceRegisterBody(binding, extra = {}) {
+  return {
+    deviceId: binding.deviceId,
+    protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+    clientVersion: '1.0.2',
+    protocolVersion: '1',
+    ...extra
+  };
+}
+
+function bindingQuery(binding, extra = {}) {
+  const params = new URLSearchParams({
+    deviceId: binding.deviceId,
+    protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+    protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+    ...extra
+  });
+  return params.toString();
+}
+
+function authHeaders(accessToken = bearerToken) {
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    'X-SkyBridge-Client-Version': '1.0.2',
+    'X-SkyBridge-Protocol-Version': '1'
+  };
+}
+
+function presenceRecordKey(binding, { requestedTenantId = tenantId, requestedUserId = userId } = {}) {
+  return `${requestedTenantId}:${requestedUserId}:${binding.deviceId}`;
+}
+
+async function registerPresence(binding, extra = {}, { accessToken = bearerToken } = {}) {
+  return postJSON('/api/presence/register', {
+    requiresAuth: true,
+    accessToken,
+    body: presenceRegisterBody(binding, extra)
+  });
+}
+
+async function listDevices(binding, { accessToken = bearerToken } = {}) {
+  return getJSON(`/api/devices/list?${bindingQuery(binding)}`, { headers: authHeaders(accessToken) });
+}
+
+test('presence register refreshes the ephemeral TTL and stores validated metadata with the observed address policy', async () => {
+  const binding = makeIdentityBinding('presence-refresh');
+  const first = await registerPresence(binding, {
+    deviceName: 'Studio Mac',
+    platform: 'macos',
+    deviceModel: 'Mac16,7',
+    osVersion: '26.6',
+    lanAddresses: ['192.168.1.20', '10.0.0.5'],
+    capabilities: ['remote_desktop', 'clipboard']
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.online, true);
+  assert.equal(first.json.ttlMs, 90_000);
+
+  await sleep(5);
+  const second = await registerPresence(binding, { deviceName: 'Studio Mac', platform: 'macos', deviceModel: 'Mac16,7', osVersion: '26.6', lanAddresses: ['10.0.0.5', '192.168.1.20'], capabilities: ['clipboard', 'remote_desktop'] });
+  assert.equal(second.status, 200);
+  assert.ok(second.json.expiresAt > first.json.expiresAt, 'a heartbeat must extend the presence TTL');
+
+  assert.equal(first.headers['cache-control'], 'no-store', 'presence state must never be cached');
+  const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+  assert.ok(stored, 'presence record must exist');
+  assert.equal(stored.deviceName, 'Studio Mac');
+  assert.equal(stored.platform, 'macos');
+  assert.equal(stored.deviceModel, 'Mac16,7');
+  assert.equal(stored.osVersion, '26.6');
+  assert.equal(stored.appVersion, '1.0.2');
+  assert.deepEqual(stored.lanAddresses, ['10.0.0.5', '192.168.1.20']);
+  assert.deepEqual(stored.capabilities, ['clipboard', 'remote_desktop']);
+  assert.equal(stored.protocolSigningAlgorithm, binding.protocolSigningAlgorithm);
+  assert.equal(stored.protocolPublicKeyFingerprint, binding.protocolPublicKeyFingerprint);
+  // Loopback is the observed client address in tests: it is never stored as a public address.
+  assert.equal(stored.publicAddress, null);
+  assert.equal(stored.expiresAt - stored.updatedAt, 90_000);
+  assert.equal(stored.expiresAt, second.json.expiresAt);
+});
+
+test('presence register refuses revoked and frozen identities but still admits pending ones', async () => {
+  const revoked = makeIdentityBinding('presence-revoked');
+  const frozen = makeIdentityBinding('presence-frozen');
+  const pending = makeIdentityBinding('presence-pending');
+  registryStore.setDeviceStatus(revoked, 'revoked');
+  registryStore.setDeviceStatus(frozen, 'frozen');
+  registryStore.setDeviceStatus(pending, 'pending');
+
+  const revokedResponse = await registerPresence(revoked, { deviceName: 'Revoked' });
+  assert.equal(revokedResponse.status, 403);
+  assert.equal(revokedResponse.json.error, 'device_revoked');
+  assert.equal(await signalingState.getEphemeral('presence', presenceRecordKey(revoked)), null, 'a refused heartbeat must leave no presence record');
+
+  const frozenResponse = await registerPresence(frozen, { deviceName: 'Frozen' });
+  assert.equal(frozenResponse.status, 403);
+  assert.equal(frozenResponse.json.error, 'device_frozen');
+  assert.equal(await signalingState.getEphemeral('presence', presenceRecordKey(frozen)), null);
+
+  const pendingResponse = await registerPresence(pending, { deviceName: 'Pending' });
+  assert.equal(pendingResponse.status, 200);
+  assert.equal(pendingResponse.json.online, true);
+  assert.equal(pendingResponse.json.persisted, false);
+  assert.equal(pendingResponse.json.persistReason, 'device_not_active');
+  assert.ok(await signalingState.getEphemeral('presence', presenceRecordKey(pending)));
+});
+
+test('presence register rejects an app version that could not be persisted instead of misreporting the registry', async () => {
+  const binding = makeIdentityBinding('presence-app-version');
+  registryStore.setDeviceStatus(binding, 'active');
+  const callsBefore = registryStore.presenceTouchCalls.length;
+  const tooLong = await registerPresence(binding, { deviceName: 'Versioned', clientVersion: '1.'.repeat(33) });
+  assert.equal(tooLong.status, 400);
+  assert.equal(tooLong.json.error, 'invalid_presence_metadata');
+  assert.equal(tooLong.json.field, 'appVersion');
+  assert.equal(await signalingState.getEphemeral('presence', presenceRecordKey(binding)), null);
+  assert.equal(registryStore.presenceTouchCalls.length, callsBefore, 'nothing reaches the registry');
+
+  const ok = await registerPresence(binding, { deviceName: 'Versioned', clientVersion: '1.0.3' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.persisted, true);
+  assert.equal(registryStore.presenceTouchCalls.at(-1).p_app_version, '1.0.3');
+});
+
+test('presence register keeps the reporter LAN address order and re-persists when the preferred interface changes', async () => {
+  const binding = makeIdentityBinding('presence-lan-order');
+  registryStore.setDeviceStatus(binding, 'active');
+  const callsBefore = registryStore.presenceTouchCalls.length;
+
+  const first = await registerPresence(binding, { deviceName: 'Ordered', lanAddresses: ['192.168.1.20', '10.0.0.5'] });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.persistReason, 'written');
+  assert.deepEqual(registryStore.presenceTouchCalls.at(-1).p_lan_addresses, ['192.168.1.20', '10.0.0.5']);
+  assert.deepEqual((await signalingState.getEphemeral('presence', presenceRecordKey(binding))).lanAddresses, ['192.168.1.20', '10.0.0.5']);
+
+  const swapped = await registerPresence(binding, { deviceName: 'Ordered', lanAddresses: ['10.0.0.5', '192.168.1.20'] });
+  assert.equal(swapped.status, 200);
+  assert.equal(swapped.json.persistReason, 'written', 'a changed preferred interface is a metadata change');
+  assert.equal(registryStore.presenceTouchCalls.length, callsBefore + 2);
+  assert.deepEqual(registryStore.presenceTouchCalls.at(-1).p_lan_addresses, ['10.0.0.5', '192.168.1.20']);
+
+  const listed = await listDevices(binding);
+  assert.equal(listed.status, 200);
+  const row = listed.json.devices.find((device) => device.deviceId === binding.deviceId);
+  assert.deepEqual(row.lanAddresses, ['10.0.0.5', '192.168.1.20']);
+});
+
+test('presence register ignores forwarded headers when the runtime does not trust a proxy', async () => {
+  const binding = makeIdentityBinding('presence-forwarded');
+  const response = await postJSON('/api/presence/register', {
+    requiresAuth: true,
+    headers: { 'X-Forwarded-For': '203.0.113.9', 'CF-Connecting-IP': '203.0.113.10' },
+    body: presenceRegisterBody(binding, { deviceName: 'Behind proxy' })
+  });
+  assert.equal(response.status, 200);
+  const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+  assert.equal(stored.publicAddress, null);
+});
+
+test('presence register rejects malformed metadata with stable public error codes', async () => {
+  const binding = makeIdentityBinding('presence-validation');
+  const cases = [
+    [{ platform: 'visionos' }, 'invalid_presence_platform', 'platform'],
+    [{ lanAddresses: '10.0.0.1' }, 'invalid_presence_metadata', 'lanAddresses'],
+    [{ lanAddresses: ['192.168.1.'] }, 'invalid_presence_lan_address', 'lanAddresses'],
+    [{ lanAddresses: Array(9).fill('10.0.0.1') }, 'invalid_presence_lan_address', 'lanAddresses'],
+    [{ capabilities: ['Remote-Desktop'] }, 'invalid_presence_capability', 'capabilities'],
+    [{ deviceModel: 'x'.repeat(65) }, 'invalid_presence_metadata', 'deviceModel'],
+    [{ deviceName: 'line\nbreak' }, 'invalid_presence_metadata', 'deviceName']
+  ];
+  for (const [extra, code, field] of cases) {
+    const response = await registerPresence(binding, extra);
+    assert.equal(response.status, 400, `${code} must be rejected`);
+    assert.equal(response.json.error, code);
+    assert.equal(response.json.field, field);
+  }
+  assert.equal(await signalingState.getEphemeral('presence', presenceRecordKey(binding)), null);
+});
+
+test('presence register persists on the first heartbeat, throttles unchanged repeats and re-persists on metadata change', async () => {
+  const binding = makeIdentityBinding('presence-persist');
+  registryStore.setDeviceStatus(binding, 'active');
+  const callsBefore = registryStore.presenceTouchCalls.length;
+
+  const first = await registerPresence(binding, { deviceName: 'Persist Mac', platform: 'macos', osVersion: '26.6', lanAddresses: ['10.0.0.9'] });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.persisted, true);
+  assert.equal(first.json.persistReason, 'written');
+  assert.equal(registryStore.presenceTouchCalls.length, callsBefore + 1);
+  const touch = registryStore.presenceTouchCalls.at(-1);
+  assert.equal(touch.p_tenant_id, tenantId);
+  assert.equal(touch.p_user_id, userId);
+  assert.equal(touch.p_device_id, binding.deviceId);
+  assert.equal(touch.p_protocol_signing_algorithm, binding.protocolSigningAlgorithm);
+  assert.equal(touch.p_protocol_public_key_fingerprint, binding.protocolPublicKeyFingerprint);
+  assert.equal(touch.p_device_name, 'Persist Mac');
+  assert.equal(touch.p_platform, 'macos');
+  assert.equal(touch.p_os_version, '26.6');
+  assert.equal(touch.p_app_version, '1.0.2');
+  assert.deepEqual(touch.p_lan_addresses, ['10.0.0.9']);
+  assert.equal(touch.p_public_address, null);
+  assert.deepEqual(touch.p_capabilities, []);
+  const persistedRow = registryStore.registeredDevice(binding);
+  assert.equal(persistedRow.device_name, 'Persist Mac');
+  assert.equal(persistedRow.platform, 'macos');
+  assert.deepEqual(persistedRow.last_lan_addresses, ['10.0.0.9']);
+  assert.ok(persistedRow.last_presence_at);
+
+  const second = await registerPresence(binding, { deviceName: 'Persist Mac', platform: 'macos', osVersion: '26.6', lanAddresses: ['10.0.0.9'] });
+  assert.equal(second.status, 200);
+  assert.equal(second.json.persisted, false);
+  assert.equal(second.json.persistReason, 'throttled');
+  assert.equal(registryStore.presenceTouchCalls.length, callsBefore + 1, 'unchanged metadata must not hit the registry again');
+
+  const third = await registerPresence(binding, { deviceName: 'Persist Mac', platform: 'macos', osVersion: '26.7', lanAddresses: ['10.0.0.9'] });
+  assert.equal(third.status, 200);
+  assert.equal(third.json.persisted, true);
+  assert.equal(third.json.persistReason, 'written');
+  assert.equal(registryStore.presenceTouchCalls.length, callsBefore + 2, 'changed metadata must persist immediately');
+  assert.equal(registryStore.registeredDevice(binding).os_version, '26.7');
+});
+
+test('presence register honours the persist interval stored in the ephemeral record', async () => {
+  const binding = makeIdentityBinding('presence-interval');
+  registryStore.setDeviceStatus(binding, 'active');
+  const body = { deviceName: 'Interval Mac', platform: 'macos' };
+  const first = await registerPresence(binding, body);
+  assert.equal(first.json.persisted, true);
+  const callsAfterFirst = registryStore.presenceTouchCalls.length;
+
+  const throttled = await registerPresence(binding, body);
+  assert.equal(throttled.json.persistReason, 'throttled');
+  assert.equal(registryStore.presenceTouchCalls.length, callsAfterFirst);
+
+  await signalingState.updateEphemeral('presence', presenceRecordKey(binding), (record) => {
+    record.persist.persistedAt -= 6 * 60_000;
+  });
+  const due = await registerPresence(binding, body);
+  assert.equal(due.json.persisted, true);
+  assert.equal(due.json.persistReason, 'written');
+  assert.equal(registryStore.presenceTouchCalls.length, callsAfterFirst + 1);
+});
+
+test('presence register keeps the heartbeat alive when the registry touch fails and retries after the claim window', async () => {
+  const binding = makeIdentityBinding('presence-touch-failure');
+  registryStore.setDeviceStatus(binding, 'active');
+  registryStore.nextPresenceTouchFailure = fakeRegistryError('registry_unavailable', 503);
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...parts) => {
+    warnings.push(parts.map(String).join(' '));
+  };
+  let failed;
+  try {
+    failed = await registerPresence(binding, { deviceName: 'Fragile Mac', platform: 'macos', lanAddresses: ['10.0.0.77'] });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(failed.status, 200);
+  assert.equal(failed.json.online, true);
+  assert.equal(failed.json.persisted, false);
+  assert.equal(failed.json.persistReason, 'registry_unavailable');
+  const warning = warnings.find((line) => line.includes('[presence] persist failed'));
+  assert.ok(warning, 'a registry failure must be observable in the server log');
+  assert.doesNotMatch(warning, /Fragile Mac|10\.0\.0\.77/);
+  const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+  assert.equal(stored.deviceName, 'Fragile Mac', 'the ephemeral record is written even when persistence fails');
+  assert.equal(stored.persist.persistedAt, null);
+  assert.ok(stored.persist.claimedAt, 'a failed attempt keeps its claim as the retry backoff');
+
+  registryStore.nextPresenceTouchFailure = null;
+  const callsBeforeRetry = registryStore.presenceTouchCalls.length;
+  const backedOff = await registerPresence(binding, { deviceName: 'Fragile Mac', platform: 'macos', lanAddresses: ['10.0.0.77'] });
+  assert.equal(backedOff.json.persistReason, 'throttled');
+  assert.equal(registryStore.presenceTouchCalls.length, callsBeforeRetry, 'no retry inside the claim window');
+
+  await signalingState.updateEphemeral('presence', presenceRecordKey(binding), (record) => {
+    record.persist.claimedAt -= 31_000;
+  });
+  const retried = await registerPresence(binding, { deviceName: 'Fragile Mac', platform: 'macos', lanAddresses: ['10.0.0.77'] });
+  assert.equal(retried.json.persisted, true);
+  assert.equal(retried.json.persistReason, 'written');
+  assert.equal(registryStore.presenceTouchCalls.length, callsBeforeRetry + 1);
+});
+
+test('presence register reports device_not_active when no active registry row matches the exact identity', async () => {
+  const binding = makeIdentityBinding('presence-not-active');
+  // Never registered: the fake must not auto-create a row when the heartbeat gate looks the identity up.
+  registryStore.allowSyntheticOnly(binding.deviceId);
+  const response = await registerPresence(binding, { deviceName: 'Unregistered' });
+  assert.equal(response.status, 200);
+  assert.equal(response.json.online, true);
+  assert.equal(response.json.persisted, false);
+  assert.equal(response.json.persistReason, 'device_not_active');
+  const stored = await signalingState.getEphemeral('presence', presenceRecordKey(binding));
+  assert.ok(stored.persist.persistedAt, 'a not-active outcome is settled at the persist interval');
+});
+
+test('presence register scopes the registry write to the JWT identity, never the declared device id', async () => {
+  const owner = makeIdentityBinding('presence-owner');
+  registryStore.setDeviceStatus(owner, 'active');
+  registryStore.registeredDevice(owner).device_name = 'Owner Mac';
+  // The impostor's own (tenant, user, device) row does not exist; keep the fake from inventing one.
+  registryStore.allowSyntheticOnly(owner.deviceId);
+  const callsBefore = registryStore.presenceTouchCalls.length;
+
+  const response = await registerPresence(owner, { deviceName: 'Impostor' }, { accessToken: sameTenantOtherUserBearerToken });
+  assert.equal(response.status, 200);
+  assert.equal(response.json.persistReason, 'device_not_active');
+  const touch = registryStore.presenceTouchCalls.at(-1);
+  assert.equal(registryStore.presenceTouchCalls.length, callsBefore + 1);
+  assert.equal(touch.p_user_id, sameTenantOtherUserId);
+  assert.equal(registryStore.registeredDevice(owner).device_name, 'Owner Mac');
+  assert.equal(await signalingState.getEphemeral('presence', presenceRecordKey(owner)), null, 'the impostor record lives under its own user key');
+  assert.ok(await signalingState.getEphemeral('presence', presenceRecordKey(owner, { requestedUserId: sameTenantOtherUserId })));
+});
+
+test('presence register answers persisted:false registry_not_configured when the registry cannot persist', async () => {
+  const binding = makeIdentityBinding('presence-no-registry');
+  const touch = registryStore.touchRegisteredDevicePresence;
+  registryStore.touchRegisteredDevicePresence = undefined;
+  try {
+    const response = await registerPresence(binding, { deviceName: 'No registry' });
+    assert.equal(response.status, 200);
+    assert.equal(response.json.online, true);
+    assert.equal(response.json.persisted, false);
+    assert.equal(response.json.persistReason, 'registry_not_configured');
+  } finally {
+    registryStore.touchRegisteredDevicePresence = touch;
+  }
+});
+
+test('presence query requires an active registered caller', async () => {
+  const active = makeIdentityBinding('presence-query-active');
+  const revoked = makeIdentityBinding('presence-query-revoked');
+  registryStore.setDeviceStatus(revoked, 'revoked');
+  await registerPresence(active, { deviceName: 'Online' });
+
+  const ok = await getJSON(`/api/presence/query?${bindingQuery(active, { ids: `${active.deviceId},${revoked.deviceId}` })}`, {
+    headers: authHeaders()
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers['cache-control'], 'no-store');
+  assert.deepEqual(ok.json.online, [active.deviceId]);
+
+  const denied = await getJSON(`/api/presence/query?${bindingQuery(revoked, { ids: active.deviceId })}`, {
+    headers: authHeaders()
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.json.error, 'device_revoked');
+});
+
+test('devices/list returns only the caller account devices with live presence overlaid on the registry row', async () => {
+  const caller = makeIdentityBinding('list-caller');
+  const activePeer = makeIdentityBinding('list-active-peer');
+  const pendingPeer = makeIdentityBinding('list-pending-peer');
+  const frozenPeer = makeIdentityBinding('list-frozen-peer');
+  const revokedPeer = makeIdentityBinding('list-revoked-peer');
+  const otherUserPeer = makeIdentityBinding('list-other-user-peer');
+  const otherTenantPeer = makeIdentityBinding('list-other-tenant-peer');
+  registryStore.setDeviceStatus(caller, 'active');
+  registryStore.setDeviceStatus(activePeer, 'active');
+  registryStore.setDeviceStatus(pendingPeer, 'pending');
+  registryStore.setDeviceStatus(frozenPeer, 'frozen');
+  registryStore.setDeviceStatus(revokedPeer, 'revoked');
+  registryStore.setDeviceStatus(otherUserPeer, 'active', { requestedUserId: sameTenantOtherUserId });
+  registryStore.setDeviceStatus(otherTenantPeer, 'active', { requestedTenantId: otherTenantId, requestedUserId: otherTenantUserId });
+  Object.assign(registryStore.registeredDevice(activePeer), {
+    device_name: 'Persisted Mac',
+    os_version: '26.0',
+    platform: 'macos',
+    last_lan_addresses: ['10.0.0.3'],
+    last_capabilities: ['remote_desktop'],
+    registered_at: '2026-09-01T10:00:00.000+00:00',
+    last_seen_at: '2026-09-02T10:00:00.000+00:00',
+    last_presence_at: '2026-09-03T10:00:00.123456+00:00'
+  });
+  Object.assign(registryStore.registeredDevice(pendingPeer), {
+    device_name: 'Pending iPad',
+    last_seen_at: '2026-09-04T10:00:00.000+00:00'
+  });
+
+  const heartbeat = await registerPresence(activePeer, { deviceName: 'Live Mac', platform: 'macos', osVersion: '26.1', lanAddresses: ['10.0.0.4'], capabilities: ['clipboard', 'remote_desktop'] });
+  assert.equal(heartbeat.status, 200);
+  const liveRecord = await signalingState.getEphemeral('presence', presenceRecordKey(activePeer));
+
+  const response = await listDevices(caller);
+  assert.equal(response.status, 200);
+  assert.equal(response.json.callerDeviceId, caller.deviceId);
+  assert.equal(response.json.truncated, false);
+  assert.ok(Number.isInteger(response.json.generatedAt));
+  const ids = response.json.devices.map((device) => device.deviceId);
+  for (const expected of [caller.deviceId, activePeer.deviceId, pendingPeer.deviceId, frozenPeer.deviceId]) {
+    assert.ok(ids.includes(expected), `${expected} must be listed`);
+  }
+  for (const excluded of [revokedPeer.deviceId, otherUserPeer.deviceId, otherTenantPeer.deviceId]) {
+    assert.ok(!ids.includes(excluded), `${excluded} must not be listed`);
+  }
+  assert.deepEqual(registryStore.listCalls.at(-1), { tenantId, userId, limit: 201 });
+
+  const live = response.json.devices.find((device) => device.deviceId === activePeer.deviceId);
+  assert.equal(live.online, true);
+  assert.equal(live.isCaller, false);
+  assert.equal(live.deviceName, 'Live Mac');
+  assert.equal(live.osVersion, '26.1', 'live metadata overrides the persisted column');
+  assert.equal(live.appVersion, '1.0.2');
+  assert.deepEqual(live.lanAddresses, ['10.0.0.4']);
+  assert.deepEqual(live.capabilities, ['clipboard', 'remote_desktop']);
+  assert.equal(live.lastSeenAt, liveRecord.updatedAt);
+  assert.equal(live.presenceUpdatedAt, liveRecord.updatedAt);
+  assert.equal(live.registeredAt, Date.parse('2026-09-01T10:00:00.000+00:00'));
+  assert.equal(live.protocolPublicKeyFingerprint, activePeer.protocolPublicKeyFingerprint.toLowerCase());
+  assert.equal(live.protocolSigningAlgorithm, activePeer.protocolSigningAlgorithm);
+
+  const pending = response.json.devices.find((device) => device.deviceId === pendingPeer.deviceId);
+  assert.equal(pending.online, false);
+  assert.equal(pending.status, 'pending');
+  assert.equal(pending.deviceName, 'Pending iPad');
+  assert.equal(pending.lastSeenAt, Date.parse('2026-09-04T10:00:00.000+00:00'), 'offline rows fall back to last_seen_at');
+  assert.deepEqual(pending.lanAddresses, []);
+  assert.equal(pending.presenceUpdatedAt, null);
+
+  const self = response.json.devices.find((device) => device.deviceId === caller.deviceId);
+  assert.equal(self.isCaller, true);
+  for (const device of response.json.devices) {
+    assert.ok(device.lastSeenAt === null || Number.isInteger(device.lastSeenAt), 'timestamps must be epoch milliseconds');
+    assert.ok(!('protocolPublicKeyBase64' in device));
+  }
+});
+
+test('devices/list prefers last_presence_at over last_seen_at for offline rows', async () => {
+  const caller = makeIdentityBinding('list-precedence-caller');
+  const peer = makeIdentityBinding('list-precedence-peer');
+  registryStore.setDeviceStatus(caller, 'active');
+  registryStore.setDeviceStatus(peer, 'active');
+  Object.assign(registryStore.registeredDevice(peer), {
+    last_seen_at: '2026-09-04T10:00:00.000+00:00',
+    last_presence_at: '2026-09-03T10:00:00.000+00:00'
+  });
+  const response = await listDevices(caller);
+  const row = response.json.devices.find((device) => device.deviceId === peer.deviceId);
+  assert.equal(row.online, false);
+  assert.equal(row.lastSeenAt, Date.parse('2026-09-03T10:00:00.000+00:00'));
+});
+
+test('devices/list does not overlay a presence record whose identity differs from the registry row', async () => {
+  const caller = makeIdentityBinding('list-overlay-caller');
+  const peer = makeIdentityBinding('list-overlay-peer');
+  const impostor = makeIdentityBinding('list-overlay-impostor');
+  registryStore.setDeviceStatus(caller, 'active');
+  registryStore.setDeviceStatus(peer, 'active');
+  registryStore.registeredDevice(peer).device_name = 'Real Peer';
+  // Same account, same declared device id, different key: must not mark the real peer online.
+  const spoofed = await registerPresence(
+    { ...impostor, deviceId: peer.deviceId },
+    { deviceName: 'Spoofed name', lanAddresses: ['10.9.9.9'] }
+  );
+  assert.equal(spoofed.status, 200);
+  const response = await listDevices(caller);
+  const row = response.json.devices.find((device) => device.deviceId === peer.deviceId);
+  assert.equal(row.online, false);
+  assert.equal(row.deviceName, 'Real Peer');
+  assert.deepEqual(row.lanAddresses, []);
+});
+
+test('devices/list rejects callers that are not active registered devices', async () => {
+  const revoked = makeIdentityBinding('list-revoked-caller');
+  const pending = makeIdentityBinding('list-pending-caller');
+  const unregistered = makeIdentityBinding('list-unregistered-caller');
+  registryStore.setDeviceStatus(revoked, 'revoked');
+  registryStore.setDeviceStatus(pending, 'pending');
+  registryStore.allowSyntheticOnly(unregistered.deviceId);
+  try {
+    const revokedResponse = await listDevices(revoked);
+    assert.equal(revokedResponse.status, 403);
+    assert.equal(revokedResponse.json.error, 'device_revoked');
+    const pendingResponse = await listDevices(pending);
+    assert.equal(pendingResponse.status, 403);
+    assert.equal(pendingResponse.json.error, 'device_not_active');
+    // Bootstrap device auth is enabled in this runtime, so an unregistered binding is admitted synthetically.
+    const unregisteredResponse = await listDevices(unregistered);
+    assert.equal(unregisteredResponse.status, 200);
+  } finally {
+    registryStore.clearSyntheticOnly(unregistered.deviceId);
+  }
+  const missingBearer = await getJSON(`/api/devices/list?${bindingQuery(pending)}`);
+  assert.equal(missingBearer.status, 401);
+  assert.equal(missingBearer.json.error, 'missing_bearer_token');
+  const badBinding = await getJSON('/api/devices/list?deviceId=short', { headers: authHeaders() });
+  assert.equal(badBinding.status, 400);
+  assert.equal(badBinding.json.error, 'bad_device_binding');
+});
+
+test('devices/list enforces the production version floor and accepts explicit current-version headers', async () => {
+  const caller = makeIdentityBinding('list-version-floor');
+  registryStore.setDeviceStatus(caller, 'active');
+  const getTenantPolicy = registryStore.getTenantPolicy;
+  registryStore.getTenantPolicy = async function (requestedTenantId) {
+    return {
+      ...await getTenantPolicy.call(this, requestedTenantId),
+      min_supported_client_version: '1.0.0',
+      min_supported_protocol_version: '1'
+    };
+  };
+  const path = `/api/devices/list?${bindingQuery(caller)}`;
+  try {
+    const missing = await getJSON(path, { headers: { Authorization: `Bearer ${bearerToken}` } });
+    assert.equal(missing.status, 426);
+    assert.equal(missing.json.error, 'client_version_too_old');
+    const oldClient = await getJSON(path, {
+      headers: { ...authHeaders(), 'X-SkyBridge-Client-Version': '0.9.0' }
+    });
+    assert.equal(oldClient.status, 426);
+    assert.equal(oldClient.json.error, 'client_version_too_old');
+    const oldProtocol = await getJSON(path, {
+      headers: { ...authHeaders(), 'X-SkyBridge-Protocol-Version': '0' }
+    });
+    assert.equal(oldProtocol.status, 426);
+    assert.equal(oldProtocol.json.error, 'protocol_version_too_old');
+    const current = await listDevices(caller);
+    assert.equal(current.status, 200);
+    assert.ok(current.json.devices.some((device) => device.deviceId === caller.deviceId && device.isCaller));
+  } finally {
+    registryStore.getTenantPolicy = getTenantPolicy;
+  }
+});
+
+test('devices/list is isolated per tenant and user', async () => {
+  const caller = makeIdentityBinding('list-isolation-caller');
+  const peer = makeIdentityBinding('list-isolation-peer');
+  registryStore.setDeviceStatus(caller, 'active');
+  registryStore.setDeviceStatus(peer, 'active');
+  const otherUserCaller = makeIdentityBinding('list-isolation-other-user');
+  const otherTenantCaller = makeIdentityBinding('list-isolation-other-tenant');
+  registryStore.setDeviceStatus(otherUserCaller, 'active', { requestedUserId: sameTenantOtherUserId });
+  registryStore.setDeviceStatus(otherTenantCaller, 'active', { requestedTenantId: otherTenantId, requestedUserId: otherTenantUserId });
+
+  const otherUser = await listDevices(otherUserCaller, { accessToken: sameTenantOtherUserBearerToken });
+  assert.equal(otherUser.status, 200);
+  assert.ok(!otherUser.json.devices.some((device) => device.deviceId === peer.deviceId));
+  assert.ok(otherUser.json.devices.some((device) => device.deviceId === otherUserCaller.deviceId));
+
+  const otherTenant = await listDevices(otherTenantCaller, { accessToken: otherTenantBearerToken });
+  assert.equal(otherTenant.status, 200);
+  assert.ok(!otherTenant.json.devices.some((device) => device.deviceId === peer.deviceId));
+});
+
+test('devices/list fails closed when the registry cannot list or the schema is outdated', async () => {
+  const caller = makeIdentityBinding('list-registry-failure');
+  registryStore.setDeviceStatus(caller, 'active');
+
+  const list = registryStore.listRegisteredDevices;
+  registryStore.listRegisteredDevices = undefined;
+  try {
+    const response = await listDevices(caller);
+    assert.equal(response.status, 503);
+    assert.equal(response.json.error, 'registry_not_configured');
+  } finally {
+    registryStore.listRegisteredDevices = list;
+  }
+
+  registryStore.nextListFailure = Object.assign(fakeRegistryError('column registered_devices.platform does not exist', 400), {
+    registryPostgrestCode: '42703'
+  });
+  const outdated = await listDevices(caller);
+  assert.equal(outdated.status, 503);
+  assert.equal(outdated.json.error, 'registry_schema_outdated');
+
+  registryStore.nextListFailure = fakeRegistryError('PGRST205', 404);
+  const missingTable = await listDevices(caller);
+  assert.equal(missingTable.status, 503);
+  assert.equal(missingTable.json.error, 'registry_not_configured');
+
+  registryStore.nextListFailure = fakeRegistryError('upstream_timeout', 504);
+  const unavailable = await listDevices(caller);
+  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.json.error, 'registry_unavailable');
+  registryStore.nextListFailure = null;
+});
+
+test('devices/list caps the response at 200 devices, flags truncation and stays within the client budget', async () => {
+  const caller = makeIdentityBinding('list-cap-caller');
+  registryStore.setDeviceStatus(caller, 'active', { requestedUserId: sameTenantOtherUserId });
+  for (let index = 0; index < 205; index++) {
+    const peer = makeIdentityBinding(`list-cap-peer-${index}`);
+    registryStore.setDeviceStatus(peer, 'active', { requestedUserId: sameTenantOtherUserId });
+    Object.assign(registryStore.registeredDevice(peer, { requestedUserId: sameTenantOtherUserId }), {
+      device_name: `Cap device ${index}`,
+      last_lan_addresses: ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4', 'fd12:3456:789a:1::1', 'fd12:3456:789a:1::2', 'fd12:3456:789a:1::3', 'fd12:3456:789a:1::4'],
+      last_capabilities: ['remote_desktop', 'file_transfer', 'clipboard']
+    });
+  }
+  const response = await fetch(`${baseURL}/api/devices/list?${bindingQuery(caller)}`, {
+    headers: authHeaders(sameTenantOtherUserBearerToken)
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const text = await response.text();
+  assert.ok(text.length < 200 * 1024, `response must stay under the client budget, got ${text.length} bytes`);
+  const json = JSON.parse(text);
+  assert.equal(json.devices.length, 200);
+  assert.equal(json.truncated, true);
+  assert.deepEqual(registryStore.listCalls.at(-1), { tenantId, userId: sameTenantOtherUserId, limit: 201 });
+});
+
 async function getJSON(path, { headers = {} } = {}) {
   const response = await fetch(`${baseURL}${path}`, {
     method: 'GET',
@@ -2832,6 +3520,7 @@ async function getJSON(path, { headers = {} } = {}) {
   const text = await response.text();
   return {
     status: response.status,
+    headers: Object.fromEntries(response.headers),
     json: text ? JSON.parse(text) : {}
   };
 }
@@ -2948,6 +3637,7 @@ async function postJSON(path, { headers = {}, body, requiresAuth = false, access
   const text = await response.text();
   return {
     status: response.status,
+    headers: Object.fromEntries(response.headers),
     json: text ? JSON.parse(text) : {}
   };
 }

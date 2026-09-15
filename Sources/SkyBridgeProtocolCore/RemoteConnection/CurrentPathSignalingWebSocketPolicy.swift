@@ -16,6 +16,11 @@ public enum CurrentPathSignalingWebSocketPolicy {
     public static let maxSessionTokenLength = 4096
     public static let maxVersionLength = 64
 
+    // RFC 3986 path characters; percent escapes are validated separately below.
+    private static let rawPathCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@/%"
+    )
+
     public enum PolicyError: LocalizedError, Sendable, Equatable {
         case invalidWebSocketPath
 
@@ -38,9 +43,7 @@ public enum CurrentPathSignalingWebSocketPolicy {
               !trimmed.contains("//"),
               trimmed.unicodeScalars.allSatisfy({ scalar in
                   scalar.isASCII
-                      && scalar.value >= 0x21
-                      && scalar.value != 0x7F
-                      && !CharacterSet.whitespacesAndNewlines.contains(scalar)
+                      && rawPathCharacters.contains(scalar)
               }),
               pathSegmentsAreSafe(trimmed),
               percentEscapesAreSafe(trimmed) else {
@@ -78,7 +81,7 @@ public enum CurrentPathSignalingWebSocketPolicy {
         }
 
         components.scheme = scheme == "https" ? "wss" : "ws"
-        components.path = path
+        components.percentEncodedPath = path
         components.fragment = nil
         var queryItems = [
             URLQueryItem(name: "shard", value: normalizedSessionID),

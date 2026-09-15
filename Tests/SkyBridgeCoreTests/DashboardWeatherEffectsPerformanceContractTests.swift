@@ -1,6 +1,22 @@
 import XCTest
 
 final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
+    func testHazeUsesOneNativeAtmosphereWithoutLegacyParticleLayers() throws {
+        let mac = try repositorySource("Sources/SkyBridgeCore/Weather/CinematicHazeView.swift")
+        let dashboard = try repositorySource("Sources/SkyBridgeCompassApp/Dashboard/DashboardBackgroundView.swift")
+        let ios = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift")
+        XCTAssertEqual(Self.countOccurrences(of: "SkyBridgeWeatherRendering.CinematicHazeView(", in: mac), 1)
+        XCTAssertFalse(mac.contains("TimelineView("))
+        XCTAssertFalse(mac.contains("MetalHazeParticleView("))
+        XCTAssertTrue(mac.contains(".opacity(clearManager.globalOpacity)"))
+        XCTAssertTrue(mac.contains("!isRemoteDesktopActive"))
+        XCTAssertEqual(Self.countOccurrences(of: "GlobalHazeBackground(", in: dashboard), 1)
+        XCTAssertTrue(dashboard.contains("if weatherManager.currentTheme.condition == .foggy"))
+        XCTAssertTrue(ios.contains("snapshot.condition == .haze"))
+        XCTAssertEqual(Self.countOccurrences(of: "SkyBridgeWeatherRendering.CinematicHazeView(", in: ios), 1)
+        XCTAssertTrue(ios.contains("fogParticles = condition == .foggy ?"))
+    }
+
     func testIOSDashboardWeatherEffectsUseSinglePureTimelineRenderer() throws {
         let source = try repositorySource(
             "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift"
@@ -14,8 +30,9 @@ final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
         XCTAssertTrue(source.contains("WeatherParticleField(seed: snapshot.seed, condition: snapshot.condition)"))
         XCTAssertTrue(source.contains("Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true)"))
         XCTAssertTrue(source.contains("shimmerParticles = condition == .clear ?"))
-        XCTAssertTrue(source.contains("rainParticles = (condition == .rainy || condition == .stormy) ?"))
-        XCTAssertTrue(source.contains("drawStormLightning("))
+        XCTAssertEqual(Self.countOccurrences(of: "CinematicRainView(", in: source), 1)
+        XCTAssertFalse(source.contains("rainParticles"))
+        XCTAssertTrue(source.contains("storm: snapshot.condition == .stormy, allowsLightning: allowsStormFlash"))
         XCTAssertTrue(source.contains("Notification.Name.NSProcessInfoPowerStateDidChange"))
         XCTAssertTrue(source.contains("ProcessInfo.thermalStateDidChangeNotification"))
         XCTAssertTrue(source.contains("@Environment(\\.accessibilityReduceMotion)"))
@@ -28,7 +45,7 @@ final class DashboardWeatherEffectsPerformanceContractTests: XCTestCase {
         XCTAssertTrue(source.contains(".id(framePolicyGeneration)"))
         XCTAssertTrue(source.contains("guard !processInfo.isLowPowerModeEnabled else { return false }"))
         XCTAssertTrue(source.contains("case .serious, .critical:\n            return false"))
-        XCTAssertTrue(source.contains("if allowsStormFlash"))
+        XCTAssertFalse(source.contains("drawRain("))
         XCTAssertFalse(source.contains("Timer.scheduledTimer"))
         XCTAssertFalse(source.contains("Double.random"))
         XCTAssertFalse(source.contains("Text(\"•\")"))

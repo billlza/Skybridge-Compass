@@ -10,7 +10,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-from apple_provisioning_profile import load_verified_profile
+from apple_provisioning_profile import (
+    ICLOUD_CONTAINER_ENVIRONMENT,
+    load_verified_profile,
+    profile_icloud_environment_covers,
+)
 
 EXPECTED_ARGUMENT_COUNT = 29
 
@@ -371,6 +375,15 @@ def analyze_target(
             expected_team=expected_team,
             lab_run=lab_run,
         )
+        if configuration == "Release" and not lab_run:
+            expected_match = expected_match and (
+                expanded_expected.get(ICLOUD_CONTAINER_ENVIRONMENT) == "Production"
+                and signed_entitlements.get(ICLOUD_CONTAINER_ENVIRONMENT) == "Production"
+                and profile_icloud_environment_covers(
+                    profile_entitlements.get(ICLOUD_CONTAINER_ENVIRONMENT),
+                    signed_entitlements.get(ICLOUD_CONTAINER_ENVIRONMENT),
+                )
+            )
     else:
         # The nested Widget has no external expected-entitlements manifest; its
         # contract is that it must not independently hold the host App's

@@ -320,6 +320,43 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return nil
     }
 
+    /// 账号设备列表行 → 当前局域网在线行。要求运行时协议指纹与注册表指纹严格一致，
+    /// 否则即使 deviceId/IP 相同也不视为同一台设备（防止同名冒充拿到连接按钮）。
+    public func resolvedOnlineDevice(for record: AccountDeviceRecord) -> OnlineDevice? {
+        // 协议指纹是这条路径的身份前提：缺失时必须直接放弃匹配（fail closed）。
+        // 否则打分器会退化成按名称/IP/别名匹配，等于给未验证身份放出连接入口。
+        let requiredFingerprint = record.protocolPublicKeyFingerprint
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requiredFingerprint.isEmpty else { return nil }
+        let candidate = IdentityMatchCandidate(
+            name: AccountDevicePresentationPolicy.displayName(for: record),
+            model: record.deviceModel,
+            familyValues: [record.deviceModel, record.deviceName, record.platformRawValue],
+            stableIDs: Set([record.deviceId].compactMap(Self.normalizeStableIdentifier)),
+            ipAddresses: Set(record.lanAddresses.map(Self.normalizeIPAddress).filter { !$0.isEmpty }),
+            requiredProtocolFingerprint: requiredFingerprint
+        )
+        let scoredMatches = onlineDevices
+            .filter { !$0.isLocalDevice }
+            .compactMap { device -> (score: Int, device: OnlineDevice)? in
+                let score = scoreIdentityCandidate(device, candidate: candidate)
+                guard score > 0 else { return nil }
+                return (score, device)
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                if lhs.device.connectionStatus.priority != rhs.device.connectionStatus.priority {
+                    return lhs.device.connectionStatus.priority > rhs.device.connectionStatus.priority
+                }
+                if lhs.device.lastSeen != rhs.device.lastSeen {
+                    return lhs.device.lastSeen > rhs.device.lastSeen
+                }
+                return lhs.device.name < rhs.device.name
+            }
+        return scoredMatches.first?.device
+    }
+
+
     /// Resolve the canonical online row for a raw discovery result.
     /// Dashboard and scan UI should use this instead of inferring online state from IP fields.
     public func resolvedOnlineDevice(for discoveredDevice: DiscoveredDevice) -> OnlineDevice? {
@@ -3614,39 +3651,68 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
         return score
     }
 
+    /// 身份匹配候选：iCloud 设备链与账号设备列表共用同一打分器，避免两套"哪一行是同一台设备"的规则。
+    private struct IdentityMatchCandidate {
+        let name: String
+        let model: String?
+        let familyValues: [String?]
+        let stableIDs: Set<String>
+        let ipAddresses: Set<String>
+        /// 非 nil 时要求在线设备的运行时协议指纹严格相等（账号设备列表：仅 deviceId 相同不足以给出连接按钮）。
+        let requiredProtocolFingerprint: String?
+    }
+
     private func scoreCloudDeviceCandidate(_ device: OnlineDevice, cloudDevice: iCloudDevice) -> Int {
-        let cloudFamily = Self.appleDeviceFamilyToken(preferredValues: [cloudDevice.model, cloudDevice.name])
+        scoreIdentityCandidate(
+            device,
+            candidate: IdentityMatchCandidate(
+                name: cloudDevice.name,
+                model: cloudDevice.model,
+                familyValues: [cloudDevice.model, cloudDevice.name],
+                stableIDs: Set([cloudDevice.stableIdentityDeviceId].compactMap(Self.normalizeStableIdentifier)),
+                ipAddresses: Set(
+                    [cloudDevice.ipAddress]
+                        .compactMap { $0.map(Self.normalizeIPAddress) }
+                        .filter { !$0.isEmpty }
+                ),
+                requiredProtocolFingerprint: nil
+            )
+        )
+    }
+
+    private func scoreIdentityCandidate(_ device: OnlineDevice, candidate: IdentityMatchCandidate) -> Int {
+        if let required = candidate.requiredProtocolFingerprint?.lowercased(), !required.isEmpty {
+            guard let live = device.protocolFingerprint?.lowercased(), live == required else { return 0 }
+        }
+
+        let candidateFamily = Self.appleDeviceFamilyToken(preferredValues: candidate.familyValues)
         let deviceFamily = Self.appleDeviceFamilyToken(preferredValues: [device.modelName, device.name, device.platformName])
-        if let cloudFamily, let deviceFamily, cloudFamily != deviceFamily {
+        if let candidateFamily, let deviceFamily, candidateFamily != deviceFamily {
             return 0
         }
 
         var score = 0
         var hasStrongIdentityMatch = false
 
-        let cloudStableIDs = Set(
-            [cloudDevice.stableIdentityDeviceId]
-                .compactMap(Self.normalizeStableIdentifier)
-        )
         let deviceStableIDs = Set(
             ([device.uniqueIdentifier] + device.routeIdentifiers).compactMap { raw in
                 Self.normalizedStableIdentifierPayload(from: raw)
                     ?? Self.normalizeStableIdentifier(raw)
             }
         )
-        if !cloudStableIDs.isEmpty, !deviceStableIDs.isDisjoint(with: cloudStableIDs) {
+        if !candidate.stableIDs.isEmpty, !deviceStableIDs.isDisjoint(with: candidate.stableIDs) {
             score += 360
             hasStrongIdentityMatch = true
         }
 
-        if let cloudIP = cloudDevice.ipAddress.map(Self.normalizeIPAddress), !cloudIP.isEmpty {
+        if !candidate.ipAddresses.isEmpty {
             let deviceIPs = Set([device.ipv4, device.ipv6].compactMap { $0.map(Self.normalizeIPAddress) })
-            if deviceIPs.contains(cloudIP) {
+            if !deviceIPs.isDisjoint(with: candidate.ipAddresses) {
                 score += 280
                 hasStrongIdentityMatch = true
             } else if device.uniqueIdentifier.hasPrefix("ip:") {
                 let identifierIP = Self.normalizeIPAddress(String(device.uniqueIdentifier.dropFirst("ip:".count)))
-                if identifierIP == cloudIP {
+                if candidate.ipAddresses.contains(identifierIP) {
                     score += 260
                     hasStrongIdentityMatch = true
                 }
@@ -3655,14 +3721,14 @@ public final class UnifiedOnlineDeviceManager: ObservableObject {
 
         guard hasStrongIdentityMatch else { return 0 }
 
-        if Self.namesRepresentSameDevice(cloudDevice.name, device.name) {
+        if Self.namesRepresentSameDevice(candidate.name, device.name) {
             score += 120
         }
 
-        let cloudModel = Self.normalizedDedupeName(cloudDevice.model)
+        let candidateModel = Self.normalizedDedupeName(candidate.model ?? "")
         let deviceModel = Self.normalizedDedupeName(device.modelName ?? "")
-        if !cloudModel.isEmpty, !deviceModel.isEmpty {
-            if cloudModel == deviceModel || cloudModel.contains(deviceModel) || deviceModel.contains(cloudModel) {
+        if !candidateModel.isEmpty, !deviceModel.isEmpty {
+            if candidateModel == deviceModel || candidateModel.contains(deviceModel) || deviceModel.contains(candidateModel) {
                 score += 40
             } else {
                 score -= 30

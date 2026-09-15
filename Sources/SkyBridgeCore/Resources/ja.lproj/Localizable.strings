@@ -631,7 +631,7 @@
 "transferStatus.transferring" = "転送中";
 "transferStatus.paused" = "一時停止";
 "transferStatus.completed" = "完了";
-"fileTransfer.receiptDeliveryUnknown" = "ファイルは保存されましたが、送信側の確認状態は不明です。自動再送しないでください。";
+"fileTransfer.receiptDeliveryUnknown" = "配信確認の状態が不明です。再送する前に受信デバイスのファイルを確認してください。";
 "transferStatus.failed" = "失敗";
 "transferStatus.cancelled" = "キャンセル済み";
 "action.close" = "閉じる";
@@ -675,7 +675,7 @@
 "remote.connectionMode.near" = "近距離";
 "remote.connectionMode.far" = "遠距離";
 "remote.connectionMode.auto.description" = "最適なモードを自動選択（同一ネットワークでは近距離を優先）";
-"remote.connectionMode.near.description" = "近距離ハードウェアミラーリング — 同一ネットワークで低遅延（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "同じネットワーク内のデバイスを表示・操作";
 "remote.connectionMode.far.description" = "手動 RDP（制限付きプレビュー）— FreeRDP 3.30 ソフトウェア GDI、厳密な証明書検証、チャネルリダイレクトなし";
 "common.unknown" = "不明";
 "profile.title" = "プロフィール";
@@ -1099,3 +1099,74 @@
 "remote.camera.feedUnavailable.title" = "映像を利用できません";
 "remote.camera.feedUnavailable.failed" = "カメラストリームが失敗し、資格情報と通信リソースは解放されました。正確な URL、資格情報、H.264 プロファイル、ローカルネットワークを確認して再接続してください。";
 "remote.camera.feedUnavailable.released" = "セッションのレンダリングリソースは解放されました。再接続してください。";
+
+/* Account Devices (账号设备) */
+"discovery.mode.accountDevices" = "アカウント端末";
+"discovery.mode.subtitle.accountDevices" = "同じアカウント";
+"discovery.accountDevices.title" = "アカウント端末";
+"discovery.accountDevices.description" = "同じアカウントでサインインした端末は名前・IP・OS・オンライン状態が自動で記録され、別ネットワークからも確認できます";
+"discovery.accountDevices.nebulaId" = "Nebula ID";
+"discovery.accountDevices.empty.title" = "まだ他の端末はありません";
+"discovery.accountDevices.empty.message" = "別の端末で同じアカウントで SkyBridge にサインインするとここに表示されます";
+"discovery.accountDevices.signedOut" = "サインインするとこのアカウントの端末が表示されます";
+"discovery.accountDevices.loading" = "アカウント端末を同期中…";
+"discovery.accountDevices.retryHint" = "自動的に再試行します。更新ボタンも使えます";
+"discovery.accountDevices.stale" = "一覧が古い可能性があります（最終更新：%@）";
+"discovery.accountDevices.truncated" = "端末が 200 台を超えています。先頭の 200 台のみ表示しています";
+"discovery.accountDevices.lastUpdated" = "%@に更新";
+"discovery.accountDevices.status.lanReachable" = "LAN で到達可能";
+"discovery.accountDevices.status.online" = "オンライン";
+"discovery.accountDevices.status.offline" = "オフライン";
+"discovery.accountDevices.capability.controllable" = "被制御可";
+"discovery.accountDevices.capability.controlOnly" = "操作側のみ";
+"discovery.accountDevices.lan" = "LAN";
+"discovery.accountDevices.public" = "パブリック";
+"discovery.accountDevices.deviceId" = "端末 ID";
+"discovery.accountDevices.lastSeen" = "最終アクティブ";
+"discovery.accountDevices.neverSeen" = "未接続";
+"discovery.accountDevices.registration.pending" = "承認待ち";
+"discovery.accountDevices.registration.frozen" = "凍結中";
+"discovery.accountDevices.action.useConnectionCode" = "コードで接続";
+"discovery.accountDevices.hint.online" = "この端末はオンラインですが同じ LAN にありません。相手側で接続コードを生成して入力してください";
+"discovery.accountDevices.copyAddress" = "アドレスをコピー";
+"discovery.accountDevices.copyDeviceId" = "端末 ID をコピー";
+"discovery.accountDevices.failure.notAuthenticated" = "未サインイン";
+"discovery.accountDevices.failure.deviceNotActive" = "この端末はまだアカウントで有効化されていません（%@）";
+"discovery.accountDevices.failure.rateLimited" = "リクエストが多すぎます。しばらくして再試行します";
+"discovery.accountDevices.failure.registryUnavailable" = "端末レジストリを利用できません（%@）";
+"discovery.accountDevices.failure.serverRejected" = "サーバーがリクエストを拒否しました（HTTP %d）";
+"discovery.accountDevices.failure.transport" = "シグナリングサーバーに接続できません";
+"discovery.accountDevices.failure.malformedResponse" = "サーバー応答を解析できません";
+"discovery.accountDevices.failure.localIdentityUnavailable" = "この端末の ID がまだ準備できていません";
+"discovery.accountDevices.failure.localAuthenticationUnavailable" = "本機のログイン状態が利用できません（%@）";
+"discovery.accountDevices.serviceInactive.title" = "アカウントデバイス同期が動作していません";
+"discovery.accountDevices.serviceInactive.message" = "ログイン済みですが、アカウントデバイス同期が開始されていません。ダッシュボードを開き直してください。改善しない場合はアプリを再起動してください。";
+"discovery.accountDevices.heartbeatFailed" = "このデバイスのオンライン報告に失敗しました。他のデバイスから見えない可能性があります";
+"dashboard.accountDevices" = "アカウント端末";
+"dashboard.accountDevices.summary" = "%d 台 · %d 台オンライン";
+"dashboard.accountDevices.viewAll" = "すべて表示";
+"dashboard.accountDevices.empty" = "同じアカウントでサインインした他の端末がここに表示されます";
+
+"remoteControl.securityNotice.inputController" = "入力操作中";
+
+"remoteControl.securityNotice.observer" = "閲覧のみ";
+
+"remoteControl.securityNotice.transferInput" = "入力操作を引き継ぐ";
+
+"remoteControl.securityNotice.approveView" = "閲覧を許可";
+
+"info.appleSilicon" = "Appleシリコン";
+"info.optimizationEnabled" = "最適化有効";
+"info.pCore" = "高性能コア";
+"info.eCore" = "高効率コア";
+"info.multiCoreOpt" = "マルチコア最適化";
+"info.reqAppleSilicon" = "Appleシリコンが必要です";
+"info.deviceUnsupported" = "非対応のデバイス";
+"info.standardMode" = "標準モード";
+
+"remoteControl.securityNotice.localInputController" = "この Mac がキーボードとマウスの操作権を持っています。リモート閲覧は継続します。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "信頼済みデバイス";
+"discovery.pendingPairings.section" = "確認が必要なペアリング記録";
+"discovery.pendingPairings.explanation" = "これらのペアリング記録は本人確認が未完了です。デバイスがオンラインかどうかは判断できません。";

@@ -148,6 +148,61 @@ final class PairingTrustApprovalServiceTests: XCTestCase {
         )
     }
 
+    func testAuthorityPolicyRejectionConsumesApprovalWithoutPersistingAuthorization() async throws {
+        let service = PairingTrustApprovalService.shared
+        service.userDismissedCurrentPrompt()
+        service.setProtocolIdentityPinErrorForTesting(
+            AuthenticatedRemoteAuthorityRejection.conflictingIdentityClaims
+        )
+        defer { service.setProtocolIdentityPinErrorForTesting(nil) }
+        let requesterId = "id:\(UUID().uuidString.lowercased())"
+        let fingerprint = String(repeating: "e", count: 64)
+        let transactionId = UUID()
+        let requestHash = String(repeating: "1", count: 64)
+        let candidateHash = String(repeating: "2", count: 64)
+        let sasHash = String(repeating: "3", count: 64)
+        let approvalTask = Task { @MainActor in
+            await service.stageTestProtocolIdentityBindingRequesterApproval(
+                peerEndpoint: "lan-authority-conflict-test",
+                requesterDeviceIds: [requesterId], displayName: "Authority conflict test",
+                platform: "iOS", verificationCode: "123456",
+                requesterProtocolSigningAlgorithm: .mlDSA65,
+                requesterProtocolIdentityFingerprint: fingerprint,
+                transactionId: transactionId, requestHashHex: requestHash,
+                candidateHashHex: candidateHash, sasTranscriptHashHex: sasHash
+            )
+        }
+        let request = try await waitForPendingRequest(service)
+        service.resolve(request, decision: .alwaysAllow)
+        let approved = await approvalTask.value
+        XCTAssertEqual(approved, .alwaysAllow)
+
+        for attempt in 0..<2 {
+            if attempt == 1 {
+                service.setProtocolIdentityPinErrorForTesting(nil)
+                service.setProtocolIdentityPinResultOverrideForTesting(true)
+            }
+            let committed = await service.commitProtocolIdentityBindingRequesterApproval(
+                decision: approved, transactionId: transactionId,
+                requesterDeviceIds: [requesterId], requesterProtocolSigningAlgorithm: .mlDSA65,
+                requesterProtocolIdentityFingerprint: fingerprint,
+                requestHashHex: requestHash, candidateHashHex: candidateHash,
+                sasTranscriptHashHex: sasHash
+            )
+            service.setProtocolIdentityPinResultOverrideForTesting(nil)
+            XCTAssertEqual(committed, .reject, "A failed approval context must not be reusable")
+            XCTAssertEqual(
+                service.pendingResolutionNotice,
+                "现有信任记录的身份声明存在冲突，无法证明它们属于同一协议身份。已保留现有配对与身份 pin，连接已拒绝。"
+            )
+        }
+        let policy = await service.persistedPolicyDecision(for: request)
+        XCTAssertNil(policy)
+        let cached = await PeerProtocolIdentityBootstrapStore.shared
+            .trustedFingerprints(forCandidates: [requesterId])
+        XCTAssertTrue(cached.isEmpty, "A rejected authority must not populate the bootstrap cache")
+    }
+
     func testPostCommitCleanupResidueStillCommitsRequesterApproval() async throws {
         let service = PairingTrustApprovalService.shared
         service.userDismissedCurrentPrompt()

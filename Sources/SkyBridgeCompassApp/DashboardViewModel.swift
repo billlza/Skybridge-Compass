@@ -223,6 +223,11 @@ final class DashboardViewModel: ObservableObject {
 // 启动系统指标监控
         systemMetricsService.startMonitoring()
 
+        // 账号设备（跨网在线状态）：只依赖登录态与信令服务器，与下面这些本地服务无关。
+        // 必须在它们之前启动，否则任何一个本地服务启动失败都会把「账号设备」永久卡在
+        // 未启动状态，而 UI 只能把它显示成「未登录」。
+        PresenceService.shared.start()
+
         do {
             try await DeviceMessagingService.shared.prepare()
             DeviceMessagingService.shared.start()
@@ -240,9 +245,6 @@ final class DashboardViewModel: ObservableObject {
                 return
             }
         }
-
-        // 跨网在线状态（presence）：心跳 + 轮询受信设备在线（幂等，未登录时安全失败）。
-        PresenceService.shared.start()
 
         if shouldAutoScan {
             guard await pauseBetweenStartupBursts() else { return }

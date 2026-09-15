@@ -42,6 +42,12 @@ MAX_JSON_BYTES = 2 * 1024 * 1024
 EXPECTED_BUNDLE_IDENTIFIER = "com.skybridge.compass.ios"
 EXPECTED_EXECUTABLE = "SkyBridgeCompass-iOS"
 START_TIME_PATTERN = re.compile(r"[1-9][0-9]*:[0-9]{1,6}\Z", re.ASCII)
+PRODUCT_IMAGE_PATH = re.compile(
+    r"/private/var/containers/Bundle/Application/"
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/"
+    r"SkyBridgeCompass-iOS\.app/SkyBridgeCompass-iOS\Z",
+    re.ASCII,
+)
 INSTALLATION_CAPTURE_PROFILE = "skybridge-formal-ios-product-installation-capture"
 IDENTITY_EVENT_NAMES = frozenset(
     {
@@ -223,17 +229,24 @@ def _remote_image_path(value: object, line_number: int) -> str:
     image = PurePosixPath(value)
     if not value.startswith("/") or str(image) != value:
         _fail(f"raw iOS OSLog line {line_number} has a non-canonical image path")
+    if PRODUCT_IMAGE_PATH.fullmatch(value) is None:
+        _fail(f"raw iOS OSLog line {line_number} is outside the exact capture boundary")
     return value
 
 
-def _extract_messages(raw_path: Path, identity: dict[str, Any]) -> list[str]:
+def bound_oslog_rows(raw_path: Path, identity: dict[str, Any]) -> list[dict[str, Any]]:
     content = _read_regular(raw_path, "private iOS OSLog NDJSON", MAX_INPUT_BYTES)
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as exc:
         _fail(f"private iOS OSLog NDJSON is not UTF-8: {exc}")
-    messages: list[str] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
+    rows: list[dict[str, Any]] = []
+    lines = text.splitlines()
+    expected_uuids = {
+        record["uuid"].lower()
+        for record in identity["installationBinding"]["iosReleaseArchive"]["appExecutableUUIDs"]
+    }
+    for line_number, line in enumerate(lines, 1):
         if not line:
             _fail(f"raw iOS OSLog line {line_number} is empty")
         try:
@@ -242,16 +255,35 @@ def _extract_messages(raw_path: Path, identity: dict[str, Any]) -> list[str]:
             _fail(f"raw iOS OSLog line {line_number} is invalid JSON: {exc}")
         if not isinstance(row, dict):
             _fail(f"raw iOS OSLog line {line_number} is not an object")
+        # Native command framing does not supply a product event. Its exact
+        # count must agree with all preceding records, including identity rows.
+        if row.keys() == {"count", "finished"}:
+            if (
+                line_number != len(lines)
+                or type(row["count"]) is not int
+                or type(row["finished"]) is not int
+                or row["finished"] != 1
+                or row["count"] != len(rows)
+            ):
+                _fail("raw iOS OSLog native completion trailer is invalid")
+            continue
+        # Unified log resolves an executable UUID through its image catalog.
+        # Reinstalling identical bytes can leave that display path pointing to
+        # the first container. Verify the product path shape here; the actual
+        # launch path is independently receipt-bound in the private identity,
+        # and every row must match both the owned PID and sealed image UUID.
+        _remote_image_path(row.get("processImagePath"), line_number)
         if (
             row.get("eventType") != "logEvent"
             or row.get("messageType") != "Default"
             or row.get("subsystem") != SUBSYSTEM
             or row.get("category") != CATEGORY
             or row.get("processID") != identity["processIdentifier"]
-            or _remote_image_path(row.get("processImagePath"), line_number)
-            != identity["executablePath"]
         ):
             _fail(f"raw iOS OSLog line {line_number} is outside the exact capture boundary")
+        runtime_uuid = row.get("processImageUUID")
+        if not isinstance(runtime_uuid, str) or runtime_uuid.lower() not in expected_uuids:
+            _fail(f"raw iOS OSLog line {line_number} does not match the sealed executable UUID")
         format_string = row.get("formatString")
         message = row.get("eventMessage")
         if not isinstance(format_string, str) or "public" not in format_string:
@@ -262,6 +294,16 @@ def _extract_messages(raw_path: Path, identity: dict[str, Any]) -> list[str]:
             message.encode("ascii")
         except UnicodeEncodeError as exc:
             _fail(f"raw iOS OSLog line {line_number} is not ASCII: {exc}")
+        rows.append(row)
+    if not rows or len(rows) > MAX_EVENT_COUNT:
+        _fail(f"private iOS OSLog event count must be 1-{MAX_EVENT_COUNT}")
+    return rows
+
+
+def _extract_messages(raw_path: Path, identity: dict[str, Any]) -> list[str]:
+    messages: list[str] = []
+    for row in bound_oslog_rows(raw_path, identity):
+        message = row["eventMessage"]
         event_name = message.split(" ", 1)[0]
         if event_name in IDENTITY_EVENT_NAMES:
             continue

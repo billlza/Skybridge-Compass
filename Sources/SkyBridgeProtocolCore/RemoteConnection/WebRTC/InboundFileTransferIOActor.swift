@@ -92,6 +92,41 @@ public struct InboundFileTransferIOHandle: Hashable, Sendable {
     }
 }
 
+/// Sealed observation produced only after the installed file and both rename
+/// directories have passed the actor's descriptor-bound durability checks.
+///
+/// The memberwise initializer is intentionally unavailable outside this file:
+/// callers can inspect a real commit, but cannot manufacture one for a trusted
+/// committer or an experiment-evidence producer.
+@available(macOS 14.0, iOS 17.0, *)
+public struct InboundFileTransferDurableCommitObservation: Sendable, Equatable {
+    public enum DurabilityPrimitive: String, Sendable {
+        case fileAndParentDirectorySync = "file_and_parent_directory_sync"
+    }
+
+    public let destinationURL: URL
+    public let destinationRelativePath: String
+    public let byteCount: UInt64
+    public let sha256: Data
+    public let committedAt: Date
+    public let durabilityPrimitive: DurabilityPrimitive
+
+    fileprivate init(
+        destinationURL: URL,
+        destinationRelativePath: String,
+        byteCount: UInt64,
+        sha256: Data,
+        committedAt: Date
+    ) {
+        self.destinationURL = destinationURL
+        self.destinationRelativePath = destinationRelativePath
+        self.byteCount = byteCount
+        self.sha256 = sha256
+        self.committedAt = committedAt
+        durabilityPrimitive = .fileAndParentDirectorySync
+    }
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 public enum InboundFileTransferIOError: Error, LocalizedError, Sendable, Equatable {
     case capacityExceeded
@@ -161,6 +196,30 @@ public enum InboundFileTransferIOError: Error, LocalizedError, Sendable, Equatab
 public actor InboundFileTransferIOActor {
     public static let shared = InboundFileTransferIOActor()
 
+    enum CommitDurabilityFaultForTesting: Sendable, Equatable {
+        case installedFileReopen
+        case installedFileSync
+        case sourceDirectorySync
+        case destinationDirectorySync
+    }
+
+    private struct InstalledFile {
+        let url: URL
+        let sourceDirectoryURL: URL
+        let sourceDirectoryDeviceIdentifier: UInt64
+        let sourceDirectoryInodeIdentifier: UInt64
+        let destinationDirectoryURL: URL
+        let destinationDirectoryDeviceIdentifier: UInt64
+        let destinationDirectoryInodeIdentifier: UInt64
+        let expectedDigest: Data
+    }
+
+    private enum CommitState {
+        case staged
+        case installedPendingDurability(InstalledFile)
+        case durableCommitted(InboundFileTransferDurableCommitObservation)
+    }
+
     private struct TransferState {
         let temporaryURL: URL
         let declaredFileSize: Int64
@@ -169,15 +228,26 @@ public actor InboundFileTransferIOActor {
         var writer: FileHandle?
         var digest: Data?
         var closeFailure: String?
-        var committedURL: URL?
+        var commitState: CommitState
     }
 
     private let maxOpenTransfers: Int
+    private var commitDurabilityFaultsForTesting: [CommitDurabilityFaultForTesting]
     private var transfers: [InboundFileTransferIOHandle: TransferState] = [:]
 
     public init(maxOpenTransfers: Int = 32) {
         precondition(maxOpenTransfers > 0, "Inbound file I/O capacity must be positive")
         self.maxOpenTransfers = maxOpenTransfers
+        commitDurabilityFaultsForTesting = []
+    }
+
+    init(
+        maxOpenTransfers: Int,
+        commitDurabilityFaultsForTesting: [CommitDurabilityFaultForTesting]
+    ) {
+        precondition(maxOpenTransfers > 0, "Inbound file I/O capacity must be positive")
+        self.maxOpenTransfers = maxOpenTransfers
+        self.commitDurabilityFaultsForTesting = commitDurabilityFaultsForTesting
     }
 
     /// Fails before any payload is received when an atomic rename cannot be
@@ -290,7 +360,7 @@ public actor InboundFileTransferIOActor {
             writer: writer,
             digest: nil,
             closeFailure: nil,
-            committedURL: nil
+            commitState: .staged
         )
         return handle
     }
@@ -378,7 +448,7 @@ public actor InboundFileTransferIOActor {
             writer: writer,
             digest: nil,
             closeFailure: nil,
-            committedURL: nil
+            commitState: .staged
         )
         return handle
     }
@@ -545,6 +615,20 @@ public actor InboundFileTransferIOActor {
         destinationDirectory: URL,
         fileName: String
     ) throws -> URL {
+        try commitWithDurabilityObservation(
+            using: handle,
+            destinationDirectory: destinationDirectory,
+            fileName: fileName
+        ).destinationURL
+    }
+
+    /// Atomically installs and durably commits a file, returning an observation
+    /// that cannot exist before the real descriptor-bound sync sequence succeeds.
+    public func commitWithDurabilityObservation(
+        using handle: InboundFileTransferIOHandle,
+        destinationDirectory: URL,
+        fileName: String
+    ) throws -> InboundFileTransferDurableCommitObservation {
         try Task.checkCancellation()
         guard let state = transfers[handle] else {
             throw InboundFileTransferIOError.unknownHandle
@@ -552,11 +636,28 @@ public actor InboundFileTransferIOActor {
         if let closeFailure = state.closeFailure {
             throw InboundFileTransferIOError.closeFailed(closeFailure)
         }
-        guard state.writer == nil, state.digest != nil else {
+        guard state.writer == nil, let expectedDigest = state.digest else {
             throw InboundFileTransferIOError.commitBeforeClose
         }
-        if let committedURL = state.committedURL {
-            return committedURL
+
+        switch state.commitState {
+        case .durableCommitted(let observation):
+            return observation
+        case .installedPendingDurability(let installedFile):
+            try completeInstalledFileDurability(
+                installedFile,
+                state: state
+            )
+            let observation = try makeDurableCommitObservation(
+                installedFile: installedFile,
+                state: state
+            )
+            var durableState = state
+            durableState.commitState = .durableCommitted(observation)
+            transfers[handle] = durableState
+            return observation
+        case .staged:
+            break
         }
 
         do {
@@ -565,11 +666,19 @@ public actor InboundFileTransferIOActor {
                 state.temporaryURL,
                 errorReason: "temporary file is not a direct child"
             )
-            return try Self.withDirectoryDescriptor(
+            let installedFile = try Self.withDirectoryDescriptor(
                 at: state.temporaryURL.deletingLastPathComponent(),
                 createIfMissing: false,
                 makeFinalComponentPrivate: true
             ) { temporaryDirectoryFD in
+                var sourceDirectoryStatus = stat()
+                guard fstat(temporaryDirectoryFD, &sourceDirectoryStatus) == 0,
+                      Self.isDirectory(sourceDirectoryStatus.st_mode),
+                      UInt64(sourceDirectoryStatus.st_dev) == state.deviceIdentifier else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "temporary directory identity changed before commit"
+                    )
+                }
                 var status = stat()
                 let statusResult = temporaryName.withCString {
                     fstatat(temporaryDirectoryFD, $0, &status, AT_SYMLINK_NOFOLLOW)
@@ -619,36 +728,35 @@ public actor InboundFileTransferIOActor {
                         if renameResult == 0 {
                             let destinationURL = destinationDirectory.standardizedFileURL
                                 .appendingPathComponent(candidateName, isDirectory: false)
-                            var committedState = state
-                            committedState.committedURL = destinationURL
-                            transfers[handle] = committedState
-
-                            var committedStatus = stat()
-                            let committedStatusResult = candidateName.withCString {
-                                fstatat(
-                                    destinationDirectoryFD,
-                                    $0,
-                                    &committedStatus,
-                                    AT_SYMLINK_NOFOLLOW
-                                )
-                            }
-                            guard committedStatusResult == 0,
-                                  Self.isRegularFile(committedStatus.st_mode),
-                                  committedStatus.st_uid == geteuid(),
-                                  UInt64(committedStatus.st_dev) == state.deviceIdentifier,
-                                  UInt64(committedStatus.st_ino) == state.inodeIdentifier,
-                                  committedStatus.st_size == off_t(state.declaredFileSize) else {
-                                throw InboundFileTransferIOError.moveFailed(
-                                    "committed file identity changed after rename"
-                                )
-                            }
-                            guard fsync(temporaryDirectoryFD) == 0,
-                                  fsync(destinationDirectoryFD) == 0 else {
-                                throw InboundFileTransferIOError.moveFailed(
-                                    "committed directory sync failed"
-                                )
-                            }
-                            return destinationURL
+                            let installedFile = InstalledFile(
+                                url: destinationURL,
+                                sourceDirectoryURL: state.temporaryURL
+                                    .deletingLastPathComponent()
+                                    .standardizedFileURL,
+                                sourceDirectoryDeviceIdentifier: UInt64(
+                                    sourceDirectoryStatus.st_dev
+                                ),
+                                sourceDirectoryInodeIdentifier: UInt64(
+                                    sourceDirectoryStatus.st_ino
+                                ),
+                                destinationDirectoryURL: destinationDirectory.standardizedFileURL,
+                                destinationDirectoryDeviceIdentifier: UInt64(
+                                    destinationStatus.st_dev
+                                ),
+                                destinationDirectoryInodeIdentifier: UInt64(
+                                    destinationStatus.st_ino
+                                ),
+                                expectedDigest: expectedDigest
+                            )
+                            var pendingState = state
+                            pendingState.commitState = .installedPendingDurability(
+                                installedFile
+                            )
+                            // Persist the exact post-rename identity in actor state before
+                            // any descriptor close, reopen, hash, or sync can fail. A retry
+                            // must resume this path and must never perform a second rename.
+                            transfers[handle] = pendingState
+                            return installedFile
                         }
                         guard errno == EEXIST else {
                             throw InboundFileTransferIOError.moveFailed(
@@ -661,11 +769,248 @@ public actor InboundFileTransferIOActor {
                     )
                 }
             }
+            try completeInstalledFileDurability(
+                installedFile,
+                state: state
+            )
+            let observation = try makeDurableCommitObservation(
+                installedFile: installedFile,
+                state: state
+            )
+            var durableState = state
+            durableState.commitState = .durableCommitted(observation)
+            transfers[handle] = durableState
+            return observation
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as InboundFileTransferIOError {
             throw error
         } catch {
             throw InboundFileTransferIOError.moveFailed(error.localizedDescription)
         }
+    }
+
+    private func makeDurableCommitObservation(
+        installedFile: InstalledFile,
+        state: TransferState
+    ) throws -> InboundFileTransferDurableCommitObservation {
+        guard let byteCount = UInt64(exactly: state.declaredFileSize),
+              state.digest == installedFile.expectedDigest,
+              installedFile.expectedDigest.count == SHA256.byteCount else {
+            throw InboundFileTransferIOError.moveFailed(
+                "durable commit observation projection is invalid"
+            )
+        }
+        let relativePath = try Self.validatedDirectChildFileName(
+            installedFile.url,
+            errorReason: "installed file is not a direct child"
+        )
+        return InboundFileTransferDurableCommitObservation(
+            destinationURL: installedFile.url,
+            destinationRelativePath: relativePath,
+            byteCount: byteCount,
+            sha256: installedFile.expectedDigest,
+            committedAt: Date()
+        )
+    }
+
+    private func completeInstalledFileDurability(
+        _ installedFile: InstalledFile,
+        state: TransferState
+    ) throws {
+        let installedName = try Self.validatedDirectChildFileName(
+            installedFile.url,
+            errorReason: "installed file is not a direct child"
+        )
+        try Self.withDirectoryDescriptor(
+            at: installedFile.sourceDirectoryURL,
+            createIfMissing: false,
+            makeFinalComponentPrivate: true
+        ) { sourceDirectoryFD in
+            var sourceDirectoryStatus = stat()
+            guard fstat(sourceDirectoryFD, &sourceDirectoryStatus) == 0,
+                  Self.isDirectory(sourceDirectoryStatus.st_mode),
+                  UInt64(sourceDirectoryStatus.st_dev)
+                    == installedFile.sourceDirectoryDeviceIdentifier,
+                  UInt64(sourceDirectoryStatus.st_ino)
+                    == installedFile.sourceDirectoryInodeIdentifier else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "source directory identity changed after rename"
+                )
+            }
+
+            try Self.withDirectoryDescriptor(
+                at: installedFile.destinationDirectoryURL,
+                createIfMissing: false,
+                makeFinalComponentPrivate: false
+            ) { destinationDirectoryFD in
+                var destinationDirectoryStatus = stat()
+                guard fstat(destinationDirectoryFD, &destinationDirectoryStatus) == 0,
+                      Self.isDirectory(destinationDirectoryStatus.st_mode),
+                      UInt64(destinationDirectoryStatus.st_dev)
+                        == installedFile.destinationDirectoryDeviceIdentifier,
+                      UInt64(destinationDirectoryStatus.st_ino)
+                        == installedFile.destinationDirectoryInodeIdentifier else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "destination directory identity changed after rename"
+                    )
+                }
+
+                try verifyHashAndSyncInstalledFile(
+                    named: installedName,
+                    in: destinationDirectoryFD,
+                    installedFile: installedFile,
+                    state: state
+                )
+                try failCommitDurabilityIfScheduledForTesting(.sourceDirectorySync)
+                guard fsync(sourceDirectoryFD) == 0 else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "source directory sync failed after rename"
+                    )
+                }
+                try failCommitDurabilityIfScheduledForTesting(.destinationDirectorySync)
+                guard fsync(destinationDirectoryFD) == 0 else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "destination directory sync failed after rename"
+                    )
+                }
+            }
+        }
+    }
+
+    private func verifyHashAndSyncInstalledFile(
+        named installedName: String,
+        in destinationDirectoryFD: Int32,
+        installedFile: InstalledFile,
+        state: TransferState
+    ) throws {
+        try failCommitDurabilityIfScheduledForTesting(.installedFileReopen)
+        let installedFileFD = installedName.withCString {
+            openat(
+                destinationDirectoryFD,
+                $0,
+                O_RDONLY | O_NOFOLLOW | O_CLOEXEC
+            )
+        }
+        guard installedFileFD >= 0 else {
+            throw InboundFileTransferIOError.moveFailed(
+                "installed file reopen failed after rename"
+            )
+        }
+
+        let operationResult: Swift.Result<Void, Error>
+        do {
+            var installedStatus = stat()
+            guard fstat(installedFileFD, &installedStatus) == 0,
+                  Self.isRegularFile(installedStatus.st_mode),
+                  installedStatus.st_uid == geteuid(),
+                  UInt64(installedStatus.st_dev) == state.deviceIdentifier,
+                  UInt64(installedStatus.st_ino) == state.inodeIdentifier,
+                  installedStatus.st_size == off_t(state.declaredFileSize) else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file identity changed after rename"
+                )
+            }
+
+            let reader = FileHandle(
+                fileDescriptor: installedFileFD,
+                closeOnDealloc: false
+            )
+            try reader.seek(toOffset: 0)
+            var hasher = SHA256()
+            var bytesHashed: Int64 = 0
+            while true {
+                try Task.checkCancellation()
+                guard let chunk = try reader.read(upToCount: 256 * 1_024),
+                      !chunk.isEmpty else {
+                    break
+                }
+                guard bytesHashed <= state.declaredFileSize - Int64(chunk.count) else {
+                    throw InboundFileTransferIOError.moveFailed(
+                        "installed file grew while hashing"
+                    )
+                }
+                hasher.update(data: chunk)
+                bytesHashed += Int64(chunk.count)
+            }
+            guard bytesHashed == state.declaredFileSize else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file size changed while hashing"
+                )
+            }
+            guard Data(hasher.finalize()) == installedFile.expectedDigest else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file digest changed after rename"
+                )
+            }
+            try failCommitDurabilityIfScheduledForTesting(.installedFileSync)
+            guard fsync(installedFileFD) == 0 else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file sync failed after rename"
+                )
+            }
+
+            var installedPathStatus = stat()
+            let installedPathStatusResult = installedName.withCString {
+                fstatat(
+                    destinationDirectoryFD,
+                    $0,
+                    &installedPathStatus,
+                    AT_SYMLINK_NOFOLLOW
+                )
+            }
+            guard installedPathStatusResult == 0,
+                  Self.isRegularFile(installedPathStatus.st_mode),
+                  UInt64(installedPathStatus.st_dev) == state.deviceIdentifier,
+                  UInt64(installedPathStatus.st_ino) == state.inodeIdentifier,
+                  installedPathStatus.st_size == off_t(state.declaredFileSize) else {
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed path identity changed during durability verification"
+                )
+            }
+            operationResult = .success(())
+        } catch {
+            operationResult = .failure(error)
+        }
+
+        let closeResult = Darwin.close(installedFileFD)
+        let closeError = errno
+        guard closeResult == 0 else {
+            switch operationResult {
+            case .success:
+                throw InboundFileTransferIOError.moveFailed(
+                    "installed file descriptor close failed (errno \(closeError))"
+                )
+            case .failure(let operationError):
+                throw InboundFileTransferIOError.moveFailed(
+                    "\(operationError.localizedDescription); installed file descriptor close "
+                        + "failed (errno \(closeError))"
+                )
+            }
+        }
+        do {
+            try operationResult.get()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as InboundFileTransferIOError {
+            throw error
+        } catch {
+            throw InboundFileTransferIOError.moveFailed(
+                "installed file verification failed: \(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func failCommitDurabilityIfScheduledForTesting(
+        _ fault: CommitDurabilityFaultForTesting
+    ) throws {
+        guard commitDurabilityFaultsForTesting.first == fault else {
+            return
+        }
+        commitDurabilityFaultsForTesting.removeFirst()
+        throw InboundFileTransferIOError.moveFailed(
+            "injected post-rename durability failure at \(fault)"
+        )
     }
 
     /// Releases actor bookkeeping after the caller has atomically published a
@@ -674,7 +1019,7 @@ public actor InboundFileTransferIOActor {
         guard let state = transfers[handle] else {
             throw InboundFileTransferIOError.unknownHandle
         }
-        guard state.committedURL != nil else {
+        guard case .durableCommitted = state.commitState else {
             throw InboundFileTransferIOError.releaseBeforeCommit
         }
         transfers.removeValue(forKey: handle)
@@ -684,10 +1029,11 @@ public actor InboundFileTransferIOActor {
         try discard(handle, preservingCommittedFile: false)
     }
 
-    /// Cancels an in-flight receive without ever rolling back an atomic commit.
+    /// Cancels an in-flight receive without ever rolling back a durable commit.
     /// This is the only cancellation primitive WebRTC lifecycles should use: a
-    /// channel-close task can race the actor's `commit`, and once that commit has
-    /// won the file is durable even if the UI lifecycle has already changed.
+    /// channel-close task can race the actor's `commit`. A renamed file whose
+    /// durability checks have not completed is still rollback-eligible and must
+    /// never be published as successful.
     public func discardUncommittedFile(_ handle: InboundFileTransferIOHandle) throws {
         try discard(handle, preservingCommittedFile: true)
     }
@@ -698,7 +1044,8 @@ public actor InboundFileTransferIOActor {
     ) throws {
         guard var state = transfers[handle] else { return }
 
-        if preservingCommittedFile, state.committedURL != nil {
+        if preservingCommittedFile,
+           case .durableCommitted = state.commitState {
             transfers.removeValue(forKey: handle)
             return
         }
@@ -712,16 +1059,40 @@ public actor InboundFileTransferIOActor {
                 failures.append("close: \(error.localizedDescription)")
             }
         }
-        let fileURL = state.committedURL ?? state.temporaryURL
+        let fileURL: URL
+        let requiresPrivateDirectory: Bool
+        switch state.commitState {
+        case .staged:
+            fileURL = state.temporaryURL
+            requiresPrivateDirectory = true
+        case .installedPendingDurability(let installedFile):
+            fileURL = installedFile.url
+            requiresPrivateDirectory = false
+        case .durableCommitted(let observation):
+            fileURL = observation.destinationURL
+            requiresPrivateDirectory = false
+        }
         do {
             try Self.removeIdentityBoundFileIfPresent(
                 at: fileURL,
                 deviceIdentifier: state.deviceIdentifier,
                 inodeIdentifier: state.inodeIdentifier,
-                requiresPrivateDirectory: state.committedURL == nil
+                requiresPrivateDirectory: requiresPrivateDirectory
             )
         } catch {
             failures.append("remove: \(error.localizedDescription)")
+        }
+        if case .installedPendingDurability(let installedFile) = state.commitState {
+            do {
+                try Self.syncIdentityBoundDirectory(
+                    at: installedFile.sourceDirectoryURL,
+                    deviceIdentifier: installedFile.sourceDirectoryDeviceIdentifier,
+                    inodeIdentifier: installedFile.sourceDirectoryInodeIdentifier,
+                    requiresPrivateDirectory: true
+                )
+            } catch {
+                failures.append("source directory sync: \(error.localizedDescription)")
+            }
         }
         if !failures.isEmpty {
             // Preserve ownership until every cleanup step succeeds. A close or
@@ -739,7 +1110,7 @@ public actor InboundFileTransferIOActor {
         guard let state = transfers[handle] else {
             throw InboundFileTransferIOError.unknownHandle
         }
-        guard state.committedURL == nil else {
+        guard case .staged = state.commitState else {
             throw InboundFileTransferIOError.releaseBeforeCommit
         }
         if let writer = state.writer {
@@ -1103,6 +1474,11 @@ public actor InboundFileTransferIOActor {
                 fstatat(directoryFD, $0, &status, AT_SYMLINK_NOFOLLOW)
             }
             if statusResult != 0, errno == ENOENT {
+                guard fsync(directoryFD) == 0 else {
+                    throw InboundFileTransferIOError.cleanupFailed(
+                        "cleanup directory resync failed"
+                    )
+                }
                 return
             }
             guard statusResult == 0,
@@ -1116,6 +1492,34 @@ public actor InboundFileTransferIOActor {
             guard fileName.withCString({ unlinkat(directoryFD, $0, 0) }) == 0,
                   fsync(directoryFD) == 0 else {
                 throw InboundFileTransferIOError.cleanupFailed("cleanup unlink failed")
+            }
+        }
+    }
+
+    private static func syncIdentityBoundDirectory(
+        at directoryURL: URL,
+        deviceIdentifier: UInt64,
+        inodeIdentifier: UInt64,
+        requiresPrivateDirectory: Bool
+    ) throws {
+        try withDirectoryDescriptor(
+            at: directoryURL,
+            createIfMissing: false,
+            makeFinalComponentPrivate: requiresPrivateDirectory
+        ) { directoryFD in
+            var status = stat()
+            guard fstat(directoryFD, &status) == 0,
+                  isDirectory(status.st_mode),
+                  UInt64(status.st_dev) == deviceIdentifier,
+                  UInt64(status.st_ino) == inodeIdentifier else {
+                throw InboundFileTransferIOError.cleanupFailed(
+                    "cleanup directory identity changed"
+                )
+            }
+            guard fsync(directoryFD) == 0 else {
+                throw InboundFileTransferIOError.cleanupFailed(
+                    "cleanup directory sync failed"
+                )
             }
         }
     }

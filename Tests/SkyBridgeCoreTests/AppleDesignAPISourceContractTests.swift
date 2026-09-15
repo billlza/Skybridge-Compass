@@ -325,12 +325,29 @@ final class AppleDesignAPISourceContractTests: XCTestCase {
         XCTAssertTrue(wrapperSource.contains("} else {\n            content"))
     }
 
+    func testOS26GlassGroupingStaysInAvailabilityGuardedWrapper() throws {
+        // Apple introduced these APIs in OS26, including GlassEffectContainer:
+        // https://developer.apple.com/documentation/swiftui/glasseffectcontainer
+        let wrapperPath = "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Utilities/LiquidGlass.swift"
+        let glassGroupingTokens = ["GlassEffectContainer", "glassEffectID", "glassEffectUnion"]
+        let unguardedReferences = try productionSwiftSources().flatMap { relativePath, source -> [String] in
+            guard relativePath != wrapperPath else { return [] }
+            return nonCommentMatches(in: source, relativePath: relativePath, tokens: glassGroupingTokens)
+        }
+        XCTAssertTrue(unguardedReferences.isEmpty, "Glass grouping must use the compatibility wrapper: \(unguardedReferences)")
+        let wrapperSource = try readSource(wrapperPath)
+        assertSource(wrapperSource, containsOrdered: [
+            "private struct LiquidGlassGroupModifier: ViewModifier",
+            "if #available(iOS 26.0, macOS 26.0, *)",
+            "GlassEffectContainer(spacing: spacing) { content }",
+            "} else {",
+            "content"
+        ])
+    }
+
     func testOS27DesignSDKSymbolsRequireExplicitCompileGateBeforeUse() throws {
         let os27DesignTokens = [
             "HAS_APPLE_OS27_DESIGN_SDK",
-            "GlassEffectContainer",
-            "glassEffectID",
-            "glassEffectUnion",
             "scrollExtensionMode"
         ]
         let productionReferences = try productionSwiftSources().flatMap { relativePath, source in

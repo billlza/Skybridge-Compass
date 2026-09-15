@@ -92,7 +92,7 @@ public struct EnhancedDeviceRow: View {
                 HStack {
                     Image(systemName: "link")
                         .font(.caption)
-                    Text(LocalizationManager.shared.localizedString("device.action.connect"))
+                    Text(LocalizationManager.shared.localizedString("discovery.action.connect"))
                         .font(.caption.weight(.medium))
                 }
                 .foregroundColor(.white)
@@ -106,14 +106,7 @@ public struct EnhancedDeviceRow: View {
             .buttonStyle(PlainButtonStyle())
         }
         .padding(settingsManager.compactMode ? 10 : 16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(red: 20/255, green: 25/255, blue: 45/255))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-        )
+        .dashboardGlassSurface(cornerRadius: 12)
     }
     
  /// 获取连接类型的颜色

@@ -8,6 +8,7 @@
 
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 // MARK: - DiscoveryTransport Protocol
 
@@ -743,6 +744,53 @@ struct ProductConnectivityHandshakeAttemptSnapshot: Sendable, Equatable {
 
 @available(iOS 17.0, *)
 public actor HandshakeDriver {
+
+    public struct AuthenticatedFinishedConfirmation: Sendable {
+        public let sessionId: String
+        public let suite: CryptoSuite
+        public let sessionReference: String
+
+        fileprivate init(sessionId: String, suite: CryptoSuite, sessionReference: String) {
+            self.sessionId = sessionId
+            self.suite = suite
+            self.sessionReference = sessionReference
+        }
+    }
+
+    private enum LocalFinishedDelivery {
+        case sending(token: UUID, sessionId: String)
+        case sent(sessionId: String)
+    }
+
+    /// A peer Finished may reenter this actor while our transport send is suspended.
+    /// Only the exact send completion can make its session eligible for publication.
+    private var localFinishedDelivery: LocalFinishedDelivery?
+    private var responderOperationToken: UUID?
+
+    public func authenticatedFinishedConfirmation(
+        matching keys: SessionKeys
+    ) -> AuthenticatedFinishedConfirmation? {
+        guard case .established(let current) = state,
+              case .some(.sent(let deliveredSessionId)) = localFinishedDelivery,
+              deliveredSessionId == current.sessionId,
+              keys.sessionId == current.sessionId,
+              keys.negotiatedSuite == current.negotiatedSuite,
+              keys.role == current.role,
+              constantTimeEqual(keys.transcriptHash, current.transcriptHash),
+              constantTimeEqual(keys.sendKey, current.sendKey),
+              constantTimeEqual(keys.receiveKey, current.receiveKey) else {
+            return nil
+        }
+        guard let reference = SkyBridgeProtocolCore.P2PEvidenceReference.sessionIncarnation(
+            sessionID: current.sessionId,
+            transcriptHash: current.transcriptHash
+        ) else { return nil }
+        return AuthenticatedFinishedConfirmation(
+            sessionId: current.sessionId,
+            suite: current.negotiatedSuite,
+            sessionReference: reference
+        )
+    }
     
     // MARK: - Properties
     
@@ -1210,8 +1258,10 @@ public actor HandshakeDriver {
     /// 取消握手
     public func cancel() async {
         guard case .idle = state else {
+            responderOperationToken = nil
             activeOutboundOperationToken = nil
             finishedCommitToken = nil
+            localFinishedDelivery = nil
             let contextToZeroize = context
             context = nil
             pendingFinished = nil
@@ -1251,6 +1301,14 @@ public actor HandshakeDriver {
     
     /// 处理 MessageA（响应方）
     private func handleMessageA(_ data: Data, from peer: PeerIdentifier) async {
+        let operationToken = UUID()
+        responderOperationToken = operationToken
+        state = .processingMessageA
+        defer {
+            if responderOperationToken == operationToken {
+                responderOperationToken = nil
+            }
+        }
         currentPeer = peer
         clearAuthenticatedRemoteAuthority()
         
@@ -1270,8 +1328,6 @@ public actor HandshakeDriver {
             )
             context = ctx
             
-            state = .processingMessageA
-            
             // 处理 MessageA
             do {
                 try await ctx.processMessageA(messageA)
@@ -1280,10 +1336,12 @@ public actor HandshakeDriver {
                     identityPublicKey: messageA.identityPublicKey
                 )
             } catch {
-                await handleHandshakeError(error, context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
                 return
             }
 
+            guard responderOperationToken == operationToken else { return }
             if let soa = messageA.soaExtension,
                let localPeerId = localSOAPeerId {
                 // SOA binding must be driven by authenticated MessageA fields.
@@ -1365,10 +1423,12 @@ public actor HandshakeDriver {
                 messageB = result.message
                 sharedSecret = result.sharedSecret
             } catch {
-                await handleHandshakeError(error, context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
                 return
             }
             defer { sharedSecret.zeroize() }
+            guard responderOperationToken == operationToken else { return }
             
             // 发送 MessageB
             do {
@@ -1376,45 +1436,46 @@ public actor HandshakeDriver {
                 // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
                 try await transport.send(to: peer, data: padded)
             } catch {
-                await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(HandshakeError.failed(.transportError(error.localizedDescription)), context: ctx, expectedResponderOperation: operationToken)
                 return
             }
             
+            guard responderOperationToken == operationToken else { return }
             // 派生会话密钥
             let sessionKeys: SessionKeys
             do {
                 sessionKeys = try await ctx.finalizeResponderSessionKeys(sharedSecret: sharedSecret)
             } catch {
-                await handleHandshakeError(error, context: ctx)
+                guard responderOperationToken == operationToken else { return }
+                await handleHandshakeError(error, context: ctx, expectedResponderOperation: operationToken)
                 return
             }
 
+            guard responderOperationToken == operationToken else { return }
+            let remoteAuthority = await ctx.getAuthenticatedRemoteAuthority()
+            guard responderOperationToken == operationToken else { return }
             captureCandidateRemoteAuthority(
-                await ctx.getAuthenticatedRemoteAuthority(),
+                remoteAuthority,
                 authenticatedRemoteSOAPeerId: candidateRemoteSOAPeerId
             )
             
             // 清理敏感数据
             await ctx.zeroize()
+            guard responderOperationToken == operationToken else { return }
             context = nil
             
             // 等待 Finished
             let clock = ContinuousClock()
             let deadline = clock.now + timeout
             state = .waitingFinished(deadline: deadline, sessionKeys: sessionKeys, expectingFrom: .initiator)
+            let finishedDeliveryToken = UUID()
+            localFinishedDelivery = .sending(
+                token: finishedDeliveryToken,
+                sessionId: sessionKeys.sessionId
+            )
             
-            // 发送 Finished
-            do {
-                let finished = try makeFinished(direction: .responderToInitiator, sessionKeys: sessionKeys)
-                let padded = try HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
-                // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
-                try await transport.send(to: peer, data: padded)
-            } catch {
-                await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
-                return
-            }
-            
-            // 设置超时
+            // The timeout also owns a suspended local Finished send.
             timeoutTask?.cancel()
             timeoutTask = Task {
                 do {
@@ -1430,13 +1491,34 @@ public actor HandshakeDriver {
                 }
             }
 
+            do {
+                let finished = try makeFinished(direction: .responderToInitiator, sessionKeys: sessionKeys)
+                let padded = try HandshakePadding.wrapIfEnabled(finished.encoded, label: "Finished")
+                // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
+                try await transport.send(to: peer, data: padded)
+            } catch {
+                guard isCurrentLocalFinishedSend(
+                    finishedDeliveryToken,
+                    sessionId: sessionKeys.sessionId
+                ) else { return }
+                await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
+                return
+            }
+
+            guard isCurrentLocalFinishedSend(
+                finishedDeliveryToken,
+                sessionId: sessionKeys.sessionId
+            ) else { return }
+            localFinishedDelivery = .sent(sessionId: sessionKeys.sessionId)
+
             if let pending = pendingFinished {
                 pendingFinished = nil
                 await handleFinished(pending, from: peer)
             }
             
         } catch {
-            await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA)
+            guard responderOperationToken == operationToken else { return }
+            await handleHandshakeError(error, rawHandshakeData: data, messageKind: .messageA, expectedResponderOperation: operationToken)
         }
     }
     
@@ -1680,6 +1762,10 @@ public actor HandshakeDriver {
     private func handleFinished(_ finished: HandshakeFinished, from peer: PeerIdentifier) async {
         switch state {
         case .waitingMessageB, .processingMessageB:
+            guard pendingFinished == nil else {
+                await transitionToFailed(.invalidMessageFormat("Duplicate pending Finished"))
+                return
+            }
             pendingFinished = finished
             return
         case .waitingFinished(_, let sessionKeys, let expectingFrom):
@@ -1688,26 +1774,70 @@ public actor HandshakeDriver {
                 return
             }
 
+            if expectingFrom == .initiator {
+                switch localFinishedDelivery {
+                case .some(.sending(_, let sessionId)) where sessionId == sessionKeys.sessionId:
+                    guard pendingFinished == nil else {
+                        await transitionToFailed(
+                            .invalidMessageFormat("Duplicate pending Finished"),
+                            negotiatedSuite: sessionKeys.negotiatedSuite
+                        )
+                        return
+                    }
+                    pendingFinished = finished
+                    return
+                case .some(.sent(let sessionId)) where sessionId == sessionKeys.sessionId:
+                    break
+                default:
+                    await transitionToFailed(
+                        .invalidMessageFormat("Finished delivery does not own the current session"),
+                        negotiatedSuite: sessionKeys.negotiatedSuite
+                    )
+                    return
+                }
+            }
+
             guard finishedCommitToken == nil else { return }
             let commitToken = UUID()
             finishedCommitToken = commitToken
             
             if expectingFrom == .responder {
+                localFinishedDelivery = .sending(
+                    token: commitToken,
+                    sessionId: sessionKeys.sessionId
+                )
                 do {
                     let clientFinished = try makeFinished(direction: .initiatorToResponder, sessionKeys: sessionKeys)
                     let padded = try HandshakePadding.wrapIfEnabled(clientFinished.encoded, label: "Finished")
                     // Handshake frames MUST NOT apply SBP2 (TrafficPadding). Keep parity with macOS core.
                     try await transport.send(to: peer, data: padded)
                 } catch {
+                    guard isCurrentFinishedCommit(
+                        commitToken,
+                        sessionId: sessionKeys.sessionId
+                    ) else { return }
                     await transitionToFailed(.transportError(error.localizedDescription), negotiatedSuite: sessionKeys.negotiatedSuite)
                     return
                 }
                 guard isCurrentFinishedCommit(
                     commitToken,
                     sessionId: sessionKeys.sessionId
+                ), isCurrentLocalFinishedSend(
+                    commitToken,
+                    sessionId: sessionKeys.sessionId
                 ) else {
                     return
                 }
+                localFinishedDelivery = .sent(sessionId: sessionKeys.sessionId)
+            }
+
+            guard case .some(.sent(let deliveredSessionId)) = localFinishedDelivery,
+                  deliveredSessionId == sessionKeys.sessionId else {
+                await transitionToFailed(
+                    .invalidMessageFormat("Local Finished has not been delivered"),
+                    negotiatedSuite: sessionKeys.negotiatedSuite
+                )
+                return
             }
 
             let committedArbiterLease: PeerSessionArbiter.EstablishedLease?
@@ -1795,8 +1925,10 @@ public actor HandshakeDriver {
     }
     
     private func transitionToFailed(_ reason: HandshakeFailureReason, negotiatedSuite: CryptoSuite? = nil) async {
+        responderOperationToken = nil
         activeOutboundOperationToken = nil
         finishedCommitToken = nil
+        localFinishedDelivery = nil
         let contextToZeroize = context
         context = nil
         pendingFinished = nil
@@ -1811,6 +1943,19 @@ public actor HandshakeDriver {
             _ = await sessionArbiter.clearEstablished(lease)
         }
         finishOnce(with: .failure(HandshakeError.failed(reason)))
+    }
+
+    private func isCurrentLocalFinishedSend(
+        _ token: UUID,
+        sessionId: String
+    ) -> Bool {
+        guard case .some(.sending(let currentToken, let currentSessionId)) = localFinishedDelivery,
+              currentToken == token,
+              currentSessionId == sessionId,
+              case .waitingFinished(_, let currentKeys, _) = state else {
+            return false
+        }
+        return currentKeys.sessionId == sessionId
     }
 
     private func isCurrentFinishedCommit(
@@ -1868,11 +2013,18 @@ public actor HandshakeDriver {
         _ error: Error,
         context: HandshakeContext? = nil,
         rawHandshakeData: Data? = nil,
-        messageKind: HandshakeWireMessageKind? = nil
+        messageKind: HandshakeWireMessageKind? = nil,
+        expectedResponderOperation: UUID? = nil
     ) async {
+        if let expectedResponderOperation,
+           responderOperationToken != expectedResponderOperation { return }
         let negotiatedSuite = await context?.negotiatedSuite
+        if let expectedResponderOperation,
+           responderOperationToken != expectedResponderOperation { return }
         if let ctx = context {
             await ctx.zeroize()
+            if let expectedResponderOperation,
+               responderOperationToken != expectedResponderOperation { return }
             self.context = nil
         }
         
@@ -2010,8 +2162,10 @@ public actor HandshakeDriver {
         winnerAttemptId: Data
     ) async {
         guard case .idle = state else {
+            responderOperationToken = nil
             activeOutboundOperationToken = nil
             finishedCommitToken = nil
+            localFinishedDelivery = nil
             let contextToZeroize = context
             context = nil
             timeoutTask?.cancel()
@@ -2570,6 +2724,14 @@ public actor HandshakeContext {
             throw HandshakeError.failed(.suiteNegotiationFailed)
         }
 
+        // Commit the same identity envelope that MessageA places on the wire. The responder
+        // reconstructs its KEM application context from that encoded field, not the raw key.
+        let identityKeys = IdentityPublicKeys(
+            protocolPublicKey: identityPublicKey,
+            protocolAlgorithm: protocolSignatureProvider.signatureAlgorithm.wire,
+            secureEnclavePublicKey: nil
+        )
+
         // Capabilities are committed by the canonical Q-Periapt MessageA
         // application context, so they must be finalized before KEM execution.
         let capabilities = CryptoCapabilities.fromProvider(
@@ -2598,7 +2760,7 @@ public actor HandshakeContext {
                     policy: policy,
                     offeredSuites: supportedSuites,
                     capabilities: capabilities,
-                    identityPublicKey: identityPublicKey,
+                    identityPublicKey: identityKeys.encoded,
                     extensionsRaw: extensionsRaw
                 )
                 encaps = try await contextBoundProvider.kemEncapsulate(
@@ -2635,13 +2797,6 @@ public actor HandshakeContext {
 
         self.sentSupportedSuites = supportedSuites
         self.sentKeyShares = Dictionary(uniqueKeysWithValues: keyShares.map { ($0.suite, $0.shareBytes) })
-        
-        // 创建身份公钥结构
-        let identityKeys = IdentityPublicKeys(
-            protocolPublicKey: identityPublicKey,
-            protocolAlgorithm: protocolSignatureProvider.signatureAlgorithm.wire,
-            secureEnclavePublicKey: nil
-        )
         
         // 构建未签名消息（以 HandshakeMessageA 的 deterministic wire bytes 为准）
         let unsigned = HandshakeMessageA(

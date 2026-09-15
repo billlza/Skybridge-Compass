@@ -65,6 +65,19 @@ struct RemoteControlStreamPolicy: Sendable, Equatable {
 }
 
 enum RemoteControlCaptureCompatibility {
+    enum GeometryError: Error { case invalidDimensions }
+
+    static func fittedCaptureSize(_ requestedSize: CGSize, displaySize: CGSize) throws -> CGSize {
+        guard requestedSize.width.isFinite, requestedSize.height.isFinite,
+              displaySize.width.isFinite, displaySize.height.isFinite,
+              requestedSize.width >= 2, requestedSize.height >= 2,
+              displaySize.width >= 2, displaySize.height >= 2 else {
+            throw GeometryError.invalidDimensions
+        }
+        let scale = min(requestedSize.width / displaySize.width, requestedSize.height / displaySize.height)
+        return CGSize(width: displaySize.width * scale, height: displaySize.height * scale)
+    }
+
     static func normalizedCaptureSize(
         _ requestedSize: CGSize,
         for codec: RemoteFrameType,
@@ -143,7 +156,7 @@ enum RemoteControlStreamPolicySelector {
         isAppleSilicon: Bool
     ) -> RemoteControlStreamPolicy {
         let normalizedFormats = Set(peerFormats.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
-        let requestedFPS = max(12, min(request.targetFrameRate, 120))
+        let requestedFPS = max(1, min(request.targetFrameRate, 120))
         let longEdge = Int(max(request.preferredSize.width, request.preferredSize.height))
 
         let codec: RemoteFrameType
@@ -264,7 +277,7 @@ enum RemoteControlStreamPolicySelector {
             fpsCap = min(fpsCap, 30)
         }
 
-        let targetFrameRate = max(12, min(requestedFPS, fpsCap))
+        let targetFrameRate = max(1, min(requestedFPS, fpsCap))
         let lowLatencyKeyFrameCeiling = highFPSHardwareHEVCPreferred
             ? max(30, targetFrameRate)
             : max(15, targetFrameRate / 2)

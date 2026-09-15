@@ -1105,8 +1105,18 @@ struct AdvancedPreferencesView: View {
                 Toggle("优先 X-Wing 混合套件（macOS 26+）", isOn: $settingsManager.preferXWingHybrid)
                     .help("仅调整本机套件优先顺序；若系统支持，启动时会同时声明 ML-KEM-768 与 X-Wing 能力。")
                 Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                    .disabled(!settingsManager.qPeriaptRuntimeSupported)
+                    .disabled(!settingsManager.qPeriaptRuntimeSupported && !settingsManager.preferQPeriaptBeta)
                     .help("实验性：只有签名策略、独立验证密钥 pin、可信状态持久化与 ABI2 自检全部通过后才可启用；双方策略身份必须完全一致。")
+                if let error = settingsManager.qPeriaptRuntimePreparationError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .textSelection(.enabled)
+                    Button("重试 Q-Periapt 准备") {
+                        settingsManager.retryQPeriaptRuntimePreparation()
+                    }
+                    .disabled(settingsManager.isPreparingQPeriaptRuntime)
+                }
             }
 
             Section("性能优化") {

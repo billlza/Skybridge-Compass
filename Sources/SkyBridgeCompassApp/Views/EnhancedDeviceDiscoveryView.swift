@@ -124,7 +124,10 @@ private enum DeviceDiscoveryPresentationProjector {
 
         let representedDevices = connected + active + recent
         let displayedTrusted = input.trustedGroups
-            .filter { !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input) }
+            .filter {
+                $0.displayRecord.requiresIdentityVerificationForPresentation
+                    || !hasVisibleOnlineRepresentation(for: $0, representedDevices: representedDevices, input: input)
+            }
             .map { group in
                 TrustedRecordCardPresentation(
                     group: group,
@@ -941,6 +944,8 @@ public struct EnhancedDeviceDiscoveryView: View {
 
  // UI 状态
     @State private var selectedConnectionMode: DiscoveryMode = .localScan
+    /// 由主控台等外部入口请求预选的标签；消费后清空，避免视图重建时旧请求再次生效。
+    @Binding private var requestedMode: DiscoveryMode?
     @State private var searchText = ""
     @State private var connectionCodeInput = ""
  // 控制二维码扫描弹窗显示与错误提示。
@@ -986,6 +991,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             ScrollView {
                 LazyVStack(spacing: 20) {
                     switch selectedConnectionMode {
+                    case .accountDevices:
+                        accountDevicesSection
                     case .localScan:
                         localScanSection
                     case .qrCode:
@@ -1000,6 +1007,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             }
         }
         .navigationTitle(LocalizationManager.shared.localizedString("discovery.title"))
+        .onAppear { applyRequestedModeIfNeeded() }
+        .onChange(of: requestedMode) { _, _ in applyRequestedModeIfNeeded() }
         .task {
 #if DEBUG || SKYBRIDGE_TESTING
             if isMacOnlineIPadSmokeClient {
@@ -1217,7 +1226,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 connectionModeButton(mode)
             }
         }
-        .background(themeConfiguration.cardBackgroundMaterial)
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             Rectangle()
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1267,8 +1276,8 @@ public struct EnhancedDeviceDiscoveryView: View {
             .background(isSelected ? mode.accentColor.opacity(0.12) : Color.clear)
             .background(
                 Rectangle()
-                    .fill(themeConfiguration.cardBackgroundMaterial)
-                    .opacity(isHovered ? 0.35 : 0)
+                    .fill(Color.white.opacity(0.06))
+                    .opacity(isHovered ? 1 : 0)
             )
             .overlay(
                 Rectangle()
@@ -1377,7 +1386,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .help(LocalizationManager.shared.localizedString("discovery.refresh"))
             }
             .padding(12)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1429,37 +1438,23 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.blue.opacity(0.6), lineWidth: 1)
                 )
             }
 
-            // 受信任设备（已配对/已允许）——来自 TrustSyncService
+            // Saved pairing hints cannot claim the reachability of a trusted identity.
             let trustedRecords = displayedTrustedRecordsForUI
-            if !trustedRecords.isEmpty {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("已信任设备")
-                        .font(.headline)
-
-                    ForEach(trustedRecords) { group in
-                        TrustedDeviceCard(
-                            record: group.group.displayRecord,
-                            subtitle: group.subtitle,
-                            status: group.status
-                        ) {
-                            selectedTrustedGroupSelection = TrustedGroupSelection(id: group.id)
-                        }
-                    }
-                }
-                .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.green.opacity(0.5), lineWidth: 1)
-                )
-            }
+            savedDeviceSection(
+                trustedRecords.filter { !$0.group.displayRecord.requiresIdentityVerificationForPresentation },
+                requiresVerification: false
+            )
+            savedDeviceSection(
+                trustedRecords.filter { $0.group.displayRecord.requiresIdentityVerificationForPresentation },
+                requiresVerification: true
+            )
 
             // 最近连接（不等同于“信任/已配对”，但应立即可见）
             let recentlyConnected = groupedRecentlyConnectedDevices
@@ -1480,7 +1475,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                 }
                 .padding(16)
-                .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .dashboardGlassSurface(cornerRadius: 12)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.green.opacity(0.35), lineWidth: 1)
@@ -1515,7 +1510,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
-                    .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .dashboardGlassSurface(cornerRadius: 6)
                     .overlay(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -1546,6 +1541,41 @@ public struct EnhancedDeviceDiscoveryView: View {
     }
 
     // MARK: - Trusted Devices helpers
+
+    @ViewBuilder
+    private func savedDeviceSection(
+        _ records: [TrustedRecordCardPresentation],
+        requiresVerification: Bool
+    ) -> some View {
+        if !records.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(LocalizationManager.shared.localizedString(
+                    requiresVerification ? "discovery.pendingPairings.section" : "discovery.trustedDevices.section"
+                ))
+                .font(.headline)
+                if requiresVerification {
+                    Text(LocalizationManager.shared.localizedString("discovery.pendingPairings.explanation"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(records) { presentation in
+                    TrustedDeviceCard(
+                        record: presentation.group.displayRecord,
+                        subtitle: presentation.subtitle,
+                        status: presentation.status
+                    ) {
+                        selectedTrustedGroupSelection = TrustedGroupSelection(id: presentation.id)
+                    }
+                }
+            }
+            .padding(16)
+            .dashboardGlassSurface(cornerRadius: 12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke((requiresVerification ? Color.orange : Color.green).opacity(0.5), lineWidth: 1)
+            )
+        }
+    }
 
     private var trustedRecordsForUI: [TrustRecordDisplayGroup] {
         cachedTrustedRecordGroups
@@ -3313,8 +3343,31 @@ public struct EnhancedDeviceDiscoveryView: View {
  // MARK: - View Models
     @StateObject private var deviceChainViewModel: CloudDeviceListViewModel
 
-    public init(deviceChainViewModel: CloudDeviceListViewModel = CloudDeviceListViewModel()) {
+    public init(
+        deviceChainViewModel: CloudDeviceListViewModel = CloudDeviceListViewModel(),
+        requestedMode: Binding<DiscoveryMode?> = .constant(nil)
+    ) {
         _deviceChainViewModel = StateObject(wrappedValue: deviceChainViewModel)
+        _requestedMode = requestedMode
+    }
+
+    private func applyRequestedModeIfNeeded() {
+        guard let mode = requestedMode else { return }
+        withAnimation(.spring(response: 0.3)) { selectedConnectionMode = mode }
+        requestedMode = nil
+    }
+
+    // MARK: - 0️⃣ 账号设备
+
+    private var accountDevicesSection: some View {
+        AccountDevicesSectionView(
+            onConnect: { device in connectToOnlineDevice(device) },
+            onOpenConnectionCode: {
+                withAnimation(.spring(response: 0.3)) { selectedConnectionMode = .connectionCode }
+            },
+            connectingDeviceIDs: connectingOnlineDeviceIds,
+            connectionErrorMessage: onlineDeviceConnectionErrorMessage
+        )
     }
 
  // MARK: - 3️⃣ iCloud 设备链（统一设备显示）
@@ -3466,7 +3519,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 }
             }
             .padding(16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -3613,7 +3666,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 }
             }
             .padding(settingsManager.compactMode ? 10 : 16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(device.isLocalDevice ? Color.blue : themeConfiguration.borderColor, lineWidth: device.isLocalDevice ? 2 : 1)
@@ -3903,7 +3956,7 @@ public struct EnhancedDeviceDiscoveryView: View {
                 .buttonStyle(.borderedProminent)
             }
             .padding(16)
-            .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .dashboardGlassSurface(cornerRadius: 12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -4023,7 +4076,7 @@ public struct EnhancedDeviceDiscoveryView: View {
             .disabled(!device.isOnline)
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -4809,17 +4862,20 @@ private final class BonjourTXTLookupResolver: NSObject, NetServiceDelegate, @unc
 
 // MARK: - 发现模式枚举
 
-enum DiscoveryMode: String, CaseIterable, Identifiable {
+public enum DiscoveryMode: String, CaseIterable, Identifiable {
+    /// 登录同一账号的设备（信令服务器账号设备列表）。放在最前：竞品式的"我的设备"入口。
+    case accountDevices = "account"
     case localScan = "local"
     case qrCode = "qr"
     case cloudLink = "cloud"
     case connectionCode = "code"
 
-    var id: String { rawValue }
+    public var id: String { rawValue }
 
     @MainActor
     var title: String {
         switch self {
+        case .accountDevices: return LocalizationManager.shared.localizedString("discovery.mode.accountDevices")
         case .localScan: return LocalizationManager.shared.localizedString("discovery.mode.localScan")
         case .qrCode: return LocalizationManager.shared.localizedString("discovery.mode.qrCode")
         case .cloudLink: return LocalizationManager.shared.localizedString("discovery.mode.cloudLink")
@@ -4830,6 +4886,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
     @MainActor
     var subtitle: String {
         switch self {
+        case .accountDevices: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.accountDevices")
         case .localScan: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.localScan")
         case .qrCode: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.qrCode")
         case .cloudLink: return LocalizationManager.shared.localizedString("discovery.mode.subtitle.cloudLink")
@@ -4839,6 +4896,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
 
     var iconName: String {
         switch self {
+        case .accountDevices: return "person.crop.rectangle.stack.fill"
         case .localScan: return "wifi.router"
         case .qrCode: return "qrcode.viewfinder"
         case .cloudLink: return "icloud.fill"
@@ -4847,6 +4905,7 @@ enum DiscoveryMode: String, CaseIterable, Identifiable {
     }
     var accentColor: Color {
         switch self {
+        case .accountDevices: return .cyan
         case .localScan: return .green
         case .qrCode: return .blue
         case .cloudLink: return .purple
@@ -4882,7 +4941,7 @@ struct InfoBanner: View {
             Spacer()
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)
@@ -5032,7 +5091,7 @@ struct CloudDeviceCardEnhanced: View {
             }
         }
         .padding(16)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 12)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)

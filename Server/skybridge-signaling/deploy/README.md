@@ -55,6 +55,35 @@ canonical schema source. `sql/security_v6.sql` is a byte-for-byte operational
 mirror for server-only recovery and review workflows. The Node migration
 contract test rejects any drift; never edit or deploy the mirror independently.
 
+## Presence metadata schema (v7)
+
+`/api/devices/list` and the presence persistence path require the v7 schema.
+Apply `supabase/migrations/20260905120000_device_presence_metadata_v7.sql`
+(mirror: `sql/security_v7.sql`, byte-identical, enforced by
+`test/security_v7_sql.test.js`) before rolling out a server build that exposes
+the account device list:
+
+1. Take and verify a restorable database backup.
+2. Apply the canonical v7 migration through the approved Supabase migration
+   pipeline. It is a single transaction (own `BEGIN`/`COMMIT`, lock and
+   statement timeouts, fail-closed self checks) and is idempotent.
+3. Verify before starting the new server:
+   - `public.registered_devices` has row level security enabled and `anon` /
+     `authenticated` hold no privileges on it (the migration's self check
+     raises `security_v7_registered_devices_exposed_to_client_roles` otherwise).
+   - `public.touch_registered_device_presence_v7` exists, `anon` cannot execute
+     it and `service_role` can.
+   - If PostgREST does not see the new RPC immediately, run
+     `notify pgrst, 'reload schema';`.
+4. Only then roll out Node instances. Until the columns exist the server keeps
+   heartbeats alive but answers `persisted:false, persistReason:registry_unavailable`
+   and `/api/devices/list` fails closed with `503 registry_schema_outdated`.
+
+The v7 change is additive. `last_seen_at` on `registered_devices` now also
+advances on every persisted heartbeat (at most once per
+`SIGNALING_PRESENCE_PERSIST_INTERVAL_MS` per device unless the reported metadata
+changed); nothing else reads that column.
+
 The v6 change is additive, so a server rollback may leave the schema installed.
 Do not down-migrate identity history after any rotation has committed. Restore a
 verified pre-migration backup only when no post-migration authority changes must
@@ -72,24 +101,127 @@ Operational maintenance:
   organization's audit-retention policy through a separately reviewed migration;
   never update or delete the immutable audit table ad hoc.
 
+## Client-role lock-down for tenant policy and enrollment invites (v8)
+
+`public.tenant_security_policy` and `public.device_enrollment_invites` were
+created by security v5 without row level security and without revoking the
+default Supabase client-role grants, so the shipped anon key could read or
+rewrite tenant policy flags and forge enrollment invites. Apply
+`supabase/migrations/20260905130000_lock_down_tenant_policy_and_enrollment_invites_v8.sql`
+(mirror: `sql/security_v8.sql`, byte-identical, enforced by
+`test/security_v8_sql.test.js`) right after v7:
+
+1. It is privilege-only (RLS on, client roles revoked, `service_role`
+   granted), single-transaction, idempotent, and raises
+   `security_v8_<table>_exposed_to_client_roles` / `security_v8_<table>_rls_disabled`
+   if the boundary is not in place afterwards.
+2. The signaling server needs no change: it reads `tenant_security_policy`
+   with the service role and reaches invites only through SECURITY DEFINER
+   RPCs. Nothing in this repository uses the anon or authenticated role on
+   these tables.
+3. If an external admin tool wrote invites or policy rows through the anon or
+   authenticated role, it will start receiving empty results / permission
+   errors. Move it to the service role or a SECURITY DEFINER RPC; do not
+   re-grant client roles.
+4. Verify with `select relname, relrowsecurity from pg_class where relname in
+   ('tenant_security_policy','device_enrollment_invites');` (both `true`) and
+   `select has_table_privilege('anon','public.device_enrollment_invites','SELECT');`
+   (`false`).
+
 ## 2. Deploy from local workspace
 
 ```bash
 bash Server/skybridge-signaling/deploy/scripts/deploy_remote.sh \
   --host <server-ip-or-dns> \
-  --user <ssh-user>
+  --user <ssh-user> \
+  --node-runtime-dir /opt/skybridge-signaling/runtime/<reviewed-node-distribution>
 ```
 
 Common flags:
 - `--service skybridge-signaling`
 - `--app-dir /opt/skybridge-signaling`
-- `--health-url http://127.0.0.1:8443/health`
+- `--health-url http://127.0.0.1:8443/readyz`
+- `--node-runtime-dir` is required. Install and review the matching official Node
+  distribution before deployment; the deploy script never upgrades system Node.
+- `--skip-systemd`: prepare and verify the isolated candidate only; leave the
+  `current` symlink and running service unchanged.
+
+Deployment verifies the same contract before promotion and after restarting the
+service: the packaged build fingerprint must match the root, health and readiness
+responses, both account-device endpoints must be advertised, and the actual
+unauthenticated requests must return `401 missing_bearer_token`. A healthy older
+process or an entry proxy returning a generic `401` does not satisfy this gate.
+The candidate boot log remains in its release directory on success or failure.
+If verification after restart fails, deployment uses the existing rollback path.
+
+This route and build check does not verify database schema, authenticated account
+access or device interoperability. Complete the schema prerequisites above and
+the authenticated product acceptance separately before promotion.
+
+### Selected Node runtime and service rollback
+
+The selected directory must contain `bin/node` and its bundled
+`lib/node_modules/npm/bin/npm-cli.js`. Preflight verifies Node 24.6.0 or newer and
+the host platform/architecture. Preflight, npm installation and candidate startup
+use that Node explicitly. The service receives a managed
+`/etc/systemd/system/<service>.service.d/20-node-runtime.conf` drop-in that resets
+`ExecStart` to the same absolute Node executable. System Node and the machine's
+global `PATH` are unchanged.
+
+`APP_DIR` and `APP_DIR/releases` must be deployment-managed and not writable by
+the service account, including through ACLs. Review and fix only those named
+parent directories when migrating an older installation. The archive is extracted
+without restoring workstation ownership. Only the candidate's `node_modules` and
+dedicated npm cache are writable by the service during `npm ci`; they are frozen
+under root ownership afterwards, including when installation fails. Deployment
+never recursively changes ownership of `APP_DIR`, shared configuration or the
+selected Node distribution.
+
+Before changing service configuration, the candidate receives a private
+`.service-runtime-journal` with the original unit and managed drop-in, preserving
+their contents, ownership, permissions and absence state. Both automatic rollback
+and `rollback_remote.sh` use `release_runtime_journal.sh` to restore this same
+configuration before reloading and restarting the service. A legacy direct
+predecessor needs no new runtime metadata: its captured original unit and missing
+drop-in state restore its original default-Node behavior.
+
+```bash
+bash Server/skybridge-signaling/deploy/scripts/rollback_remote.sh \
+  --host <server-ip-or-dns> --user <ssh-user>
+```
+
+The default target is the recorded direct predecessor, never the newest directory
+by modification time. `--release <name>` may select another release only when its
+Node binding and successful `.deployment-verified` record exist. Prepared or failed
+candidates and unknown legacy history are rejected rather than assigned a guessed
+runtime. This restores service configuration and the current release; it does not
+roll back database migrations, shared environment configuration or runtime files.
+
+Rollback also requires the configured health endpoint to return the exact target
+build. It uses the target's `.skybridge-build-fingerprint`, or the private
+pre-promotion health receipt for a direct legacy predecessor without that file.
+HTTP 200 with a different or missing build is a rollback verification failure.
+Legacy rollback does not require the newer account-device routes.
+
+SSH and SCP use batch mode, strict existing host-key verification, a 10-second
+connection timeout and bounded server-alive checks. No user SSH configuration is
+modified, and a connection or authentication failure cannot open an interactive
+password prompt or claim successful deployment.
 
 ## 3. Post-deploy smoke checks
 
 ```bash
-bash Server/skybridge-signaling/deploy/scripts/smoke_local.sh http://127.0.0.1:8443
+bash Server/skybridge-signaling/deploy/scripts/smoke_local.sh \
+  http://127.0.0.1:8443 "" 'skybridge-signaling/<expected-release-name>'
 ```
+
+Use the fingerprint from the reviewed release's `.skybridge-build-fingerprint`
+file; do not derive the expected value from the server being checked. The third
+argument is required unless `SKYBRIDGE_EXPECTED_SERVER_BUILD_FINGERPRINT` is set.
+An explicitly empty second argument keeps every deployment probe credential-free.
+The base URL must use HTTP(S), without credentials, query or fragment. Redirects
+are rejected, TLS verification stays enabled, and response bodies are never
+printed, including TURN credentials.
 
 For a real PNVS hook probe in staging:
 
@@ -105,6 +237,10 @@ Expected behavior:
 - `GET /health` returns `200`.
 - `GET /health` includes an `sms` readiness block.
 - `GET /readyz` returns `200` only when the signaling backend and required SMS OTP dependencies are ready.
+- `GET /`, `GET /health` and `GET /readyz` report the exact expected `serverBuildFingerprint`.
+- `GET /` advertises `/api/presence/register` and `/api/devices/list`.
+- Unauthenticated `POST /api/presence/register` with `{}` and `GET /api/devices/list`
+  both return `401` with JSON `error=missing_bearer_token`.
 - `probe_supabase_send_sms_hook.sh` returns `200`, then PNVS control panel shows a matching sending record.
 - `GET /api/turn/credentials` is not `404`.
 - `GET /api/turn/credentials` returns short-lived mode (`mode=shared_secret_hmac`) in production.

@@ -578,7 +578,15 @@ function copy_resource_bundle_into_app_resources() {
           ( -f "${dest_bundle}/Info.plist" || -f "${dest_bundle}/Contents/Info.plist" ) ]]; then
       normalize_resource_bundle_to_macos_layout "${dest_bundle}"
     fi
-    ditto "${tmp_bundle}" "${dest_bundle}"
+    if [[ "${has_info_plist}" -eq 0 && ! -d "${tmp_bundle}/Contents/Resources" && \
+          -d "${dest_bundle}/Contents/Resources" ]]; then
+      # SwiftPM data-only bundles have no Info.plist and place their resources at
+      # the root. Merge them at the native bundle's actual lookup path; adding a
+      # second root-level Resources directory would leave the old shader active.
+      ditto "${tmp_bundle}" "${dest_bundle}/Contents/Resources"
+    else
+      ditto "${tmp_bundle}" "${dest_bundle}"
+    fi
   else
     mkdir -p "$(dirname "${dest_bundle}")"
     mv "${tmp_bundle}" "${dest_bundle}"
@@ -605,7 +613,6 @@ function graft_xcode_app_compiled_resources_into_module_bundle() {
   local module_bundle="$1"
   local native_resources_dir="${XCODE_APP_BUNDLE}/Contents/Resources"
   local module_resources_dir="${module_bundle}/Contents/Resources"
-  local lproj=""
 
   normalize_resource_bundle_to_macos_layout "${module_bundle}"
   mkdir -p "${module_resources_dir}"
@@ -625,10 +632,6 @@ function graft_xcode_app_compiled_resources_into_module_bundle() {
     exit 1
   }
 
-  for lproj in "${native_resources_dir}"/*.lproj(N); do
-    rm -rf "${module_resources_dir}/$(basename "${lproj}")"
-    ditto "${lproj}" "${module_resources_dir}/$(basename "${lproj}")"
-  done
 }
 
 function copy_xcode_app_compiled_resources_to_main_bundle() {
@@ -991,6 +994,7 @@ source "${ROOT_DIR}/Scripts/framework_artifact_helpers.sh"
 source "${ROOT_DIR}/Scripts/package_build_policy.sh"
 source "${ROOT_DIR}/Scripts/signing_entitlements_helpers.sh"
 source "${ROOT_DIR}/Scripts/xcodebuild_helpers.sh"
+CONFIGURED_BUILD_JOBS="$(skybridge_configured_build_jobs)"
 XCODE_DERIVED_DATA_PATH="${SKYBRIDGE_XCODE_DERIVED_DATA_PATH:-$(skybridge_default_xcode_derived_data_path)}"
 XCODE_BUILD_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/Release"
 BUILD_ARCH="${BUILD_ARCH:-$(skybridge_default_macos_build_arch)}"
@@ -1115,6 +1119,9 @@ if [[ "${SKIP_BUILD}" != "1" ]]; then
       -c release
       --arch "${BUILD_ARCH}"
     )
+    if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+      SWIFTPM_BUILD_ARGS+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+    fi
     if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
       SWIFTPM_BUILD_ARGS+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
     fi
@@ -1179,6 +1186,16 @@ if [[ ! -x "${BUILD_DIR}/${EXECUTABLE}" ]]; then
 fi
 
 log "本次打包使用构建目录: ${BUILD_DIR}"
+
+bound_session_verifier=(
+  python3
+  "${ROOT_DIR}/Scripts/verify_boundsession_xcframework.py"
+  --root "${ROOT_DIR}"
+)
+if is_release_distribution_context; then
+  bound_session_verifier+=(--require-publishable-source)
+fi
+"${bound_session_verifier[@]}"
 
 log "复验并清理既有 App Bundle，然后创建输出结构"
 skybridge_remove_package_app_bundle_for_replacement \
@@ -1362,9 +1379,10 @@ log "拷贝构建产物中的资源 bundle 到 .app/Contents/Resources/"
 found_bundle=0
 resource_bundle_dirs=("${BUILD_DIR}")
 if [[ "${XCODE_BUILD_DIR}" != "${BUILD_DIR}" && -d "${XCODE_BUILD_DIR}" ]]; then
-  # Xcode 编译后的 Bundle.module 资源包含 Assets.car 和 default.metallib；
-  # SwiftPM CLI 目录保留源码资源形态，不能作为发布包中 asset catalog 的最终来源。
-  resource_bundle_dirs+=("${XCODE_BUILD_DIR}")
+  # Xcode supplies compiled assets that SwiftPM does not produce. The selected
+  # executable's build directory is authoritative for overlapping resources,
+  # especially translations, so stage it last.
+  resource_bundle_dirs=("${XCODE_BUILD_DIR}" "${BUILD_DIR}")
 fi
 for bundle_dir in "${resource_bundle_dirs[@]}"; do
   [[ -d "${bundle_dir}" ]] || continue
@@ -1563,6 +1581,9 @@ build_power_metrics_helper() {
     -c release
     --arch "${BUILD_ARCH}"
   )
+  if [[ -n "${CONFIGURED_BUILD_JOBS}" ]]; then
+    swiftpm_build_args+=(--jobs "${CONFIGURED_BUILD_JOBS}")
+  fi
   if [[ -n "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH:-}" ]]; then
     swiftpm_build_args+=(--scratch-path "${SKYBRIDGE_SWIFTPM_RELEASE_SCRATCH_PATH}")
   fi

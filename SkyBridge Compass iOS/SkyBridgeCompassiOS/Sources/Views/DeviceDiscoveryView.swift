@@ -52,6 +52,9 @@ struct DeviceDiscoveryView: View {
     @State private var selectedDevice: DiscoveredDevice?
     @State private var showConnectionSheet = false
     @State private var searchText = ""
+
+    /// 账号设备行「用连接码连接」→ 由首页打开扫码/跨网连接入口。
+    var onOpenCrossNetworkConnect: () -> Void = {}
     
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     
@@ -59,6 +62,12 @@ struct DeviceDiscoveryView: View {
         NavigationStack {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 16) {
+                    // 账号设备（同一账号下的全部设备）放在附近扫描之前。
+                    AccountDevicesSectionView(
+                        onOpenNearbyDevice: { device in selectedDevice = device },
+                        onOpenCrossNetworkConnect: onOpenCrossNetworkConnect
+                    )
+
                     scanStatusHeader
 
                     AdvertisingLifecycleBanner(
@@ -116,13 +125,13 @@ struct DeviceDiscoveryView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(isScanning ? "正在扫描..." : "设备扫描")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                 
                 Text(isScanning
                      ? "发现 \(discoveryManager.discoveredDevices.count) 台设备"
                      : "点击右上角开始扫描附近设备")
                     .font(.caption)
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundStyle(.secondary)
             }
             
             Spacer()
@@ -134,19 +143,7 @@ struct DeviceDiscoveryView: View {
             }
         }
         .padding(16)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(
-                    LinearGradient(
-                        colors: [isScanning ? Color.cyan.opacity(0.4) : Color.white.opacity(0.15), .clear],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
+        .liquidGlassCard(cornerRadius: 20, padding: 0)
     }
 
     // MARK: - Empty State
@@ -169,11 +166,11 @@ struct DeviceDiscoveryView: View {
             
             Text(isScanning ? "正在搜索附近设备..." : "暂无发现设备")
                 .font(.title3.weight(.medium))
-                .foregroundColor(.white.opacity(0.8))
+                .foregroundStyle(.secondary)
             
             Text("请确保目标设备在同一网络，或已开启跨网发现")
                 .font(.caption)
-                .foregroundColor(.white.opacity(0.4))
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
             
@@ -184,7 +181,7 @@ struct DeviceDiscoveryView: View {
                         Text("开始扫描")
                             .fontWeight(.semibold)
                     }
-                    .foregroundColor(.white)
+                    .foregroundStyle(.primary)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 14)
                     .background(
@@ -360,7 +357,7 @@ struct AdvertisingLifecycleBanner: View {
 
                 Text(detail)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 if let action {
@@ -420,12 +417,12 @@ struct InboundConnectionNoticeBanner: View {
 
                 Text(notice.message)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text(notice.occurredAt, style: .time)
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(.secondary)
             }
 
             Spacer(minLength: 0)
@@ -433,7 +430,7 @@ struct InboundConnectionNoticeBanner: View {
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
             .accessibilityLabel(Text("关闭入站连接通知"))
@@ -467,7 +464,7 @@ struct InfoRow: View {
             Spacer()
             
             Text(value)
-                .foregroundColor(.white)
+                .foregroundStyle(.primary)
                 .font(.system(.body, design: .monospaced))
         }
         .font(.subheadline)

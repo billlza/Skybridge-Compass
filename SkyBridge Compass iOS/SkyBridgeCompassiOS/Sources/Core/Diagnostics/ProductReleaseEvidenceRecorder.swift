@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import OSLog
 import SkyBridgeProtocolCore
 
@@ -112,7 +113,7 @@ final class ProductReleaseEvidenceRecorder {
         role: ProductConnectivityHandshakeRole,
         suite: CryptoSuite
     ) -> Bool {
-        guard owner.transport == .p2p, suite == .xwing else { return false }
+        guard owner.transport == .p2p, (suite == .xwing || suite == .qperiaptABI2PolicyBound) else { return false }
         return mutateCurrent(owner) { state in
             guard !state.p2pAuthenticated else { return nil }
             state.p2pAuthenticated = true
@@ -132,7 +133,7 @@ final class ProductReleaseEvidenceRecorder {
         owner: ProductEvidenceSessionOwner,
         suite: CryptoSuite
     ) -> Bool {
-        guard owner.transport == .webrtc, suite == .xwing else { return false }
+        guard owner.transport == .webrtc, (suite == .xwing || suite == .qperiaptABI2PolicyBound) else { return false }
         return mutateCurrent(owner) { state in
             guard !state.webrtcRekeyAuthenticated else { return nil }
             state.webrtcRekeyAuthenticated = true
@@ -256,8 +257,8 @@ final class ProductReleaseEvidenceRecorder {
         emit(
             event: "releaseSessionDisconnected",
             fields: ownerFields(owner) + [
-                "reason=\(reason.rawValue)",
                 "noticeHidden=not-applicable",
+                "reason=\(reason.rawValue)",
                 "result=disconnected"
             ]
         )
@@ -322,13 +323,18 @@ final class ProductReleaseEvidenceRecorder {
     func recordProductionIdentityHandshakeBound(
         descriptor: ProductIdentityEvidenceDescriptor,
         sessionReference: String,
-        attemptOwner: ProductConnectivityAttemptOwner
+        attemptOwner: ProductConnectivityAttemptOwner,
+        finishedConfirmation: HandshakeDriver.AuthenticatedFinishedConfirmation? = nil
     ) -> Bool {
         let key = IdentitySessionKey(
             transport: .p2p,
             sessionReference: sessionReference
         )
-        guard descriptor.isFormalProductionIdentity,
+        guard let finishedFields = Self.identityFinishedFields(
+                descriptor: descriptor,
+                sessionReference: sessionReference,
+                confirmation: finishedConfirmation
+              ),
               P2PEvidenceReference.isValid(sessionReference),
               authenticatedP2PAttemptSessions[attemptOwner.attemptReference]
                 == sessionReference,
@@ -342,7 +348,8 @@ final class ProductReleaseEvidenceRecorder {
             descriptor: descriptor,
             transport: .p2p,
             sessionReference: sessionReference,
-            attemptReference: attemptOwner.attemptReference
+            attemptReference: attemptOwner.attemptReference,
+            finishedFields: finishedFields
         ))
         return true
     }
@@ -355,7 +362,8 @@ final class ProductReleaseEvidenceRecorder {
     func recordProductionIdentityHandshakeBound(
         descriptor: ProductIdentityEvidenceDescriptor,
         sessionOwner: ProductEvidenceSessionOwner,
-        attemptReference: String? = nil
+        attemptReference: String? = nil,
+        finishedConfirmation: HandshakeDriver.AuthenticatedFinishedConfirmation? = nil
     ) -> Bool {
         let key = IdentitySessionKey(
             transport: sessionOwner.transport,
@@ -365,7 +373,11 @@ final class ProductReleaseEvidenceRecorder {
             transport: sessionOwner.transport,
             sessionReference: sessionOwner.sessionReference
         )
-        guard descriptor.isFormalProductionIdentity,
+        guard let finishedFields = Self.identityFinishedFields(
+                descriptor: descriptor,
+                sessionReference: sessionOwner.sessionReference,
+                confirmation: finishedConfirmation
+              ),
               restoredIdentityReferences.contains(descriptor.identityReference),
               var state = sessionsByGeneration[sessionOwner.generation],
               state.owner == sessionOwner,
@@ -388,7 +400,8 @@ final class ProductReleaseEvidenceRecorder {
             descriptor: descriptor,
             transport: sessionOwner.transport,
             sessionReference: sessionOwner.sessionReference,
-            attemptReference: attemptReference ?? "not-applicable"
+            attemptReference: attemptReference ?? "not-applicable",
+            finishedFields: finishedFields
         ))
         return true
     }
@@ -400,12 +413,8 @@ final class ProductReleaseEvidenceRecorder {
     func recordProductionIdentityCommitted(
         _ descriptor: ProductIdentityEvidenceDescriptor
     ) -> Bool {
-        guard descriptor.isFormalProductionIdentity,
-              committedIdentityReferences.count
-                < Self.maximumRetainedIdentityCount,
-              committedIdentityReferences.insert(
-                descriptor.identityReference
-              ).inserted else {
+        guard noteNonRestoredIdentityResolution(descriptor),
+              descriptor.isFormalProductionIdentity else {
             return false
         }
         emitLine((["productionIdentityCommitted"]
@@ -418,14 +427,28 @@ final class ProductReleaseEvidenceRecorder {
         return true
     }
 
+    /// Creation or reconciliation during this launch must never be relabeled as
+    /// an existing identity restoration by a later provider reinitialization.
+    @discardableResult
+    func noteNonRestoredIdentityResolution(
+        _ descriptor: ProductIdentityEvidenceDescriptor
+    ) -> Bool {
+        guard descriptor.isFormalProductionIdentity || descriptor.isExistingQProductionIdentity,
+              committedIdentityReferences.count < Self.maximumRetainedIdentityCount else {
+            return false
+        }
+        return committedIdentityReferences.insert(descriptor.identityReference).inserted
+    }
+
     /// Records only a slot whose immutable key and authority existed before
-    /// this process resolved it and whose restored Secure Enclave handle passed
+    /// this process resolved it and whose restored signing handle passed
     /// the real signing verification performed by `SkyBridgeiOSCore`.
     @discardableResult
     func recordProductionIdentityRestored(
         _ descriptor: ProductIdentityEvidenceDescriptor
     ) -> Bool {
-        guard descriptor.isFormalProductionIdentity,
+        guard descriptor.isFormalProductionIdentity || descriptor.isExistingQProductionIdentity,
+              committedIdentityReferences.count < Self.maximumRetainedIdentityCount,
               !committedIdentityReferences.contains(
                 descriptor.identityReference
               ),
@@ -450,7 +473,8 @@ final class ProductReleaseEvidenceRecorder {
         descriptor: ProductIdentityEvidenceDescriptor,
         transport: ProductEvidenceTransport,
         sessionReference: String,
-        attemptReference: String
+        attemptReference: String,
+        finishedFields: [String]
     ) -> String {
         (["productionIdentityHandshakeBound", "transport=\(transport.rawValue)"]
             + [
@@ -463,7 +487,28 @@ final class ProductReleaseEvidenceRecorder {
                 "peerVerification=authenticated-finished",
                 "currentPathAuthority=verified",
                 "result=success"
-            ]).joined(separator: " ")
+            ]
+            + finishedFields).joined(separator: " ")
+    }
+
+    private static func identityFinishedFields(
+        descriptor: ProductIdentityEvidenceDescriptor,
+        sessionReference: String,
+        confirmation: HandshakeDriver.AuthenticatedFinishedConfirmation?
+    ) -> [String]? {
+        if descriptor.isFormalProductionIdentity { return [] }
+        guard descriptor.isExistingQProductionIdentity,
+              let confirmation,
+              confirmation.sessionReference == sessionReference,
+              confirmation.suite == .qperiaptABI2PolicyBound else {
+            return nil
+        }
+        return [
+            "suite=Q-Periapt-ABI2-PolicyBound",
+            "suite_wire=0x0012",
+            "localFinished=sent",
+            "peerFinished=verified"
+        ]
     }
 
     private static func sessionIsAuthenticatedForIdentityBinding(
@@ -600,6 +645,14 @@ enum ProductEvidenceTransport: String, Sendable, Hashable {
 enum ProductEvidenceRouteClass: String, Sendable {
     case wifi
     case awdl
+
+    static func current(for connection: NWConnection) -> Self? {
+        guard let path = connection.currentPath else { return nil }
+        if path.availableInterfaces.contains(where: { $0.name.lowercased().hasPrefix("awdl") }) {
+            return .awdl
+        }
+        return path.usesInterfaceType(.wifi) ? .wifi : nil
+    }
 }
 
 enum ProductEvidenceSelectedTransport: String, Sendable {

@@ -55,6 +55,28 @@ public final class ReferenceRenderer: @unchecked Sendable {
     /// 帧输出回调。texture 为 HDR 渲染后纹理，backing 持有引用防止提前释放。
     public var frameHandler: ((MTLTexture, AnyObject?) -> Void)?
 
+    /// Decode failures are delivered at the stream boundary, never represented as a frame.
+    public var failureHandler: (@Sendable (RemoteFrameRenderError) -> Void)?
+    var syncFrameHandler: (@Sendable () -> Void)?
+    private lazy var h264Decoder = H264VideoDecoder(
+        maximumWidth: Int32(BGRAFrameBuilder.maximumWidth),
+        maximumHeight: Int32(BGRAFrameBuilder.maximumHeight),
+        frameHandler: { [weak self] frame in
+            guard let self else { return }
+            self.ringBuffer.push(frame)
+            // A completed decode drives presentation, including a single final frame.
+            self.pullAndRender()
+        },
+        failureHandler: { [weak self] error in self?.reportH264Failure(error) },
+        syncFrameHandler: { [weak self] in self?.syncFrameHandler?() }
+    )
+
+    private func reportH264Failure(_ error: RemoteFrameRenderError) {
+        log.error("H.264 decode failed: \(error.localizedDescription, privacy: .public)")
+        healthMonitor?.recordDroppedFrame(reason: .decodeFailed)
+        failureHandler?(error)
+    }
+
     // MARK: - Metal 资源
 
     private let device: MTLDevice?
@@ -66,6 +88,7 @@ public final class ReferenceRenderer: @unchecked Sendable {
     // MARK: - Ring Buffer
 
     private let ringBuffer = DecodedFrameRingBuffer(capacity: 3)
+    private let presentationQueue = DispatchQueue(label: "com.skybridge.compass.reference.present")
 
     // MARK: - VideoToolbox
 
@@ -154,18 +177,24 @@ public final class ReferenceRenderer: @unchecked Sendable {
     // MARK: - 生命周期
 
     public func teardown() {
+        h264Decoder.teardown()
         invalidateDecompressionSession()
-        ringBuffer.reset()
-        lastTexture = nil
-        lastBacking = nil
-        hasPresented = false
-        textureCache = nil
-        hdrPipelineState = nil
-        uniformBuffer = nil
+        presentationQueue.sync {
+            ringBuffer.reset()
+            lastTexture = nil
+            lastBacking = nil
+            hasPresented = false
+            textureCache = nil
+            hdrPipelineState = nil
+            uniformBuffer = nil
+            hdrOutputTextures.removeAll()
+            hdrOutputDimensions = (0, 0)
+            hdrOutputIndex = 0
 
-        if let observer = thermalObserver {
-            NotificationCenter.default.removeObserver(observer)
-            thermalObserver = nil
+            if let observer = thermalObserver {
+                NotificationCenter.default.removeObserver(observer)
+                thermalObserver = nil
+            }
         }
     }
 
@@ -174,7 +203,7 @@ public final class ReferenceRenderer: @unchecked Sendable {
     /// 更新功耗模式
     public func updatePowerMode() {
         let onAC = HardwareCapabilityProbe.isOnExternalPower()
-        powerMode = onAC ? .externalPower : .battery
+        presentationQueue.sync { powerMode = onAC ? .externalPower : .battery }
         log.info("Power mode updated: \(onAC ? "external" : "battery")")
     }
 
@@ -182,8 +211,7 @@ public final class ReferenceRenderer: @unchecked Sendable {
 
     /// 接收一帧远程桌面数据，解码后推入 ring buffer。
     ///
-    /// Reference 模式专用：仅处理 HEVC（Main10），不支持 H.264 或 BGRA。
-    /// 如果传入非 HEVC 数据，会记录错误并丢帧。
+    /// HEVC Main10 retains the HDR path; H.264 uses the shared SDR decoder.
     @discardableResult
     public func processFrame(
         data: Data,
@@ -201,7 +229,7 @@ public final class ReferenceRenderer: @unchecked Sendable {
         let bandwidth = calculateBandwidth(bytes: data.count, delta: delta)
 
         // 功耗策略：电池模式下限制分辨率
-        if powerMode == .battery && width > batteryMaxWidth {
+        if currentPowerMode == .battery && width > batteryMaxWidth {
             // 不拒绝帧，但记录警告——实际限制应在编码端协商
             log.debug("Battery mode: frame \(width)x\(height) exceeds limit \(self.batteryMaxWidth)")
         }
@@ -210,8 +238,9 @@ public final class ReferenceRenderer: @unchecked Sendable {
         case .hevc:
             processHEVCMain10Frame(data: data, width: width, height: height, recvTime: recvTime)
         case .h264:
-            // Reference 模式也可以处理 H.264，但使用标准解码路径
-            processCompressedFrame(data: data, width: width, height: height, codec: type, recvTime: recvTime)
+            if case .failure(let error) = h264Decoder.submit(data: data) {
+                reportH264Failure(error)
+            }
         case .bgra:
             processBGRAFrame(data: data, width: width, height: height, stride: stride, recvTime: recvTime)
         }
@@ -236,6 +265,15 @@ public final class ReferenceRenderer: @unchecked Sendable {
         renderPassDescriptor: MTLRenderPassDescriptor? = nil,
         drawable: (any MTLDrawable)? = nil,
         edrHeadroom: Float = 1.0
+    ) -> Bool {
+        presentationQueue.sync {
+            pullAndRenderSerially(renderPassDescriptor: renderPassDescriptor,
+                                  drawable: drawable, edrHeadroom: edrHeadroom)
+        }
+    }
+
+    private func pullAndRenderSerially(
+        renderPassDescriptor: MTLRenderPassDescriptor?, drawable: (any MTLDrawable)?, edrHeadroom: Float
     ) -> Bool {
         guard let frame = ringBuffer.latestFrame() else {
             return false // 没有新帧，保持上一帧
@@ -521,22 +559,6 @@ public final class ReferenceRenderer: @unchecked Sendable {
         decodeAndPush(data: data, session: decompressionSession, formatDescription: formatDescription, recvTime: recvTime)
     }
 
-    private func processCompressedFrame(data: Data, width: Int, height: Int, codec: RemoteFrameType, recvTime: DispatchTime) {
-        ensureFormatDescription(width: width, height: height, codec: codec)
-        guard let formatDescription else {
-            healthMonitor?.recordDroppedFrame(reason: .decodeFailed)
-            return
-        }
-
-        ensureDecompressionSession(formatDescription: formatDescription, is10Bit: false)
-        guard let decompressionSession else {
-            healthMonitor?.recordDroppedFrame(reason: .decodeFailed)
-            return
-        }
-
-        decodeAndPush(data: data, session: decompressionSession, formatDescription: formatDescription, recvTime: recvTime)
-    }
-
     private func decodeAndPush(
         data: Data,
         session: VTDecompressionSession,
@@ -805,19 +827,19 @@ public final class ReferenceRenderer: @unchecked Sendable {
 
     /// 当前功耗模式
     public var currentPowerMode: PowerMode {
-        powerMode
+        presentationQueue.sync { powerMode }
     }
 
     // MARK: - 色彩管线控制
 
     /// 更新传输函数（用于切换 PQ / HLG / sRGB 源）
     public func setTransferFunction(_ tf: TransferFunction) {
-        currentTransferFunc = tf
+        presentationQueue.sync { currentTransferFunc = tf }
     }
 
     /// 更新色调映射模式
     public func setToneMappingMode(_ mode: ToneMappingMode) {
-        currentToneMapping = mode
+        presentationQueue.sync { currentToneMapping = mode }
     }
 
     // MARK: - 工具方法

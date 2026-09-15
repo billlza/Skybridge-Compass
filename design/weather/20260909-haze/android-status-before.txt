@@ -1,0 +1,1 @@
+Android source directory has no Git metadata. Targeted file snapshots are preserved in before/android.

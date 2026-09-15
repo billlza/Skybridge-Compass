@@ -800,6 +800,49 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         })
     }
 
+    func testQPeriaptABI2AuthenticationRetainsExactOwnerAndDoesNotInventMediaProof() throws {
+        var lines: [String] = []
+        let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+        let owner = try XCTUnwrap(recorder.beginSession(
+            product: .macOSApp, transport: .webrtc,
+            sessionReference: sessionReference, selectedTransport: .relay
+        ))
+        for rejected in [CryptoSuite.qperiaptContextBound, .x25519Ed25519, CryptoSuite(wireId: 0xffff)] {
+            XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, negotiatedSuite: rejected))
+        }
+        XCTAssertTrue(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertTrue(lines.last?.contains("suite=Q-Periapt-ABI2-PolicyBound result=authenticated") == true)
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertFalse(lines.contains { $0.hasPrefix("webrtcMediaSample ") || $0.hasPrefix("secureFrameAccepted ") })
+        XCTAssertFalse(recorder.recordRemoteInputApplied(owner: owner, effect: .pointer))
+        XCTAssertTrue(recorder.endSession(owner: owner, reason: .peer))
+        let replacement = try XCTUnwrap(recorder.beginSession(
+            product: .macOSApp, transport: .webrtc,
+            sessionReference: sessionReference, selectedTransport: .relay
+        ))
+        let beforeStale = lines.count
+        XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertEqual(lines.count, beforeStale)
+        XCTAssertTrue(recorder.recordWebRTCPQCRekeyAuthenticated(owner: replacement, negotiatedSuite: .qperiaptABI2PolicyBound))
+    }
+
+    func testQPeriaptABI2P2PAuthenticationPreservesSuiteAndTransportAdmission() throws {
+        var lines: [String] = []
+        let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+        let owner = try XCTUnwrap(recorder.beginSession(
+            product: .macOSApp, transport: .p2p,
+            sessionReference: sessionReference, routeClass: .wifi
+        ))
+        XCTAssertFalse(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, negotiatedSuite: .qperiaptContextBound))
+        XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertTrue(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, negotiatedSuite: .qperiaptABI2PolicyBound))
+        XCTAssertTrue(lines.last?.contains("role=initiator suite=Q-Periapt-ABI2-PolicyBound result=authenticated") == true)
+        XCTAssertEqual(lines.count, 2)
+    }
+
     func testShippingSourceContractHasNoHiddenTriggerPersistenceOrHashExpansion() throws {
         let recorderSource = try source(
             "Sources/SkyBridgeCore/Diagnostics/ProductReleaseEvidenceRecorder.swift"
@@ -897,14 +940,29 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         let fileManagerSource = try source(
             "Sources/SkyBridgeCore/FileTransfer/FileTransferManager.swift"
         )
-        XCTAssertTrue(fileManagerSource.contains("exactSnapshot: ClassicTransferSessionSnapshot?"))
-        XCTAssertTrue(fileManagerSource.contains("symmetricKeyMaterialEquals("))
+        XCTAssertTrue(fileManagerSource.contains("material = try connection.classicTransferKeyMaterial("))
+        XCTAssertTrue(fileManagerSource.contains("transferKey: material.transferKey"))
+        XCTAssertTrue(fileManagerSource.contains("let routeClass = ProductReleaseEvidenceRouteClass.current(for: connection)"))
+        XCTAssertTrue(fileManagerSource.contains("context.integrityReceiptVerified"))
+        let liveKeySource = try source("Sources/SkyBridgeCore/P2P/P2PModels.swift")
+        XCTAssertTrue(liveKeySource.contains("ClassicTransferKeyMaterial(sessionKeys: keys, transferId: transferId)"))
         XCTAssertTrue(fileManagerSource.contains("recordProductFileTransferCompletionVisible("))
         let fileViewSource = try source(
             "Sources/SkyBridgeUI/FileTransfer/FileTransferView.swift"
         )
         XCTAssertTrue(fileViewSource.contains(".onAppear"))
         XCTAssertTrue(fileViewSource.contains("recordProductFileTransferCompletionVisible("))
+        let iOSFileManagerSource = try source(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/FileTransferManager.swift"
+        )
+        XCTAssertTrue(iOSFileManagerSource.contains("recordFileTransferStarted("))
+        XCTAssertTrue(iOSFileManagerSource.contains("recordFileTransferCompleted("))
+        XCTAssertTrue(iOSFileManagerSource.contains("confirmProductFileTransferIntegrityReceipt(for: transfer.id)"))
+        XCTAssertTrue(iOSFileManagerSource.contains("receiptDeliveryStatus == .delivered"))
+        let iOSFileViewSource = try source(
+            "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/FileTransferView.swift"
+        )
+        XCTAssertTrue(iOSFileViewSource.contains("recordProductFileTransferCompletionVisible(for: transfer)"))
 
         let webRTCSource = try source(
             "Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift"

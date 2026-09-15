@@ -122,6 +122,13 @@
 		FDD48779FE89C3C746869876 /* SupabaseTurnstileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D5F467BEAD915B84BACF7DF /* SupabaseTurnstileView.swift */; };
 		FEB4E5F083CBE09135FC0B5A /* BackgroundControlManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C029BBBAD7F82EA70394637A /* BackgroundControlManager.swift */; };
 		FF7C91DAC645B2312CA969B0 /* RemoteSessionsPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9084B8D1A2C8E96846F2EABC /* RemoteSessionsPanelView.swift */; };
+		3C0A372CAB4F17017A2437C7 /* DashboardLiquidGlassChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E1151E626346916E672EBC0 /* DashboardLiquidGlassChrome.swift */; };
+		C2D035561142D8216CF47A4D /* AccountDevicesPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */; };
+		E0D6C0B4D4876F5A83B04BAF /* AccountDevicePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */; };
+		F2B0BE87BA55EABB1B973425 /* AccountDevicesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */; };
+		A8BD3FD15341DBB7907F1AFE /* NearFieldControlCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */; };
+		AC7FECF6887AB68C91E310B1 /* NearFieldWorkspaceViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */; };
+		71D10F4CC0694067DBE52DDF /* RemoteControlPairingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -259,6 +266,13 @@
 		F63965829D3ABAF0609035D3 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
 		F82B594F9E6F32F8BBED768E /* EmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateView.swift; sourceTree = "<group>"; };
 		FDC840D20233F0618288F1E6 /* ClassicBackgroundV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClassicBackgroundV2.swift; sourceTree = "<group>"; };
+		9E1151E626346916E672EBC0 /* DashboardLiquidGlassChrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardLiquidGlassChrome.swift; sourceTree = "<group>"; };
+		417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesPanelView.swift; sourceTree = "<group>"; };
+		815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicePresentation.swift; sourceTree = "<group>"; };
+		D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountDevicesSectionView.swift; sourceTree = "<group>"; };
+		4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldControlCanvas.swift; sourceTree = "<group>"; };
+		5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearFieldWorkspaceViewModel.swift; sourceTree = "<group>"; };
+		B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteControlPairingView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -383,12 +397,17 @@
 		55FC17AEF69153420C3FC65C /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				D462ABA601F27AA921D27C95 /* AccountDevicesSectionView.swift */,
+				815A2616693D8D8F76CD42DD /* AccountDevicePresentation.swift */,
 				DE3E2F0E44685A79BA4C94DD /* CopyToastView.swift */,
 				614723D38FB3796157959949 /* CrossNetworkConnectionView.swift */,
 				4079761EBCBD6E5B76DF8D69 /* DeviceMessagingView.swift */,
 				2FB0C73089453C8B07AB53D6 /* EnhancedDeviceDiscoveryView.swift */,
 				C358D8499396F28ADEBAE316 /* LiquidGlassUserArea.swift */,
 				80758AF748C8962CAB9491F5 /* NearFieldMirrorView.swift */,
+				B0D5E76733DCD4F00C97BF7F /* RemoteControlPairingView.swift */,
+				5EF77BAE554BBC1D841CA29D /* NearFieldWorkspaceViewModel.swift */,
+				4BE3E686745731252D279F30 /* NearFieldControlCanvas.swift */,
 				72E3832E6ABD806CA833E1AA /* NotificationBellView.swift */,
 				904A7A42479065B9367A8E4D /* SSHTerminalView.swift */,
 				4B510D8932F4F9C7768456DE /* TrustedDeviceDetailView.swift */,
@@ -446,6 +465,7 @@
 		82FF3543520062B6996BF2EC /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				9E1151E626346916E672EBC0 /* DashboardLiquidGlassChrome.swift */,
 				AAFBEC275559A384FBE1B542 /* CompactDeviceRow.swift */,
 				F82B594F9E6F32F8BBED768E /* EmptyStateView.swift */,
 				8793A89866E33950D6F13A33 /* EnhancedDeviceRow.swift */,
@@ -493,6 +513,7 @@
 		B4FAF91F5B79E59E39668B94 /* Sections */ = {
 			isa = PBXGroup;
 			children = (
+				417BBFC72E39DE47BD58C081 /* AccountDevicesPanelView.swift */,
 				0BE7D0EE9AAE38836D4F2611 /* AppleSiliconInfoCardView.swift */,
 				74DF29B58CA8ADE6A6AD3F74 /* DashboardContentView.swift */,
 				CFEB5C8A3A97F114A59348AC /* DeviceDiscoveryPanelView.swift */,
@@ -710,6 +731,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F2B0BE87BA55EABB1B973425 /* AccountDevicesSectionView.swift in Sources */,
+				E0D6C0B4D4876F5A83B04BAF /* AccountDevicePresentation.swift in Sources */,
+				C2D035561142D8216CF47A4D /* AccountDevicesPanelView.swift in Sources */,
+				3C0A372CAB4F17017A2437C7 /* DashboardLiquidGlassChrome.swift in Sources */,
 				31370A0F880FBCEC4782E390 /* AppUpdateChecker.swift in Sources */,
 				A9EC192B3EAACD1D9DDD648C /* AppleSiliconFeatures.swift in Sources */,
 				B70CD70DCDCA73539F3EA1B1 /* AppleSiliconInfoCardView.swift in Sources */,
@@ -764,6 +789,9 @@
 				460A1A9C2CD7B05278490283 /* NavigationItem.swift in Sources */,
 				E1E33C33EF35461B1031B9F9 /* NavigationNotifications.swift in Sources */,
 				7905FFC1F533B585ED3BA250 /* NearFieldMirrorView.swift in Sources */,
+				71D10F4CC0694067DBE52DDF /* RemoteControlPairingView.swift in Sources */,
+				AC7FECF6887AB68C91E310B1 /* NearFieldWorkspaceViewModel.swift in Sources */,
+				A8BD3FD15341DBB7907F1AFE /* NearFieldControlCanvas.swift in Sources */,
 				E93F2D2FEF6DB167B7A65C17 /* NotificationBellView.swift in Sources */,
 				47408F11F55E2E3497CF25CF /* OnlineDeviceConnectionCoordinator.swift in Sources */,
 				56B242EDEDEF0D41AA48BB57 /* OnlineDeviceRow.swift in Sources */,

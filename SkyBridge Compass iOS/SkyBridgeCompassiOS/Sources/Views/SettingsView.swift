@@ -202,10 +202,15 @@ struct SettingsView: View {
     
     private var appearanceSettingsSection: some View {
         Section(t("settings.section.appearance")) {
-            Picker(t("settings.theme"), selection: $themeConfiguration.isDarkMode) {
-                Text(t("settings.theme.light")).tag(false)
-                Text(t("settings.theme.dark")).tag(true)
+            Picker(t("settings.background_style"), selection: $themeConfiguration.isDarkMode) {
+                Text(t("settings.background_style.classic")).tag(true)
+                Text(t("settings.background_style.light")).tag(false)
             }
+            .accessibilityIdentifier("settings.background_style")
+
+            Text(t("settings.background_style.description"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             
             Picker(localizationManager.localized("settings.language"), selection: $localizationManager.currentLanguage) {
                 ForEach(AppLanguage.allCases, id: \.self) { language in

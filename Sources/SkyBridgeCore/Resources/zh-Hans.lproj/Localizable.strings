@@ -687,7 +687,7 @@
 "transferStatus.transferring" = "传输中";
 "transferStatus.paused" = "已暂停";
 "transferStatus.completed" = "已完成";
-"fileTransfer.receiptDeliveryUnknown" = "文件已保存，但发送端确认状态未知；请勿自动重传。";
+"fileTransfer.receiptDeliveryUnknown" = "投递确认状态未知。请核对接收设备上的文件，确认前请勿重传。";
 "transferStatus.failed" = "失败";
 "transferStatus.cancelled" = "已取消";
 "action.close" = "关闭";
@@ -731,7 +731,7 @@
 "remote.connectionMode.near" = "近距";
 "remote.connectionMode.far" = "远距";
 "remote.connectionMode.auto.description" = "自动选择最佳连接模式（同网优先近距镜像）";
-"remote.connectionMode.near.description" = "近距硬件镜像 - 同网低延迟（ScreenCaptureKit + HEVC + QUIC）";
+"remote.connectionMode.near.description" = "查看并控制同一网络内的设备";
 "remote.connectionMode.far.description" = "手动 RDP（受限预览）- FreeRDP 3.30 软件 GDI、严格证书校验、无通道重定向";
 "common.unknown" = "未知";
 "profile.title" = "用户资料";
@@ -1250,3 +1250,74 @@
 "remote.camera.feedUnavailable.title" = "画面不可用";
 "remote.camera.feedUnavailable.failed" = "摄像头流已失败，凭据和传输资源也已释放。请检查精确地址、凭据、H.264 编码和本地网络后重连。";
 "remote.camera.feedUnavailable.released" = "会话渲染资源已释放，请重新连接。";
+
+/* Account Devices (账号设备) */
+"discovery.mode.accountDevices" = "账号设备";
+"discovery.mode.subtitle.accountDevices" = "同一账号";
+"discovery.accountDevices.title" = "账号设备";
+"discovery.accountDevices.description" = "登录同一账号的设备会自动记录名称、IP、系统与在线状态，跨网络也能看到";
+"discovery.accountDevices.nebulaId" = "Nebula ID";
+"discovery.accountDevices.empty.title" = "还没有其他设备";
+"discovery.accountDevices.empty.message" = "在其他设备上用同一账号登录 SkyBridge，它就会出现在这里";
+"discovery.accountDevices.signedOut" = "登录后才能看到本账号的设备";
+"discovery.accountDevices.loading" = "正在同步账号设备…";
+"discovery.accountDevices.retryHint" = "将自动重试；也可以点击刷新";
+"discovery.accountDevices.stale" = "列表可能已过期（上次更新：%@）";
+"discovery.accountDevices.truncated" = "设备数量超过 200 台，仅显示前 200 台";
+"discovery.accountDevices.lastUpdated" = "更新于 %@";
+"discovery.accountDevices.status.lanReachable" = "局域网可达";
+"discovery.accountDevices.status.online" = "在线";
+"discovery.accountDevices.status.offline" = "离线";
+"discovery.accountDevices.capability.controllable" = "可被控";
+"discovery.accountDevices.capability.controlOnly" = "仅控制端";
+"discovery.accountDevices.lan" = "局域网";
+"discovery.accountDevices.public" = "公网";
+"discovery.accountDevices.deviceId" = "设备 ID";
+"discovery.accountDevices.lastSeen" = "最近活跃";
+"discovery.accountDevices.neverSeen" = "尚未上线";
+"discovery.accountDevices.registration.pending" = "待批准";
+"discovery.accountDevices.registration.frozen" = "已冻结";
+"discovery.accountDevices.action.useConnectionCode" = "用连接码连接";
+"discovery.accountDevices.hint.online" = "该设备在线但不在同一局域网：请在对方设备生成智能连接码后输入";
+"discovery.accountDevices.copyAddress" = "复制地址";
+"discovery.accountDevices.copyDeviceId" = "复制设备 ID";
+"discovery.accountDevices.failure.notAuthenticated" = "未登录";
+"discovery.accountDevices.failure.deviceNotActive" = "本机尚未在账号中激活（%@）";
+"discovery.accountDevices.failure.rateLimited" = "请求过于频繁，稍后自动重试";
+"discovery.accountDevices.failure.registryUnavailable" = "设备注册表暂不可用（%@）";
+"discovery.accountDevices.failure.serverRejected" = "服务器拒绝了请求（HTTP %d）";
+"discovery.accountDevices.failure.transport" = "无法连接信令服务器";
+"discovery.accountDevices.failure.malformedResponse" = "服务器响应无法解析";
+"discovery.accountDevices.failure.localIdentityUnavailable" = "本机身份尚未就绪";
+"discovery.accountDevices.failure.localAuthenticationUnavailable" = "本机登录状态异常（%@）";
+"discovery.accountDevices.serviceInactive.title" = "账号设备服务未运行";
+"discovery.accountDevices.serviceInactive.message" = "本机已登录，但账号设备同步尚未启动。请重新打开主控台；若持续如此请重启应用。";
+"discovery.accountDevices.heartbeatFailed" = "本机在线状态上报失败，其他设备可能看不到这台设备";
+"dashboard.accountDevices" = "账号设备";
+"dashboard.accountDevices.summary" = "%d 台设备 · %d 台在线";
+"dashboard.accountDevices.viewAll" = "查看全部";
+"dashboard.accountDevices.empty" = "登录同一账号的其他设备会显示在这里";
+
+"remoteControl.securityNotice.inputController" = "拥有输入权";
+
+"remoteControl.securityNotice.observer" = "仅观看";
+
+"remoteControl.securityNotice.transferInput" = "交接输入权";
+
+"remoteControl.securityNotice.approveView" = "允许观看";
+
+"info.appleSilicon" = "Apple 芯片";
+"info.optimizationEnabled" = "优化已启用";
+"info.pCore" = "性能核心";
+"info.eCore" = "能效核心";
+"info.multiCoreOpt" = "多核优化";
+"info.reqAppleSilicon" = "需要 Apple 芯片";
+"info.deviceUnsupported" = "不支持此设备";
+"info.standardMode" = "标准模式";
+
+"remoteControl.securityNotice.localInputController" = "本机已收回键盘和鼠标控制权，远端仍可观看。";
+
+// Saved pairing identity status
+"discovery.trustedDevices.section" = "已信任设备";
+"discovery.pendingPairings.section" = "待验证的配对记录";
+"discovery.pendingPairings.explanation" = "这些配对记录尚未完成身份验证，不能据此判断设备是否在线。";

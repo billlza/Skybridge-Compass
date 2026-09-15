@@ -20,6 +20,222 @@ import SkyBridgeProtocolCore
 // 当在同一模块内时
 #endif
 
+protocol DiscoveryConnectionStartTransport: AnyObject, Sendable {
+    func setStateUpdateHandler(_ handler: @escaping @Sendable (NWConnection.State) -> Void)
+    func clearStateUpdateHandler()
+    func start()
+    func cancel()
+}
+
+private final class NWDiscoveryConnectionStartTransport: DiscoveryConnectionStartTransport, @unchecked Sendable {
+    private let connection: NWConnection
+    private let queue: DispatchQueue
+
+    init(connection: NWConnection, queue: DispatchQueue) {
+        self.connection = connection
+        self.queue = queue
+    }
+
+    func setStateUpdateHandler(_ handler: @escaping @Sendable (NWConnection.State) -> Void) {
+        connection.stateUpdateHandler = handler
+    }
+
+    func clearStateUpdateHandler() { connection.stateUpdateHandler = nil }
+    func start() { connection.start(queue: queue) }
+    func cancel() { connection.cancel() }
+}
+
+/// Owns a provisional connection until the ready connection is handed back.
+/// Ready may wake the caller before cancellation arrives, so it is distinct
+/// from transfer. Terminal transitions take cleanup responsibility exactly once.
+final class DiscoveryConnectionStartOperation: @unchecked Sendable {
+    private enum Phase {
+        case idle
+        case waiting
+        case ready
+        case failed(Error)
+        case transferred
+    }
+
+    private struct State {
+        var phase = Phase.idle
+        var transport: (any DiscoveryConnectionStartTransport)?
+        var continuation: CheckedContinuation<Void, Error>?
+        var timeoutTask: Task<Void, Never>?
+    }
+
+    private enum TransportAction {
+        case use(any DiscoveryConnectionStartTransport)
+        case failed(Error)
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
+    private let timeout: Duration
+    private let effects = DispatchQueue(label: "com.skybridge.discovery.connection-start", qos: .userInitiated)
+
+    init(transport: any DiscoveryConnectionStartTransport, timeout: Duration = .seconds(10)) {
+        precondition(timeout > .zero)
+        self.state = OSAllocatedUnfairLock(initialState: State(transport: transport))
+        self.timeout = timeout
+    }
+
+    @MainActor
+    func run() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                effects.async { self.begin(continuation) }
+            }
+            // Cancellation still owns the provisional socket while this actor
+            // is waiting to resume. No throwing work follows the transfer.
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                effects.async { self.transfer(continuation) }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    /// Returns false only after ownership has moved to the recipient. A cached
+    /// connection can then retire its already transferred socket itself.
+    @discardableResult
+    func cancel() -> Bool { fail(CancellationError()) }
+
+    func timeOut() {
+        fail(DeviceDiscoveryError.connectionTimeout, onlyWhileWaiting: true)
+    }
+
+    private func begin(_ continuation: CheckedContinuation<Void, Error>) {
+        let action = state.withLock { state -> TransportAction in
+            switch state.phase {
+            case .idle:
+                guard let transport = state.transport else {
+                    preconditionFailure("A new connection attempt must own its transport")
+                }
+                state.phase = .waiting
+                state.continuation = continuation
+                return .use(transport)
+            case .failed(let error):
+                return .failed(error)
+            case .waiting, .ready, .transferred:
+                preconditionFailure("A connection attempt can only run once")
+            }
+        }
+        switch action {
+        case .failed(let error):
+            // A cancellation claim may have queued cleanup behind this block.
+            effects.async { continuation.resume(throwing: error) }
+        case .use(let transport):
+            transport.setStateUpdateHandler { [weak self] connectionState in
+                switch connectionState {
+                case .ready:
+                    self?.becameReady()
+                case .failed(let error):
+                    self?.fail(error)
+                case .cancelled:
+                    self?.fail(DeviceDiscoveryError.deviceNotConnected, alreadyCancelled: true)
+                default:
+                    break
+                }
+            }
+            let deadline = ContinuousClock.now.advanced(by: timeout)
+            let timeoutTask = Task<Void, Never> { [weak self] in
+                do {
+                    try await Task.sleep(until: deadline, clock: .continuous)
+                    self?.timeOut()
+                } catch is CancellationError {
+                    // Readiness or a terminal transition retires this timer.
+                    return
+                } catch {
+                    self?.fail(error)
+                }
+            }
+            let shouldCancelTimer = state.withLock { state in
+                guard case .waiting = state.phase else { return true }
+                state.timeoutTask = timeoutTask
+                return false
+            }
+            if shouldCancelTimer { timeoutTask.cancel() }
+            // Start and teardown use the same serial queue. Cancellation that
+            // races this block cannot cancel first and then start a dead socket.
+            transport.start()
+        }
+    }
+
+    private func becameReady() {
+        let completion = state.withLock { state -> (
+            CheckedContinuation<Void, Error>?, Task<Void, Never>?
+        ) in
+            guard case .waiting = state.phase else { return (nil, nil) }
+            state.phase = .ready
+            defer {
+                state.continuation = nil
+                state.timeoutTask = nil
+            }
+            return (state.continuation, state.timeoutTask)
+        }
+        completion.1?.cancel()
+        completion.0?.resume()
+    }
+
+    @discardableResult
+    private func fail(_ error: Error, onlyWhileWaiting: Bool = false, alreadyCancelled: Bool = false) -> Bool {
+        state.withLock { state -> Bool in
+            switch state.phase {
+            case .transferred:
+                return false
+            case .failed:
+                return true
+            case .idle, .ready:
+                if onlyWhileWaiting { return true }
+            case .waiting:
+                break
+            }
+            let transport = state.transport
+            let continuation = state.continuation
+            let timeoutTask = state.timeoutTask
+            state.phase = .failed(error)
+            state.transport = nil
+            state.continuation = nil
+            state.timeoutTask = nil
+            // Only enqueue while locked; all transport effects and continuation
+            // callbacks run outside the lock, after any in-flight start block.
+            effects.async {
+                timeoutTask?.cancel()
+                transport?.clearStateUpdateHandler()
+                if !alreadyCancelled { transport?.cancel() }
+                continuation?.resume(throwing: error)
+            }
+            return true
+        }
+    }
+
+    private func transfer(_ continuation: CheckedContinuation<Void, Error>) {
+        let action = state.withLock { state -> TransportAction in
+            switch state.phase {
+            case .ready:
+                guard let transport = state.transport else {
+                    preconditionFailure("A ready connection must still own its transport")
+                }
+                state.phase = .transferred
+                state.transport = nil
+                return .use(transport)
+            case .failed(let error):
+                return .failed(error)
+            case .idle, .waiting, .transferred:
+                preconditionFailure("Only a ready connection can be transferred once")
+            }
+        }
+        switch action {
+        case .use(let transport):
+            // Finish clearing our handler before the recipient installs its own.
+            transport.clearStateUpdateHandler()
+            continuation.resume()
+        case .failed(let error):
+            effects.async { continuation.resume(throwing: error) }
+        }
+    }
+}
+
 /// 2025年10月最新：高性能设备发现管理器
 /// 优化重点：
 /// 1. 所有网络操作在后台队列执行
@@ -30,7 +246,7 @@ import SkyBridgeProtocolCore
 public class DeviceDiscoveryManagerOptimized: ObservableObject {
     nonisolated private static let protocolIdentityLogRedaction = "<redacted>"
 
-    private struct ResolvedBonjourService: Sendable {
+    struct ResolvedBonjourService: Sendable {
         let port: Int
         let ipv4: String?
         let ipv6: String?
@@ -44,7 +260,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         let networkLinkStatus: DeviceNetworkLinkStatus?
     }
 
-    private enum BonjourResolveError: Error {
+    enum BonjourResolveError: Error {
         case timeout
         case failed([String: NSNumber])
     }
@@ -125,12 +341,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
             guard shouldResume else { return }
 
-            timeoutTask?.cancel()
-            timeoutTask = nil
-            service.stop()
-            service.delegate = nil
-            service.remove(from: .main, forMode: .common)
-
             switch result {
             case .success(let resolved):
                 continuation.resume(returning: resolved)
@@ -138,7 +348,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 continuation.resume(throwing: error)
             }
 
-            selfRetain = nil
+            // NetService callbacks and teardown share the main run loop. Retain
+            // the delegate until any callback already executing there returns.
+            Task { @MainActor [self] in
+                timeoutTask?.cancel()
+                timeoutTask = nil
+                service.stop()
+                service.delegate = nil
+                service.remove(from: .main, forMode: .common)
+                selfRetain = nil
+            }
         }
     }
 
@@ -167,7 +386,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     /// 浏览失败（通常是缺少 NSBonjourServices 条目导致的 mDNSResponder 策略拒绝 -65555）后
     /// 记录的非核心服务类型，后续不再重建其浏览器，避免无限 churn 拖垮主线程与电量。
     private var knownUnsupportedServiceTypes: Set<String> = []
-    private var connections: [String: NWConnection] = [:]
+    private struct CachedConnection {
+        let connection: NWConnection
+        var startup: DiscoveryConnectionStartOperation?
+    }
+    private var connections: [String: CachedConnection] = [:]
 
  // 使用 actor 来管理设备缓存，避免数据竞争
     private let deviceCache = DeviceCache()
@@ -178,10 +401,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private let identityResolver = IdentityResolver()
  /// 外部候选指纹提供者（例如来自 DeviceDiscoveryService 的 SSDP/ARP/HTTP 指纹聚合）。
     private var fingerprintProvider: (@Sendable (DiscoveredDevice) async -> IdentityFingerprint?)?
-    private var pendingUpdates: Set<DiscoveredDevice> = []
+    nonisolated static let maximumPendingObservations =
+        P2PDiscoveryService.maximumDiscoveredDevices * P2PDiscoveryService.maximumRouteIdentifiersPerDevice
+    private var observationBuffer = DiscoveryObservationBuffer(capacity: DeviceDiscoveryManagerOptimized.maximumPendingObservations)
+    private var lastObservationCapacityLogAt: Date?
 
     /// 最近被 `.removed` 浏览事件移除的设备身份及其时间戳，用于在短 TTL 内压制
-    /// 在途 detached 解析 Task 把已移除设备重新插回 pendingUpdates 导致的“幽灵设备”。
+    /// 在途 detached 解析 Task 把已移除设备重新入队 导致的“幽灵设备”。
     /// key = 有稳定 deviceId 时为该 id，否则为 "name:" + 清洗后的名称。仅在 @MainActor 上读写。
     private var recentlyRemovedIdentities: [String: Date] = [:]
     private let removedTTL: TimeInterval = 5.0
@@ -366,13 +592,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             return
         }
 
+        guard let generation = observationBuffer.currentGeneration else { return }
         for usbDevice in usbDevices {
  // 将USB设备转换为DiscoveredDevice
             let discoveredDevice = convertUSBDeviceToDiscoveredDevice(usbDevice)
 
  // 直接添加到待处理更新队列（会被批量刷新机制处理，包含去重逻辑）
-            pendingUpdates.insert(discoveredDevice)
-            scheduleFlush()
+            let key = DiscoveryObservationBuffer.Key.usb(
+                identifier: discoveredDevice.uniqueIdentifier ?? discoveredDevice.id.uuidString)
+            guard let lease = beginObservation(key: key, generation: generation) else { continue }
+            enqueueDiscoveryObservation(discoveredDevice, lease: lease)
 
             logger.info("✅ 添加USB设备到发现列表: \(discoveredDevice.name)")
         }
@@ -410,12 +639,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
         logger.info("🔍 开始高性能网络扫描")
         isScanning = true
+        let generation = observationBuffer.start()
 
  // 改为事件驱动 + 防抖，无需定时器
 
  // 在后台并发启动所有浏览器
         Task(priority: .userInitiated) { [weak self] in
-            await self?.startBrowsersConcurrently()
+            await self?.startBrowsersConcurrently(generation: generation)
         }
 
         // `_skybridge._tcp` advertising and its authenticated inbound handler
@@ -466,36 +696,73 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     public func stopScanning() {
         logger.info("⏹️ 停止扫描")
         isScanning = false
-
- // 取消防抖任务
+        observationBuffer.stop()
         flushTask?.cancel()
         flushTask = nil
-
- // 取消所有浏览器（在后台）
-        Task { [weak self] in
-            guard let self = self else { return }
-            await MainActor.run {
-                for browser in self.browsers {
-                    browser.cancel()
-                }
-                self.browsers.removeAll()
- // 扫描停止后清空已发布的设备列表，避免下游读取到已不再广播的陈旧路由
-                self.discoveredDevices.removeAll()
-            }
+        for browser in browsers {
+            browser.browseResultsChangedHandler = nil
+            browser.stateUpdateHandler = nil
+            browser.cancel()
         }
-
- // 扫描结束后清洗缓存，确保本机唯一性
-        Task { [weak self] in
-            let selfId = await SelfIdentityProvider.shared.presentationSnapshot()
-            await MainActor.run {
-                self?.sanitizeCache(selfId)
-            }
-        }
+        browsers.removeAll()
+        discoveredDevices.removeAll()
     }
 
  /// 连接到设备 - 完全异步
  /// 根据 enableIPv6Support 设置决定是否优先使用 IPv6 地址
     public func connectToDevice(_ device: DiscoveredDevice) async throws {
+        let connection = try makeConnection(to: device)
+        let startup = makeConnectionStartOperation(connection)
+        let connKey = device.id.uuidString
+        if let old = connections[connKey] {
+            let retiredByStartup = old.startup?.cancel() == true
+            if !retiredByStartup {
+                old.connection.stateUpdateHandler = nil
+                old.connection.cancel()
+            }
+        }
+        connections[connKey] = CachedConnection(connection: connection, startup: startup)
+        do {
+            try await startup.run()
+            guard connections[connKey]?.connection === connection else {
+                throw DeviceDiscoveryError.connectionCancelled
+            }
+            connections[connKey]?.startup = nil
+            connection.stateUpdateHandler = { [weak self, weak connection] state in
+                Task { @MainActor in
+                    guard let self, let connection,
+                          self.connections[connKey]?.connection === connection else { return }
+                    self.handleConnectionStateUpdate(state, for: connKey)
+                }
+            }
+            connectionStatus = .connected
+        } catch {
+            if connections[connKey]?.connection === connection {
+                connections.removeValue(forKey: connKey)
+            }
+            throw error
+        }
+        logger.info("✅ 连接成功: \(device.name)")
+    }
+
+    /// Creates an exclusively owned transport for a remote-control session.
+    /// The caller must cancel it on abandonment or transfer ownership to its
+    /// session engine. Discovery's cached connections are never borrowed.
+    public func makeRemoteControlConnection(to device: DiscoveredDevice) async throws -> NWConnection {
+        guard supportsRemoteControl(device) else {
+            throw DeviceDiscoveryError.deviceNotConnected
+        }
+        // The primary P2P port also exists on viewer-only devices. A control
+        // session must never fall through to that unrelated file/signaling port.
+        var remoteHost = device
+        remoteHost.services = device.services.filter(Self.isRemoteControlService)
+        remoteHost.portMap = device.portMap.filter { Self.isRemoteControlService($0.key) }
+        let connection = try makeConnection(to: remoteHost)
+        try await startAndWaitForConnection(connection)
+        return connection
+    }
+
+    private func makeConnection(to device: DiscoveredDevice) throws -> NWConnection {
         logger.info("连接设备: \(device.name)")
 
  // 根据 IPv6 设置选择地址；若地址缺失，则仅在拥有可信 Bonjour 实例名时回退到 service endpoint。
@@ -504,14 +771,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         let portInt = resolvedConnectablePort(for: device)
 
         if enableIPv6Support, let ipv6 = Self.sanitizedConnectableAddress(device.ipv6) {
-            guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
-            let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
+            guard let rawPort = UInt16(exactly: portInt), rawPort > 0 else {
+                throw NWError.posix(.EINVAL)
+            }
+            let port = NWEndpoint.Port(integerLiteral: rawPort)
             endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(ipv6), port: port)
             serverNameForTLS = ipv6
             logger.info("🌐 使用 IPv6 地址连接: \(ipv6)")
         } else if let ipv4 = Self.sanitizedConnectableAddress(device.ipv4) {
-            guard portInt > 0 else { throw DeviceDiscoveryError.scanningFailed }
-            let port = NWEndpoint.Port(integerLiteral: UInt16(portInt))
+            guard let rawPort = UInt16(exactly: portInt), rawPort > 0 else {
+                throw NWError.posix(.EINVAL)
+            }
+            let port = NWEndpoint.Port(integerLiteral: rawPort)
             endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(ipv4), port: port)
             serverNameForTLS = ipv4
             logger.info("🌐 使用 IPv4 地址连接: \(ipv4)")
@@ -624,27 +895,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
             connection = NWConnection(to: endpoint, using: params)
         }
-        let connKey = device.id.uuidString
- // 若同一设备已有在途连接，先解除其 handler 再取消，避免：
- // 1) 旧 NWConnection 失去唯一引用却未 cancel（保活 TCP socket 泄漏）；
- // 2) 旧 handler 的 .cancelled 回调异步 removeValue 误删新写入的条目。
-        if let old = connections[connKey] {
-            old.stateUpdateHandler = nil
-            old.cancel()
-        }
-        connections[connKey] = connection
-
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.handleConnectionStateUpdate(state, for: device.id.uuidString)
-            }
-        }
-
- // 在后台队列启动连接
-        connection.start(queue: discoveryQueue)
-
-        try await waitForConnection(connection)
-        logger.info("✅ 连接成功: \(device.name)")
+        return connection
     }
 
     private func isSkyBridgeControlDevice(_ device: DiscoveredDevice) -> Bool {
@@ -656,6 +907,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             || device.portMap[BonjourInteropContract.remoteControlServiceType] != nil
             || device.portMap[BonjourInteropContract.legacyRemoteControlServiceType] != nil
             || device.portMap["_skybridge._udp"] != nil
+    }
+
+    public func supportsRemoteControl(_ device: DiscoveredDevice) -> Bool {
+        !device.isLocalDevice && (
+            device.services.contains(where: Self.isRemoteControlService)
+                || device.portMap.keys.contains(where: Self.isRemoteControlService)
+        )
+    }
+
+    private static func isRemoteControlService(_ service: String) -> Bool {
+        service == BonjourInteropContract.remoteControlServiceType
+            || service == BonjourInteropContract.legacyRemoteControlServiceType
     }
 
     private func resolvedConnectablePort(for device: DiscoveredDevice) -> Int {
@@ -881,15 +1144,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  /// - Returns: 如果连接存在且处于就绪/活动状态，返回对应的 `NWConnection`；否则返回 `nil`
     public func activeConnection(for deviceId: UUID) -> NWConnection? {
         let key = deviceId.uuidString
-        guard let connection = connections[key] else { return nil }
- // 仅在连接未被取消时返回，避免使用已失效连接
+        guard let connection = connections[key]?.connection else { return nil }
+        guard case .ready = connection.state else { return nil }
         return connection
     }
 
  // MARK: - 私有方法（性能优化核心）
 
  /// 并发启动所有浏览器
-    private func startBrowsersConcurrently() async {
+    private func startBrowsersConcurrently(generation: UUID) async {
+        guard observationBuffer.isCurrent(generation: generation) else { return }
         guard enableBonjourDiscovery else {
             logger.info("📡 Bonjour 发现已关闭，跳过浏览器启动")
             return
@@ -908,10 +1172,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     && !knownUnsupportedServiceTypes.contains(t)
             }
         }
+        guard observationBuffer.isCurrent(generation: generation) else { return }
         await withTaskGroup(of: Void.self) { group in
             for serviceType in types {
                 group.addTask { [weak self] in
-                    await self?.startSingleBrowser(serviceType: serviceType)
+                    await self?.startSingleBrowser(serviceType: serviceType, generation: generation)
                 }
             }
         }
@@ -962,7 +1227,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  /// 启动单个浏览器（在后台队列）
  /// Bonjour discovery must let Network.framework pick Wi-Fi/Ethernet/AWDL interfaces.
-    private func startSingleBrowser(serviceType: String) async {
+    private func startSingleBrowser(serviceType: String, generation: UUID) {
+        guard observationBuffer.isCurrent(generation: generation) else { return }
         // 已知不可浏览的服务类型不再重建浏览器。
         if knownUnsupportedServiceTypes.contains(serviceType) {
             logger.debug("⏭️ 跳过已知不可浏览的服务类型: \(serviceType)")
@@ -980,24 +1246,57 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
         browser.stateUpdateHandler = { [weak self, weak browser] state in
             Task { @MainActor in
-                self?.handleBrowserStateUpdate(state, for: serviceType, browser: browser)
+                guard let self, self.observationBuffer.isCurrent(generation: generation) else { return }
+                self.handleBrowserStateUpdate(state, for: serviceType, browser: browser)
             }
         }
 
         browser.browseResultsChangedHandler = { [weak self] results, changes in
  // 在后台队列处理结果变化
             Task(priority: .userInitiated) {
-                await self?.handleBrowseResultsChanged(results: results, changes: changes, serviceType: serviceType)
+                await self?.handleBrowseResultsChanged(results: results, changes: changes, serviceType: serviceType, generation: generation)
             }
         }
 
  // 在专用队列启动浏览器（非主线程）
         browser.start(queue: discoveryQueue)
 
-        await MainActor.run {
-            self.browsers.append(browser)
-            self.logger.debug("✅ 浏览器已启动: \(serviceType)")
+        browsers.append(browser)
+        logger.debug("✅ 浏览器已启动: \(serviceType)")
+    }
+
+    private nonisolated static func observationKey(from endpoint: NWEndpoint) -> DiscoveryObservationBuffer.Key? {
+        guard case .service(let instance, let type, let domain, _) = endpoint else { return nil }
+        return .bonjour(instance: instance.lowercased(), serviceType: type.lowercased(),
+                        domain: normalizedBonjourDomain(domain).lowercased())
+    }
+
+    private func beginObservation(key: DiscoveryObservationBuffer.Key, generation: UUID) -> DiscoveryObservationBuffer.Lease? {
+        switch observationBuffer.begin(key: key, generation: generation) {
+        case .accepted(let lease):
+            return lease
+        case .staleScan:
+            return nil
+        case .capacityExceeded(let limit):
+            let now = Date()
+            if lastObservationCapacityLogAt.map({ now.timeIntervalSince($0) >= 5 }) != false {
+                lastObservationCapacityLogAt = now
+                logger.error("❌ Discovery observation capacity exceeded: limit=\(limit, privacy: .public); existing observations remain updateable")
+            }
+            return nil
         }
+    }
+
+    @discardableResult
+    private func enqueueDiscoveryObservation(_ device: DiscoveredDevice, lease: DiscoveryObservationBuffer.Lease) -> Bool {
+        guard observationBuffer.isCurrent(lease) else { return false }
+        guard !isRecentlyRemoved(device) else {
+            observationBuffer.remove(key: lease.key)
+            return false
+        }
+        guard observationBuffer.enqueue(device, lease: lease) else { return false }
+        scheduleFlush()
+        return true
     }
 
     /// Bounded, monotonically increasing retry spacing for identity-authority failures.
@@ -1032,7 +1331,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  /// 刷新待处理的更新（批量UI更新）
     private func flushPendingUpdates() async {
-        guard !pendingUpdates.isEmpty else { return }
+        guard observationBuffer.hasPendingUpdates,
+              let generation = observationBuffer.currentGeneration else { return }
 
         // A previous resolution failed and the backoff window has not elapsed. The batch
         // stays pending and no Keychain access is attempted, so a persistent identity
@@ -1044,11 +1344,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         // Local-device classification is a security decision: keep the batch pending
         // if the complete authority tuple cannot be resolved, rather than publishing
         // rows against an empty presentation snapshot.
-        let selfId: SelfIdentitySnapshot
+        let localIdentity: CanonicalBonjourAdvertisementIdentity
         do {
-            selfId = try await SelfIdentityProvider.shared
-                .snapshotEnsuringProtocolDeviceId(allowCreate: true)
+            localIdentity = try await CanonicalBonjourAdvertisementIdentityProvider.current(
+                allowCreateDeviceId: false
+            )
         } catch {
+            guard observationBuffer.isCurrent(generation: generation) else { return }
             let delay = Self.identityResolutionBackoffDelay(
                 forFailureCount: identityResolutionFailureCount
             )
@@ -1064,19 +1366,30 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             )
             return
         }
+        guard observationBuffer.isCurrent(generation: generation) else { return }
         identityResolutionFailureCount = 0
         identityResolutionRetryNotBefore = nil
 
-        let updates = pendingUpdates
-        pendingUpdates.removeAll()
+        let updates = observationBuffer.takePending()
 
  // 清理过期的移除身份守卫，限制字典增长
         let now = Date()
         recentlyRemovedIdentities = recentlyRemovedIdentities.filter { now.timeIntervalSince($0.value) < removedTTL }
 
  // 批量生成候选弱指纹并持久化，提高后续合并命中率
-        let fpMap = await generateFingerprintsBatch(for: updates)
+        let fpMap = await generateFingerprintsBatch(for: Set(updates.map(\.device)))
+        guard observationBuffer.isCurrent(generation: generation) else { return }
+        let currentUpdates = Set(updates.filter { observationBuffer.isCurrent($0.lease) }.map(\.device))
+        applyDiscoveryUpdates(currentUpdates, fingerprints: fpMap, localIdentity: localIdentity)
+    }
 
+    /// Applies a resolved batch without suspending between selecting a record and
+    /// writing it back. Identity and fingerprint I/O finishes before this boundary.
+    func applyDiscoveryUpdates(
+        _ updates: Set<DiscoveredDevice>,
+        fingerprints fpMap: [UUID: IdentityFingerprint?],
+        localIdentity: CanonicalBonjourAdvertisementIdentity
+    ) {
  // 批量更新设备列表（严格防止不同设备错误合并）
         for device in updates {
  // 守卫：若该身份在 TTL 内刚被 `.removed` 移除，跳过这条在途解析结果，避免幽灵设备复活
@@ -1100,57 +1413,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  // 继续使用清理后的设备
                 let candidateFP = fpMap[sanitized.id] ?? nil
-                let mergeIndex = await identityResolver.findMergeIndex(in: discoveredDevices, candidate: sanitized, candidateFP: candidateFP)
+                let mergeIndex = Self.routeBoundMergeIndex(in: discoveredDevices, candidate: sanitized)
+                    ?? identityResolver.findMergeIndex(in: discoveredDevices, candidate: sanitized, candidateFP: candidateFP)
 
-                if let index = mergeIndex, discoveredDevices.indices.contains(index) {
+                if let index = mergeIndex {
                     let existingDevice = discoveredDevices[index]
-                    let betterName = Self.preferredDisplayName(
-                        existing: existingDevice.name,
-                        candidate: sanitized.name
+                    var updatedDevice = Self.mergingNonSkyBridgeObservation(
+                        existingDevice: existingDevice,
+                        sanitized: sanitized
                     )
-                    let mergedConnectionTypes = sanitized.connectionTypes.union(existingDevice.connectionTypes)
-                    let sanitizedIsUSBPresence =
-                        sanitized.source == .skybridgeUSB
-                        || (sanitized.connectionTypes == [.usb] && sanitized.services.isEmpty && sanitized.portMap.isEmpty)
-                    let existingHasSkyBridgeEndpoint =
-                        existingDevice.services.contains(where: { $0.lowercased().contains("skybridge") })
-                        || existingDevice.portMap.keys.contains(where: { $0.lowercased().contains("skybridge") })
-                    let preserveExistingNetworkIdentity = sanitizedIsUSBPresence && existingHasSkyBridgeEndpoint
-
-                    let updatedDevice = DiscoveredDevice(
-                        id: existingDevice.id,
-                        name: betterName,
-                        ipv4: sanitized.ipv4 ?? existingDevice.ipv4,
-                        ipv6: sanitized.ipv6 ?? existingDevice.ipv6,
-                        platformName: sanitized.platformName ?? existingDevice.platformName,
-                        osVersion: sanitized.osVersion ?? existingDevice.osVersion,
-                        modelName: sanitized.modelName ?? existingDevice.modelName,
-                        chip: sanitized.chip ?? existingDevice.chip,
-                        services: preserveExistingNetworkIdentity
-                            ? existingDevice.services
-                            : Array(Set(sanitized.services + existingDevice.services)),
-                        portMap: preserveExistingNetworkIdentity
-                            ? existingDevice.portMap
-                            : Self.mergedPortMapPreservingResolvedPorts(
-                                incoming: sanitized.portMap,
-                                existing: existingDevice.portMap
-                            ),
-                        remoteVideoFormats: sanitized.remoteVideoFormats.union(existingDevice.remoteVideoFormats),
-                        connectionTypes: mergedConnectionTypes,
-                        uniqueIdentifier: preserveExistingNetworkIdentity
-                            ? existingDevice.uniqueIdentifier
-                            : (sanitized.uniqueIdentifier ?? existingDevice.uniqueIdentifier),
-                        routeIdentifiers: preserveExistingNetworkIdentity
-                            ? existingDevice.routeIdentifiers
-                            : DiscoveredDevice.mergedRouteIdentifiers(sanitized.routeIdentifiers, existingDevice.routeIdentifiers),
-                        signalStrength: sanitized.signalStrength ?? existingDevice.signalStrength,
-                        networkLinkStatus: sanitized.networkLinkStatus ?? existingDevice.networkLinkStatus,
-                        source: preserveExistingNetworkIdentity ? existingDevice.source : sanitized.source,
-                        isLocalDevice: false, // 强制非本机
-                        deviceId: preserveExistingNetworkIdentity ? existingDevice.deviceId : nil,
-                        pubKeyFP: preserveExistingNetworkIdentity ? existingDevice.pubKeyFP : nil,
-                        macSet: preserveExistingNetworkIdentity ? existingDevice.macSet : []
-                    )
+                    applyLocalFlag(&updatedDevice, localIdentity: localIdentity)
                     discoveredDevices[index] = updatedDevice
                 } else {
                     discoveredDevices.append(sanitized)
@@ -1166,11 +1438,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             if let routeBoundMergeIndex {
                 mergeIndex = routeBoundMergeIndex
             } else {
-                mergeIndex = await identityResolver.findMergeIndex(in: discoveredDevices, candidate: device, candidateFP: candidateFP)
+                mergeIndex = identityResolver.findMergeIndex(in: discoveredDevices, candidate: device, candidateFP: candidateFP)
             }
 
  // 判定候选设备是否为本机（强身份硬匹配）
-            let candidateIsLocal = await identityResolver.resolveIsLocal(device, selfId: selfId)
+            let candidateIsLocal = IdentityResolver.resolveIsLocalSynchronously(device: device, localIdentity: localIdentity)
 
             #if DEBUG
  // DEBUG 日志：精简版 - 只打印强身份来源和匹配结果
@@ -1181,9 +1453,9 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
  // 判定触发了哪条优先级
             var matchedRule = "无匹配"
             if candidateIsLocal {
-                if deviceIdValid && device.deviceId == selfId.deviceId {
+                if deviceIdValid && device.deviceId == localIdentity.deviceId {
                     matchedRule = "优先级A:deviceId"
-                } else if pubKeyFPValid && device.pubKeyFP == selfId.pubKeyFP {
+                } else if pubKeyFPValid && device.pubKeyFP == localIdentity.protocolPublicKeyFingerprint {
                     matchedRule = "优先级B:pubKeyFP"
                 }
             }
@@ -1204,31 +1476,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
             #endif
 
-            if let index = mergeIndex, discoveredDevices.indices.contains(index) {
+            if let index = mergeIndex {
                 let existingDevice = discoveredDevices[index]
-                // ⚠️ 重要：不要在 `await` 之后继续使用旧的 index 写回数组。
-                // 由于本类是 @MainActor，`await` 会让出执行权，期间其他任务可能会移除/重排 `discoveredDevices`，
-                // 从而导致 index 过期（Release 下会触发 Swift runtime "Index out of range"）。
-                let existingRecordId = existingDevice.id
-                let existingStableDeviceId = existingDevice.deviceId
-                let existingPubKeyFP = existingDevice.pubKeyFP
 
  // 判定现有设备是否为本机
-                let existingIsLocal = await identityResolver.resolveIsLocal(existingDevice, selfId: selfId)
+                let existingIsLocal = IdentityResolver.resolveIsLocalSynchronously(device: existingDevice, localIdentity: localIdentity)
 
                 #if DEBUG
                 logger.debug("🔄 合并判定 [\(existingDevice.name)]: existing=\(existingIsLocal), candidate=\(candidateIsLocal)")
                 #endif
 
  // 1️⃣ 强匹配检查（只有强身份匹配才允许合并）
-                let validId: (String?) -> Bool = { id in
-                    guard let id = id, !id.isEmpty, id.count >= 8 else { return false }
-                    return true
-                }
-                let validFP: (String?) -> Bool = { fp in
-                    guard let fp = fp, fp.count == 64, fp.allSatisfy({ $0.isHexDigit }) else { return false }
-                    return true
-                }
+                let existingIdentity = IdentityResolver.protocolIdentity(
+                    deviceId: existingDevice.deviceId, pubKeyFP: existingDevice.pubKeyFP)
+                let candidateIdentity = IdentityResolver.protocolIdentity(
+                    deviceId: device.deviceId, pubKeyFP: device.pubKeyFP)
 
                 // Allow same-record updates (same UUID) even if strong identity fields weren't present in the initial placeholder.
                 let routeBoundProtocolMerge = Self.isRouteBoundProtocolMerge(
@@ -1236,10 +1498,10 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     candidate: device
                 )
                 let strongMatch =
-                    (existingDevice.id == device.id) ||
-                    (validId(existingDevice.deviceId) && validId(device.deviceId) && existingDevice.deviceId == device.deviceId) ||
-                    (validFP(existingDevice.pubKeyFP) && validFP(device.pubKeyFP) && existingDevice.pubKeyFP == device.pubKeyFP) ||
-                    routeBoundProtocolMerge
+                    !PeerIdentityFusionPolicy.identitiesContradict(existingIdentity, candidateIdentity)
+                    && (existingDevice.id == device.id
+                        || IdentityResolver.protocolIdentitiesMatch(existingIdentity, candidateIdentity)
+                        || routeBoundProtocolMerge)
 
  // 若非强匹配，禁止合并（视为不同设备）
                 guard strongMatch else {
@@ -1307,26 +1569,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 #endif
 
  // 4️⃣ 重新应用本机标志（统一写入点）
-                applyLocalFlag(&merged, selfId: selfId)
+                applyLocalFlag(&merged, localIdentity: localIdentity)
 
-                // 重新定位：优先按 record UUID，其次按强身份字段，最后回退追加（避免崩溃 & 避免写错槽位）
-                let targetIndex =
-                    discoveredDevices.firstIndex(where: { $0.id == existingRecordId }) ??
-                    (existingStableDeviceId.flatMap { sid in
-                        sid.isEmpty ? nil : discoveredDevices.firstIndex(where: { $0.deviceId == sid })
-                    }) ??
-                    (existingPubKeyFP.flatMap { fp in
-                        fp.isEmpty ? nil : discoveredDevices.firstIndex(where: { $0.pubKeyFP == fp })
-                    })
-
-                if let targetIndex {
-                    discoveredDevices[targetIndex] = merged
-                } else {
-                    discoveredDevices.append(merged)
-                }
+                discoveredDevices[index] = merged
                 logger.debug("🔄 合并设备: \(merged.name) - 本机: \(merged.isLocalDevice)")
             } else {
  // 新设备，添加到列表
+                guard !discoveredDevices.contains(where: { $0.id == device.id }) else {
+                    logger.error("❌ Discovery update rejected: conflicting protocol identity for record \(device.id)")
+                    continue
+                }
                 var newDevice = device
                 newDevice.setIsLocalDeviceByDiscovery(candidateIsLocal) // 设置本机标记
                 discoveredDevices.append(newDevice)
@@ -1334,8 +1586,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             }
         }
 
- // 单本机硬阀：确保列表中最多只有一个本机标记
-        await hardClampSingleLocal(selfId: selfId)
+        // Each local route remains local even when one machine has several records.
+        sanitizeCache(localIdentity)
 
         logger.debug("📊 批量更新了 \(updates.count) 个设备，当前总数: \(self.discoveredDevices.count)")
     }
@@ -1380,87 +1632,6 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         return result
     }
 
- /// 单本机硬阀：确保设备列表中最多只有一个本机标记
- /// 中文说明：即使前面判定有误差，这里也会强制校正，只保留最强匹配者为本机。
-    private func hardClampSingleLocal(selfId: SelfIdentitySnapshot) async {
-        let locals = self.discoveredDevices.filter { $0.isLocalDevice }
-
-        guard locals.count > 1 else {
- // 0或1个本机标记，无需处理
-            return
-        }
-
-        logger.warning("⚠️ 检测到多个本机标记（\(locals.count)个），执行硬阀校正")
-
-        #if DEBUG
- // DEBUG：列出所有被误判为本机的设备
-        for (idx, local) in locals.enumerated() {
-            logger.debug("""
-                🚨 误判设备 #\(idx+1) [\(local.name)]:
-                  - DeviceID: \(local.deviceId ?? "nil")
-                  - PubKeyFP: \(local.pubKeyFP?.prefix(16) ?? "nil")...
-                  - MAC数: \(local.macSet.count)
-                  - Services: \(local.services.joined(separator: ", "))
-                """)
-        }
-        #endif
-
-        // 重新计算所有设备的 isLocal 状态
-        // ⚠️ 重要：不要在 `await` 之后继续使用旧的 index 写回数组（同上，避免 index 过期崩溃）。
-        let snapshot = self.discoveredDevices
-        for device in snapshot {
-            let isLocal = await identityResolver.resolveIsLocal(device, selfId: selfId)
-            if let idx = self.discoveredDevices.firstIndex(where: { $0.id == device.id }) {
-                self.discoveredDevices[idx].setIsLocalDeviceByDiscovery(isLocal)
-            }
-        }
-
- // 再次检查是否仍有多个本机标记（极端情况：脏数据）
-        let finalLocals = self.discoveredDevices.enumerated().filter { $0.element.isLocalDevice }
-
-        if finalLocals.count > 1 {
-            logger.error("❌ 硬阀后仍有多个本机标记，保留最强匹配者")
-
- // 优先级：deviceId 匹配 > pubKeyFP 匹配 > MAC 匹配 > 第一个
-            var keepIndex: Int? = nil
-
- // 优先级 A：deviceId 匹配
-            keepIndex = finalLocals.first(where: {
-                $0.element.deviceId == selfId.deviceId && !(selfId.deviceId.isEmpty)
-            })?.offset
-
- // 优先级 B：pubKeyFP 匹配
-            if keepIndex == nil {
-                keepIndex = finalLocals.first(where: {
-                    $0.element.pubKeyFP == selfId.pubKeyFP && !(selfId.pubKeyFP.isEmpty)
-                })?.offset
-            }
-
- // 优先级 C：MAC 交集匹配
-            if keepIndex == nil {
-                keepIndex = finalLocals.first(where: {
-                    !$0.element.macSet.intersection(selfId.macSet).isEmpty
-                })?.offset
-            }
-
- // 默认：保留第一个
-            if keepIndex == nil {
-                keepIndex = finalLocals.first?.offset
-            }
-
- // 清除其他所有本机标记
-            if let keep = keepIndex {
-                for (idx, _) in finalLocals where idx != keep {
-                    self.discoveredDevices[idx].setIsLocalDeviceByDiscovery(false)
-                    logger.warning("🔧 移除设备 [\(self.discoveredDevices[idx].name)] 的本机标记")
-                }
-                logger.info("✅ 保留设备 [\(self.discoveredDevices[keep].name)] 为唯一本机")
-            }
-        } else {
-            logger.info("✅ 硬阀校正完成，本机标记唯一")
-        }
-    }
-
  /// 设置外部候选指纹提供者（由发现服务提供）。
     public func setFingerprintProvider(_ provider: @escaping @Sendable (DiscoveredDevice) async -> IdentityFingerprint?) {
         fingerprintProvider = provider
@@ -1471,16 +1642,18 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     private func handleBrowseResultsChanged(
         results: Set<NWBrowser.Result>,
         changes: Set<NWBrowser.Result.Change>,
-        serviceType: String
+        serviceType: String,
+        generation: UUID
     ) async {
         for change in changes {
+            guard observationBuffer.isCurrent(generation: generation) else { return }
             switch change {
             case .added(let result):
-                await addDiscoveredDeviceAsync(from: result, serviceType: serviceType)
+                await addDiscoveredDeviceAsync(from: result, serviceType: serviceType, generation: generation)
             case .removed(let result):
-                await removeDiscoveredDeviceAsync(from: result, serviceType: serviceType)
+                removeDiscoveredDevice(from: result, serviceType: serviceType)
             case .changed(old: _, new: let new, flags: _):
-                await updateDiscoveredDeviceAsync(from: new, serviceType: serviceType)
+                await updateDiscoveredDeviceAsync(from: new, serviceType: serviceType, generation: generation)
             case .identical:
                 break
             @unknown default:
@@ -1538,7 +1711,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
  /// 异步添加设备（在后台解析网络信息）
-    private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
+    private func addDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String, generation: UUID) async {
  // 快速提取基本信息（不阻塞）
         guard let validated = validatedBrowseMetadata(
             from: result,
@@ -1546,6 +1719,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         ) else {
             return
         }
+        guard let key = Self.observationKey(from: result.endpoint),
+              let lease = beginObservation(key: key, generation: generation) else { return }
         let metadata = validated.deviceInfo
         let deviceName = resolvedDisplayName(
             metadata: metadata,
@@ -1567,7 +1742,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             from: result,
             serviceType: serviceType,
             fallbackMetadata: metadata,
-            fallbackNetworkLinkStatus: networkLinkStatus
+            fallbackNetworkLinkStatus: networkLinkStatus,
+            generation: generation
         )
 
  // 守卫：非 SkyBridge serviceType 的设备强制标记为非本机
@@ -1611,8 +1787,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
 
  // 立即添加到待处理更新（快速显示）
         await MainActor.run(resultType: Void.self) { [weak self] in
-            self?.pendingUpdates.insert(tempDevice)
-            self?.scheduleFlush()
+            self?.enqueueDiscoveryObservation(tempDevice, lease: lease)
         }
 
  // 在后台异步解析网络信息
@@ -1655,8 +1830,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             )
 
             await MainActor.run(resultType: Void.self) { [weak self] in
-                self?.pendingUpdates.insert(updatedDevice)
-                self?.scheduleFlush()
+                self?.enqueueDiscoveryObservation(updatedDevice, lease: lease)
             }
         }
     }
@@ -1732,10 +1906,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
 
         do {
-            let resolved = try await Self.resolveBonjourServiceOnMain(
+            let service = NetService(
                 domain: Self.normalizedBonjourDomain(domain),
                 type: endpointType,
-                name: name,
+                name: name
+            )
+            let resolved = try await Self.resolveBonjourServiceOnMain(
+                service: service,
                 timeoutSeconds: 3.0
             )
             return (resolved.ipv4, resolved.ipv6, resolved.port)
@@ -1751,7 +1928,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         from result: NWBrowser.Result,
         serviceType: String,
         fallbackMetadata: BonjourDeviceInfo?,
-        fallbackNetworkLinkStatus: DeviceNetworkLinkStatus?
+        fallbackNetworkLinkStatus: DeviceNetworkLinkStatus?,
+        generation: UUID
     ) {
         let normalizedServiceType = serviceType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard normalizedServiceType != BonjourInteropContract.controlServiceType,
@@ -1772,15 +1950,21 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
            now.timeIntervalSince(last) < primaryControlResolveCooldownTTL {
             return
         }
+        guard let lease = beginObservation(
+            key: .bonjour(instance: trimmedName.lowercased(), serviceType: BonjourInteropContract.controlServiceType,
+                          domain: normalizedDomain.lowercased()), generation: generation) else { return }
         primaryControlResolveCooldown[cooldownKey] = now
 
         Task { [weak self, trimmedName, normalizedDomain, fallbackMetadata, fallbackNetworkLinkStatus] in
             guard let self else { return }
             do {
-                let resolved = try await Self.resolveBonjourServiceOnMain(
+                let service = NetService(
                     domain: normalizedDomain,
                     type: BonjourInteropContract.controlServiceType,
-                    name: trimmedName,
+                    name: trimmedName
+                )
+                let resolved = try await Self.resolveBonjourServiceOnMain(
+                    service: service,
                     timeoutSeconds: 3.0
                 )
                 self.publishHydratedPrimaryControlService(
@@ -1788,7 +1972,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                     serviceName: trimmedName,
                     domain: normalizedDomain,
                     fallbackMetadata: fallbackMetadata,
-                    fallbackNetworkLinkStatus: fallbackNetworkLinkStatus
+                    fallbackNetworkLinkStatus: fallbackNetworkLinkStatus,
+                    lease: lease
                 )
             } catch {
                 self.logger.debug(
@@ -1799,18 +1984,11 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
     @MainActor
-    private static func resolveBonjourServiceOnMain(
-        domain: String,
-        type: String,
-        name: String,
+    static func resolveBonjourServiceOnMain(
+        service: NetService,
         timeoutSeconds: TimeInterval
     ) async throws -> ResolvedBonjourService {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ResolvedBonjourService, Error>) in
-            let service = NetService(
-                domain: domain.isEmpty ? "local." : domain,
-                type: type,
-                name: name
-            )
             let context = BonjourServiceResolveContext(
                 service: service,
                 timeoutSeconds: timeoutSeconds,
@@ -1825,7 +2003,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         serviceName: String,
         domain: String,
         fallbackMetadata: BonjourDeviceInfo?,
-        fallbackNetworkLinkStatus: DeviceNetworkLinkStatus?
+        fallbackNetworkLinkStatus: DeviceNetworkLinkStatus?,
+        lease: DiscoveryObservationBuffer.Lease
     ) {
         let controlType = BonjourInteropContract.controlServiceType
         guard let rawTXTData = resolved.rawTXTData else {
@@ -1898,8 +2077,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             pubKeyFP: identity.pubKeyFP
         )
 
-        pendingUpdates.insert(hydrated)
-        scheduleFlush()
+        guard enqueueDiscoveryObservation(hydrated, lease: lease) else { return }
         logger.debug(
             "✅ primary-control hydration queued name=\(serviceName, privacy: .public) port=\(controlPort, privacy: .public) identity=\(identity.deviceId == nil ? "missing" : "present", privacy: .public) fingerprint=\(identity.pubKeyFP == nil ? "missing" : "present", privacy: .public)"
         )
@@ -1990,67 +2168,61 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }.value
     }
 
-    private func removeDiscoveredDeviceAsync(
-        from result: NWBrowser.Result,
-        serviceType: String
-    ) async {
-        // Prefer strong identity removal when available; fall back to name.
+    private func removeDiscoveredDevice(from result: NWBrowser.Result, serviceType: String) {
+        guard let validated = validatedBrowseMetadata(from: result, serviceType: serviceType),
+              let key = Self.observationKey(from: result.endpoint),
+              case .service(let name, _, _, _) = result.endpoint else { return }
+        let cleanName = name.replacingOccurrences(of: "._tcp", with: "")
+            .replacingOccurrences(of: ".local", with: "")
+        removeDiscoveryObservation(key: key, deviceId: validated.deviceId, name: cleanName)
+    }
+
+    /// Retires both published and in-flight observations using the existing
+    /// stable-ID/name removal contract, with a five-second late-result tombstone.
+    func removeDiscoveryObservation(
+        key: DiscoveryObservationBuffer.Key,
+        deviceId: String?,
+        name: String,
+        at removedAt: Date = Date()
+    ) {
+        observationBuffer.remove(key: key)
+        let matchesRemovedIdentity: (DiscoveredDevice) -> Bool
+        if let stableID = PeerIdentityFusionPolicy.normalizedStableDeviceId(deviceId) {
+            recentlyRemovedIdentities[stableID] = removedAt
+            matchesRemovedIdentity = {
+                PeerIdentityFusionPolicy.normalizedStableDeviceId($0.deviceId) == stableID
+            }
+        } else {
+            let cleanName = name.filter { $0.isLetter || $0.isNumber }
+            guard !cleanName.isEmpty else { return }
+            recentlyRemovedIdentities["name:" + cleanName] = removedAt
+            matchesRemovedIdentity = { $0.name.filter { $0.isLetter || $0.isNumber } == cleanName }
+        }
+        discoveredDevices.removeAll(where: matchesRemovedIdentity)
+        observationBuffer.remove(where: matchesRemovedIdentity)
+    }
+
+    private func isRecentlyRemoved(_ device: DiscoveredDevice) -> Bool {
+        let now = Date()
+        if let stableID = PeerIdentityFusionPolicy.normalizedStableDeviceId(device.deviceId),
+           let removedAt = recentlyRemovedIdentities[stableID],
+           now.timeIntervalSince(removedAt) < removedTTL { return true }
+        let cleaned = device.name.filter { $0.isLetter || $0.isNumber }
+        if !cleaned.isEmpty, let removedAt = recentlyRemovedIdentities["name:" + cleaned],
+           now.timeIntervalSince(removedAt) < removedTTL { return true }
+        return false
+    }
+
+    private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String, generation: UUID) async {
+ // Changed results use the same identity, source-protection and backoff boundary as added results.
         guard let validated = validatedBrowseMetadata(
             from: result,
             serviceType: serviceType
         ) else {
             return
         }
-        let strong = (
-            deviceId: validated.deviceId,
-            pubKeyFP: validated.protocolPublicKeyFingerprint
-        )
-        if let stableId = strong.deviceId, !stableId.isEmpty {
-            await MainActor.run {
-                discoveredDevices.removeAll { $0.deviceId == stableId }
- // 记录移除身份并立即清理已排队的同身份候选，关闭“移除后又被在途 Task 插回”的竞态
-                recentlyRemovedIdentities[stableId] = Date()
-                pendingUpdates = pendingUpdates.filter { !isRecentlyRemoved($0) }
-            }
-            return
-        }
-// 精确移除（基于设备名称）
-        if case .service(let name, _, _, _) = result.endpoint {
-            let cleanName = name.replacingOccurrences(of: "._tcp", with: "")
-                               .replacingOccurrences(of: ".local", with: "")
-
-            await MainActor.run {
-                let targetCleanName = cleanName.filter { $0.isLetter || $0.isNumber }
- // 只移除完全匹配的设备
-                discoveredDevices.removeAll { device in
-                    let deviceCleanName = device.name.filter { $0.isLetter || $0.isNumber }
-                    return deviceCleanName == targetCleanName && !targetCleanName.isEmpty
-                }
- // 记录移除身份（按清洗后的名称键）并清理已排队的同名候选
-                if !targetCleanName.isEmpty {
-                    recentlyRemovedIdentities["name:" + targetCleanName] = Date()
-                    pendingUpdates = pendingUpdates.filter { !isRecentlyRemoved($0) }
-                }
-            }
-        }
-    }
-
- /// 判断候选设备是否命中 TTL 内刚被移除的身份（同时覆盖稳定 deviceId 与清洗后名称两种键）。
- /// 仅在 @MainActor 上调用，与 recentlyRemovedIdentities 的读写共享 actor 隔离，无额外加锁。
-    private func isRecentlyRemoved(_ d: DiscoveredDevice) -> Bool {
-        if let id = d.deviceId, !id.isEmpty, recentlyRemovedIdentities[id] != nil { return true }
-        let cleaned = d.name.filter { $0.isLetter || $0.isNumber }
-        return !cleaned.isEmpty && recentlyRemovedIdentities["name:" + cleaned] != nil
-    }
-
-    private func updateDiscoveredDeviceAsync(from result: NWBrowser.Result, serviceType: String) async {
- // 更新现有设备信息（不添加新设备）
-        guard let validated = validatedBrowseMetadata(
-            from: result,
-            serviceType: serviceType
-        ) else {
-            return
-        }
+        guard let key = Self.observationKey(from: result.endpoint),
+              let lease = beginObservation(key: key, generation: generation) else { return }
         let metadata = validated.deviceInfo
         let deviceName = resolvedDisplayName(
             metadata: metadata,
@@ -2071,7 +2243,8 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
             from: result,
             serviceType: serviceType,
             fallbackMetadata: metadata,
-            fallbackNetworkLinkStatus: networkLinkStatus
+            fallbackNetworkLinkStatus: networkLinkStatus,
+            generation: generation
         )
 
         await MainActor.run {
@@ -2105,75 +2278,73 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
                 deviceId: strong.deviceId,
                 pubKeyFP: strong.pubKeyFP
             )
-            let routeBoundIndex = Self.routeBoundMergeIndex(in: discoveredDevices, candidate: candidate)
-            let hasProtocolIdentity = Self.hasAnyProtocolIdentity(
-                deviceId: strong.deviceId,
-                pubKeyFP: strong.pubKeyFP
-            )
- // 查找现有设备
-            let weakIndex = hasProtocolIdentity ? nil : discoveredDevices.firstIndex(where: { existingDevice in
-                // Prefer stable deviceId match when available.
-                if let sid = strong.deviceId, !sid.isEmpty, existingDevice.deviceId == sid { return true }
-                if let existingIPv4 = existingDevice.ipv4, let newIPv4 = ipv4, existingIPv4 == newIPv4 {
-                    return true
-                }
-                let cleanExistingName = existingDevice.name.filter { $0.isLetter || $0.isNumber }
-                let cleanNewName = deviceName.filter { $0.isLetter || $0.isNumber }
-                return cleanExistingName == cleanNewName && !cleanNewName.isEmpty
-            })
-
-            if let index = routeBoundIndex ?? weakIndex {
- // 更新现有设备（重新创建以更新不可变属性）
-                let existingDevice = discoveredDevices[index]
-                var newServices = existingDevice.services
-                var newPortMap = existingDevice.portMap
-
-                if !existingDevice.services.contains(serviceType) {
-                    newServices.append(serviceType)
-                    newPortMap[serviceType] = port
-                } else if (newPortMap[serviceType] ?? 0) <= 0, port > 0 {
-                    newPortMap[serviceType] = port
-                }
-
-                let updatedDevice = DiscoveredDevice(
-                    id: existingDevice.id,
-                    name: Self.preferredDisplayName(existing: existingDevice.name, candidate: deviceName),
-                    ipv4: ipv4 ?? existingDevice.ipv4,
-                    ipv6: ipv6 ?? existingDevice.ipv6,
-                    platformName: metadata?.platform ?? existingDevice.platformName,
-                    osVersion: metadata?.osVersion ?? existingDevice.osVersion,
-                    modelName: metadata?.model ?? existingDevice.modelName,
-                    chip: metadata?.chip ?? existingDevice.chip,
-                    services: newServices,
-                    portMap: newPortMap,
-                    remoteVideoFormats: Set(metadata?.remoteVideoFormats ?? Array(existingDevice.remoteVideoFormats)),
-                    connectionTypes: Self.connectionTypes(
-                        from: networkLinkStatus ?? existingDevice.networkLinkStatus,
-                        defaultTypes: existingDevice.connectionTypes
-                    ),
-                    uniqueIdentifier: Self.preferredUniqueIdentifier(
-                        deviceId: strong.deviceId ?? existingDevice.deviceId,
-                        pubKeyFP: strong.pubKeyFP ?? existingDevice.pubKeyFP,
-                        bonjourID: bonjourID,
-                        ipv4: ipv4 ?? existingDevice.ipv4,
-                        ipv6: ipv6 ?? existingDevice.ipv6
-                    ) ?? existingDevice.uniqueIdentifier,
-                    routeIdentifiers: DiscoveredDevice.mergedRouteIdentifiers(
-                        existingDevice.routeIdentifiers,
-                        [bonjourID].compactMap { $0 }
-                    ),
-                    signalStrength: Self.signalPercentage(from: networkLinkStatus) ?? existingDevice.signalStrength,
-                    networkLinkStatus: networkLinkStatus ?? existingDevice.networkLinkStatus,
-                    source: Self.preferredDeviceSource(existing: existingDevice.source, candidate: source),
-                    isLocalDevice: existingDevice.isLocalDevice,
-                    deviceId: strong.deviceId ?? existingDevice.deviceId,
-                    pubKeyFP: strong.pubKeyFP ?? existingDevice.pubKeyFP,
-                    macSet: existingDevice.macSet
-                )
-                discoveredDevices[index] = updatedDevice
-                logger.debug("🔄 更新设备: \(deviceName)")
-            }
+            enqueueDiscoveryObservation(candidate, lease: lease)
         }
+    }
+
+    /// Merges a non-SkyBridge observation after its untrusted identity hints are removed.
+    static func mergingNonSkyBridgeObservation(
+        existingDevice: DiscoveredDevice,
+        sanitized: DiscoveredDevice
+    ) -> DiscoveredDevice {
+        let sanitizedIsUSBPresence =
+            sanitized.source == .skybridgeUSB
+            || (sanitized.connectionTypes == [.usb] && sanitized.services.isEmpty && sanitized.portMap.isEmpty)
+        if sanitizedIsUSBPresence {
+            var updated = existingDevice
+            updated.connectionTypes.insert(.usb)
+            return updated
+        }
+
+        let existingHasSkyBridgeEndpoint =
+            existingDevice.services.contains(where: { $0.lowercased().contains("skybridge") })
+            || existingDevice.portMap.keys.contains(where: { $0.lowercased().contains("skybridge") })
+        let preserveExistingNetworkIdentity = existingHasSkyBridgeEndpoint || hasAnyProtocolIdentity(
+            deviceId: existingDevice.deviceId, pubKeyFP: existingDevice.pubKeyFP)
+        let incomingServices = preserveExistingNetworkIdentity
+            ? sanitized.services.filter { !$0.lowercased().contains("skybridge") }
+            : sanitized.services
+        let incomingPorts = preserveExistingNetworkIdentity
+            ? sanitized.portMap.filter { !$0.key.lowercased().contains("skybridge") }
+            : sanitized.portMap
+
+        return DiscoveredDevice(
+            id: existingDevice.id,
+            name: preserveExistingNetworkIdentity ? existingDevice.name : Self.preferredDisplayName(
+                existing: existingDevice.name, candidate: sanitized.name),
+            ipv4: preserveExistingNetworkIdentity
+                ? existingDevice.ipv4 ?? sanitized.ipv4 : sanitized.ipv4 ?? existingDevice.ipv4,
+            ipv6: preserveExistingNetworkIdentity
+                ? existingDevice.ipv6 ?? sanitized.ipv6 : sanitized.ipv6 ?? existingDevice.ipv6,
+            platformName: preserveExistingNetworkIdentity
+                ? existingDevice.platformName ?? sanitized.platformName : sanitized.platformName ?? existingDevice.platformName,
+            osVersion: preserveExistingNetworkIdentity
+                ? existingDevice.osVersion ?? sanitized.osVersion : sanitized.osVersion ?? existingDevice.osVersion,
+            modelName: preserveExistingNetworkIdentity
+                ? existingDevice.modelName ?? sanitized.modelName : sanitized.modelName ?? existingDevice.modelName,
+            chip: preserveExistingNetworkIdentity
+                ? existingDevice.chip ?? sanitized.chip : sanitized.chip ?? existingDevice.chip,
+            services: Array(Set(incomingServices + existingDevice.services)),
+            portMap: Self.mergedPortMapPreservingResolvedPorts(
+                incoming: incomingPorts, existing: existingDevice.portMap),
+            remoteVideoFormats: preserveExistingNetworkIdentity
+                ? existingDevice.remoteVideoFormats
+                : sanitized.remoteVideoFormats.union(existingDevice.remoteVideoFormats),
+            connectionTypes: sanitized.connectionTypes.union(existingDevice.connectionTypes),
+            uniqueIdentifier: preserveExistingNetworkIdentity
+                ? existingDevice.uniqueIdentifier
+                : (sanitized.uniqueIdentifier ?? existingDevice.uniqueIdentifier),
+            routeIdentifiers: preserveExistingNetworkIdentity
+                ? existingDevice.routeIdentifiers
+                : DiscoveredDevice.mergedRouteIdentifiers(sanitized.routeIdentifiers, existingDevice.routeIdentifiers),
+            signalStrength: sanitized.signalStrength ?? existingDevice.signalStrength,
+            networkLinkStatus: sanitized.networkLinkStatus ?? existingDevice.networkLinkStatus,
+            source: preserveExistingNetworkIdentity ? existingDevice.source : sanitized.source,
+            isLocalDevice: preserveExistingNetworkIdentity && existingDevice.isLocalDevice,
+            deviceId: preserveExistingNetworkIdentity ? existingDevice.deviceId : nil,
+            pubKeyFP: preserveExistingNetworkIdentity ? existingDevice.pubKeyFP : nil,
+            macSet: preserveExistingNetworkIdentity ? existingDevice.macSet : []
+        )
     }
 
     private nonisolated static func nonEmptyDeviceInfo(
@@ -2213,23 +2384,17 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     ) -> Int? {
         let normalizedDeviceId = sanitizeStableDeviceId(candidate.deviceId)
         let normalizedFingerprint = sanitizePubKeyFingerprint(candidate.pubKeyFP)
+        let candidateIdentity = IdentityResolver.protocolIdentity(
+            deviceId: candidate.deviceId, pubKeyFP: candidate.pubKeyFP)
         let hasProtocolIdentity = hasAnyProtocolIdentity(
             deviceId: normalizedDeviceId,
             pubKeyFP: normalizedFingerprint
         )
 
         if let strongIndex = devices.firstIndex(where: { existing in
-            if let normalizedDeviceId,
-               let existingId = sanitizeStableDeviceId(existing.deviceId),
-               existingId == normalizedDeviceId {
-                return true
-            }
-            if let normalizedFingerprint,
-               let existingFingerprint = sanitizePubKeyFingerprint(existing.pubKeyFP),
-               existingFingerprint == normalizedFingerprint {
-                return true
-            }
-            return false
+            IdentityResolver.protocolIdentitiesMatch(
+                IdentityResolver.protocolIdentity(deviceId: existing.deviceId, pubKeyFP: existing.pubKeyFP),
+                candidateIdentity)
         }) {
             return strongIndex
         }
@@ -2240,8 +2405,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
 
         let routeMatchedIndexes = devices.indices.filter {
-            discoveredDevice(
-                devices[$0],
+            let existing = devices[$0]
+            let existingIdentity = IdentityResolver.protocolIdentity(
+                deviceId: existing.deviceId, pubKeyFP: existing.pubKeyFP)
+            guard PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal(
+                lhs: existingIdentity, rhs: candidateIdentity
+            ) else { return false }
+            // Ordinary services can reuse a display/service-instance name on a
+            // different host. A known address disagreement defeats that weak route.
+            if !candidate.services.contains(where: { $0.lowercased().contains("skybridge") }),
+               hasConflictingResolvedAddresses(existing: existing, candidate: candidate) {
+                return false
+            }
+            return discoveredDevice(
+                existing,
                 hasNormalizedBonjourIdentifier: normalizedRouteIdentifier
             )
         }
@@ -2275,6 +2452,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         existing: DiscoveredDevice,
         candidate: DiscoveredDevice
     ) -> Bool {
+        guard PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal(
+            lhs: IdentityResolver.protocolIdentity(deviceId: existing.deviceId, pubKeyFP: existing.pubKeyFP),
+            rhs: IdentityResolver.protocolIdentity(deviceId: candidate.deviceId, pubKeyFP: candidate.pubKeyFP)
+        ) else { return false }
+        if !candidate.services.contains(where: { $0.lowercased().contains("skybridge") }),
+           hasConflictingResolvedAddresses(existing: existing, candidate: candidate) {
+            return false
+        }
         guard let routeIdentifier = P2PDiscoveryBonjourPolicy.preferredRoutableBonjourIdentifier(for: candidate),
               let normalizedRouteIdentifier = P2PDiscoveryBonjourPolicy.normalizeIdentifierForMatching(routeIdentifier),
               discoveredDevice(existing, hasNormalizedBonjourIdentifier: normalizedRouteIdentifier) else {
@@ -2307,11 +2492,20 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         return false
     }
 
-    nonisolated static func preferredDeviceSource(
-        existing: DeviceSource,
-        candidate: DeviceSource
-    ) -> DeviceSource {
-        candidate == .unknown ? existing : candidate
+    private nonisolated static func hasConflictingResolvedAddresses(
+        existing: DiscoveredDevice,
+        candidate: DiscoveredDevice
+    ) -> Bool {
+        let existingIPv4 = P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching(existing.ipv4)
+        let candidateIPv4 = P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching(candidate.ipv4)
+        let existingIPv6 = P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching(existing.ipv6)
+        let candidateIPv6 = P2PDiscoveryBonjourPolicy.normalizeIPAddressForMatching(candidate.ipv6)
+        if (existingIPv4 != nil && existingIPv4 == candidateIPv4)
+            || (existingIPv6 != nil && existingIPv6 == candidateIPv6) {
+            return false
+        }
+        return (existingIPv4 != nil && candidateIPv4 != nil && existingIPv4 != candidateIPv4)
+            || (existingIPv6 != nil && candidateIPv6 != nil && existingIPv6 != candidateIPv6)
     }
 
     nonisolated static func hasCompleteProtocolIdentity(
@@ -2427,18 +2621,16 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
     private func handleConnectionStateUpdate(_ state: NWConnection.State, for deviceId: String) {
-        Task { @MainActor in
-            switch state {
-            case .ready:
-                connectionStatus = .connected
-            case .failed, .cancelled:
-                connections.removeValue(forKey: deviceId)
-                if connections.isEmpty {
-                    connectionStatus = .disconnected
-                }
-            default:
-                break
+        switch state {
+        case .ready:
+            connectionStatus = .connected
+        case .failed, .cancelled:
+            connections.removeValue(forKey: deviceId)
+            if connections.isEmpty {
+                connectionStatus = .disconnected
             }
+        default:
+            break
         }
     }
 
@@ -3594,47 +3786,14 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
     }
 
-    private func waitForConnection(_ connection: NWConnection) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let resumed = OSAllocatedUnfairLock(initialState: false)
- // 仅第一个解析者获得 true，确保 continuation 只 resume 一次
- // 用 @Sendable 闭包而非局部函数，以便在 @Sendable 的 stateUpdateHandler / asyncAfter 闭包中捕获
-            let claim: @Sendable () -> Bool = {
-                resumed.withLock { isResumed in
-                    if isResumed { return false }
-                    isResumed = true
-                    return true
-                }
-            }
+    private func startAndWaitForConnection(_ connection: NWConnection) async throws {
+        try await makeConnectionStartOperation(connection).run()
+    }
 
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    guard claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    continuation.resume()
-                case .failed(let error):
-                    guard claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    continuation.resume(throwing: error)
-                case .cancelled:
-                    guard claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    continuation.resume(throwing: DeviceDiscoveryError.deviceNotConnected)
-                default:
- // .setup/.preparing/.waiting 为瞬态；卡死的 .waiting 由下方超时兜底
-                    break
-                }
-            }
-
- // 超时边界：避免不可达对端在 .waiting/.preparing 永久挂起。
-            discoveryQueue.asyncAfter(deadline: .now() + 10.0) {
-                guard claim() else { return }
-                connection.stateUpdateHandler = nil
-                connection.cancel()
-                continuation.resume(throwing: DeviceDiscoveryError.connectionTimeout)
-            }
-        }
+    private func makeConnectionStartOperation(_ connection: NWConnection) -> DiscoveryConnectionStartOperation {
+        DiscoveryConnectionStartOperation(
+            transport: NWDiscoveryConnectionStartTransport(connection: connection, queue: discoveryQueue)
+        )
     }
 
     private final class SendContentContinuationContext: @unchecked Sendable {
@@ -3728,7 +3887,7 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
  /// A. 统一写入点：唯一能调用 setIsLocalDeviceByDiscovery() 的地方
-    private func applyLocalFlag(_ device: inout DiscoveredDevice, selfId: SelfIdentitySnapshot) {
+    private func applyLocalFlag(_ device: inout DiscoveredDevice, localIdentity: CanonicalBonjourAdvertisementIdentity) {
  // 前置检查：只有 SkyBridge 来源才有资格成为本机
         let eligible =
             device.source == .skybridgeBonjour ||
@@ -3746,13 +3905,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
         }
 
  // 同步判定本机（使用内联实现避免异步复杂度）
-        let local = resolveIsLocalSync(device: device, selfId: selfId)
+        let local = resolveIsLocalSync(device: device, localIdentity: localIdentity)
         device.setIsLocalDeviceByDiscovery(local)
     }
 
  /// 同步版本复用唯一的强身份判定，避免异步/同步路径语义漂移。
-    private func resolveIsLocalSync(device: DiscoveredDevice, selfId: SelfIdentitySnapshot) -> Bool {
-        IdentityResolver.resolveIsLocalSynchronously(device: device, selfId: selfId)
+    private func resolveIsLocalSync(device: DiscoveredDevice, localIdentity: CanonicalBonjourAdvertisementIdentity) -> Bool {
+        IdentityResolver.resolveIsLocalSynchronously(device: device, localIdentity: localIdentity)
     }
 
  /// 检查 IP 是否为本机 IP
@@ -3785,39 +3944,13 @@ public class DeviceDiscoveryManagerOptimized: ObservableObject {
     }
 
  /// B. 刷新后清洗：对历史缓存污染进行一次性清洗
-    private func sanitizeCache(_ selfId: SelfIdentitySnapshot) {
+    func sanitizeCache(_ localIdentity: CanonicalBonjourAdvertisementIdentity) {
         for i in discoveredDevices.indices {
-            applyLocalFlag(&discoveredDevices[i], selfId: selfId)
-        }
-        hardClampSingleLocalSync(selfId: selfId)
-    }
-
- /// C. 周期末兜底（同步版本）：确保全局只有一个本机（"单机硬化"）
- /// 注意：异步版本见 `hardClampSingleLocal(selfId:) async`
-    private func hardClampSingleLocalSync(selfId: SelfIdentitySnapshot) {
-        var localCount = 0
-        var firstLocalIndex: Int?
-
-        for (index, device) in discoveredDevices.enumerated() {
-            if device.isLocalDevice {
-                localCount += 1
-                if firstLocalIndex == nil {
-                    firstLocalIndex = index
-                }
-            }
-        }
-
- // 如果发现多个本机，只保留第一个强匹配的
-        if localCount > 1 {
-            logger.warning("⚠️ 检测到多个本机设备（\(localCount)个），执行硬化清零")
-
-            for i in discoveredDevices.indices {
-                if i != firstLocalIndex {
-                    discoveredDevices[i].setIsLocalDeviceByDiscovery(false)
-                }
-            }
+            applyLocalFlag(&discoveredDevices[i], localIdentity: localIdentity)
         }
     }
+
+
 }
 
 // MARK: - 设备缓存 Actor

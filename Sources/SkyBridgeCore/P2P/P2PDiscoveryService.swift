@@ -2908,7 +2908,9 @@ public class P2PDiscoveryService: BaseManager {
 	        }
 
         let candidates = Self.outboundStrictPQCTrustCandidates(for: device, stableTarget: targetDeviceId)
-        let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite()
+        guard let preferredTargetSuite = await Self.preferredStrictPQCOutboundTargetSuite() else {
+            throw P2PDiscoveryError.strictPQCTrustPreflightFailed("local PQC provider unavailable")
+        }
         let trustProvider = DefaultHandshakeTrustProvider()
         let trustedKEMSuites = await Self.trustedKEMSuites(
             provider: trustProvider,
@@ -3252,6 +3254,9 @@ public class P2PDiscoveryService: BaseManager {
         let requesterProof = try await localProtocolIdentityProofForOutboundPIB()
         let requesterFingerprint = requesterProof.fingerprint
         let request = AppMessage.KEMRefreshRequestPayload(
+            version: requestedSuites == [.qperiaptABI2PolicyBound]
+                ? AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+                : AppMessage.KEMRefreshRequestPayload.currentVersion,
             requesterDeviceId: requesterDeviceId,
             targetDeviceId: targetDeviceId,
             requesterProtocolIdentityFingerprint: requesterFingerprint,
@@ -3622,19 +3627,24 @@ public class P2PDiscoveryService: BaseManager {
         policy: CryptoProviderFactory.SelectionPolicy
     ) async -> [CryptoSuite] {
         await Task.detached(priority: .utility) {
-            CryptoProviderFactory.make(policy: policy).supportedSuites
+            // Bootstrap must request the same key family as the actual LAN
+            // handshake, including an explicitly admitted Q provider.
+            P2PConnection.makeHandshakeCryptoProvider(policy: policy).supportedSuites
         }.value
     }
 
-    private static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
+    static func preferredStrictPQCOutboundTargetSuite() async -> CryptoSuite? {
         await cryptoProviderSupportedSuites(policy: .requirePQC)
             .first(where: { $0.isPQCGroup && $0.isNegotiable })?
             .canonicalKEMSuite
     }
 
-    private static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+    static func signedLANRefreshRequestedSuites(preferredTargetSuite: CryptoSuite?) async -> [CryptoSuite] {
+        if preferredTargetSuite?.canonicalKEMSuite == .qperiaptABI2PolicyBound {
+            return [.qperiaptABI2PolicyBound]
+        }
         let providerSuites = await cryptoProviderSupportedSuites(policy: .requirePQC)
-            .filter { $0.isPQCGroup && $0.isNegotiable }
+            .filter { $0.isPQCGroup && $0.isNegotiable && $0.canonicalKEMSuite != .qperiaptABI2PolicyBound }
             .map(\.canonicalKEMSuite)
         var suites = providerSuites
         if let preferred = preferredTargetSuite?.canonicalKEMSuite, preferred.isNegotiable, preferred.isPQCGroup {
@@ -3688,12 +3698,8 @@ public class P2PDiscoveryService: BaseManager {
         return trustedPeerKEMSuites.contains(where: { $0.isPQCGroup })
     }
 
-    private static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
-        if availableSuite == target { return true }
-        if availableSuite.canonicalKEMSuite == target.canonicalKEMSuite { return true }
-        if target.isHybrid { return availableSuite.isHybrid }
-        if availableSuite.isHybrid { return target.isHybrid }
-        return false
+    static func suiteSupportsTargetKEM(_ availableSuite: CryptoSuite, target: CryptoSuite) -> Bool {
+        availableSuite.canonicalKEMSuite == target.canonicalKEMSuite
     }
 
     private static func signedRefreshEvidenceSatisfiesStrictPQC(
@@ -5876,10 +5882,10 @@ public class P2PDiscoveryService: BaseManager {
                 return
             }
             productConnectivityAttemptOwner = nil
-            guard let sessionReference = P2PEvidenceReference.sessionIncarnation(
-                sessionID: keys.sessionId,
-                transcriptHash: keys.transcriptHash
-            ) else {
+            guard let driverSnapshot = driver,
+                  let confirmation = await driverSnapshot
+                    .authenticatedFinishedConfirmation(matching: keys),
+                  driver === driverSnapshot else {
                 _ = await MainActor.run {
                     ProductReleaseEvidenceRecorder.shared.failConnectivityAttempt(
                         owner: owner,
@@ -5888,6 +5894,7 @@ public class P2PDiscoveryService: BaseManager {
                 }
                 return
             }
+            let sessionReference = confirmation.sessionReference
             let recorded = await MainActor.run {
                 ProductReleaseEvidenceRecorder.shared.authenticateConnectivityAttempt(
                     owner: owner,
@@ -6086,7 +6093,7 @@ public class P2PDiscoveryService: BaseManager {
 
             let endpoints = ServiceEndpointRegistry.shared.snapshot()
             let localIdentity = RemoteControlSecurityNoticeCenter.cachedLocalIdentitySnapshot()
-            let localPresentation = LocalDevicePresentation.current()
+            let localPresentation = LocalDevicePresentation.currentProtocolMetadata()
             let protocolIdentityPublicKeys: [AppMessage.ProtocolIdentityPublicKeyInfo]
             do {
                 protocolIdentityPublicKeys = try await Self.localProtocolIdentityPublicKeysForPairing()
@@ -6561,6 +6568,14 @@ public class P2PDiscoveryService: BaseManager {
                                 return
                             }
                             case .ping(let payload):
+                                // An authenticated keepalive proves liveness of this exact owner;
+                                // it must not let an active file authority expire after 120 seconds.
+                                if let activeLease = classicTransferSessionLease,
+                                   !(await ClassicTransferSessionRegistry.shared.refreshIfOwned(activeLease)) {
+                                    logger.warning("⛔️ inbound control keepalive rejected: file-session owner expired or replaced")
+                                    connection.cancel()
+                                    return
+                                }
                                 let reply = AppMessage.pong(.init(id: payload.id))
                                 let outPlain = try JSONEncoder().encode(reply)
                                 let outCipher = try encryptAppPayload(outPlain, with: keys)

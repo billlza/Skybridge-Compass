@@ -144,6 +144,15 @@ function isRetryableRedisWatchError(error) {
   return name === 'WatchError' || message.includes('watched keys has been changed');
 }
 
+function assertValidEphemeralRecord(kind, record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) {
+    throw new Error(`ephemeral upsert produced a non-object record for kind=${kind}`);
+  }
+  if (!Number.isSafeInteger(record.expiresAt) || record.expiresAt <= 0) {
+    throw new Error(`ephemeral upsert produced a record without a valid expiresAt for kind=${kind}`);
+  }
+}
+
 function ephemeralRecordFromStorage(raw) {
   const parsed = safeJsonParse(raw);
   if (!parsed || typeof parsed !== 'object') return null;
@@ -520,6 +529,24 @@ class MemorySignalingStateBackend {
   async deleteEphemeral(kind, id) {
     this.ephemeralObjects.delete(`${kind}:${id}`);
   }
+
+  /**
+   * Create-or-replace an ephemeral record in one step.
+   *
+   * `mutator` receives a clone of the live record (or `null` when absent /
+   * expired) and must return the complete next record including `expiresAt`.
+   * Unlike `updateEphemeral` the returned value IS the stored record, so a
+   * heartbeat can refresh both payload and TTL without the create/update race.
+   */
+  async upsertEphemeral(kind, id, mutator) {
+    const key = `${kind}:${id}`;
+    const current = await this.getEphemeral(kind, id);
+    const nextRecord = mutator(current ? deepClone(current) : null);
+    assertValidEphemeralRecord(kind, nextRecord);
+    this.ephemeralObjects.set(key, deepClone(nextRecord));
+    return deepClone(nextRecord);
+  }
+
 
   async incrementWindowCounter(key, windowMs, increment = 1) {
     const now = Date.now();
@@ -1209,6 +1236,40 @@ class RedisSignalingStateBackend {
   async deleteEphemeral(kind, id) {
     await this.command.del(this.ephemeralKey(kind, id));
   }
+
+  async upsertEphemeral(kind, id, mutator) {
+    const key = this.ephemeralKey(kind, id);
+    return this.executeIsolated(async (isolated) => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await isolated.watch(key);
+          let current = ephemeralRecordFromStorage(await isolated.get(key));
+          if (current && Date.now() > toInteger(current.expiresAt, 0)) {
+            current = null;
+          }
+          const nextRecord = mutator(current ? deepClone(current) : null);
+          assertValidEphemeralRecord(kind, nextRecord);
+          const execResult = await isolated.multi()
+            .set(key, JSON.stringify(nextRecord), {
+              PX: Math.max(1, nextRecord.expiresAt - Date.now())
+            })
+            .exec();
+          if (execResult) {
+            return nextRecord;
+          }
+        } catch (error) {
+          if (!isRetryableRedisWatchError(error)) {
+            throw error;
+          }
+          try {
+            await isolated.unwatch();
+          } catch (_) {}
+        }
+      }
+      throw new Error(`redis optimistic ephemeral upsert failed for kind=${kind} id=${id}`);
+    });
+  }
+
 
   async incrementWindowCounter(key, windowMs, increment = 1) {
     const redisKey = this.counterKey(key);

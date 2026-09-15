@@ -21,24 +21,19 @@ from extract_ios_product_release_evidence import (
     IOSProductEvidenceError,
     validate_installation_capture,
 )
+from extract_ios_production_identity_evidence import identity_manifest_fields
 from ios_physical_release_acceptance import expected_binding
 from ios_release_archive_identity import ArchiveIdentityError, load_identity
 from macos_release_candidate_identity import CandidateIdentityError, load_manifest
 from validate_product_release_evidence_log import (
-    IOS_LOG_FILE,
-    IOS_PRODUCT,
-    MAC_LOG_FILE,
-    MAC_PRODUCT,
     ProductEvidenceError,
-    parse_canonical_log,
+    product_session_references,
     validate_artifact_log,
 )
 from validate_real_device_release_acceptance_artifact import (
     validate_production_identity_proof,
 )
 
-
-MAX_JSON_BYTES = 2 * 1024 * 1024
 FORMAL_KINDS = ("connectivity", "p2p", "webrtc", "file-transfer")
 
 
@@ -50,79 +45,19 @@ def _fail(message: str) -> NoReturn:
     raise FormalManifestError(message)
 
 
-def _read_regular(path: Path, label: str) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        _fail(f"unable to open {label} without following links: {exc}")
-    try:
-        before = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(before.st_mode)
-            or before.st_nlink != 1
-            or before.st_size < 1
-            or before.st_size > MAX_JSON_BYTES
-        ):
-            _fail(f"{label} must be a bounded single-link regular file")
-        content = bytearray()
-        while len(content) < before.st_size:
-            chunk = os.read(descriptor, before.st_size - len(content))
-            if not chunk:
-                _fail(f"{label} was truncated while reading")
-            content.extend(chunk)
-        after = os.fstat(descriptor)
-        stable = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
-        if os.read(descriptor, 1) or any(
-            getattr(before, field) != getattr(after, field) for field in stable
-        ):
-            _fail(f"{label} changed while reading")
-        return bytes(content)
-    finally:
-        os.close(descriptor)
-
-
-def _load_json(path: Path, label: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(_read_regular(path, label).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        _fail(f"{label} is invalid UTF-8 JSON: {exc}")
-    if not isinstance(payload, dict):
-        _fail(f"{label} must be a JSON object")
-    return payload
-
-
-def _product_session_references(artifact_dir: Path, kind: str) -> set[str]:
-    references_by_owner: list[set[str]] = []
-    for file_name, owner in ((MAC_LOG_FILE, MAC_PRODUCT), (IOS_LOG_FILE, IOS_PRODUCT)):
-        events = parse_canonical_log(artifact_dir / file_name, expected_owner=owner)
-        if kind == "connectivity":
-            references = {
-                event.fields["session_ref"]
-                for event in events
-                if event.name == "connectivityEndpoint"
-            }
-        else:
-            references = {
-                event.fields["session_ref"]
-                for event in events
-                if event.name == "releaseSessionOwner"
-            }
-        references_by_owner.append(references)
-    if not references_by_owner[0] or references_by_owner[0] != references_by_owner[1]:
-        _fail("Mac and iOS product evidence do not expose the same session references")
-    return references_by_owner[0]
-
-
-def _validate_identity_session_binding(artifact_dir: Path, kind: str) -> None:
-    identity = _load_json(
-        artifact_dir / "ios-production-identity-proof.json",
-        "iOS production identity proof",
+def _validate_identity_session_binding(
+    artifact_dir: Path, kind: str, identity: dict[str, Any]
+) -> None:
+    sessions = product_session_references(
+        artifact_dir, kind, expected_suite=identity.get("expectedSuite")
     )
-    if identity.get("evidenceSessionRef") not in _product_session_references(
-        artifact_dir, kind
-    ):
+    if identity.get("evidenceSessionRef") not in sessions:
         _fail("production identity proof is not bound to this product session")
+    if (
+        identity["schemaVersion"] == 2
+        and set(identity["evidenceSessionRefs"]) != sessions
+    ):
+        _fail("existing identity proof does not bind every exact Q product session")
 
 
 def build_manifest(
@@ -143,7 +78,6 @@ def build_manifest(
         archive = load_identity(archive_identity)
         archive_binding = expected_binding(archive)
         candidate = load_manifest(artifact_dir / "macos-release-candidate.json")
-        validate_artifact_log(artifact_dir, kind)
         validate_installation_capture(
             artifact_dir / "ios-product-installation-capture.json",
             expected_archive_binding=archive_binding,
@@ -163,14 +97,25 @@ def build_manifest(
     ):
         _fail("Mac candidate and sealed iOS archive source identities differ")
     try:
-        validate_production_identity_proof(
+        identity = validate_production_identity_proof(
             artifact_dir,
             expected_repository=archive["sourceRepository"],
             expected_source_sha=archive["sourceCommit"],
         )
     except SystemExit as exc:
         _fail(str(exc))
-    _validate_identity_session_binding(artifact_dir, kind)
+    if (
+        identity["schemaVersion"] == 2
+        and identity["iosReleaseArchive"] != archive_binding
+    ):
+        _fail("existing identity proof belongs to a different sealed iOS archive")
+    try:
+        validate_artifact_log(
+            artifact_dir, kind, expected_suite=identity.get("expectedSuite")
+        )
+        _validate_identity_session_binding(artifact_dir, kind, identity)
+    except ProductEvidenceError as exc:
+        _fail(f"shipping product lifecycle is invalid: {exc}")
 
     # These fixed values are not caller assertions.  They are emitted only
     # after the validators above have established each corresponding fact.
@@ -180,10 +125,9 @@ def build_manifest(
         "diagnosticOnly": True,
         "iosBinaryTestSurfaceDetected": False,
         "iosProductSurface": "production",
-        "iosProductionIdentityAlgorithm": "mldsa87",
+        **identity_manifest_fields(identity),
         "iosProductionIdentityLifecycleVerified": True,
         "iosProductionIdentityProof": True,
-        "iosProductionIdentityProtection": "secureEnclaveRequired",
         "iosProductionProduct": True,
         "iosReleaseArchive": archive_binding,
         "iosSwiftActiveCompilationConditions": archive[
@@ -201,7 +145,6 @@ def build_manifest(
         "macTestingCompilationCondition": False,
         "preCleanupCandidate": True,
         "realDevice": True,
-        "schemaVersion": 1,
         "sourceCommit": archive["sourceCommit"],
         "sourceRepository": archive["sourceRepository"],
         "transport": kind,
@@ -235,7 +178,9 @@ def _atomic_new(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory_descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        directory_descriptor = os.open(
+            parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        )
         try:
             os.fsync(directory_descriptor)
         finally:

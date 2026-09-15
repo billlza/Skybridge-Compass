@@ -52,6 +52,32 @@ def _discover_real_profile() -> Path | None:
 REAL_PROFILE = _discover_real_profile()
 
 
+class ICloudEnvironmentGrantTests(unittest.TestCase):
+    def test_scalar_and_array_grants_cover_only_known_requested_environments(self) -> None:
+        for requested in ("Development", "Production"):
+            for granted in (requested, [requested], ["Production", "Development"]):
+                with self.subTest(requested=requested, granted=granted):
+                    self.assertTrue(app_profile.profile_icloud_environment_covers(granted, requested))
+        self.assertFalse(app_profile.profile_icloud_environment_covers("Development", "Production"))
+        self.assertFalse(app_profile.profile_icloud_environment_covers(["Development"], "Production"))
+
+    def test_missing_malformed_unknown_or_wildcard_grants_are_rejected(self) -> None:
+        for granted in (
+            None, "", "Unknown", "*", "Production.*", True, 1, {}, (), [],
+            ["Development"], ["*"], ["Production", "*"], ["Production", "Unknown"],
+            ["Production", 1], ["Production", True], ["Production", ["Development"]],
+        ):
+            with self.subTest(granted=granted):
+                self.assertFalse(app_profile.profile_icloud_environment_covers(granted, "Production"))
+
+    def test_requested_environment_must_be_a_known_scalar(self) -> None:
+        for requested in (None, "", "production", "Unknown", "*", True, 1, ["Production"], {}):
+            with self.subTest(requested=requested):
+                self.assertFalse(
+                    app_profile.profile_icloud_environment_covers(["Production", "Development"], requested)
+                )
+
+
 class ProfileAuthenticityNegativeTests(unittest.TestCase):
     """These must reject regardless of environment."""
 

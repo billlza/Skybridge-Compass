@@ -787,12 +787,17 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertTrue(macICloudSource.contains("public var listenerReady: Bool?"))
         XCTAssertTrue(macICloudSource.contains("public var controlPort: UInt16?"))
         XCTAssertTrue(macICloudSource.contains("继续使用 iCloud KV Store 做设备在线心跳"))
+        let iosAddressInspectorSource = try repositorySource("SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Utilities/LocalNetworkAddressInspector.swift")
+        let sharedAddressPolicySource = try repositorySource("Sources/SkyBridgeProtocolCore/Discovery/LANAddressRoutabilityPolicy.swift")
         XCTAssertTrue(
-            iosPresenceSource.contains("isAdvertisableRoutableIPv4") &&
-            iosPresenceSource.contains("!value.hasPrefix(\"169.254.\")") &&
-            macICloudSource.contains("isAdvertisableRoutableIPv4") &&
-            macICloudSource.contains("!value.hasPrefix(\"169.254.\")"),
-            "iOS and Mac iCloud KVS presence must not publish link-local IPv4 addresses as cross-device dial targets."
+            iosPresenceSource.contains("LocalNetworkAddressInspector.routableAddresses().first") &&
+            iosAddressInspectorSource.contains("LANAddressRoutabilityPolicy.parse(host)") &&
+            iosAddressInspectorSource.contains("literal.isRoutableLANAddress") &&
+            sharedAddressPolicySource.contains("if first == 169, bytes[1] == 254 { return false }") &&
+            macICloudSource.contains("LocalNetworkAdvertisementAddressProvider.routableLANAddresses().first") &&
+            !macICloudSource.contains("getifaddrs(") &&
+            !macICloudSource.contains("isAdvertisableRoutableIPv4"),
+            "iOS and Mac iCloud KVS presence must publish the same shared-policy LAN address (no private getifaddrs copy, never link-local)."
         )
         XCTAssertFalse(
             macICloudSource.contains("iCloud 容器不可用：请检查 iCloud Drive"),
@@ -901,7 +906,7 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(p2pSource.contains("连接码功能将支持"))
     }
 
-    func testMacMainSceneIsSingletonWhileAuxiliaryScenesRemainMultiWindow() throws {
+    func testMacMainAndNearFieldScenesAreSingletonWhileIndependentSessionsRemainMultiWindow() throws {
         let appSource = try repositorySource("Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift")
         let appDelegateSource = try repositorySource(
             "Sources/SkyBridgeCompassApp/Core/RemoteNotificationAppDelegate.swift"
@@ -914,7 +919,8 @@ final class MacTrustedDeviceTrustActionsTests: XCTestCase {
         XCTAssertFalse(
             appSource.contains("WindowGroup(localizationManager.localizedString(\"app.name\"), id: \"main\")")
         )
-        XCTAssertTrue(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
+        XCTAssertTrue(appSource.contains("Window(\"近距远程控制\", id: \"near-field-mirror\")"))
+        XCTAssertFalse(appSource.contains("WindowGroup(id: \"near-field-mirror\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"cross-network-connection\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"vnc-viewer\")"))
         XCTAssertTrue(appSource.contains("WindowGroup(id: \"ssh-terminal\", for: UUID.self)"))

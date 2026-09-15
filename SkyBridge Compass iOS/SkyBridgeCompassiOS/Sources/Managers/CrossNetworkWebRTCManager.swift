@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import OSLog
+import enum SkyBridgeProtocolCore.AppleProtocolPlatformMetadata
 import struct SkyBridgeProtocolCore.CrossNetworkFileTransferOperationReservationLedger
 import class SkyBridgeProtocolCore.InboundFileTransferIOActor
 import enum SkyBridgeProtocolCore.CrossNetworkFileTransferOp
@@ -2522,7 +2523,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
         attemptSnapshot: ProductConnectivityHandshakeAttemptSnapshot
     ) async {
         let sessionObjectIdentifier = ObjectIdentifier(session)
-        guard keys.negotiatedSuite == .xwing,
+        guard (keys.negotiatedSuite == .xwing || keys.negotiatedSuite == .qperiaptABI2PolicyBound),
               isCurrentSession(
                 sessionId: sessionId,
                 sessionObjectIdentifier: sessionObjectIdentifier
@@ -2558,7 +2559,9 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
 
         let committedIdentity = try? await SkyBridgeiOSCore.shared
             .committedActiveProtocolIdentitySnapshot()
-        guard isCurrentSession(
+        let finishedConfirmation = await driver.authenticatedFinishedConfirmation(matching: keys)
+        guard let finishedConfirmation,
+              isCurrentSession(
                 sessionId: sessionId,
                 sessionObjectIdentifier: sessionObjectIdentifier
               ),
@@ -2596,14 +2599,15 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
             sessionReference: sessionReference,
             selectedTransport: selectedTransport
         ), ProductReleaseEvidenceRecorder.shared
-            .recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .xwing) else {
+            .recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: keys.negotiatedSuite) else {
             return
         }
         productEvidenceOwnersBySessionId[sessionId] = owner
         _ = ProductReleaseEvidenceRecorder.shared
             .recordProductionIdentityHandshakeBound(
                 descriptor: identityDescriptor,
-                sessionOwner: owner
+                sessionOwner: owner,
+                finishedConfirmation: finishedConfirmation
             )
         beginWebRTCProductEvidenceMediaSampling(
             sessionId: sessionId,
@@ -3586,7 +3590,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 deviceID: localBinding.deviceId,
                 deviceName: localDeviceName,
                 deviceType: P2PDeviceType.iOS.rawValue,
-                osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(),
                 capabilities: ["cross-network", "p2p"],
                 protocolSigningAlgorithm: localBinding.protocolSigningAlgorithm,
                 protocolPublicKeyBytes: localBinding.protocolPublicKeyBytes,
@@ -5858,10 +5862,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                 )
             },
             platform: "iOS",
-            osVersion: {
-                let version = ProcessInfo.processInfo.operatingSystemVersion
-                return "iOS \(version.majorVersion).\(version.minorVersion)"
-            }()
+            osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion()
         )
     }
 
@@ -6350,7 +6351,7 @@ public final class CrossNetworkWebRTCManager: ObservableObject {
                     deviceName: localName,
                     modelName: localModel,
                     platform: "iOS",
-                    osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+                    osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(),
                     chip: nil,
                     accountDisplayName: identity.accountDisplayName,
                     nebulaId: identity.nebulaId,
@@ -9048,7 +9049,7 @@ extension CrossNetworkWebRTCManager {
             deviceName: localIdentity.deviceName,
             modelName: localIdentity.modelName,
             platform: "iOS",
-            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            osVersion: AppleProtocolPlatformMetadata.operatingSystemVersion(),
             chip: nil,
             remoteVideoFormats: RemoteDesktopManager.supportedRemoteVideoFormats()
         ))
@@ -10194,6 +10195,11 @@ private extension CrossNetworkWebRTCManager {
         if msg.type == .overlayUpdate,
            let payload = try? JSONDecoder().decode(RemoteDesktopOverlayPayload.self, from: msg.payload) {
             RemoteDesktopManager.instance.handleInboundOverlayUpdate(payload)
+            return true
+        }
+
+        if msg.type == .controlAccess {
+            RemoteDesktopManager.instance.handleCrossNetworkControlAccessPayload(msg.payload)
             return true
         }
 

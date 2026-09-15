@@ -36,6 +36,9 @@ Usage:
     --identity-lifecycle-proof <public one-time lifecycle proof> \
     --expected-source-repository <owner/repository> \
     --expected-source-sha <40 lowercase hex> \
+    [--identity-purpose <new-secure-enclave-identity|existing-production-identity>] \
+    [--expected-suite <0x0012>] \
+    [--expected-identity-protection <softwareKeychain|secureEnclaveRequired>] \
     [--timeout-seconds <30-1800>]
 
 The one-time lifecycle inputs must be produced by
@@ -61,6 +64,9 @@ IDENTITY_LIFECYCLE_BINDING=""
 IDENTITY_LIFECYCLE_PROOF=""
 EXPECTED_SOURCE_REPOSITORY=""
 EXPECTED_SOURCE_SHA=""
+IDENTITY_PURPOSE="new-secure-enclave-identity"
+EXPECTED_SUITE=""
+EXPECTED_IDENTITY_PROTECTION=""
 TIMEOUT_SECONDS=900
 
 while (( $# > 0 )); do
@@ -79,11 +85,24 @@ while (( $# > 0 )); do
     --identity-lifecycle-proof) IDENTITY_LIFECYCLE_PROOF="${2:-}"; shift 2 ;;
     --expected-source-repository) EXPECTED_SOURCE_REPOSITORY="${2:-}"; shift 2 ;;
     --expected-source-sha) EXPECTED_SOURCE_SHA="${2:-}"; shift 2 ;;
+    --identity-purpose) IDENTITY_PURPOSE="${2:-}"; shift 2 ;;
+    --expected-suite) EXPECTED_SUITE="${2:-}"; shift 2 ;;
+    --expected-identity-protection) EXPECTED_IDENTITY_PROTECTION="${2:-}"; shift 2 ;;
     --timeout-seconds) TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+IDENTITY_POLICY_ARGS=(--identity-purpose "$IDENTITY_PURPOSE")
+if [[ -n "$EXPECTED_SUITE" ]]; then
+  IDENTITY_POLICY_ARGS+=(--expected-suite "$EXPECTED_SUITE")
+fi
+if [[ -n "$EXPECTED_IDENTITY_PROTECTION" ]]; then
+  IDENTITY_POLICY_ARGS+=(--expected-identity-protection "$EXPECTED_IDENTITY_PROTECTION")
+fi
+python3 "$ROOT_DIR/Scripts/extract_ios_production_identity_evidence.py" validate-policy \
+  "${IDENTITY_POLICY_ARGS[@]}"
 
 case "$KIND" in
   connectivity|p2p|webrtc|file-transfer) ;;
@@ -143,6 +162,7 @@ python3 "$ROOT_DIR/Scripts/ios_physical_release_acceptance.py" verify-product \
   --identity "$IOS_ARCHIVE_IDENTITY" \
   --release-testing-ipa "$IOS_RELEASE_TESTING_IPA"
 python3 "$IDENTITY_EXTRACTOR" validate-lifecycle-proof \
+  "${IDENTITY_POLICY_ARGS[@]}" \
   --proof "$IDENTITY_LIFECYCLE_PROOF" \
   --archive-identity "$IOS_ARCHIVE_IDENTITY"
 
@@ -240,19 +260,9 @@ python3 "$ROOT_DIR/Scripts/ios_product_installation.py" \
   --release-testing-ipa "$IOS_RELEASE_TESTING_IPA" \
   --expected-device-identifier "$IOS_DEVICE_ID" \
   --output "$IOS_INSTALLATION_BINDING"
-skybridge_ios_process_snapshot "$IOS_DEVICE_ID" "$IOS_PRELAUNCH_PROCESSES" 60
-if python3 "$OWNERSHIP_HELPER" ios-presence \
-  --processes-json "$IOS_PRELAUNCH_PROCESSES" \
-  --app-path "$IOS_EXTRACTED_APP"; then
-  echo "installed iOS product is already running before the owned launch" >&2
-  exit 1
-else
-  prelaunch_status=$?
-  (( prelaunch_status == 1 )) || {
-    echo "post-install iOS product absence is unverifiable" >&2
-    exit 1
-  }
-fi
+skybridge_ios_require_postinstall_app_absence \
+  "$OWNERSHIP_HELPER" "$IOS_DEVICE_ID" "$IOS_EXTRACTED_APP" \
+  "$IOS_PRELAUNCH_PROCESSES" "$TIMEOUT_SECONDS"
 IOS_LAUNCH_PERSISTENT_IDENTIFIER="$(
   python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
 import json
@@ -267,6 +277,21 @@ PY
   echo "verified installation has no launch persistent identifier" >&2
   exit 1
 }
+IOS_REMOTE_APP_PATH="$(python3 - "$IOS_INSTALLATION_BINDING" <<'PY'
+import json
+import pathlib
+import sys
+
+print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["remoteApplicationPath"])
+PY
+)"
+IOS_PRODUCT_LAUNCH_ARGS=("$IOS_REMOTE_APP_PATH")
+if [[ "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" != "unknown" ]]; then
+  IOS_PRODUCT_LAUNCH_ARGS=(
+    --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER"
+    "$IOS_REMOTE_APP_PATH"
+  )
+fi
 
 echo "==> Launching immutable Mac candidate through its ordinary application entry"
 /usr/bin/open "$CANDIDATE_APP"
@@ -300,9 +325,8 @@ echo "==> Launching sealed iOS product with no arguments or child environment"
 xcrun devicectl --timeout "$((TIMEOUT_SECONDS + 120))" device process launch \
   --device "$IOS_DEVICE_ID" \
   --console \
-  --launch-persistent-identifier "$IOS_LAUNCH_PERSISTENT_IDENTIFIER" \
   --json-output "$IOS_LAUNCH_RESULT" \
-  com.skybridge.compass.ios \
+  "${IOS_PRODUCT_LAUNCH_ARGS[@]}" \
   >"$IOS_CONSOLE_STDOUT" 2>"$IOS_CONSOLE_STDERR" &
 IOS_CONSOLE_PID="$!"
 skybridge_ios_capture_console_handle \
@@ -315,32 +339,40 @@ cat <<EOF
     Use only normal Mac and iPhone/iPad UI. The iOS launch must restore the
     existing production identity and bind it to this exact authenticated run.
 EOF
+REQUIRED_PRODUCT_SUITE="X-Wing"
+if [[ "$EXPECTED_SUITE" == "0x0012" ]]; then
+  REQUIRED_PRODUCT_SUITE="Q-Periapt-ABI2-PolicyBound (0x0012)"
+  echo "==> Q acceptance requires actual suite 0x0012 on both product endpoints."
+fi
 case "$KIND" in
   connectivity)
     cat <<'EOF'
-    Complete exactly three paired authenticated profiles: xwing/xwing,
+    Complete the three compatibility profiles: xwing/xwing,
     xwing/pqc, pqc/xwing. Present one correctly signed classic offer to each
     strict-PQC shipping responder. The classic stimulus is not an endpoint.
 EOF
+    if [[ "$EXPECTED_SUITE" == "0x0012" ]]; then
+      echo "    Also complete one pqc/pqc pair using Q suite 0x0012 on both endpoints."
+    fi
     ;;
   p2p)
-    cat <<'EOF'
+    cat <<EOF
     Complete two different P2P sessions. First, iOS initiates and Mac responds:
     approve the visible Mac notice, obtain the peer renderer acknowledgement,
     apply real input, and disconnect. Second, Mac initiates and iOS responds;
-    authenticate with X-Wing and disconnect normally on both endpoints.
+    authenticate both sessions with $REQUIRED_PRODUCT_SUITE and disconnect normally on both endpoints.
 EOF
     ;;
   webrtc)
-    cat <<'EOF'
-    Establish relay-selected WebRTC with authenticated X-Wing rekey. Approve
+    cat <<EOF
+    Establish relay-selected WebRTC with authenticated $REQUIRED_PRODUCT_SUITE rekey. Approve
     the visible Mac notice, sustain real audio/video for at least 31 seconds,
     obtain the peer-renderer receipt, apply real input, then disconnect.
 EOF
     ;;
   file-transfer)
-    cat <<'EOF'
-    Within one authenticated P2P session, use normal Send/Accept UI for one
+    cat <<EOF
+    Within one $REQUIRED_PRODUCT_SUITE P2P session, use normal Send/Accept UI for one
     Mac-to-iOS and one iOS-to-Mac nonempty transfer. Wait for both Completed UI
     states and authenticated integrity receipts, then disconnect normally.
 EOF
@@ -396,6 +428,7 @@ python3 "$IOS_EXTRACTOR" extract \
   --output-log "$ARTIFACT_DIR/ios-product-session.log" \
   --output-capture "$ARTIFACT_DIR/ios-product-session-capture.json"
 python3 "$IDENTITY_EXTRACTOR" extract-session-proof \
+  "${IDENTITY_POLICY_ARGS[@]}" \
   --lifecycle-binding "$IDENTITY_LIFECYCLE_BINDING" \
   --lifecycle-proof "$IDENTITY_LIFECYCLE_PROOF" \
   --current-raw-oslog "$IOS_CURRENT_RAW_OSLOG" \
@@ -413,7 +446,12 @@ python3 "$IOS_EXTRACTOR" installation-capture \
 /bin/cp -p "$CANDIDATE_MANIFEST" "$ARTIFACT_DIR/macos-release-candidate.json"
 chmod 0600 "$ARTIFACT_DIR/macos-release-candidate.json"
 
-python3 "$PRODUCT_VALIDATOR" validate --kind "$KIND" --artifact-dir "$ARTIFACT_DIR"
+if [[ -n "$EXPECTED_SUITE" ]]; then
+  python3 "$PRODUCT_VALIDATOR" validate --kind "$KIND" --artifact-dir "$ARTIFACT_DIR" \
+    --expected-suite "$EXPECTED_SUITE"
+else
+  python3 "$PRODUCT_VALIDATOR" validate --kind "$KIND" --artifact-dir "$ARTIFACT_DIR"
+fi
 python3 "$IDENTITY_EXTRACTOR" validate-proof \
   --proof "$ARTIFACT_DIR/ios-production-identity-proof.json" \
   --archive-identity "$IOS_ARCHIVE_IDENTITY"

@@ -1,6 +1,6 @@
-# rtc 0.20.0 — SkyBridge patched copy
+# rtc 0.20.5 — SkyBridge patched copy
 
-Byte-identical to the crates.io `rtc 0.20.0` release except for one surgical
+Byte-identical to the crates.io `rtc 0.20.5` release except for one surgical
 fix, applied via `[patch.crates-io]` in `rust/Cargo.toml`.
 
 ## The defect
@@ -33,9 +33,16 @@ Grep for `SKYBRIDGE PATCH` to find every modified line.
 
 ## Retiring this patch
 
-Upstream `rtc 0.21` was beta-only at the time of this patch. When a stable
+The latest stable `rtc 0.20.5` still lacks this fix; `rtc 0.21.0-rc.2` is
+pre-release only (checked 2026-09-15). When a stable
 release registers prflx candidates (or otherwise makes the selected pair's
 endpoints resolvable from `get_stats`), delete this directory and the
 `[patch.crates-io]` entry, and confirm
 `skybridge-core native_webrtc::tests::selected_ice_route_is_observed_on_a_real_loopback_pair`
 still passes — that test pins the behaviour against a real loopback pair.
+
+## Upstream provenance
+
+The 0.20.5 crate archive was verified against the official crates.io SHA-256
+`66355ae7cad547376873a2ee7968eee1e3727492a241c05bf511b01db4cef077`. Only the two source files
+named above and this note differ from that archive.

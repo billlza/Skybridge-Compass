@@ -18,6 +18,76 @@ import XCTest
 @available(macOS 14.0, iOS 17.0, *)
 final class P2PTrustSyncTests: XCTestCase {
 
+    func testAuthenticatedAuthorityResolutionPreservesRejectionReasons() throws {
+        let deviceId = "id:authority-resolution"
+        let publicKey = Data(repeating: 0x45, count: 32)
+        let fingerprint = ProtocolIdentityBinding.computeFingerprint(
+            algorithm: .ed25519,
+            publicKeyBytes: publicKey
+        )
+        func rejection(
+            records: [TrustRecord] = [],
+            identity: String = "id:authority-resolution",
+            stableIdentity: String? = "id:authority-resolution",
+            fingerprint suppliedFingerprint: String? = nil,
+            key: Data? = nil
+        ) throws -> AuthenticatedRemoteAuthorityRejection {
+            let result = TrustSyncService.authenticatedRemoteAuthorityResolution(
+                existingRecords: records,
+                deviceId: identity,
+                preferredCurrentDeviceId: stableIdentity,
+                protocolSigningAlgorithm: .ed25519,
+                protocolPublicKeyFingerprint: suppliedFingerprint ?? fingerprint,
+                authenticatedProtocolPublicKey: key ?? publicKey
+            )
+            let reason: AuthenticatedRemoteAuthorityRejection?
+            switch result {
+            case .failure(let rejected): reason = rejected
+            case .success: reason = nil
+            }
+            return try XCTUnwrap(reason, "Rejected authority unexpectedly produced a record")
+        }
+        XCTAssertEqual(try rejection(identity: " "), .invalidDeviceId)
+        XCTAssertEqual(try rejection(fingerprint: "invalid"), .invalidFingerprint)
+        XCTAssertEqual(try rejection(key: Data(repeating: 0x45, count: 31)), .invalidPublicKey)
+        XCTAssertEqual(try rejection(fingerprint: String(repeating: "0", count: 64)), .invalidPublicKey)
+        XCTAssertEqual(try rejection(stableIdentity: nil), .missingStableIdentity)
+
+        let ambiguousRecords = ["bonjour:first", "bonjour:second"].map { alias in
+            TrustRecord(
+                deviceId: alias, pubKeyFP: "", publicKey: Data(), signature: Data(),
+                currentDeviceId: deviceId, lifecycleState: .active
+            )
+        }
+        XCTAssertEqual(try rejection(records: ambiguousRecords), .ambiguousDirectIdentity)
+
+        let canonical = try TrustSyncService.authenticatedRemoteAuthorityResolution(
+            existingRecords: [], deviceId: deviceId, preferredCurrentDeviceId: deviceId,
+            protocolSigningAlgorithm: .ed25519,
+            protocolPublicKeyFingerprint: fingerprint,
+            authenticatedProtocolPublicKey: publicKey
+        ).get()
+        let rawIdentityAlias = TrustRecord(
+            deviceId: "bonjour:raw-identity", pubKeyFP: "", publicKey: Data(), signature: Data(),
+            currentDeviceId: "authority-resolution", lifecycleState: .active
+        )
+        XCTAssertEqual(
+            try rejection(records: [canonical, rawIdentityAlias]),
+            .conflictingIdentityClaims
+        )
+        let differentKey = Data(repeating: 0x46, count: 32)
+        XCTAssertEqual(
+            try rejection(
+                records: [canonical],
+                fingerprint: ProtocolIdentityBinding.computeFingerprint(
+                    algorithm: .ed25519, publicKeyBytes: differentKey
+                ),
+                key: differentKey
+            ),
+            .authorityBindingConflict
+        )
+    }
+
     @MainActor
     func testTrustInvalidationDisconnectsOnlyTheExactCurrentP2PAuthority() async throws {
         let suffix = UUID().uuidString.lowercased()
@@ -35,6 +105,7 @@ final class P2PTrustSyncTests: XCTestCase {
             publicKeyBytes: replacementPublicKey
         )
         let trust = TrustSyncService.shared
+        try await trust.requireInitialLoadForTesting()
         trust.setInMemoryPersistenceForTesting(true)
         try await trust.removeRecordsForTesting(deviceIds: [oldRecordId, replacementRecordId])
         addTeardownBlock { @MainActor [trust] in
@@ -229,7 +300,7 @@ final class P2PTrustSyncTests: XCTestCase {
  /// **Validates: Requirements 3.5**
     @MainActor
     func testTombstoneConflictResolutionProperty() async throws {
-        let service = TrustSyncService.shared
+        let service = TrustSyncService(initialRecordsForTesting: [])
         
  // Test case 1: Local is tombstone, remote is add
         let localTombstone = createTestTrustRecord(
@@ -315,7 +386,7 @@ final class P2PTrustSyncTests: XCTestCase {
  /// Test conflict resolution is symmetric for same-type records
     @MainActor
     func testConflictResolutionSymmetry() async throws {
-        let service = TrustSyncService.shared
+        let service = TrustSyncService(initialRecordsForTesting: [])
         
         let record1 = createTestTrustRecord(
             deviceId: "symmetric-test",
@@ -487,7 +558,7 @@ final class P2PTrustSyncTests: XCTestCase {
 
     @MainActor
     func testAuthenticatedProtocolIdentityLookupRequiresActiveRawBinding() async throws {
-        let service = TrustSyncService.shared
+        let service = TrustSyncService(initialRecordsForTesting: [])
         let deviceId = "id:\(UUID().uuidString.lowercased())"
         let publicKey = Data(repeating: 0x87, count: 2_592)
         let fingerprint = ProtocolIdentityBinding.computeFingerprint(
@@ -504,13 +575,6 @@ final class P2PTrustSyncTests: XCTestCase {
                 authenticatedProtocolPublicKey: publicKey
             )
         )
-
-        service.setInMemoryPersistenceForTesting(true)
-        try await service.removeRecordsForTesting(deviceIds: [deviceId])
-        addTeardownBlock { @MainActor in
-            try await service.removeRecordsForTesting(deviceIds: [deviceId])
-            service.setInMemoryPersistenceForTesting(false)
-        }
 
         XCTAssertEqual(
             service.outboundPQCSignatureAlgorithm(
@@ -686,7 +750,8 @@ final class P2PTrustSyncTests: XCTestCase {
             lifecycleState: .active
         )
         XCTAssertThrowsError(
-            try TrustSyncService.shared.resolveConflict(local: firstRecord, remote: conflictingRecord)
+            try TrustSyncService(initialRecordsForTesting: [])
+                .resolveConflict(local: firstRecord, remote: conflictingRecord)
         ) { error in
             guard case TrustSyncError.conflictResolutionFailed = error else {
                 return XCTFail("Unexpected error: \(error)")
@@ -762,7 +827,7 @@ final class P2PTrustSyncTests: XCTestCase {
 
     @MainActor
     func testLegacyRecordSignatureRemainsValidButCannotAuthorizeUnsignedV2Sidecar() async throws {
-        let service = TrustSyncService.shared
+        let service = TrustSyncService(initialRecordsForTesting: [])
         let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
         let updatedAt = createdAt.addingTimeInterval(60)
         let legacyKey = Data(repeating: 0x65, count: 1_952)
@@ -976,17 +1041,10 @@ final class P2PTrustSyncTests: XCTestCase {
 
     @MainActor
     func testEvaluateCurrentPathBindingMatchesKnownAliasesBeforeDeclaringConflict() async throws {
-        let service = TrustSyncService.shared
+        let service = TrustSyncService(initialRecordsForTesting: [])
         let suffix = UUID().uuidString.lowercased()
         let aliasId = "bonjour:skybridge-\(suffix)@local."
         let stableId = "id:\(suffix)"
-
-        service.setInMemoryPersistenceForTesting(true)
-        try await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-        addTeardownBlock { @MainActor [service] in
-            try await service.removeRecordsForTesting(deviceIds: [aliasId, stableId])
-            service.setInMemoryPersistenceForTesting(false)
-        }
 
         _ = try await service.addTrustRecord(
             TrustRecord(
@@ -1091,20 +1149,11 @@ final class P2PTrustSyncTests: XCTestCase {
 
     @MainActor
     func testOnlyActiveLifecycleRecordsCanAuthorizeTrust() async throws {
-        let service = TrustSyncService.shared
+        let service = TrustSyncService(initialRecordsForTesting: [])
         let suffix = UUID().uuidString.lowercased()
         let activeId = "id:active-\(suffix)"
         let quarantineId = "id:quarantine-\(suffix)"
         let reverificationId = "id:reverify-\(suffix)"
-        let ids = [activeId, quarantineId, reverificationId]
-
-        service.setInMemoryPersistenceForTesting(true)
-        try await service.removeRecordsForTesting(deviceIds: ids)
-        addTeardownBlock { @MainActor in
-            try await service.removeRecordsForTesting(deviceIds: ids)
-            service.setInMemoryPersistenceForTesting(false)
-        }
-
         let records = [
             TrustRecord(
                 deviceId: activeId,

@@ -23,6 +23,9 @@ Usage:
     --ios-device-udid <xcdevice physical UDID> \
     --expected-source-repository <owner/repository> \
     --expected-source-sha <40 lowercase hex> \
+    [--identity-purpose <new-secure-enclave-identity|existing-production-identity>] \
+    [--expected-suite <0x0012>] \
+    [--expected-identity-protection <softwareKeychain|secureEnclaveRequired>] \
     [--timeout-seconds <30-1800>]
 
 The lifecycle binding containing the stable private id1 reference exists only
@@ -43,6 +46,9 @@ IOS_DEVICE_ID=""
 IOS_DEVICE_UDID=""
 EXPECTED_SOURCE_REPOSITORY=""
 EXPECTED_SOURCE_SHA=""
+IDENTITY_PURPOSE="new-secure-enclave-identity"
+EXPECTED_SUITE=""
+EXPECTED_IDENTITY_PROTECTION=""
 TIMEOUT_SECONDS=900
 
 while (( $# > 0 )); do
@@ -58,11 +64,24 @@ while (( $# > 0 )); do
     --ios-device-udid) IOS_DEVICE_UDID="${2:-}"; shift 2 ;;
     --expected-source-repository) EXPECTED_SOURCE_REPOSITORY="${2:-}"; shift 2 ;;
     --expected-source-sha) EXPECTED_SOURCE_SHA="${2:-}"; shift 2 ;;
+    --identity-purpose) IDENTITY_PURPOSE="${2:-}"; shift 2 ;;
+    --expected-suite) EXPECTED_SUITE="${2:-}"; shift 2 ;;
+    --expected-identity-protection) EXPECTED_IDENTITY_PROTECTION="${2:-}"; shift 2 ;;
     --timeout-seconds) TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+IDENTITY_POLICY_ARGS=(--identity-purpose "$IDENTITY_PURPOSE")
+if [[ -n "$EXPECTED_SUITE" ]]; then
+  IDENTITY_POLICY_ARGS+=(--expected-suite "$EXPECTED_SUITE")
+fi
+if [[ -n "$EXPECTED_IDENTITY_PROTECTION" ]]; then
+  IDENTITY_POLICY_ARGS+=(--expected-identity-protection "$EXPECTED_IDENTITY_PROTECTION")
+fi
+python3 "$ROOT_DIR/Scripts/extract_ios_production_identity_evidence.py" validate-policy \
+  "${IDENTITY_POLICY_ARGS[@]}"
 
 for path in \
   "$PRIVATE_EVIDENCE_ROOT" "$PUBLIC_EVIDENCE_ROOT" "$CANDIDATE_MANIFEST" \
@@ -113,6 +132,7 @@ cleanup() {
 trap cleanup EXIT
 
 "$LIFECYCLE_PRODUCER" \
+  "${IDENTITY_POLICY_ARGS[@]}" \
   --private-output-dir "$LIFECYCLE_PRIVATE" \
   --public-output-dir "$LIFECYCLE_PUBLIC" \
   --ios-archive-identity "$IOS_ARCHIVE_IDENTITY" \
@@ -134,6 +154,7 @@ for spec in "${kind_specs[@]}"; do
   kind="${spec%%|*}"
   public_name="${spec#*|}"
   "$KIND_PRODUCER" \
+    "${IDENTITY_POLICY_ARGS[@]}" \
     --kind "$kind" \
     --artifact-dir "$PRIVATE_EVIDENCE_ROOT/$public_name" \
     --public-artifact-dir "$PUBLIC_STAGING/$public_name" \

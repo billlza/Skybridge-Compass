@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import SkyBridgeProtocolCore
 
 public struct IdentityFingerprint: Sendable, Codable {
     public let pairedID: String?
@@ -61,15 +62,14 @@ struct IdentityResolver {
         device: DiscoveredDevice,
         selfId: SelfIdentitySnapshot
     ) -> Bool {
-        if !selfId.deviceId.isEmpty,
-           let deviceId = device.deviceId,
-           deviceId == selfId.deviceId {
+        // This snapshot describes the P-256 device authority. It is not the
+        // committed protocol-signing identity advertised by Bonjour.
+        if let localDeviceID = PeerIdentityFusionPolicy.normalizedStableDeviceId(selfId.deviceId),
+           localDeviceID == PeerIdentityFusionPolicy.normalizedStableDeviceId(device.deviceId) {
             return true
         }
-        if isCanonicalSHA256Fingerprint(selfId.pubKeyFP),
-           let fingerprint = device.pubKeyFP,
-           isCanonicalSHA256Fingerprint(fingerprint),
-           fingerprint == selfId.pubKeyFP {
+        if let localDeviceKeyFingerprint = BonjourInteropContract.normalizedPubKeyFingerprint(selfId.pubKeyFP),
+           localDeviceKeyFingerprint == BonjourInteropContract.normalizedPubKeyFingerprint(device.pubKeyFP) {
             return true
         }
 
@@ -78,11 +78,35 @@ struct IdentityResolver {
         return !localMACs.isEmpty && !localMACs.isDisjoint(with: remoteMACs)
     }
 
-    private static func isCanonicalSHA256Fingerprint(_ value: String) -> Bool {
-        value.utf8.count == 64 && value.utf8.allSatisfy { byte in
-            (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
-                || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
-        }
+    /// Bonjour identities must be compared with the same committed protocol
+    /// authority used to advertise this host, rather than its P-256 device key.
+    static func resolveIsLocalSynchronously(
+        device: DiscoveredDevice,
+        localIdentity: CanonicalBonjourAdvertisementIdentity
+    ) -> Bool {
+        protocolIdentitiesMatch(
+            protocolIdentity(deviceId: device.deviceId, pubKeyFP: device.pubKeyFP),
+            protocolIdentity(deviceId: localIdentity.deviceId, pubKeyFP: localIdentity.protocolPublicKeyFingerprint)
+        )
+    }
+
+    static func protocolIdentity(
+        deviceId: String?,
+        pubKeyFP: String?
+    ) -> PeerIdentityFusionPolicy.IdentityEvidence {
+        PeerIdentityFusionPolicy.IdentityEvidence(
+            stableDeviceId: PeerIdentityFusionPolicy.normalizedStableDeviceId(deviceId),
+            publicKeyFingerprint: BonjourInteropContract.normalizedPubKeyFingerprint(pubKeyFP)
+        )
+    }
+
+    static func protocolIdentitiesMatch(
+        _ lhs: PeerIdentityFusionPolicy.IdentityEvidence,
+        _ rhs: PeerIdentityFusionPolicy.IdentityEvidence
+    ) -> Bool {
+        guard !PeerIdentityFusionPolicy.identitiesContradict(lhs, rhs) else { return false }
+        return (lhs.stableDeviceId != nil && lhs.stableDeviceId == rhs.stableDeviceId)
+            || (lhs.publicKeyFingerprint != nil && lhs.publicKeyFingerprint == rhs.publicKeyFingerprint)
     }
 
     private static func isUsableCanonicalMACAddress(_ value: String) -> Bool {
@@ -112,27 +136,50 @@ struct IdentityResolver {
         return true
     }
     
-    func findMergeIndex(in devices: [DiscoveredDevice], candidate: DiscoveredDevice, candidateFP: IdentityFingerprint?) async -> Int? {
+    func findMergeIndex(in devices: [DiscoveredDevice], candidate: DiscoveredDevice, candidateFP: IdentityFingerprint?) -> Int? {
         let cIPv4 = candidate.ipv4
         let cIPv6 = candidate.ipv6
         let cName = candidate.name
         let cUID = candidate.uniqueIdentifier
-        let cFP = candidate.pubKeyFP
+        let candidateIdentity = Self.protocolIdentity(deviceId: candidate.deviceId, pubKeyFP: candidate.pubKeyFP)
         
         var bestIndex: Int?
         var bestScore = 0
         
         for (idx, existing) in devices.enumerated() {
+            let existingIdentity = Self.protocolIdentity(deviceId: existing.deviceId, pubKeyFP: existing.pubKeyFP)
+            guard PeerIdentityFusionPolicy.mayFuseOnCorroboratingSignal(
+                lhs: existingIdentity, rhs: candidateIdentity
+            ) else { continue }
+
+            let sameRecord = existing.id == candidate.id
+            let sameIdentity = Self.protocolIdentitiesMatch(existingIdentity, candidateIdentity)
+            let sameIPv4 = cIPv4?.isEmpty == false && existing.ipv4 == cIPv4
+            let sameIPv6 = cIPv6?.isEmpty == false && existing.ipv6 == cIPv6
+            let sameUniqueIdentifier = cUID?.isEmpty == false && existing.uniqueIdentifier == cUID
+            let sameUSBSerial = candidate.connectionTypes.contains(.usb)
+                && cUID?.hasPrefix("serial:") == true && sameUniqueIdentifier
+
+            // Names, weak fingerprints and port spectra cannot attach an unrelated
+            // observation to a protocol identity. Bonjour route matching is handled
+            // by the discovery manager before this address-based resolver.
+            if existingIdentity.hasProtocolIdentity || candidateIdentity.hasProtocolIdentity {
+                guard sameRecord || sameIdentity || sameIPv4 || sameIPv6 || sameUSBSerial else { continue }
+            }
+
             var score = 0
  // 🔧 修复：优先检查 UUID（id）匹配，用于同一设备的更新
-            if existing.id == candidate.id { score += 200 }
-            if let id1 = existing.deviceId, let id2 = candidate.deviceId, !id1.isEmpty, id1 == id2 { score += 100 }
-            if let eFP = existing.pubKeyFP, let cFP = cFP, !eFP.isEmpty, !cFP.isEmpty, eFP == cFP { score += 80 }
+            if sameRecord { score += 200 }
+            if existingIdentity.stableDeviceId != nil,
+               existingIdentity.stableDeviceId == candidateIdentity.stableDeviceId { score += 100 }
+            if existingIdentity.publicKeyFingerprint != nil,
+               existingIdentity.publicKeyFingerprint == candidateIdentity.publicKeyFingerprint { score += 80 }
             if let mac = candidateFP?.macAddress, existing.macSet.contains(mac) { score += 60 }
-            if let ipv4 = existing.ipv4, let cIPv4 = cIPv4, ipv4 == cIPv4 { score += 40 }
-            if let ipv6 = existing.ipv6, let cIPv6 = cIPv6, ipv6 == cIPv6 { score += 40 }
-            if let uid = existing.uniqueIdentifier, let cUID = cUID, !uid.isEmpty, uid == cUID { score += 35 }
-            if IdentityResolver.areNamesSimilar(existing.name, cName) { score += 20 }
+            if sameIPv4 { score += 40 }
+            if sameIPv6 { score += 40 }
+            if sameUniqueIdentifier { score += 35 }
+            if PeerIdentityFusionPolicy.mayFuseOnDisplayNameAlone(lhs: existingIdentity, rhs: candidateIdentity),
+               IdentityResolver.areNamesSimilar(existing.name, cName) { score += 20 }
             if let ps = candidateFP?.portSpectrumHash, let ePS = IdentityResolver.computePortSpectrumHash(from: existing.portMap), ps == ePS { score += 30 }
             if let http = candidateFP?.httpServer, let host = candidateFP?.hostname, !http.isEmpty, IdentityResolver.areNamesSimilar(existing.name, host) { score += 10 }
             

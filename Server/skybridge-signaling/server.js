@@ -18,6 +18,12 @@ const { createMediaRelay, createSignedMediaLeaseToken } = require('./lib/media_r
 const { RegistryStore } = require('./lib/registry_store');
 const { buildIdempotencyFingerprint, clientIPForRequest, normalizeClientIP } = require('./lib/request_security');
 const {
+  normalizeAppVersion,
+  normalizePresenceReport,
+  presenceMetadataFingerprint,
+  publicAddressForPresence
+} = require('./lib/presence_report');
+const {
   allowsLegacyQueryTokenFromEnv,
   extractWebSocketSessionCredentials
 } = require('./lib/websocket_credentials');
@@ -158,6 +164,19 @@ if (
 }
 // 设备在线状态（presence）TTL：心跳每 ~30s 写一次；超时未续即视为离线（缺键 == 离线）。
 const PRESENCE_TTL_MS = Number(process.env.SIGNALING_PRESENCE_TTL_MS || 90_000);
+// 心跳元数据落库节流：同一设备两次落库最小间隔（元数据指纹变化时立即落库）。
+const PRESENCE_PERSIST_INTERVAL_MS = Number(process.env.SIGNALING_PRESENCE_PERSIST_INTERVAL_MS || 300_000);
+if (
+  !Number.isSafeInteger(PRESENCE_PERSIST_INTERVAL_MS)
+  || PRESENCE_PERSIST_INTERVAL_MS < 30_000
+  || PRESENCE_PERSIST_INTERVAL_MS > 24 * 60 * 60_000
+) {
+  throw new Error('invalid_presence_persist_interval');
+}
+// 落库尝试的独占窗口：一次尝试（成功或失败）后 30s 内不再重试，避免并发心跳重复写库。
+const PRESENCE_PERSIST_RETRY_MS = 30_000;
+// 账号设备列表上限（超过则 truncated=true）。
+const ACCOUNT_DEVICE_LIST_LIMIT = 200;
 const TURN_ADMISSION_TOKEN_TTL_MS = Number(process.env.TURN_ADMISSION_TOKEN_TTL_MS || 60_000);
 const TURN_CRED_TTL_SECONDS = Number(process.env.TURN_CRED_TTL_SECONDS || 300);
 const MEDIA_ADMISSION_TOKEN_TTL_MS = Number(process.env.MEDIA_ADMISSION_TOKEN_TTL_MS || 120_000);
@@ -180,6 +199,9 @@ const HTTP_LOOKUP_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_LOOKUP_RATE_LIMIT
 const HTTP_TURN_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_TURN_RATE_LIMIT_PER_MIN || 60);
 const HTTP_MEDIA_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_MEDIA_RATE_LIMIT_PER_MIN || 60);
 const HTTP_ADMISSION_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_ADMISSION_RATE_LIMIT_PER_MIN || 60);
+// presence/list traffic is periodic (30 s heartbeat + list per device) and shares one NAT IP for a
+// whole office; it must not drain the control bucket that user-initiated connect flows depend on.
+const HTTP_PRESENCE_RATE_LIMIT_PER_MIN = Number(process.env.HTTP_PRESENCE_RATE_LIMIT_PER_MIN || 240);
 
 const WS_MAX_MSG_BYTES = Number(process.env.WS_MAX_MSG_BYTES || 16 * 1024);
 const WS_MAX_MSGS_PER_10S = Number(process.env.WS_MAX_MSGS_PER_10S || 60);
@@ -1860,6 +1882,18 @@ function registryCanBootstrapRegisterDevices(store = registryStore) {
   return registrySupportsMethod(store, 'bootstrapRegisterDevice');
 }
 
+function registryCanListRegisteredDevices(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
+  if (advertised === false) return false;
+  return registrySupportsMethod(store, 'listRegisteredDevices');
+}
+
+function registryCanPersistDevicePresence(store = registryStore) {
+  const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
+  if (advertised === false) return false;
+  return registrySupportsMethod(store, 'touchRegisteredDevicePresence');
+}
+
 function registryCanManageIdentityRotations(store = registryStore) {
   const advertised = registryAdvertisesCapability(store?.canAccessRegistry);
   if (advertised === false) return false;
@@ -1906,7 +1940,7 @@ function translateIdentityRotationRegistryError(error) {
   return translated;
 }
 
-async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = true } = {}) {
+async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = true, rejectRevokedRegisteredDevice = false } = {}) {
   const accessToken = getBearerToken(req);
   if (!accessToken) {
     throw makeError('missing_bearer_token', 401);
@@ -1991,6 +2025,23 @@ async function loadAuthenticatedDeviceContext(req, { requireRegisteredDevice = t
     }
     if (deviceRecord.status !== 'active') {
       throw makeError('device_not_active', 403);
+    }
+  } else if (rejectRevokedRegisteredDevice && registryCanReadRegisteredDevices()) {
+    // Routes that admit pending (not yet approved) or unknown devices still must not let a
+    // revoked or frozen identity keep acting: when the registry knows the declared identity,
+    // its status wins.
+    deviceRecord = await registryStore.getRegisteredDevice({
+      tenantId,
+      userId: user.id,
+      deviceId: binding.deviceId,
+      protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint
+    });
+    if (deviceRecord && deviceRecord.status === 'revoked') {
+      throw makeError('device_revoked', 403);
+    }
+    if (deviceRecord && deviceRecord.status === 'frozen') {
+      throw makeError('device_frozen', 403);
     }
   }
   return {
@@ -3165,6 +3216,7 @@ const rlLookup = rateLimit({ windowMs: 60_000, max: HTTP_LOOKUP_RATE_LIMIT_PER_M
 const rlTurn = rateLimit({ windowMs: 60_000, max: HTTP_TURN_RATE_LIMIT_PER_MIN });
 const rlMedia = rateLimit({ windowMs: 60_000, max: HTTP_MEDIA_RATE_LIMIT_PER_MIN });
 const rlAdmission = rateLimit({ windowMs: 60_000, max: HTTP_ADMISSION_RATE_LIMIT_PER_MIN });
+const rlPresence = rateLimit({ windowMs: 60_000, max: HTTP_PRESENCE_RATE_LIMIT_PER_MIN });
 
 function evaluateServiceHealth({
   backendHealth,
@@ -3290,6 +3342,7 @@ app.get('/', asyncRoute(async (req, res) => {
       '/api/devices/enroll/confirm',
       '/api/presence/register',
       '/api/presence/query',
+      '/api/devices/list',
       `${SIGNALING_WEBSOCKET_PATH}?shard=<session_id> with X-SkyBridge-Session-Id/X-SkyBridge-Session headers`
     ]
   });
@@ -4466,31 +4519,204 @@ function presenceKey(tenantId, userId, deviceId) {
   return `${String(tenantId)}:${String(userId)}:${String(deviceId).trim()}`;
 }
 
-app.post('/api/presence/register', rlControl, asyncRoute(async (req, res) => {
-  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
-  await assertPublicCapabilityAvailable('presence_register', context.tenantId);
-  const deviceName = typeof req.body?.deviceName === 'string' ? req.body.deviceName.slice(0, 128) : '';
-  const key = presenceKey(context.tenantId, context.user.id, context.binding.deviceId);
-  const expiresAt = now() + PRESENCE_TTL_MS;
-  const record = {
-    tenantId: context.tenantId,
-    userId: context.user.id,
-    deviceId: context.binding.deviceId,
-    deviceName,
-    updatedAt: now(),
-    expiresAt
-  };
-  const existing = await signalingState.getEphemeral('presence', key);
-  if (existing) {
-    await signalingState.updateEphemeral('presence', key, () => record);
-  } else {
-    await signalingState.createEphemeral('presence', key, record);
+function safeEpochMs(value) {
+  if (Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
-  res.json({ online: true, ttlMs: PRESENCE_TTL_MS, expiresAt });
+  return null;
+}
+
+function normalizedLowerFingerprint(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function persistStateFromRecord(record) {
+  const persist = record && record.persist && typeof record.persist === 'object' ? record.persist : {};
+  return {
+    fingerprint: typeof persist.fingerprint === 'string' ? persist.fingerprint : null,
+    persistedAt: safeEpochMs(persist.persistedAt),
+    claimedAt: safeEpochMs(persist.claimedAt)
+  };
+}
+
+function stringArrayFromRegistry(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === 'string') : [];
+}
+
+// Merge one registry row with its live presence record. The ephemeral record is
+// only trusted when it carries the exact identity of the row: a heartbeat under a
+// sibling's device id (same account, different key) must never dress that sibling
+// with foreign metadata or mark it online.
+function accountDeviceFromRegistryRow(row, presence, callerBinding) {
+  const rowAlgorithm = String(row.protocol_signing_algorithm || '');
+  const rowFingerprint = normalizedLowerFingerprint(row.protocol_public_key_fingerprint);
+  const live = presence
+    && presence.protocolSigningAlgorithm === rowAlgorithm
+    && normalizedLowerFingerprint(presence.protocolPublicKeyFingerprint) === rowFingerprint
+    ? presence
+    : null;
+  const liveDeviceName = live && typeof live.deviceName === 'string' && live.deviceName.trim()
+    ? live.deviceName
+    : null;
+  return {
+    deviceId: String(row.device_id),
+    deviceName: liveDeviceName || (typeof row.device_name === 'string' ? row.device_name : null),
+    status: String(row.status || ''),
+    protocolSigningAlgorithm: rowAlgorithm,
+    protocolPublicKeyFingerprint: rowFingerprint,
+    platform: live ? (live.platform || null) : (typeof row.platform === 'string' ? row.platform : null),
+    deviceModel: live ? (live.deviceModel || null) : (typeof row.device_model === 'string' ? row.device_model : null),
+    osVersion: live ? (live.osVersion || null) : (typeof row.os_version === 'string' ? row.os_version : null),
+    appVersion: live ? (live.appVersion || null) : (typeof row.app_version === 'string' ? row.app_version : null),
+    lanAddresses: live ? stringArrayFromRegistry(live.lanAddresses) : stringArrayFromRegistry(row.last_lan_addresses),
+    publicAddress: live
+      ? (live.publicAddress || null)
+      : (typeof row.last_public_address === 'string' ? row.last_public_address : null),
+    capabilities: live ? stringArrayFromRegistry(live.capabilities) : stringArrayFromRegistry(row.last_capabilities),
+    registeredAt: safeEpochMs(row.registered_at),
+    lastSeenAt: live
+      ? safeEpochMs(live.updatedAt)
+      : (safeEpochMs(row.last_presence_at) ?? safeEpochMs(row.last_seen_at)),
+    presenceUpdatedAt: live ? safeEpochMs(live.updatedAt) : null,
+    online: Boolean(live),
+    isCaller: String(row.device_id) === callerBinding.deviceId
+      && rowAlgorithm === callerBinding.protocolSigningAlgorithm
+      && rowFingerprint === normalizedLowerFingerprint(callerBinding.protocolPublicKeyFingerprint)
+  };
+}
+
+function accountDeviceListRegistryError(error) {
+  const postgrestCode = String(error?.registryPostgrestCode || '').trim();
+  const message = String(error?.message || '');
+  if (postgrestCode === 'PGRST205' || message.includes('PGRST205') || message.includes('registry_not_configured')) {
+    return makeError('registry_not_configured', 503);
+  }
+  if (postgrestCode === '42703' || message.includes('42703')) {
+    // The v7 presence columns are missing: the schema behind the registry is older than this server.
+    return makeError('registry_schema_outdated', 503);
+  }
+  incrementSecurityCounter('account_device_list_registry_failed');
+  console.warn(
+    `[presence] account device list failed status=${error?.registryStatus || 'n/a'} code=${postgrestCode || 'n/a'}`
+  );
+  return makeError('registry_unavailable', 503);
+}
+
+app.post('/api/presence/register', rlPresence, asyncRoute(async (req, res) => {
+  // requireRegisteredDevice stays false so a pending (not yet approved) device can announce itself;
+  // revoked / frozen identities are still refused, and persistence plus the account list are
+  // identity-bound separately (see touch RPC + list overlay).
+  const context = await loadAuthenticatedDeviceContext(req, {
+    requireRegisteredDevice: false,
+    rejectRevokedRegisteredDevice: true
+  });
+  await assertPublicCapabilityAvailable('presence_register', context.tenantId);
+  const report = normalizePresenceReport(req.body);
+  const appVersion = normalizeAppVersion(context.clientVersion);
+  const publicAddress = publicAddressForPresence(
+    clientIPForRequest(req, { trustProxy: currentTrustProxy })
+  );
+  const fingerprint = presenceMetadataFingerprint(report, {
+    appVersion,
+    publicAddress
+  });
+  const key = presenceKey(context.tenantId, context.user.id, context.binding.deviceId);
+  const canPersist = registryCanPersistDevicePresence();
+  const heartbeatAt = now();
+  let claimedPersistSlot = false;
+  // The mutator may run several times under the redis optimistic loop: it is pure and re-derives the
+  // persist claim from the record it is handed each time.
+  const record = await signalingState.upsertEphemeral('presence', key, (current) => {
+    claimedPersistSlot = false;
+    const persist = persistStateFromRecord(current);
+    const due = !persist.persistedAt
+      || persist.fingerprint !== fingerprint
+      || heartbeatAt - persist.persistedAt >= PRESENCE_PERSIST_INTERVAL_MS;
+    const slotOpen = !persist.claimedAt || heartbeatAt - persist.claimedAt >= PRESENCE_PERSIST_RETRY_MS;
+    if (canPersist && due && slotOpen) {
+      claimedPersistSlot = true;
+    }
+    return {
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      deviceId: context.binding.deviceId,
+      protocolSigningAlgorithm: context.binding.protocolSigningAlgorithm,
+      protocolPublicKeyFingerprint: context.binding.protocolPublicKeyFingerprint,
+      deviceName: report.deviceName,
+      platform: report.platform,
+      deviceModel: report.deviceModel,
+      osVersion: report.osVersion,
+      appVersion,
+      lanAddresses: report.lanAddresses,
+      capabilities: report.capabilities,
+      publicAddress,
+      updatedAt: heartbeatAt,
+      expiresAt: heartbeatAt + PRESENCE_TTL_MS,
+      persist: {
+        fingerprint: persist.fingerprint,
+        persistedAt: persist.persistedAt,
+        claimedAt: claimedPersistSlot ? heartbeatAt : persist.claimedAt
+      }
+    };
+  });
+
+  let persisted = false;
+  let persistReason;
+  if (!canPersist) {
+    persistReason = 'registry_not_configured';
+  } else if (!claimedPersistSlot) {
+    persistReason = 'throttled';
+  } else {
+    try {
+      const result = await registryStore.touchRegisteredDevicePresence({
+        p_tenant_id: context.tenantId,
+        p_user_id: context.user.id,
+        p_device_id: context.binding.deviceId,
+        p_protocol_signing_algorithm: context.binding.protocolSigningAlgorithm,
+        p_protocol_public_key_fingerprint: context.binding.protocolPublicKeyFingerprint,
+        p_device_name: report.deviceName || null,
+        p_platform: report.platform,
+        p_device_model: report.deviceModel,
+        p_os_version: report.osVersion,
+        p_app_version: appVersion,
+        p_lan_addresses: report.lanAddresses,
+        p_public_address: publicAddress,
+        p_capabilities: report.capabilities
+      });
+      persisted = Boolean(result && result.updated === true);
+      persistReason = persisted ? 'written' : 'device_not_active';
+      // Both outcomes are settled for throttling purposes: a device without an active row is
+      // re-checked at the normal persist interval, not on every heartbeat.
+      await signalingState.updateEphemeral('presence', key, (nextRecord) => {
+        nextRecord.persist = { fingerprint, persistedAt: now(), claimedAt: null };
+      });
+    } catch (error) {
+      // The heartbeat itself succeeded; the registry write is reported explicitly and retried after
+      // PRESENCE_PERSIST_RETRY_MS (the claim window doubles as the failure backoff).
+      incrementSecurityCounter('presence_persist_failed');
+      console.warn(
+        `[presence] persist failed status=${error?.registryStatus || 'n/a'} code=${error?.registryPostgrestCode || 'n/a'}`
+      );
+      persistReason = 'registry_unavailable';
+    }
+  }
+
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    online: true,
+    ttlMs: PRESENCE_TTL_MS,
+    expiresAt: record.expiresAt,
+    persisted,
+    persistReason
+  });
 }));
 
-app.get('/api/presence/query', rlControl, asyncRoute(async (req, res) => {
-  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: false });
+// 旧客户端专用：1.0.2 之前的 macOS/iOS 版本用它轮询在线状态，新版本改用 /api/devices/list（超集）。
+// 只要仍有旧版本在外面跑就必须保留；删除前先确认线上没有调用方。
+app.get('/api/presence/query', rlPresence, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
   await assertPublicCapabilityAvailable('presence_query', context.tenantId);
   const raw = typeof req.query?.ids === 'string' ? req.query.ids : '';
   const ids = Array.from(new Set(raw.split(',').map((s) => s.trim()).filter(Boolean))).slice(0, 200);
@@ -4499,7 +4725,51 @@ app.get('/api/presence/query', rlControl, asyncRoute(async (req, res) => {
     const record = await signalingState.getEphemeral('presence', presenceKey(context.tenantId, context.user.id, id));
     if (record) online.push(id);
   }
+  res.set('Cache-Control', 'no-store');
   res.json({ online });
+}));
+
+// 账号设备列表：调用方（必须是已注册且 active 的设备）所属 tenant+user 下的全部设备，
+// 合并信令服务器上的实时在线记录。永远不会返回空列表来掩盖注册表不可用。
+app.get('/api/devices/list', rlPresence, asyncRoute(async (req, res) => {
+  const context = await loadAuthenticatedDeviceContext(req, { requireRegisteredDevice: true });
+  await assertPublicCapabilityAvailable('devices_list', context.tenantId);
+  if (!registryCanListRegisteredDevices()) {
+    throw makeError('registry_not_configured', 503);
+  }
+  let rows;
+  try {
+    rows = await registryStore.listRegisteredDevices({
+      tenantId: context.tenantId,
+      userId: context.user.id,
+      limit: ACCOUNT_DEVICE_LIST_LIMIT + 1
+    });
+  } catch (error) {
+    throw accountDeviceListRegistryError(error);
+  }
+  const truncated = rows.length > ACCOUNT_DEVICE_LIST_LIMIT;
+  const boundedRows = rows.slice(0, ACCOUNT_DEVICE_LIST_LIMIT);
+  const devices = [];
+  const chunkSize = 20;
+  for (let index = 0; index < boundedRows.length; index += chunkSize) {
+    const chunk = boundedRows.slice(index, index + chunkSize);
+    const presences = await Promise.all(
+      chunk.map((row) => signalingState.getEphemeral(
+        'presence',
+        presenceKey(context.tenantId, context.user.id, String(row.device_id))
+      ))
+    );
+    chunk.forEach((row, offset) => {
+      devices.push(accountDeviceFromRegistryRow(row, presences[offset], context.binding));
+    });
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    generatedAt: now(),
+    callerDeviceId: context.binding.deviceId,
+    truncated,
+    devices
+  });
 }));
 
 for (const path of ['/api/register', '/api/lookup/:code', '/api/answer/:code', '/api/ice/:sessionId']) {

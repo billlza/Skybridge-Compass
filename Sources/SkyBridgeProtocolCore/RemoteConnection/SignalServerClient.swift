@@ -186,14 +186,48 @@ public actor SignalServerClient {
         public let newIdentity: Identity
     }
 
-    public struct PresenceRegisterResponseBody: Decodable, Sendable {
+    /// 心跳请求体：身份绑定 + 版本 + 本机元数据（`AccountDevicePresenceReport` 的字段平铺）。
+    public struct PresenceRegisterRequestBody: Encodable, Sendable {
+        public let deviceId: String
+        public let protocolSigningAlgorithm: ProtocolSigningAlgorithm
+        public let protocolPublicKeyFingerprint: String
+        public let clientVersion: String
+        public let protocolVersion: String
+        public let deviceName: String
+        public let platform: String
+        public let deviceModel: String?
+        public let osVersion: String?
+        public let lanAddresses: [String]
+        public let capabilities: [String]
+
+        public init(
+            binding: ProtocolIdentityBinding,
+            clientVersion: String,
+            protocolVersion: String,
+            report: AccountDevicePresenceReport
+        ) {
+            self.deviceId = binding.deviceId
+            self.protocolSigningAlgorithm = binding.protocolSigningAlgorithm
+            self.protocolPublicKeyFingerprint = binding.protocolPublicKeyFingerprint
+            self.clientVersion = clientVersion
+            self.protocolVersion = protocolVersion
+            self.deviceName = report.deviceName
+            self.platform = report.platform.rawValue
+            self.deviceModel = report.deviceModel
+            self.osVersion = report.osVersion
+            self.lanAddresses = report.lanAddresses
+            self.capabilities = report.capabilities
+        }
+    }
+
+    public struct PresenceRegisterResponseBody: Decodable, Sendable, Equatable {
         public let online: Bool
         public let ttlMs: Int?
         public let expiresAt: Double?
-    }
-
-    public struct PresenceQueryResponseBody: Decodable, Sendable {
-        public let online: [String]
+        /// 本次心跳是否把元数据写入了注册表（旧服务端没有该字段 → nil）。
+        public let persisted: Bool?
+        /// written / throttled / device_not_active / registry_not_configured / registry_unavailable。
+        public let persistReason: String?
     }
 
     public struct RegisteredDeviceBody: Decodable, Sendable, Equatable {
@@ -662,7 +696,7 @@ public actor SignalServerClient {
     public static let identityRotationChallengePath = "/api/devices/identity-rotation/challenge"
     public static let identityRotationCommitPath = "/api/devices/identity-rotation/commit"
     public static let presenceRegisterPath = "/api/presence/register"
-    public static let presenceQueryPath = "/api/presence/query"
+    public static let accountDevicesListPath = "/api/devices/list"
     public static let mediaLeasePath = "/api/media/lease"
     public static let mediaAdmissionRefreshPath = "/api/media/admission/refresh"
 
@@ -1067,49 +1101,80 @@ public actor SignalServerClient {
         )
     }
 
-    /// 注册/续约本设备在线状态（presence 心跳）。服务端从已验证 JWT + body 绑定派生身份。
-    @discardableResult
+    /// 注册/续约本设备在线状态（presence 心跳），并上报本机元数据。服务端从已验证 JWT + body 绑定派生身份。
     public func registerPresence(
         binding: ProtocolIdentityBinding,
-        deviceName: String
-    ) async throws -> Bool {
-        let requestBody = RegisterCurrentDeviceRequestBody(
-            deviceId: binding.deviceId,
-            protocolSigningAlgorithm: binding.protocolSigningAlgorithm,
-            protocolPublicKeyFingerprint: binding.protocolPublicKeyFingerprint,
+        report: AccountDevicePresenceReport
+    ) async throws -> PresenceRegisterResponseBody {
+        let requestBody = PresenceRegisterRequestBody(
+            binding: binding,
             clientVersion: clientVersionProvider(),
             protocolVersion: protocolVersionProvider(),
-            deviceName: deviceName
+            report: report
         )
-        let response: PresenceRegisterResponseBody = try await performJSONRequest(
+        return try await performJSONRequest(
             path: Self.presenceRegisterPath,
             method: "POST",
             body: try JSONEncoder().encode(requestBody),
             requiresUserAuthentication: true
         )
-        return response.online
     }
 
-    /// 查询调用方自己的哪些设备 id 当前在线（绑定经 query 参数传递，与服务端 req.query 解析一致）。
-    public func queryPresence(
-        binding: ProtocolIdentityBinding,
-        deviceIDs: [String]
-    ) async throws -> [String] {
-        let ids = Array(Set(deviceIDs.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })).prefix(200)
-        guard !ids.isEmpty else { return [] }
-        let response: PresenceQueryResponseBody = try await performJSONRequest(
-            path: Self.presenceQueryPath,
+    /// 拉取调用方账号（JWT 的 tenant+user）下的全部设备及实时在线状态（绑定经 query 参数传递，与服务端 req.query 解析一致）。
+    public func listAccountDevices(binding: ProtocolIdentityBinding) async throws -> AccountDeviceListSnapshot {
+        try await performJSONRequest(
+            path: Self.accountDevicesListPath,
             method: "GET",
             queryItems: [
                 URLQueryItem(name: "deviceId", value: binding.deviceId),
                 URLQueryItem(name: "protocolSigningAlgorithm", value: binding.protocolSigningAlgorithm.rawValue),
-                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint),
-                URLQueryItem(name: "ids", value: ids.joined(separator: ","))
+                URLQueryItem(name: "protocolPublicKeyFingerprint", value: binding.protocolPublicKeyFingerprint)
             ],
-            requiresUserAuthentication: true
+            requiresUserAuthentication: true,
+            extraHeaders: [
+                "X-SkyBridge-Client-Version": clientVersionProvider(),
+                "X-SkyBridge-Protocol-Version": protocolVersionProvider()
+            ]
         )
-        return response.online
     }
+
+    /// 把 presence/账号设备列表请求抛出的错误归类为可决策的失败类型。
+    public nonisolated static func presenceFailure(for error: Error) -> AccountPresenceFailure {
+        if let clientError = error as? ClientError {
+            switch clientError {
+            case .serverRejected(let status, let description):
+                return AccountPresenceRefreshPolicy.classify(
+                    status: status,
+                    code: serverRejectedErrorCode(fromSanitizedDescription: description)
+                )
+            case .missingAuthentication, .missingTenantID, .missingUserID, .authenticationSessionChanged:
+                return .notAuthenticated
+            case .malformedResponse:
+                return .malformedResponse
+            default:
+                return .transport
+            }
+        }
+        if let presenceError = error as? AccountPresenceClientError {
+            switch presenceError {
+            case .localIdentityUnavailable:
+                return .localIdentityUnavailable
+            }
+        }
+        return .transport
+    }
+
+    /// 从 `sanitizedServerRejectedBodyDescription` 生成的摘要里取回服务端错误码（若摘要被整体脱敏则为 nil）。
+    public nonisolated static func serverRejectedErrorCode(fromSanitizedDescription description: String) -> String? {
+        guard let data = description.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let code = object["error"] as? String else {
+            return nil
+        }
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
 
     public func requestMediaRelayLease(mediaAdmissionToken: String) async throws -> MediaRelayLease {
         let response: MediaLeaseResponseBody = try await performJSONRequest(

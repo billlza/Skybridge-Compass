@@ -1,0 +1,21 @@
+/Users/bill/Desktop/SkyBridge Compass Pro release/.gitignore
+/Users/bill/Desktop/SkyBridge Compass Pro release/Package.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Scripts/sync_cloud_weather.py
+/Users/bill/Desktop/SkyBridge Compass Pro release/Sources/SkyBridgeCore/Weather/Effects/Cinematic/CinematicCloudyEffectView.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/README.md
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Package.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/CloudRenderPolicy.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/CinematicCloudView.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/CloudVolumeRenderer.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources/cloud_noise_volume.rgba
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Sources/SkyBridgeWeatherRendering/Resources/CloudVolume.metal
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/HostApp/project.yml
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/HostApp/CloudRenderingHost.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/HostApp/Info.plist
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/SkyBridgeWeatherRenderingTests/CloudSurfaceTests.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/SkyBridgeWeatherRenderingTests/CloudRenderingTests.swift
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/HostApp/CloudRenderingHost.xcodeproj/project.pbxproj
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/HostApp/CloudRenderingHost.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+/Users/bill/Desktop/SkyBridge Compass Pro release/Packages/SkyBridgeWeatherRendering/Tests/HostApp/CloudRenderingHost.xcodeproj/xcshareddata/xcschemes/CloudRenderingHost.xcscheme

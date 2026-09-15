@@ -12,9 +12,9 @@ publish = false
 [workspace]
 
 [dependencies]
-q-periapt-backends = { path = "../../External/pqt_hybrid_suite/crates/q-periapt-backends" }
-q-periapt-policy = { path = "../../External/pqt_hybrid_suite/crates/q-periapt-policy" }
-q-periapt-sig = { path = "../../External/pqt_hybrid_suite/crates/q-periapt-sig" }
+q-periapt-backends = { version = "=0.1.5", path = "../../External/pqt_hybrid_suite/crates/q-periapt-backends" }
+q-periapt-policy = { version = "=0.1.5", path = "../../External/pqt_hybrid_suite/crates/q-periapt-policy" }
+q-periapt-sig = { version = "=0.1.5", path = "../../External/pqt_hybrid_suite/crates/q-periapt-sig" }
 # OS randomness for the root seed and hedged signing nonce. The suite keeps
 # randomness at the product boundary, so the ceremony supplies it explicitly.
 getrandom = "0.3"

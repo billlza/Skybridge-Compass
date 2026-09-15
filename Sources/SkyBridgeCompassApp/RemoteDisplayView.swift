@@ -2,7 +2,6 @@ import SwiftUI
 @preconcurrency import Metal
 import MetalKit
 import Combine
-import os.log
 import SkyBridgeCore
 
 /// 支持输入事件的交互式远程显示视图
@@ -12,31 +11,81 @@ class InteractiveRemoteView: MTKView {
     var onKeyboardEvent: ((UInt16, Bool) -> Void)?
     var onScrollEvent: ((CGFloat, CGFloat) -> Void)?
     
-    private let logger = Logger(subsystem: "com.skybridge.compass", category: "RemoteInput")
-    private var renderingErrorLabel: NSTextField?
-    
-    override var acceptsFirstResponder: Bool { true }
-    override var canBecomeKeyView: Bool { true }
-    
-    override func awakeFromNib() {
-        super.awakeFromNib()
-        Task { @MainActor in
-            setupInputTracking()
-        }
+    var mapsPointerToRemoteFrame = false
+    var remoteFrameSize: CGSize = .zero
+    private var inputFeedIdentity: ObjectIdentifier?
+    private enum PressedControl: Equatable {
+        case key(UInt16)
+        case mouse(Int)
     }
-    
-    @MainActor
-    private func setupInputTracking() {
- // 启用鼠标跟踪
-        let trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+    private var pressedControls: [PressedControl] = []
+    private var lastPointerLocation: CGPoint = .zero
+    private var inputTrackingArea: NSTrackingArea?
+    private var renderingErrorLabel: NSTextField?
+
+    override var acceptsFirstResponder: Bool { onKeyboardEvent != nil }
+    override var canBecomeKeyView: Bool { acceptsFirstResponder }
+
+    override func updateTrackingAreas() {
+        if let inputTrackingArea { removeTrackingArea(inputTrackingArea) }
+        let tracking = NSTrackingArea(
+            rect: .zero,
+            options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
-        addTrackingArea(trackingArea)
-        
-        logger.info("🖱️ 远程显示视图输入跟踪已启用")
+        addTrackingArea(tracking)
+        inputTrackingArea = tracking
+        super.updateTrackingAreas()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        releasePressedInput()
+        if let window {
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(windowResignedKey),
+                name: NSWindow.didResignKeyNotification, object: window
+            )
+        }
+    }
+
+    @objc private func windowResignedKey(_ notification: Notification) {
+        releasePressedInput()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { releasePressedInput() }
+        return resigned
+    }
+
+    func prepareInputBinding(feed: RemoteTextureFeed, hasKeyboardInput: Bool, hasMouseInput: Bool) {
+        let identity = ObjectIdentifier(feed)
+        if inputFeedIdentity != identity || !hasKeyboardInput || !hasMouseInput {
+            releasePressedInput()
+        }
+        inputFeedIdentity = identity
+    }
+
+    /// Release through the old callbacks before focus, feed, or window ownership changes.
+    func releasePressedInput() {
+        let controls = pressedControls.reversed()
+        pressedControls.removeAll()
+        for control in controls {
+            switch control {
+            case .key(let key): onKeyboardEvent?(key, false)
+            case .mouse(let button):
+                onMouseEvent?(lastPointerLocation, button == 0 ? .leftMouseUp : .rightMouseUp, button)
+            }
+        }
     }
 
     @MainActor
@@ -65,75 +114,118 @@ class InteractiveRemoteView: MTKView {
         renderingErrorLabel = nil
     }
     
- // MARK: - 鼠标事件处理
-    
-    override func mouseDown(with event: NSEvent) {
+    // MARK: - Input in the displayed frame's coordinate space
+
+    private func pointerLocation(for event: NSEvent) -> CGPoint? {
         let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .leftMouseDown, Int(event.buttonNumber))
+        guard mapsPointerToRemoteFrame else { return location }
+        guard bounds.width > 0, bounds.height > 0,
+              remoteFrameSize.width > 0, remoteFrameSize.height > 0 else { return nil }
+        let x = (location.x - bounds.minX) / bounds.width
+        let y = isFlipped
+            ? (location.y - bounds.minY) / bounds.height
+            : (bounds.maxY - location.y) / bounds.height
+        return CGPoint(
+            x: min(max(x * remoteFrameSize.width, 0), remoteFrameSize.width - 1),
+            y: min(max(y * remoteFrameSize.height, 0), remoteFrameSize.height - 1)
+        )
     }
-    
-    override func mouseUp(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .leftMouseUp, Int(event.buttonNumber))
+
+    private func forwardMouse(_ event: NSEvent, type: NSEvent.EventType, button: Int = 0) {
+        guard let onMouseEvent else { return }
+        let isRelease = type == .leftMouseUp || type == .rightMouseUp
+        let location: CGPoint
+        if let mapped = pointerLocation(for: event) {
+            location = mapped
+        } else if isRelease, pressedControls.contains(.mouse(button)) {
+            // A frame transition must not strand a previously delivered press.
+            location = lastPointerLocation
+        } else {
+            return
+        }
+        if type == .leftMouseDown || type == .rightMouseDown {
+            window?.makeFirstResponder(self)
+            if !pressedControls.contains(.mouse(button)) { pressedControls.append(.mouse(button)) }
+        } else if isRelease {
+            guard let index = pressedControls.firstIndex(of: .mouse(button)) else { return }
+            pressedControls.remove(at: index)
+        }
+        lastPointerLocation = location
+        onMouseEvent(location, type, button)
     }
-    
-    override func rightMouseDown(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .rightMouseDown, Int(event.buttonNumber))
-    }
-    
-    override func rightMouseUp(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .rightMouseUp, Int(event.buttonNumber))
-    }
-    
-    override func mouseMoved(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .mouseMoved, 0)
-    }
-    
-    override func mouseDragged(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .leftMouseDragged, Int(event.buttonNumber))
-    }
-    
-    override func rightMouseDragged(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        onMouseEvent?(location, .rightMouseDragged, Int(event.buttonNumber))
-    }
-    
+
+    override func mouseDown(with event: NSEvent) { forwardMouse(event, type: .leftMouseDown) }
+    override func mouseUp(with event: NSEvent) { forwardMouse(event, type: .leftMouseUp) }
+    override func rightMouseDown(with event: NSEvent) { forwardMouse(event, type: .rightMouseDown, button: 1) }
+    override func rightMouseUp(with event: NSEvent) { forwardMouse(event, type: .rightMouseUp, button: 1) }
+    override func mouseMoved(with event: NSEvent) { forwardMouse(event, type: .mouseMoved) }
+    override func mouseDragged(with event: NSEvent) { forwardMouse(event, type: .leftMouseDragged) }
+    override func rightMouseDragged(with event: NSEvent) { forwardMouse(event, type: .rightMouseDragged, button: 1) }
     override func scrollWheel(with event: NSEvent) {
         onScrollEvent?(event.scrollingDeltaX, event.scrollingDeltaY)
     }
-    
- // MARK: - 键盘事件处理
-    
+
+    private func forwardKey(_ code: UInt16, pressed: Bool) {
+        guard let onKeyboardEvent else { return }
+        if pressed {
+            if !pressedControls.contains(.key(code)) { pressedControls.append(.key(code)) }
+        } else {
+            guard let index = pressedControls.firstIndex(of: .key(code)) else { return }
+            pressedControls.remove(at: index)
+        }
+        onKeyboardEvent(code, pressed)
+    }
+
     override func keyDown(with event: NSEvent) {
-        onKeyboardEvent?(event.keyCode, true)
+        reconcileKeyboardModifiers(event.modifierFlags)
+        forwardKey(event.keyCode, pressed: true)
     }
-    
+
     override func keyUp(with event: NSEvent) {
-        onKeyboardEvent?(event.keyCode, false)
+        forwardKey(event.keyCode, pressed: false)
+        reconcileKeyboardModifiers(event.modifierFlags)
     }
-    
+
+    /// Focus may enter this view after a modifier was pressed, and synthesized
+    /// key events may carry flags without a separate flagsChanged event. Emit
+    /// the missing physical modifier events through the existing input binding.
+    private func reconcileKeyboardModifiers(_ flags: NSEvent.ModifierFlags) {
+        let groups: [(NSEvent.ModifierFlags, [UInt16])] = [
+            (.shift, [56, 60]), (.control, [59, 62]), (.option, [58, 61]),
+            (.command, [55, 54])
+        ]
+        for (flag, codes) in groups {
+            let held = codes.filter { pressedControls.contains(.key($0)) }
+            if flags.contains(flag) {
+                if held.isEmpty, let code = codes.first { forwardKey(code, pressed: true) }
+            } else {
+                for code in held { forwardKey(code, pressed: false) }
+            }
+        }
+    }
+
     override func flagsChanged(with event: NSEvent) {
- // 处理修饰键变化（Shift、Ctrl、Alt、Cmd等）
-        let modifierFlags = event.modifierFlags
-        
- // 可以根据需要处理特定的修饰键
-        if modifierFlags.contains(.shift) {
- // Shift键状态变化
+        let flag: NSEvent.ModifierFlags
+        let codes: [UInt16]
+        switch event.keyCode {
+        case 54, 55: flag = .command; codes = [54, 55]
+        case 56, 60: flag = .shift; codes = [56, 60]
+        case 58, 61: flag = .option; codes = [58, 61]
+        case 59, 62: flag = .control; codes = [59, 62]
+        case 63: flag = .function; codes = [63]
+        case 57:
+            forwardKey(57, pressed: true)
+            forwardKey(57, pressed: false)
+            return
+        default: return
         }
-        if modifierFlags.contains(.control) {
- // Control键状态变化
-        }
-        if modifierFlags.contains(.option) {
- // Option键状态变化
-        }
-        if modifierFlags.contains(.command) {
- // Command键状态变化
+        if event.modifierFlags.contains(flag) {
+            forwardKey(event.keyCode, pressed: !pressedControls.contains(.key(event.keyCode)))
+        } else {
+            for code in codes { forwardKey(code, pressed: false) }
         }
     }
+
 }
 
 /// SwiftUI 包装的 MTKView，用于在屏幕上呈现远端 GPU 纹理。
@@ -142,6 +234,7 @@ class InteractiveRemoteView: MTKView {
 /// - 新增：完整的鼠标和键盘事件处理，支持远程桌面交互
 struct RemoteDisplayView: NSViewRepresentable {
     let textureFeed: RemoteTextureFeed
+    var mapsPointerToRemoteFrame = false
     
  /// 输入事件回调
     var onMouseEvent: ((CGPoint, NSEvent.EventType, Int) -> Void)?
@@ -157,6 +250,8 @@ struct RemoteDisplayView: NSViewRepresentable {
         view.framebufferOnly = true           // 仅作为显示目标，提高驱动优化
         view.delegate = context.coordinator
         
+        view.mapsPointerToRemoteFrame = mapsPointerToRemoteFrame
+        view.prepareInputBinding(feed: textureFeed, hasKeyboardInput: onKeyboardEvent != nil, hasMouseInput: onMouseEvent != nil)
  // 设置输入事件回调
         view.onMouseEvent = onMouseEvent
         view.onKeyboardEvent = onKeyboardEvent
@@ -167,6 +262,8 @@ struct RemoteDisplayView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: InteractiveRemoteView, context: Context) {
+        nsView.prepareInputBinding(feed: textureFeed, hasKeyboardInput: onKeyboardEvent != nil, hasMouseInput: onMouseEvent != nil)
+        nsView.mapsPointerToRemoteFrame = mapsPointerToRemoteFrame
         context.coordinator.attach(view: nsView, feed: textureFeed)
  // 更新回调
         nsView.onMouseEvent = onMouseEvent
@@ -176,6 +273,7 @@ struct RemoteDisplayView: NSViewRepresentable {
     
     static func dismantleNSView(_ nsView: InteractiveRemoteView, coordinator: RendererCoordinator) {
  // 在视图销毁时清理资源
+        nsView.releasePressedInput()
         coordinator.detach()
     }
 
@@ -236,6 +334,9 @@ struct RemoteDisplayView: NSViewRepresentable {
                 .sink { [weak self] frame in
                     guard let self = self else { return }
                     self.latestFrame = frame
+                    (self.view as? InteractiveRemoteView)?.remoteFrameSize = frame.map {
+                        CGSize(width: $0.texture.width, height: $0.texture.height)
+                    } ?? .zero
                     guard let view = self.view, view.window != nil else { return }
                     if !self.displayRequestPending {
                         self.displayRequestPending = true

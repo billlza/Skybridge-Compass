@@ -1171,8 +1171,18 @@ public struct SettingsView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Toggle("Q-Periapt ABI2 PolicyBound 混合套件（beta）", isOn: $settingsManager.preferQPeriaptBeta)
-                            .disabled(!settingsManager.qPeriaptRuntimeSupported)
+                            .disabled(!settingsManager.qPeriaptRuntimeSupported && !settingsManager.preferQPeriaptBeta)
                             .help("实验性：仅在已验证签名策略、独立验证密钥 pin、持久化可信状态和 ABI2 自检全部通过后，才优先协商 Q-Periapt PolicyBound。")
+                        if let error = settingsManager.qPeriaptRuntimePreparationError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .textSelection(.enabled)
+                            Button("重试 Q-Periapt 准备") {
+                                settingsManager.retryQPeriaptRuntimePreparation()
+                            }
+                            .disabled(settingsManager.isPreparingQPeriaptRuntime)
+                        }
                         Text("Beta：默认关闭；与现有 X-Wing / ML-KEM 不互通，且双方必须使用完全相同的已认证策略。")
                             .font(.caption)
                         Text("现有 peer 继续使用已 pin 的 ML-DSA-65；只有完成 87 公钥认证与持久化后才使用 ML-DSA-87，不会因失败自动降级。")

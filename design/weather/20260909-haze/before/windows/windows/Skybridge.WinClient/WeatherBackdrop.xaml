@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WeatherBackdrop — an in-app animated particle layer (rain streaks + faint twinkling
+  stars) that sits BEHIND the dashboard content, element-matching the Mac dashboard's
+  live weather background (the Mac uses a Metal particle system: RealisticRainView /
+  CinematicRainSystem; this is the lightweight WinUI equivalent built on the Composition
+  API so it runs on the GPU off the UI thread). The host is hit-test-invisible so it never
+  intercepts input; particles are generated in code-behind from the live size and re-laid
+  out on SizeChanged.
+
+  Layering: placed as the bottom-most child of the content Grid (RowSpan over the top bar +
+  body), so the half-transparent GlassPanel cards/top-bar pills read AS lit glass over the
+  moving rain — that combination (moving backdrop + translucent surfaces) is what gives the
+  Mac its depth and what the flat static Windows gradient was missing.
+-->
+<UserControl
+    x:Class="Skybridge.WinClient.WeatherBackdrop"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    IsHitTestVisible="False">
+
+    <!-- The Composition child visual is attached to this Grid; it also clips particles to
+         the bounds so streaks never bleed past the content region. -->
+    <Grid x:Name="HostGrid" />
+</UserControl>

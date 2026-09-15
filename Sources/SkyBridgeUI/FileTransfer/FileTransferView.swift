@@ -234,7 +234,7 @@ public struct FileTransferView: View {
                 .font(.headline)
                 .fontWeight(.semibold)
 
-            let recentTransfers = Array(fileTransferManager.transferHistory.prefix(3))
+            let recentTransfers = Array(fileTransferManager.transferHistory.suffix(3).reversed())
             if recentTransfers.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "clock.arrow.circlepath")
@@ -443,7 +443,7 @@ public struct FileTransferView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        ForEach(fileTransferManager.transferHistory) { transfer in
+                        ForEach(fileTransferManager.transferHistory.reversed()) { transfer in
                             EnhancedHistoryRowView(transfer: transfer)
                         }
                     }

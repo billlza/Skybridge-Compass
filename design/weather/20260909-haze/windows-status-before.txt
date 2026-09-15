@@ -1,0 +1,211 @@
+ M .github/workflows/windows-portability.yml
+ M .gitignore
+ M AGENTS.md
+ M README.md
+ M Scripts/audit-windows-portability-completion.ps1
+ M Scripts/register-windows-reverse-ssh-relay-task.ps1
+ M Scripts/verify-windows-ci-workflow.ps1
+ M Scripts/verify-windows-command-gates.ps1
+ M Scripts/verify-windows-connection-launch.ps1
+ M Scripts/verify-windows-current-path-bridge-contract.ps1
+ M Scripts/verify-windows-ffi-client.ps1
+ M Scripts/verify-windows-file-transfer-qr.ps1
+ M Scripts/verify-windows-native-dns-sd-acceptance.ps1
+ M Scripts/verify-windows-native-runtime-profile.ps1
+ M Scripts/verify-windows-portability-acceptance-evidence.ps1
+ M Scripts/verify-windows-portability-acceptance-map.ps1
+ M Scripts/verify-windows-portability-smoke.ps1
+ M Scripts/verify-windows-reverse-ssh-relay-lifecycle.ps1
+ M Scripts/verify-windows-stack-freshness.ps1
+ M Scripts/verify-windows-startup-state.ps1
+ M Scripts/verify-windows-ui-action-order.ps1
+ M Scripts/verify-windows-ui-automation-smoke.ps1
+ M Scripts/verify-windows-ui-parity-matrix.ps1
+ M Scripts/verify-windows-ui-parity.ps1
+ M Scripts/verify-windows-webrtc-proof.ps1
+ M core/skybridge-core/Cargo.lock
+ M core/skybridge-core/Cargo.toml
+ M core/skybridge-core/src/cli.rs
+ M core/skybridge-core/src/crypto.rs
+ M core/skybridge-core/src/discovery.rs
+ M core/skybridge-core/src/ffi.rs
+ M core/skybridge-core/src/padding.rs
+ M core/skybridge-core/tests/cli_smoke.rs
+ M docs/windows-architecture.md
+ M docs/windows-mac-ios-parity-gap-audit.md
+ M docs/windows-portability-acceptance-map.md
+ M docs/windows-research-agent-synthesis.md
+ M docs/windows-stable-ssh-connection.md
+ M docs/windows-ui-parity-contract.md
+ M docs/windows-ui-parity-matrix.md
+ M windows/Skybridge.WebRtcHelper/Skybridge.WebRtcHelper.csproj
+ M windows/Skybridge.WinClient.ContractTests/Program.cs
+ M windows/Skybridge.WinClient.ContractTests/Skybridge.WinClient.ContractTests.csproj
+ M windows/Skybridge.WinClient.ContractTests/TestStubs.cs
+ M windows/Skybridge.WinClient.RuntimeSmoke/Program.cs
+ M windows/Skybridge.WinClient.RuntimeSmoke/Skybridge.WinClient.RuntimeSmoke.csproj
+ M windows/Skybridge.WinClient/App.xaml
+ M windows/Skybridge.WinClient/App.xaml.cs
+ M windows/Skybridge.WinClient/AuthOverlay.xaml
+ M windows/Skybridge.WinClient/AuthOverlay.xaml.cs
+ M windows/Skybridge.WinClient/Converters/LabelKeyToLocalizedConverter.cs
+ M windows/Skybridge.WinClient/MainWindow.xaml
+ M windows/Skybridge.WinClient/MainWindow.xaml.cs
+ M windows/Skybridge.WinClient/Package.appxmanifest
+ M windows/Skybridge.WinClient/Services/ConnectionPreflightClient.cs
+ M windows/Skybridge.WinClient/Services/ConnectionWorkspaceStateClient.cs
+ M windows/Skybridge.WinClient/Services/CoreBridge.cs
+ M windows/Skybridge.WinClient/Services/CurrentPathSignalingClient.cs
+ M windows/Skybridge.WinClient/Services/CurrentPathWebRtcHelperSignalingBridge.cs
+ M windows/Skybridge.WinClient/Services/CurrentPathWebRtcProductControlSessionConnector.cs
+ M windows/Skybridge.WinClient/Services/DiscoveryBrowserClient.cs
+ M windows/Skybridge.WinClient/Services/FeatureCatalogClient.cs
+ M windows/Skybridge.WinClient/Services/FfiEngineClient.cs
+ M windows/Skybridge.WinClient/Services/FileTransferWorkspaceClient.cs
+ M windows/Skybridge.WinClient/Services/IEngineClient.cs
+ M windows/Skybridge.WinClient/Services/ISupabaseAuthClient.cs
+ M windows/Skybridge.WinClient/Services/NativeWindowsDnsSdBrowseClient.cs
+ M windows/Skybridge.WinClient/Services/SessionStore.cs
+ M windows/Skybridge.WinClient/Services/SupabaseAuthClient.cs
+ M windows/Skybridge.WinClient/Services/TopBarNetworkStatusClient.cs
+ M windows/Skybridge.WinClient/Services/UnavailableClientStubs.cs
+ M windows/Skybridge.WinClient/Services/WebRtcAppControlBootstrapClient.cs
+ M windows/Skybridge.WinClient/Services/WebRtcControlChannelCodec.cs
+ M windows/Skybridge.WinClient/Services/WebRtcHelperLaunchClient.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductControlRuntime.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductHandshakeCodec.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductHandshakeDriver.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductHandshakeIdentity.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductHandshakeSessionKeys.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductPqcHandshakeCryptoProvider.cs
+ M windows/Skybridge.WinClient/Services/WebRtcProductSecureSessionStore.cs
+ M windows/Skybridge.WinClient/Services/WebRtcSessionRuntime.cs
+ M windows/Skybridge.WinClient/Services/WebRtcSessionTransportAdapterClient.cs
+ M windows/Skybridge.WinClient/Services/WindowsNativeMsQuicListenerTransportAdapterClient.cs
+ M windows/Skybridge.WinClient/Services/WindowsNativeMsQuicTransportAdapterClient.cs
+ M windows/Skybridge.WinClient/Services/WindowsNativeMsQuicTransportSecret.cs
+ M windows/Skybridge.WinClient/Services/WindowsPowerKeepAwake.cs
+ M windows/Skybridge.WinClient/Services/WindowsTransportAdapterClient.cs
+ M windows/Skybridge.WinClient/Services/WorkspaceActionCatalogClient.cs
+ M windows/Skybridge.WinClient/SessionViewModelDependencyFactory.cs
+ M windows/Skybridge.WinClient/Settings/SettingsAdvancedView.xaml
+ M windows/Skybridge.WinClient/Settings/SettingsFileTransferView.xaml
+ M windows/Skybridge.WinClient/Settings/SettingsSystemMonitorView.xaml
+ M windows/Skybridge.WinClient/Skybridge.WinClient.csproj
+ M windows/Skybridge.WinClient/Strings/en-US/Resources.resw
+ M windows/Skybridge.WinClient/Strings/ja/Resources.resw
+ M windows/Skybridge.WinClient/Strings/zh-Hans/Resources.resw
+ M windows/Skybridge.WinClient/Themes/SkyBridgeControls.xaml
+ M windows/Skybridge.WinClient/Themes/SkyBridgeTheme.xaml
+ M windows/Skybridge.WinClient/UserProfileOverlay.xaml
+ M windows/Skybridge.WinClient/ViewModels/AccountSessionCoordinator.cs
+ M windows/Skybridge.WinClient/ViewModels/AsyncRelayCommand.cs
+ M windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceActions.cs
+ M windows/Skybridge.WinClient/ViewModels/ConnectionWorkspaceResultProjector.cs
+ M windows/Skybridge.WinClient/ViewModels/DiscoveryBrowserActions.cs
+ D windows/Skybridge.WinClient/ViewModels/FeatureEntryIdToAccentBrushConverter.cs
+ M windows/Skybridge.WinClient/ViewModels/RemoteDesktopWorkspaceActions.cs
+ M windows/Skybridge.WinClient/ViewModels/SessionViewModel.cs
+ M windows/Skybridge.WinClient/ViewModels/SessionViewModelDependencies.cs
+ M windows/Skybridge.WinClient/ViewModels/SettingsCoordinator.cs
+ M windows/Skybridge.WinClient/ViewModels/TopBarNetworkCoordinator.cs
+ M windows/Skybridge.WinClient/ViewModels/WorkspaceBusyCoordinator.cs
+ M windows/Skybridge.WinClient/ViewModels/WorkspaceCommandGateCoordinator.cs
+ M windows/Skybridge.WinClient/ViewModels/WorkspaceItemViews.cs
+ M windows/Skybridge.WinClient/ViewModels/WorkspaceShellStateSource.cs
+ M windows/Skybridge.WinClient/WeatherBackdropDX.xaml
+ M windows/Skybridge.WinClient/WeatherBackdropDX.xaml.cs
+ M windows/Skybridge.WinClient/WindowsNativeRuntimeDependencyFactory.cs
+ M windows/Skybridge.WinClient/tools/Setup-Msix.ps1
+?? .cargo/
+?? Scripts/DesktopBackendSmoke.cs
+?? Scripts/DesktopScalerSmoke.cs
+?? Scripts/DesktopSyncRefreshSmoke.cs
+?? Scripts/DesktopViewerInputReceipt.cs
+?? Scripts/NetworkStatusSmoke.cs
+?? Scripts/export-mac-remote-control-vectors.py
+?? Scripts/register-windows-lan-ssh-access.ps1
+?? Scripts/test-windows-lan-ssh-lifecycle.ps1
+?? Scripts/test-windows-reverse-ssh-relay-registration.ps1
+?? Scripts/verify-windows-current-path-product-control-answerer-file-transfer-live.ps1
+?? Scripts/verify-windows-current-path-product-control-file-transfer-live.ps1
+?? Scripts/verify-windows-desktop-host-native.ps1
+?? Scripts/verify-windows-lan-ssh-lifecycle.ps1
+?? Scripts/verify-windows-msquic-dial-target.ps1
+?? Scripts/verify-windows-network-status.ps1
+?? Scripts/verify-windows-public-artifact-redaction-smoke.ps1
+?? Scripts/verify-windows-public-artifact-redaction.ps1
+?? Scripts/verify-windows-shader-source.ps1
+?? core/skybridge-core/tests/fixtures/
+?? core/skybridge-core/tests/qperiapt_abi2_bridge.rs
+?? core/skybridge-core/tests/x25519_ffi.rs
+?? docs/windows-lan-desktop-host.md
+?? docs/windows-lan-ssh-lifecycle.md
+?? docs/windows-network-diagnostics.md
+?? global.json
+?? rust-toolchain.toml
+?? windows/NativeCore.targets
+?? windows/Skybridge.WinClient.ContractTests/ClassicFileTransferOperationTests.cs
+?? windows/Skybridge.WinClient.ContractTests/ClassicFileTransferWireTests.cs
+?? windows/Skybridge.WinClient.ContractTests/Fixtures/
+?? windows/Skybridge.WinClient.ContractTests/LanProductControlSessionTests.cs
+?? windows/Skybridge.WinClient.ContractTests/NativeLanFileTransferValidation.cs
+?? windows/Skybridge.WinClient.ContractTests/NetworkTelemetryTests.cs
+?? windows/Skybridge.WinClient.ContractTests/QPeriaptNativeContractTests.cs
+?? windows/Skybridge.WinClient.ContractTests/RemoteControlHostAccessTests.cs
+?? windows/Skybridge.WinClient.ContractTests/RemoteControlHostSessionTests.cs
+?? windows/Skybridge.WinClient.ContractTests/RemoteControlIdentityContractTests.cs
+?? windows/Skybridge.WinClient.ContractTests/RemoteControlNetworkSelectionTests.cs
+?? windows/Skybridge.WinClient.ContractTests/RemoteControlProtocolContractTests.cs
+?? windows/Skybridge.WinClient.ContractTests/RemoteControlViewerSessionTests.cs
+?? windows/Skybridge.WinClient.ContractTests/ViewModelTestStubs.cs
+?? windows/Skybridge.WinClient.ContractTests/WeatherGlassGeometryTests.cs
+?? windows/Skybridge.WinClient.ContractTests/WindowsDesktopBackendContractTests.cs
+?? windows/Skybridge.WinClient.ContractTests/WindowsPowerKeepAwakeTests.cs
+?? windows/Skybridge.WinClient.ContractTests/WindowsRemoteControlAudioAdvertisementTests.cs
+?? windows/Skybridge.WinClient/Assets/
+?? windows/Skybridge.WinClient/MainWindow.FileTransfer.cs
+?? windows/Skybridge.WinClient/RemoteControl/
+?? windows/Skybridge.WinClient/Services/AccountDeviceRosterClient.cs
+?? windows/Skybridge.WinClient/Services/CoreBridge.QPeriapt.cs
+?? windows/Skybridge.WinClient/Services/DiscoveryPeerRoutes.cs
+?? windows/Skybridge.WinClient/Services/FileTransfer/
+?? windows/Skybridge.WinClient/Services/FileTransferWorkspaceContracts.cs
+?? windows/Skybridge.WinClient/Services/LanProductControlMessages.cs
+?? windows/Skybridge.WinClient/Services/LanProductControlSession.cs
+?? windows/Skybridge.WinClient/Services/NativeWindowsDnsSdTxtRecordCodec.cs
+?? windows/Skybridge.WinClient/Services/ProductControlTrafficPadding.cs
+?? windows/Skybridge.WinClient/Services/ProductForwardSecretContribution.cs
+?? windows/Skybridge.WinClient/Services/ProductHandshakeContracts.cs
+?? windows/Skybridge.WinClient/Services/ProductHandshakeCore.cs
+?? windows/Skybridge.WinClient/Services/ProductHandshakeKeyDerivation.cs
+?? windows/Skybridge.WinClient/Services/ProductPeerAuthentication.cs
+?? windows/Skybridge.WinClient/Services/ProductSecureEnvelope.cs
+?? windows/Skybridge.WinClient/Services/ProductSessionActionGateClient.cs
+?? windows/Skybridge.WinClient/Services/ProductSessionActionTargetProjection.cs
+?? windows/Skybridge.WinClient/Services/QPeriaptNativeClient.cs
+?? windows/Skybridge.WinClient/Services/RealtimeMediaPacketCodec.cs
+?? windows/Skybridge.WinClient/Services/RemoteControl/
+?? windows/Skybridge.WinClient/Services/RemoteControlHandshakeBinding.cs
+?? windows/Skybridge.WinClient/Services/RemoteControlSecureEnvelope.cs
+?? windows/Skybridge.WinClient/Services/SkyBridgeProtocolConstants.cs
+?? windows/Skybridge.WinClient/Services/TcpProductControlTransport.cs
+?? windows/Skybridge.WinClient/Services/WebRtcAuthenticatedRouteBindingPayload.cs
+?? windows/Skybridge.WinClient/Services/WebRtcAuthenticatedRouteBindingStore.cs
+?? windows/Skybridge.WinClient/Services/WebRtcFileTransferRuntimeProof.cs
+?? windows/Skybridge.WinClient/Services/WebRtcProductControlContracts.cs
+?? windows/Skybridge.WinClient/Services/WebRtcProductControlEngineClient.cs
+?? windows/Skybridge.WinClient/Services/WebRtcProductControlMessageInbox.cs
+?? windows/Skybridge.WinClient/Services/WebRtcProductHandshakeSessionEstablisher.cs
+?? windows/Skybridge.WinClient/Services/WebRtcProductSecureSessionRuntimeConsumer.cs
+?? windows/Skybridge.WinClient/Services/WebRtcSessionEngineClient.cs
+?? windows/Skybridge.WinClient/Services/WebRtcSessionResourceOwner.cs
+?? windows/Skybridge.WinClient/Services/WebRtcSessionRuntimeContracts.cs
+?? windows/Skybridge.WinClient/Services/WindowsDeviceWorkspace.cs
+?? windows/Skybridge.WinClient/ThirdPartyNotices/
+?? windows/Skybridge.WinClient/ViewModels/FeatureAccentBrushes.cs
+?? windows/Skybridge.WinClient/ViewModels/RemoteControlHostSessionViewModel.cs
+?? windows/Skybridge.WinClient/ViewModels/RemoteControlHostViewModel.cs
+?? windows/Skybridge.WinClient/ViewModels/SidebarItemStyleSelector.cs
+?? windows/Skybridge.WinClient/VisualParity/
+?? windows/Skybridge.WinClient/WeatherGlassGeometry.cs

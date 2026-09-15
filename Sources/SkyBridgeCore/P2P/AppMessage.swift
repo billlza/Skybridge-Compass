@@ -275,6 +275,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
     public struct KEMRefreshRequestPayload: Codable, Sendable, Equatable {
         public static let domainSeparator = "SkyBridge-SKR-1-Request"
         public static let currentVersion = 1
+        public static let qPeriaptVersion = 2
         public static let maximumAcceptedAge: TimeInterval = 120
         public static let maximumAcceptedFutureSkew: TimeInterval = 30
 
@@ -319,7 +320,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 ?? AppMessage.skr1PolicyHashHex(
                     requirePQC: policyRequirePQC,
                     allowClassicFallback: policyAllowClassicFallback,
-                    routeScope: routeScope
+                    routeScope: routeScope,
+                    version: version
                 )
             self.routeScope = routeScope
             self.bonjourEndpointDigest = bonjourEndpointDigest
@@ -331,7 +333,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             AppMessage.skr1PolicyHashHex(
                 requirePQC: policyRequirePQC,
                 allowClassicFallback: policyAllowClassicFallback,
-                routeScope: routeScope
+                routeScope: routeScope,
+                    version: version
             )
         }
 
@@ -359,7 +362,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             maximumAcceptedAge: TimeInterval = Self.maximumAcceptedAge,
             maximumAcceptedFutureSkew: TimeInterval = Self.maximumAcceptedFutureSkew
         ) throws -> [CryptoSuite] {
-            guard version == Self.currentVersion else { throw KEMRefreshValidationError.invalidVersion }
+            guard version == Self.currentVersion || version == Self.qPeriaptVersion else { throw KEMRefreshValidationError.invalidVersion }
             guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil else {
                 throw KEMRefreshValidationError.unrepresentableTimestamp
             }
@@ -368,7 +371,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             guard routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "lan" else {
                 throw KEMRefreshValidationError.invalidRouteScope
             }
-            guard nonce.count >= 16 else { throw KEMRefreshValidationError.invalidRequestNonce }
+            guard (16...128).contains(nonce.count) else { throw KEMRefreshValidationError.invalidRequestNonce }
             guard sentAt.timeIntervalSince(now) <= maximumAcceptedFutureSkew else {
                 throw KEMRefreshValidationError.requestFromFuture
             }
@@ -383,12 +386,22 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 guard !suite.isLegacyOnly else { throw KEMRefreshValidationError.legacySuiteRejected(wireId: suite.wireId) }
                 guard suite.isPQCGroup else { throw KEMRefreshValidationError.classicSuiteRejected(wireId: suite.wireId) }
             }
+            guard Set(requestedSuiteWireIds).count == requestedSuiteWireIds.count else {
+                throw KEMRefreshValidationError.policyMismatch
+            }
+            if version == Self.qPeriaptVersion {
+                guard requestedSuiteWireIds == [CryptoSuite.qperiaptABI2PolicyBound.wireId] else {
+                    throw KEMRefreshValidationError.policyMismatch
+                }
+            } else if suites.contains(.qperiaptABI2PolicyBound) {
+                throw KEMRefreshValidationError.policyMismatch
+            }
             return suites
         }
 
         public var canonicalPreimage: Data {
             let fields: [(String, String)] = [
-                ("domain", Self.domainSeparator),
+                ("domain", version == Self.currentVersion ? Self.domainSeparator : "SkyBridge-SKR-\(version)-Request"),
                 ("version", String(version)),
                 ("requesterDeviceId", AppMessage.normalizedToken(requesterDeviceId)),
                 ("targetDeviceId", AppMessage.normalizedToken(targetDeviceId)),
@@ -1157,6 +1170,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
     public struct SignedKEMRefreshPayload: Codable, Sendable, Equatable {
         public static let domainSeparator = "SkyBridge-SKR-1-SignedKEMRefresh"
         public static let currentVersion = 1
+        public static let qPeriaptVersion = 2
 
         public let version: Int
         public let deviceId: String
@@ -1175,6 +1189,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
         public let policyAllowClassicFallback: Bool
         public let routeScope: String
         public let bonjourEndpointDigest: String?
+        public let platform: String?
+        public let osVersion: String?
         public let signature: Data
 
         public init(
@@ -1195,6 +1211,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             policyAllowClassicFallback: Bool = false,
             routeScope: String = "lan",
             bonjourEndpointDigest: String? = nil,
+            platform: String? = nil,
+            osVersion: String? = nil,
             signature: Data
         ) {
             self.version = version
@@ -1214,6 +1232,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
             self.policyAllowClassicFallback = policyAllowClassicFallback
             self.routeScope = routeScope
             self.bonjourEndpointDigest = bonjourEndpointDigest
+            self.platform = platform
+            self.osVersion = osVersion
             self.signature = signature
         }
 
@@ -1249,6 +1269,8 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 policyAllowClassicFallback: policyAllowClassicFallback,
                 routeScope: routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 bonjourEndpointDigest: AppMessage.normalizedToken(bonjourEndpointDigest ?? ""),
+                platform: platform.map(AppMessage.normalizedToken),
+                osVersion: osVersion.map(AppMessage.normalizedToken),
                 signature: signature
             )
         }
@@ -1262,7 +1284,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 .sorted()
                 .joined(separator: ",")
             let fields: [(String, String)] = [
-                ("domain", Self.domainSeparator),
+                ("domain", payload.version == Self.currentVersion ? Self.domainSeparator : "SkyBridge-SKR-\(payload.version)-SignedKEMRefresh"),
                 ("version", String(payload.version)),
                 ("deviceId", AppMessage.normalizedToken(payload.deviceId)),
                 ("aliases", AppMessage.normalizedUniqueTokens(payload.aliases).joined(separator: ",")),
@@ -1282,7 +1304,10 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 ("policyAllowClassicFallback", payload.policyAllowClassicFallback ? "1" : "0"),
                 ("routeScope", payload.routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()),
                 ("bonjourEndpointDigest", AppMessage.normalizedToken(payload.bonjourEndpointDigest ?? ""))
-            ]
+            ] + (payload.version == Self.qPeriaptVersion ? [
+                ("platform", AppMessage.normalizedToken(payload.platform ?? "")),
+                ("osVersion", AppMessage.normalizedToken(payload.osVersion ?? ""))
+            ] : [])
             return AppMessage.canonicalLineEncoding(fields)
         }
 
@@ -1291,7 +1316,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             pinnedProtocolFingerprints: Set<String>,
             minimumGeneration: UInt64? = nil
         ) throws -> SignedKEMRefreshPayload {
-            guard version == Self.currentVersion else { throw KEMRefreshValidationError.invalidVersion }
+            guard version == Self.currentVersion || version == Self.qPeriaptVersion else { throw KEMRefreshValidationError.invalidVersion }
             guard AppMessage.canonicalMillisecondsSinceEpoch(sentAt) != nil,
                   AppMessage.canonicalMillisecondsSinceEpoch(expiresAt) != nil else {
                 throw KEMRefreshValidationError.unrepresentableTimestamp
@@ -1313,6 +1338,32 @@ public enum AppMessage: Codable, Sendable, Equatable {
                 throw KEMRefreshValidationError.invalidProtocolIdentityFingerprint
             }
             guard !kemPublicKeys.isEmpty else { throw KEMRefreshValidationError.missingKEMPublicKey }
+            guard Set(kemPublicKeys.map(\.suiteWireId)).count == kemPublicKeys.count else {
+                throw KEMRefreshValidationError.policyMismatch
+            }
+            if version == Self.qPeriaptVersion {
+                guard algorithm == .mlDSA65 else { throw KEMRefreshValidationError.invalidSignatureAlgorithm }
+                guard protocolIdentityPublicKey.count == 1952 else {
+                    throw KEMRefreshValidationError.invalidProtocolIdentityPublicKey
+                }
+                guard signature.count == algorithm.signatureByteCount else {
+                    throw KEMRefreshValidationError.missingSignature
+                }
+                guard expiresAt.timeIntervalSince(sentAt) <= 300,
+                      sentAt.timeIntervalSince(now) <= KEMRefreshRequestPayload.maximumAcceptedFutureSkew,
+                      requestNonce.count <= 128 else {
+                    throw KEMRefreshValidationError.invalidValidityWindow
+                }
+                guard kemPublicKeys.map(\.suiteWireId) == [CryptoSuite.qperiaptABI2PolicyBound.wireId],
+                      let platform, let osVersion,
+                      !AppMessage.normalizedToken(platform).isEmpty,
+                      !AppMessage.normalizedToken(osVersion).isEmpty,
+                      QPeriaptPeerPlatformPolicy.isPeerAppPlatformEligible(platform: platform, osVersion: osVersion) else {
+                    throw KEMRefreshValidationError.policyMismatch
+                }
+            } else if platform != nil || osVersion != nil || kemPublicKeys.contains(where: { $0.suiteWireId == CryptoSuite.qperiaptABI2PolicyBound.wireId }) {
+                throw KEMRefreshValidationError.policyMismatch
+            }
             guard let payload = normalizedForSignature else { throw KEMRefreshValidationError.invalidDeviceId }
             guard payload.policyRequirePQC, !payload.policyAllowClassicFallback else {
                 throw KEMRefreshValidationError.policyMismatch
@@ -1361,6 +1412,7 @@ public enum AppMessage: Codable, Sendable, Equatable {
             pinnedProtocolFingerprints: Set<String>,
             minimumGeneration: UInt64? = nil
         ) throws -> SignedKEMRefreshPayload {
+            guard version == request.version else { throw KEMRefreshValidationError.invalidVersion }
             guard request.hasExpectedPolicyHash else {
                 throw KEMRefreshValidationError.requestPolicyHashMismatch
             }
@@ -1387,6 +1439,14 @@ public enum AppMessage: Codable, Sendable, Equatable {
             )
             guard !targetDeviceId.isEmpty, responseDeviceIds.contains(targetDeviceId) else {
                 throw KEMRefreshValidationError.targetDeviceIdMismatch
+            }
+            guard AppMessage.normalizedToken(bonjourEndpointDigest ?? "") ==
+                    AppMessage.normalizedToken(request.bonjourEndpointDigest ?? "") else {
+                throw KEMRefreshValidationError.requestHashMismatch
+            }
+            if let requestedFingerprint = AppMessage.normalizedFingerprint(request.targetProtocolIdentityFingerprint),
+               requestedFingerprint != payload.protocolIdentityFingerprint {
+                throw KEMRefreshValidationError.pinnedProtocolIdentityMismatch(fingerprint: payload.protocolIdentityFingerprint)
             }
             return payload
         }
@@ -1885,11 +1945,12 @@ public enum AppMessage: Codable, Sendable, Equatable {
     private static func skr1PolicyHashHex(
         requirePQC: Bool,
         allowClassicFallback: Bool,
-        routeScope: String
+        routeScope: String,
+        version: Int
     ) -> String {
         let fields: [(String, String)] = [
-            ("domain", "SkyBridge-SKR-1-Policy"),
-            ("version", String(KEMRefreshRequestPayload.currentVersion)),
+            ("domain", "SkyBridge-SKR-\(version)-Policy"),
+            ("version", String(version)),
             ("policyRequirePQC", requirePQC ? "1" : "0"),
             ("policyAllowClassicFallback", allowClassicFallback ? "1" : "0"),
             ("routeScope", routeScope.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())

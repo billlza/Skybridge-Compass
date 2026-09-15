@@ -1,6 +1,26 @@
 import CryptoKit
 import Foundation
 
+/// One immutable read of the keys that actually protect this file transfer.
+/// The opaque reference and key cannot be taken from different rekey generations.
+@available(macOS 14.0, iOS 17.0, *)
+struct ClassicTransferKeyMaterial: Sendable {
+    let transferKey: SymmetricKey
+    let sessionReference: String?
+    let role: HandshakeRole
+    let negotiatedSuite: CryptoSuite
+
+    init(sessionKeys: SessionKeys, transferId: String) {
+        transferKey = sessionKeys.deriveClassicFileTransferKey(transferId: transferId)
+        sessionReference = P2PEvidenceReference.sessionIncarnation(
+            sessionID: sessionKeys.sessionId,
+            transcriptHash: sessionKeys.transcriptHash
+        )
+        role = sessionKeys.role
+        negotiatedSuite = sessionKeys.negotiatedSuite
+    }
+}
+
 @available(macOS 14.0, iOS 17.0, *)
 struct ClassicTransferSessionSnapshot: Sendable {
     let sessionId: String

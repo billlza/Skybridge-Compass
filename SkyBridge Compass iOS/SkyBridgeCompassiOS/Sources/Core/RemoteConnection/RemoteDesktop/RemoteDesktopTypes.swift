@@ -32,6 +32,7 @@ public enum RemoteMessageType: String, Codable, Sendable {
     // The payload is the shared, transaction-correlated acknowledgement from
     // SkyBridgeProtocolCore; LAN and WebRTC both consume the same contract.
     case streamConfigurationAck = "streamConfigurationAck"
+    case controlAccess = "controlAccess"
     case framePresentationAck = "framePresentationAck"
     case damageReport = "damageReport"
     case cursorUpdate = "cursorUpdate"
@@ -42,10 +43,12 @@ public enum RemoteMessageType: String, Codable, Sendable {
 public struct RemoteMessage: Codable, Sendable {
     public let type: RemoteMessageType
     public let payload: Data
+    public let inputControlLease: UUID?
 
-    public init(type: RemoteMessageType, payload: Data) {
+    public init(type: RemoteMessageType, payload: Data, inputControlLease: UUID? = nil) {
         self.type = type
         self.payload = payload
+        self.inputControlLease = inputControlLease
     }
 }
 

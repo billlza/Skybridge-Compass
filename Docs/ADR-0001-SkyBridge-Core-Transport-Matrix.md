@@ -1,18 +1,23 @@
 # ADR-0001: SkyBridge Core Transport Matrix
 
-**Status:** Proposed for implementation  
-**ADR Version:** 1.0  
-**Date:** 2026-06-07  
-**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, branch hygiene, stale-paper boundary  
+**Status:** Approved target architecture; implementation is tracked separately
+
+**ADR Version:** 1.1
+
+**Date:** 2026-06-07
+
+**Last reviewed:** 2026-09-08
+
+**Scope:** SkyBridge Core, macOS, iOS, Windows, Android, Linux, cross-platform P2P/WebRTC interop, branch hygiene, stale-paper boundary
+
 **Related areas:** P2P discovery, transport selection, WebRTC, Windows native networking, Android Kotlin stack, Android Wi-Fi Aware/NSD, Linux Rust core, Linux Avahi/DNS-SD, Apple Network.framework, QUIC, PQC, trust/pairing, traffic padding, session audit, signaling/TURN deployment
 
-> **⚠️ 实现状态（2026-06-16）**：本 ADR 是**已批准的架构目标（approved target architecture）**，其中
-> 大部分跨平台内容尚未落地。当前实现仅 **Apple↔Apple**：macOS 主机端通过 SkyBridge 私有 PQC 握手 +
-> Bonjour `_skybridge-rd._tcp` 提供远程控制，**只接受已登记信任的 Apple 对端**。
-> 下表中 §6.7 / §1 的 **Apple ↔ Windows/Android/Linux 的 “WebRTC DataChannel MVP 互通路径” 目前尚未接线**：
-> WebRTC 子系统没有任何调用进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`）。
-> Windows/Android/Linux 的 MsQuic / Quinn / Wi-Fi Aware / Avahi 原生栈同样为目标设计，尚无构建目标。
-> 因此非 Apple 设备目前**既不能被 Mac 控制、也不能控制 Mac**。落地顺序见 `ROADMAP.md`。
+> **实现范围复核（2026-09-08）**：本 ADR 的传输矩阵是目标架构，不是已发布功能清单。
+> 2026-06-16 的“仅实现 Apple 对端、WebRTC 未进入远控主机”快照已经过时。
+> 当前构建入口和模块边界见 [README](../README.md) 与 [CoreLayering](CoreLayering.md)；
+> 各端远控角色及已实现限制见 [共享观看与输入权](RemoteControl-SharedViewing.md)。
+> 共享远控的身份、批准和会话所有权由 [ADR-0002](ADR-0002-Remote-Control-Authority-and-Sessions.md) 细化。
+> 平台代码、成功构建、已安装候选和真机互通是分别验收的状态，不能相互替代。
 
 ---
 
@@ -30,7 +35,7 @@ The platform-specific best practices are:
 | Linux ↔ Linux | Linux native path: Rust core, Avahi DNS-SD/mDNS discovery, Rust-native QUIC or MsQuic provider, systemd/journal diagnostics | Cross-NAT fallback and interop option |
 | Windows ↔ Linux | SkyBridge native QUIC interop over compatible ALPN/cipher policy | Fallback if native QUIC path fails |
 | Android ↔ Windows/Linux | SkyBridge native QUIC interop when Android network binding succeeds | Fallback if native QUIC path fails |
-| Apple ↔ Windows/Android/Linux | SkyBridge interop path: WebRTC DataChannel + ICE/STUN/TURN for MVP; future SkyBridge native QUIC interop where both sides support it | Primary practical MVP interop path |
+| Apple ↔ Windows/Android/Linux | Preserve compatible SkyBridge LAN paths; WebRTC DataChannel + ICE/STUN/TURN for cross-NAT MVP; native QUIC when implemented and validated on both sides | Cross-NAT MVP interop adapter |
 
 All paths must run above a shared SkyBridge Core overlay layer:
 
@@ -82,15 +87,16 @@ The paper can later be updated to reflect the architecture after implementation 
 
 ### 2.3 Current Implemented Build Scope
 
-The current repository build entry is macOS. The core protocol layer contains iOS-specific code paths guarded by `#if os(iOS)` and `@available(iOS ...)`, but Windows, Android, and Linux are architectural targets rather than current implemented build targets.
+The root SwiftPM application build entry is macOS. The iOS client has its own Xcode project in `SkyBridge Compass iOS/`; migrated protocol contracts are consumed through the shared `SkyBridgeProtocolCore` product. Windows, Android, and Linux platform work is not a target of the root macOS SwiftPM application build. Its implementation and validation must be recorded against each platform's own entry point and artifact.
 
 Required wording discipline:
 
 ```text
-Current implemented build entry: macOS
-Current portable code paths: iOS/macOS inside SkyBridgeCore
-Architecture targets in this ADR: Windows, Android, Linux
-Do not present Windows/Android/Linux as already included in the current build or artifact until implemented, tested, and documented separately.
+Root application build entry: macOS SwiftPM
+iOS application build entry: SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj
+Shared Apple protocol product: SkyBridgeProtocolCore; remaining adapters are platform-specific
+Platform implementation or device presence does not establish cross-platform acceptance.
+Validate Windows/Android/Linux using their own build entry and exact installed artifact.
 ```
 
 The current README lists the practical build environment as:
@@ -98,11 +104,13 @@ The current README lists the practical build environment as:
 ```text
 macOS 14+
 Apple Silicon arm64 Mac
-Xcode 26.2+
-Swift 6.2+
+Xcode 26.5 stable release baseline
+Swift 6.3+
 ```
 
 Because the vendored XCFrameworks are arm64-only, Intel x86_64 Macs are out of scope for the current Apple build.
+
+Xcode 27 beta is a separate manual compatibility lane. It does not replace the stable release toolchain or establish release/notarization readiness. The executable toolchain checks and the README own the exact supported Xcode build and SDK requirements.
 
 ### 2.4 Apple PQC Compile-Time Gate
 
@@ -209,6 +217,8 @@ These are architectural constraints, not implementation suggestions:
 ## 4. Current Technology Baseline
 
 This ADR uses a stable-first baseline. Preview and experimental APIs are allowed only behind feature flags.
+
+The table records technology choices, not a continuously updated dependency lockfile. Current versions come from each platform's manifests, lockfiles and validated toolchain receipts. A version update requires compatibility and runtime evidence; editing this table alone does not upgrade an implementation.
 
 | Platform | UI / Shell | Core | Native Discovery | Native Transport | Crypto Provider Baseline | Diagnostics |
 |---|---|---|---|---|---|---|
@@ -403,12 +413,12 @@ Default nearby Android path is still Android-native for Android ↔ Android. Mix
 
 ### 6.7 Apple ↔ Windows/Android/Linux
 
-> **实现状态：未接线（2026-06-16）。** 下述 MVP 路径是目标设计。代码中 WebRTC（`CrossNetworkConnectionManager`）
-> 没有任何路径进入远程控制主机（`RemoteControlManager` / `RemoteControlServer`），主机握手只解析
-> 已登记的 `TrustRecord`（Apple 对端）。要让非 Apple 客户端真正驱动 Mac，需要先实现“非 Apple 入站契约”
-> （标准协议主机或 WebRTC media-track + 标准输入协议 + 信任登记路径）——属于 ROADMAP 后续阶段，非当前可用能力。
+> **路径适用边界（2026-09-08）**：下述 WebRTC 路径描述跨 NAT 的互通适配方向。
+> 它不要求把已经实现的兼容 LAN 连接强制切换到 WebRTC，也不允许为了增加一个平台而建立第二套信任或输入协议。
+> 现有 LAN 远控继续复用 SkyBridge 的身份绑定、签名 KEM 刷新、握手和控制消息。
+> 新增平台应对齐成熟的 Mac/iOS 契约，并按 [ADR-0002](ADR-0002-Remote-Control-Authority-and-Sessions.md) 核对端能力、会话和输入权。
 
-Default MVP path:
+Cross-NAT MVP path:
 
 ```text
 Discovery local:       DNS-SD / Bonjour-compatible records
@@ -462,50 +472,15 @@ Output:
 - selected channel profile
 - audit reason
 
-Recommended selector:
+Selection requirements:
 
-```swift
-func selectTransport(local: PeerCaps, remote: PeerCaps, path: NetworkPath) -> TransportPlan {
-    if local.isApple && remote.isApple && remote.supports("apple-native") {
-        return .appleNative(priority: 100)
-    }
+1. Admit only implemented adapters supported by both peers and allowed by current security, permission and path policy.
+2. Preserve a compatible current LAN path before choosing a cross-NAT adapter. Platform names alone do not determine interoperability.
+3. Select the native QUIC/Aware adapters below when their implementation and capability gates are satisfied; otherwise use an explicitly permitted existing adapter.
+4. Use WebRTC/relay for the applicable NAT path while retaining the same SkyBridge identity, handshake and input authorization contract.
+5. Return an explicit unsupported or failed result when no allowed plan exists. A timeout or trust rejection is not permission to lower the crypto policy.
 
-    if local.isWindows && remote.isWindows && path.isLocal && remote.supports("msquic") {
-        return .windowsNativeMsQuic(priority: 100)
-    }
-
-    if local.isAndroid && remote.isAndroid &&
-       path.isNearby &&
-       local.supports("wifi-aware") &&
-       remote.supports("wifi-aware") {
-        return .androidNativeAware(priority: 100)
-    }
-
-    if local.isAndroid && remote.isAndroid && path.isLocal && remote.supports("android-lan-quic") {
-        return .androidLanQuic(priority: 90)
-    }
-
-    if local.isLinux && remote.isLinux && path.isLocal && remote.supports("linux-native-quic") {
-        return .linuxNativeQuic(priority: 100)
-    }
-
-    if local.supports("skybridge-native-quic") &&
-       remote.supports("skybridge-native-quic") &&
-       path.isLocalOrManaged {
-        return .skyBridgeNativeQuicInterop(priority: 85)
-    }
-
-    if remote.supports("webrtc-dc") {
-        return .webRTCDataChannel(priority: 70)
-    }
-
-    if remote.supports("tcp-fallback") && path.isLocal {
-        return .tcpFallback(priority: 40)
-    }
-
-    return .unsupported(reason: "No compatible transport")
-}
-```
+The transport names and priorities in this ADR describe architecture targets. Concrete selectors use the repository's existing capability definitions; this document does not allocate new wire capability strings.
 
 Priority table:
 
@@ -523,7 +498,7 @@ Priority table:
 | Linux ↔ Linux | No | No | Yes | WebRTCInteropTransport / RelayTransport |
 | Windows ↔ Linux | Yes | No | Optional | SkyBridgeNativeQuicInteropTransport |
 | Android ↔ Windows/Linux | Yes | Optional | Optional | SkyBridgeNativeQuicInteropTransport if Network binding succeeds; otherwise WebRTC |
-| Apple ↔ Windows/Android/Linux | Yes | Optional | Optional | MVP: WebRTCInteropTransport; future: native QUIC interop |
+| Apple ↔ Windows/Android/Linux | Yes | Optional | Optional | Compatible current LAN adapter; cross-NAT WebRTC; native QUIC after validation |
 | Any ↔ Any | No | No | Yes | WebRTCInteropTransport + TURN fallback |
 
 ---
@@ -808,7 +783,7 @@ Linux packaging targets:
 
 ## 14. macOS/iOS Refactor Scope
 
-The mature macOS/iOS path should be modified only to clarify boundaries and prepare for multi-transport selection.
+The mature macOS/iOS path remains the reference contract. Changes may repair verified correctness, security and lifecycle defects or clarify transport boundaries; they must preserve wire compatibility and platform capability limits. Shared-control authority and failure semantics are specified in [ADR-0002](ADR-0002-Remote-Control-Authority-and-Sessions.md).
 
 Expected changes:
 
@@ -991,7 +966,7 @@ Required tests:
 | Android LAN | Android ↔ Android same LAN selects AndroidLanQuicTransport when Wi-Fi Aware unavailable |
 | Linux native | Linux ↔ Linux same LAN selects LinuxNativeQuicTransport |
 | Desktop interop | Windows ↔ Linux same LAN selects SkyBridgeNativeQuicInteropTransport |
-| Interop | Apple ↔ Windows/Android/Linux selects WebRTCInteropTransport for MVP |
+| Interop | Compatible LAN paths retain the shared SkyBridge contract; cross-NAT WebRTC interop is validated separately |
 | Signaling deploy | `/api/turn/credentials` smoke test passes in deploy scripts |
 | Fallback | TURN relay use emits audit/metrics |
 | Network labeling | CGNAT/DS-Lite, IPv6 direct, overlay, relay, and direct paths are labeled distinctly |
@@ -1001,6 +976,7 @@ Required tests:
 | SBP2 | Swift, Rust, and Kotlin-facing wrapper test vectors match |
 | Channel mapping | control/file/telemetry map to distinct transport channels |
 | Transport binding | transcript changes if selected transport changes |
+| Shared remote control | ADR-0002 identity, observer/input-owner, cancellation and exact-session acceptance gates pass |
 
 Acceptance criteria:
 

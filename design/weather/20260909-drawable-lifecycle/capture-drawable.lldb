@@ -1,0 +1,7 @@
+command script import "/Users/bill/Desktop/SkyBridge Compass Pro release/design/weather/20260909-drawable-lifecycle/drawable_trace.py"
+device select 00008140-000E788401C0801C
+device process attach -n CloudRenderingHost --waitfor
+breakpoint set -n "-[CAMetalLayerDrawable texture]"
+breakpoint command add -F drawable_trace.capture 1
+continue
+quit

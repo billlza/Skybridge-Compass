@@ -12,11 +12,13 @@ final class RemoteControlInboundAdmission: @unchecked Sendable {
     struct Lease: @unchecked Sendable {
         fileprivate let connectionID: ObjectIdentifier
         fileprivate let endpointKey: String
+        fileprivate let generation: UUID
     }
 
     private struct Record {
         let connection: NWConnection
         let endpointKey: String
+        let generation: UUID
     }
 
     private let lock = NSLock()
@@ -39,28 +41,36 @@ final class RemoteControlInboundAdmission: @unchecked Sendable {
         defer { lock.unlock() }
 
         if let existing = records[connectionID] {
-            return Lease(connectionID: connectionID, endpointKey: existing.endpointKey)
+            return Lease(connectionID: connectionID, endpointKey: existing.endpointKey, generation: existing.generation)
         }
         guard records.count < maximumConnections,
               countsByEndpoint[endpointKey, default: 0] < maximumConnectionsPerEndpoint else {
             return nil
         }
 
-        records[connectionID] = Record(connection: connection, endpointKey: endpointKey)
+        let generation = UUID()
+        records[connectionID] = Record(connection: connection, endpointKey: endpointKey, generation: generation)
         countsByEndpoint[endpointKey, default: 0] += 1
-        return Lease(connectionID: connectionID, endpointKey: endpointKey)
+        return Lease(connectionID: connectionID, endpointKey: endpointKey, generation: generation)
     }
 
     func release(_ lease: Lease) {
         lock.lock()
         defer { lock.unlock() }
-        guard let record = records.removeValue(forKey: lease.connectionID) else { return }
+        guard let record = records[lease.connectionID], record.generation == lease.generation else { return }
+        records.removeValue(forKey: lease.connectionID)
         let remaining = countsByEndpoint[record.endpointKey, default: 0] - 1
         if remaining > 0 {
             countsByEndpoint[record.endpointKey] = remaining
         } else {
             countsByEndpoint.removeValue(forKey: record.endpointKey)
         }
+    }
+
+    func isCurrent(_ lease: Lease) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return records[lease.connectionID]?.generation == lease.generation
     }
 
     func cancelAll() {
@@ -93,6 +103,7 @@ final class RemoteControlInboundAdmission: @unchecked Sendable {
 @MainActor
 public final class RemoteControlServer: ObservableObject {
     private static let listenerStartTimeout: Duration = .seconds(5)
+    private static let maximumConcurrentSessions = 2
 
     private final class IncomingConnectionLifecycle: @unchecked Sendable {
         private let lock = NSLock()
@@ -121,13 +132,13 @@ public final class RemoteControlServer: ObservableObject {
         category: "RemoteControlSmoke"
     )
     
-    private let manager: RemoteControlManager
+    private let sessions: RemoteControlInboundSessionCoordinator
     private let preferredPort: UInt16
     
     private var listener: NWListener?
     private var pendingListener: NWListener?
     private let queue = DispatchQueue(label: "com.skybridge.remote.server", qos: .userInteractive)
-    nonisolated private let inboundAdmission = RemoteControlInboundAdmission()
+    nonisolated private let inboundAdmission: RemoteControlInboundAdmission
     
     private let serviceType = BonjourInteropContract.remoteControlServiceType
     private let serviceDomain = "local."
@@ -147,8 +158,12 @@ public final class RemoteControlServer: ObservableObject {
     private var startTask: Task<Void, Error>?
     private var startTaskToken: UUID?
     
-    public init(manager: RemoteControlManager, port: UInt16 = 0) {
-        self.manager = manager
+    public init(port: UInt16 = 0) {
+        self.sessions = RemoteControlInboundSessionCoordinator(limit: Self.maximumConcurrentSessions)
+        self.inboundAdmission = RemoteControlInboundAdmission(
+            maximumConnections: Self.maximumConcurrentSessions,
+            maximumConnectionsPerEndpoint: Self.maximumConcurrentSessions
+        )
         self.preferredPort = port
     }
     
@@ -281,6 +296,7 @@ public final class RemoteControlServer: ObservableObject {
     
     public func stop() {
         stopListenerPreservingAcceptedConnections()
+        sessions.stopAll()
         inboundAdmission.cancelAll()
     }
 
@@ -782,8 +798,8 @@ public final class RemoteControlServer: ObservableObject {
                 }
 
                 guard lifecycle.finishReadyInspection() else { return }
-                inboundAdmission.release(admissionLease)
                 if initialData == probePayload {
+                    inboundAdmission.release(admissionLease)
                     RemoteControlSmokeStatusWriter.append(
                         "mac-remote-inbound probe=remote-route-preflight bytes=\(initialData.count) endpoint=\(endpointDescription)"
                     )
@@ -797,7 +813,14 @@ public final class RemoteControlServer: ObservableObject {
                     "mac-remote-inbound handoff-scheduled bytes=\(handoffData.count) endpoint=\(endpointDescription)"
                 )
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
+                    guard let self else {
+                        handoffConnection.cancel()
+                        return
+                    }
+                    guard self.inboundAdmission.isCurrent(admissionLease) else {
+                        handoffConnection.cancel()
+                        return
+                    }
                     let deviceId = self.resolveInboundPeerIdentifier(for: handoffConnection.endpoint)
                     RemoteControlSmokeStatusWriter.append(
                         "mac-remote-inbound handoff-manager peer=\(deviceId) bytes=\(handoffData.count) endpoint=\(endpointDescription)"
@@ -805,11 +828,19 @@ public final class RemoteControlServer: ObservableObject {
                     self.log.info(
                         "🔐 RemoteControlServer handing ready connection to manager: peer=\(deviceId, privacy: .public) initialBytes=\(handoffData.count, privacy: .public)"
                     )
-                    await self.manager.allowRemoteControl(
-                        from: deviceId,
-                        connection: handoffConnection,
-                        initialData: handoffData
-                    )
+                    do {
+                        try self.sessions.accept(
+                            connection: handoffConnection,
+                            deviceId: deviceId,
+                            initialData: handoffData
+                        ) { [inboundAdmission = self.inboundAdmission] in
+                            inboundAdmission.release(admissionLease)
+                        }
+                    } catch {
+                        self.inboundAdmission.release(admissionLease)
+                        handoffConnection.cancel()
+                        self.log.error("Remote-control session admission failed: \(String(describing: error), privacy: .public)")
+                    }
                 }
                 return
             }

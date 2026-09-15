@@ -1311,9 +1311,9 @@ final class WebRTCInboundFileTransferReceiver {
             return
         }
 
-        let savedURL: URL
+        let durableCommit: InboundFileTransferDurableCommitObservation
         do {
-            savedURL = try await ioActor.commit(
+            durableCommit = try await ioActor.commitWithDurabilityObservation(
                 using: state.ioHandle,
                 destinationDirectory: state.finalURL.deletingLastPathComponent(),
                 fileName: state.fileName
@@ -1400,7 +1400,7 @@ final class WebRTCInboundFileTransferReceiver {
 
         FileTransferManager.shared.completeExternalInboundTransfer(
             token: state.presentationToken,
-            savedTo: savedURL,
+            savedTo: durableCommit.destinationURL,
             receiptDeliveryStatus: receiptDeliveryStatus,
             operationalWarning: operationalWarning
         )

@@ -8,6 +8,15 @@ enum WebRTCAppSecurePacketType: UInt8, Sendable, Hashable, CaseIterable {
     case remoteControl = 3
     case remoteDesktop = 4
     case remoteDesktopAudio = 5
+    case boundSession = 6
+
+    static let genericApplicationTypes: Set<Self> = [
+        .appControl,
+        .fileTransfer,
+        .remoteControl,
+        .remoteDesktop,
+        .remoteDesktopAudio,
+    ]
 }
 
 struct WebRTCAppSecureOpenedPayload: Sendable {
@@ -43,6 +52,7 @@ enum WebRTCAppSecureEnvelopeError: Error, LocalizedError, Equatable {
     case authenticationFailed(packetType: WebRTCAppSecurePacketType, counter: UInt64)
     case invalidCounter(UInt64)
     case counterExhausted
+    case boundSessionRequiresCarrier
     case replayDetected(
         packetType: WebRTCAppSecurePacketType,
         counter: UInt64,
@@ -77,6 +87,8 @@ enum WebRTCAppSecureEnvelopeError: Error, LocalizedError, Equatable {
             return "WebRTC secure envelope invalid counter=\(counter)"
         case .counterExhausted:
             return "WebRTC secure envelope counter exhausted"
+        case .boundSessionRequiresCarrier:
+            return "WebRTC secure envelope packet type 6 requires the BSC1 carrier API"
         case .replayDetected(let packetType, let counter, let highestCounter, let reason):
             return "WebRTC secure envelope replay detected packetType=\(packetType.rawValue) counter=\(counter) highestCounter=\(highestCounter) reason=\(reason.rawValue)"
         }
@@ -408,7 +420,10 @@ enum WebRTCControlChannelCodec {
         packetType: WebRTCAppSecurePacketType = .appControl,
         counter: UInt64
     ) throws -> Data {
-        try WebRTCAppSecureEnvelope.seal(
+        guard packetType != .boundSession else {
+            throw WebRTCAppSecureEnvelopeError.boundSessionRequiresCarrier
+        }
+        return try WebRTCAppSecureEnvelope.seal(
             plaintext,
             keys: keys,
             packetType: packetType,
@@ -423,13 +438,85 @@ enum WebRTCControlChannelCodec {
     static func decryptAppPayload(
         _ ciphertext: Data,
         with keys: SessionKeys,
-        allowedPacketTypes: Set<WebRTCAppSecurePacketType> = Set(WebRTCAppSecurePacketType.allCases)
+        allowedPacketTypes: Set<WebRTCAppSecurePacketType> =
+            WebRTCAppSecurePacketType.genericApplicationTypes
     ) throws -> WebRTCAppSecureOpenedPayload {
-        try WebRTCAppSecureEnvelope.open(
+        guard !allowedPacketTypes.contains(.boundSession) else {
+            throw WebRTCAppSecureEnvelopeError.boundSessionRequiresCarrier
+        }
+        return try WebRTCAppSecureEnvelope.open(
             ciphertext,
             keys: keys,
             allowedPacketTypes: allowedPacketTypes
         )
+    }
+
+    static func encryptBoundSessionRecord(
+        _ record: Data,
+        recordKind: BoundSessionWebRTCRecordKindV1,
+        with keys: SessionKeys,
+        counter: UInt64
+    ) throws -> Data {
+        try BoundSessionWebRTCCarrierPolicyV1.validateRecordEnvelope(
+            record,
+            expectedRecordKind: recordKind
+        )
+        let carrierHeader = try BoundSessionWebRTCCarrierPolicyV1.encodeHeader(
+            recordKind: recordKind,
+            recordByteCount: record.count
+        )
+        let secureEnvelope = try WebRTCAppSecureEnvelope.seal(
+            record,
+            keys: keys,
+            packetType: .boundSession,
+            counter: counter
+        )
+        let expectedSecureEnvelopeByteCount =
+            BoundSessionWebRTCCarrierPolicyV1.secureEnvelopeOverheadByteCount + record.count
+        guard secureEnvelope.count == expectedSecureEnvelopeByteCount else {
+            throw WebRTCAppSecureEnvelopeError.malformed
+        }
+        var payload = Data()
+        payload.reserveCapacity(carrierHeader.count + secureEnvelope.count)
+        payload.append(carrierHeader)
+        payload.append(secureEnvelope)
+        return payload
+    }
+
+    static func decryptBoundSessionCarrier(
+        _ carrierPayload: Data,
+        admittedHeader: BoundSessionWebRTCCarrierHeaderV1,
+        with keys: SessionKeys
+    ) throws -> WebRTCAppSecureOpenedPayload {
+        let stagedPrefixByteCount = BoundSessionWebRTCCarrierPolicyV1.stagedPrefixByteCount
+        guard carrierPayload.count >= stagedPrefixByteCount else {
+            throw BoundSessionWebRTCCarrierErrorV1.truncatedCarrierPrefix
+        }
+        let stagedPrefix = Data(carrierPayload.prefix(stagedPrefixByteCount))
+        let route = try BoundSessionWebRTCCarrierPolicyV1.classifyStagedPrefix(
+            declaredPayloadByteCount: carrierPayload.count,
+            stagedPrefix: stagedPrefix
+        )
+        guard route == .boundSession(admittedHeader) else {
+            throw WebRTCAppSecureEnvelopeError.malformed
+        }
+
+        let secureEnvelope = Data(
+            carrierPayload.dropFirst(
+                BoundSessionWebRTCCarrierPolicyV1.carrierHeaderByteCount
+            )
+        )
+        let opened = try WebRTCAppSecureEnvelope.open(
+            secureEnvelope,
+            keys: keys,
+            allowedPacketTypes: [.boundSession]
+        )
+        try BoundSessionWebRTCCarrierPolicyV1.validateAuthenticatedRecord(
+            opened.payload,
+            header: admittedHeader,
+            expectedRecordKind: admittedHeader.recordKind
+        )
+        return opened
     }
 
     static func decodeCompatibilityAppMessage(_ plaintext: Data) -> AppMessage? {

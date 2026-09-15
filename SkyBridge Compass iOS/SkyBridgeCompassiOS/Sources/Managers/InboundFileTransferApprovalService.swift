@@ -1,4 +1,5 @@
 import Foundation
+import enum SkyBridgeProtocolCore.ClassicTransferInboundPolicy
 
 @available(iOS 17.0, *)
 @MainActor
@@ -24,7 +25,9 @@ final class InboundFileTransferApprovalService: ObservableObject {
     private var pendingDecision: PendingDecision?
     private let decisionTimeout: Duration
 
-    init(decisionTimeout: Duration = .seconds(60)) {
+    init(decisionTimeout: Duration = .seconds(
+        ClassicTransferInboundPolicy.receiverDecisionTimeoutSeconds
+    )) {
         self.decisionTimeout = decisionTimeout
     }
 

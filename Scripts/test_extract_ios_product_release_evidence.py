@@ -130,6 +130,7 @@ class IOSProductEvidenceExtractionTests(unittest.TestCase):
                 "messageType": "Default",
                 "processID": self.process_id if process_id is None else process_id,
                 "processImagePath": process_image_path or self.executable_path,
+                "processImageUUID": self.binding["appExecutableUUIDs"][0]["uuid"],
                 "subsystem": "com.skybridge.compass.release-evidence",
             }
             for message in messages
@@ -187,6 +188,62 @@ class IOSProductEvidenceExtractionTests(unittest.TestCase):
             "outside the exact capture boundary",
         ):
             self._extract()
+
+    def test_runtime_uuid_is_required_even_with_unavailable_sync_identifier(self) -> None:
+        identity = json.loads(self.identity.read_text())
+        identity["installationBinding"]["launchServicesIdentifier"] = "unknown"
+        self._write_json(self.identity, identity)
+        original = self.raw.read_text()
+        for value in (None, "00000000-0000-0000-0000-000000000000"):
+            with self.subTest(uuid=value):
+                rows = [json.loads(line) for line in original.splitlines()]
+                rows[0]["processImageUUID"] = value
+                self.raw.write_text("".join(json.dumps(row) + "\n" for row in rows))
+                with self.assertRaisesRegex(extractor.IOSProductEvidenceError, "sealed executable UUID"):
+                    self._extract()
+                self.assertFalse(self.output_log.exists())
+                self.assertFalse(self.output_capture.exists())
+        self.raw.write_text(original)
+        self._extract()
+
+    def test_native_completion_trailer_is_validated_and_not_an_event(self) -> None:
+        with self.raw.open("a") as handle:
+            handle.write(json.dumps({"count": len(self.ios_lines), "finished": 1}) + "\n")
+        self._extract()
+        self.assertEqual(self.output_log.read_text(), "\n".join(self.ios_lines) + "\n")
+
+    def test_native_catalog_path_may_refer_to_previous_container_of_same_image(self) -> None:
+        cached = self.executable_path.replace(
+            "11111111-2222-3333-4444-555555555555",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        )
+        self._write_raw(self.raw, self.ios_lines, process_image_path=cached)
+        self._extract()
+        self.assertEqual(self.output_log.read_text(), "\n".join(self.ios_lines) + "\n")
+        capture = json.loads(self.output_capture.read_text())
+        self.assertEqual(capture["processID"], self.process_id)
+        self.assertEqual(capture["iosReleaseArchive"], self.binding)
+
+    def test_rejects_incorrect_or_premature_native_completion(self) -> None:
+        original = self.raw.read_text()
+        count = len(self.ios_lines)
+        good = json.dumps({"count": count, "finished": 1}) + "\n"
+        cases = [
+            original + json.dumps(trailer) + "\n"
+            for trailer in (
+                {"count": count + 1, "finished": 1},
+                {"count": count, "finished": True},
+                {"count": count, "finished": 0},
+                {"count": count, "finished": 1, "eventMessage": "extra"},
+            )
+        ] + [good + original, original + good + good]
+        for content in cases:
+            with self.subTest(trailer=content[-100:]):
+                self.raw.write_text(content)
+                with self.assertRaises(extractor.IOSProductEvidenceError):
+                    self._extract()
+                self.assertFalse(self.output_log.exists())
+                self.assertFalse(self.output_capture.exists())
 
     def test_rejects_private_format_or_wrong_owner(self) -> None:
         for messages, format_string in (

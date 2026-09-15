@@ -19,6 +19,8 @@ packages:
     exactVersion: 150.0.0
   SkyBridgeCameraKitLocal:
     path: ../Packages/SkyBridgeCameraKit
+  SkyBridgeWeatherRenderingLocal:
+    path: ../Packages/SkyBridgeWeatherRendering
 
 targets:
   SkyBridgeCompass-iOS:
@@ -28,7 +30,7 @@ targets:
       path: "SkyBridgeCompassiOS/Supporting Files/Info.plist"
       properties:
         CFBundleShortVersionString: "1.0.2"
-        CFBundleVersion: "2"
+        CFBundleVersion: "13"
         CFBundleURLTypes:
           - CFBundleURLName: com.skybridge.compass.ios
             CFBundleURLSchemes:
@@ -101,6 +103,8 @@ targets:
         product: SkyBridgeMessagePersistence
       - package: SkyBridgeCameraKitLocal
         product: SkyBridgeCameraKit
+      - package: SkyBridgeWeatherRenderingLocal
+        product: SkyBridgeWeatherRendering
       - target: SkyBridgeCompass-Widgets
         embed: true
     settings:
@@ -159,7 +163,7 @@ targets:
       path: "Widgets/Info.plist"
       properties:
         CFBundleShortVersionString: "1.0.2"
-        CFBundleVersion: "2"
+        CFBundleVersion: "13"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     sources:
@@ -203,6 +207,23 @@ targets:
       - path: ../Tests/SkyBridgeCoreTests/Fixtures/QPeriaptABI2/signed-policy-vectors.json
         group: SkyBridgeCompassiOSTests/Fixtures/QPeriaptABI2
         buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/Fixtures/QPeriaptABI2/skr2-golden.json
+        group: SkyBridgeCompassiOSTests/Fixtures/QPeriaptABI2
+        buildPhase: resources
+      - path: ../Tests/SkyBridgeCoreTests/AccountDevicePresenceReportTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountDevicePresentationPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountDeviceRecordDecodingTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountPresenceRefreshEngineTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/AccountPresenceRefreshPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/LANAddressRoutabilityPolicyTests.swift
+        group: SkyBridgeCompassiOSTests
+      - path: ../Tests/SkyBridgeCoreTests/SignalServerClientPresenceFailureTests.swift
+        group: SkyBridgeCompassiOSTests
     dependencies:
       - target: SkyBridgeCompass-iOS
       - package: SkyBridgeRoot

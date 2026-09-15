@@ -4,7 +4,7 @@ import XCTest
 @available(iOS 17.0, *)
 @MainActor
 final class InboundFileTransferApprovalServiceTests: XCTestCase {
-    private let service = InboundFileTransferApprovalService(decisionTimeout: .milliseconds(50))
+    private var service = InboundFileTransferApprovalService()
 
     func testExplicitApprovalResumesExactlyTheDisplayedRequest() async throws {
         let request = makeRequest(transferId: UUID().uuidString)
@@ -62,6 +62,8 @@ final class InboundFileTransferApprovalServiceTests: XCTestCase {
     }
 
     func testApprovalTimeoutResumesOnceAndClearsPrompt() async throws {
+        // Only the timeout test should race against a short wall-clock deadline.
+        service = InboundFileTransferApprovalService(decisionTimeout: .milliseconds(50))
         let request = makeRequest(transferId: UUID().uuidString)
         let decisionTask = Task { @MainActor in
             await service.decide(for: request)

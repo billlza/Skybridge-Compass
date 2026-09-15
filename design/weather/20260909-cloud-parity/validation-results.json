@@ -1,0 +1,205 @@
+{
+  "date": "2026-09-09T18:00:05.845487+08:00",
+  "implementation": {
+    "macos": true,
+    "ios": true,
+    "windows": false
+  },
+  "formalProductInstalled": false,
+  "releaseAcceptance": "open",
+  "checks": [
+    {
+      "log": "macos-release-delivery.log",
+      "passed": true,
+      "compilerDiagnosticCount": 0,
+      "runtimeApiDiagnosticCount": 0
+    },
+    {
+      "log": "ios-release-delivery.log",
+      "passed": true,
+      "compilerDiagnosticCount": 0,
+      "runtimeApiDiagnosticCount": 0
+    },
+    {
+      "log": "macos-tests-delivery.log",
+      "passed": true,
+      "compilerDiagnosticCount": 0,
+      "runtimeApiDiagnosticCount": 0
+    },
+    {
+      "log": "dashboard-contract-tests.log",
+      "passed": true,
+      "compilerDiagnosticCount": 0,
+      "runtimeApiDiagnosticCount": 0
+    },
+    {
+      "log": "ipad-native-cloud-pool.log",
+      "passed": true,
+      "compilerDiagnosticCount": 0,
+      "runtimeApiDiagnosticCount": 0
+    },
+    {
+      "log": "iphone-native-cloud-pool.log",
+      "passed": true,
+      "compilerDiagnosticCount": 0,
+      "runtimeApiDiagnosticCount": 1
+    }
+  ],
+  "tests": {
+    "macos": 5,
+    "iphone": 5,
+    "ipad": 5,
+    "dashboardContracts": 4
+  },
+  "renderParity": {
+    "reference": "Android approved cloud renderer",
+    "comparisons": [
+      {
+        "platform": "macos",
+        "frame": "clouds-after-12-seconds.png",
+        "width": 360,
+        "height": 780,
+        "meanAbsoluteChannelDifference": 0.053703703703703705,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-quality-0.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843199324680806,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-quality-0.45.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843199324680806,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-quality-1.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05683496887200591,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "macos",
+        "frame": "clouds-wide.png",
+        "width": 780,
+        "height": 585,
+        "meanAbsoluteChannelDifference": 0.0547505296223245,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-after-12-seconds.png",
+        "width": 360,
+        "height": 780,
+        "meanAbsoluteChannelDifference": 0.05370489078822412,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-quality-0.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-quality-0.45.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-quality-1.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05683655165136647,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "iphone",
+        "frame": "clouds-wide.png",
+        "width": 780,
+        "height": 585,
+        "meanAbsoluteChannelDifference": 0.05474906859522244,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-after-12-seconds.png",
+        "width": 360,
+        "height": 780,
+        "meanAbsoluteChannelDifference": 0.05370489078822412,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-quality-0.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-quality-0.45.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05843252083992825,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-quality-1.0.png",
+        "width": 540,
+        "height": 1170,
+        "meanAbsoluteChannelDifference": 0.05683655165136647,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      },
+      {
+        "platform": "ipad",
+        "frame": "clouds-wide.png",
+        "width": 780,
+        "height": 585,
+        "meanAbsoluteChannelDifference": 0.05474906859522244,
+        "maxAbsoluteChannelDifference": 2,
+        "fullyOpaque": true
+      }
+    ]
+  },
+  "openIssues": [
+    {
+      "platform": "iPhone 16 Pro",
+      "context": "Metal HUD enabled",
+      "diagnostic": "[CAMetalLayerDrawable texture] should not be called after already presenting this drawable. Get a nextDrawable instead.",
+      "cause": "libMTLHud.dylib HUDMTLLayerTracking._snapshotDrawable:state: accesses the drawable from a Core Animation presentation/release callback after its backing is nil; exact iPhone LLDB stack captured.",
+      "followUp": "Application frame scheduling fixed and native tests passed on all three devices. The Apple HUD diagnostic itself still reproduces; no application-side suppression or global HUD changes were applied."
+    }
+  ],
+  "deviceState": "Formal product applications preserved; physical checks used com.skybridge.weather.rendering.validation.",
+  "lifecycleFollowUp": "../20260909-drawable-lifecycle/validation-results.json"
+}

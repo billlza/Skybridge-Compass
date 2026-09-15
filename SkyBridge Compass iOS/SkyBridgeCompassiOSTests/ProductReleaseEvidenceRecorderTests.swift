@@ -373,6 +373,44 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         XCTAssertTrue(lines.last?.contains("attempt_ref=not-applicable") == true)
     }
 
+    func testExistingQIdentityRestorationDoesNotClaimNewCreationOrUnconfirmedHandshake() throws {
+        for protection: ProductIdentityEvidenceProtection in [.softwareKeychain, .secureEnclaveRequired] {
+            var lines: [String] = []
+            let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+            let descriptor = try XCTUnwrap(ProductIdentityEvidenceDescriptor(
+                identityReference: "id1:66666666666666666666666666666666",
+                algorithm: .mlDSA65, protection: protection
+            ))
+            XCTAssertTrue(recorder.recordProductionIdentityRestored(descriptor))
+            XCTAssertFalse(recorder.recordProductionIdentityRestored(descriptor))
+            let owner = try XCTUnwrap(recorder.beginSession(
+                transport: .p2p, sessionReference: sessionReference, routeClass: .wifi
+            ))
+            XCTAssertTrue(recorder.recordP2PSessionAuthenticated(
+                owner: owner, role: .initiator, suite: .qperiaptABI2PolicyBound
+            ))
+            XCTAssertFalse(recorder.recordProductionIdentityHandshakeBound(
+                descriptor: descriptor, sessionOwner: owner,
+                attemptReference: "at1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ))
+            XCTAssertEqual(lines.filter { $0.hasPrefix("productionIdentity") }.count, 1)
+            XCTAssertFalse(lines.contains { $0.contains("created=1") || $0.contains("localFinished=sent") })
+        }
+    }
+
+    func testSameLaunchIdentityCreationAndReconciliationCannotBecomeRestoration() throws {
+        let descriptor = try XCTUnwrap(ProductIdentityEvidenceDescriptor(
+            identityReference: "id1:77777777777777777777777777777777",
+            algorithm: .mlDSA65, protection: .softwareKeychain
+        ))
+        var lines: [String] = []
+        let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+        recorder.noteNonRestoredIdentityResolution(descriptor)
+        XCTAssertFalse(recorder.recordProductionIdentityRestored(descriptor))
+        XCTAssertFalse(recorder.recordProductionIdentityCommitted(descriptor))
+        XCTAssertTrue(lines.isEmpty)
+    }
+
     func testGenericP2PFileTransferOwnerIsSingleSlotAndStaleSafe() throws {
         var lines: [String] = []
         let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
@@ -437,6 +475,16 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         ])
         XCTAssertTrue(lines.last?.contains("noticeHidden=not-applicable") == true)
         XCTAssertFalse(lines.last?.contains("noticeHidden=1") == true)
+        XCTAssertEqual(try XCTUnwrap(lines.last), [
+            "releaseSessionDisconnected",
+            "transport=p2p",
+            "session_ref=\(sessionReference)",
+            "owner=SkyBridgeCompassiOS",
+            "generation=1",
+            "noticeHidden=not-applicable",
+            "reason=user",
+            "result=disconnected"
+        ].joined(separator: " "))
     }
 
     func testWebRTCMediaSamplesAreBoundedOrderedAndMonotonic() throws {
@@ -483,6 +531,48 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         XCTAssertTrue(recorder.recordWebRTCMediaSample(owner: owner, sample: second))
         XCTAssertTrue(recorder.endSession(owner: owner, reason: .peer))
         XCTAssertEqual(lines.filter { $0.hasPrefix("webrtcMediaSample ") }.count, 2)
+    }
+
+    func testQPeriaptABI2RetainsExactOwnerWithoutFabricatingMediaReadiness() throws {
+        var lines: [String] = []
+        let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+        let owner = try XCTUnwrap(recorder.beginSession(
+            transport: .webrtc, sessionReference: sessionReference, selectedTransport: .relay
+        ))
+        let rejectedSuites: [SkyBridgeCompass_iOS.CryptoSuite] = [
+            .qperiaptContextBound, .x25519Ed25519, .unknown(0xffff)
+        ]
+        for rejected in rejectedSuites {
+            XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: rejected))
+        }
+        XCTAssertTrue(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, suite: .qperiaptABI2PolicyBound))
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertTrue(lines.last?.contains("suite=Q-Periapt-ABI2-PolicyBound result=authenticated") == true)
+        XCTAssertFalse(lines.contains { $0.hasPrefix("webrtcMediaSample ") || $0.hasPrefix("secureFrameAccepted ") })
+        XCTAssertTrue(recorder.endSession(owner: owner, reason: .peer))
+        let replacement = try XCTUnwrap(recorder.beginSession(
+            transport: .webrtc, sessionReference: sessionReference, selectedTransport: .relay
+        ))
+        let beforeStale = lines.count
+        XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .qperiaptABI2PolicyBound))
+        XCTAssertEqual(lines.count, beforeStale)
+        XCTAssertTrue(recorder.recordWebRTCPQCRekeyAuthenticated(owner: replacement, suite: .qperiaptABI2PolicyBound))
+    }
+
+    func testQPeriaptABI2P2PUsesTheSameBoundedAuthenticationSlot() throws {
+        var lines: [String] = []
+        let recorder = ProductReleaseEvidenceRecorder { lines.append($0) }
+        let owner = try XCTUnwrap(recorder.beginSession(
+            transport: .p2p, sessionReference: sessionReference, routeClass: .wifi
+        ))
+        XCTAssertFalse(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, suite: .qperiaptContextBound))
+        XCTAssertFalse(recorder.recordWebRTCPQCRekeyAuthenticated(owner: owner, suite: .qperiaptABI2PolicyBound))
+        XCTAssertTrue(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, suite: .qperiaptABI2PolicyBound))
+        XCTAssertFalse(recorder.recordP2PSessionAuthenticated(owner: owner, role: .initiator, suite: .qperiaptABI2PolicyBound))
+        XCTAssertTrue(lines.last?.contains("role=initiator suite=Q-Periapt-ABI2-PolicyBound result=authenticated") == true)
+        XCTAssertEqual(lines.count, 2)
     }
 
     private func signedClassicOffer(

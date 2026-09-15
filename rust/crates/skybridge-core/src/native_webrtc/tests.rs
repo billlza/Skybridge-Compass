@@ -312,9 +312,12 @@ async fn selected_ice_route_is_observed_on_a_real_loopback_pair() -> Result<()> 
     let (mut initiator, mut responder) = new_started_classic_pair("route-observation").await?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
-    let mut route_events = 0usize;
+    let mut initiator_route_observed = false;
+    let mut responder_route_observed = false;
     let mut disconnects: Vec<String> = Vec::new();
-    while tokio::time::Instant::now() < deadline && route_events < 2 {
+    while tokio::time::Instant::now() < deadline
+        && !(initiator_route_observed && responder_route_observed)
+    {
         tokio::select! {
             event = initiator.next_event() => {
                 if let Some(event) = event {
@@ -326,7 +329,7 @@ async fn selected_ice_route_is_observed_on_a_real_loopback_pair() -> Result<()> 
                             assert_eq!(observation.remote_address, "127.0.0.1");
                             assert!(observation.remote_port > 0);
                             assert_eq!(observation.protocol, "udp");
-                            route_events += 1;
+                            initiator_route_observed = true;
                         }
                         NativeWebRtcEvent::TransportDisconnected { reason } => {
                             disconnects.push(format!("initiator:{reason:?}"));
@@ -345,7 +348,7 @@ async fn selected_ice_route_is_observed_on_a_real_loopback_pair() -> Result<()> 
                             assert_eq!(observation.remote_address, "127.0.0.1");
                             assert!(observation.remote_port > 0);
                             assert_eq!(observation.protocol, "udp");
-                            route_events += 1;
+                            responder_route_observed = true;
                         }
                         NativeWebRtcEvent::TransportDisconnected { reason } => {
                             disconnects.push(format!("responder:{reason:?}"));
@@ -365,10 +368,12 @@ async fn selected_ice_route_is_observed_on_a_real_loopback_pair() -> Result<()> 
         disconnects.is_empty(),
         "transport must not disconnect while awaiting the route observation: {disconnects:?}"
     );
-    assert_eq!(
-        route_events, 2,
-        "both sides must observe their selected ICE route within the observation window"
+    assert!(
+        initiator_route_observed && responder_route_observed,
+        "both sides must observe their selected ICE route within the observation window: initiator={initiator_route_observed}, responder={responder_route_observed}"
     );
+    initiator.close().await?;
+    responder.close().await?;
     Ok(())
 }
 
@@ -378,7 +383,8 @@ async fn new_started_classic_pair(
     session_id: &str,
 ) -> Result<(NativeWebRtcSession, NativeWebRtcSession)> {
     let (classic_initiator, classic_responder) = classic_config_pair()?;
-    let initiator = NativeWebRtcSession::new(NativeWebRtcConfig {
+    let loopback_bind_addrs = || vec!["127.0.0.1:0".to_owned()];
+    let initiator_config = NativeWebRtcConfig {
         session_id: session_id.to_owned(),
         local_device_id: "device-a".to_owned(),
         role: RuntimeSessionRole::Initiator,
@@ -387,9 +393,10 @@ async fn new_started_classic_pair(
         classic_responder: None,
         pqc_initiator: None,
         pqc_responder: None,
-    })
-    .await?;
-    let responder = NativeWebRtcSession::new(NativeWebRtcConfig {
+    };
+    let initiator =
+        NativeWebRtcSession::new_with_udp_bind_addrs(initiator_config, loopback_bind_addrs).await?;
+    let responder_config = NativeWebRtcConfig {
         session_id: session_id.to_owned(),
         local_device_id: "device-b".to_owned(),
         role: RuntimeSessionRole::Responder,
@@ -398,8 +405,9 @@ async fn new_started_classic_pair(
         classic_responder: Some(classic_responder),
         pqc_initiator: None,
         pqc_responder: None,
-    })
-    .await?;
+    };
+    let responder =
+        NativeWebRtcSession::new_with_udp_bind_addrs(responder_config, loopback_bind_addrs).await?;
     initiator.start().await?;
     responder.start().await?;
     initiator.notify_remote_join("device-b").await?;

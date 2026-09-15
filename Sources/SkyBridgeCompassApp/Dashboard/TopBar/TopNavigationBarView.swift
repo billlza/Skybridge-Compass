@@ -1,4 +1,5 @@
 import SwiftUI
+import SkyBridgeWeatherRendering
 import SkyBridgeCore
 import os.log
 
@@ -53,6 +54,7 @@ public struct TopNavigationBarView: View {
                 .foregroundColor(themeConfiguration.borderColor),
             alignment: .bottom
         )
+        .weatherGlassSurface(cornerRadius: 0)
         .zIndex(1) // 顶部导航置前，避免被顶部提示覆盖
  // 订阅Metal渲染链路的FPS通知
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MetalFPSUpdated"))) { note in
@@ -85,7 +87,7 @@ public struct TopNavigationBarView: View {
                 HStack {
                     Spacer()
                     Button(LocalizationManager.shared.localizedString("action.cancel")) { showManualConnectSheet = false }
-                    Button(LocalizationManager.shared.localizedString("device.action.connect")) {
+                    Button(LocalizationManager.shared.localizedString("discovery.action.connect")) {
                         showManualConnectSheet = false
                         let port = UInt16(manualPort) ?? 0
                         Task { await appModel.manualConnect(ip: manualIP, port: port, pairingCode: manualCode) }

@@ -1,0 +1,8 @@
+{
+  "xctestrun": "/tmp/skybridge-cloud-native-host/Build/Products/CloudRenderingHost-api-validation.xctestrun",
+  "changedEnvironment": {
+    "MTL_DEBUG_LAYER": "1"
+  },
+  "globalDeviceSettingsChanged": false,
+  "hudConfigurationChanged": false
+}

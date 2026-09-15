@@ -17,6 +17,60 @@ public enum TrafficPaddingMode: String, Sendable {
 }
 
 @available(macOS 14.0, iOS 17.0, *)
+/// 进程生命周期内不变的填充配置输入。
+///
+/// `wrapIfEnabled` 在每一帧出站数据上都会解析一次配置：屏幕流约 60 赫兹、交互流 62.5 赫兹、
+/// 外加每个控制心跳。此前每次调用都会新建一个 App Group `UserDefaults`，并把
+/// `ProcessInfo.processInfo.environment` 整个字典物化五次（四个填充键 + 一个诊断总开关）。
+/// 环境变量在进程存活期间不会变化，`UserDefaults(suiteName:)` 也只是一个句柄，
+/// 因此两者都只需解析一次；UserDefaults 的键值仍然每次实时读取，运行时改配置照样立即生效。
+private enum TrafficPaddingProcessEnvironment {
+    /// `UserDefaults` 按文档是线程安全的，但它没有标注 `Sendable`，编译器看不出来。
+    /// 这里持有的是一个不可变句柄，读取全部走 UserDefaults 自身的同步，故显式标注。
+    nonisolated(unsafe) static let groupDefaults = UserDefaults(suiteName: "group.com.skybridge.compass")
+
+    struct Overrides: Sendable {
+        let enabled: Bool
+        let debugLog: Bool
+        let umbrellaDiagnostics: Bool
+        let bucketCapBytes: Int?
+        let bucketCapKiB: Int?
+    }
+
+    /// 整个环境字典只物化一次。
+    static let overrides: Overrides = {
+        let environment = ProcessInfo.processInfo.environment
+        return Overrides(
+            enabled: environment["SB_TRAFFIC_PADDING_ENABLED"] == "1",
+            debugLog: environment["SB_TRAFFIC_PADDING_DEBUG_LOG"] == "1",
+            umbrellaDiagnostics: environment["SKYBRIDGE_LOG_TRAFFIC_PADDING"] == "1",
+            bucketCapBytes: Int(environment["SB_TRAFFIC_PADDING_BUCKET_CAP_BYTES"] ?? ""),
+            bucketCapKiB: Int(environment["SB_TRAFFIC_PADDING_BUCKET_CAP_KIB"] ?? "")
+        )
+    }()
+
+    private static let bucketCacheLock = NSLock()
+    private nonisolated(unsafe) static var cachedBuckets: (cap: Int, sizes: [Int])?
+
+    /// 桶尺寸只取决于 cap；同一个 cap 不必每帧重新生成数组。
+    static func bucketSizes(upTo capClamped: Int) -> [Int] {
+        bucketCacheLock.lock()
+        defer { bucketCacheLock.unlock() }
+        if let cachedBuckets, cachedBuckets.cap == capClamped {
+            return cachedBuckets.sizes
+        }
+        var sizes: [Int] = []
+        var size = 256
+        while size < capClamped {
+            sizes.append(size)
+            size *= 2
+        }
+        sizes.append(max(size, capClamped))
+        cachedBuckets = (capClamped, sizes)
+        return sizes
+    }
+}
+
 public struct TrafficPaddingConfig: Sendable {
     public var enabled: Bool
     public var debugLog: Bool
@@ -46,12 +100,13 @@ public struct TrafficPaddingConfig: Sendable {
         let bucketCapKey = "sb_traffic_padding_bucket_cap_bytes"
 
         let defaults = UserDefaults.standard
-        let groupDefaults = UserDefaults(suiteName: "group.com.skybridge.compass")
-
-        let envEnabled = (ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_ENABLED"] == "1")
-        let envDebug = (ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_DEBUG_LOG"] == "1")
-        let envCapBytes = Int(ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_BUCKET_CAP_BYTES"] ?? "")
-        let envCapKiB = Int(ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_BUCKET_CAP_KIB"] ?? "")
+        // 句柄与环境快照只解析一次；下面的键值读取仍然是实时的。
+        let groupDefaults = TrafficPaddingProcessEnvironment.groupDefaults
+        let overrides = TrafficPaddingProcessEnvironment.overrides
+        let envEnabled = overrides.enabled
+        let envDebug = overrides.debugLog
+        let envCapBytes = overrides.bucketCapBytes
+        let envCapKiB = overrides.bucketCapKiB
 
         let enabled = defaults.bool(forKey: enabledKey)
             || (groupDefaults?.bool(forKey: enabledKey) ?? false)
@@ -85,14 +140,8 @@ public struct TrafficPaddingConfig: Sendable {
         let cap = max(256, max(capFromUD, capFromEnv, 65536))
         let capClamped = min(cap, 1024 * 1024) // hard ceiling: 1 MiB to prevent accidental blowups
 
-        // Generate power-of-two buckets up to cap.
-        var buckets: [Int] = []
-        var s = 256
-        while s < capClamped {
-            buckets.append(s)
-            s *= 2
-        }
-        buckets.append(max(s, capClamped))
+        // Generate power-of-two buckets up to cap (memoised per cap).
+        let buckets = TrafficPaddingProcessEnvironment.bucketSizes(upTo: capClamped)
 
         return TrafficPaddingConfig(
             enabled: enabled,
@@ -125,7 +174,7 @@ public enum TrafficPadding {
         // Enable explicitly via either:
         // - SB_TRAFFIC_PADDING_DEBUG_LOG=1 (existing)
         // - SKYBRIDGE_LOG_TRAFFIC_PADDING=1 (new umbrella switch)
-        let envDiag = (ProcessInfo.processInfo.environment["SKYBRIDGE_LOG_TRAFFIC_PADDING"] == "1")
+        let envDiag = TrafficPaddingProcessEnvironment.overrides.umbrellaDiagnostics
         return cfg.debugLog || envDiag
     }
 
@@ -139,11 +188,11 @@ public enum TrafficPadding {
         guard shouldEmitDiagnostics(cfg: cfg) else { return }
 
         let bundleId = Bundle.main.bundleIdentifier ?? "unknown.bundle"
-        let envEnabled = (ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_ENABLED"] == "1")
-        let envDebug = (ProcessInfo.processInfo.environment["SB_TRAFFIC_PADDING_DEBUG_LOG"] == "1")
+        let envEnabled = TrafficPaddingProcessEnvironment.overrides.enabled
+        let envDebug = TrafficPaddingProcessEnvironment.overrides.debugLog
 
         let defaults = UserDefaults.standard
-        let group = UserDefaults(suiteName: "group.com.skybridge.compass")
+        let group = TrafficPaddingProcessEnvironment.groupDefaults
         func obj(_ ud: UserDefaults?, _ key: String) -> String {
             guard let ud else { return "nil-suite" }
             if ud.object(forKey: key) == nil { return "nil" }

@@ -1,0 +1,176 @@
+ M .gitignore
+ M Docs/ADR-0001-SkyBridge-Core-Transport-Matrix.md
+ M Package.swift
+ M Scripts/check_protocol_parity.py
+ M Scripts/package_app.sh
+ M Scripts/run_real_device_p2p_remote_smoke.sh
+ M Scripts/test_check_protocol_parity.py
+ M Scripts/test_loopback_benchmark_fixture_policy.sh
+ M Scripts/test_real_device_p2p_remote_smoke_preflight.sh
+ M Server/skybridge-signaling/deploy/README.md
+ M Server/skybridge-signaling/deploy/scripts/deploy_remote.sh
+ M Server/skybridge-signaling/deploy/scripts/rollback_remote.sh
+ M Server/skybridge-signaling/deploy/scripts/smoke_local.sh
+ M Server/skybridge-signaling/test/http_integration.test.js
+ M "SkyBridge Compass iOS/SkyBridgeCompass-iOS.xcodeproj/project.pbxproj"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopPresentationTypes.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopTypes.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopViewerStreamConfigurationPushPolicy.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopWirePayloads.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/WebRTC/CrossNetworkWebRTCSignalingPolicy.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/CrossNetworkWebRTCManager.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/P2PConnectionManager.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/Dashboard/DashboardWeatherEffectsView.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Views/RemoteDesktopView.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/KEMTrustStoreTests.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/P2PBootstrapPolicyTests.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/RegressionHardeningTests.swift"
+ M "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/RemoteDesktopViewerStreamConfigurationPushPolicyTests.swift"
+ M SkyBridgeWidgets.xcodeproj/project.pbxproj
+ D Sources/HandshakeBenchRunner/main.swift
+ M Sources/LocalLanInteropHost/main.swift
+ M Sources/SkyBridgeCompassApp/Info.plist
+ M Sources/SkyBridgeCompassApp/LocalPeerServiceCoordinator.swift
+ M Sources/SkyBridgeCompassApp/RemoteDisplayView.swift
+ M Sources/SkyBridgeCompassApp/SkyBridgeCompassApp.swift
+ M Sources/SkyBridgeCompassApp/Views/NearFieldMirrorView.swift
+ M Sources/SkyBridgeCore/DeviceDiscovery/DeviceDiscoveryManagerOptimized.swift
+ M Sources/SkyBridgeCore/DeviceDiscovery/IdentityResolver.swift
+ M Sources/SkyBridgeCore/Discovery/BonjourInteropContract.swift
+ M Sources/SkyBridgeCore/LatestTextureDeliveryGate.swift
+ M Sources/SkyBridgeCore/P2P/DeviceIdentityKeyManager.swift
+ M Sources/SkyBridgeCore/P2P/TrustSyncService.swift
+ M Sources/SkyBridgeCore/RemoteConnection/CrossNetworkConnectionManager.swift
+ M Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCControlChannelCodec.swift
+ M Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCInboundFileTransferReceiver.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlInputEventInjector.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlManager.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlOutboundFramePump.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlSecurityNotice.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlServer.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlStreamPolicy.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteControlStreamRequestPolicy.swift
+ M Sources/SkyBridgeCore/RemoteControl/RemoteDesktopControlPayloads.swift
+ M Sources/SkyBridgeCore/RemoteControl/ScreenCaptureKitStreamer.swift
+ M Sources/SkyBridgeCore/RemoteDesktop/ClipboardRedirection.swift
+ M Sources/SkyBridgeCore/RemoteDesktop/H264ParameterSetTransitionState.swift
+ M Sources/SkyBridgeCore/RemoteDesktop/Renderers/FluidRenderer.swift
+ M Sources/SkyBridgeCore/RemoteDesktop/Renderers/ReferenceRenderer.swift
+ M Sources/SkyBridgeCore/RemoteDesktop/Renderers/StableRenderer.swift
+ M Sources/SkyBridgeCore/RemoteFrameRenderer.swift
+ M Sources/SkyBridgeCore/Resources/en.lproj/Localizable.strings
+ M Sources/SkyBridgeCore/Resources/ja.lproj/Localizable.strings
+ M Sources/SkyBridgeCore/Resources/zh-Hans.lproj/Localizable.strings
+ M Sources/SkyBridgeCore/Security/PairingTrustApprovalService.swift
+ M Sources/SkyBridgeCore/Utilities/SelfIdentityProvider.swift
+ M Sources/SkyBridgeCore/Weather/Effects/Cinematic/CinematicCloudyEffectView.swift
+ M Sources/SkyBridgeProtocolCore/RemoteConnection/ControlledHostSessionPolicy.swift
+ M Sources/SkyBridgeProtocolCore/RemoteConnection/CurrentPathSignalingWebSocketPolicy.swift
+ M Sources/SkyBridgeProtocolCore/RemoteConnection/RemoteDesktopStreamConfigurationTransaction.swift
+ M Sources/SkyBridgeProtocolCore/RemoteConnection/SignalServerClient.swift
+ M Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/InboundFileTransferIOActor.swift
+ M Sources/SkyBridgeUI/Security/PairingTrustApprovalView.swift
+ M Sources/SkyBridgeUI/Security/RemoteControlSecurityNoticePanelController.swift
+ M Sources/WebRTCAudioDeviceBridge/SBWebRTCSystemAudioDevice.m
+ M Sources/WebRTCAudioDeviceBridge/include/SBWebRTCSystemAudioDevice.h
+ M Tests/SkyBridgeCoreTests/AppleCompatibilityVectorCaptureTests.swift
+ M Tests/SkyBridgeCoreTests/ControlledHostSessionPolicyTests.swift
+ M Tests/SkyBridgeCoreTests/CrossNetworkWebRTCHandshakeBootstrapTests.swift
+ M Tests/SkyBridgeCoreTests/H264ParameterSetTransitionStateTests.swift
+ M Tests/SkyBridgeCoreTests/IdentityResolutionKeychainStormTests.swift
+ M Tests/SkyBridgeCoreTests/InboundFileTransferIOActorTests.swift
+ M Tests/SkyBridgeCoreTests/LocalLanInteropHostApprovalSurfaceContractTests.swift
+ M Tests/SkyBridgeCoreTests/P2PBonjourAdvertisementHealthTests.swift
+ M Tests/SkyBridgeCoreTests/P2PTrustSyncTests.swift
+ M Tests/SkyBridgeCoreTests/PairingTrustApprovalServiceTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteControlCaptureCompatibilityTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteControlInputLifecycleCoordinatorTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteControlSecurityNoticeTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteControlStreamPolicyTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteControlStreamRequestPolicyTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteControlTrustResolutionTests.swift
+ M Tests/SkyBridgeCoreTests/RemoteDesktopSessionTerminationPolicyTests.swift
+ M Tests/SkyBridgeCoreTests/SelfIdentityProviderTests.swift
+ M Tests/SkyBridgeCoreTests/SettingsViewSourceContractTests.swift
+ M Tests/SkyBridgeCoreTests/TrafficPaddingConfigResolutionTests.swift
+ M Tests/SkyBridgeCoreTests/TrustSyncConcurrencyHardeningTests.swift
+ M Tests/SkyBridgeCoreTests/WebRTCSignalingCurrentPathTests.swift
+?? Docs/ADR-0002-Remote-Control-Authority-and-Sessions.md
+?? Docs/Benchmarks/
+?? Docs/RemoteControl-MultiHost-Workspace.md
+?? Docs/RemoteControl-SharedViewing.md
+?? Packages/SkyBridgeWeatherRendering/
+?? Scripts/boundsession_abi_v2_layout.c
+?? Scripts/build_boundsession_xcframework.sh
+?? Scripts/sync_cloud_weather.py
+?? Scripts/test_verify_boundsession_xcframework.py
+?? Scripts/verify_boundsession_xcframework.py
+?? Scripts/write_boundsession_provenance.py
+?? Server/skybridge-signaling/deploy/scripts/release_runtime_journal.sh
+?? Server/skybridge-signaling/test/smoke_deployment_contract.test.js
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/P2P/P2PPairingIdentityBootstrapCoordinator.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopConfigurationWaiter.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopInputDispatcher.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Core/RemoteConnection/RemoteDesktop/RemoteDesktopOperationDeadline.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopWorkspace.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/CurrentPathSignalingPathEncodingTests.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/P2PPairingIdentityBootstrapCoordinatorTests.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/RemoteDesktopInputDispatcherTests.swift"
+?? "SkyBridge Compass iOS/SkyBridgeCompassiOSTests/RemoteDesktopWorkspaceTests.swift"
+?? Sources/CBoundSession/
+?? Sources/HandshakeBenchRunner/BenchmarkArtifacts.swift
+?? Sources/HandshakeBenchRunner/BenchmarkConfiguration.swift
+?? Sources/HandshakeBenchRunner/BenchmarkTransport.swift
+?? Sources/HandshakeBenchRunner/HandshakeBenchRunner.swift
+?? Sources/SkyBridgeCompassApp/Views/NearFieldControlCanvas.swift
+?? Sources/SkyBridgeCompassApp/Views/NearFieldWorkspaceViewModel.swift
+?? Sources/SkyBridgeCompassApp/Views/RemoteControlPairingView.swift
+?? Sources/SkyBridgeCore/DeviceDiscovery/DiscoveryObservationBuffer.swift
+?? Sources/SkyBridgeCore/Evidence/
+?? Sources/SkyBridgeCore/RemoteConnection/WebRTC/BoundSessionFFIActor.swift
+?? Sources/SkyBridgeCore/RemoteConnection/WebRTC/BoundSessionFFITypes.swift
+?? Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCBoundSessionCarrierIntegration.swift
+?? Sources/SkyBridgeCore/RemoteConnection/WebRTC/WebRTCStagedFramedPayloadReader.swift
+?? Sources/SkyBridgeCore/RemoteControl/ControlledHostWorkspace.swift
+?? Sources/SkyBridgeCore/RemoteControl/RemoteControlHostAccessCoordinator.swift
+?? Sources/SkyBridgeCore/RemoteControl/RemoteControlInboundSessionCoordinator.swift
+?? Sources/SkyBridgeCore/RemoteControl/RemoteControlPairingService.swift
+?? Sources/SkyBridgeCore/RemoteControl/RemoteControlViewerInputDispatcher.swift
+?? Sources/SkyBridgeCore/RemoteDesktop/H264VideoDecoder.swift
+?? Sources/SkyBridgeProtocolCore/RemoteConnection/RemoteControlAccess.swift
+?? Sources/SkyBridgeProtocolCore/RemoteConnection/RemoteControlStartupTiming.swift
+?? Sources/SkyBridgeProtocolCore/RemoteConnection/WebRTC/BoundSessionWebRTCCarrierPolicy.swift
+?? Sources/Vendor/boundsession.xcframework/
+?? Tests/HandshakeBenchRunnerTests/
+?? Tests/SkyBridgeCompassAppTests/
+?? Tests/SkyBridgeCoreTests/BonjourResolverLifecycleTests.swift
+?? Tests/SkyBridgeCoreTests/BoundSessionEvidenceJournalV2Tests.swift
+?? Tests/SkyBridgeCoreTests/BoundSessionFFIActorTests.swift
+?? Tests/SkyBridgeCoreTests/BoundSessionRunEvidenceV2Tests.swift
+?? Tests/SkyBridgeCoreTests/BoundSessionWebRTCCarrierTests.swift
+?? Tests/SkyBridgeCoreTests/ClipboardRedirectionOwnershipTests.swift
+?? Tests/SkyBridgeCoreTests/ControlledHostWorkspaceTests.swift
+?? Tests/SkyBridgeCoreTests/CrossNetworkSessionTeardownParityTests.swift
+?? Tests/SkyBridgeCoreTests/CurrentPathSignalingPathEncodingTests.swift
+?? Tests/SkyBridgeCoreTests/CurrentPathSignalingPathTransportTests.swift
+?? Tests/SkyBridgeCoreTests/DeviceDiscoveryIdentityDomainTests.swift
+?? Tests/SkyBridgeCoreTests/DeviceDiscoveryLocalRecordTests.swift
+?? Tests/SkyBridgeCoreTests/DiscoveryObservationBufferTests.swift
+?? Tests/SkyBridgeCoreTests/Fixtures/BoundSession/
+?? Tests/SkyBridgeCoreTests/RemoteControlAccessTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlConnectionStartTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlInboundSessionCoordinatorTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlInjectionMappingOwnershipTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlManagerRenderingTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlManagerViewerIngressTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlNoticePanelLifecycleTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlOutboundProviderTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlPairingTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlStartupTimingTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlTransportOwnershipTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteControlViewerInputDispatcherTests.swift
+?? Tests/SkyBridgeCoreTests/RemoteH264RenderingTests.swift
+?? Tests/SkyBridgeCoreTests/SystemAudioCaptureOwnershipTests.swift
+?? design/
+?? supabase/migrations/20260901120000_harden_cli_sessions_and_pin_search_path.sql

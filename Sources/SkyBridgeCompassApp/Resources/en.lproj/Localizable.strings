@@ -35,3 +35,11 @@
 "startup.step.weatherServices" = "Weather services";
 "startup.step.appleSiliconOptimization" = "Apple Silicon optimization";
 "startup.step.remoteDesktopServices" = "Remote desktop services";
+
+/* Account device registration and hardware metadata */
+"discovery.accountDevices.caller.identityMismatch" = "This device’s identity differs from its historical registration. Verify the device again.";
+"discovery.accountDevices.caller.notRegistered" = "This device is not registered. Approval from a registered device is required.";
+"discovery.accountDevices.caller.pending" = "This device’s registration is awaiting approval.";
+"discovery.accountDevices.caller.frozen" = "This device’s registration is frozen.";
+"discovery.accountDevices.caller.unrecognizedStatus" = "This device’s registration status could not be confirmed.";
+"discovery.accountDevices.modelNotReported" = "Model not reported";

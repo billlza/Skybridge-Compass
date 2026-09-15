@@ -39,80 +39,6 @@ enum P2PHandshakeFramePostAwaitAction: Sendable, Equatable {
     case continueResponderTerminalProcessing
 }
 
-struct P2PPairingIdentityBootstrapReadinessReceipt: Sendable, Equatable {
-    let peerId: String
-    let connectionGeneration: UUID
-    let sessionId: String
-    let declaredDeviceId: String
-    let protocolPublicKeyFingerprint: String
-    let acceptedMaterialDigest: Data
-
-    func matches(
-        peerId: String,
-        connectionGeneration: UUID,
-        sessionId: String,
-        declaredDeviceId: String,
-        protocolPublicKeyFingerprint: String,
-        acceptedMaterialDigest: Data
-    ) -> Bool {
-        self.peerId == peerId
-            && self.connectionGeneration == connectionGeneration
-            && self.sessionId == sessionId
-            && self.declaredDeviceId == declaredDeviceId
-            && self.protocolPublicKeyFingerprint == protocolPublicKeyFingerprint
-            && self.acceptedMaterialDigest == acceptedMaterialDigest
-    }
-
-    func evidenceState(
-        for candidates: [P2PPairingIdentityBootstrapEvidence]
-    ) -> P2PPairingIdentityBootstrapEvidenceState {
-        let exactSessionCandidates = candidates.filter {
-            $0.connectionGeneration == connectionGeneration
-                && $0.sessionId == sessionId
-        }
-        guard !exactSessionCandidates.isEmpty else { return .missing }
-        guard exactSessionCandidates.allSatisfy({ candidate in
-            matches(
-                peerId: peerId,
-                connectionGeneration: candidate.connectionGeneration,
-                sessionId: candidate.sessionId,
-                declaredDeviceId: candidate.declaredDeviceId,
-                protocolPublicKeyFingerprint: candidate.protocolPublicKeyFingerprint,
-                acceptedMaterialDigest: candidate.acceptedMaterialDigest
-            )
-        }) else {
-            return .authorityConflict
-        }
-        return .current
-    }
-}
-
-enum P2PPairingIdentityBootstrapReceiptState: Sendable, Equatable {
-    case current
-    case journalBusy
-}
-
-enum P2PPairingIdentityBootstrapEvidenceState: Sendable, Equatable {
-    case current
-    case missing
-    case authorityConflict
-}
-
-struct P2PPairingIdentityBootstrapEvidence: Sendable, Equatable {
-    let connectionGeneration: UUID
-    let sessionId: String
-    let declaredDeviceId: String
-    let protocolPublicKeyFingerprint: String
-    let acceptedMaterialDigest: Data
-}
-
-struct P2PPairingIdentityBootstrapReadinessResult: Sendable, Equatable {
-    let receipt: P2PPairingIdentityBootstrapReadinessReceipt?
-    let observedReply: Bool
-
-    var isReady: Bool { receipt != nil }
-}
-
 struct P2PConnectionLease<Connection: AnyObject & Sendable>: Sendable {
     let peerId: String
     let generation: UUID
@@ -813,14 +739,7 @@ public class P2PConnectionManager: ObservableObject {
     private var pairingIdentityAcceptanceOperations: [
         PairingIdentityAcceptanceKey: PairingIdentityAcceptanceOperation
     ] = [:]
-    private struct PairingIdentityReceiveObservation: Sendable {
-        let connectionGeneration: UUID
-        let sessionId: String
-        let observedAt: Date
-        let declaredDeviceId: String
-        let protocolPublicKeyFingerprint: String
-        let acceptedMaterialDigest: Data
-    }
+    private typealias PairingIdentityReceiveObservation = P2PPairingIdentityBootstrapObservation
     private var lastPairingIdentityExchangeSentAt: [String: PairingIdentitySendObservation] = [:]
     private var lastPairingIdentityExchangeReceivedAt: [String: PairingIdentityReceiveObservation] = [:]
     private var lastAcceptedPairingIdentityDeviceIdByPeerId: [String: String] = [:]
@@ -1970,8 +1889,11 @@ public class P2PConnectionManager: ObservableObject {
         candidates: [String],
         pinnedProtocolFingerprints: Set<String>,
         preferredTargetSuite: CryptoSuite?,
-        recoveryReference: String? = nil
+        recoveryReference: String? = nil,
+        expectedSession: AuthenticatedConnectionReceipt? = nil
     ) async throws {
+        try Task.checkCancellation()
+        if let expectedSession { try requireCurrentAuthenticatedConnection(expectedSession) }
         let routeCandidates = connectionEndpointCandidates(for: device)
         guard !routeCandidates.isEmpty else {
             throw signedLANRefreshFailure("no LAN endpoint candidates")
@@ -1999,6 +1921,9 @@ public class P2PConnectionManager: ObservableObject {
             throw signedLANRefreshFailure("missing stable protocol identity target; refusing endpoint alias target")
         }
         let request = AppMessage.KEMRefreshRequestPayload(
+            version: requestedSuites == [.qperiaptABI2PolicyBound]
+                ? AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+                : AppMessage.KEMRefreshRequestPayload.currentVersion,
             requesterDeviceId: try localStablePersistentDeviceIdentifier(),
             targetDeviceId: targetProtocolDeviceId,
             requesterProtocolIdentityFingerprint: requesterProtocolIdentityFingerprint,
@@ -2086,6 +2011,8 @@ public class P2PConnectionManager: ObservableObject {
             throw signedLANRefreshFailure("canonical SKR payload hash is invalid")
         }
 
+        try Task.checkCancellation()
+        if let expectedSession { try requireCurrentAuthenticatedConnection(expectedSession) }
         try await KEMTrustStore.shared.upsertSignedKEMRefresh(
             deviceIds: candidates + [device.id],
             payload: validated,
@@ -2094,6 +2021,8 @@ public class P2PConnectionManager: ObservableObject {
             minimumGeneration: minimumGeneration,
             recoveryEvidenceReference: recoveryReference
         )
+        try Task.checkCancellation()
+        if let expectedSession { try requireCurrentAuthenticatedConnection(expectedSession) }
         let protocolIdentityKey = AppMessage.ProtocolIdentityPublicKeyInfo(
             protocolSigningAlgorithm: validated.protocolSigningAlgorithm,
             publicKey: validated.protocolIdentityPublicKey
@@ -5593,9 +5522,17 @@ public class P2PConnectionManager: ObservableObject {
             targetFingerprint: request.targetProtocolIdentityFingerprint
         )
         try Task.checkCancellation()
+        let isQProfile = request.version == AppMessage.KEMRefreshRequestPayload.qPeriaptVersion
+        if isQProfile && selectedIdentity.algorithm != .mlDSA65 {
+            throw signedLANRefreshFailure("Q bootstrap requires the committed ML-DSA-65 identity")
+        }
+        let signedPlatform: String? = isQProfile ? "iOS" : nil
+        let signedOSVersion: String? = isQProfile ? "iOS \(ProcessInfo.processInfo.operatingSystemVersion.majorVersion).\(ProcessInfo.processInfo.operatingSystemVersion.minorVersion)" : nil
         let requestedWireIds = Set(requestedSuites.map(\.wireId))
         let kemKeys = KEMPublicKeyInfo.normalizedValidKeys(
-            try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys()
+            try await P2PKEMIdentityKeyStore.shared.getOrCreateBootstrapPublicKeys(),
+            platform: signedPlatform,
+            osVersion: signedOSVersion
         )
         .filter { requestedWireIds.contains($0.suiteWireId) }
         try Task.checkCancellation()
@@ -5611,6 +5548,7 @@ public class P2PConnectionManager: ObservableObject {
             kemPublicKeys: kemKeys
         )
         let unsigned = AppMessage.SignedKEMRefreshPayload(
+            version: request.version,
             deviceId: localId,
             aliases: PeerIdentityAliasResolver.lookupCandidates(for: localId),
             protocolSigningAlgorithm: selectedIdentity.algorithm.rawValue,
@@ -5627,12 +5565,15 @@ public class P2PConnectionManager: ObservableObject {
             policyAllowClassicFallback: false,
             routeScope: "lan",
             bonjourEndpointDigest: request.bonjourEndpointDigest,
+            platform: signedPlatform,
+            osVersion: signedOSVersion,
             signature: Data()
         )
         let signatureProvider = ProtocolSignatureProviderSelector.select(for: selectedIdentity.algorithm)
         let signature = try await signatureProvider.sign(unsigned.signaturePreimage, key: selectedIdentity.keyHandle)
         try Task.checkCancellation()
         let response = AppMessage.SignedKEMRefreshPayload(
+            version: unsigned.version,
             deviceId: unsigned.deviceId,
             aliases: unsigned.aliases,
             protocolSigningAlgorithm: unsigned.protocolSigningAlgorithm,
@@ -5649,6 +5590,8 @@ public class P2PConnectionManager: ObservableObject {
             policyAllowClassicFallback: unsigned.policyAllowClassicFallback,
             routeScope: unsigned.routeScope,
             bonjourEndpointDigest: unsigned.bonjourEndpointDigest,
+            platform: unsigned.platform,
+            osVersion: unsigned.osVersion,
             signature: signature
         )
         await admissionGate.recordCompletedResponse(
@@ -8845,131 +8788,63 @@ public class P2PConnectionManager: ObservableObject {
     }
 
     func requestPairingIdentityExchangeBootstrapReadiness(
-        with deviceId: String,
+        with device: DiscoveredDevice,
         timeout: Duration = .seconds(8)
     ) async throws -> P2PPairingIdentityBootstrapReadinessResult {
         guard let current = currentAuthenticatedSession(
-            forAnyPeerId: deviceId,
+            forAnyPeerId: device.id,
             requireConnectedStatus: true
-        ) else {
-            throw P2PError.noSessionKey
-        }
-        let clock = ContinuousClock()
-        let deadline = clock.now + timeout
-        var observedReply = false
+        ) else { throw P2PError.noSessionKey }
 
-        // A current authenticated session may already have completed the exact
-        // identity exchange. Reuse that evidence before sending another frame:
-        // the peer deliberately rate-limits identical replies for ten seconds.
-        // Requiring the same receipt and strict signed-refresh trust prevents
-        // an older connection or a locator alias from satisfying this fast path.
-        if let observation = pairingIdentityObservation(
-            in: lastPairingIdentityExchangeReceivedAt,
-            matching: pairingIdentityObservationAliases(for: deviceId),
-            since: .distantPast,
-            expectedConnectionGeneration: current.receipt.lease.generation,
-            expectedSessionId: current.receipt.sessionId
-        ) {
-            observedReply = true
-            while clock.now < deadline {
-                guard isCurrentAuthenticatedConnection(current.receipt) else {
-                    throw P2PError.staleConnectionIncarnation
-                }
-                if await hasStrictPQCTrustBootstrapMaterial(for: observation),
-                   let receipt = pairingIdentityBootstrapReceipt(
-                    for: observation,
-                    current: current
-                   ) {
-                    switch try pairingIdentityBootstrapReceiptState(receipt) {
-                    case .current:
-                        return P2PPairingIdentityBootstrapReadinessResult(
-                            receipt: receipt,
-                            observedReply: true
-                        )
-                    case .journalBusy:
-                        try await Task.sleep(for: .milliseconds(100))
-                        continue
+        return try await P2PPairingIdentityBootstrapCoordinator.run(
+            timeout: timeout,
+            operations: .init(
+                requireCurrent: { try self.requireCurrentAuthenticatedConnection(current.receipt) },
+                isRecoveryReady: { PairingAcceptancePersistence.isRecoveryReady },
+                observe: {
+                    self.pairingIdentityObservation(
+                        in: self.lastPairingIdentityExchangeReceivedAt,
+                        matching: self.pairingIdentityObservationAliases(for: device.id),
+                        since: .distantPast,
+                        expectedConnectionGeneration: current.receipt.lease.generation,
+                        expectedSessionId: current.receipt.sessionId
+                    )
+                },
+                hasStrictMaterial: { await self.hasStrictPQCTrustBootstrapMaterial(for: $0) },
+                refreshSignedMaterial: { observation in
+                    guard let stableID = PeerIdentityAliasResolver.persistentDeviceId(
+                        from: observation.declaredDeviceId
+                    ) else { throw P2PError.authenticatedIdentityMismatch }
+                    let candidates = PeerIdentityAliasResolver.lookupCandidates(for: stableID)
+                    let fingerprint = observation.protocolPublicKeyFingerprint.lowercased()
+                    let pins = await self.trustedProtocolFingerprints(forAny: candidates)
+                    guard pins.contains(fingerprint) else { throw P2PError.authenticatedIdentityMismatch }
+                    try await self.attemptSignedLANKEMRefresh(
+                        for: device, candidates: candidates,
+                        pinnedProtocolFingerprints: [fingerprint],
+                        preferredTargetSuite: current.keys.negotiatedSuite,
+                        expectedSession: current.receipt
+                    )
+                },
+                makeCurrentReceipt: { observation in
+                    guard let receipt = self.pairingIdentityBootstrapReceipt(
+                        for: observation, current: current
+                    ) else { throw P2PError.authenticatedIdentityMismatch }
+                    switch try self.pairingIdentityBootstrapReceiptState(receipt) {
+                    case .current: return receipt
+                    case .journalBusy: return nil
+                    }
+                },
+                sendIdentityExchange: {
+                    let outcome = try await self.sendPairingIdentityExchange(
+                        to: current.peerId, expectedLease: current.receipt.lease,
+                        expectedSessionId: current.receipt.sessionId, acceptedMaterialDigest: nil
+                    )
+                    guard outcome == .contentProcessedCurrent else {
+                        throw P2PError.staleConnectionIncarnation
                     }
                 }
-                // A journal is an explicit transient quarantine. Wait for it
-                // instead of generating another pairing transaction. If the
-                // stores are readable and strict material is genuinely absent,
-                // fall through to the normal authenticated exchange below.
-                guard !PairingAcceptancePersistence.isRecoveryReady else {
-                    break
-                }
-                try await Task.sleep(for: .milliseconds(100))
-            }
-        }
-
-        guard clock.now < deadline else {
-            return P2PPairingIdentityBootstrapReadinessResult(
-                receipt: nil,
-                observedReply: observedReply
             )
-        }
-
-        let observedAt = Date()
-        let sendOutcome = try await sendPairingIdentityExchange(
-            to: current.peerId,
-            expectedLease: current.receipt.lease,
-            expectedSessionId: current.receipt.sessionId,
-            acceptedMaterialDigest: nil
-        )
-        guard sendOutcome == .contentProcessedCurrent else {
-            throw P2PError.staleConnectionIncarnation
-        }
-
-        while clock.now < deadline {
-            guard isCurrentAuthenticatedConnection(current.receipt) else {
-                throw P2PError.staleConnectionIncarnation
-            }
-            let aliases = pairingIdentityObservationAliases(for: deviceId)
-            let observation = pairingIdentityObservation(
-                in: lastPairingIdentityExchangeReceivedAt,
-                matching: aliases,
-                since: observedAt,
-                expectedConnectionGeneration: current.receipt.lease.generation,
-                expectedSessionId: current.receipt.sessionId
-            )
-            observedReply = observedReply || observation != nil
-            let hasStrictPQCTrustMaterial = if let observation {
-                await hasStrictPQCTrustBootstrapMaterial(for: observation)
-            } else {
-                false
-            }
-            if Self.isPairingIdentityBootstrapReady(
-                hasCurrentSessionObservation: observation != nil,
-                hasStrictPQCTrustMaterial: hasStrictPQCTrustMaterial
-            ) {
-                guard let observation else {
-                    throw P2PError.pairingIdentityExchangeUnavailable(
-                        reason: "bootstrap readiness 缺少 exact observation"
-                    )
-                }
-                guard let receipt = pairingIdentityBootstrapReceipt(
-                    for: observation,
-                    current: current
-                ) else {
-                    throw P2PError.authenticatedIdentityMismatch
-                }
-                switch try pairingIdentityBootstrapReceiptState(receipt) {
-                case .current:
-                    return P2PPairingIdentityBootstrapReadinessResult(
-                        receipt: receipt,
-                        observedReply: observedReply
-                    )
-                case .journalBusy:
-                    try await Task.sleep(for: .milliseconds(100))
-                    continue
-                }
-            }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-
-        return P2PPairingIdentityBootstrapReadinessResult(
-            receipt: nil,
-            observedReply: observedReply
         )
     }
 
@@ -9035,13 +8910,6 @@ public class P2PConnectionManager: ObservableObject {
                 reason: "配对 authority 持久化事务仍在隔离中"
             )
         }
-    }
-
-    nonisolated static func isPairingIdentityBootstrapReady(
-        hasCurrentSessionObservation: Bool,
-        hasStrictPQCTrustMaterial: Bool
-    ) -> Bool {
-        hasCurrentSessionObservation && hasStrictPQCTrustMaterial
     }
 
     private func pairingIdentityObservationAliases(for deviceId: String) -> Set<String> {
@@ -9711,6 +9579,9 @@ public class P2PConnectionManager: ObservableObject {
             return "file_transfer"
         }
 
+        if RemoteDesktopWorkspace.instance.hasSession(for: deviceId) {
+            return "remote_desktop"
+        }
         let remoteDesktop = RemoteDesktopManager.instance
         if remoteDesktop.isStreaming {
             return "remote_desktop"
@@ -11866,7 +11737,9 @@ public class P2PConnectionManager: ObservableObject {
         } else {
             identityDescriptor = nil
         }
-        guard let currentBinding = productConnectivityAttemptsByDriver[identifier],
+        let finishedConfirmation = await driver.authenticatedFinishedConfirmation(matching: keys)
+        guard let finishedConfirmation,
+              let currentBinding = productConnectivityAttemptsByDriver[identifier],
               currentBinding.connectionGeneration == connectionGeneration,
               currentBinding.owner === binding.owner,
               currentBinding.identityAlgorithm == binding.identityAlgorithm,
@@ -11900,7 +11773,8 @@ public class P2PConnectionManager: ObservableObject {
                 .recordProductionIdentityHandshakeBound(
                     descriptor: identityDescriptor,
                     sessionReference: sessionReference,
-                    attemptOwner: binding.owner
+                    attemptOwner: binding.owner,
+                    finishedConfirmation: finishedConfirmation
                 )
         }
         return true
@@ -12706,13 +12580,68 @@ public class P2PConnectionManager: ObservableObject {
     /// This mirrors the macOS derivation so local file-transfer metadata/chunks/receipts
     /// stay cryptographically bound to the already authenticated P2P session.
     public func deriveClassicFileTransferKey(transferId: String, deviceId: String) throws -> SymmetricKey {
+        try classicTransferKeyMaterial(transferId: transferId, deviceId: deviceId).transferKey
+    }
+
+    struct ClassicFileTransferKeyMaterial: Sendable {
+        let transferKey: SymmetricKey
+        let sessionReference: String?
+        let role: ProductConnectivityHandshakeRole
+        let suite: CryptoSuite
+        let connectionGeneration: UUID
+
+        init(sessionKeys: SessionKeys, transferId: String, connectionGeneration: UUID) {
+            self.connectionGeneration = connectionGeneration
+            let orderedKeys = [sessionKeys.sendKey, sessionKeys.receiveKey].sorted { lhs, rhs in
+                lhs.lexicographicallyPrecedes(rhs)
+            }
+            let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
+                partial.append(key)
+            }
+
+            transferKey = HKDF<SHA256>.deriveKey(
+                inputKeyMaterial: SymmetricKey(data: combinedMaterial),
+                salt: Data("skybridge-classic-file-transfer-v1".utf8),
+                info: Data(transferId.utf8),
+                outputByteCount: 32
+            )
+            sessionReference = P2PEvidenceReference.sessionIncarnation(
+                sessionID: sessionKeys.sessionId,
+                transcriptHash: sessionKeys.transcriptHash
+            )
+            role = sessionKeys.role == .initiator ? .initiator : .responder
+            suite = sessionKeys.negotiatedSuite
+        }
+
+        func matches(_ other: Self) -> Bool {
+            guard connectionGeneration == other.connectionGeneration,
+                  sessionReference == other.sessionReference,
+                  role == other.role, suite == other.suite else { return false }
+            return transferKey.withUnsafeBytes { lhs in
+                other.transferKey.withUnsafeBytes { rhs in
+                    guard lhs.count == rhs.count else { return false }
+                    var difference: UInt8 = 0
+                    for index in lhs.indices { difference |= lhs[index] ^ rhs[index] }
+                    return difference == 0
+                }
+            }
+        }
+    }
+
+    /// Derive the file key and evidence reference from one exact authenticated
+    /// incarnation. This synchronous read cannot straddle a rekey or replacement.
+    func classicTransferKeyMaterial(
+        transferId: String,
+        deviceId: String
+    ) throws -> ClassicFileTransferKeyMaterial {
         guard let current = currentAuthenticatedSession(
             forAnyPeerId: deviceId,
             requireConnectedStatus: true
         ) else { throw P2PError.noSessionKey }
-        return deriveClassicFileTransferKey(
-            from: current.keys,
-            transferId: transferId
+        return ClassicFileTransferKeyMaterial(
+            sessionKeys: current.keys,
+            transferId: transferId,
+            connectionGeneration: current.receipt.lease.generation
         )
     }
 
@@ -12805,22 +12734,7 @@ public class P2PConnectionManager: ObservableObject {
         }
     }
 
-    private func deriveClassicFileTransferKey(from keys: SessionKeys, transferId: String) -> SymmetricKey {
-        let orderedKeys = [keys.sendKey, keys.receiveKey].sorted { lhs, rhs in
-            lhs.lexicographicallyPrecedes(rhs)
-        }
-        let combinedMaterial = orderedKeys.reduce(into: Data()) { partial, key in
-            partial.append(key)
-        }
 
-        return HKDF<SHA256>.deriveKey(
-            inputKeyMaterial: SymmetricKey(data: combinedMaterial),
-            salt: Data("skybridge-classic-file-transfer-v1".utf8),
-            info: Data(transferId.utf8),
-            outputByteCount: 32
-        )
-    }
-    
     /// 获取设备的协商套件
     public func getNegotiatedSuite(for deviceId: String) -> CryptoSuite? {
         currentAuthenticatedSession(

@@ -60,7 +60,7 @@ public struct QuickActionsPanelView: View {
             }
         }
         .padding(20)
-        .background(themeConfiguration.cardBackgroundMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .dashboardGlassSurface(cornerRadius: 18)
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(themeConfiguration.borderColor, lineWidth: 1)

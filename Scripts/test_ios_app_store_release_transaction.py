@@ -17,20 +17,18 @@ SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 
+import ios_app_store_upload_preflight as upload_preflight
 import ios_physical_release_acceptance as physical
 import ios_release_archive_identity as archive_identity
 import validate_real_device_release_acceptance_artifact as release_validator
 import verify_ios_app_store_export as app_store_verifier
 
-
 SOURCE_REPOSITORY = "billlza/Skybridge-Compass"
 SOURCE_COMMIT = "1" * 40
 SOURCE_INPUT_DIGEST = "2" * 64
 VERSION = "1.0.2"
-BUILD = "2"
-APP_UUIDS = [
-    {"architecture": "arm64", "uuid": "11111111-1111-1111-1111-111111111111"}
-]
+BUILD = "4"
+APP_UUIDS = [{"architecture": "arm64", "uuid": "11111111-1111-1111-1111-111111111111"}]
 WIDGET_UUIDS = [
     {"architecture": "arm64", "uuid": "22222222-2222-2222-2222-222222222222"}
 ]
@@ -76,7 +74,9 @@ class ArchiveIdentityTests(unittest.TestCase):
         )
         write_plist(
             self.widget / "Info.plist",
-            app_info(archive_identity.WIDGET_BUNDLE_IDENTIFIER, "SkyBridgeCompass-Widgets"),
+            app_info(
+                archive_identity.WIDGET_BUNDLE_IDENTIFIER, "SkyBridgeCompass-Widgets"
+            ),
         )
         (self.app / "SkyBridgeCompass-iOS").write_bytes(b"app-binary")
         (self.widget / "SkyBridgeCompass-Widgets").write_bytes(b"widget-binary")
@@ -111,12 +111,11 @@ class ArchiveIdentityTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def build(
-        self, release_app_uuids: list[dict[str, str]] | None = None
-    ) -> dict:
+    def build(self, release_app_uuids: list[dict[str, str]] | None = None) -> dict:
         selected_release_app_uuids = (
             APP_UUIDS if release_app_uuids is None else release_app_uuids
         )
+
         def fake_uuids(executable: Path, _label: str) -> list[dict[str, str]]:
             if executable.name == "SkyBridgeCompass-iOS":
                 return APP_UUIDS
@@ -127,13 +126,20 @@ class ArchiveIdentityTests(unittest.TestCase):
                 archive_identity,
                 "release_testing_products",
                 return_value=(
-                    app_info(archive_identity.APP_BUNDLE_IDENTIFIER, "SkyBridgeCompass-iOS"),
-                    app_info(archive_identity.WIDGET_BUNDLE_IDENTIFIER, "SkyBridgeCompass-Widgets"),
+                    app_info(
+                        archive_identity.APP_BUNDLE_IDENTIFIER, "SkyBridgeCompass-iOS"
+                    ),
+                    app_info(
+                        archive_identity.WIDGET_BUNDLE_IDENTIFIER,
+                        "SkyBridgeCompass-Widgets",
+                    ),
                     selected_release_app_uuids,
                     WIDGET_UUIDS,
                 ),
             ),
-            mock.patch.object(archive_identity, "executable_uuids", side_effect=fake_uuids),
+            mock.patch.object(
+                archive_identity, "executable_uuids", side_effect=fake_uuids
+            ),
             mock.patch.object(archive_identity, "archive_debug_symbols"),
         ):
             return archive_identity.build_identity(
@@ -152,12 +158,16 @@ class ArchiveIdentityTests(unittest.TestCase):
         archive_identity.write_identity(identity_path, payload)
         self.assertEqual(archive_identity.load_identity(identity_path), payload)
         self.assertEqual(self.build(), payload)
-        self.assertEqual(payload["identityPurpose"], "detect-accidental-cross-run-mismatch")
+        self.assertEqual(
+            payload["identityPurpose"], "detect-accidental-cross-run-mismatch"
+        )
 
     def test_archive_or_release_testing_ipa_change_is_rejected(self) -> None:
         before = self.build()
         (self.app / "SkyBridgeCompass-iOS").write_bytes(b"changed-app-binary")
-        self.assertNotEqual(self.build()["archiveTreeSha256"], before["archiveTreeSha256"])
+        self.assertNotEqual(
+            self.build()["archiveTreeSha256"], before["archiveTreeSha256"]
+        )
         (self.app / "SkyBridgeCompass-iOS").write_bytes(b"app-binary")
         self.ipa.write_bytes(b"changed-release-testing-ipa")
         with self.assertRaises(archive_identity.ArchiveIdentityError):
@@ -218,7 +228,9 @@ class ArchiveIdentityTests(unittest.TestCase):
             )
 
         with (
-            mock.patch.object(archive_identity, "executable_uuids", return_value=APP_UUIDS),
+            mock.patch.object(
+                archive_identity, "executable_uuids", return_value=APP_UUIDS
+            ),
             self.assertRaises(archive_identity.ArchiveIdentityError),
         ):
             archive_identity.archive_debug_symbols(
@@ -262,7 +274,9 @@ class PhysicalAcceptanceTests(unittest.TestCase):
             }
         )
         self.identity_path = self.root / "identity.json"
-        self.identity_path.write_bytes(archive_identity.canonical_bytes(self.identity_payload))
+        self.identity_path.write_bytes(
+            archive_identity.canonical_bytes(self.identity_payload)
+        )
         self.evidence_root = self.root / "evidence"
         self.evidence_root.mkdir(mode=0o700)
         binding = physical.expected_binding(self.identity_payload)
@@ -301,12 +315,16 @@ class PhysicalAcceptanceTests(unittest.TestCase):
     def test_create_and_verify_exact_four_evidence_records(self) -> None:
         records = self.collect()
         payload = physical.validate_acceptance(
-            physical.build_acceptance(identity=self.identity_payload, evidence_records=records),
+            physical.build_acceptance(
+                identity=self.identity_payload, evidence_records=records
+            ),
             self.identity_payload,
         )
         output = self.root / "physical.json"
         physical._write_new(output, payload)
-        self.assertEqual(physical.load_acceptance(output, self.identity_payload), payload)
+        self.assertEqual(
+            physical.load_acceptance(output, self.identity_payload), payload
+        )
 
     def test_missing_archive_binding_or_changed_manifest_is_rejected(self) -> None:
         records = self.collect()
@@ -322,10 +340,12 @@ class PhysicalAcceptanceTests(unittest.TestCase):
     def test_all_four_evidence_bindings_must_be_identical(self) -> None:
         for _, directory_name in physical.EVIDENCE_CONTRACT:
             with self.subTest(directory=directory_name):
-                manifest_path = self.evidence_root / directory_name / "release-acceptance.json"
+                manifest_path = (
+                    self.evidence_root / directory_name / "release-acceptance.json"
+                )
                 original = manifest_path.read_bytes()
                 manifest = json.loads(original)
-                manifest["iosReleaseArchive"]["releaseBuild"] = "3"
+                manifest["iosReleaseArchive"]["releaseBuild"] = "5"
                 manifest_path.write_text(
                     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8",
@@ -347,7 +367,9 @@ class PhysicalAcceptanceTests(unittest.TestCase):
                 self.identity_payload, self.release_testing_ipa
             )
 
-    def test_bind_manifest_rejects_wrong_identity_and_preserves_exact_binding(self) -> None:
+    def test_bind_manifest_rejects_wrong_identity_and_preserves_exact_binding(
+        self,
+    ) -> None:
         manifest_path = (
             self.evidence_root
             / physical.EVIDENCE_CONTRACT[0][1]
@@ -383,7 +405,9 @@ class PhysicalAcceptanceTests(unittest.TestCase):
             )
 
     def test_formal_validator_rejects_a_different_archive_binding(self) -> None:
-        manifest = {"iosReleaseArchive": physical.expected_binding(self.identity_payload)}
+        manifest = {
+            "iosReleaseArchive": physical.expected_binding(self.identity_payload)
+        }
         release_validator.validate_ios_release_archive_binding(
             manifest,
             self.identity_path,
@@ -404,6 +428,26 @@ class PhysicalAcceptanceTests(unittest.TestCase):
 
 
 class AppStoreProductPolicyTests(unittest.TestCase):
+    def test_release_source_and_app_store_require_the_same_production_environment(
+        self,
+    ) -> None:
+        release_entitlements = plistlib.loads(
+            (
+                ROOT / "SkyBridge Compass iOS/SkyBridgeCompass-iOSRelease.entitlements"
+            ).read_bytes()
+        )
+        key = app_store_verifier.ICLOUD_CONTAINER_ENVIRONMENT
+        self.assertEqual(release_entitlements[key], "Production")
+        self.assertEqual(
+            app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES[key], "Production"
+        )
+        self.assertFalse(
+            app_store_verifier._profile_value_covers(["Production"], "Production")
+        )
+        self.assertTrue(
+            app_store_verifier._profile_value_covers(["TEAM.*"], ["TEAM.app"])
+        )
+
     def test_archive_and_exported_metadata_must_match(self) -> None:
         identity = {
             "releaseVersion": VERSION,
@@ -422,7 +466,7 @@ class AppStoreProductPolicyTests(unittest.TestCase):
             app_store_widget_info=dict(archive_widget),
         )
         changed = dict(archive_app)
-        changed["CFBundleVersion"] = "3"
+        changed["CFBundleVersion"] = str(int(BUILD) + 1)
         with self.assertRaises(app_store_verifier.AppStoreVerificationError):
             app_store_verifier._validate_archive_product_metadata(
                 identity=identity,
@@ -432,7 +476,9 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                 app_store_widget_info=dict(archive_widget),
             )
 
-    def test_app_store_target_requires_production_profile_and_certificate_binding(self) -> None:
+    def test_app_store_target_requires_production_profile_and_certificate_binding(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as name:
             bundle = Path(name) / "App.app"
             bundle.mkdir()
@@ -446,16 +492,23 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                 **app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
             }
             profile_entitlements = dict(entitlements)
+            environment_key = app_store_verifier.ICLOUD_CONTAINER_ENVIRONMENT
+            profile_entitlements[environment_key] = ["Production", "Development"]
             profile = {
                 "Entitlements": profile_entitlements,
                 "TeamIdentifier": [app_store_verifier.EXPECTED_TEAM],
                 "Platform": ["iOS"],
-                "ExpirationDate": dt.datetime.now() + dt.timedelta(days=90),
+                "ExpirationDate": dt.datetime.now(dt.UTC).replace(tzinfo=None)
+                + dt.timedelta(days=90),
                 "DeveloperCertificates": [b"certificate"],
             }
 
             def fake_run(args: list[str], _label: str) -> bytes:
                 if "--entitlements" in args:
+                    self.assertEqual(
+                        args[:-1],
+                        ["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml"],
+                    )
                     return plistlib.dumps(entitlements)
                 return b""
 
@@ -467,8 +520,14 @@ class AppStoreProductPolicyTests(unittest.TestCase):
             with (
                 mock.patch.object(app_store_verifier, "_run", side_effect=fake_run),
                 mock.patch.object(app_store_verifier, "_profile", return_value=profile),
-                mock.patch.object(app_store_verifier, "_codesign_metadata", return_value=metadata),
-                mock.patch.object(app_store_verifier, "_certificate_matches_profile", return_value=True),
+                mock.patch.object(
+                    app_store_verifier, "_codesign_metadata", return_value=metadata
+                ),
+                mock.patch.object(
+                    app_store_verifier,
+                    "_certificate_matches_profile",
+                    return_value=True,
+                ),
             ):
                 app_store_verifier._validate_target(
                     label="App Store app",
@@ -476,13 +535,83 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                     expected_bundle_identifier=archive_identity.APP_BUNDLE_IDENTIFIER,
                     expected_entitlements=app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
                 )
+                for target_name, target, invalid_values in (
+                    (
+                        "signed",
+                        entitlements,
+                        (
+                            None,
+                            "Development",
+                            "production",
+                            "Unknown",
+                            "",
+                            ["Production"],
+                            True,
+                        ),
+                    ),
+                    (
+                        "profile",
+                        profile_entitlements,
+                        (
+                            None,
+                            "Development",
+                            ["Development"],
+                            "*",
+                            [],
+                            ["Production", True],
+                            ["Production", "Unknown"],
+                        ),
+                    ),
+                ):
+                    original = target[environment_key]
+                    for value in invalid_values:
+                        with self.subTest(target=target_name, value=value):
+                            if value is None:
+                                target.pop(environment_key, None)
+                            else:
+                                target[environment_key] = value
+                            with self.assertRaisesRegex(
+                                app_store_verifier.AppStoreVerificationError,
+                                environment_key,
+                            ):
+                                app_store_verifier._validate_target(
+                                    label="App Store app",
+                                    bundle=bundle,
+                                    expected_bundle_identifier=archive_identity.APP_BUNDLE_IDENTIFIER,
+                                    expected_entitlements=app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
+                                )
+                    target[environment_key] = original
+                for value in (None, "Development", ["Production"]):
+                    with self.subTest(expected_environment=value):
+                        expected = dict(
+                            app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES
+                        )
+                        if value is None:
+                            expected.pop(environment_key)
+                        else:
+                            expected[environment_key] = value
+                        with self.assertRaisesRegex(
+                            app_store_verifier.AppStoreVerificationError,
+                            "policy must require Production",
+                        ):
+                            app_store_verifier._validate_target(
+                                label="App Store app",
+                                bundle=bundle,
+                                expected_bundle_identifier=archive_identity.APP_BUNDLE_IDENTIFIER,
+                                expected_entitlements=expected,
+                            )
                 for unexpected_key, unexpected_value in (
-                    ("com.apple.developer.associated-domains", ["applinks:example.invalid"]),
+                    (
+                        "com.apple.developer.associated-domains",
+                        ["applinks:example.invalid"],
+                    ),
                     ("com.example.unreviewed-capability", True),
                 ):
                     entitlements[unexpected_key] = unexpected_value
                     profile_entitlements[unexpected_key] = unexpected_value
-                    with self.assertRaises(app_store_verifier.AppStoreVerificationError):
+                    with self.assertRaises(
+                        app_store_verifier.AppStoreVerificationError
+                    ):
                         app_store_verifier._validate_target(
                             label="App Store app",
                             bundle=bundle,
@@ -505,7 +634,9 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                         expected_entitlements=app_store_verifier.PRODUCTION_ENTITLEMENT_VALUES,
                     )
                     entitlements[system_key] = unsafe_value
-                    with self.assertRaises(app_store_verifier.AppStoreVerificationError):
+                    with self.assertRaises(
+                        app_store_verifier.AppStoreVerificationError
+                    ):
                         app_store_verifier._validate_target(
                             label="App Store app",
                             bundle=bundle,
@@ -517,7 +648,9 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                 device_bound = dict(profile)
                 device_bound["ProvisionedDevices"] = ["device"]
                 with (
-                    mock.patch.object(app_store_verifier, "_profile", return_value=device_bound),
+                    mock.patch.object(
+                        app_store_verifier, "_profile", return_value=device_bound
+                    ),
                     self.assertRaises(app_store_verifier.AppStoreVerificationError),
                 ):
                     app_store_verifier._validate_target(
@@ -543,7 +676,8 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                     "Entitlements": profile_entitlements,
                     "TeamIdentifier": [app_store_verifier.EXPECTED_TEAM],
                     "Platform": ["iOS"],
-                    "ExpirationDate": dt.datetime.now() + dt.timedelta(days=90),
+                    "ExpirationDate": dt.datetime.now(dt.UTC).replace(tzinfo=None)
+                    + dt.timedelta(days=90),
                     "DeveloperCertificates": [b"certificate"],
                 }
                 metadata["Identifier"] = archive_identity.WIDGET_BUNDLE_IDENTIFIER
@@ -560,13 +694,19 @@ class AppStoreProductPolicyTests(unittest.TestCase):
                     )
                     for unexpected_key, unexpected_value in (
                         ("aps-environment", "production"),
-                        ("com.apple.developer.associated-domains", ["applinks:example.invalid"]),
+                        (
+                            "com.apple.developer.associated-domains",
+                            ["applinks:example.invalid"],
+                        ),
                         ("com.apple.developer.icloud-services", ["CloudKit"]),
+                        (environment_key, "Production"),
                         ("com.example.unreviewed-widget-capability", True),
                     ):
                         entitlements[unexpected_key] = unexpected_value
                         profile_entitlements[unexpected_key] = unexpected_value
-                        with self.assertRaises(app_store_verifier.AppStoreVerificationError):
+                        with self.assertRaises(
+                            app_store_verifier.AppStoreVerificationError
+                        ):
                             app_store_verifier._validate_target(
                                 label="App Store Widget",
                                 bundle=widget_bundle,
@@ -578,13 +718,67 @@ class AppStoreProductPolicyTests(unittest.TestCase):
 
 
 class BoundaryCommandTests(unittest.TestCase):
-    def run_script(self, script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_script(
+        self, script: str, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(SCRIPTS / script), *arguments],
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def test_upload_preflight_reads_the_existing_source_version_transaction(
+        self,
+    ) -> None:
+        source_identity = upload_preflight.source_release_version()
+        for relative_path in (
+            "SkyBridgeCompassiOS/Supporting Files/Info.plist",
+            "Widgets/Info.plist",
+        ):
+            with self.subTest(plist=relative_path):
+                info = plistlib.loads(
+                    (ROOT / "SkyBridge Compass iOS" / relative_path).read_bytes()
+                )
+                self.assertEqual(
+                    source_identity,
+                    (info["CFBundleShortVersionString"], info["CFBundleVersion"]),
+                )
+
+    def test_upload_preflight_rejects_failed_or_malformed_version_checker(self) -> None:
+        for error in (
+            OSError("checker unavailable"),
+            subprocess.CalledProcessError(1, "checker"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                mock.patch.object(
+                    upload_preflight.subprocess, "run", side_effect=error
+                ),
+                self.assertRaisesRegex(
+                    SystemExit, "source iOS release version transaction is invalid"
+                ),
+            ):
+                upload_preflight.source_release_version()
+        for output in (
+            "",
+            "1.0.2\t0\n",
+            "1.0\t3\n",
+            "1.0.2\t3\textra\n",
+            "warning\n1.0.2\t3\n",
+        ):
+            with (
+                self.subTest(output=output),
+                mock.patch.object(
+                    upload_preflight.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        ["checker"], 0, output, ""
+                    ),
+                ),
+                self.assertRaisesRegex(SystemExit, "checker returned malformed output"),
+            ):
+                upload_preflight.source_release_version()
 
     def test_export_options_are_exact_and_tampering_fails(self) -> None:
         options = ROOT / "Scripts/ios_app_store_export_options.plist"
@@ -681,12 +875,16 @@ class BoundaryCommandTests(unittest.TestCase):
                 "12345678-1234-1234-1234-123456789abc",
             )
             self.assertEqual(
-                self.run_script("validate_app_store_connect_key.py", *arguments).returncode,
+                self.run_script(
+                    "validate_app_store_connect_key.py", *arguments
+                ).returncode,
                 0,
             )
             key.chmod(0o644)
             self.assertNotEqual(
-                self.run_script("validate_app_store_connect_key.py", *arguments).returncode,
+                self.run_script(
+                    "validate_app_store_connect_key.py", *arguments
+                ).returncode,
                 0,
             )
 
@@ -695,7 +893,9 @@ class BoundaryCommandTests(unittest.TestCase):
             root = Path(name)
             source = root / "raw.log"
             output = root / "redacted.log"
-            source.write_text("path=/secret/key id=ABCDEFGHIJ issuer=issuer-value\n", encoding="utf-8")
+            source.write_text(
+                "path=/secret/key id=ABCDEFGHIJ issuer=issuer-value\n", encoding="utf-8"
+            )
             result = self.run_script(
                 "redact_app_store_connect_log.py",
                 "--input",
@@ -732,7 +932,8 @@ class BoundaryCommandTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(token_output.exists())
 
-    def test_upload_preflight_rejects_ipa_changed_after_verification(self) -> None:
+    def test_upload_preflight_requires_current_build_and_unchanged_ipa(self) -> None:
+        source_version, source_build = upload_preflight.source_release_version()
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             export = root / "export"
@@ -754,8 +955,8 @@ class BoundaryCommandTests(unittest.TestCase):
                 "swiftActiveCompilationConditions": ["HAS_APPLE_PQC_SDK"],
                 "sourceCommit": SOURCE_COMMIT,
                 "archiveIdentityPurpose": archive_identity.IDENTITY_PURPOSE,
-                "releaseVersion": VERSION,
-                "releaseBuild": BUILD,
+                "releaseVersion": source_version,
+                "releaseBuild": source_build,
                 "appBundleIdentifier": archive_identity.APP_BUNDLE_IDENTIFIER,
                 "widgetBundleIdentifier": archive_identity.WIDGET_BUNDLE_IDENTIFIER,
                 "teamIdentifier": app_store_verifier.EXPECTED_TEAM,
@@ -777,6 +978,19 @@ class BoundaryCommandTests(unittest.TestCase):
                 ).returncode,
                 0,
             )
+            payload["releaseBuild"] = str(int(source_build) + 1)
+            verification.write_text(json.dumps(payload), encoding="utf-8")
+            old_build = self.run_script(
+                "ios_app_store_upload_preflight.py",
+                "--export-dir",
+                str(export),
+                "--verification",
+                str(verification),
+            )
+            self.assertNotEqual(old_build.returncode, 0)
+            self.assertIn("releaseBuild does not match this release", old_build.stderr)
+            payload["releaseBuild"] = source_build
+            verification.write_text(json.dumps(payload), encoding="utf-8")
             ipa.write_bytes(b"changed")
             self.assertNotEqual(
                 self.run_script(
@@ -790,12 +1004,18 @@ class BoundaryCommandTests(unittest.TestCase):
             )
 
     def test_source_and_workflow_contract_keep_upload_separate(self) -> None:
-        exporter = (SCRIPTS / "export_ios_app_store_product.sh").read_text(encoding="utf-8")
-        uploader = (SCRIPTS / "upload_ios_app_store_product.sh").read_text(encoding="utf-8")
+        exporter = (SCRIPTS / "export_ios_app_store_product.sh").read_text(
+            encoding="utf-8"
+        )
+        uploader = (SCRIPTS / "upload_ios_app_store_product.sh").read_text(
+            encoding="utf-8"
+        )
         workflow = (ROOT / ".github/workflows/ios-app-store-export.yml").read_text(
             encoding="utf-8"
         )
-        options = plistlib.loads((SCRIPTS / "ios_app_store_export_options.plist").read_bytes())
+        options = plistlib.loads(
+            (SCRIPTS / "ios_app_store_export_options.plist").read_bytes()
+        )
         self.assertIn("xcodebuild -exportArchive", exporter)
         self.assertIn("--release-testing-ipa", exporter)
         self.assertNotIn("--upload-package", exporter)
@@ -803,9 +1023,13 @@ class BoundaryCommandTests(unittest.TestCase):
         self.assertIn("release-ios-app-store-export", workflow)
         self.assertIn("actions: read", workflow)
         self.assertIn("Revalidate App Store Export Approval Environment", workflow)
-        post_approval = workflow.index("Revalidate App Store Export Approval Environment")
+        post_approval = workflow.index(
+            "Revalidate App Store Export Approval Environment"
+        )
         source_check = workflow.index("Require Exact Clean Source")
-        export_step = workflow.index("Revalidate Physical Evidence and Export Accepted Archive")
+        export_step = workflow.index(
+            "Revalidate Physical Evidence and Export Accepted Archive"
+        )
         self.assertLess(post_approval, source_check)
         self.assertLess(post_approval, export_step)
         secret_path = "ASC_API_KEY_PATH: ${{ secrets.SKYBRIDGE_ASC_API_KEY_PATH }}"

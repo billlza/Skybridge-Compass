@@ -5,6 +5,134 @@ import SkyBridgeProtocolCore
 
 @available(iOS 17.0, *)
 final class RemoteDesktopViewerStreamConfigurationPushPolicyTests: XCTestCase {
+    func testStartupWatchdogsWaitForAcknowledgementAndDoNotRestartOnDuplicateACKs() {
+        var admission = RemoteDesktopViewerStreamConfigurationPushPolicy.StartupWatchdogAdmission<UUID>()
+        let video = admission.acknowledge(audioOwner: nil)
+        XCTAssertTrue(video.startVideo)
+        XCTAssertFalse(video.startAudio)
+        let audio = UUID()
+        let audioACK = admission.acknowledge(audioOwner: audio)
+        XCTAssertFalse(audioACK.startVideo)
+        XCTAssertTrue(audioACK.startAudio)
+        let repeated = admission.acknowledge(audioOwner: audio)
+        XCTAssertFalse(repeated.startVideo)
+        XCTAssertFalse(repeated.startAudio)
+    }
+
+    func testReplacementAudioReceiverGetsItsOwnWatchdogWithoutExtendingVideoDeadline() {
+        var admission = RemoteDesktopViewerStreamConfigurationPushPolicy.StartupWatchdogAdmission<UUID>()
+        let first = admission.acknowledge(audioOwner: UUID())
+        XCTAssertTrue(first.startVideo && first.startAudio)
+        let replacement = admission.acknowledge(audioOwner: UUID())
+        XCTAssertFalse(replacement.startVideo)
+        XCTAssertTrue(replacement.startAudio)
+    }
+
+    func testRetiredAudioWaitsForItsNextACKAndNewSessionStartsFresh() {
+        var admission = RemoteDesktopViewerStreamConfigurationPushPolicy.StartupWatchdogAdmission<UUID>()
+        let audio = UUID()
+        _ = admission.acknowledge(audioOwner: audio)
+        admission.retireAudio()
+        XCTAssertFalse(admission.acknowledge(audioOwner: nil).startAudio)
+        XCTAssertTrue(admission.acknowledge(audioOwner: audio).startAudio)
+        admission = .init()
+        let nextSession = admission.acknowledge(audioOwner: audio)
+        XCTAssertTrue(nextSession.startVideo && nextSession.startAudio)
+    }
+
+    @MainActor
+    func testWorkspaceWaiterPreservesTerminalTransportFailure() async throws {
+        let waiter = RemoteDesktopConfigurationWaiter()
+        let started = expectation(description: "waiting for host configuration acknowledgement")
+        let waiting = Task {
+            started.fulfill()
+            try await waiter.wait(for: .init(), timeout: .seconds(1))
+        }
+        await fulfillment(of: [started], timeout: 1)
+        waiter.fail(RemoteDesktopError.streamingFailed("exact transport retired"))
+        do {
+            try await waiting.value
+            XCTFail("Transport retirement must fail the pending workspace operation")
+        } catch RemoteDesktopError.streamingFailed(let reason) {
+            XCTAssertEqual(reason, "exact transport retired")
+        }
+    }
+
+    func testRuntimeArmsMediaWatchdogsOnlyAfterAnExactConfigurationACK() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try readRepositorySourceForSourceShapeTests(at: root.appendingPathComponent(
+            "SkyBridgeCompassiOS/Sources/Managers/RemoteDesktopManager.swift"
+        ))
+        let start = try XCTUnwrap(source.range(of: "public func startStreaming() async throws"))
+        let startEnd = try XCTUnwrap(source.range(of: "private func scheduleFirstFrameWatchdog", range: start.upperBound..<source.endIndex))
+        XCTAssertFalse(source[start.lowerBound..<startEnd.lowerBound].contains("scheduleFirstFrameWatchdog(for:"))
+        let prepare = try XCTUnwrap(source.range(of: "private func prepareRealtimeMediaAudioReceiverIfNeeded"))
+        let prepareEnd = try XCTUnwrap(source.range(of: "private func scheduleRealtimeMediaAudioStartupDiagnostic", range: prepare.upperBound..<source.endIndex))
+        let preparation = source[prepare.lowerBound..<prepareEnd.lowerBound]
+        XCTAssertFalse(preparation.contains("scheduleRealtimeMediaAudioNoTrafficRecovery("))
+        XCTAssertFalse(preparation.contains("rx startup stalled"))
+        let ack = try XCTUnwrap(source.range(of: "public func handleStreamConfigurationAck("))
+        let match = try XCTUnwrap(source.range(of: "acknowledgementMatches(", range: ack.upperBound..<source.endIndex))
+        let accepted = try XCTUnwrap(source.range(of: "acknowledgedStreamConfigurationTransaction = owner.transaction", range: match.upperBound..<source.endIndex))
+        let arm = try XCTUnwrap(source.range(of: "scheduleAcknowledgedMediaStartupWatchdogs(for: owner)", range: accepted.upperBound..<source.endIndex))
+        XCTAssertLessThan(match.lowerBound, accepted.lowerBound)
+        XCTAssertLessThan(accepted.lowerBound, arm.lowerBound)
+        XCTAssertTrue(source.contains("workspaceConfigurationWaiter.fail(RemoteDesktopError.streamingFailed(errorMessage))"))
+        XCTAssertTrue(source.contains("realtimeMediaAudioStartupDiagnosticTask?.cancel()"))
+    }
+
+    @MainActor
+    func testVideoConfigurationRemainsAwaitableWhenAudioInstallsBeforeReplacement() async throws {
+        let operationGate = RemoteDesktopManager.RemoteDesktopStreamConfigurationOperationGate()
+        let transaction = operationGate.begin()
+        let requirement = try RemoteDesktopViewerStreamConfigurationPushPolicy
+            .AudioBindingRequirement<UUID>(audioEndpointPresent: false, installedOwner: nil)
+        let waiter = RemoteDesktopConfigurationWaiter()
+        let started = expectation(description: "waiting for the video transaction")
+        let waiting = Task {
+            started.fulfill()
+            try await waiter.wait(for: transaction, timeout: .seconds(1))
+        }
+        await fulfillment(of: [started], timeout: 1)
+        let installedAudio = UUID()
+        XCTAssertTrue(operationGate.isCurrent(transaction))
+        XCTAssertTrue(requirement.isSatisfied(by: installedAudio))
+        XCTAssertFalse(requirement.requiresAudioBinding, "A video ACK cannot admit newly installed audio")
+        waiter.acknowledge(transaction)
+        try await waiting.value
+    }
+
+    func testAudioConfigurationRequiresTheExactPublishedReceiver() throws {
+        let published = UUID()
+        let replacement = UUID()
+        let requirement = try RemoteDesktopViewerStreamConfigurationPushPolicy
+            .AudioBindingRequirement(audioEndpointPresent: true, installedOwner: published)
+        XCTAssertTrue(requirement.requiresAudioBinding)
+        XCTAssertTrue(requirement.isSatisfied(by: published))
+        XCTAssertFalse(requirement.isSatisfied(by: replacement))
+        XCTAssertFalse(requirement.isSatisfied(by: nil))
+    }
+
+    func testAudioConfigurationRejectsMissingReceiver() {
+        XCTAssertThrowsError(try RemoteDesktopViewerStreamConfigurationPushPolicy
+            .AudioBindingRequirement<UUID>(audioEndpointPresent: true, installedOwner: nil)) { error in
+            guard case RemoteDesktopViewerStreamConfigurationPushPolicy
+                .AudioBindingRequirement<UUID>.Failure.missingAudioBinding = error else {
+                return XCTFail("Unexpected failure: \(error)")
+            }
+        }
+    }
+
+    func testStopConfigurationDoesNotCaptureAnExistingAudioReceiver() throws {
+        let installed = UUID()
+        let requirement = try RemoteDesktopViewerStreamConfigurationPushPolicy
+            .AudioBindingRequirement(audioEndpointPresent: false, installedOwner: installed)
+        XCTAssertFalse(requirement.requiresAudioBinding)
+        XCTAssertTrue(requirement.isSatisfied(by: installed))
+        XCTAssertTrue(requirement.isSatisfied(by: UUID()))
+        XCTAssertTrue(requirement.isSatisfied(by: nil))
+    }
+
     func testAudioAdmissionCloseWaitsForInFlightPublisherAndRejectsLateEffects() {
         let gate = IOSRealtimeMediaAudioAdmissionGate(open: true)
         let entered = DispatchSemaphore(value: 0)

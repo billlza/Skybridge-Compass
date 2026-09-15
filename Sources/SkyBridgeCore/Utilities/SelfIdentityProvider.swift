@@ -15,7 +15,6 @@ public actor SelfIdentityProvider {
 
     private typealias IdentityLoader = @Sendable (Bool) async throws -> DeviceIdentityKeyInfo?
     private typealias ReadOnlyIdentityLoader = @Sendable () async throws -> DeviceIdentityKeyInfo?
-    private typealias DeviceIDMirror = @Sendable (String) -> Bool
     private typealias MACAddressLoader = @Sendable () async -> Set<String>
     
     private let logger = Logger(subsystem: "com.skybridge.compass", category: "SelfIdentity")
@@ -28,7 +27,6 @@ public actor SelfIdentityProvider {
 
     private let identityLoader: IdentityLoader
     private let readOnlyIdentityLoader: ReadOnlyIdentityLoader
-    private let deviceIDMirror: DeviceIDMirror
     private let macAddressLoader: MACAddressLoader
 
     private init() {
@@ -43,14 +41,6 @@ public actor SelfIdentityProvider {
             try await DeviceIdentityKeyManager.shared
                 .existingIdentityAuthoritySnapshotReadOnly()
         }
-        deviceIDMirror = { deviceID in
-            guard let data = deviceID.data(using: .utf8) else { return false }
-            return KeychainManager.shared.importKey(
-                data: data,
-                service: DeviceIDStorage.service,
-                account: DeviceIDStorage.account
-            )
-        }
         macAddressLoader = {
             await NetworkInterfaceInspector.currentPhysicalMACs()
         }
@@ -60,21 +50,15 @@ public actor SelfIdentityProvider {
     init(
         identityLoader: @escaping @Sendable (Bool) async throws -> DeviceIdentityKeyInfo?,
         readOnlyIdentityLoader: (@Sendable () async throws -> DeviceIdentityKeyInfo?)? = nil,
-        deviceIDMirror: @escaping @Sendable (String) -> Bool = { _ in true },
         macAddressLoader: @escaping @Sendable () async -> Set<String> = { [] }
     ) {
         self.identityLoader = identityLoader
         self.readOnlyIdentityLoader = readOnlyIdentityLoader ?? {
             try await identityLoader(false)
         }
-        self.deviceIDMirror = deviceIDMirror
         self.macAddressLoader = macAddressLoader
     }
 
-    private enum DeviceIDStorage {
-        static let service = "SkyBridge.SelfIdentity"
-        static let account = "deviceId"
-    }
     
  // MARK: - 加载或创建本机身份
     
@@ -196,22 +180,7 @@ public actor SelfIdentityProvider {
     
  /// 获取硬件型号（避免使用已废弃的 String(cString:)）
     private func getHardwareModel() -> String {
-        var size = 0
-        sysctlbyname("hw.model", nil, &size, nil, 0)
-        
-        guard size > 0 else { return "" }
-        
-        var model = [CChar](repeating: 0, count: size)
-        sysctlbyname("hw.model", &model, &size, nil, 0)
-        
- // 转为 UInt8 并截断到首个 `\\0`，再用 UTF8 解码，兼容 Swift 6.2.1
-        let bytes: [UInt8] = model.map { UInt8(bitPattern: $0) }
-        if let terminator = bytes.firstIndex(of: 0) {
-            let slice = bytes.prefix(terminator)
-            return String(decoding: slice, as: UTF8.self)
-        } else {
-            return String(decoding: bytes, as: UTF8.self)
-        }
+        HardwareModelIdentifier.current() ?? ""
     }
     
  // MARK: - 私有加载逻辑
@@ -224,17 +193,11 @@ public actor SelfIdentityProvider {
         }
         let identity = try Self.validatedAuthoritativeIdentity(loadedIdentity)
 
-        // Publish both fields together only after the complete authority tuple
-        // has passed validation. The historical store is write-only here and can
-        // never become an identity source.
+        // Publish only the validated authority tuple. Historical device-ID mirrors
+        // have no readers; rewriting them can block every identity query on the
+        // legacy Keychain's process-wide file lock.
         deviceId = identity.deviceId
         pubKeyFP = identity.pubKeyFP
-        if !DeviceIdentityKeyManager.requiresExistingOnlyIdentityRuntime,
-           !deviceIDMirror(identity.deviceId) {
-            logger.warning(
-                "⚠️ Failed to update the non-authoritative device ID mirror"
-            )
-        }
         return identity
     }
 

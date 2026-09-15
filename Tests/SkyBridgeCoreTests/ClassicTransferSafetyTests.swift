@@ -4,6 +4,52 @@ import SkyBridgeProtocolCore
 import XCTest
 
 final class ClassicTransferSafetyTests: XCTestCase {
+    func testDelayedApprovalDoesNotExpireAnOutboundFrameInsideTheConsentWindow() {
+        let start = ContinuousClock().now
+        let window = ClassicTransferReceiverDecisionWindow(startedAt: start)
+        let timeout = ClassicTransferInboundPolicy.frameSendTimeoutSeconds
+            + window.remainingGraceSeconds(at: start)
+
+        // Physical regression: approval at 42 seconds was still allowed by the
+        // receiver, but the old 30-second send deadline had closed the socket.
+        XCTAssertLessThan(ClassicTransferInboundPolicy.frameSendTimeoutSeconds, 42)
+        XCTAssertGreaterThan(ClassicTransferInboundPolicy.receiverDecisionTimeoutSeconds, 42)
+        XCTAssertGreaterThan(timeout, 42)
+        // Allow the full metadata-read and consent periods, then ordinary I/O.
+        XCTAssertEqual(timeout, 105, accuracy: 0.001)
+    }
+
+    func testConsecutiveFramesAndRateLimitedSlicesCannotRenewDecisionGrace() {
+        let start = ContinuousClock().now
+        let window = ClassicTransferReceiverDecisionWindow(startedAt: start)
+        for elapsed: TimeInterval in [0, 1, 35, 42, 60, 74.5, 75, 90] {
+            let remaining = window.remainingGraceSeconds(at: start.advanced(by: .seconds(elapsed)))
+            let deadline = elapsed + ClassicTransferInboundPolicy.frameSendTimeoutSeconds + remaining
+            XCTAssertEqual(deadline, max(105, elapsed + 30), accuracy: 0.001)
+        }
+    }
+
+    func testBufferedSmallOrEmptyFileRetainsOnlyTheUnspentDecisionWindowForItsReceipt() {
+        let start = ContinuousClock().now
+        let window = ClassicTransferReceiverDecisionWindow(startedAt: start)
+        let receiptStartedAt = start.advanced(by: .seconds(2))
+        let remaining = window.remainingGraceSeconds(at: receiptStartedAt)
+        // No payload backpressure is needed to reach the receipt wait. Consent
+        // and the normal 60-second commit/receipt allowance must both fit.
+        XCTAssertEqual(remaining + 60, 133, accuracy: 0.001)
+        XCTAssertEqual(window.remainingGraceSeconds(at: start.advanced(by: .seconds(76))), 0)
+    }
+
+    func testDecisionGraceIsBoundedAndIndependentForEachNewTransferAttempt() {
+        let start = ContinuousClock().now
+        let first = ClassicTransferReceiverDecisionWindow(startedAt: start)
+        let later = start.advanced(by: .seconds(120))
+        let second = ClassicTransferReceiverDecisionWindow(startedAt: later)
+        XCTAssertEqual(first.remainingGraceSeconds(at: later), 0)
+        XCTAssertEqual(second.remainingGraceSeconds(at: later), 75)
+        XCTAssertEqual(first.remainingGraceSeconds(at: start.advanced(by: .seconds(-10))), 75)
+    }
+
     func testCanonicalTranscriptsMatchFixedV2HexVectors() throws {
         let metadata = try ClassicTransferCanonicalTranscript.metadata(
             transferID: "t",

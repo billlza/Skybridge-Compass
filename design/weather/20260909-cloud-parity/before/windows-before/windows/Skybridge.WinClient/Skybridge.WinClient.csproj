@@ -1,0 +1,138 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- Platform SDK 22621 (TargetPlatformMinVersion stays 19041 so the app still RUNS on Win10 2004+).
+         Vortice.WinUI's TFM wants a recent platform; 22621 is safe and the box already has the SDK. -->
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+
+    <!-- MSIX toggle. Default OFF => the unpackaged build/run is byte-for-byte identical to
+         before. Opt in for a packaged build with: /p:EnableMsixTooling=true -->
+    <EnableMsixTooling Condition="'$(EnableMsixTooling)'==''">false</EnableMsixTooling>
+    <WindowsPackageType Condition="'$(EnableMsixTooling)'!='true'">None</WindowsPackageType>
+    <WindowsPackageType Condition="'$(EnableMsixTooling)'=='true'">MSIX</WindowsPackageType>
+
+    <!-- Win2D ships native dlls and cannot be referenced under AnyCPU (WIN2D0001). Pin the
+         unpackaged build to win-x64. The MSIX build sets its own RuntimeIdentifiers above. -->
+    <RuntimeIdentifier Condition="'$(EnableMsixTooling)'!='true'">win-x64</RuntimeIdentifier>
+
+    <!-- Self-contained, for the same reason the Windows App SDK above is: the unpackaged build
+         has to run on a machine nobody prepared. This was false, on the assumption that the
+         .NET 10 Desktop Runtime would already be installed machine-wide. It is not: a stock
+         Windows 11 box (YY014, 2026-08-31) shipped Microsoft.WindowsDesktop.App 7.0.20 and
+         8.0.15 only, so the exe died on launch with "You must install or update .NET to run
+         this application" — no hint as to which .NET, and the browser opened a download page
+         the user then has to reason about. .NET 10 is new enough that this will be the common
+         case for a while.
+
+         Cost is roughly 80 MB of output. That buys a build that behaves like the Mac's .app:
+         copy it across, double-click, it runs. The alternative is an installer that chains the
+         Desktop Runtime, which is fine to add later — but until that installer exists, false
+         here means the product does not start for anyone who has not already been handed a
+         developer machine. -->
+    <SelfContained Condition="'$(EnableMsixTooling)'!='true'">true</SelfContained>
+
+    <!-- The Windows App SDK runtime is NOT. This previously said "the box has the WindowsAppSDK
+         runtime", which held for a provisioned dev machine and failed everywhere else: on a clean
+         Windows 10 22H2 install the exe dies at startup with the bare
+         "This application could not be started" dialog and silently opens the SDK download page —
+         no indication of what is missing or why. The Mac ships a self-contained .app that a user
+         simply runs, so carrying the runtime here is the behaviour-matching choice, not an extra
+         implementation. Applies to the unpackaged path only; the MSIX branch sets its own. -->
+    <WindowsAppSDKSelfContained Condition="'$(EnableMsixTooling)'!='true'">true</WindowsAppSDKSelfContained>
+
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\SkyBridgeCompass.ico</ApplicationIcon>
+
+    <!-- ===== Trilingual localization (en-US / zh-Hans / ja) =====
+         Default/fallback UI language. The Resource Management System resolves the actual UI
+         language from the SYSTEM DISPLAY LANGUAGE for unpackaged apps (NOT the user's preferred-
+         language list), falling back to this default when no per-language .resw matches. Strings
+         live in Strings/<lang>/Resources.resw and are referenced from XAML via x:Uid. The .resw
+         are declared as <PRIResource> below so MSBuild/MakePri index them into the app PRI.
+         Runtime override (for the in-app language switch + the C:\sb\force-lang.txt test hook) is
+         Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride — see App.xaml.cs. -->
+    <DefaultLanguage>en-US</DefaultLanguage>
+  </PropertyGroup>
+
+  <!-- ===== Single-project MSIX (Microsoft best practice: package identity, so location /
+       notifications etc. are granted via the manifest instead of a system-wide desktop-apps
+       switch). Inert unless /p:EnableMsixTooling=true, so the default unpackaged path is
+       unaffected. SAFE ROLLBACK: restore the single <WindowsPackageType>None</WindowsPackageType>
+       line and delete the two groups below. ===== -->
+  <PropertyGroup Condition="'$(EnableMsixTooling)'=='true'">
+    <Platforms>x86;x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <AppxPackageSigningEnabled>true</AppxPackageSigningEnabled>
+    <AppxBundle>Never</AppxBundle>
+    <GenerateTestCertificate>false</GenerateTestCertificate>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(EnableMsixTooling)'=='true'">
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+  </ItemGroup>
+
+  <!-- Image assets ship with BOTH build shapes. This include used to live in the MSIX-only
+       group above, so the default unpackaged build carried no images at all — which is why
+       the sidebar brand mark was a Segoe glyph on a flat blue square instead of the product
+       icon. Assets\SidebarBrandIcon.png is the Mac's own Resources/AppIcon.png, byte for
+       byte, so both shells show the same mark rather than two lookalikes that drift. -->
+  <ItemGroup>
+    <Content Include="Assets\**\*.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\SkyBridgeCompass.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="ThirdPartyNotices\*.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" PrivateAssets="all" />
+    <PackageReference Include="QRCoder" Version="1.8.0" />
+    <!-- Vortice.Windows: native DirectX 12 + DXGI + WinUI SwapChainPanel interop — the Windows
+         equivalent of Mac's Metal. The cinematic weather backdrop is a hand-written HLSL raymarch
+         shader rendered into a SwapChainPanel. Chosen over ComputeSharp: ComputeSharp's source
+         generator is hard-pinned to Roslyn 4.9 and silently fails on net10's Roslyn 5.3; this native
+         D3D12/HLSL path has ZERO Roslyn-generator dependency, so an SDK bump cannot break it.
+         Vortice 3.8.x explicitly targets net10. Needs the win-x64 RID set above. -->
+    <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
+    <!-- WeatherBackdropDX consumes Color4 and Viewport directly; keep this an explicit
+         product dependency instead of relying on Vortice.DirectX's transitive floor. -->
+    <PackageReference Include="Vortice.Mathematics" Version="2.1.1" />
+    <PackageReference Include="Vortice.WinUI" Version="3.8.3" />
+    <!-- Runtime HLSL compile (FXC, Shader Model 5.1 -> DXBC, accepted by D3D12) for the weather
+         raymarch shader. SM5.1 is enough for fbm + light-march loops; keeps iteration fast (no
+         MSBuild dxc step). Can move to compile-time dxc/.cso later. -->
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+    <!-- DPAPI (ProtectedData) for at-rest encryption of the persisted account session
+         (Services/SessionStore.cs, DataProtectionScope.CurrentUser). -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.10" />
+  </ItemGroup>
+
+  <Import Project="..\NativeCore.targets" />
+
+  <!-- ===== Localization resources =====
+       Take explicit control of the PRIResource item set so the per-language Resources.resw are
+       deterministically indexed into the app PRI (MakePri runs as part of the WinAppSDK build
+       targets and produces Skybridge.WinClient.pri in the current unpackaged output directory —
+       unpackaged resolves it via the auto-initializer / "Application" root namespace). Turning
+       off the default glob and declaring the three files explicitly avoids any double-include and
+       documents exactly which strings ship. Add new Strings/<lang>/Resources.resw here as the
+       rollout proceeds. -->
+  <PropertyGroup>
+    <EnableDefaultPriItems>false</EnableDefaultPriItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <PRIResource Include="Strings\en-US\Resources.resw" />
+    <PRIResource Include="Strings\zh-Hans\Resources.resw" />
+    <PRIResource Include="Strings\ja\Resources.resw" />
+  </ItemGroup>
+</Project>

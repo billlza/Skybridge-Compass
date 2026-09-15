@@ -21,7 +21,7 @@ struct FileTransferView: View {
     @State private var targetSelection: FileTransferTargetSelection?
     @State private var previewItem: FilePreviewItem?
     @State private var shareItem: FilePreviewItem?
-    @State private var fileOpenErrorMessage: String?
+    @State private var fileActionErrorMessage: String?
 
 #if DEBUG || SKYBRIDGE_TESTING
     private var isUITestFilesScenario: Bool {
@@ -51,11 +51,29 @@ struct FileTransferView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: { showFilePicker = true }) {
+                    Menu {
+                        if let selection = crossNetworkQuickSendSelection {
+                            Button(selection.device.name) {
+                                handleQuickSendTargetSelection(selection)
+                            }
+                        }
+                        ForEach(lanQuickSendDevices, id: \.id) { device in
+                            Button(device.name) {
+                                handleQuickSendTargetSelection(
+                                    FileTransferTargetSelection(device: device, routeIntent: .directLAN)
+                                )
+                            }
+                        }
+                        if lanQuickSendDevices.isEmpty && crossNetworkQuickSendSelection == nil {
+                            Text(RuntimeLocalization.string("请先在发现页面连接设备"))
+                        }
+                    } label: {
                         Image(systemName: "plus.circle.fill")
                             .font(.title3)
                             .foregroundStyle(.cyan)
                     }
+                    .accessibilityLabel(RuntimeLocalization.string("选择接收设备"))
+                    .accessibilityIdentifier("files.chooseRecipient")
                 }
             }
             .fileImporter(
@@ -71,13 +89,13 @@ struct FileTransferView: View {
             .sheet(item: $shareItem) { item in
                 FileShareSheet(items: [item.url])
             }
-            .alert(RuntimeLocalization.string("无法打开文件"), isPresented: Binding(
-                get: { fileOpenErrorMessage != nil },
-                set: { if !$0 { fileOpenErrorMessage = nil } }
+            .alert(RuntimeLocalization.string("文件操作失败"), isPresented: Binding(
+                get: { fileActionErrorMessage != nil },
+                set: { if !$0 { fileActionErrorMessage = nil } }
             )) {
-                Button(RuntimeLocalization.string("好的"), role: .cancel) { fileOpenErrorMessage = nil }
+                Button(RuntimeLocalization.string("好的"), role: .cancel) { fileActionErrorMessage = nil }
             } message: {
-                Text(fileOpenErrorMessage ?? RuntimeLocalization.string("未知错误"))
+                Text(fileActionErrorMessage ?? RuntimeLocalization.string("未知错误"))
             }
         }
     }
@@ -235,6 +253,12 @@ struct FileTransferView: View {
             
             ForEach(fileTransferManager.activeTransfers) { transfer in
                 FileTransferCard(transfer: transfer)
+                    .onAppear {
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
+                    .onChange(of: transfer.status) { _, _ in
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
             }
         }
         .padding(16)
@@ -286,6 +310,12 @@ struct FileTransferView: View {
                         onOpenFile: openLocalFile,
                         onShareFile: shareLocalFile
                     )
+                    .onAppear {
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
+                    .onChange(of: transfer.status) { _, _ in
+                        fileTransferManager.recordProductFileTransferCompletionVisible(for: transfer)
+                    }
                 }
             }
         }
@@ -308,16 +338,19 @@ struct FileTransferView: View {
             
         case .failure(let error):
             SkyBridgeLogger.shared.error("❌ 文件选择失败: \(error.localizedDescription)")
+            fileActionErrorMessage = error.localizedDescription
         }
     }
     
     private func sendFiles(_ urls: [URL]) {
         guard let selection = targetSelection else {
             SkyBridgeLogger.shared.warning("⚠️ 未选择目标设备")
+            fileActionErrorMessage = RuntimeLocalization.string("请先选择接收设备，再选择文件。")
             return
         }
         
         Task {
+            var failures: [String] = []
             for url in urls {
                 do {
                     try await fileTransferManager.sendFile(
@@ -325,10 +358,14 @@ struct FileTransferView: View {
                         to: selection.device,
                         routeIntent: selection.routeIntent
                     )
-                    SkyBridgeLogger.shared.info("📤 开始发送: \(url.lastPathComponent)")
+                    SkyBridgeLogger.shared.info("📤 文件发送完成: \(url.lastPathComponent)")
                 } catch {
                     SkyBridgeLogger.shared.error("❌ 发送失败: \(error.localizedDescription)")
+                    failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
                 }
+            }
+            if !failures.isEmpty {
+                fileActionErrorMessage = failures.joined(separator: "\n")
             }
         }
     }
@@ -352,7 +389,7 @@ struct FileTransferView: View {
         Task { @MainActor in
             do {
                 guard let resolvedURL = try await fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
-                    fileOpenErrorMessage = String(
+                    fileActionErrorMessage = String(
                         format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
                         transfer.localPath ?? "Downloads/\(transfer.fileName)"
                     )
@@ -360,7 +397,7 @@ struct FileTransferView: View {
                 }
                 previewItem = FilePreviewItem(url: resolvedURL)
             } catch {
-                fileOpenErrorMessage = RuntimeLocalization.string("文件路径检查失败，请稍后重试。")
+                fileActionErrorMessage = RuntimeLocalization.string("文件路径检查失败，请稍后重试。")
             }
         }
     }
@@ -369,7 +406,7 @@ struct FileTransferView: View {
         Task { @MainActor in
             do {
                 guard let resolvedURL = try await fileTransferManager.resolveExistingLocalFileURL(for: transfer) else {
-                    fileOpenErrorMessage = String(
+                    fileActionErrorMessage = String(
                         format: RuntimeLocalization.string("文件不存在，可能已被删除。\n路径：%@"),
                         transfer.localPath ?? "Downloads/\(transfer.fileName)"
                     )
@@ -377,7 +414,7 @@ struct FileTransferView: View {
                 }
                 shareItem = FilePreviewItem(url: resolvedURL)
             } catch {
-                fileOpenErrorMessage = RuntimeLocalization.string("文件路径检查失败，请稍后重试。")
+                fileActionErrorMessage = RuntimeLocalization.string("文件路径检查失败，请稍后重试。")
             }
         }
     }
@@ -451,7 +488,7 @@ struct FileTransferCard: View {
                 
                 Spacer()
                 
-                statusBadge
+                FileTransferStatusBadge(transfer: transfer)
             }
             
             if transfer.status == .transferring {
@@ -538,31 +575,6 @@ struct FileTransferCard: View {
         }
     }
     
-    private var statusBadge: some View {
-        Group {
-            switch transfer.status {
-            case .pending:
-                Image(systemName: "clock.fill")
-                    .foregroundColor(.orange)
-            case .transferring:
-                ProgressView()
-                    .tint(.cyan)
-                    .scaleEffect(0.8)
-            case .completed:
-                Image(systemName: transfer.receiptDeliveryStatus == .unknown
-                    ? "exclamationmark.triangle.fill"
-                    : "checkmark.circle.fill")
-                    .foregroundColor(transfer.receiptDeliveryStatus == .unknown ? .orange : .green)
-            case .failed:
-                Image(systemName: transfer.receiptDeliveryStatus == .unknown
-                    ? "exclamationmark.triangle.fill"
-                    : "xmark.circle.fill")
-                    .foregroundColor(transfer.receiptDeliveryStatus == .unknown ? .orange : .red)
-            }
-        }
-        .font(.body)
-    }
-    
     private func formatFileSize(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
@@ -577,6 +589,35 @@ struct FileTransferCard: View {
         guard let localPath = transfer.localPath else { return nil }
         let url = URL(fileURLWithPath: localPath)
         return "Downloads/\(url.lastPathComponent)"
+    }
+}
+
+private struct FileTransferStatusBadge: View {
+    let transfer: FileTransfer
+
+    var body: some View {
+        Group {
+            switch transfer.status {
+            case .pending:
+                Label(RuntimeLocalization.string("等待中"), systemImage: "clock.fill")
+                    .foregroundColor(.orange)
+            case .transferring:
+                HStack(spacing: 4) {
+                    ProgressView().tint(.cyan).scaleEffect(0.8)
+                    Text(RuntimeLocalization.string("正在传输"))
+                }
+                .foregroundColor(.cyan)
+            case .completed:
+                Label(RuntimeLocalization.string("已完成"), systemImage: transfer.receiptDeliveryStatus == .unknown
+                    ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .foregroundColor(transfer.receiptDeliveryStatus == .unknown ? .orange : .green)
+            case .failed:
+                Label(RuntimeLocalization.string("失败"), systemImage: transfer.receiptDeliveryStatus == .unknown
+                    ? "exclamationmark.triangle.fill" : "xmark.circle.fill")
+                    .foregroundColor(transfer.receiptDeliveryStatus == .unknown ? .orange : .red)
+            }
+        }
+        .font(.caption)
     }
 }
 
@@ -622,9 +663,12 @@ struct FileTransferHistoryCard: View {
                 
                 Spacer()
                 
-                Text(ByteCountFormatter.string(fromByteCount: transfer.fileSize, countStyle: .file))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundColor(.white.opacity(0.4))
+                VStack(alignment: .trailing, spacing: 4) {
+                    FileTransferStatusBadge(transfer: transfer)
+                    Text(ByteCountFormatter.string(fromByteCount: transfer.fileSize, countStyle: .file))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.white.opacity(0.4))
+                }
             }
 
             if transfer.isIncoming, let localPath = transfer.localPath {

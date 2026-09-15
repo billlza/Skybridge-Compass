@@ -227,7 +227,10 @@ public enum CryptoProviderFactory {
         policy: SelectionPolicy,
         peerSupportedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
-        makeInboundPQCResponderProvider(
+        if let requestedQProvider = makeRequestedQHandshakeProvider(policy: policy) {
+            return requestedQProvider
+        }
+        return makeInboundPQCResponderProvider(
             policy: policy,
             peerSupportedSuites: peerSupportedSuites,
             using: SystemCryptoEnvironment.system
@@ -294,7 +297,10 @@ public enum CryptoProviderFactory {
         policy: SelectionPolicy,
         peerAdvertisedSuites: [CryptoSuite]
     ) -> any CryptoProvider {
-        makeOutboundPQCInitiatorProvider(
+        if let requestedQProvider = makeRequestedQHandshakeProvider(policy: policy) {
+            return requestedQProvider
+        }
+        return makeOutboundPQCInitiatorProvider(
             policy: policy,
             peerAdvertisedSuites: peerAdvertisedSuites,
             using: SystemCryptoEnvironment.system
@@ -346,6 +352,26 @@ public enum CryptoProviderFactory {
 
     public static func handshakeOfferedPQCSuites(using provider: any CryptoProvider) -> [CryptoSuite] {
         provider.supportedSuites.filter { $0.isPQCGroup && $0.isNegotiable }
+    }
+
+    /// Freeze the admitted Q session before native-suite preference can select a different family.
+    /// An explicit Q request with no admitted runtime yields the existing failure-only provider;
+    /// it cannot become X-Wing, ML-KEM, or a classical handshake. Peer agreement is still checked
+    /// against this single-suite provider by the authenticated handshake.
+    private static func makeRequestedQHandshakeProvider(policy: SelectionPolicy) -> (any CryptoProvider)? {
+        guard policy != .classicOnly, QPeriaptPlatformPolicy.isRequested() else { return nil }
+        let provider: any CryptoProvider
+        if let admittedProvider = QPeriaptPlatformPolicy.makeCryptoProvider() {
+            provider = admittedProvider
+        } else {
+            provider = UnavailablePQCProvider()
+        }
+        emitProviderSelectedEvent(
+            provider: provider,
+            capability: capability(environment: SystemCryptoEnvironment.system),
+            policy: .requirePQC
+        )
+        return provider
     }
 
  /// 发射 Provider 选择事件
