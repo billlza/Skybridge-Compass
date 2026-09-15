@@ -475,6 +475,16 @@ final class ProductReleaseEvidenceRecorderTests: XCTestCase {
         ])
         XCTAssertTrue(lines.last?.contains("noticeHidden=not-applicable") == true)
         XCTAssertFalse(lines.last?.contains("noticeHidden=1") == true)
+        XCTAssertEqual(try XCTUnwrap(lines.last), [
+            "releaseSessionDisconnected",
+            "transport=p2p",
+            "session_ref=\(sessionReference)",
+            "owner=SkyBridgeCompassiOS",
+            "generation=1",
+            "noticeHidden=not-applicable",
+            "reason=user",
+            "result=disconnected"
+        ].joined(separator: " "))
     }
 
     func testWebRTCMediaSamplesAreBoundedOrderedAndMonotonic() throws {

@@ -257,8 +257,8 @@ final class ProductReleaseEvidenceRecorder {
         emit(
             event: "releaseSessionDisconnected",
             fields: ownerFields(owner) + [
-                "reason=\(reason.rawValue)",
                 "noticeHidden=not-applicable",
+                "reason=\(reason.rawValue)",
                 "result=disconnected"
             ]
         )
