@@ -687,7 +687,7 @@
 "transferStatus.transferring" = "传输中";
 "transferStatus.paused" = "已暂停";
 "transferStatus.completed" = "已完成";
-"fileTransfer.receiptDeliveryUnknown" = "文件已保存，但发送端确认状态未知；请勿自动重传。";
+"fileTransfer.receiptDeliveryUnknown" = "投递确认状态未知。请核对接收设备上的文件，确认前请勿重传。";
 "transferStatus.failed" = "失败";
 "transferStatus.cancelled" = "已取消";
 "action.close" = "关闭";

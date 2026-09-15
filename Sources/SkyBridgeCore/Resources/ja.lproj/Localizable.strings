@@ -631,7 +631,7 @@
 "transferStatus.transferring" = "転送中";
 "transferStatus.paused" = "一時停止";
 "transferStatus.completed" = "完了";
-"fileTransfer.receiptDeliveryUnknown" = "ファイルは保存されましたが、送信側の確認状態は不明です。自動再送しないでください。";
+"fileTransfer.receiptDeliveryUnknown" = "配信確認の状態が不明です。再送する前に受信デバイスのファイルを確認してください。";
 "transferStatus.failed" = "失敗";
 "transferStatus.cancelled" = "キャンセル済み";
 "action.close" = "閉じる";

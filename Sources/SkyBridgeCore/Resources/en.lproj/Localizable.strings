@@ -660,7 +660,7 @@
 "transferStatus.transferring" = "Transferring";
 "transferStatus.paused" = "Paused";
 "transferStatus.completed" = "Completed";
-"fileTransfer.receiptDeliveryUnknown" = "File saved, but sender confirmation is unknown. Do not retransmit automatically.";
+"fileTransfer.receiptDeliveryUnknown" = "Delivery confirmation is unknown. Check the file on the receiving device before retransmitting.";
 "transferStatus.failed" = "Failed";
 "transferStatus.cancelled" = "Cancelled";
 "action.close" = "Close";
