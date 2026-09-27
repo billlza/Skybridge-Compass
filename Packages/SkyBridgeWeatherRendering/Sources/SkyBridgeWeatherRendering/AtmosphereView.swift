@@ -189,6 +189,12 @@ struct AtmosphereNativeView {
         }
 
         private func updateFrameRateMonitoring(_ view: MTKView) {
+            #if targetEnvironment(simulator)
+            // The simulator Metal SDK omits drawable presentation callbacks.
+            // Keep the readout unavailable instead of measuring submissions or
+            // reporting a synthetic zero while the surface still renders.
+            if !frameRateMonitoringEnded { stopFrameRateMonitoring() }
+            #else
             guard !frameRateMonitoringEnded,
                   settings.frameRateMonitor != nil || frameRateSource != nil else { return }
             #if os(macOS)
@@ -220,6 +226,7 @@ struct AtmosphereNativeView {
             let now = CACurrentMediaTime()
             frameRateCounter = frameRateSource != nil && animating ? PresentedFrameRateCounter(startingAt: now) : nil
             nextFrameRateSampleTime = now + 1
+            #endif
         }
 
         #if os(macOS)
@@ -303,11 +310,13 @@ struct AtmosphereNativeView {
                         Task { @MainActor in onFailure(message) }
                     }
                 }
+                #if !targetEnvironment(simulator)
                 if let counter = frameRateCounter {
                     drawable.addPresentedHandler { presented in
                         counter.recordPresentation(at: presented.presentedTime)
                     }
                 }
+                #endif
                 // The foreground glass and background share one frame. Count only the
                 // background drawable, never both layers, submission attempts or GPU completions.
                 buffer.present(drawable)

@@ -22,8 +22,10 @@ struct CloudSurfaceTests {
     @Test(arguments: AtmosphereKind.allCases)
     func nativeSurfaceLoadsWhenPausedAndTracksWindowSize(kind: AtmosphereKind) async throws {
         let rainScene = WeatherRainScene()
+        let frameRateMonitor = WeatherFrameRateMonitor()
         let root = AtmosphereView(kind: kind, isAnimating: false, rainScene: kind == .rain ? rainScene : nil)
             .overlay { if kind == .rain { WeatherRainGlassOverlay(scene: rainScene) } }
+            .environment(\.weatherFrameRateMonitor, frameRateMonitor)
         #if os(macOS)
         let window = NSWindow(contentRect: CGRect(x: 40, y: 40, width: 480, height: 780),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -65,7 +67,8 @@ struct CloudSurfaceTests {
         let original = coordinator.settings
         let changed = AtmosphereNativeView(renderer: original.renderer, intensity: 0.5, wind: original.wind,
                                       quality: original.quality, framesPerSecond: original.framesPerSecond,
-                                      isAnimating: false, onFailure: { Issue.record("\($0)") }, rainScene: original.rainScene)
+                                      isAnimating: false, onFailure: { Issue.record("\($0)") }, rainScene: original.rainScene,
+                                      frameRateMonitor: frameRateMonitor)
         coordinator.update(changed, view: surface)
         #expect(!surface.isPaused, "A static settings change must request one new frame")
         try await requireSubmittedStaticFrame(surface)
@@ -84,7 +87,14 @@ struct CloudSurfaceTests {
         let animated = AtmosphereNativeView(renderer: original.renderer, intensity: changed.intensity,
                                            wind: original.wind, quality: original.quality,
                                            framesPerSecond: 30, isAnimating: true,
-                                           onFailure: { Issue.record("\($0)") }, rainScene: original.rainScene)
+                                           onFailure: { Issue.record("\($0)") }, rainScene: original.rainScene,
+                                           frameRateMonitor: frameRateMonitor)
+        #if targetEnvironment(simulator)
+        coordinator.update(animated, view: surface)
+        await Task.yield()
+        #expect(frameRateMonitor.reading == .unavailable,
+            "The simulator cannot prove presentation timing; it must not show a measured FPS")
+        #else
         let firstAnimatedFrame = observer.presentedAnimationFrames
         coordinator.update(animated, view: surface)
         let animationDeadline = ContinuousClock.now.advanced(by: .seconds(8))
@@ -92,6 +102,7 @@ struct CloudSurfaceTests {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(observer.presentedAnimationFrames - firstAnimatedFrame >= 60, "A visible surface must present at least 60 animated frames")
+        #endif
         #expect(!surface.isPaused)
         coordinator.update(changed, view: surface)
         #expect(surface.isPaused, "Stopping animation must pause the frame clock without another settings change")
@@ -161,6 +172,7 @@ private final class SurfaceFrameObserver: NSObject, MTKViewDelegate {
         if let texture = view.currentRenderPassDescriptor?.colorAttachments[0].texture {
             lastFrame = FrameLayout(width: texture.width, height: texture.height, pixelFormat: texture.pixelFormat)
         }
+        #if !targetEnvironment(simulator)
         let isAnimating = coordinator.settings.isAnimating
         if let drawable = view.currentDrawable {
             drawable.addPresentedHandler { [weak self] presented in
@@ -170,6 +182,7 @@ private final class SurfaceFrameObserver: NSObject, MTKViewDelegate {
                 }
             }
         }
+        #endif
         coordinator.draw(in: view)
     }
 }
