@@ -2800,11 +2800,28 @@ final class P2PBootstrapPolicyTests: XCTestCase {
         XCTAssertTrue(bootstrapControlBody.contains("isProvisionalConnection: provisionalConnection != nil"))
         XCTAssertTrue(bootstrapControlBody.contains("hasHandshakeDriver: handshakeDrivers[peerId] != nil"))
         XCTAssertTrue(bootstrapControlBody.contains("hasSessionKeys: sessionKeys[peerId] != nil"))
-        XCTAssertTrue(
-            bootstrapControlBody.contains(
-                "case .kemRefreshRequest, .protocolIdentityBindingRequest, .protocolIdentityBindingConfirm:"
-            ),
-            "Only the three authenticated bootstrap-control message families may coexist with an active session."
+        let allowedCasesStart = try XCTUnwrap(
+            bootstrapControlBody.range(of: "switch message {\n        case ")
+        )
+        let allowedCasesEnd = try XCTUnwrap(
+            bootstrapControlBody.range(
+                of: ":\n            break\n        default:\n            return false",
+                range: allowedCasesStart.upperBound..<bootstrapControlBody.endIndex
+            )
+        )
+        let allowedCases = bootstrapControlBody[allowedCasesStart.upperBound..<allowedCasesEnd.lowerBound]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        XCTAssertEqual(
+            Set(allowedCases),
+            Set([
+                ".usbPeerDiscoveryRequest",
+                ".handshakeConfigurationRequest",
+                ".kemRefreshRequest",
+                ".protocolIdentityBindingRequest",
+                ".protocolIdentityBindingConfirm",
+            ]),
+            "Provisional control routing must admit only the bounded discovery and authenticated management/binding requests, rejecting all other messages."
         )
         XCTAssertTrue(bootstrapControlBody.contains("provisionalConnection ?? connections[peerId]"))
 
