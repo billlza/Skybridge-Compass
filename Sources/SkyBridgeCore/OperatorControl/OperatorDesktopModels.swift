@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 public struct OperatorDesktopRequest: Sendable {
     public enum Action: String, Sendable { case devices, start, status, stop }
@@ -70,11 +73,32 @@ public struct OperatorDesktopResult: Codable, Sendable {
 @MainActor
 public final class OperatorDesktopPresentation {
     public static let shared = OperatorDesktopPresentation()
-    public private(set) var isVisible = false
     private var open: (@MainActor () -> Void)?
     public init() {}
     public func register(_ open: @escaping @MainActor () -> Void) { self.open = open }
-    public func confirmVisible(_ visible: Bool) { isVisible = visible }
+    #if canImport(AppKit)
+    private(set) weak var window: NSWindow?
+    private var windowObserverID: UUID?
+    public var isVisible: Bool {
+        guard let window else { return false }
+        return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+    }
+    public var canReceiveInput: Bool {
+        isVisible && window?.isKeyWindow == true && NSApplication.shared.isActive
+    }
+    public func bindWindow(_ window: NSWindow, observerID: UUID) {
+        self.window = window
+        windowObserverID = observerID
+    }
+    public func releaseWindow(observerID: UUID) {
+        guard windowObserverID == observerID else { return }
+        window = nil
+        windowObserverID = nil
+    }
+    #else
+    public var isVisible: Bool { false }
+    public var canReceiveInput: Bool { false }
+    #endif
     public func present() throws {
         guard let open else { throw CrossnetControlFailure.sessionMutationRejected("desktop_window_unavailable") }
         open()

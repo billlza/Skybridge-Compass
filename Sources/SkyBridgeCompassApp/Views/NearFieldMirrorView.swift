@@ -34,13 +34,12 @@ struct NearFieldMirrorContent: View {
 
     var body: some View {
         workspaceContent
+            .background(OperatorDesktopWindowProbe().frame(width: 0, height: 0).accessibilityHidden(true))
             .onAppear {
-                OperatorDesktopPresentation.shared.confirmVisible(true)
                 if workspace.focusedSessionId != nil { model.showsDevicePicker = false }
                 model.startDiscovery()
             }
             .onDisappear {
-                OperatorDesktopPresentation.shared.confirmVisible(false)
                 model.close()
                 displayedManager = nil
                 displayedSessionId = nil
@@ -252,5 +251,26 @@ struct NearFieldMirrorContent: View {
     private func dismissError() {
         model.errorMessage = nil
         workspace.clearError()
+    }
+}
+
+/// The terminal reads the actual window at query time, including minimization
+/// and focus changes that do not cause SwiftUI's onDisappear to run.
+private struct OperatorDesktopWindowProbe: NSViewRepresentable {
+    final class Probe: NSView {
+        let observerID = UUID()
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window {
+                OperatorDesktopPresentation.shared.bindWindow(window, observerID: observerID)
+            } else {
+                OperatorDesktopPresentation.shared.releaseWindow(observerID: observerID)
+            }
+        }
+    }
+    func makeNSView(context: Context) -> Probe { Probe() }
+    func updateNSView(_ view: Probe, context: Context) {}
+    static func dismantleNSView(_ view: Probe, coordinator: ()) {
+        OperatorDesktopPresentation.shared.releaseWindow(observerID: view.observerID)
     }
 }

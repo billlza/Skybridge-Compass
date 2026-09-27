@@ -152,7 +152,8 @@ final class OperatorDesktopRuntime {
         return OperatorDesktopSession(sessionRef: entry.reference, deviceRef: entry.device.id.uuidString,
             name: entry.device.name, phase: phase, windowVisible: visible,
             framePresented: presented, inputAuthorized: active && manager?.viewerInputAccess.canSendInput == true,
-            inputReady: visible && presented && workspace.canSendInput(to: entry.hostKey), errorCode: error)
+            inputReady: visible && presented && presentation.canReceiveInput
+                && workspace.canSendInput(to: entry.hostKey), errorCode: error)
     }
 
     private func targets() -> [DiscoveredDevice] {

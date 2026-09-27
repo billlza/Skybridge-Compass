@@ -43,7 +43,7 @@ fn show(result: &DesktopResult, json: bool) -> Result<()> {
         let state = match session.phase.as_str() {
             "connecting" => "建立安全会话／等待对端授权",
             "waiting_frame" => "已建立会话，等待实际首帧",
-            "ready" => "画面已显示",
+            "ready" => "画面流已就绪",
             "stopping" => "正在结束会话",
             "closed" => "会话已结束",
             "failed" => "会话失败",
@@ -113,7 +113,7 @@ async fn start(target: &str, detach: bool, json: bool) -> Result<()> {
             show(&result, false)?;
         }
         previous = Some(state);
-        if session.phase == "ready" {
+        if session.phase == "ready" && session.window_visible {
             if json {
                 show(&result, true)?;
             }

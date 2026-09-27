@@ -180,6 +180,7 @@ private struct MainWindowPresentationRegistrar: View {
                 MainWindowPresentationCoordinator.shared.register(openWindow: openWindow)
                 OperatorDesktopPresentation.shared.register {
                     openWindow(id: "near-field-mirror")
+                    NSApp.activate(ignoringOtherApps: true)
                 }
             }
     }

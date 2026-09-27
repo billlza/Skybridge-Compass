@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import SkyBridgeCore
 
 final class OperatorCompletionTests: XCTestCase {
@@ -73,9 +74,26 @@ final class OperatorCompletionTests: XCTestCase {
         try presentation.present()
         XCTAssertTrue(requested)
         XCTAssertFalse(presentation.isVisible)
-        presentation.confirmVisible(true)
-        XCTAssertTrue(presentation.isVisible)
-        presentation.confirmVisible(false)
+        XCTAssertFalse(presentation.canReceiveInput)
+    }
+
+    @MainActor
+    func testHiddenWindowAndRetiredObserverCannotClaimPresentationOrInput() {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let presentation = OperatorDesktopPresentation()
+        let old = UUID(), current = UUID()
+        presentation.bindWindow(window, observerID: old)
+        presentation.bindWindow(window, observerID: current)
+        presentation.releaseWindow(observerID: old)
+        XCTAssertTrue(presentation.window === window)
+        XCTAssertFalse(presentation.isVisible)
+        XCTAssertFalse(presentation.canReceiveInput)
+        presentation.releaseWindow(observerID: current)
+        XCTAssertNil(presentation.window)
         XCTAssertFalse(presentation.isVisible)
     }
 }
