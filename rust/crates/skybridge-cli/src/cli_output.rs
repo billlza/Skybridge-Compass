@@ -40,7 +40,7 @@ pub(crate) fn json_failure_was_written() -> bool {
 }
 
 pub(crate) fn unhandled_error_details(error: &anyhow::Error) -> (&'static str, &'static str) {
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(target_os = "macos")]
     if let Some(failure) = error.downcast_ref::<crate::usb_commands::USBActivationFailure>() {
         return failure.details();
     }
@@ -115,6 +115,16 @@ pub(crate) fn write_unhandled_json_failure(code: &str, message: &str) -> Result<
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_activation_failure_keeps_its_closed_reason_through_context() {
+        let error = anyhow::Error::new(crate::usb_commands::USBActivationFailure::Security)
+            .context("private Apple diagnostic context");
+        let (code, message) = unhandled_error_details(&error);
+        assert_eq!(code, "usb_app_activation_security");
+        assert!(message.contains("signature"));
+        assert!(!message.contains("private Apple diagnostic context"));
+    }
 
     #[test]
     fn closed_suite_error_survives_context_without_exposing_context_text() {
