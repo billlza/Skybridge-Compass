@@ -68,9 +68,7 @@ impl TransferProgress {
     }
 
     pub(crate) fn finish(&mut self) -> Result<()> {
-        if self.enabled && self.interactive && self.last.is_some() {
-            writeln!(std::io::stderr().lock())?;
-        }
+        self.pause()?;
         self.enabled = false;
         Ok(())
     }
