@@ -444,6 +444,11 @@ fn require_app_method(app: &HelloResult, method: &str) -> Result<()> {
     {
         return Err(HandshakeManagementUnavailable.into());
     }
+    require_advertised_app_method(app, method)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn require_advertised_app_method(app: &HelloResult, method: &str) -> Result<()> {
     let Some(methods) = &app.enabled_mutation_methods else {
         bail!(
             "Mac app did not report mutation capabilities; update the app before GUI mutations (code: method_capabilities_unreported)"
@@ -1461,7 +1466,7 @@ mod tests {
             }
             let app: HelloResult = serde_json::from_value(wire)?;
             assert!(
-                require_app_method(&app, "crossnet.host")
+                require_advertised_app_method(&app, "crossnet.host")
                     .unwrap_err()
                     .to_string()
                     .contains(expected)
