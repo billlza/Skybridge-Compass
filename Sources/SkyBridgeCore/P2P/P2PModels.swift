@@ -422,6 +422,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     private let metricsTaskOwnerLock = OSAllocatedUnfairLock<MetricsTaskOwner?>(
         initialState: nil
     )
+    private let disconnectionTaskLock = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
     @available(macOS 14.0, iOS 17.0, *)
     private let rekeyInProgressLock = OSAllocatedUnfairLock<Bool>(initialState: false)
     @available(macOS 14.0, iOS 17.0, *)
@@ -1208,6 +1209,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
 
     #if DEBUG || SKYBRIDGE_TESTING
     @available(macOS 14.0, iOS 17.0, *)
+    func testingInstallEstablishedLeaseForDisconnection(_ lease: PeerSessionArbiter.EstablishedLease) {
+        establishedArbiterLeaseLock.withLock { $0 = lease }
+    }
+
+    @available(macOS 14.0, iOS 17.0, *)
     func testingRollbackPublishedArbiterLease(
         currentLease: PeerSessionArbiter.EstablishedLease?,
         to previousLease: PeerSessionArbiter.EstablishedLease?
@@ -1298,6 +1304,25 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
     }
 
     public func disconnect() {
+        _ = disconnectionTask()
+    }
+
+    /// Reconnection may start only after this connection's exact owner leases
+    /// have been retired. Repeated callers await the same teardown operation.
+    public func disconnectAndWait() async {
+        await disconnectionTask().value
+    }
+
+    private func disconnectionTask() -> Task<Void, Never> {
+        disconnectionTaskLock.withLock { existing in
+            if let existing { return existing }
+            let task = beginDisconnection()
+            existing = task
+            return task
+        }
+    }
+
+    private func beginDisconnection() -> Task<Void, Never> {
         let receiveTask = receiveLeaseLock.withLock { state -> Task<Void, Never>? in
             let current = state?.task
             state = nil
@@ -1311,6 +1336,7 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
         }
         metricsTask?.cancel()
 
+        let ownershipCleanup: Task<Void, Never>?
         if #available(macOS 14.0, iOS 17.0, *) {
             let peerIds = Array(
                 Set(([handshakePeer.deviceId] + classicTransferPeerLookupAliases())
@@ -1373,15 +1399,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             }
             rekeyInProgressLock.withLock { $0 = false }
             bootstrapAssistedHandshakeLock.withLock { $0 = false }
-            if teardown.driver != nil || teardown.arbiterLease != nil {
-                Task {
-                    await teardown.driver?.cancel()
-                    if let arbiterLease = teardown.arbiterLease {
-                        _ = await PeerSessionArbiter.shared.clearEstablished(arbiterLease)
-                    }
+            ownershipCleanup = Task {
+                await teardown.driver?.cancel()
+                if let arbiterLease = teardown.arbiterLease {
+                    _ = await PeerSessionArbiter.shared.clearEstablished(arbiterLease)
                 }
-            }
-            Task {
                 for sessionLease in teardown.classicTransferSessionLeases {
                     _ = await ClassicTransferSessionRegistry.shared.remove(
                         ifOwned: sessionLease
@@ -1411,9 +1433,11 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
                     }
                 }
             }
+        } else {
+            ownershipCleanup = nil
         }
         connection.cancel()
-        Task { @MainActor [weak self] in
+        let presentationCleanup = Task { @MainActor [weak self] in
             guard let self else { return }
             self.status = .disconnected
             self.measuredLatency = 0
@@ -1422,6 +1446,10 @@ public final class P2PConnection: ObservableObject, Identifiable, @unchecked Sen
             if #available(macOS 14.0, iOS 17.0, *) {
                 self.assuranceLevel = .unknown
             }
+        }
+        return Task {
+            await ownershipCleanup?.value
+            await presentationCleanup.value
         }
     }
 

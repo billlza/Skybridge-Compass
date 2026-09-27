@@ -105,6 +105,10 @@ pub(crate) struct CrossnetUSBArgs {
 pub(crate) enum CrossnetUSBSubcommand {
     /// Enumerate USB entries from the OS multiplexer; exclude network twins.
     Devices(OutputOptions),
+    /// List existing paired identities without requiring network discovery.
+    Peers(OutputOptions),
+    /// Activate the selected USB device's existing SkyBridge app using Apple tools.
+    Wake(CrossnetUSBWakeArgs),
     /// Authenticate the selected peer over USB, without a network fallback.
     Connect(CrossnetUSBConnectArgs),
     /// Connect a named app device over a selected cable, without network fallback.
@@ -116,6 +120,13 @@ pub(crate) struct CrossnetUSBDeviceConnectArgs {
     pub(crate) udid: String,
     #[arg(long)]
     pub(crate) to: String,
+    #[command(flatten)]
+    pub(crate) output: OutputOptions,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct CrossnetUSBWakeArgs {
+    pub(crate) udid: String,
     #[command(flatten)]
     pub(crate) output: OutputOptions,
 }

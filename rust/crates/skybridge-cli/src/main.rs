@@ -61,6 +61,7 @@ mod test_commands;
 mod transfer_progress;
 #[cfg(target_os = "macos")]
 mod tui;
+mod usb_commands;
 mod webrtc_media_artifacts;
 mod webrtc_media_dimensions;
 mod webrtc_media_doctor;

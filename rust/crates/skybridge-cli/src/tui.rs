@@ -6,7 +6,7 @@ use crate::handshake_commands::safe;
 use anyhow::{Result, anyhow, bail};
 use catalog::{Category, Control, SETTINGS, command_parts};
 use serde_json::Value;
-use skybridge_crossnet_client::{NearbyDevice, SettingsSnapshotResult};
+use skybridge_crossnet_client::{NearbyDevice, SettingsSnapshotResult, USBPeerChoice};
 use std::io::{self, IsTerminal, Write};
 
 #[derive(Clone, Debug)]
@@ -17,6 +17,8 @@ enum Page {
     Devices,
     DevicePicker,
     Usb,
+    UsbDevice(String),
+    UsbPeers(String),
     Files,
     Search(String),
     Setting(usize),
@@ -36,6 +38,8 @@ impl Page {
             Self::Devices => "设备".into(),
             Self::DevicePicker => "选择设备".into(),
             Self::Usb => "USB".into(),
+            Self::UsbDevice(_) => "USB 设备操作".into(),
+            Self::UsbPeers(_) => "选择已配对身份".into(),
             Self::Files => "文件".into(),
             Self::Search(q) => format!("查找：{}", safe(q)),
             Self::Setting(i) => SETTINGS[*i].title.into(),
@@ -47,7 +51,6 @@ impl Page {
 #[derive(Clone, Debug)]
 enum TargetAction {
     Connect,
-    Usb(String),
     Status,
     Send(Option<String>),
     Approvals,
@@ -60,6 +63,8 @@ enum Action {
     Open(Page),
     Target(TargetAction),
     Pick(NearbyDevice),
+    ConnectUSB(USBSelection),
+    WakeUSB(String),
     LocalOnly,
     Handshake,
     RuntimeStatus,
@@ -77,6 +82,12 @@ enum Action {
         after: Value,
     },
     Back,
+}
+
+#[derive(Clone, Debug)]
+struct USBSelection {
+    udid: String,
+    peer: USBPeerChoice,
 }
 #[derive(Clone)]
 struct Item {
@@ -96,6 +107,7 @@ fn target_item(label: &str, action: TargetAction) -> Item {
 struct Session {
     pages: Vec<Page>,
     target: Option<NearbyDevice>,
+    usb_selection: Option<USBSelection>,
     pending: Option<TargetAction>,
     exit: bool,
 }
@@ -104,6 +116,7 @@ impl Session {
         Self {
             pages: vec![Page::Home],
             target: None,
+            usb_selection: None,
             pending: None,
             exit: false,
         }
@@ -133,6 +146,11 @@ impl Session {
         self.target
             .as_ref()
             .map(|d| safe(&d.name))
+            .or_else(|| {
+                self.usb_selection
+                    .as_ref()
+                    .map(|s| format!("{}（未连接）", safe(&s.peer.name)))
+            })
             .unwrap_or_else(|| "尚未选择".into())
     }
     async fn items(&self) -> Result<Vec<Item>> {
@@ -214,10 +232,7 @@ impl Session {
             }
             Page::Usb => {
                 let devices = skybridge_crossnet_client::usb_devices().await?.devices;
-                println!(
-                    "选择线连设备连接到「{}」。此操作只走 USB。",
-                    self.target_name()
-                );
+                println!("选择物理 USB 设备；下一步选择已配对身份，无需局域网发现。");
                 if devices.is_empty() {
                     println!("当前没有物理 USB 设备；插线后输入 /refresh。");
                 }
@@ -226,10 +241,58 @@ impl Session {
                     .map(|d| {
                         item(
                             format!("USB · {}", safe(&d.udid)),
-                            Action::Target(TargetAction::Usb(d.udid)),
+                            Action::Open(Page::UsbDevice(d.udid)),
                         )
                     })
                     .collect())
+            }
+            Page::UsbDevice(udid) => {
+                println!("USB：{}", safe(udid));
+                Ok(vec![
+                    item("连接已配对身份", Action::Open(Page::UsbPeers(udid.clone()))),
+                    item(
+                        "在设备上打开 SkyBridge（需要 Apple 开发工具）",
+                        Action::WakeUSB(udid.clone()),
+                    ),
+                ])
+            }
+            Page::UsbPeers(udid) => {
+                println!(
+                    "USB：{}\n选择线另一端的已配对身份，连接时会核验指纹。",
+                    safe(udid)
+                );
+                let peers = skybridge_crossnet_client::usb_peers().await?.peers;
+                if peers.is_empty() {
+                    println!("尚无可用的配对记录；新设备需要先完成一次 SkyBridge 身份核对。");
+                }
+                let mut rows = Vec::new();
+                for peer in peers {
+                    if let Some(reason) = &peer.unavailable_reason {
+                        let explanation = match reason.as_str() {
+                            "pairing_identity_needs_verification" => "配对身份需要重新核验",
+                            _ => "配对记录不可用，请检查设备的信任设置",
+                        };
+                        println!("{} · 暂不可连接：{}", safe(&peer.name), explanation);
+                        continue;
+                    }
+                    let fingerprint = peer
+                        .expected_fingerprint
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("配对记录缺少协议指纹"))?;
+                    rows.push(item(
+                        format!(
+                            "{} · 身份 {} · 指纹 {}",
+                            safe(&peer.name),
+                            peer.peer_id.chars().take(8).collect::<String>(),
+                            fingerprint.chars().take(12).collect::<String>()
+                        ),
+                        Action::ConnectUSB(USBSelection {
+                            udid: udid.clone(),
+                            peer,
+                        }),
+                    ));
+                }
+                Ok(rows)
             }
             Page::Search(query) => {
                 let rows = search_items(query);
@@ -297,6 +360,7 @@ impl Session {
             Action::Back => self.back(),
             Action::Pick(device) => {
                 println!("已选择：{}", safe(&device.name));
+                self.usb_selection = None;
                 self.target = Some(device);
                 self.pages.pop();
                 if let Some(next) = self.pending.take() {
@@ -305,17 +369,36 @@ impl Session {
             }
             Action::LocalOnly => {
                 self.target = None;
+                self.usb_selection = None;
                 self.back();
                 println!("当前仅操作本机。");
             }
             Action::Target(action) => {
-                if self.target.is_none() {
+                if matches!(action, TargetAction::Connect) && self.usb_selection.is_some() {
+                    self.connect_selected_usb().await?;
+                } else if self.target.is_none() && self.usb_selection.is_some() {
+                    bail!("所选 USB 设备尚未连接；先在 /device 中连接，或用 /USB 重新选择");
+                } else if self.target.is_none() {
                     println!("先选择这次操作的设备。");
                     self.pending = Some(action);
                     self.open(Page::DevicePicker);
                 } else {
                     self.target_action(action).await?;
                 }
+            }
+            Action::ConnectUSB(selection) => {
+                self.usb_selection = Some(selection);
+                self.target = None;
+                self.connect_selected_usb().await?;
+                self.jump(Page::Devices);
+            }
+            Action::WakeUSB(udid) => {
+                println!("正在打开设备上的 SkyBridge…");
+                let result = crate::usb_commands::wake(&udid).await?;
+                println!(
+                    "✓ SkyBridge 已激活（进程 {}）。下一步：连接已配对身份。",
+                    result.process_id
+                );
             }
             Action::Handshake => crate::handshake_commands::menu(self.target.as_ref()).await?,
             Action::RuntimeStatus => {
@@ -377,14 +460,9 @@ impl Session {
             .clone()
             .ok_or_else(|| anyhow!("尚未选择目标设备"))?;
         match action {
-            TargetAction::Connect | TargetAction::Usb(_) => {
-                let connection = match action {
-                    TargetAction::Usb(udid) => {
-                        skybridge_crossnet_client::connect_usb_device(&udid, &device.device_ref)
-                            .await?
-                    }
-                    _ => skybridge_crossnet_client::connect_nearby(&device.device_ref).await?,
-                };
+            TargetAction::Connect => {
+                let connection =
+                    skybridge_crossnet_client::connect_nearby(&device.device_ref).await?;
                 println!(
                     "✓ {} 已认证连接 · {} · {}",
                     safe(&device.name),
@@ -400,6 +478,7 @@ impl Session {
                         .unwrap_or_else(|| "套件未报告".into())
                 );
                 if let Some(target) = &mut self.target {
+                    target.device_ref = connection.device_ref;
                     target.authenticated = connection.authenticated;
                     target.transport = connection.transport;
                 }
@@ -462,6 +541,43 @@ impl Session {
                 }
             }
         }
+        Ok(())
+    }
+    async fn connect_selected_usb(&mut self) -> Result<()> {
+        let selected = self
+            .usb_selection
+            .clone()
+            .ok_or_else(|| anyhow!("尚未选择 USB 身份"))?;
+        let fingerprint = selected
+            .peer
+            .expected_fingerprint
+            .as_deref()
+            .ok_or_else(|| anyhow!("配对身份需要重新验证，不能连接"))?;
+        // The selection retains only a public peer ID and expected pin. Every
+        // reconnect obtains a fresh authenticated reference from the native owner.
+        self.target = None;
+        let connection = skybridge_crossnet_client::connect_usb(
+            &selected.udid,
+            &selected.peer.peer_id,
+            fingerprint,
+        )
+        .await?;
+        println!(
+            "✓ {} 已认证连接 · USB · {}",
+            safe(&selected.peer.name),
+            connection
+                .negotiated_suite
+                .as_deref()
+                .map(safe)
+                .unwrap_or_else(|| "套件未报告".into())
+        );
+        self.target = Some(NearbyDevice {
+            device_ref: connection.device_ref,
+            name: selected.peer.name,
+            platform: None,
+            authenticated: connection.authenticated,
+            transport: connection.transport,
+        });
         Ok(())
     }
     async fn command(&mut self, command: &str, arg: &str) -> Result<()> {
@@ -714,7 +830,7 @@ pub(crate) async fn run() -> Result<()> {
             Err(error) => {
                 eprintln!(
                     "读取失败：{}；可用 /refresh 重读或 /back 返回。",
-                    safe(&error.to_string())
+                    safe(&format!("{error:#}"))
                 );
                 None
             }
@@ -758,7 +874,7 @@ pub(crate) async fn run() -> Result<()> {
             }
         };
         if let Err(error) = result {
-            eprintln!("操作未完成：{}", safe(&error.to_string()));
+            eprintln!("操作未完成：{}", safe(&format!("{error:#}")));
         }
     }
     Ok(())
@@ -829,6 +945,48 @@ mod tests {
         assert!(require_unchanged(&snapshot, 0, &Value::Bool(false)).is_err());
         assert!(require_unchanged(&snapshot, 0, &Value::Bool(true)).is_ok());
     }
+    #[tokio::test]
+    async fn rejected_usb_selection_cannot_reuse_the_previous_target_or_send_files() {
+        let mut session = Session::new();
+        session.target = Some(NearbyDevice {
+            device_ref: "00000000-0000-0000-0000-000000000001".into(),
+            name: "Previous peer".into(),
+            platform: None,
+            authenticated: true,
+            transport: Some("tcp".into()),
+        });
+        let selection = USBSelection {
+            // Validation must fail before any socket or physical device is used.
+            udid: "invalid cable identifier".into(),
+            peer: USBPeerChoice {
+                peer_id: "00000000-0000-0000-0000-000000000002".into(),
+                name: "Selected USB peer".into(),
+                expected_fingerprint: Some("a".repeat(64)),
+                unavailable_reason: None,
+            },
+        };
+        assert!(session.act(Action::ConnectUSB(selection)).await.is_err());
+        assert!(session.target.is_none());
+        assert_eq!(
+            session.usb_selection.as_ref().unwrap().peer.name,
+            "Selected USB peer"
+        );
+        let error = session
+            .act(Action::Target(TargetAction::Send(Some("unused".into()))))
+            .await
+            .expect_err("a failed USB connection must not send to an earlier peer");
+        assert!(error.to_string().contains("尚未连接"));
+        assert!(session.pending.is_none());
+        assert!(!matches!(session.page(), Page::DevicePicker));
+        assert!(
+            session
+                .act(Action::Target(TargetAction::Connect))
+                .await
+                .is_err()
+        );
+        assert!(session.target.is_none());
+    }
+
     #[test]
     fn scripted_usb_device_selection_requires_target_and_preserves_json_mode() {
         use clap::Parser;

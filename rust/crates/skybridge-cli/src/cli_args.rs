@@ -110,6 +110,8 @@ impl Cli {
                 CrossnetSubcommand::ConnectNearby(args) => args.output.json,
                 CrossnetSubcommand::Usb(args) => match &args.command {
                     CrossnetUSBSubcommand::Devices(output) => output.json,
+                    CrossnetUSBSubcommand::Peers(output) => output.json,
+                    CrossnetUSBSubcommand::Wake(args) => args.output.json,
                     CrossnetUSBSubcommand::Connect(args) => args.output.json,
                     CrossnetUSBSubcommand::ConnectDevice(args) => args.output.json,
                 },

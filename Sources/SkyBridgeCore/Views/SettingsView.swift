@@ -2218,6 +2218,10 @@ public struct SettingsView: View {
         do {
             let snapshot = try await applicationCacheService.cacheUsageSnapshot()
             cacheSizeDisplay = formattedByteCount(snapshot.totalBytes)
+            if showErrorMessage && !isCacheOperationInProgress {
+                cacheOperationIsError = false
+                cacheOperationMessage = nil
+            }
         } catch {
             cacheSizeDisplay = localizationManager.localizedString("settings.general.cacheSize.unavailable")
             SkyBridgeLogger.ui.error("计算缓存大小失败: \(error.localizedDescription, privacy: .private)")

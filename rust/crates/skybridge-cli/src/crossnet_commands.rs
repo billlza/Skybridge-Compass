@@ -237,6 +237,29 @@ pub(crate) async fn connect_usb(args: crate::CrossnetUSBConnectArgs) -> Result<(
     Ok(())
 }
 
+pub(crate) async fn usb_peers(json_output: bool) -> Result<()> {
+    let result = skybridge_crossnet_client::usb_peers().await?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("已配对身份（连接时仍会验证线连设备的身份）：");
+        for peer in result.peers {
+            let detail = match (&peer.expected_fingerprint, &peer.unavailable_reason) {
+                (Some(fingerprint), None) => fingerprint.clone(),
+                (None, Some(reason)) => format!("不可用：{reason}"),
+                _ => bail!("USB pairing catalog omitted identity status"),
+            };
+            println!(
+                "{} · {} · {}",
+                crate::handshake_commands::safe(&peer.name),
+                peer.peer_id,
+                crate::handshake_commands::safe(&detail)
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn connect_usb_device(args: crate::CrossnetUSBDeviceConnectArgs) -> Result<()> {
     let result = skybridge_crossnet_client::connect_usb_device(&args.udid, &args.to).await?;
     if args.output.json {

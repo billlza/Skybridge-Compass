@@ -32,6 +32,7 @@ impl OperatorCapabilityStatus {
 #[serde(rename_all = "snake_case")]
 enum OperatorRuntimeTarget {
     MacAppRuntime,
+    AppleDeveloperTools,
     WindowsAppRuntime,
     NativeHeadlessStateDir,
     AgentOwnedRegistry,
@@ -42,6 +43,7 @@ impl OperatorRuntimeTarget {
     fn as_str(self) -> &'static str {
         match self {
             Self::MacAppRuntime => "mac_app_runtime",
+            Self::AppleDeveloperTools => "apple_developer_tools",
             Self::WindowsAppRuntime => "windows_app_runtime",
             Self::NativeHeadlessStateDir => "native_headless_state_dir",
             Self::AgentOwnedRegistry => "agent_owned_registry",
@@ -342,6 +344,26 @@ fn operator_capabilities() -> &'static [OperatorCapability] {
             verification_gate: "signed application store inspection; recovery requires a separate explicitly authorized transaction",
         },
         OperatorCapability {
+            id: "crossnet.usb.peers",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::MacAppRuntime,
+            control_effect: OperatorControlEffect::ReadOnly,
+            command: "skybridge crossnet usb peers [--json]",
+            owner_module: "Mac OperatorControlServer + TrustSyncService",
+            authority_boundary: "Lists active paired identities without LAN discovery; unreadable stores fail explicitly; selecting a row is not proof that its identity is at the physical cable; live signed-app socket smoke remains pending",
+            verification_gate: "native pairing catalog and physical USB identity handshake with no discovery dependency",
+        },
+        OperatorCapability {
+            id: "crossnet.usb.wake",
+            status: OperatorCapabilityStatus::PendingLiveProof,
+            runtime_target: OperatorRuntimeTarget::AppleDeveloperTools,
+            control_effect: OperatorControlEffect::NativeMutation,
+            command: "skybridge crossnet usb wake <udid> [--json]",
+            owner_module: "Apple devicectl normal application activation",
+            authority_boundary: "Requires current physical USB inventory and normal app activation evidence; no debugger, app replacement, XCTest, test environment overrides, authenticated-session claim or automatic retry; real-device cross-platform process activation evidence remains pending",
+            verification_gate: "real-device process activation through Apple tools followed separately by an authenticated USB handshake",
+        },
+        OperatorCapability {
             id: "crossnet.usb.connect",
             status: OperatorCapabilityStatus::PendingLiveProof,
             runtime_target: OperatorRuntimeTarget::MacAppRuntime,
@@ -568,7 +590,9 @@ fn capabilities_for_host(host: &str) -> Vec<&'static OperatorCapability> {
     operator_capabilities()
         .iter()
         .filter(|capability| match capability.runtime_target {
-            OperatorRuntimeTarget::MacAppRuntime => host == "macos",
+            OperatorRuntimeTarget::MacAppRuntime | OperatorRuntimeTarget::AppleDeveloperTools => {
+                host == "macos"
+            }
             OperatorRuntimeTarget::WindowsAppRuntime => host == "windows",
             _ => true,
         })

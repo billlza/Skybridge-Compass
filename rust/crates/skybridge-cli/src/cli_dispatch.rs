@@ -76,6 +76,12 @@ pub(super) async fn dispatch(cli: Cli) -> Result<()> {
                 crate::CrossnetUSBSubcommand::Devices(output) => {
                     crate::crossnet_commands::usb_devices(output.json).await
                 }
+                crate::CrossnetUSBSubcommand::Peers(output) => {
+                    crate::crossnet_commands::usb_peers(output.json).await
+                }
+                crate::CrossnetUSBSubcommand::Wake(args) => {
+                    crate::usb_commands::command(args).await
+                }
                 crate::CrossnetUSBSubcommand::Connect(args) => {
                     crate::crossnet_commands::connect_usb(args).await
                 }

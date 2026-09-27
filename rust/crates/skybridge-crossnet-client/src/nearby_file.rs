@@ -41,6 +41,59 @@ pub struct USBDevicesResult {
     pub devices: Vec<USBDevice>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct USBPeerChoice {
+    pub peer_id: String,
+    pub name: String,
+    pub expected_fingerprint: Option<String>,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct USBPeersResult {
+    pub runtime_target: String,
+    pub peers: Vec<USBPeerChoice>,
+}
+
+impl USBPeersResult {
+    fn validate(&self) -> Result<()> {
+        if self.runtime_target != "mac_app_runtime" || self.peers.len() > 4096 {
+            bail!("USB pairing catalog runtime or size is invalid");
+        }
+        let mut ids = std::collections::HashSet::new();
+        for peer in &self.peers {
+            let id = uuid::Uuid::parse_str(&peer.peer_id)?;
+            let valid_state = match (&peer.expected_fingerprint, &peer.unavailable_reason) {
+                (Some(fingerprint), None) => {
+                    fingerprint.len() == 64
+                        && fingerprint
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                }
+                (None, Some(reason)) => !reason.is_empty(),
+                _ => false,
+            };
+            if !ids.insert(id) || peer.name.is_empty() || !valid_state {
+                bail!("USB pairing catalog contains an ambiguous or invalid identity");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Paired identities are independent of discovery. A later USB handshake must
+/// still prove that the selected identity is at the selected physical cable.
+pub async fn usb_peers() -> Result<USBPeersResult> {
+    let path = default_socket_path()?;
+    preflight_app_method_at_path(&path, "crossnet.usb.peers").await?;
+    let result: USBPeersResult = parse_result(
+        "crossnet.usb.peers",
+        call_at_path(&path, "crossnet.usb.peers", json!({})).await?,
+    )?;
+    result.validate()?;
+    Ok(result)
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TrustRecoveryPreviewResult {
     pub runtime_target: String,
@@ -606,6 +659,50 @@ pub async fn send_app_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_pairing_catalog_requires_explicit_available_or_blocked_identity() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let ready = json!({"runtime_target":"mac_app_runtime", "peers":[{
+            "peer_id":id,"name":"Paired iPad","expected_fingerprint":"a".repeat(64)}]});
+        let parsed: USBPeersResult = serde_json::from_value(ready.clone()).unwrap();
+        assert!(parsed.validate().is_ok());
+        let mut blocked = ready.clone();
+        blocked["peers"][0]["expected_fingerprint"] = Value::Null;
+        blocked["peers"][0]["unavailable_reason"] = json!("pairing_identity_needs_verification");
+        assert!(
+            serde_json::from_value::<USBPeersResult>(blocked.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        blocked["peers"][0]["unavailable_reason"] = Value::Null;
+        assert!(
+            serde_json::from_value::<USBPeersResult>(blocked)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut ambiguous = ready.clone();
+        ambiguous["peers"]
+            .as_array_mut()
+            .unwrap()
+            .push(ready["peers"][0].clone());
+        assert!(
+            serde_json::from_value::<USBPeersResult>(ambiguous)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut invalid_pin = ready;
+        invalid_pin["peers"][0]["expected_fingerprint"] = json!("short");
+        assert!(
+            serde_json::from_value::<USBPeersResult>(invalid_pin)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
 
     #[test]
     fn trust_recovery_partial_result_never_claims_a_connected_session() {

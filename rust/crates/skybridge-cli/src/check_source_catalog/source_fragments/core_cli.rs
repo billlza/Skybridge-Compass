@@ -1,6 +1,7 @@
 pub(super) const SOURCE_FRAGMENTS: &[(&str, &str)] = &[
     ("main.rs", include_str!("../../main.rs")),
     ("tui.rs", include_str!("../../tui.rs")),
+    ("usb_commands.rs", include_str!("../../usb_commands.rs")),
     ("tui/catalog.rs", include_str!("../../tui/catalog.rs")),
     (
         "file_approval_commands.rs",
